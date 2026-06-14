@@ -10,7 +10,7 @@ import {
 import { AuthForm } from "../auth-form";
 
 export const metadata: Metadata = {
-  title: "Create your account — __APP_NAME__",
+  title: "Create your account — Acme",
   robots: "noindex",
 };
 

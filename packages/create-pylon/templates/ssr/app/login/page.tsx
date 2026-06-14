@@ -10,7 +10,7 @@ import {
 import { AuthForm } from "../auth-form";
 
 export const metadata: Metadata = {
-  title: "Sign in — __APP_NAME__",
+  title: "Sign in — Acme",
   // Auth pages shouldn't be indexed.
   robots: "noindex",
 };

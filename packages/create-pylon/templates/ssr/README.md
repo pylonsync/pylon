@@ -1,8 +1,10 @@
 # __APP_NAME__
 
-A full-stack [Pylon](https://pylonsync.com) app — a server-rendered homepage,
-email/password auth, and a live client dashboard over a synced database, all
-served from one binary on one port. No Next.js, no separate API server.
+A full-stack, multi-tenant SaaS starter on [Pylon](https://pylonsync.com),
+branded as a fictional product called **Acme**: a server-rendered marketing
+landing page, email/password auth, organizations with members + roles, and
+tenant-scoped projects — all from one binary on one port. No Next.js, no
+separate API server, no realtime sidecar.
 
 ## Develop
 
@@ -10,42 +12,55 @@ served from one binary on one port. No Next.js, no separate API server.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Sign up, and your notes dashboard updates live
-(open a second tab to watch writes sync). Edit any file under `app/` and save —
-the page reloads instantly.
+Open http://localhost:4321. You get the **Acme landing page**. Sign up, create
+an organization, and you land in a **workspace** with tenant-scoped projects and
+a members panel. Create a second org and switch between them — each org's data
+is private to it. Edit any file under `app/` and save — the page reloads.
 
 ## Layout
 
 ```
-app.ts                 data model + manifest (entities, policies, auth, routes)
-app/page.tsx           "/" — the server-rendered, auth-aware homepage
-app/login,signup/      email/password forms (POST /api/auth/password/*)
-app/dashboard/         "/dashboard" — authed; server-gated, live notes + sign out
-app/auth-form.tsx      shared client island for the login/signup forms
-app/layout.tsx         root layout wrapping every page (auth-aware nav)
-app/globals.css        Tailwind entrypoint (compiled by Pylon)
-functions/             server functions (query/mutation/action) — typed RPC
+app.ts                       User + Org/OrgMember/OrgInvite + tenant-scoped Project
+app/page.tsx                 "/" — the server-rendered Acme landing page (auth-aware)
+app/layout.tsx               marketing nav + footer (rebrand "Acme")
+app/login,signup/            email/password (POST /api/auth/password/*)
+app/dashboard/               "/dashboard" — authed; org switcher + projects + members
+app/dashboard/dashboard-client.tsx   the workspace client island
+app/globals.css              Tailwind v4 + shadcn tokens (compiled by Pylon)
+components/ui/                shadcn primitives (Button, Card)
 ```
 
-## How auth works
+## How it works
 
-Email/password is built in. `/login` and `/signup` call
-`/api/auth/password/*`; on success the server sets an **HttpOnly session
-cookie** (no token in JS-readable storage). `/dashboard` reads `auth` during
-the server render and redirects anonymous visitors to `/login` — a real 3xx
-before any HTML, so there's no flash and it works with JS off. The sync engine
-authenticates with the same cookie.
+**The landing page** (`app/page.tsx`) is server-rendered React — view source and
+the copy + SEO `<head>` are in the HTML, so it's fully indexable. It reads the
+session during the render, so the call-to-action is "Get started" for visitors
+and "Open dashboard" once you're signed in — no flash, no client fetch.
 
-## Add a route
+**Auth** is built in: `/login` + `/signup` POST to `/api/auth/password/*`, the
+server sets an HttpOnly session cookie, and `/dashboard` redirects anonymous
+visitors with a real 3xx before any HTML (works with JS off).
 
-Drop a file at `app/about/page.tsx` and visit `/about`. Pages receive
-`{ url, params, searchParams, auth, response, serverData }` from the SSR
-runtime — all typed via `PageProps` from `@pylonsync/react`.
+**Multi-tenancy** is a framework primitive. Declaring `Org` / `OrgMember` /
+`OrgInvite` lights up `/api/auth/orgs/*` + `/api/auth/select-org`, driven by
+`<OrganizationSwitcher>` from `@pylonsync/client`. Your data lives in
+tenant-scoped entities (`Project`), gated by policy:
 
-## Add data
+```ts
+allowRead:   "auth.tenantId == data.orgId"
+allowInsert: "auth.tenantId == data.orgId"
+```
 
-Edit `app.ts`. Every `entity()` becomes a synced table with a REST +
-realtime API and a typed client — no migrations, no resolvers.
+So `db.useQuery("Project")` returns only your **active org's** projects — switch
+orgs and the list changes, and a client literally cannot read or write another
+tenant's rows. `db.useQuery` is live; `db.insert` is optimistic.
+
+## Make it yours
+
+- **Rebrand:** replace "Acme" in `app/page.tsx` + `app/layout.tsx`.
+- **Add tenant data:** new `entity()` with an `orgId` + the same two policy
+  lines — a new tenant-scoped table, typed client and REST/realtime API included.
+- **Add a route:** drop `app/about/page.tsx` and visit `/about`.
 
 ## Deploy
 

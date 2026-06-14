@@ -7,11 +7,9 @@ import {
   discoverAppRoutes,
 } from "@pylonsync/sdk";
 
-// Accounts. Email/password auth is built in: POST /api/auth/password/register
-// hashes the password and writes this row; /api/auth/password/login mints a
-// session and sets an HttpOnly cookie. The framework treats the entity named
-// "User" as the account table — `passwordHash` is server-only and never
-// serialized to a client.
+// Accounts — email/password is built in (the entity named "User" is the
+// account table; passwordHash is server-only). Each user can belong to many
+// organizations.
 const User = entity(
   "User",
   {
@@ -26,40 +24,87 @@ const User = entity(
   { indexes: [{ name: "by_email", fields: ["email"], unique: true }] },
 );
 
-// A note that belongs to one user. `ownerId: field.owner()` is the key move:
-// the framework stamps the signed-in user's id server-side on insert and
-// rejects any forged value — so the dashboard can do a plain, optimistic
-// `db.insert("Note", { body })` (the row shows instantly, no round-trip) while
-// the owner stays unspoofable. No createNote function to write.
-const Note = entity(
-  "Note",
+// ---------------------------------------------------------------------------
+// Organizations — multi-tenancy is a framework primitive. Declaring these
+// three entities with the names + fields below lights up the built-in
+// `/api/auth/orgs/*` routes (create/list orgs, members, invites) and
+// `/api/auth/select-org` (switch your active tenant). The framework writes
+// only the fields it manages; add your own (logo, plan, billingEmail…) freely.
+// The `@pylonsync/client` `<OrganizationSwitcher>` drives all of this for you.
+// ---------------------------------------------------------------------------
+const Org = entity(
+  "Org",
   {
-    ownerId: field.string().owner(),
-    body: field.string(),
-    done: field.boolean().default(false),
-    createdAt: field.datetime().defaultNow(),
+    name: field.string(),
+    createdBy: field.id("User"),
+    createdAt: field.datetime(),
   },
-  { indexes: [{ name: "by_owner", fields: ["ownerId"], unique: false }] },
+  { indexes: [{ name: "by_created_by", fields: ["createdBy"], unique: false }] },
 );
 
-// Notes are private — every read and write is gated to the owner. An entity
-// with NO policy is denied to clients by default, so this is exactly what
-// makes the dashboard's live query + optimistic writes work, and only for
-// your own rows. `auth.userId` is the session user; `data.ownerId` is the row.
-const notePolicy = policy({
-  name: "note_access",
-  entity: "Note",
-  allowRead: "auth.userId == data.ownerId",
-  allowInsert: "auth.userId != null",
-  allowUpdate: "auth.userId == data.ownerId",
-  allowDelete: "auth.userId == data.ownerId",
-});
+// User ↔ Org edge with a role. `select-org` checks this table before letting
+// you switch tenants, so a client can't impersonate an org it doesn't belong
+// to. role ∈ "owner" | "admin" | "member".
+const OrgMember = entity(
+  "OrgMember",
+  {
+    orgId: field.id("Org"),
+    userId: field.id("User"),
+    role: field.string(),
+    joinedAt: field.datetime(),
+  },
+  {
+    indexes: [
+      { name: "by_org_user", fields: ["orgId", "userId"], unique: true },
+      { name: "by_user", fields: ["userId"], unique: false },
+    ],
+  },
+);
 
-// User rows are read-only to clients, and only your own (so the dashboard can
-// read your display name). The auth subsystem owns writes — registration and
-// login go through /api/auth/password/*, never the entity API.
+// Pending invite. The framework's /api/auth/orgs/:id/invites endpoints write
+// these (tokenHash is server-only — the raw token only ever goes to the
+// invitee). accepted* are filled in when the invite is redeemed.
+const OrgInvite = entity(
+  "OrgInvite",
+  {
+    orgId: field.id("Org"),
+    email: field.string(),
+    role: field.string(),
+    invitedBy: field.id("User"),
+    tokenHash: field.string().serverOnly(),
+    tokenPrefix: field.string(),
+    createdAt: field.datetime(),
+    expiresAt: field.datetime(),
+    acceptedAt: field.datetime().optional(),
+    acceptedByUserId: field.id("User").optional(),
+  },
+  {
+    indexes: [
+      { name: "by_org", fields: ["orgId"], unique: false },
+      { name: "by_email_org", fields: ["email", "orgId"], unique: false },
+    ],
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Your app's data — one tenant-scoped resource. `orgId` carries the tenant,
+// and the policy scopes every read AND write to your ACTIVE org
+// (`auth.tenantId`, set by select-org). Switch orgs in the UI and the project
+// list changes — clients literally cannot read or write another tenant's rows.
+// ---------------------------------------------------------------------------
+const Project = entity(
+  "Project",
+  {
+    orgId: field.id("Org"),
+    name: field.string(),
+    createdAt: field.datetime().defaultNow(),
+  },
+  { indexes: [{ name: "by_org", fields: ["orgId"], unique: false }] },
+);
+
+// User rows: read your own; the auth subsystem owns writes.
 const userPolicy = policy({
-  name: "user_access",
+  name: "user_self",
   entity: "User",
   allowRead: "auth.userId == data.id",
   allowInsert: "false",
@@ -67,28 +112,68 @@ const userPolicy = policy({
   allowDelete: "false",
 });
 
-// The manifest is your whole app in one object: data, policies, and the
-// file-based routes under `app/`. `pylon dev` reads this, serves the SSR
-// frontend and the API from one port, and regenerates a typed client on
-// every change.
+// Org / OrgMember / OrgInvite are managed by the framework's /api/auth/orgs
+// routes (which bypass these policies via the OrgStore). Clients reach them
+// through the `@pylonsync/client` org helpers, not the entity API — so deny
+// direct writes, and scope reads to your own membership / active org.
+const orgPolicy = policy({
+  name: "org_access",
+  entity: "Org",
+  allowRead: "auth.tenantId == data.id",
+  allowInsert: "false",
+  allowUpdate: "false",
+  allowDelete: "false",
+});
+const orgMemberPolicy = policy({
+  name: "org_member_access",
+  entity: "OrgMember",
+  allowRead: "auth.userId == data.userId || auth.tenantId == data.orgId",
+  allowInsert: "false",
+  allowUpdate: "false",
+  allowDelete: "false",
+});
+const orgInvitePolicy = policy({
+  name: "org_invite_access",
+  entity: "OrgInvite",
+  allowRead: "auth.tenantId == data.orgId",
+  allowInsert: "false",
+  allowUpdate: "false",
+  allowDelete: "false",
+});
+
+// Projects are scoped to your ACTIVE tenant. `auth.tenantId == data.orgId`
+// gates read AND write — and because orgId is client-supplied at insert time
+// (not stamped later), checking it here means you can only create a project in
+// the org you've selected. Switch orgs → a different project list.
+const projectPolicy = policy({
+  name: "project_tenant",
+  entity: "Project",
+  allowRead: "auth.tenantId == data.orgId",
+  allowInsert: "auth.tenantId == data.orgId",
+  allowUpdate: "auth.tenantId == data.orgId",
+  allowDelete: "auth.tenantId == data.orgId",
+});
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
-  entities: [User, Note],
+  entities: [User, Org, OrgMember, OrgInvite, Project],
   queries: [],
   actions: [],
-  policies: [userPolicy, notePolicy],
-  // Email/password is on by default against the User entity above. `auth()`
-  // is the knob for session lifetime, exposed fields, orgs, and trusted
-  // origins — `auth({ session: { expiresIn: 60 * 60 * 24 * 7 } })` for a
-  // 7-day session, etc.
+  policies: [
+    userPolicy,
+    orgPolicy,
+    orgMemberPolicy,
+    orgInvitePolicy,
+    projectPolicy,
+  ],
+  // Email/password is on by default against the User entity. The org entities
+  // above are named with the framework defaults (Org / OrgMember / OrgInvite),
+  // so `/api/auth/orgs/*` + `/api/auth/select-org` work with no extra config.
   auth: auth(),
-  // File-based routing: `discoverAppRoutes()` walks `app/**/page.tsx` and
-  // emits one route per page. Drop `app/about/page.tsx` to add `/about`.
   routes: await discoverAppRoutes(),
 });
 
-// Emit canonical manifest JSON to stdout for `pylon codegen`.
 console.log(JSON.stringify(manifest, null, 2));
 
 export default manifest;
