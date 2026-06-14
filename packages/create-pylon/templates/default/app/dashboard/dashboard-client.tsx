@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { db } from "@pylonsync/react";
+import { db, callFn } from "@pylonsync/react";
 import {
   createInvite,
   deleteOrg,
@@ -95,10 +95,12 @@ export function Overview({
   tenantId,
   projects,
   memberCount,
+  plan,
 }: {
   tenantId: string | null;
   projects: Project[];
   memberCount: number;
+  plan: string;
 }) {
   if (!tenantId) return <NoOrg />;
   return (
@@ -106,7 +108,10 @@ export function Overview({
       <div className="grid gap-4 sm:grid-cols-3">
         <Stat label="Projects" value={projects.length} />
         <Stat label="Members" value={memberCount} />
-        <Stat label="Plan" value="Free" />
+        <Stat
+          label="Plan"
+          value={<span className="capitalize">{plan}</span>}
+        />
       </div>
       <Card
         title="Recent projects"
@@ -563,4 +568,196 @@ function formatDate(iso: string) {
     month: "short",
     day: "numeric",
   });
+}
+
+/* ============================ Billing ============================ */
+
+// One row of the @pylonsync/stripe StripeSubscription entity (client-readable
+// via the plugin's policy, scoped to the active org by referenceId).
+export interface Subscription {
+  id: string;
+  referenceId: string;
+  plan: string;
+  status: string;
+  cancelAtPeriodEnd?: boolean;
+  currentPeriodEnd?: string;
+}
+
+const ACTIVE = ["active", "trialing", "past_due"];
+
+export function Billing({
+  tenantId,
+  role,
+  subscription,
+}: {
+  tenantId: string | null;
+  role: string;
+  subscription: Subscription | null;
+}) {
+  if (!tenantId) return <NoOrg />;
+  return (
+    <BillingView tenantId={tenantId} role={role} subscription={subscription} />
+  );
+}
+
+// Real Stripe billing via the plugin's actions (callFn → /api/fn/*). Upgrade
+// opens Stripe Checkout; Manage opens the Customer Portal; the webhook keeps the
+// StripeSubscription row in sync, so a full page load after returning reflects
+// the new plan. Until STRIPE_SECRET_KEY + STRIPE_PRICE_PRO are set the actions
+// return STRIPE_NOT_CONFIGURED, which we surface as a "connect Stripe" state.
+function BillingView({
+  tenantId,
+  role,
+  subscription,
+}: {
+  tenantId: string;
+  role: string;
+  subscription: Subscription | null;
+}) {
+  const canManage = isManager(role);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const active = subscription && ACTIVE.includes(subscription.status);
+  const planLabel = active ? subscription!.plan : "free";
+
+  function origin() {
+    return typeof window !== "undefined" ? window.location.origin : "";
+  }
+
+  async function run(action: string, fn: () => Promise<void>) {
+    setBusy(action);
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(
+        /not.?configured|STRIPE_NOT_CONFIGURED/i.test(msg)
+          ? "Stripe isn't configured yet — set STRIPE_SECRET_KEY + STRIPE_PRICE_PRO to enable billing."
+          : msg,
+      );
+      setBusy(null);
+    }
+  }
+
+  async function upgrade() {
+    await run("upgrade", async () => {
+      const res = await callFn<{ url: string }>("createCheckoutSession", {
+        plan: "pro",
+        referenceId: tenantId,
+        successUrl: `${origin()}/dashboard/billing`,
+        cancelUrl: `${origin()}/dashboard/billing`,
+      });
+      window.location.assign(res.url);
+    });
+  }
+
+  async function manage() {
+    await run("manage", async () => {
+      const res = await callFn<{ url: string }>("createBillingPortalSession", {
+        referenceId: tenantId,
+        returnUrl: `${origin()}/dashboard/billing`,
+      });
+      window.location.assign(res.url);
+    });
+  }
+
+  async function cancel() {
+    await run("cancel", async () => {
+      await callFn("cancelSubscription", {
+        referenceId: tenantId,
+        scheduleAtPeriodEnd: true,
+      });
+      window.location.reload();
+    });
+  }
+
+  async function restore() {
+    await run("restore", async () => {
+      await callFn("restoreSubscription", { referenceId: tenantId });
+      window.location.reload();
+    });
+  }
+
+  return (
+    <div className="max-w-2xl space-y-6">
+      <Card title="Plan">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-2xl font-semibold capitalize text-zinc-900">
+                {planLabel}
+              </span>
+              {active && <RoleBadge role={subscription!.status} />}
+            </div>
+            {active && subscription!.currentPeriodEnd && (
+              <p className="mt-1 text-[13px] text-zinc-500">
+                {subscription!.cancelAtPeriodEnd ? "Ends" : "Renews"}{" "}
+                {formatDate(subscription!.currentPeriodEnd)}
+              </p>
+            )}
+            {!active && (
+              <p className="mt-1 text-[13px] text-zinc-500">
+                The free plan. Upgrade to Pro for higher limits.
+              </p>
+            )}
+          </div>
+
+          {canManage ? (
+            active ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={manage}
+                disabled={!!busy}
+              >
+                {busy === "manage" ? "…" : "Manage billing"}
+              </Button>
+            ) : (
+              <Button type="button" onClick={upgrade} disabled={!!busy}>
+                {busy === "upgrade" ? "…" : "Upgrade to Pro"}
+              </Button>
+            )
+          ) : (
+            <span className="text-xs text-zinc-400">
+              Owners and admins manage billing.
+            </span>
+          )}
+        </div>
+
+        {active && canManage && (
+          <div className="mt-4 border-t border-zinc-100 pt-3 text-[13px]">
+            {subscription!.cancelAtPeriodEnd ? (
+              <button
+                type="button"
+                onClick={restore}
+                disabled={!!busy}
+                className="font-medium text-brand hover:underline disabled:opacity-50"
+              >
+                {busy === "restore" ? "…" : "Resume subscription"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={cancel}
+                disabled={!!busy}
+                className="text-zinc-500 hover:text-red-600 disabled:opacity-50"
+              >
+                {busy === "cancel" ? "…" : "Cancel at period end"}
+              </button>
+            )}
+          </div>
+        )}
+
+        {error && <p className="mt-3 text-xs text-red-600">{error}</p>}
+      </Card>
+
+      <p className="text-xs text-zinc-400">
+        Powered by Stripe Checkout + Customer Portal via the @pylonsync/stripe
+        plugin. Set STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_PRO
+        to go live; point the webhook at <code>/api/fn/stripeWebhook</code>.
+      </p>
+    </div>
+  );
 }

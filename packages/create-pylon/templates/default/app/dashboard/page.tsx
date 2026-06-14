@@ -1,7 +1,12 @@
 import React, { use } from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
 import { DashboardShell } from "@/components/dashboard-shell";
-import { Overview, type Project, type OrgMemberRow } from "./dashboard-client";
+import {
+  Overview,
+  type Project,
+  type OrgMemberRow,
+  type Subscription,
+} from "./dashboard-client";
 
 export const metadata: Metadata = {
   title: "Dashboard — Acme",
@@ -32,6 +37,15 @@ export default function DashboardPage({
   // The OrgMember read policy returns this user's memberships across every org,
   // so scope the count to the active workspace.
   const memberCount = members.filter((m) => m.orgId === auth.tenant_id).length;
+  // Active-plan badge from the workspace's Stripe subscription (Free until one
+  // exists). Scoped to the active tenant by the plugin's read policy.
+  const subs = auth.tenant_id
+    ? use(serverData.list<Subscription>("StripeSubscription"))
+    : [];
+  const active = subs.find((s) =>
+    ["active", "trialing", "past_due"].includes(s.status),
+  );
+  const plan = active ? active.plan : "free";
   return (
     <DashboardShell
       active="overview"
@@ -43,6 +57,7 @@ export default function DashboardPage({
         tenantId={auth.tenant_id}
         projects={projects}
         memberCount={memberCount}
+        plan={plan}
       />
     </DashboardShell>
   );

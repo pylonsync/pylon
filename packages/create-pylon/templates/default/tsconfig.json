@@ -8,7 +8,7 @@
     "strict": true,
     "skipLibCheck": true,
     "lib": ["ES2022", "DOM"],
-    "types": ["react", "react-dom"],
+    "types": ["react", "react-dom", "node"],
     "baseUrl": ".",
     "paths": {
       "@/*": ["./*"]

@@ -7,18 +7,20 @@ import {
   LayoutDashboard,
   FolderKanban,
   Users,
+  CreditCard,
   Settings as SettingsIcon,
   LogOut,
   ExternalLink,
   type LucideIcon,
 } from "lucide-react";
 
-type NavKey = "overview" | "projects" | "members" | "settings";
+type NavKey = "overview" | "projects" | "members" | "billing" | "settings";
 
 const NAV: { key: NavKey; label: string; href: string; Icon: LucideIcon }[] = [
   { key: "overview", label: "Overview", href: "/dashboard", Icon: LayoutDashboard },
   { key: "projects", label: "Projects", href: "/dashboard/projects", Icon: FolderKanban },
   { key: "members", label: "Members", href: "/dashboard/members", Icon: Users },
+  { key: "billing", label: "Billing", href: "/dashboard/billing", Icon: CreditCard },
   { key: "settings", label: "Settings", href: "/dashboard/settings", Icon: SettingsIcon },
 ];
 

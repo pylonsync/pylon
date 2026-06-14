@@ -6,6 +6,11 @@ import {
   buildManifest,
   discoverAppRoutes,
 } from "@pylonsync/sdk";
+// Per-workspace Stripe billing — see lib/billing.ts. `billing.manifest` brings
+// the StripeSubscription entity + checkout/portal/cancel/restore/webhook actions
+// + their read policy; the matching handlers live in functions/ (one wrapper per
+// handler, re-exported from lib/billing.ts).
+import { billing } from "./lib/billing";
 
 // Accounts — email/password is built in (the entity named "User" is the
 // account table; passwordHash is server-only). Each user can belong to many
@@ -38,6 +43,10 @@ const Org = entity(
     name: field.string(),
     createdBy: field.id("User"),
     createdAt: field.datetime(),
+    // Stripe customer for this workspace's billing (referenceType: "org").
+    // The billing plugin creates + stamps this on first checkout; server-only
+    // so it never reaches the client.
+    stripeCustomerId: field.string().serverOnly().optional(),
   },
   { indexes: [{ name: "by_created_by", fields: ["createdBy"], unique: false }] },
 );
@@ -157,15 +166,21 @@ const projectPolicy = policy({
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
-  entities: [User, Org, OrgMember, OrgInvite, Project],
+  entities: [User, Org, OrgMember, OrgInvite, Project, ...billing.manifest.entities],
   queries: [],
-  actions: [],
+  // Billing actions (createCheckoutSession / createBillingPortalSession /
+  // cancelSubscription / restoreSubscription / stripeWebhook). The plugin also
+  // declares getSubscription/listSubscriptions queries, but the dashboard reads
+  // the StripeSubscription entity directly (it's client-readable via the
+  // plugin's policy), so we don't wire those.
+  actions: [...billing.manifest.actions],
   policies: [
     userPolicy,
     orgPolicy,
     orgMemberPolicy,
     orgInvitePolicy,
     projectPolicy,
+    ...billing.manifest.policies,
   ],
   // Email/password is on by default against the User entity. The org entities
   // above are named with the framework defaults (Org / OrgMember / OrgInvite),

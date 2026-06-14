@@ -13,6 +13,7 @@
     "@pylonsync/sdk": "^__PYLON_VERSION__",
     "@pylonsync/functions": "^__PYLON_VERSION__",
     "@pylonsync/client": "^__PYLON_VERSION__",
+    "@pylonsync/stripe": "^__PYLON_VERSION__",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwindcss": "^4.3.0",
@@ -26,6 +27,7 @@
   },
   "devDependencies": {
     "@pylonsync/cli": "^__PYLON_VERSION__",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "typescript": "^5.6.0"
