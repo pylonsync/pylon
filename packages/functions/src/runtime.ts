@@ -35,6 +35,17 @@ import { validateArgs } from "./validators";
 import { readdirSync } from "fs";
 import { join, basename } from "path";
 
+// Bun runtime globals this process uses. The runtime executes under Bun, but
+// consuming apps type-check this source under node/DOM where the `Bun` global
+// is absent — so declare the surface we touch (mirrors the ambient in
+// ssr-client-bundler.ts). Keeps `tsc` clean in a scaffolded app.
+declare const Bun: {
+  write(destination: unknown, input: string): Promise<number>;
+  stdout: unknown;
+  stderr: unknown;
+  stdin: { stream(): ReadableStream<Uint8Array> };
+};
+
 // ---------------------------------------------------------------------------
 // Protocol types
 // ---------------------------------------------------------------------------

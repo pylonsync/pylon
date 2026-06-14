@@ -43,6 +43,16 @@ export type CrdtAnnotation =
   | "movable-list"
   | "tree";
 
+/**
+ * Insert-time default marker stored on a field definition. Apps never
+ * construct these directly — they come from `.default(v)` / `.defaultNow()`
+ * / `.owner()` on a field builder. The runtime + codegen read them.
+ */
+export type DefaultMarker =
+  | { kind: "value"; value: unknown }
+  | { kind: "now" }
+  | { kind: "owner" };
+
 export interface FieldDefinition {
   type: FieldType;
   optional: boolean;
@@ -119,6 +129,16 @@ export interface FieldDefinition {
    * pipeline upgrades them to ciphertext.
    */
   encrypted?: boolean;
+  /**
+   * Insert-time default. Set via `.default(value)` / `.defaultNow()` /
+   * `.owner()` on the field builder; recorded for the runtime + codegen.
+   */
+  default?: DefaultMarker;
+  /**
+   * Allowed values for `field.enum([...])` — recorded so codegen emits a
+   * precise literal-union type instead of a wide `string`.
+   */
+  enumValues?: readonly string[];
 }
 
 interface FieldBuilder {
@@ -194,6 +214,16 @@ interface FieldBuilder {
    * stays unspoofable.
    */
   owner(): FieldBuilder;
+  /**
+   * Set a static insert-time default, recorded for the runtime +
+   * codegen. Example: `enabled: field.bool().default(true)`.
+   */
+  default(value: unknown): FieldBuilder;
+  /**
+   * Default a datetime field to insert-time `now()`. Example:
+   * `createdAt: field.datetime().defaultNow()`.
+   */
+  defaultNow(): FieldBuilder;
 }
 
 function createFieldBuilder(type: FieldType): FieldBuilder {
@@ -224,11 +254,13 @@ function buildField(def: FieldDefinition): FieldBuilder {
     owner() {
       // Dynamic default filled by the auth-aware pipeline; also lock
       // the field on update so ownership can't be reassigned via PATCH.
-      return buildField({
-        ...def,
-        readonly: true,
-        default: { kind: "owner" },
-      } as FieldDefinition);
+      return buildField({ ...def, readonly: true, default: { kind: "owner" } });
+    },
+    default(value: unknown) {
+      return buildField({ ...def, default: { kind: "value", value } });
+    },
+    defaultNow() {
+      return buildField({ ...def, default: { kind: "now" } });
     },
   };
 }
@@ -250,6 +282,18 @@ export const field = {
   datetime: () => createFieldBuilder("datetime"),
   richtext: () => createFieldBuilder("richtext"),
   id: (target: string) => createFieldBuilder(`id(${target})`),
+  /**
+   * `field.enum(["pending", "paid", "failed"])` — stored as a string with
+   * allowed-values metadata so codegen emits a precise literal union
+   * (`"pending" | "paid" | "failed"`) instead of a wide `string`.
+   */
+  enum: (values: readonly string[]) =>
+    buildField({
+      type: "string",
+      optional: false,
+      unique: false,
+      enumValues: values,
+    }),
 };
 
 // ---------------------------------------------------------------------------
@@ -1506,124 +1550,10 @@ export const audit: Behavior = {
   },
 };
 
-/**
- * Internal sentinel — apps don't construct these directly. The
- * `field.X` builders gain `default(val)` / `defaultNow()` chainables
- * below; this is just the shape stored on the field definition for
- * the runtime to read.
- */
-type DefaultMarker =
-  | { kind: "value"; value: unknown }
-  | { kind: "now" }
-  | { kind: "owner" };
-
-/**
- * Augment FieldBuilder with the new `default()` / `defaultNow()`
- * chainables. Runtime support for actually filling these values on
- * insert lands as part of v0.4.1; until then the markers are
- * recorded in the manifest for tooling + the codegen layer.
- */
-declare module "./index" {
-  // (Empty — the `default*` methods are added at runtime via the
-  // patched buildField below. Apps see them via the FieldBuilder
-  // surface declared above.)
-}
-
-// Field builder with chainable `.default()` / `.defaultNow()`. All
-// other chainables (`optional`, `unique`, `crdt`, `serverOnly`,
-// `readonly`) are reimplemented here to return another
-// `buildFieldWithDefaults` — without this, calling `.optional()`
-// after `.default()` would drop the default markers off the chain
-// (codex Wave-3 review: the previous `{ ...base, default, defaultNow }`
-// pattern delegated optional/unique to the original buildField which
-// returned a builder lacking `.default()`). Recursion through the
-// same constructor keeps the surface stable regardless of chain
-// order.
-function buildFieldWithDefaults(
-  def: FieldDefinition & {
-    default?: DefaultMarker;
-    enumValues?: readonly string[];
-  },
-): FieldBuilder & {
-  default(value: unknown): ReturnType<typeof buildFieldWithDefaults>;
-  defaultNow(): ReturnType<typeof buildFieldWithDefaults>;
-  owner(): ReturnType<typeof buildFieldWithDefaults>;
-} {
-  return {
-    _def: def,
-    optional() {
-      return buildFieldWithDefaults({ ...def, optional: true });
-    },
-    unique() {
-      return buildFieldWithDefaults({ ...def, unique: true });
-    },
-    crdt(annotation) {
-      return buildFieldWithDefaults({ ...def, crdt: annotation });
-    },
-    serverOnly() {
-      return buildFieldWithDefaults({ ...def, serverOnly: true });
-    },
-    readonly() {
-      return buildFieldWithDefaults({ ...def, readonly: true });
-    },
-    encrypted() {
-      return buildFieldWithDefaults({ ...def, encrypted: true });
-    },
-    default(value: unknown) {
-      return buildFieldWithDefaults({
-        ...def,
-        default: { kind: "value", value },
-      });
-    },
-    defaultNow() {
-      return buildFieldWithDefaults({ ...def, default: { kind: "now" } });
-    },
-    owner() {
-      // Server-stamped owner: a dynamic default the auth-aware
-      // pipeline fills + enforces, plus `readonly` so the owner can't
-      // be reassigned via a later PATCH. See FieldBuilder.owner().
-      return buildFieldWithDefaults({
-        ...def,
-        readonly: true,
-        default: { kind: "owner" },
-      });
-    },
-  };
-}
-// Re-export `field` with the patched builder so callers picking up
-// the new SDK get the chainables transparently. The old `field`
-// surface still works — `.default()` / `.defaultNow()` are additive.
-// We intentionally re-export from the same name so existing imports
-// (`import { field } from "@pylonsync/sdk"`) keep working AND gain
-// the new methods without a code change.
-Object.assign(field, {
-  string: () => buildFieldWithDefaults({ type: "string", optional: false, unique: false }),
-  int: () => buildFieldWithDefaults({ type: "int", optional: false, unique: false }),
-  float: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
-  number: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
-  bool: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
-  boolean: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
-  datetime: () => buildFieldWithDefaults({ type: "datetime", optional: false, unique: false }),
-  richtext: () => buildFieldWithDefaults({ type: "richtext", optional: false, unique: false }),
-  id: (target: string) => buildFieldWithDefaults({ type: `id(${target})` as FieldType, optional: false, unique: false }),
-  /**
-   * `field.enum(["pending", "paid", "failed"])` — stored as a string
-   * with allowed-values metadata. Runtime enforcement (CHECK
-   * constraint or insert-time validation) lands in a follow-up
-   * patch; for now the values flow through to codegen so the
-   * generated client gets a precise `"pending" | "paid" | "failed"`
-   * literal-union type instead of a wide `string`.
-   */
-  enum(values: readonly string[]) {
-    const def: FieldDefinition & { enumValues?: readonly string[] } = {
-      type: "string",
-      optional: false,
-      unique: false,
-      enumValues: values,
-    };
-    return buildFieldWithDefaults(def);
-  },
-});
+// `field` builders (`default` / `defaultNow` / `owner` / `enum`) are all
+// implemented directly on `buildField` above and typed on the FieldBuilder
+// interface, so `field.datetime().defaultNow()` and `field.enum([...])`
+// are real, statically-typed chainables — no runtime augmentation needed.
 
 /** Variadic index helper — `e.idx("customer", "createdAt")` reads
  *  better than the options-object form for the common case. */

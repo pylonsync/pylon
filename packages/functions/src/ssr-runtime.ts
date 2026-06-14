@@ -7,6 +7,12 @@
 // the dispatch arm) so projects without SSR routes pay nothing — no
 // react-dom dependency requirement, no startup cost.
 
+// Bun runtime global. This module runs under Bun but is type-checked by
+// consuming apps under node/DOM (no `Bun` global) — declare the surface used.
+declare const Bun: {
+  resolveSync?(specifier: string, from: string): string;
+};
+
 /**
  * Is the runtime in dev mode? MUST match the Rust host's `is_dev_mode()`
  * (crates/runtime/src/frontend.rs): `PYLON_DEV_MODE` is on ONLY for the exact
