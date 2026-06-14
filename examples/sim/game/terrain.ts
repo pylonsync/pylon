@@ -111,7 +111,13 @@ export function buildTerrainMesh(): THREE.Mesh {
   const pos = geo.attributes.position as THREE.BufferAttribute;
   const colors = new Float32Array(pos.count * 3);
 
-  const cGrass = new THREE.Color(0xffffff); // grass shows through the map
+  // The tint multiplies the grass map. Two grass tones — a lusher,
+  // slightly darker green and a drier, paler one — blended by broad
+  // low-frequency noise give the large lush/dry patches a real CS map
+  // has, instead of one flat fully-saturated green carpet. Both sit a
+  // little under white so the canopy reads muted, not neon.
+  const cGrassLush = new THREE.Color(0xbccb9c);
+  const cGrassDry = new THREE.Color(0xdcd8b8);
   const cSand = new THREE.Color(0xcbb98c);
   const cRock = new THREE.Color(0x83796a);
   const cSnow = new THREE.Color(0xf2f4f7);
@@ -124,8 +130,9 @@ export function buildTerrainMesh(): THREE.Mesh {
     pos.setY(i, h);
     const slope = slopeAt(x, z);
 
-    // Pick a tint that multiplies the grass map.
-    tmp.copy(cGrass);
+    // Broad lush↔dry grass variation (large tonal patches across the map).
+    const gn = Math.min(1, Math.max(0, fbm(x * 0.035 + 13, z * 0.035 + 7, TERRAIN_SEED + 200, 3)));
+    tmp.copy(cGrassLush).lerp(cGrassDry, gn);
     if (h < WATER_LEVEL + 1.2) tmp.lerp(cSand, smoothstep(WATER_LEVEL + 1.2, WATER_LEVEL - 1, h));
     if (slope > 0.5) tmp.lerp(cRock, smoothstep(0.5, 1.1, slope));
     if (h > 75) tmp.lerp(cSnow, smoothstep(75, 110, h));
