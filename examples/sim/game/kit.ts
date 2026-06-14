@@ -415,8 +415,39 @@ export function makeBuilding(
   varyBuildingColor(inner, gx, gz, zone);
   const group = new THREE.Group();
   group.add(inner);
+  // Rooftop clutter (AC/vent boxes) on the tall downtown towers only — a
+  // close-up detail. L3 is the fewest, so the per-building Box3 to find the
+  // roof top is paid rarely. Added to the OUTER group so the rise scales them
+  // with the building.
+  if (lvl >= 3) {
+    const bb = new THREE.Box3().setFromObject(group);
+    const topY = bb.max.y;
+    const cx = (bb.min.x + bb.max.x) / 2;
+    const cz = (bb.min.z + bb.max.z) / 2;
+    const half = Math.min(bb.max.x - bb.min.x, bb.max.z - bb.min.z) * 0.5;
+    if (Number.isFinite(topY) && half > 0.2) {
+      const count = 1 + Math.floor(hash2(gx, gz, 30) * 2);
+      for (let i = 0; i < count; i++) {
+        const wd = half * (0.22 + hash2(gx, gz, 31 + i) * 0.18);
+        const ac = new THREE.Mesh(new THREE.BoxGeometry(wd, wd * 0.5, wd), ROOFTOP_MAT);
+        ac.position.set(
+          cx + (hash2(gx, gz, 33 + i) - 0.5) * half,
+          topY + wd * 0.25,
+          cz + (hash2(gx, gz, 35 + i) - 0.5) * half,
+        );
+        ac.castShadow = true;
+        group.add(ac);
+      }
+    }
+  }
   return group;
 }
+
+const ROOFTOP_MAT = new THREE.MeshStandardMaterial({
+  color: 0x9a9a98,
+  roughness: 0.8,
+  metalness: 0.3,
+});
 
 // Per-zone cast, blended over the per-building variation so districts read
 // distinctly the way they do in Cities: Skylines: commercial trends lighter

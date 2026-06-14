@@ -71,20 +71,33 @@ const CARPARK_PAD_GEO = new THREE.PlaneGeometry(TILE * 0.94, TILE * 0.94).rotate
 const CARPARK_PAD_MAT = new THREE.MeshStandardMaterial({ color: 0x46474b, roughness: 1 });
 const CARPARK_LINE_GEO = new THREE.PlaneGeometry(TILE * 0.04, TILE * 0.62).rotateX(-Math.PI / 2);
 const CARPARK_LINE_MAT = new THREE.MeshBasicMaterial({ color: 0xd7d4c8 });
-const CAR_BODY_GEO = new THREE.BoxGeometry(0.9, 0.45, 1.9).translate(0, 0.28, 0);
-const CAR_CABIN_GEO = new THREE.BoxGeometry(0.82, 0.38, 1.0).translate(0, 0.66, -0.05);
 const CAR_CABIN_MAT = new THREE.MeshStandardMaterial({ color: 0x2a3038, roughness: 0.4, metalness: 0.2 });
-const CAR_COLORS = [0x9a3b3b, 0x35507c, 0x5a5e66, 0xb0b3b8, 0x3a6b4a, 0xc7a23a, 0xe2e2e2];
+const CAR_COLORS = [
+  0x9a3b3b, 0x35507c, 0x5a5e66, 0xb0b3b8, 0x3a6b4a, 0xc7a23a, 0xe2e2e2, 0x2c2c30, 0x7a4a2a,
+];
 
-/** A small two-box parked car in the given body colour. */
-function makeParkedCar(color: number): THREE.Object3D {
+/** A small two-box parked car. The `seed` varies the silhouette (sedan vs a
+ *  taller SUV/van) so a lot isn't all identical boxes. */
+function makeParkedCar(color: number, seed: number): THREE.Object3D {
   const g = new THREE.Group();
+  let r = Math.abs(Math.sin(seed * 12.9898) * 4151.3);
+  r -= Math.floor(r);
+  const suv = r < 0.4;
+  const len = 1.75 + r * 0.55;
+  const w = 0.82 + r * 0.16;
+  const bodyH = suv ? 0.58 : 0.42;
   const body = new THREE.Mesh(
-    CAR_BODY_GEO,
+    new THREE.BoxGeometry(w, bodyH, len),
     new THREE.MeshStandardMaterial({ color, roughness: 0.5, metalness: 0.15, flatShading: true }),
   );
+  body.position.y = bodyH / 2;
   body.castShadow = true;
-  const cabin = new THREE.Mesh(CAR_CABIN_GEO, CAR_CABIN_MAT);
+  const cabinH = suv ? 0.4 : 0.34;
+  const cabin = new THREE.Mesh(
+    new THREE.BoxGeometry(w * 0.92, cabinH, suv ? len * 0.66 : len * 0.5),
+    CAR_CABIN_MAT,
+  );
+  cabin.position.set(0, bodyH + cabinH / 2, suv ? 0 : -len * 0.06);
   g.add(body, cabin);
   return g;
 }
@@ -353,7 +366,7 @@ export class TileMap implements GameSystem {
       for (let i = 0; i < n; i++) {
         let c = Math.abs(Math.sin((gx * 3.1 + gz * 9.7 + i) * 27.3));
         c -= Math.floor(c);
-        const car = makeParkedCar(CAR_COLORS[(c * CAR_COLORS.length) | 0]);
+        const car = makeParkedCar(CAR_COLORS[(c * CAR_COLORS.length) | 0], gx * 31 + gz * 7 + i);
         const slot = (i - (n - 1) / 2) * TILE * 0.27;
         car.position.set(cx + slot, base + 0.06, cz - TILE * 0.12);
         lot.add(car);
