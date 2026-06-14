@@ -341,11 +341,21 @@ export function makeBuilding(
   } else {
     proceduralMassing(inner, zone, lvl, gx, gz, rotY);
   }
-  varyBuildingColor(inner, gx, gz);
+  varyBuildingColor(inner, gx, gz, zone);
   const group = new THREE.Group();
   group.add(inner);
   return group;
 }
+
+// Per-zone cast, blended over the per-building variation so districts read
+// distinctly the way they do in Cities: Skylines: commercial trends lighter
+// and cooler (concrete + glass), industrial darker and grimier, residential
+// stays warm and varied (no cast).
+const ZONE_MIX: Record<string, { target: THREE.Color; amt: number } | null> = {
+  res: null,
+  com: { target: new THREE.Color(0xdce4ec), amt: 0.32 },
+  ind: { target: new THREE.Color(0xb8b2a6), amt: 0.26 },
+};
 
 // Per-building colour variation. Clones the (shared, prototype) materials
 // and nudges brightness — plus a touch of hue on solid colours — keyed to
@@ -353,14 +363,27 @@ export function makeBuilding(
 // buildings instead of a copy-paste wall, the way a CS street does.
 // Textured facades keep their hue (value only) so brick stays brick.
 const _bhsl = { h: 0, s: 0, l: 0 };
-function varyBuildingColor(root: THREE.Object3D, gx: number, gz: number): void {
+function varyBuildingColor(
+  root: THREE.Object3D,
+  gx: number,
+  gz: number,
+  zone: string,
+): void {
   const hueShift = (hash2(gx, gz, 21) - 0.5) * 0.05;
   const valShift = 0.85 + hash2(gx, gz, 23) * 0.3;
+  const zoneMix = ZONE_MIX[zone] ?? null;
   const recolor = (mat: THREE.Material): THREE.Material => {
     const std = (mat as THREE.MeshStandardMaterial).clone();
-    std.color.getHSL(_bhsl);
-    const h = std.map ? _bhsl.h : (_bhsl.h + hueShift + 1) % 1;
-    std.color.setHSL(h, _bhsl.s, Math.min(1, _bhsl.l * valShift));
+    if (std.map) {
+      // Textured brick/brownstone — its tint multiplies the (dark) map, so
+      // BRIGHTEN it (>1) instead of darkening, or tall facades read as black
+      // blocks from above. Vary per building; keep the map's own hue.
+      std.color.setScalar(1.1 + (hash2(gx, gz, 23) - 0.5) * 0.22);
+    } else {
+      std.color.getHSL(_bhsl);
+      std.color.setHSL((_bhsl.h + hueShift + 1) % 1, _bhsl.s, Math.min(1, _bhsl.l * valShift));
+      if (zoneMix) std.color.lerp(zoneMix.target, zoneMix.amt);
+    }
     return std;
   };
   root.traverse((o) => {
