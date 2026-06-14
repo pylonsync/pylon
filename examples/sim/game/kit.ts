@@ -402,9 +402,12 @@ function varyBuildingColor(
     } else if (std.map) {
       // Textured brick / asphalt roof — its tint multiplies a dark map, so
       // BRIGHTEN it (>1) or tall facades + flat roofs read as black from
-      // above; asphalt roofs start darkest, so lift them hardest.
-      const roof = name.includes("asphalt") || name.includes("roof");
-      std.color.setScalar((roof ? 1.45 : 1.1) + (hash2(gx, gz, 23) - 0.5) * 0.18);
+      // above. The office flat roofs (MI_Asphalt) + dark parapet trim are
+      // the darkest thing in the aerial downtown, so lift them to a pale
+      // concrete grey; brick facades only need a gentle lift.
+      const roof =
+        name.includes("asphalt") || name.includes("roof") || name.includes("trim_dark");
+      std.color.setScalar((roof ? 2.2 : 1.1) + (hash2(gx, gz, 23) - 0.5) * 0.18);
     } else {
       std.color.getHSL(_bhsl);
       // Floor the lightness so dark roof/trim colours (DarkGrey, Brown) don't
