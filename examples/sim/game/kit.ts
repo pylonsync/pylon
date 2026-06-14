@@ -324,14 +324,25 @@ export function makeBuilding(
   const proto = variants.length
     ? variants[Math.floor(hash2(gx, gz, 5) * variants.length) % variants.length]
     : undefined;
-  const group = new THREE.Group();
+  // Seat the building against its street frontage (CS buildings line the
+  // pavement) instead of centred in the lot: slide it toward the facing
+  // road by its setback, leaving a small margin so it never overhangs the
+  // kerb. Houses (small footprint) gain a clear frontage + backyard; lot-
+  // filling towers barely move. Interior cells (no faceRad) stay centred.
+  const fp = BUILDING_SLOTS[zone + lvl]?.fp ?? 0.8;
+  const push =
+    faceRad !== undefined ? Math.max(0, (TILE * (1 - fp)) / 2 - TILE * 0.06) : 0;
+  const inner = new THREE.Group();
+  inner.position.set(Math.sin(faceRad ?? 0) * push, 0, Math.cos(faceRad ?? 0) * push);
   if (proto) {
     const inst = proto.clone(true);
     inst.rotation.y = rotY;
-    group.add(inst);
-    return group;
+    inner.add(inst);
+  } else {
+    proceduralMassing(inner, zone, lvl, gx, gz, rotY);
   }
-  proceduralMassing(group, zone, lvl, gx, gz, rotY);
+  const group = new THREE.Group();
+  group.add(inner);
   return group;
 }
 
