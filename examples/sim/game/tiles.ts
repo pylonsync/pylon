@@ -33,6 +33,52 @@ interface BuildingView {
 
 const LOT_Y = 0.05;
 
+// --- Park props (shared geometry/material; cloned per park) ---
+const PARK_LAWN_GEO = new THREE.PlaneGeometry(TILE * 0.96, TILE * 0.96).rotateX(-Math.PI / 2);
+// A brighter, mowed green that reads as manicured next to the wilder terrain grass.
+const PARK_LAWN_MAT = new THREE.MeshStandardMaterial({ color: 0x6fa24a, roughness: 0.95 });
+const FOUNTAIN_BASIN_GEO = new THREE.CylinderGeometry(TILE * 0.17, TILE * 0.19, 0.32, 18).translate(0, 0.16, 0);
+const FOUNTAIN_PLINTH_GEO = new THREE.CylinderGeometry(0.12, 0.16, 0.55, 10).translate(0, 0.45, 0);
+const FOUNTAIN_WATER_GEO = new THREE.CylinderGeometry(TILE * 0.14, TILE * 0.14, 0.06, 18).translate(0, 0.3, 0);
+const STONE_MAT = new THREE.MeshStandardMaterial({ color: 0xc3bdb0, roughness: 0.85 });
+const FOUNTAIN_WATER_MAT = new THREE.MeshStandardMaterial({
+  color: 0x5aa6cc,
+  roughness: 0.1,
+  metalness: 0.2,
+  emissive: 0x123040,
+  emissiveIntensity: 0.25,
+});
+const TRUNK_GEO = new THREE.CylinderGeometry(0.08, 0.12, 1.3, 6).translate(0, 0.65, 0);
+const TRUNK_MAT = new THREE.MeshStandardMaterial({ color: 0x6b4f33, roughness: 0.9 });
+const CANOPY_GEO = new THREE.IcosahedronGeometry(0.85, 0).translate(0, 1.75, 0);
+const CANOPY_MAT = new THREE.MeshStandardMaterial({ color: 0x4f8a3e, roughness: 0.9, flatShading: true });
+
+/** A small stone fountain (basin + plinth + a translucent water disc). */
+function makeFountain(): THREE.Object3D {
+  const g = new THREE.Group();
+  const basin = new THREE.Mesh(FOUNTAIN_BASIN_GEO, STONE_MAT);
+  basin.castShadow = true;
+  basin.receiveShadow = true;
+  const plinth = new THREE.Mesh(FOUNTAIN_PLINTH_GEO, STONE_MAT);
+  plinth.castShadow = true;
+  const water = new THREE.Mesh(FOUNTAIN_WATER_GEO, FOUNTAIN_WATER_MAT);
+  g.add(basin, plinth, water);
+  return g;
+}
+
+/** A simple flat-shaded ornamental tree (trunk + low-poly canopy). */
+function makeParkTree(scale: number): THREE.Object3D {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(TRUNK_GEO, TRUNK_MAT);
+  const canopy = new THREE.Mesh(CANOPY_GEO, CANOPY_MAT);
+  trunk.castShadow = true;
+  canopy.castShadow = true;
+  canopy.receiveShadow = true;
+  g.add(trunk, canopy);
+  g.scale.setScalar(scale);
+  return g;
+}
+
 export class TileMap implements GameSystem {
   readonly name = "tiles";
   readonly group = new THREE.Group();
@@ -40,15 +86,17 @@ export class TileMap implements GameSystem {
   private readonly roadGroup = new THREE.Group();
   private readonly lotGroup = new THREE.Group();
   private readonly buildGroup = new THREE.Group();
+  private readonly parkGroup = new THREE.Group();
 
   private state = new Map<string, TileState>();
   private buildings = new Map<string, BuildingView>();
   private rising = new Set<BuildingView>();
   private roadSig = "";
   private lotSig = "";
+  private parkSig = "";
 
   constructor(private readonly events: EventBus) {
-    this.group.add(this.roadGroup, this.lotGroup, this.buildGroup);
+    this.group.add(this.roadGroup, this.lotGroup, this.buildGroup, this.parkGroup);
   }
 
   /** Current kind at a cell (for placement validation / cursor). */
@@ -119,7 +167,62 @@ export class TileMap implements GameSystem {
       if (zoneCells.length) this.lotGroup.add(this.buildLots(zoneCells));
     }
 
+    // --- Parks: seeded pocket-greenspace (mowed lawn + fountain + trees),
+    //     rebuilt only when the park set changes. ---
+    const parkCells: Cell[] = [];
+    for (const [key, t] of next) {
+      if (t.kind !== "park") continue;
+      const [gx, gz] = key.split(",").map(Number);
+      parkCells.push({ gx, gz });
+    }
+    const parkSig = parkCells.map((c) => c.gx + ":" + c.gz).sort().join("|");
+    if (parkSig !== this.parkSig) {
+      this.parkSig = parkSig;
+      this.buildParks(parkCells);
+    }
+
     this.syncBuildings();
+  }
+
+  /** (Re)build the seeded parks: a manicured lawn pad, a central stone
+   *  fountain, and a few ornamental trees per cell. Deterministic from the
+   *  cell so every client renders the same greens. */
+  private buildParks(parkCells: Cell[]): void {
+    this.parkGroup.clear();
+    for (const { gx, gz } of parkCells) {
+      const cx = cellCenterX(gx);
+      const cz = cellCenterZ(gz);
+      const base = heightAt(cx, cz);
+      const park = new THREE.Group();
+
+      const lawn = new THREE.Mesh(PARK_LAWN_GEO, PARK_LAWN_MAT);
+      lawn.position.set(cx, base + 0.06, cz);
+      lawn.receiveShadow = true;
+      park.add(lawn);
+
+      const fountain = makeFountain();
+      fountain.position.set(cx, base + 0.06, cz);
+      park.add(fountain);
+
+      // Four corner trees (deterministic slight scale jitter).
+      const r = TILE * 0.3;
+      const corners: Array<[number, number]> = [
+        [r, r],
+        [-r, r],
+        [r, -r],
+        [-r, -r],
+      ];
+      corners.forEach(([ox, oz], i) => {
+        let s = Math.abs(Math.sin((gx * 13.1 + gz * 7.7 + i) * 9.13) * 41.7);
+        s -= Math.floor(s);
+        const tree = makeParkTree(0.85 + s * 0.4);
+        tree.position.set(cx + ox, heightAt(cx + ox, cz + oz) + 0.05, cz + oz);
+        tree.rotation.y = s * Math.PI * 2;
+        park.add(tree);
+      });
+
+      this.parkGroup.add(park);
+    }
   }
 
   /** Rebuild the road group: GLB tiles (auto-tiled from the neighbour
@@ -152,7 +255,7 @@ export class TileMap implements GameSystem {
   private syncBuildings(): void {
     const wanted = new Set<string>();
     for (const [key, t] of this.state) {
-      if (t.kind === "road" || t.level < 1) continue;
+      if (t.kind === "road" || t.kind === "park" || t.level < 1) continue;
       wanted.add(key);
       const [gx, gz] = key.split(",").map(Number);
       const existing = this.buildings.get(key);

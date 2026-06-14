@@ -27,6 +27,7 @@ export const COST: Record<TileKind, number> = {
   res: 20,
   com: 30,
   ind: 25,
+  park: 0, // seeded greenspace, not player-placed
 };
 /** Bulldoze refunds a fraction of the original cost. */
 export const BULLDOZE_REFUND = 0.3;

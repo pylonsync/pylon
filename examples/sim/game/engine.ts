@@ -17,8 +17,8 @@ export interface Cell {
   gz: number;
 }
 
-/** Zone / road kinds painted onto the grid. */
-export type TileKind = "road" | "res" | "com" | "ind";
+/** Zone / road kinds painted onto the grid. ("park" is seeded, not painted.) */
+export type TileKind = "road" | "res" | "com" | "ind" | "park";
 
 /** Per-frame context handed to every system. */
 export interface FrameCtx {

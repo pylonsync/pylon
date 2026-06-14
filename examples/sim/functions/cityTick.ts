@@ -97,7 +97,8 @@ export default mutation({
     const nowIso = new Date(now).toISOString();
     let grown = 0;
     for (const t of tiles) {
-      if (t.kind === "road") continue;
+      // Only zones develop; roads and seeded parks never grow buildings.
+      if (t.kind !== "res" && t.kind !== "com" && t.kind !== "ind") continue;
       if (!served(t.gx as number, t.gz as number)) continue;
       const lvl = Math.max(0, Math.min(MAX_LEVEL, Math.round((t.level as number) ?? 0)));
       const cap = cellCap(t.gx as number, t.gz as number, t.kind as string);

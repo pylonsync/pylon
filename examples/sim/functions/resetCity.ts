@@ -38,7 +38,10 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
         isRoad(gx + 1, gz) || isRoad(gx - 1, gz) || isRoad(gx, gz + 1) || isRoad(gx, gz - 1);
       if (!adj) continue;
       const h = rnd(gx, gz);
-      if (h > density) continue;
+      if (h > density) {
+        if (rnd(gx * 3 + 1, gz * 3 + 1) < 0.4) set(gx, gz, "park", 1);
+        continue;
+      }
       const k = rnd(gx * 7 + 1, gz * 13 + 1);
       const kind = k < 0.74 ? "res" : k < 0.9 ? "com" : "ind";
       set(gx, gz, kind, rnd(gx + 5, gz + 5) < 0.72 ? 1 : 2);
