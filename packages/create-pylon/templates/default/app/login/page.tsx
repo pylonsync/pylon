@@ -16,7 +16,7 @@ export default function LoginPage({ auth, response }: PageProps) {
   // (no flash, works with JS disabled).
   if (auth.user_id) response.redirect("/dashboard");
   return (
-    <div className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center bg-white px-6 py-16">
+    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-16">
       <div className="w-full max-w-sm">
         <Link href="/" className="mx-auto flex w-fit items-center gap-2">
           <span className="flex size-8 items-center justify-center rounded-lg bg-zinc-900 text-sm font-bold text-white">
