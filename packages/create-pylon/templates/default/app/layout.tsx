@@ -101,9 +101,12 @@ function Chevron() {
 // your product.
 export default function RootLayout({ children, url, auth }: LayoutProps) {
   const signedIn = Boolean(auth?.user_id);
-  // Auth pages render bare — no marketing nav or footer chrome.
-  const isAuthPage =
-    (url ?? "").includes("/login") || (url ?? "").includes("/signup");
+  // These render bare — no marketing nav/footer: the auth screens and the
+  // dashboard (which brings its own sidebar shell).
+  const isBare =
+    (url ?? "").includes("/login") ||
+    (url ?? "").includes("/signup") ||
+    (url ?? "").includes("/dashboard");
   return (
     <html lang="en">
       <head>
@@ -129,7 +132,7 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
             stylesheet link is injected here automatically. */}
       </head>
       <body className="flex min-h-screen flex-col bg-background text-foreground antialiased">
-        {isAuthPage ? (
+        {isBare ? (
           children
         ) : (
           <>
