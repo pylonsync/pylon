@@ -17,18 +17,29 @@ const START_FUNDS = 8000;
  * road-served, so the sim grows them immediately).
  */
 function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: number }> {
-  // A starter neighbourhood: a grid of streets (every 4 cells) with
-  // zones lining them and block interiors left open for trees. Mostly
-  // residential, some commercial/industrial; pre-grown to L1-2 so the
-  // city looks alive on first load. Deterministic from the cell coords.
+  // A starter neighbourhood: a grid of streets with zones lining them and
+  // block interiors left open for trees. RANDOMISED per call (street
+  // spacing, district size, mix, density) so every "new city" is a
+  // genuinely different layout. The generated tiles are stored + synced,
+  // so all co-op clients still see the one shared city.
+  const seed = ((Math.random() * 0xffffffff) >>> 0) || 1;
+  const rnd = (a: number, b: number): number => {
+    let h = (Math.imul(a | 0, 73856093) ^ Math.imul(b | 0, 19349663) ^ seed) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 2246822507) >>> 0;
+    h = Math.imul(h ^ (h >>> 13), 3266489909) >>> 0;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
   const cells = new Map<string, { gx: number; gz: number; kind: string; level: number }>();
   const set = (gx: number, gz: number, kind: string, level: number) => {
     const k = gx + "," + gz;
     if (!cells.has(k)) cells.set(k, { gx, gz, kind, level });
   };
   const C = 64;
-  const R = 10;
-  const isRoad = (gx: number, gz: number) => (gx - C) % 4 === 0 || (gz - C) % 4 === 0;
+  const R = 10 + Math.floor(rnd(7, 7) * 3); // 10..12
+  const spacing = 3 + Math.floor(rnd(3, 9) * 3); // streets every 3..5 cells
+  const density = 0.62 + rnd(5, 5) * 0.18; // fraction of road-served lots built
+  const isRoad = (gx: number, gz: number) =>
+    (gx - C) % spacing === 0 || (gz - C) % spacing === 0;
   for (let gx = C - R; gx <= C + R; gx++) {
     for (let gz = C - R; gz <= C + R; gz++) {
       if (isRoad(gx, gz)) {
@@ -38,11 +49,11 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
       const adj =
         isRoad(gx + 1, gz) || isRoad(gx - 1, gz) || isRoad(gx, gz + 1) || isRoad(gx, gz - 1);
       if (!adj) continue; // interior → trees
-      let h = Math.abs(Math.sin(gx * 12.9898 + gz * 78.233) * 43758.5453);
-      h -= Math.floor(h);
-      if (h < 0.3) continue; // some empty lots
-      const kind = h < 0.76 ? "res" : h < 0.9 ? "com" : "ind";
-      set(gx, gz, kind, h < 0.72 ? 1 : 2);
+      const h = rnd(gx, gz);
+      if (h > density) continue; // empty lot → trees
+      const k = rnd(gx * 7 + 1, gz * 13 + 1);
+      const kind = k < 0.74 ? "res" : k < 0.9 ? "com" : "ind";
+      set(gx, gz, kind, rnd(gx + 5, gz + 5) < 0.72 ? 1 : 2);
     }
   }
   return [...cells.values()];

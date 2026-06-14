@@ -105,6 +105,8 @@ export class City {
   private stroke = new Set<string>();
 
   private city: CityRow = { funds: 0, population: 0, jobs: 0, happiness: 100, tick: 0 };
+  private pendingTiles: Array<{ gx: number; gz: number; kind: string; level: number }> | null =
+    null;
   private statsCb: ((s: CityStats) => void) | null = null;
   private running = false;
   private raf = 0;
@@ -223,6 +225,21 @@ export class City {
   }
 
   setTiles(rows: Array<{ gx: number; gz: number; kind: string; level: number }>): void {
+    // Coalesce. The live query hands us the FULL current tile set on every
+    // change, and a bulk op ("new city" reseeds ~500 rows) can fire the
+    // query hundreds of times in a burst. Rebuilding roads + trees +
+    // traffic on every one of those thrashes the GPU and drags the reseed
+    // out into a multi-second melt. Stash the latest set and apply it at
+    // most once per frame (drained in the loop) — intermediate states are
+    // safely skipped because each update is a complete snapshot.
+    this.pendingTiles = rows;
+  }
+
+  /** Apply the latest tile snapshot to the scene (heavy: rebuilds roads,
+   *  re-scatters trees, resizes traffic). Driven once per frame. */
+  private applyTiles(
+    rows: Array<{ gx: number; gz: number; kind: string; level: number }>,
+  ): void {
     this.tiles.setTiles(rows);
     this.rescatterTrees();
     this.traffic.setRoads(this.tiles.roadCells(), (gx, gz) => this.tiles.isRoadAt(gx, gz));
@@ -322,6 +339,13 @@ export class City {
       this.raf = requestAnimationFrame(loop);
       const dt = (now - this.lastFrameAt) / 1000;
       this.lastFrameAt = now;
+
+      // Drain the latest tile snapshot (at most one heavy rebuild per frame).
+      if (this.pendingTiles) {
+        const rows = this.pendingTiles;
+        this.pendingTiles = null;
+        this.applyTiles(rows);
+      }
 
       const ctx = this.engine.tick(dt, this.camera);
 
