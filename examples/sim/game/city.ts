@@ -22,6 +22,7 @@ import { Sky } from "./sky";
 import { buildTerrainMesh, buildWater, heightAt, isBuildableCell } from "./terrain";
 import { TileMap } from "./tiles";
 import { StreetLamps } from "./lamps";
+import { People } from "./people";
 import { preloadCars, Traffic } from "./traffic";
 import { preloadTrees, Vegetation } from "./vegetation";
 
@@ -90,6 +91,7 @@ export class City {
   private readonly vegetation: Vegetation;
   private readonly traffic: Traffic;
   private readonly lamps: StreetLamps;
+  private readonly people: People;
   private readonly sky: Sky;
   private readonly terrain: THREE.Mesh;
   private readonly cursor: THREE.Mesh;
@@ -183,10 +185,12 @@ export class City {
     this.vegetation = this.engine.add(new Vegetation());
     this.traffic = this.engine.add(new Traffic());
     this.lamps = this.engine.add(new StreetLamps());
+    this.people = this.engine.add(new People());
     this.scene.add(this.tiles.group);
     this.scene.add(this.vegetation.group);
     this.scene.add(this.traffic.group);
     this.scene.add(this.lamps.group);
+    this.scene.add(this.people.group);
 
     // Async-load the Quaternius kit; procedural fallback renders until
     // it arrives, then rebuild buildings with the real models.
@@ -247,8 +251,10 @@ export class City {
     this.tiles.setTiles(rows);
     this.rescatterTrees();
     const isRoad = (gx: number, gz: number) => this.tiles.isRoadAt(gx, gz);
-    this.traffic.setRoads(this.tiles.roadCells(), isRoad);
-    this.lamps.setRoads(this.tiles.roadCells(), isRoad);
+    const roadCells = this.tiles.roadCells();
+    this.traffic.setRoads(roadCells, isRoad);
+    this.lamps.setRoads(roadCells, isRoad);
+    this.people.setRoads(roadCells, isRoad);
   }
 
   /** Keep the forest clear of the built area (no-op if unchanged). */
