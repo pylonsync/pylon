@@ -1818,7 +1818,8 @@ fn start_server(
         Arc::new(
             crate::frontend::FrontendConfig::from_env(&app_dir)
                 .with_ssr(Arc::new(ssr_routes), fn_ops_arc)
-                .with_session(Arc::clone(&session_store), Arc::clone(&cookie_config)),
+                .with_session(Arc::clone(&session_store), Arc::clone(&cookie_config))
+                .with_orgs(Arc::clone(&orgs)),
         )
     };
     if frontend_config.is_active() {

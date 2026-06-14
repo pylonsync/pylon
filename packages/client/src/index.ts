@@ -99,6 +99,8 @@ export {
 	createApiKey,
 	createInvite,
 	createOrg,
+	deleteOrg,
+	renameOrg,
 	listActiveSessions,
 	listApiKeys,
 	listAuthProviders,

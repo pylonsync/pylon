@@ -240,6 +240,18 @@ impl OrgStore {
         Some(row_to_org(&row))
     }
 
+    /// Rename an org. Returns true when the row was updated. Org metadata is
+    /// owned by the framework (the Org entity is policy-locked to no client
+    /// writes), so renames go through here, not a sync mutation.
+    pub fn rename(&self, org_id: &str, name: &str) -> bool {
+        if self.is_disabled() {
+            return false;
+        }
+        self.store
+            .update(&self.cfg.entity, org_id, &serde_json::json!({ "name": name }))
+            .unwrap_or(false)
+    }
+
     /// Delete an org (and its memberships + pending invites).
     pub fn delete(&self, org_id: &str) -> bool {
         if self.is_disabled() {
@@ -914,6 +926,16 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].0.id, org.id);
         assert_eq!(list[0].1, OrgRole::Owner);
+    }
+
+    #[test]
+    fn rename_updates_the_org_name() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        assert!(s.rename(&org.id, "Acme Inc"));
+        assert_eq!(s.get(&org.id).unwrap().name, "Acme Inc");
+        // Unknown org → no row updated.
+        assert!(!s.rename("org-nope", "Whatever"));
     }
 
     #[test]

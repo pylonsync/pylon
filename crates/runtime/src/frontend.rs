@@ -117,6 +117,11 @@ pub struct FrontendConfig {
     /// Cookie config — used to find the session cookie by name on
     /// the incoming request. Pair with session_store.
     pub cookie_config: Option<std::sync::Arc<pylon_auth::CookieConfig>>,
+    /// Org store — used to enrich the SSR auth context's `roles` with the
+    /// caller's role in their active org, so SSR pages see the same
+    /// `auth.roles` the main request handler resolves. None → SSR `roles`
+    /// stays whatever the session carries (empty for plain sessions).
+    pub orgs: Option<std::sync::Arc<pylon_auth::org::OrgStore>>,
 }
 
 impl std::fmt::Debug for FrontendConfig {
@@ -180,6 +185,7 @@ impl FrontendConfig {
             fn_ops: None,
             session_store: None,
             cookie_config: None,
+            orgs: None,
         }
     }
 
@@ -208,6 +214,13 @@ impl FrontendConfig {
     ) -> Self {
         self.session_store = Some(session_store);
         self.cookie_config = Some(cookie_config);
+        self
+    }
+
+    /// Attach the org store so SSR auth resolution can enrich `roles` with the
+    /// caller's active-org role (mirrors the main HTTP request handler).
+    pub fn with_orgs(mut self, orgs: std::sync::Arc<pylon_auth::org::OrgStore>) -> Self {
+        self.orgs = Some(orgs);
         self
     }
 
@@ -2650,7 +2663,14 @@ fn resolve_request_auth(
         return anonymous;
     };
     let token = cookies.get(&cookie_cfg.name);
-    let ctx = store.resolve(token.map(|s| s.as_str()));
+    let mut ctx = store.resolve(token.map(|s| s.as_str()));
+    // Mirror the main HTTP request handler: fill `roles` from the caller's
+    // active-org membership so SSR pages gate on `auth.roles` the same way API
+    // routes do (e.g. an owner sees the invite UI). Without this, SSR `roles`
+    // is always empty — `SessionStore::resolve` only copies user_id + tenant.
+    if let Some(orgs) = cfg.orgs.as_ref() {
+        pylon_auth::org::enrich_active_org_role(orgs, &mut ctx);
+    }
     pylon_functions::protocol::AuthInfo {
         user_id: ctx.user_id.clone(),
         is_admin: ctx.is_admin,

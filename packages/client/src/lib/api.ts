@@ -171,10 +171,31 @@ export async function createOrg(name: string): Promise<OrgSummary> {
 	return post<OrgSummary>("/api/auth/orgs", { name });
 }
 
+/** Rename an org. Server gates this to owners + admins (`can_manage_members`). */
+export async function renameOrg(
+	orgId: string,
+	name: string,
+): Promise<{ id: string; name: string }> {
+	return req<{ id: string; name: string }>("PATCH", `/api/auth/orgs/${orgId}`, {
+		name,
+	});
+}
+
+/** Delete an org and its memberships + invites. Server gates this to owners
+ *  (`can_delete_org`). Irreversible. */
+export async function deleteOrg(orgId: string): Promise<{ deleted: boolean }> {
+	return req<{ deleted: boolean }>("DELETE", `/api/auth/orgs/${orgId}`);
+}
+
 export interface OrgMember {
 	user_id: string;
 	role: string;
 	joined_at: number;
+	/** Member's email, joined server-side from the User entity. `null` if the
+	 *  User row is missing or has no email. */
+	email: string | null;
+	/** Member's display name (displayName / name / fullName), if set. */
+	name: string | null;
 }
 
 export async function listOrgMembers(orgId: string): Promise<OrgMember[]> {
@@ -362,7 +383,7 @@ export async function revokeApiKey(
 }
 
 async function req<T>(
-	method: "PUT" | "DELETE",
+	method: "PUT" | "PATCH" | "DELETE",
 	path: string,
 	body?: unknown,
 ): Promise<T> {

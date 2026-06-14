@@ -27,6 +27,14 @@ export interface OrganizationSwitcherProps {
 	onSwitched?: (orgId: string | null) => void;
 	/** Called after a new org is created (post-creation, pre-switch). */
 	onCreated?: (org: OrgSummary) => void;
+	/**
+	 * Active org name resolved on the server (e.g. `serverData.get("Org", …)`
+	 * in an SSR layout). Seeds the trigger label so it renders the real name on
+	 * the first paint — no "Personal" → real-name flash, and no pop-in waiting
+	 * for `useAuth()`/`listOrgs()` to hydrate. The dropdown list still loads
+	 * client-side, but it's hidden until opened.
+	 */
+	initialActiveName?: string;
 	className?: string;
 }
 
@@ -44,6 +52,7 @@ export function OrganizationSwitcher({
 	hideCreate,
 	onSwitched,
 	onCreated,
+	initialActiveName,
 	className,
 }: OrganizationSwitcherProps) {
 	const { isSignedIn, tenantId, selectOrg, clearOrg } = useAuth();
@@ -88,10 +97,14 @@ export function OrganizationSwitcher({
 		};
 	}, [open]);
 
-	if (!isSignedIn) return null;
+	// A server-seeded active name means the SSR layout already rendered this in
+	// an authenticated shell — render immediately instead of waiting for
+	// `isSignedIn` to hydrate (which causes a pop-in).
+	if (!isSignedIn && !initialActiveName) return null;
 
 	const active = orgs?.find((o) => o.id === tenantId) ?? null;
-	const label = active?.name ?? (hidePersonal ? "Select org" : "Personal");
+	const label =
+		active?.name ?? initialActiveName ?? (hidePersonal ? "Select org" : "Personal");
 
 	async function switchTo(orgId: string | null) {
 		setSwitching(true);

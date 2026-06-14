@@ -3599,6 +3599,34 @@ pub(crate) fn handle(
                     .to_string(),
                 ));
             }
+            [_id] if method == HttpMethod::Patch => {
+                if !caller_role.can_manage_members() {
+                    return Some((
+                        403,
+                        json_error("FORBIDDEN", "Only owners and admins can rename an org"),
+                    ));
+                }
+                let data: serde_json::Value = match serde_json::from_str(body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Some((
+                            400,
+                            json_error_safe("INVALID_JSON", "Invalid request body", &format!("{e}")),
+                        ));
+                    }
+                };
+                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+                if name.is_empty() {
+                    return Some((400, json_error("INVALID_NAME", "name is required")));
+                }
+                if !ctx.orgs.rename(org_id, name) {
+                    return Some((404, json_error("ORG_NOT_FOUND", "org not found")));
+                }
+                return Some((
+                    200,
+                    serde_json::json!({ "id": org_id, "name": name }).to_string(),
+                ));
+            }
             [_id] if method == HttpMethod::Delete => {
                 if !caller_role.can_delete_org() {
                     return Some((
@@ -3940,14 +3968,40 @@ pub(crate) fn handle(
             }
             // /api/auth/orgs/:id/members
             [_id, "members"] if method == HttpMethod::Get => {
+                // Join each member's identity from the User entity. The caller
+                // is a confirmed member of this org (gate above), so surfacing
+                // co-members' email + name is expected — and the only way a
+                // "who's on my team" UI can show anything but raw ids (the User
+                // read policy blocks reading other users via sync/entity APIs,
+                // so this trusted server-side join is the right surface).
+                let user_entity = ctx.store.manifest().auth.user.entity.clone();
                 let list = ctx.orgs.list_members(org_id);
                 let payload: Vec<serde_json::Value> = list
                     .iter()
                     .map(|m| {
+                        let user = ctx.store.get_by_id(&user_entity, &m.user_id).ok().flatten();
+                        let email = user
+                            .as_ref()
+                            .and_then(|u| u.get("email"))
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                        let name = user
+                            .as_ref()
+                            .and_then(|u| {
+                                u.get("displayName")
+                                    .or_else(|| u.get("name"))
+                                    .or_else(|| u.get("fullName"))
+                            })
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(String::from);
                         serde_json::json!({
                             "user_id": m.user_id,
                             "role": m.role.as_str(),
                             "joined_at": m.joined_at,
+                            "email": email,
+                            "name": name,
                         })
                     })
                     .collect();
