@@ -128,7 +128,7 @@ export class TileMap implements GameSystem {
         if (!tile) continue;
         const cx = cellCenterX(gx);
         const cz = cellCenterZ(gz);
-        tile.position.set(cx, heightAt(cx, cz) + 0.04, cz);
+        tile.position.set(cx, heightAt(cx, cz) + 0.1, cz);
         this.roadGroup.add(tile);
       }
     } else {

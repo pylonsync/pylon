@@ -139,7 +139,9 @@ function normalizeToCell(scene: THREE.Object3D): THREE.Object3D {
   box.getSize(size);
   box.getCenter(center);
   const span = Math.max(size.x, size.z) || 1;
-  const scale = TILE / span;
+  // Slight overlap (×1.03) so neighbouring road tiles meet seamlessly
+  // even where the terrain steps a little between cells.
+  const scale = (TILE * 1.03) / span;
   scene.position.set(-center.x, -box.min.y, -center.z);
   scene.scale.setScalar(1);
   const inner = new THREE.Group();

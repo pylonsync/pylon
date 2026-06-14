@@ -68,10 +68,12 @@ export function heightAt(x: number, z: number): number {
   const ridged = 1 - Math.abs(fbm(nx * 3 + 11, nz * 3 + 7, TERRAIN_SEED + 91, 3) * 2 - 1);
   h += ridged * smoothstep(0.42, 1.05, d) * 135;
 
-  // Flatten a gentle central basin so the city is buildable (and safely
-  // above water).
-  const basin = 1 - smoothstep(0.04, 0.3, d);
-  const base = 5 + (fbm(nx * 8, nz * 8, TERRAIN_SEED, 2) - 0.5) * 4;
+  // Flatten a WIDE, near-level central plateau so the city is buildable
+  // and roads/buildings sit cohesively (steps between flat tiles on bumpy
+  // ground are what made the network look disconnected). The mountains
+  // and water stay outside this core.
+  const basin = 1 - smoothstep(0.08, 0.5, d);
+  const base = 5 + (fbm(nx * 8, nz * 8, TERRAIN_SEED, 2) - 0.5) * 1.3;
   h = lerp(h, base, basin);
 
   // River channel.
