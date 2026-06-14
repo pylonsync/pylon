@@ -7,26 +7,32 @@ import { mutation } from "@pylonsync/functions";
  */
 const START_FUNDS = 8000;
 
-function seedTiles(): Array<{ gx: number; gz: number; kind: string }> {
-  const cells = new Map<string, { gx: number; gz: number; kind: string }>();
-  const set = (gx: number, gz: number, kind: string) => {
+function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: number }> {
+  // Mirror of ensureCity.seedTiles — a starter neighbourhood grid.
+  const cells = new Map<string, { gx: number; gz: number; kind: string; level: number }>();
+  const set = (gx: number, gz: number, kind: string, level: number) => {
     const k = gx + "," + gz;
-    if (!cells.has(k)) cells.set(k, { gx, gz, kind });
+    if (!cells.has(k)) cells.set(k, { gx, gz, kind, level });
   };
   const C = 64;
-  for (let i = -6; i <= 6; i++) {
-    set(C + i, C, "road");
-    set(C, C + i, "road");
+  const R = 10;
+  const isRoad = (gx: number, gz: number) => (gx - C) % 4 === 0 || (gz - C) % 4 === 0;
+  for (let gx = C - R; gx <= C + R; gx++) {
+    for (let gz = C - R; gz <= C + R; gz++) {
+      if (isRoad(gx, gz)) {
+        set(gx, gz, "road", 0);
+        continue;
+      }
+      const adj =
+        isRoad(gx + 1, gz) || isRoad(gx - 1, gz) || isRoad(gx, gz + 1) || isRoad(gx, gz - 1);
+      if (!adj) continue;
+      let h = Math.abs(Math.sin(gx * 12.9898 + gz * 78.233) * 43758.5453);
+      h -= Math.floor(h);
+      if (h < 0.3) continue;
+      const kind = h < 0.76 ? "res" : h < 0.9 ? "com" : "ind";
+      set(gx, gz, kind, h < 0.55 ? 1 : 2);
+    }
   }
-  for (let i = -5; i <= 5; i++) {
-    if (i === 0) continue;
-    set(C + i, C + 1, "res");
-    set(C + i, C - 1, "res");
-  }
-  set(C + 1, C + 3, "com");
-  set(C - 1, C + 3, "com");
-  set(C + 1, C - 3, "ind");
-  set(C - 1, C - 3, "ind");
   return [...cells.values()];
 }
 
@@ -46,7 +52,7 @@ export default mutation({
         gx: t.gx,
         gz: t.gz,
         kind: t.kind,
-        level: 0,
+        level: t.level,
         userId: "seed",
         updatedAt: nowIso,
       });
