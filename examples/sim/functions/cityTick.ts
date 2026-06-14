@@ -64,23 +64,33 @@ export default mutation({
       else if (t.kind === "com" || t.kind === "ind") jobs += JOB_CAPACITY[lvl];
     }
 
-    // Demand → target development level per zone type.
-    const resTarget = Math.max(1, bucket(jobs * 1.2 + 12 - population));
+    // Demand → how tall zones MAY grow as the city matures. Residential
+    // densifies with the population (apartments, not just single houses),
+    // rather than freezing at L1 the moment residents outnumber jobs.
+    const resTarget = Math.max(1, bucket(population * 0.45));
     const comTarget = bucket(population);
     const indTarget = bucket(population * 0.8);
     const targetFor = (kind: string) =>
       kind === "res" ? resTarget : kind === "com" ? comTarget : indTarget;
 
-    // Per-cell density character: most residential lots stay low (single
-    // houses), some become mid-rise, a few become towers — so the city
-    // reads as a varied neighbourhood (mostly houses + the odd highrise)
-    // rather than a uniform wall of max-level blocks. Commercial/
-    // industrial lean denser. Deterministic from the cell.
+    // Land value decides WHERE the height goes: towers cluster in a downtown
+    // core and fade to low-rise suburbs — the defining Cities: Skylines
+    // skyline. Per-cell variety keeps the core from being a uniform wall;
+    // commercial/industrial lean a notch taller for a given location.
+    // Deterministic from the cell so every client renders the same skyline.
+    const C = 64;
     const cellCap = (gx: number, gz: number, kind: string): number => {
-      let h = Math.abs(Math.sin(gx * 92.41 + gz * 41.17) * 24634.17);
-      h -= Math.floor(h);
-      if (kind === "res") return h < 0.62 ? 1 : h < 0.88 ? 2 : 3;
-      return h < 0.3 ? 1 : h < 0.7 ? 2 : 3;
+      let v = Math.abs(Math.sin(gx * 92.41 + gz * 41.17) * 24634.17);
+      v -= Math.floor(v);
+      // Effective distance from downtown: real distance pulled in by per-cell
+      // variety (blurs the band edges so it's not concentric rings) and by a
+      // zone bias (commercial/industrial run taller for a given spot). Inside
+      // the core → towers, a mid-rise ring, then low-rise suburbs.
+      const d =
+        Math.hypot(gx - C, gz - C) - v * 2.6 - (kind === "res" ? 0 : 1.8);
+      if (d < 4.5) return 3;
+      if (d < 9) return 2;
+      return 1;
     };
 
     // Grow each road-served zone one step toward its (capped) target.
