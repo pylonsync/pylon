@@ -341,9 +341,35 @@ export function makeBuilding(
   } else {
     proceduralMassing(inner, zone, lvl, gx, gz, rotY);
   }
+  varyBuildingColor(inner, gx, gz);
   const group = new THREE.Group();
   group.add(inner);
   return group;
+}
+
+// Per-building colour variation. Clones the (shared, prototype) materials
+// and nudges brightness — plus a touch of hue on solid colours — keyed to
+// the cell, so the same model repeated down a block reads as distinct
+// buildings instead of a copy-paste wall, the way a CS street does.
+// Textured facades keep their hue (value only) so brick stays brick.
+const _bhsl = { h: 0, s: 0, l: 0 };
+function varyBuildingColor(root: THREE.Object3D, gx: number, gz: number): void {
+  const hueShift = (hash2(gx, gz, 21) - 0.5) * 0.05;
+  const valShift = 0.85 + hash2(gx, gz, 23) * 0.3;
+  const recolor = (mat: THREE.Material): THREE.Material => {
+    const std = (mat as THREE.MeshStandardMaterial).clone();
+    std.color.getHSL(_bhsl);
+    const h = std.map ? _bhsl.h : (_bhsl.h + hueShift + 1) % 1;
+    std.color.setHSL(h, _bhsl.s, Math.min(1, _bhsl.l * valShift));
+    return std;
+  };
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh) return;
+    // Preserve the single-vs-array shape: assigning a one-element array to a
+    // mesh whose geometry has no material groups renders NOTHING.
+    m.material = Array.isArray(m.material) ? m.material.map(recolor) : recolor(m.material);
+  });
 }
 
 /**
