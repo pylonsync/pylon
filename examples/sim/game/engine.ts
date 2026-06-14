@@ -19,7 +19,15 @@ export interface Cell {
 
 /** Zone / road kinds painted onto the grid. "avenue" is a major road (seeded
  *  on arterial grid lines); "park"/"carpark" are seeded greenspace. */
-export type TileKind = "road" | "avenue" | "res" | "com" | "ind" | "park" | "carpark";
+export type TileKind =
+  | "road"
+  | "avenue"
+  | "res"
+  | "com"
+  | "ind"
+  | "park"
+  | "carpark"
+  | "civic"; // a distinctive seeded landmark (city hall / clocktower)
 
 /** Per-frame context handed to every system. */
 export interface FrameCtx {

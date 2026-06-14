@@ -47,6 +47,10 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
         else if (open < 0.5) set(gx, gz, "carpark", 1);
         continue;
       }
+      if (Math.hypot(gx - C, gz - C) < 6 && rnd(gx * 5 + 3, gz * 5 + 3) < 0.1) {
+        set(gx, gz, "civic", 1);
+        continue;
+      }
       const k = rnd(gx * 7 + 1, gz * 13 + 1);
       const kind = k < 0.74 ? "res" : k < 0.9 ? "com" : "ind";
       set(gx, gz, kind, rnd(gx + 5, gz + 5) < 0.72 ? 1 : 2);

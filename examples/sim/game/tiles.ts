@@ -102,6 +102,75 @@ function makeParkTree(scale: number): THREE.Object3D {
   return g;
 }
 
+// --- Civic landmark props (procedural; only a few instances per city) ---
+const CIVIC_STONE = new THREE.MeshStandardMaterial({ color: 0xe3ddcd, roughness: 0.9 });
+const CIVIC_DOME = new THREE.MeshStandardMaterial({ color: 0x5b9087, roughness: 0.5, metalness: 0.3 });
+const CIVIC_ROOF = new THREE.MeshStandardMaterial({ color: 0x595550, roughness: 0.9 });
+const CIVIC_CLOCK = new THREE.MeshBasicMaterial({ color: 0xf4efe0 });
+
+function cbox(w: number, h: number, d: number, mat: THREE.Material, yBase: number): THREE.Mesh {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+  m.position.y = yBase + h / 2;
+  m.castShadow = true;
+  m.receiveShadow = true;
+  return m;
+}
+
+/** A distinctive civic landmark — a domed hall or a clocktower — so downtown
+ *  has a few standout public buildings. Deterministic from the cell. */
+function makeCivic(gx: number, gz: number): THREE.Object3D {
+  const g = new THREE.Group();
+  let v = Math.abs(Math.sin((gx * 13.7 + gz * 7.1) * 5.3));
+  v -= Math.floor(v);
+  if (v < 0.5) {
+    // Domed hall: stylobate + body + colonnade + verdigris dome.
+    const W = TILE * 0.82;
+    g.add(cbox(W * 1.06, 0.3, W * 1.06, CIVIC_STONE, 0));
+    g.add(cbox(W, 2.4, W, CIVIC_STONE, 0.3));
+    for (let i = -2; i <= 2; i++) {
+      const col = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 2.0, 8), CIVIC_STONE);
+      col.position.set(i * W * 0.2, 0.3 + 1.0, W * 0.44);
+      col.castShadow = true;
+      g.add(col);
+    }
+    const dome = new THREE.Mesh(
+      new THREE.SphereGeometry(W * 0.34, 14, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+      CIVIC_DOME,
+    );
+    dome.position.y = 0.3 + 2.4;
+    dome.castShadow = true;
+    g.add(dome);
+    const finial = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.5, 8), CIVIC_DOME);
+    finial.position.y = 0.3 + 2.4 + W * 0.34 + 0.1;
+    g.add(finial);
+  } else {
+    // Clocktower: square base + tall tower + clock faces + spire.
+    const B = TILE * 0.5;
+    g.add(cbox(B, 2.0, B, CIVIC_STONE, 0));
+    const T = TILE * 0.3;
+    g.add(cbox(T, 3.4, T, CIVIC_STONE, 2.0));
+    const cy = 2.0 + 2.9;
+    const clockGeo = new THREE.CircleGeometry(T * 0.32, 14);
+    const faces: Array<[number, number, number, number]> = [
+      [0, cy, T / 2 + 0.02, 0],
+      [0, cy, -T / 2 - 0.02, Math.PI],
+      [T / 2 + 0.02, cy, 0, Math.PI / 2],
+      [-T / 2 - 0.02, cy, 0, -Math.PI / 2],
+    ];
+    for (const [x, y, z, ry] of faces) {
+      const clock = new THREE.Mesh(clockGeo, CIVIC_CLOCK);
+      clock.position.set(x, y, z);
+      clock.rotation.y = ry;
+      g.add(clock);
+    }
+    const spire = new THREE.Mesh(new THREE.ConeGeometry(T * 0.78, 1.5, 4), CIVIC_ROOF);
+    spire.position.y = 2.0 + 3.4 + 0.75;
+    spire.castShadow = true;
+    g.add(spire);
+  }
+  return g;
+}
+
 export class TileMap implements GameSystem {
   readonly name = "tiles";
   readonly group = new THREE.Group();
@@ -111,6 +180,7 @@ export class TileMap implements GameSystem {
   private readonly buildGroup = new THREE.Group();
   private readonly parkGroup = new THREE.Group();
   private readonly carparkGroup = new THREE.Group();
+  private readonly civicGroup = new THREE.Group();
 
   private state = new Map<string, TileState>();
   private buildings = new Map<string, BuildingView>();
@@ -119,6 +189,7 @@ export class TileMap implements GameSystem {
   private lotSig = "";
   private parkSig = "";
   private carparkSig = "";
+  private civicSig = "";
 
   constructor(private readonly events: EventBus) {
     this.group.add(
@@ -127,6 +198,7 @@ export class TileMap implements GameSystem {
       this.buildGroup,
       this.parkGroup,
       this.carparkGroup,
+      this.civicGroup,
     );
   }
 
@@ -227,6 +299,26 @@ export class TileMap implements GameSystem {
     if (carparkSig !== this.carparkSig) {
       this.carparkSig = carparkSig;
       this.buildCarparks(carparkCells);
+    }
+
+    // --- Civic landmarks: distinctive seeded public buildings. ---
+    const civicCells: Cell[] = [];
+    for (const [key, t] of next) {
+      if (t.kind !== "civic") continue;
+      const [gx, gz] = key.split(",").map(Number);
+      civicCells.push({ gx, gz });
+    }
+    const civicSig = civicCells.map((c) => c.gx + ":" + c.gz).sort().join("|");
+    if (civicSig !== this.civicSig) {
+      this.civicSig = civicSig;
+      this.civicGroup.clear();
+      for (const { gx, gz } of civicCells) {
+        const cx = cellCenterX(gx);
+        const cz = cellCenterZ(gz);
+        const civic = makeCivic(gx, gz);
+        civic.position.set(cx, heightAt(cx, cz), cz);
+        this.civicGroup.add(civic);
+      }
     }
 
     this.syncBuildings();
@@ -345,7 +437,13 @@ export class TileMap implements GameSystem {
   private syncBuildings(): void {
     const wanted = new Set<string>();
     for (const [key, t] of this.state) {
-      if (t.kind === "road" || t.kind === "park" || t.kind === "carpark" || t.level < 1)
+      if (
+        t.kind === "road" ||
+        t.kind === "park" ||
+        t.kind === "carpark" ||
+        t.kind === "civic" ||
+        t.level < 1
+      )
         continue;
       wanted.add(key);
       const [gx, gz] = key.split(",").map(Number);

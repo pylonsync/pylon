@@ -30,6 +30,7 @@ export const COST: Record<TileKind, number> = {
   ind: 25,
   park: 0, // seeded greenspace, not player-placed
   carpark: 0, // seeded parking lot, not player-placed
+  civic: 0, // seeded landmark, not player-placed
 };
 /** Bulldoze refunds a fraction of the original cost. */
 export const BULLDOZE_REFUND = 0.3;
