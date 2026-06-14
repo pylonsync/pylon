@@ -214,9 +214,10 @@ export class Traffic implements GameSystem {
       const len = Math.hypot(dx, dz) || 1;
       const ux = dx / len;
       const uz = dz / len;
-      // Right-hand lane: offset to the right of travel.
-      const rx = uz;
-      const rz = -ux;
+      // Right-hand lane: offset to the right of travel. The right of a
+      // forward (ux,uz) on the ground is (-uz, ux).
+      const rx = -uz;
+      const rz = ux;
       const px = this.tmpA.x + dx * car.t + rx * LANE;
       const pz = this.tmpA.z + dz * car.t + rz * LANE;
       car.obj.position.set(px, heightAt(px, pz) + 0.12, pz);
