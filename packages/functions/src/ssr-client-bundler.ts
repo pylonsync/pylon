@@ -759,30 +759,20 @@ async function buildTailwind(
     );
   }
 
-  // Hash the source content so we can name the output uniquely +
-  // serve it with long-cache immutable headers.
-  const src = fs.readFileSync(globalsPath, "utf8");
-  let hash = 0;
-  for (let i = 0; i < src.length; i++) {
-    hash = (hash * 31 + src.charCodeAt(i)) >>> 0;
-  }
-  // Mix in the discovered routes so adding/removing pages changes
-  // the hash (Tailwind v4 auto-discovers `@source` paths; we still
-  // want the cache to bust on layout changes).
+  // Compile to a temp file first, then name the asset by a hash of the
+  // COMPILED OUTPUT — NOT the source. Hashing `globals.css` was the wrong
+  // input: adding a Tailwind class in any component regenerates the CSS but
+  // leaves globals.css untouched, so the `styles-<hash>.css` filename never
+  // changed and browsers / CDNs kept serving the STALE stylesheet (missing the
+  // new classes — dropdowns rendered unstyled, etc.). The compiled output, by
+  // contrast, changes iff a scanned class changes: its hash busts the cache
+  // exactly when it must, and stays identical (cache stays warm) otherwise.
   //
-  // Pad the base36 hash to 8 chars: the runtime's `is_hashed_name`
-  // (frontend.rs) only sends `Cache-Control: immutable` for hashes ≥8
-  // chars (Bun's JS chunk convention). A 32-bit base36 hash is ≤7 chars,
-  // so WITHOUT the pad the content-hashed CSS was served `no-cache` —
-  // browsers + any CDN refetched it on every page load (defeats the cache
-  // and, behind Cloudflare, needlessly wakes an autostopped origin).
-  const stylesName = `styles-${hash.toString(36).padStart(8, "0")}.css`;
-  const outPath = path.join(outdir, stylesName);
-
-  // Spawn the CLI. Bun is already running; reuse it as the
-  // interpreter so the user doesn't need node on PATH.
+  // Spawn the CLI. Bun is already running; reuse it as the interpreter so the
+  // user doesn't need node on PATH.
+  const tmpPath = path.join(outdir, ".styles.build.css");
   const proc = (Bun as any).spawn({
-    cmd: [process.execPath, cliPath, "-i", globalsPath, "-o", outPath, "--minify"],
+    cmd: [process.execPath, cliPath, "-i", globalsPath, "-o", tmpPath, "--minify"],
     cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -792,6 +782,34 @@ async function buildTailwind(
     const err = await new Response(proc.stderr).text();
     throw new Error(`tailwindcss build failed (exit ${exitCode}): ${err}`);
   }
+
+  const out = fs.readFileSync(tmpPath, "utf8");
+  let hash = 0;
+  for (let i = 0; i < out.length; i++) {
+    hash = (hash * 31 + out.charCodeAt(i)) >>> 0;
+  }
+  // Pad the base36 hash to 8 chars: the runtime's `is_hashed_name`
+  // (frontend.rs) only sends `Cache-Control: immutable` for hashes ≥8 chars
+  // (Bun's JS chunk convention). A 32-bit base36 hash is ≤7 chars, so without
+  // the pad the content-hashed CSS would be served `no-cache` — browsers + any
+  // CDN would refetch it on every page load (and, behind Cloudflare, wake an
+  // autostopped origin).
+  const stylesName = `styles-${hash.toString(36).padStart(8, "0")}.css`;
+  const outPath = path.join(outdir, stylesName);
+
+  // Drop previous styles-*.css so the outdir doesn't accumulate stale builds
+  // (the filename now changes on every class change), then move the freshly
+  // compiled file into place.
+  try {
+    for (const f of fs.readdirSync(outdir) as string[]) {
+      if (f.startsWith("styles-") && f.endsWith(".css")) {
+        fs.rmSync(path.join(outdir, f), { force: true });
+      }
+    }
+  } catch {
+    /* outdir may not be listable on the first build — ignore */
+  }
+  fs.renameSync(tmpPath, outPath);
   return stylesName;
 }
 

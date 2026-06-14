@@ -30,6 +30,29 @@ class ApiError extends Error {
 	}
 }
 
+// Turn a non-2xx Response into an ApiError, pulling the stable error `code` and
+// human `message` out of Pylon's error envelope. The server returns
+// `{ "error": { "code": "...", "message": "..." } }`; older/other endpoints may
+// send a flat `{ "error": "CODE", "message": "..." }`. Handle both so callers
+// always get a real `.code` to branch on (not "Bad Request").
+async function throwApiError(res: Response): Promise<never> {
+	const payload = (await res.json().catch(() => ({}))) as {
+		error?: { code?: string; message?: string } | string;
+		code?: string;
+		message?: string;
+	};
+	const nested =
+		payload && typeof payload.error === "object" ? payload.error : null;
+	const code =
+		nested?.code ??
+		(typeof payload?.error === "string" ? payload.error : undefined) ??
+		payload?.code ??
+		`HTTP_${res.status}`;
+	const message =
+		nested?.message ?? payload?.message ?? res.statusText ?? "request failed";
+	throw new ApiError(code, message, res.status);
+}
+
 async function post<T>(path: string, body: unknown): Promise<T> {
 	const res = await fetch(`${getBaseUrl()}${path}`, {
 		method: "POST",
@@ -37,13 +60,7 @@ async function post<T>(path: string, body: unknown): Promise<T> {
 		headers: { "content-type": "application/json" },
 		body: JSON.stringify(body),
 	});
-	if (!res.ok) {
-		const payload = await res.json().catch(() => ({}) as Record<string, unknown>);
-		const code = (payload?.error as string) ?? `HTTP_${res.status}`;
-		const message =
-			(payload?.message as string) ?? res.statusText ?? "request failed";
-		throw new ApiError(code, message, res.status);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json() as Promise<T>;
 }
 
@@ -52,7 +69,7 @@ async function get<T>(path: string): Promise<T> {
 		method: "GET",
 		credentials: "include",
 	});
-	if (!res.ok) throw new ApiError(`HTTP_${res.status}`, res.statusText, res.status);
+	if (!res.ok) await throwApiError(res);
 	return res.json() as Promise<T>;
 }
 
@@ -355,13 +372,7 @@ async function req<T>(
 		headers: body ? { "content-type": "application/json" } : undefined,
 		body: body ? JSON.stringify(body) : undefined,
 	});
-	if (!res.ok) {
-		const payload = await res.json().catch(() => ({}) as Record<string, unknown>);
-		const code = (payload?.error as string) ?? `HTTP_${res.status}`;
-		const message =
-			(payload?.message as string) ?? res.statusText ?? "request failed";
-		throw new ApiError(code, message, res.status);
-	}
+	if (!res.ok) await throwApiError(res);
 	return res.json() as Promise<T>;
 }
 
