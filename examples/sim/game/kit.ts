@@ -410,9 +410,11 @@ function varyBuildingColor(
       std.color.setScalar((roof ? 2.2 : 1.1) + (hash2(gx, gz, 23) - 0.5) * 0.18);
     } else {
       std.color.getHSL(_bhsl);
-      // Floor the lightness so dark roof/trim colours (DarkGrey, Brown) don't
-      // read as black boxes from above, then apply the per-building + zone shift.
-      const l = Math.min(1, Math.max(0.3, _bhsl.l * valShift));
+      // Floor the lightness so dark roof/trim colours don't read as black
+      // boxes from above. The brownstone slate roof (solid "DarkGrey") is the
+      // darkest thing left in the core, so lift it harder to a mid slate grey.
+      const slate = name.includes("darkgrey") || name.includes("darkgray");
+      const l = Math.min(1, Math.max(slate ? 0.54 : 0.3, _bhsl.l * valShift));
       std.color.setHSL((_bhsl.h + hueShift + 1) % 1, _bhsl.s, l);
       if (zoneMix) std.color.lerp(zoneMix.target, zoneMix.amt);
     }
