@@ -25,7 +25,7 @@ function seedTiles(): Array<{ gx: number; gz: number; kind: string; level: numbe
   const C = 64;
   const R = 10 + Math.floor(rnd(7, 7) * 3);
   const spacing = 3 + Math.floor(rnd(3, 9) * 3);
-  const density = 0.62 + rnd(5, 5) * 0.18;
+  const density = 0.82 + rnd(5, 5) * 0.13;
   const isRoad = (gx: number, gz: number) =>
     (gx - C) % spacing === 0 || (gz - C) % spacing === 0;
   for (let gx = C - R; gx <= C + R; gx++) {
