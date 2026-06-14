@@ -179,6 +179,20 @@ function normalizeToCell(scene: THREE.Object3D): THREE.Object3D {
 const laneMat = new THREE.MeshBasicMaterial({ color: 0xe8c34a });
 const dashGeo = new THREE.PlaneGeometry(TILE * 0.04, TILE * 0.34).rotateX(-Math.PI / 2);
 
+// Sidewalk / kerb: a raised light-concrete strip laid along any tile edge
+// that faces a non-road cell, so every block reads as a kerbed city block —
+// the single strongest "this is a city, not models on grass" cue vs bare
+// asphalt. Two box geometries (one per axis) shared across all road tiles.
+const SW_W = TILE * 0.17; // strip width (~1.1 m)
+const SW_H = 0.14; // raised kerb height
+const sidewalkMat = new THREE.MeshStandardMaterial({
+  color: 0xbcbcb4,
+  roughness: 0.97,
+  metalness: 0,
+});
+const swGeoNS = new THREE.BoxGeometry(TILE, SW_H, SW_W); // runs along x (N/S edges)
+const swGeoEW = new THREE.BoxGeometry(SW_W, SW_H, TILE); // runs along z (E/W edges)
+
 /**
  * One road tile for a cell — the MegaKit's clean asphalt road piece
  * (square, abuts its neighbours seamlessly) with a generated dashed
@@ -217,6 +231,24 @@ export function makeRoadTile(
     if (e) addDash(off, 0, true);
     if (w) addDash(-off, 0, true);
   }
+
+  // Kerb every edge that faces a non-road cell (north = +z, east = +x).
+  // The strips span the full cell so adjacent tiles' kerbs join into one
+  // continuous sidewalk, and the gap left on a connected side is exactly
+  // the mouth of that road. Corners overlap, which reads fine from above.
+  const edge = TILE / 2 - SW_W / 2;
+  const addWalk = (geo: THREE.BoxGeometry, x: number, z: number) => {
+    const m = new THREE.Mesh(geo, sidewalkMat);
+    m.position.set(x, SW_H / 2, z);
+    m.castShadow = true;
+    m.receiveShadow = true;
+    group.add(m);
+  };
+  if (!n) addWalk(swGeoNS, 0, edge);
+  if (!s) addWalk(swGeoNS, 0, -edge);
+  if (!e) addWalk(swGeoEW, edge, 0);
+  if (!w) addWalk(swGeoEW, -edge, 0);
+
   return group;
 }
 
