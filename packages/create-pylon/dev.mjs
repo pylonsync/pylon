@@ -4,7 +4,7 @@
  * re-scaffolding by hand.
  *
  *   node packages/create-pylon/dev.mjs <template> [port]
- *   node packages/create-pylon/dev.mjs ssr            # default port 4321
+ *   node packages/create-pylon/dev.mjs default        # the default template, port 4321
  *   node packages/create-pylon/dev.mjs todo 4480
  *
  * What it does:
@@ -48,7 +48,7 @@ const port = portArg || "4321";
 if (!template) {
   console.error(
     "usage: node packages/create-pylon/dev.mjs <template> [port]\n" +
-      "       template is a unified template dir name (ssr, todo, barebones, consumer, chat, b2b)",
+      "       template is a unified template dir name (default, todo, barebones, consumer, chat, b2b)",
   );
   process.exit(1);
 }

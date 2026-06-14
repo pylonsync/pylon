@@ -71,9 +71,9 @@ const PYLON_VERSION = JSON.parse(
 const PLATFORMS_AVAILABLE = ["web", "vite", "ios", "mac", "expo"];
 
 const TEMPLATE_REGISTRY = {
-	ssr: {
+	default: {
 		blurb:
-			"Full-stack SSR — server-rendered React + Link/Image/Tailwind, one server, no Next.js.",
+			"SaaS starter — server-rendered marketing landing + multi-tenant dashboard (orgs, members, tenant-scoped data). One app, one port, no Next.js.",
 		// `unified` templates are a single Pylon app (app.ts + app/ routes +
 		// functions/), NOT a monorepo of apps/api + apps/web. `pylon dev`
 		// serves the SSR frontend and the API from one port. They take no
@@ -167,15 +167,14 @@ Usage: npm create @pylonsync/pylon [name] [options]
 ${tmplLines.join("\n")}
 
   --platforms <list>     comma list: ${PLATFORMS_AVAILABLE.join(",")}  (default: web)
-                         ignored for ssr — it's a single full-stack app, no platforms
+                         ignored for unified templates — they're a single full-stack app
   --bun|--pnpm|--yarn|--npm
   --skip-install         scaffold only, don't run install
 
 Examples:
-  npm create @pylonsync/pylon my-app --template ssr         # full-stack SSR, no Next.js
+  npm create @pylonsync/pylon my-app                        # default — SaaS landing + multi-tenant dashboard
   npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
-  npm create @pylonsync/pylon my-app
-  npm create @pylonsync/pylon my-app --template b2b          # multi-tenant SaaS (orgs, members, RBAC)
+  npm create @pylonsync/pylon my-app --template b2b          # minimal multi-tenant (orgs, members, RBAC)
   npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
 `);
 	exit(0);
@@ -192,14 +191,17 @@ if (!flags.template) {
 	process.stdout.write(`\n${lines}\n`);
 	const ans = (
 		await rl.question(
-			`Template (${TEMPLATES_AVAILABLE.join(", ")}) [ssr]: `,
+			`Template (${TEMPLATES_AVAILABLE.join(", ")}) [default]: `,
 		)
 	)
 		.trim()
 		.toLowerCase();
-	flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "ssr";
+	flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "default";
 }
-// `unified` templates (ssr) are a single app, not a monorepo — they take
+// `ssr` was the original name of the default template; keep it working as a
+// quiet alias so older `--template ssr` invocations don't break.
+if (flags.template === "ssr") flags.template = "default";
+// `unified` templates (default) are a single app, not a monorepo — they take
 // no platforms. Skip the platform prompt + validation for them entirely.
 const isUnified = TEMPLATE_REGISTRY[flags.template]?.unified === true;
 if (!isUnified && !flags.platforms) {
