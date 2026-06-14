@@ -696,6 +696,36 @@ fn random_token(n_bytes: usize) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
+/// Populate `auth.roles` with the caller's role in their active org.
+///
+/// `SessionStore::resolve` → `to_auth_context` only copies `user_id` +
+/// `tenant_id`; it leaves `roles` empty for org members because the session
+/// store has no view of the entity-backed membership table. That left
+/// `auth.roles` permanently empty for every signed-in user, so any gate on it
+/// — the client `Protect` / `InviteMembers` components, server-side policies
+/// branching on "owner"/"admin"/"member" — was dead. The visible symptom: the
+/// invite UI was hidden even from the org's own owner.
+///
+/// This runs once per request, after session resolution and admin promotion,
+/// to fill that gap from the same `OrgMember` table the server already trusts
+/// for enforcement. Conservative + idempotent:
+///   - never overwrites a non-empty `roles` list (admin contexts carry
+///     `["admin"]`; JWT sessions carry their claim roles),
+///   - skips admin and API-key contexts (a scoped `pk.*` token must not pick
+///     up org roles it wasn't minted with),
+///   - only fills when there's an active tenant AND a membership row in it.
+pub fn enrich_active_org_role(orgs: &OrgStore, auth: &mut crate::AuthContext) {
+    if !auth.roles.is_empty() || auth.is_admin || auth.is_api_key_auth() {
+        return;
+    }
+    let (Some(tenant), Some(uid)) = (auth.tenant_id.clone(), auth.user_id.clone()) else {
+        return;
+    };
+    if let Some(role) = orgs.role_of(&tenant, &uid) {
+        auth.roles = vec![role.as_str().to_string()];
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests — in-memory DataStore exercising the entity-backed OrgStore
 // ---------------------------------------------------------------------------
@@ -905,6 +935,55 @@ mod tests {
         s.add_member(&org.id, "u-bob", OrgRole::Member);
         assert!(s.set_role(&org.id, "u-bob", OrgRole::Admin));
         assert_eq!(s.role_of(&org.id, "u-bob"), Some(OrgRole::Admin));
+    }
+
+    // Regression: `to_auth_context` leaves `roles` empty, so without this
+    // enrichment every org member (the owner included) failed role gates like
+    // `InviteMembers`' `roles.includes("owner"|"admin")` check — the invite UI
+    // was hidden from the very person who just created the org.
+    #[test]
+    fn enrich_fills_active_org_role_for_owner_and_member() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+        s.add_member(&org.id, "u-bob", OrgRole::Member);
+
+        let mut owner = crate::AuthContext::user("u-alice".into()).with_tenant(org.id.clone());
+        enrich_active_org_role(&s, &mut owner);
+        assert_eq!(owner.roles, vec!["owner".to_string()]);
+
+        let mut member = crate::AuthContext::user("u-bob".into()).with_tenant(org.id.clone());
+        enrich_active_org_role(&s, &mut member);
+        assert_eq!(member.roles, vec!["member".to_string()]);
+    }
+
+    #[test]
+    fn enrich_is_conservative() {
+        let s = store();
+        let org = s.create("Acme", "u-alice").unwrap();
+
+        // No active tenant → nothing to resolve, roles stay empty.
+        let mut no_tenant = crate::AuthContext::user("u-alice".into());
+        enrich_active_org_role(&s, &mut no_tenant);
+        assert!(no_tenant.roles.is_empty());
+
+        // Active tenant but the caller isn't a member → no role granted.
+        let mut stranger = crate::AuthContext::user("u-stranger".into()).with_tenant(org.id.clone());
+        enrich_active_org_role(&s, &mut stranger);
+        assert!(stranger.roles.is_empty());
+
+        // Admin contexts already carry ["admin"] and must not be clobbered
+        // with an org role (or skipped into emptiness).
+        let mut admin = crate::AuthContext::admin().with_tenant(org.id.clone());
+        enrich_active_org_role(&s, &mut admin);
+        assert_eq!(admin.roles, vec!["admin".to_string()]);
+
+        // A scoped API-key context must not pick up org roles it wasn't
+        // minted with, even for a real member user.
+        let mut api_key =
+            crate::AuthContext::from_api_key("u-alice".into(), "key_1".into(), None)
+                .with_tenant(org.id.clone());
+        enrich_active_org_role(&s, &mut api_key);
+        assert!(api_key.roles.is_empty());
     }
 
     #[test]

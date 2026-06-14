@@ -3393,6 +3393,13 @@ fn start_server(
                 }
             }
         }
+
+        // Multi-tenant role resolution. Surface the caller's role in their
+        // active org as `auth_ctx.roles` (see the helper's doc comment for why
+        // the session store can't do this itself). Without it, `auth.roles`
+        // stays empty for org members and every role gate is dead — including
+        // hiding the invite UI from the org's own owner.
+        pylon_auth::org::enrich_active_org_role(&og, &mut auth_ctx);
         let auth_ctx = auth_ctx;
 
         // --- Test-reset endpoint — in-memory + dev mode + localhost only ---
