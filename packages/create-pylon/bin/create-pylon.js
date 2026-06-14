@@ -94,8 +94,10 @@ const TEMPLATE_REGISTRY = {
 		unified: true,
 	},
 	b2b: {
-		blurb: "Multi-tenant SaaS: orgs, members, roles, RBAC policies.",
-		platforms: ["web", "mac"],
+		blurb:
+			"Multi-tenant SaaS — orgs, members, roles, tenant-scoped data. One SSR app.",
+		platforms: [],
+		unified: true,
 	},
 	consumer: {
 		blurb:
@@ -173,8 +175,8 @@ Examples:
   npm create @pylonsync/pylon my-app --template ssr         # full-stack SSR, no Next.js
   npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
   npm create @pylonsync/pylon my-app
-  npm create @pylonsync/pylon my-app --template b2b --platforms web,mac
-  npm create @pylonsync/pylon my-app --template chat --platforms ios,mac,expo
+  npm create @pylonsync/pylon my-app --template b2b          # multi-tenant SaaS (orgs, members, RBAC)
+  npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
 `);
 	exit(0);
 }

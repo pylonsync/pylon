@@ -18,6 +18,9 @@ const User = entity(
     email: field.string(),
     displayName: field.string().optional(),
     passwordHash: field.string().serverOnly().optional(),
+    // The framework's /api/auth/password/register stamps a generated avatar
+    // color here, so the User entity must declare it.
+    avatarColor: field.string().optional(),
     createdAt: field.datetime().defaultNow(),
   },
   { indexes: [{ name: "by_email", fields: ["email"], unique: true }] },
