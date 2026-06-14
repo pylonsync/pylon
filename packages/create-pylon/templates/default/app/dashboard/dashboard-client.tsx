@@ -1,13 +1,8 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useState } from "react";
 import { db } from "@pylonsync/react";
-import {
-  useAuth,
-  listOrgMembers,
-  createInvite,
-  type OrgMember,
-} from "@pylonsync/client";
+import { createInvite } from "@pylonsync/client";
 import { Button } from "@/components/ui/button";
 
 export interface Project {
@@ -17,8 +12,19 @@ export interface Project {
   createdAt: string;
 }
 
-// Shown when no org is selected — the sidebar's <OrganizationSwitcher> is where
-// you pick or create one. Every dashboard view keys off the active tenant.
+// OrgMember rows as returned by `serverData.list("OrgMember")` (the entity
+// shape — camelCase fields).
+export interface OrgMemberRow {
+  id: string;
+  userId: string;
+  role: string;
+}
+
+// Every view receives its data from the SERVER (resolved via `serverData` +
+// React 19 `use()` in the page) and the active org as `tenantId` (from
+// `auth.tenant_id`). So the first client paint already has the right state —
+// no `useAuth()`/fetch round-trip, no empty-state flash.
+
 function NoOrg() {
   return (
     <div className="rounded-xl border border-dashed border-zinc-300 px-6 py-12 text-center text-sm text-zinc-500">
@@ -64,25 +70,21 @@ const inputCls =
 
 /* ============================ Overview ============================ */
 
-export function Overview() {
-  const { tenantId } = useAuth();
+export function Overview({
+  tenantId,
+  projects,
+  memberCount,
+}: {
+  tenantId: string | null;
+  projects: Project[];
+  memberCount: number;
+}) {
   if (!tenantId) return <NoOrg />;
-  return <OverviewInner orgId={tenantId} />;
-}
-
-function OverviewInner({ orgId }: { orgId: string }) {
-  const { data: all } = db.useQuery<Project>("Project");
-  const projects = all.filter((p) => p.orgId === orgId);
-  const [memberCount, setMemberCount] = useState<number | null>(null);
-  useEffect(() => {
-    void listOrgMembers(orgId).then((m) => setMemberCount(m.length));
-  }, [orgId]);
-
   return (
     <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-3">
         <Stat label="Projects" value={projects.length} />
-        <Stat label="Members" value={memberCount ?? "—"} />
+        <Stat label="Members" value={memberCount} />
         <Stat label="Plan" value="Free" />
       </div>
       <Card
@@ -116,20 +118,32 @@ function OverviewInner({ orgId }: { orgId: string }) {
 
 /* ============================ Projects ============================ */
 
-export function Projects() {
-  const { tenantId } = useAuth();
+export function Projects({
+  tenantId,
+  initial,
+}: {
+  tenantId: string | null;
+  initial: Project[];
+}) {
   if (!tenantId) return <NoOrg />;
-  return <ProjectsList orgId={tenantId} />;
+  return <ProjectsList orgId={tenantId} initial={initial} />;
 }
 
-// Tenant-scoped data. `db.useQuery("Project")` returns only your active org's
-// projects (the policy gates on `auth.tenantId == data.orgId`), and switching
-// orgs re-syncs the list. `db.insert` is optimistic; we pass `orgId` = the
-// active tenant so the row lands in this org — the policy rejects any other.
-function ProjectsList({ orgId }: { orgId: string }) {
+// Live + optimistic, seeded from the server. `db.useQuery` is reactive
+// (db.insert/db.delete update it instantly across tabs), but until the first
+// server-confirmed sync settles we render the server-passed `initial` rows — so
+// there's no flash of an empty list on load. The policy gates reads on
+// `auth.tenantId == data.orgId`, so this is only ever this org's projects.
+function ProjectsList({
+  orgId,
+  initial,
+}: {
+  orgId: string;
+  initial: Project[];
+}) {
   const [name, setName] = useState("");
-  const { data: all } = db.useQuery<Project>("Project");
-  const projects = all.filter((p) => p.orgId === orgId);
+  const { data, loading } = db.useQuery<Project>("Project");
+  const projects = loading ? initial : data.filter((p) => p.orgId === orgId);
 
   async function add(e: React.FormEvent) {
     e.preventDefault();
@@ -176,8 +190,8 @@ function ProjectsList({ orgId }: { orgId: string }) {
         </ul>
       )}
       <p className="mt-3 text-xs text-zinc-400">
-        Tenant-scoped: only this org&apos;s projects, enforced by policy — switch
-        orgs and the list changes.
+        Tenant-scoped + live: only this org&apos;s projects (enforced by policy),
+        seeded from the server so there&apos;s no load flash.
       </p>
     </Card>
   );
@@ -185,39 +199,39 @@ function ProjectsList({ orgId }: { orgId: string }) {
 
 /* ============================= Members ============================ */
 
-export function Members() {
-  const { tenantId } = useAuth();
+export function Members({
+  tenantId,
+  initial,
+}: {
+  tenantId: string | null;
+  initial: OrgMemberRow[];
+}) {
   if (!tenantId) return <NoOrg />;
-  return <MembersList orgId={tenantId} />;
+  return <MembersList orgId={tenantId} initial={initial} />;
 }
 
-// Membership + invites go through the framework's /api/auth/orgs/:id endpoints
-// (the @pylonsync/client helpers). The framework gates invites to org admins,
-// so a member calling createInvite gets a 403 — real RBAC, no extra code.
-function MembersList({ orgId }: { orgId: string }) {
-  const [members, setMembers] = useState<OrgMember[] | null>(null);
+// Members come pre-resolved from the server (no flash). Invites go through the
+// framework's /api/auth/orgs/:id endpoints (the @pylonsync/client helper). The
+// framework gates invites to org admins, so a member calling createInvite gets
+// a 403 — real RBAC, no extra code.
+function MembersList({
+  orgId,
+  initial,
+}: {
+  orgId: string;
+  initial: OrgMemberRow[];
+}) {
   const [email, setEmail] = useState("");
   const [note, setNote] = useState("");
-
-  const refresh = useCallback(() => {
-    void listOrgMembers(orgId).then(setMembers);
-  }, [orgId]);
-
-  useEffect(() => {
-    setMembers(null);
-    refresh();
-  }, [refresh]);
 
   async function invite(e: React.FormEvent) {
     e.preventDefault();
     const value = email.trim();
     if (!value) return;
     setEmail("");
-    setNote("");
     try {
       await createInvite(orgId, value, "member");
       setNote(`Invited ${value}.`);
-      refresh();
     } catch {
       setNote("Only org admins can invite members.");
     }
@@ -239,17 +253,17 @@ function MembersList({ orgId }: { orgId: string }) {
         </Button>
       </form>
       {note && <p className="mt-2 text-xs text-zinc-500">{note}</p>}
-      {members === null ? (
-        <p className="mt-3 text-sm text-zinc-500">Loading…</p>
+      {initial.length === 0 ? (
+        <p className="mt-3 text-sm text-zinc-500">No members yet.</p>
       ) : (
         <ul className="mt-3 space-y-1.5">
-          {members.map((m) => (
+          {initial.map((m) => (
             <li
-              key={m.user_id}
+              key={m.id}
               className="flex items-center justify-between rounded-md border border-zinc-200 px-3 py-2 text-sm"
             >
               <span className="truncate font-mono text-xs text-zinc-600">
-                {shortId(m.user_id)}
+                {shortId(m.userId)}
               </span>
               <span className="text-xs text-zinc-500">{m.role}</span>
             </li>
@@ -262,8 +276,7 @@ function MembersList({ orgId }: { orgId: string }) {
 
 /* ============================ Settings ============================ */
 
-export function Settings() {
-  const { tenantId } = useAuth();
+export function Settings({ tenantId }: { tenantId: string | null }) {
   return (
     <div className="max-w-2xl space-y-6">
       <Card title="Workspace">

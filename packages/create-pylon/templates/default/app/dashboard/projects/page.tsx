@@ -1,22 +1,29 @@
-import React from "react";
+import React, { use } from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
 import { DashboardShell } from "@/components/dashboard-shell";
-import { Projects } from "../dashboard-client";
+import { Projects, type Project } from "../dashboard-client";
 
 export const metadata: Metadata = {
   title: "Projects — Acme",
   robots: "noindex",
 };
 
-// `/dashboard/projects` — tenant-scoped projects for the active org.
-export default function ProjectsPage({ auth, response }: PageProps) {
+// `/dashboard/projects` — this org's projects, server-resolved via `use()` then
+// kept live + optimistic by `db` on the client.
+export default function ProjectsPage({
+  auth,
+  response,
+  serverData,
+}: PageProps) {
   if (!auth.user_id) {
     response.redirect("/login");
     return null;
   }
+  const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
+  const projects = use(serverData.list<Project>("Project"));
   return (
-    <DashboardShell active="projects" title="Projects">
-      <Projects />
+    <DashboardShell active="projects" title="Projects" userEmail={me?.email ?? ""}>
+      <Projects tenantId={auth.tenant_id} initial={projects} />
     </DashboardShell>
   );
 }
