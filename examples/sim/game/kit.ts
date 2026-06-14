@@ -334,6 +334,12 @@ export function makeBuilding(
     faceRad !== undefined ? Math.max(0, (TILE * (1 - fp)) / 2 - TILE * 0.06) : 0;
   const inner = new THREE.Group();
   inner.position.set(Math.sin(faceRad ?? 0) * push, 0, Math.cos(faceRad ?? 0) * push);
+  // Vary height per building so the downtown steps into a varied skyline
+  // instead of a uniform wall of equal boxes — strongest on the taller
+  // levels, barely perceptible on houses. (Composes with the rise animation,
+  // which scales the OUTER group's Y to 1.) Front of the inner group is the
+  // building base, so this grows it upward.
+  inner.scale.y = lvl >= 2 ? 0.82 + hash2(gx, gz, 17) * 0.46 : 0.94 + hash2(gx, gz, 17) * 0.14;
   if (proto) {
     const inst = proto.clone(true);
     inst.rotation.y = rotY;
