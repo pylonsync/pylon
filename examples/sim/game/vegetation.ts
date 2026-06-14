@@ -136,9 +136,10 @@ function forestDensity(gx: number, gz: number): number {
   return lerp(top, bot, fz);
 }
 
-// Cherry-blossom pinks + a few autumn tones — the colour pop CS suburbs
-// are full of. Weighted toward pink.
-const BLOSSOM = [0xefa9c8, 0xf2bcd6, 0xe98fb8, 0xf0c0a0, 0xd98a6a, 0xddb84a];
+// Occasional flowering / autumn trees — a restrained colour pop, not the
+// candy-pink carpet. Muted blush + cream + autumn so the canopy stays
+// believably green-dominant like a real CS suburb.
+const BLOSSOM = [0xe3b6c6, 0xe7c8d2, 0xdcc8a6, 0xd2ad84, 0xc9a85a, 0xc28d6a];
 
 export class Vegetation implements GameSystem {
   readonly name = "vegetation";
@@ -173,7 +174,7 @@ export class Vegetation implements GameSystem {
       dummy.rotation.set(0, hash2(seed, 3, 9) * Math.PI * 2, 0);
       dummy.scale.set(sxz, h, sxz);
       dummy.updateMatrix();
-      const blossom = hash2(seed, 7, 9) < 0.2;
+      const blossom = hash2(seed, 7, 9) < 0.07;
       tpl.parts.forEach((p, pi) => {
         mats[ti][pi].push(dummy.matrix.clone());
         // Leaf instances always carry a colour (blossom tint or the

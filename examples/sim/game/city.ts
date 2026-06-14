@@ -52,10 +52,10 @@ export interface CityStats {
 const COLOR_GRADE = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
-    saturation: { value: 1.07 },
-    warmth: { value: 0.012 },
-    contrast: { value: 1.04 },
-    lift: { value: 0.008 },
+    saturation: { value: 1.0 },
+    warmth: { value: 0.0 },
+    contrast: { value: 1.07 },
+    lift: { value: 0.004 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
