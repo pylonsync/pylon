@@ -1543,8 +1543,8 @@ export function LandingPage({
 									<span className="nav-github-stars">GitHub</span>
 								)}
 							</a>
-							<Link className="btn ghost" href="https://cloud.pylonsync.com/login">Sign in</Link>
-							<Link className="btn dark" href="https://cloud.pylonsync.com">Start building →</Link>
+							<Link className="btn ghost" href="https://www.pylonsync.com/login">Sign in</Link>
+							<Link className="btn dark" href="https://www.pylonsync.com">Start building →</Link>
 							<button
 								type="button"
 								className="nav-burger"
@@ -1562,7 +1562,7 @@ export function LandingPage({
 						<a href="https://docs.pylonsync.com">Docs</a>
 						<a href="https://github.com/pylonsync/pylon/releases">Changelog</a>
 						<a href="#compare" onClick={() => setMenuOpen(false)}>Compare</a>
-						<a href="https://cloud.pylonsync.com/login" className="sheet-signin">Sign in →</a>
+						<a href="https://www.pylonsync.com/login" className="sheet-signin">Sign in →</a>
 					</div>
 				</nav>
 
@@ -2234,7 +2234,7 @@ export function LandingPage({
 							<h2>Stop gluing services together.</h2>
 							<p>Open source, MIT/Apache. Free tier on Pylon Cloud — pay when you outgrow it, or take the binary and run it yourself.</p>
 							<div className="ctas">
-								<Link className="btn accent" href="https://cloud.pylonsync.com">Start free →</Link>
+								<Link className="btn accent" href="https://www.pylonsync.com">Start free →</Link>
 								<a className="btn ghost" style={{ color: "rgba(255,255,255,.7)" }} href="https://docs.pylonsync.com">Read the docs</a>
 							</div>
 							<div className="cta-secondary">
@@ -2262,7 +2262,7 @@ export function LandingPage({
 								<li><a href="https://docs.pylonsync.com/concepts/live-queries">Live queries</a></li>
 								<li><a href="https://docs.pylonsync.com/plugins/overview">Plugins</a></li>
 								<li><a href="#compare">Compare</a></li>
-								<li><a href="https://cloud.pylonsync.com">Pylon Cloud</a></li>
+								<li><a href="https://www.pylonsync.com">Pylon Cloud</a></li>
 							</ul>
 						</div>
 						<div>

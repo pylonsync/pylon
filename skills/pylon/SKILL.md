@@ -17,7 +17,7 @@ This skill is a starting point, not the ceiling. When the user asks something th
 - **Docs site:** <https://docs.pylonsync.com/> — human docs covering Get started, Core concepts, Auth, Plugins, Clients, Cloud, Operations, and Compare-vs-X pages.
 - **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`, and the Swift SDK at `packages/swift/`. When in doubt about a method name or signature, read the source, not your training data.
 - **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — full apps covering CRM, ERP, chat, 3D, dashboards, plus `examples/swift-todo` for the iOS/macOS SDK.
-- **Pylon Cloud:** <https://cloud.pylonsync.com> — managed Pylon. Same binary, same APIs, no infra to run.
+- **Pylon Cloud:** <https://www.pylonsync.com> — managed Pylon. Same binary, same APIs, no infra to run.
 - **This skill file (latest):** <https://pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
 **Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`, `db.useAggregate({sum: ...})`) is probably hallucinated.
@@ -29,7 +29,7 @@ Use this skill whenever:
 - The user's Swift project imports `PylonClient`, `PylonSync`, `PylonRealtime`, or `PylonSwiftUI`.
 - The user says "Pylon", "Pylonsync", "realtime backend", or asks to build a live-syncing feature.
 - The user runs `pylon dev`, `pylon init`, `pylon deploy`, `pylon codegen`, or another `pylon` CLI command.
-- The user mentions Pylon Cloud, `cloud.pylonsync.com`, or `pylon deploy --target cloud`.
+- The user mentions Pylon Cloud, `www.pylonsync.com`, or `pylon deploy --target cloud`.
 
 ## Core mental model
 
@@ -483,7 +483,7 @@ For Fly.io the common pattern is a 1GB volume mounted at `/data` with `auto_stop
 
 ### CLI ops surface (Pylon Cloud)
 
-Once logged in (`pylon login`, or via the dashboard's "Hand off to your coding agent" card → `pylon login --code XXXX-XXXX`), the CLI covers every dashboard operation. Use these instead of clicking through `cloud.pylonsync.com` for anything scripted.
+Once logged in (`pylon login`, or via the dashboard's "Hand off to your coding agent" card → `pylon login --code XXXX-XXXX`), the CLI covers every dashboard operation. Use these instead of clicking through `www.pylonsync.com` for anything scripted.
 
 ```bash
 pylon projects list                     # all projects you can see
@@ -500,7 +500,7 @@ pylon members list / invite EMAIL [role]
 
 Every command accepts `--json` for piping to `jq`. Project context resolves from `--project` flag → `$PYLON_PROJECT` → `.pylon/project` file → interactive picker. The `.pylon/project` file is what `pylon projects use` writes; subsequent commands in that directory tree auto-target.
 
-**Project creation** still lives in the dashboard — provisioning a Fly machine + Postgres DB isn't a one-call CLI operation yet. After signup, point the user at `cloud.pylonsync.com/dashboard` to create the first project; then `pylon projects use <slug>` from the local repo and everything else flows through the CLI.
+**Project creation** still lives in the dashboard — provisioning a Fly machine + Postgres DB isn't a one-call CLI operation yet. After signup, point the user at `www.pylonsync.com/dashboard` to create the first project; then `pylon projects use <slug>` from the local repo and everything else flows through the CLI.
 
 ## Gotchas & rules
 
@@ -576,7 +576,7 @@ This skill focused on the React/TS happy path. Pylon has more — fetch the docs
 - **Swift SDK** at `packages/swift/` — `PylonClient`, `PylonSync`, `PylonRealtime`, `PylonSwiftUI`. iOS 16+, macOS 13+, tvOS 16+, watchOS 9+, Linux. Codegen via `pylon codegen client --target swift`.
 
 ### Pylon Cloud
-Managed Pylon at `cloud.pylonsync.com`. Same binary, same APIs.
+Managed Pylon at `www.pylonsync.com`. Same binary, same APIs.
 - `pylon login` then `pylon deploy --target cloud`
 - Custom domains via `pylon domain add`
 - Environment vars via `pylon env set/list/unset`

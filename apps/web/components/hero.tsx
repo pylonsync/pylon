@@ -120,7 +120,7 @@ function CloudButton() {
   return (
     <a
       className="btn btn-primary"
-      href="https://cloud.pylonsync.com"
+      href="https://www.pylonsync.com"
       target="_blank"
       rel="noopener noreferrer"
     >

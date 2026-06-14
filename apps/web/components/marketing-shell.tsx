@@ -80,12 +80,12 @@ function MarketingNav({ stars }: { stars: number | null }) {
 							<span className="nav-github-stars">GitHub</span>
 						)}
 					</a>
-					<Link className="btn ghost" href="https://cloud.pylonsync.com/login">
+					<Link className="btn ghost" href="https://www.pylonsync.com/login">
 						Sign in
 					</Link>
 					<Link
 						className="btn dark"
-						href="https://cloud.pylonsync.com"
+						href="https://www.pylonsync.com"
 					>
 						Start building →
 					</Link>
@@ -123,8 +123,8 @@ function MarketingFooter() {
 					</div>
 					<div className="footer-col">
 						<h6>Cloud</h6>
-						<a href="https://cloud.pylonsync.com/signup">Sign up</a>
-						<a href="https://cloud.pylonsync.com/login">Sign in</a>
+						<a href="https://www.pylonsync.com/signup">Sign up</a>
+						<a href="https://www.pylonsync.com/login">Sign in</a>
 						<a href="https://docs.pylonsync.com/cloud">Pylon Cloud</a>
 						<a href="https://status.pylonsync.com">Status</a>
 					</div>

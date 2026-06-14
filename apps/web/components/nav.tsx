@@ -54,7 +54,7 @@ export function Nav() {
           </a>
           <a
             className="nav-cloud-link inline-flex items-center h-[30px] px-[11px] text-[12.5px] rounded-[5px] border border-[color:var(--accent)] bg-[color:var(--accent)] text-white hover:bg-[color:var(--accent-hover)] hover:border-[color:var(--accent-hover)] transition-colors font-medium"
-            href="https://cloud.pylonsync.com"
+            href="https://www.pylonsync.com"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -118,7 +118,7 @@ export function Nav() {
           Docs
         </a>
         <a
-          href="https://cloud.pylonsync.com"
+          href="https://www.pylonsync.com"
           target="_blank"
           rel="noopener noreferrer"
           onClick={close}

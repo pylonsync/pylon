@@ -11,7 +11,7 @@ const STEPS = [
     title: "Pylon Cloud",
     meta: "managed",
     desc: "Start with hosted infra when you want the framework, not another operations project.",
-    href: "https://cloud.pylonsync.com",
+    href: "https://www.pylonsync.com",
     tag: { label: "managed", accent: true },
   },
   {

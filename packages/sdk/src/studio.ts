@@ -360,7 +360,7 @@ export interface StudioConfig {
    * the framework's "access denied" page (no point sending them back
    * to a login they're already past).
    *
-   * Example: `loginUrl: "/login"` — cloud.pylonsync.com handles `/login`
+   * Example: `loginUrl: "/login"` — www.pylonsync.com handles `/login`
    * at the dashboard, and the user's existing session cookie lifts
    * them to admin via `auth.user.adminField` on the way back.
    */

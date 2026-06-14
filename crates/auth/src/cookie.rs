@@ -154,7 +154,7 @@ impl CookieConfig {
     /// guard when this config is broader than the previous one — e.g.
     /// after flipping `PYLON_COOKIE_DOMAIN=.pylonsync.com` from unset,
     /// browsers still hold a host-only cookie at the narrower scope
-    /// (`cloud.pylonsync.com`), and both cookies get sent at once,
+    /// (`www.pylonsync.com`), and both cookies get sent at once,
     /// causing the server to alternate between them per request.
     ///
     /// Returns `None` when this config has no domain set — there's no

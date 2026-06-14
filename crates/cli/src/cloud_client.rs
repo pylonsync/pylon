@@ -1,7 +1,7 @@
 //! Pylon Cloud client — credential storage + authenticated HTTP.
 //!
 //! Used by `pylon login`, `pylon logout`, and `pylon deploy --target
-//! cloud`. Talks to https://cloud.pylonsync.com by default; the
+//! cloud`. Talks to https://api.pylonsync.com by default; the
 //! cloud origin is overridable via `PYLON_CLOUD_URL` for staging /
 //! self-hosted Pylon Cloud installations.
 //!
@@ -37,7 +37,7 @@ pub struct Credentials {
 
 /// Default cloud origin. Override with `PYLON_CLOUD_URL` for staging
 /// or self-hosted installs.
-pub const DEFAULT_CLOUD_URL: &str = "https://cloud.pylonsync.com";
+pub const DEFAULT_CLOUD_URL: &str = "https://api.pylonsync.com";
 
 pub fn cloud_url() -> String {
     std::env::var("PYLON_CLOUD_URL").unwrap_or_else(|_| DEFAULT_CLOUD_URL.to_string())

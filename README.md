@@ -224,7 +224,7 @@ PYLON_DEV_MODE=false
 
 ## Deployment
 
-- **Managed cloud**: [cloud.pylonsync.com](https://cloud.pylonsync.com) — same binary, hosted; sign up and `pylon deploy`
+- **Managed cloud**: [pylonsync.com](https://www.pylonsync.com) — same binary, hosted; sign up and `pylon deploy`
 - **Self-host**: `curl … | bash` or `docker run` — see [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
 - **AWS ECS**: see `deploy/terraform/` and `deploy/sst/`
 - **Cloudflare Workers**: see `crates/workers/README.md` (experimental)

@@ -57,7 +57,7 @@ function Hero({ data }: { data: Comparison }) {
 				<div className="cmp-ctas">
 					<Link
 						className="btn accent"
-						href="https://cloud.pylonsync.com"
+						href="https://www.pylonsync.com"
 					>
 						Start free on Pylon Cloud →
 					</Link>
@@ -279,7 +279,7 @@ function CtaBanner({ data }: { data: Comparison }) {
 					</p>
 					<Link
 						className="btn accent"
-						href="https://cloud.pylonsync.com"
+						href="https://www.pylonsync.com"
 					>
 						Start free on Pylon Cloud →
 					</Link>
