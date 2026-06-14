@@ -65,6 +65,17 @@ export class TileMap implements GameSystem {
     return this.state.get(cellKey(gx, gz))?.kind === "road";
   }
 
+  /** All road cells (for the traffic graph). */
+  roadCells(): Array<{ gx: number; gz: number }> {
+    const out: Array<{ gx: number; gz: number }> = [];
+    for (const [key, t] of this.state) {
+      if (t.kind !== "road") continue;
+      const [gx, gz] = key.split(",").map(Number);
+      out.push({ gx, gz });
+    }
+    return out;
+  }
+
   get tileCount(): number {
     return this.state.size;
   }

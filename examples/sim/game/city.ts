@@ -15,6 +15,7 @@ import { Net } from "./net";
 import { Sky } from "./sky";
 import { buildTerrainMesh, buildWater, heightAt, isBuildableCell } from "./terrain";
 import { TileMap } from "./tiles";
+import { preloadCars, Traffic } from "./traffic";
 import { preloadTrees, Vegetation } from "./vegetation";
 
 export type Tool = "road" | "res" | "com" | "ind" | "bulldoze" | "pan";
@@ -51,6 +52,7 @@ export class City {
   private readonly tiles: TileMap;
   private readonly net: Net;
   private readonly vegetation: Vegetation;
+  private readonly traffic: Traffic;
   private readonly sky: Sky;
   private readonly terrain: THREE.Mesh;
   private readonly cursor: THREE.Mesh;
@@ -117,8 +119,10 @@ export class City {
     this.tiles = this.engine.add(new TileMap(this.engine.events));
     this.net = this.engine.add(new Net(this.engine.events));
     this.vegetation = this.engine.add(new Vegetation());
+    this.traffic = this.engine.add(new Traffic());
     this.scene.add(this.tiles.group);
     this.scene.add(this.vegetation.group);
+    this.scene.add(this.traffic.group);
 
     // Async-load the Quaternius kit; procedural fallback renders until
     // it arrives, then rebuild buildings with the real models.
@@ -128,6 +132,10 @@ export class City {
     // Trees scatter once loaded; rescatter when the built area changes.
     preloadTrees()
       .then(() => this.rescatterTrees())
+      .catch(() => {});
+    // Cars start driving once loaded.
+    preloadCars()
+      .then(() => this.traffic.setRoads(this.tiles.roadCells(), (gx, gz) => this.tiles.isRoadAt(gx, gz)))
       .catch(() => {});
 
     // Painting interaction (left button).
@@ -158,6 +166,7 @@ export class City {
   setTiles(rows: Array<{ gx: number; gz: number; kind: string; level: number }>): void {
     this.tiles.setTiles(rows);
     this.rescatterTrees();
+    this.traffic.setRoads(this.tiles.roadCells(), (gx, gz) => this.tiles.isRoadAt(gx, gz));
   }
 
   /** Keep the forest clear of the built area (no-op if unchanged). */
