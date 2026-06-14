@@ -20,6 +20,10 @@ import { type BuildingZone, hasRoadKit, makeAvenueTile, makeBuilding, makeRoadTi
 import { buildRoadMesh } from "./roads";
 import { heightAt } from "./terrain";
 
+// Reused when draping road tiles onto the terrain slope (see rebuildRoads).
+const ROAD_UP = new THREE.Vector3(0, 1, 0);
+const ROAD_UP_NORMAL = new THREE.Vector3();
+
 interface TileState {
   kind: TileKind;
   level: number;
@@ -437,7 +441,18 @@ export class TileMap implements GameSystem {
         if (!tile) continue;
         const cx = cellCenterX(gx);
         const cz = cellCenterZ(gz);
-        tile.position.set(cx, heightAt(cx, cz) + 0.1, cz);
+        // Drape the tile to the ground: tilt its surface to the local terrain
+        // normal so the flat asphalt follows the slope. Adjacent tiles share
+        // the boundary height, so they meet instead of leaving a stepped grass
+        // gap where the basin rolls (cells step up to ~0.2 m apart).
+        const e2 = TILE * 0.5;
+        ROAD_UP_NORMAL.set(
+          heightAt(cx - e2, cz) - heightAt(cx + e2, cz),
+          2 * e2,
+          heightAt(cx, cz - e2) - heightAt(cx, cz + e2),
+        ).normalize();
+        tile.quaternion.setFromUnitVectors(ROAD_UP, ROAD_UP_NORMAL);
+        tile.position.set(cx, heightAt(cx, cz) + 0.06, cz);
         this.roadGroup.add(tile);
       }
     } else {

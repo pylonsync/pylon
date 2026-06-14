@@ -366,6 +366,8 @@ export class City {
       // frustum over the camera focus for crisp shadows on the big map.
       this.sky.focus.copy(this.rig.target);
       this.sky.update(ctx);
+      // Fade the street-lamp light pools in as night falls.
+      this.lamps.setNight(this.sky.night);
 
       // Scroll the water ripples (two crossing directions for a live surface).
       const wn = (this.water.material as THREE.MeshStandardMaterial).normalMap;

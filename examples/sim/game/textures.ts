@@ -51,6 +51,28 @@ export function makeWaterNormal(size = 256): THREE.DataTexture {
 }
 
 /**
+ * A soft warm radial glow for a street-lamp light pool: bright centre fading
+ * to transparent at the rim. Laid flat on the road under each lamp and blended
+ * additively, it reads as the lamp casting a pool of light at night (faded out
+ * by day via material opacity). Alpha carries the falloff so additive blending
+ * adds the warm colour strongest at the centre.
+ */
+export function makeLampPool(size = 128): THREE.CanvasTexture {
+  const [c, ctx] = canvas(size);
+  const r = size / 2;
+  const g = ctx.createRadialGradient(r, r, 0, r, r, r);
+  g.addColorStop(0.0, "rgba(255,226,158,0.95)");
+  g.addColorStop(0.35, "rgba(255,210,140,0.45)");
+  g.addColorStop(0.7, "rgba(255,200,128,0.14)");
+  g.addColorStop(1.0, "rgba(255,200,128,0.0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+/**
  * A tileable building facade: rows of lit/unlit windows over a tinted
  * wall. `warm` lights some windows so towers read as occupied at dusk.
  */

@@ -176,7 +176,10 @@ function normalizeToCell(scene: THREE.Object3D): THREE.Object3D {
   return holder;
 }
 
-const laneMat = new THREE.MeshBasicMaterial({ color: 0xe8c34a });
+// Road paint is a lit (matte) material, not MeshBasic — basic is unlit and
+// ignores the day/night cycle, so the markings stayed at full brightness and
+// glowed against the dark night while everything else went dark.
+const laneMat = new THREE.MeshStandardMaterial({ color: 0xc7a83e, roughness: 1, metalness: 0 });
 const dashGeo = new THREE.PlaneGeometry(TILE * 0.04, TILE * 0.34).rotateX(-Math.PI / 2);
 
 // Sidewalk / kerb: a raised light-concrete strip laid along any tile edge
@@ -193,9 +196,10 @@ const sidewalkMat = new THREE.MeshStandardMaterial({
 const swGeoNS = new THREE.BoxGeometry(TILE, SW_H, SW_W); // runs along x (N/S edges)
 const swGeoEW = new THREE.BoxGeometry(SW_W, SW_H, TILE); // runs along z (E/W edges)
 
-// Zebra crossing stripes — unlit white bars laid on the approaches of a
-// junction. Two bar geometries (one per road axis) shared across all tiles.
-const crosswalkMat = new THREE.MeshBasicMaterial({ color: 0xece9df });
+// Zebra crossing stripes — white bars laid on the approaches of a junction.
+// Lit (matte) so they darken at night with the rest of the scene instead of
+// glowing like a light source. Two bar geometries (one per road axis).
+const crosswalkMat = new THREE.MeshStandardMaterial({ color: 0xcdcabf, roughness: 1, metalness: 0 });
 const cwBarX = new THREE.PlaneGeometry(TILE * 0.46, TILE * 0.05).rotateX(-Math.PI / 2); // long in x
 const cwBarZ = new THREE.PlaneGeometry(TILE * 0.05, TILE * 0.46).rotateX(-Math.PI / 2); // long in z
 

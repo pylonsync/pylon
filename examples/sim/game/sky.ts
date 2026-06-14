@@ -50,6 +50,8 @@ export class Sky implements GameSystem {
   readonly sun: THREE.DirectionalLight;
   /** Ground target the sun shadow frustum follows. */
   readonly focus = new THREE.Vector3();
+  /** 0 = full day, 1 = full night. Read by the lamps to fade in light pools. */
+  night = 0;
 
   private readonly moon: THREE.DirectionalLight;
   private readonly hemi: THREE.HemisphereLight;
@@ -121,6 +123,7 @@ export class Sky implements GameSystem {
     const day = smooth(-0.04, 0.22, elev); // 0 night .. 1 day
     const dusk = Math.max(0, 1 - Math.abs(elev) / 0.28) * (1 - day) * 1.0; // warm band near horizon
     const night = 1 - day;
+    this.night = night;
 
     // --- Sky colours ---
     const top = lerpCol(col(0x070d22), col(0x2a6bd0), day);

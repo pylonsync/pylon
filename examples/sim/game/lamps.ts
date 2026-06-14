@@ -11,6 +11,7 @@ import { TILE } from "./config";
 import type { FrameCtx, GameSystem } from "./engine";
 import { cellCenterX, cellCenterZ } from "./grid";
 import { heightAt } from "./terrain";
+import { makeLampPool } from "./textures";
 
 const POLE_H = 3.4;
 const poleGeo = new THREE.CylinderGeometry(0.05, 0.07, POLE_H, 6).translate(0, POLE_H / 2, 0);
@@ -25,6 +26,18 @@ const headMat = new THREE.MeshStandardMaterial({
   emissive: 0xffcf7a,
   emissiveIntensity: 0.95,
   roughness: 0.5,
+});
+
+// The light each lamp casts: a warm glow disc laid flat just above the road,
+// blended additively so it brightens whatever's under it. A shared material
+// whose opacity the day/night cycle drives (invisible by day, full at night).
+const poolGeo = new THREE.CircleGeometry(TILE * 1.25, 20).rotateX(-Math.PI / 2);
+const poolMat = new THREE.MeshBasicMaterial({
+  map: makeLampPool(),
+  transparent: true,
+  blending: THREE.AdditiveBlending,
+  depthWrite: false,
+  opacity: 0,
 });
 
 export class StreetLamps implements GameSystem {
@@ -66,16 +79,29 @@ export class StreetLamps implements GameSystem {
 
     const poles = new THREE.InstancedMesh(poleGeo, poleMat, pts.length);
     const heads = new THREE.InstancedMesh(headGeo, headMat, pts.length);
+    const pools = new THREE.InstancedMesh(poolGeo, poolMat, pts.length);
+    pools.renderOrder = 2; // draw the additive glow over the road surface
     poles.castShadow = true;
     for (let i = 0; i < pts.length; i++) {
-      this.m.makeTranslation(pts[i][0], heightAt(pts[i][0], pts[i][1]), pts[i][1]);
+      const y = heightAt(pts[i][0], pts[i][1]);
+      this.m.makeTranslation(pts[i][0], y, pts[i][1]);
       poles.setMatrixAt(i, this.m);
       heads.setMatrixAt(i, this.m);
+      // The pool sits on the road just below the post, not at the head height.
+      this.m.makeTranslation(pts[i][0], y + 0.07, pts[i][1]);
+      pools.setMatrixAt(i, this.m);
     }
     poles.instanceMatrix.needsUpdate = true;
     heads.instanceMatrix.needsUpdate = true;
+    pools.instanceMatrix.needsUpdate = true;
     this.group.add(poles);
     this.group.add(heads);
+    this.group.add(pools);
+  }
+
+  /** Fade the lamp light pools with the day/night cycle (0 day .. 1 night). */
+  setNight(night: number): void {
+    poolMat.opacity = Math.max(0, Math.min(1, night)) * 0.9;
   }
 
   update(_ctx: FrameCtx): void {}
