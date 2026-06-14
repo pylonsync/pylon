@@ -18,7 +18,7 @@ export default function DashboardPage({ auth, response }: PageProps) {
     return null;
   }
   return (
-    <div className="space-y-6">
+    <div className="mx-auto w-full max-w-5xl space-y-6 px-6 py-12">
       <h1 className="text-2xl font-semibold tracking-tight">Workspace</h1>
       <Workspace />
     </div>

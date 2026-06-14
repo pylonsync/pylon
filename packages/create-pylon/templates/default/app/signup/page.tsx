@@ -18,7 +18,7 @@ export const metadata: Metadata = {
 export default function SignupPage({ auth, response }: PageProps) {
   if (auth.user_id) response.redirect("/dashboard");
   return (
-    <div className="mx-auto max-w-sm">
+    <div className="mx-auto max-w-sm px-6 py-16">
       <Card>
         <CardHeader>
           <CardTitle>Create your account</CardTitle>

@@ -23,7 +23,7 @@ export default function LoginPage({ auth, response }: PageProps) {
   // (no flash, works with JS disabled).
   if (auth.user_id) response.redirect("/dashboard");
   return (
-    <div className="mx-auto max-w-sm">
+    <div className="mx-auto max-w-sm px-6 py-16">
       <Card>
         <CardHeader>
           <CardTitle>Sign in</CardTitle>
