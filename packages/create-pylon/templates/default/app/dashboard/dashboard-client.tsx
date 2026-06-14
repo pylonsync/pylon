@@ -374,7 +374,7 @@ function MembersList({
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-medium text-zinc-900">
-                        {m.name || m.email || m.user_id}
+                        {m.name || m.email || "Unknown member"}
                       </span>
                       {isMe && (
                         <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
