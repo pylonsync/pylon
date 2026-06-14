@@ -8,6 +8,7 @@
  * way a building's base sits at y=0, centred, scaled to the cell.
  */
 import * as THREE from "three";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { TILE } from "./config";
 import { ZONE } from "./config";
@@ -15,38 +16,51 @@ import { hash2 } from "./prng";
 
 export type BuildingZone = "res" | "com" | "ind";
 
-/**
- * Uniform scale applied to every kit model (preserves the pack's real
- * proportions, so bigger structures stay bigger across levels). Tuned so
- * the widest MegaKit building (~21 m) lands at roughly one cell.
- */
-const KIT_SCALE = TILE * 0.052;
-
 /** Footprint for the procedural fallback massing. */
 const FOOTPRINT = TILE * 0.82;
 
 /**
- * The Quaternius MegaKit ships three pre-built structures; we map them
- * to the three growth levels (small → mid → large) and tint them per
- * zone so R/C/I read differently while sharing the pack's look. Drop a
- * `models.json` in to override the level → filename mapping.
+ * Each (zone, level) maps to its OWN building model with a footprint
+ * target that grows with the level, so developing a tile swaps in a
+ * visibly bigger, different building: houses / low blocks at level 1,
+ * the tall MegaKit brownstones at level 3. `fp` is the fraction of a
+ * cell the footprint fills. Drop a models.json in to override.
  */
-const LEVEL_FILES: Record<number, string> = {
-  1: "building_small.glb",
-  2: "building_medium.glb",
-  3: "building_large.glb",
+const BUILDING_SLOTS: Record<string, { file: string; fp: number }> = {
+  res1: { file: "House1.glb", fp: 0.6 },
+  res2: { file: "Building1_Large.glb", fp: 0.92 },
+  res3: { file: "building_medium.glb", fp: 0.95 },
+  com1: { file: "Building2_Small.glb", fp: 0.64 },
+  com2: { file: "Building2_Large.glb", fp: 0.9 },
+  com3: { file: "building_large.glb", fp: 0.98 },
+  ind1: { file: "Building3_Small.glb", fp: 0.7 },
+  ind2: { file: "Building4.glb", fp: 0.88 },
+  ind3: { file: "Building3_Big.glb", fp: 0.96 },
 };
 
-/** Subtle per-zone multiply tint over the textured facades. */
-const ZONE_TINT: Record<BuildingZone, number> = {
-  res: 0xf3ddc8, // warm brownstone
-  com: 0xc4d4ea, // cool steel/glass
-  ind: 0xe7d49a, // industrial amber
-};
+/**
+ * The Quaternius low-poly building packs colour by MATERIAL NAME (no
+ * textures), so we map those names to the palette here.
+ */
+const PALETTE: Array<[RegExp, number]> = [
+  [/darkred/i, 0x6f2f2b],
+  [/brickred/i, 0x9c4438],
+  [/darkgrey|darkgray/i, 0x45474b],
+  [/greyblue|grayblue/i, 0x66788a],
+  [/whiteblue/i, 0xccd8e6],
+  [/lightblue/i, 0x9cc0db],
+  [/lightyellow/i, 0xe3d49a],
+  [/beige/i, 0xd9c9a6],
+  [/brown/i, 0x6b4a2e],
+  [/white/i, 0xe8e5dc],
+  [/grey|gray/i, 0x9a9aa0],
+];
+function paletteColor(name: string): number | null {
+  for (const [re, hex] of PALETTE) if (re.test(name)) return hex;
+  return null;
+}
 
-/** Raw normalised model per level (white). */
-const levelProtos = new Map<number, THREE.Object3D>();
-/** Tinted, cached per (zone, level). */
+/** Normalised + coloured prototype per (zone, level) slot key. */
 const prototypes = new Map<string, THREE.Object3D>();
 
 /** Road tile prototypes (filled to the cell), keyed straight/cross/tee/curve. */
@@ -64,25 +78,30 @@ export function hasRoadKit(): boolean {
 }
 
 /**
- * Load the building GLBs under `basePath`. Missing files just leave the
- * procedural fallback in place. A `models.json` may remap levels:
- *   { "1": "MyHouse.glb", "2": "...", "3": "..." }
+ * Load the building + road GLBs under `basePath`. Missing files just
+ * leave the procedural fallback in place. A `models.json` may remap any
+ * slot to a different filename: { "res1": "MyHouse.glb", ... }.
  */
 export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
-  const files = { ...LEVEL_FILES };
+  const slots = structuredClone(BUILDING_SLOTS);
   try {
     const res = await fetch(basePath + "models.json");
     if (res.ok) {
       const map = (await res.json()) as Record<string, string>;
-      for (const [lvl, file] of Object.entries(map)) {
-        const n = Number(lvl);
-        if (n >= 1 && n <= 3) files[n] = file;
+      for (const [slot, file] of Object.entries(map)) {
+        if (slots[slot]) slots[slot].file = file;
       }
     }
   } catch {
     /* no manifest — use defaults */
   }
-  const loader = new GLTFLoader();
+  // The building GLBs are Draco-compressed (~10x smaller); the decoder
+  // streams from the standard three.js CDN. Non-Draco GLBs (roads) load
+  // through the same loader unaffected.
+  const draco = new DRACOLoader().setDecoderPath(
+    "https://www.gstatic.com/draco/versioned/decoders/1.5.7/",
+  );
+  const loader = new GLTFLoader().setDRACOLoader(draco);
   const loadInto = (
     file: string,
     onLoad: (gltf: { scene: THREE.Object3D }) => void,
@@ -100,8 +119,8 @@ export async function preloadKit(basePath = "/models/citykit/"): Promise<void> {
     });
 
   await Promise.all([
-    ...Object.entries(files).map(([lvl, file]) =>
-      loadInto(file, (g) => levelProtos.set(Number(lvl), normalizeModel(g.scene))),
+    ...Object.entries(slots).map(([key, { file, fp }]) =>
+      loadInto(file, (g) => prototypes.set(key, normalizeToFootprint(g.scene, fp))),
     ),
     // Road tiles fill exactly one cell (flat); see makeRoadTile.
     ...Object.entries(ROAD_FILES).map(([key, file]) =>
@@ -191,47 +210,27 @@ export function makeRoadTile(
   return group;
 }
 
-/** Build (once) the zone-tinted prototype for a level, cloning
- *  materials so the tint doesn't bleed across zones. */
-function tintedProto(zone: BuildingZone, lvl: number): THREE.Object3D | null {
-  const key = zone + lvl;
-  const cached = prototypes.get(key);
-  if (cached) return cached;
-  const raw = levelProtos.get(lvl);
-  if (!raw) return null;
-  const tinted = raw.clone(true);
-  const tint = new THREE.Color(ZONE_TINT[zone]);
-  const tintMat = (m: THREE.Material): THREE.Material => {
-    const c = m.clone() as THREE.MeshStandardMaterial;
-    if (c.color) c.color.multiply(tint);
-    return c;
-  };
-  tinted.traverse((o) => {
-    const mesh = o as THREE.Mesh;
-    if (!mesh.isMesh) return;
-    mesh.material = Array.isArray(mesh.material)
-      ? mesh.material.map(tintMat)
-      : tintMat(mesh.material);
-  });
-  prototypes.set(key, tinted);
-  return tinted;
-}
-
 /**
- * Recentre a loaded model on the cell (base at y=0, centred in x/z) and
- * apply the shared uniform KIT_SCALE so all models keep real-world
- * proportions relative to each other.
+ * Recentre a model on the cell (base y=0, centred), scale so its
+ * footprint fills `fpFraction` of a cell (the level → size progression),
+ * and prepare materials: paint the name-keyed palette materials (the
+ * houses/blocks ship grey) and matte the textured brownstones (which the
+ * pack authors at metalness=1, so they'd otherwise render dark).
  */
-function normalizeModel(scene: THREE.Object3D): THREE.Object3D {
+function normalizeToFootprint(scene: THREE.Object3D, fpFraction: number): THREE.Object3D {
   scene.updateWorldMatrix(true, true);
   const box = new THREE.Box3().setFromObject(scene);
+  const size = new THREE.Vector3();
+  box.getSize(size);
   const center = new THREE.Vector3();
   box.getCenter(center);
+  const span = Math.max(size.x, size.z) || 1;
+  const scale = (TILE * fpFraction) / span;
   scene.position.set(-center.x, -box.min.y, -center.z);
   scene.scale.setScalar(1);
   const inner = new THREE.Group();
   inner.add(scene);
-  inner.scale.setScalar(KIT_SCALE);
+  inner.scale.setScalar(scale);
   const holder = new THREE.Group();
   holder.add(inner);
   holder.traverse((o) => {
@@ -239,15 +238,20 @@ function normalizeModel(scene: THREE.Object3D): THREE.Object3D {
     if (!m.isMesh) return;
     m.castShadow = true;
     m.receiveShadow = true;
-    // The pack authors brick/concrete at metalness=1, which renders dark
-    // and muddy without an env map. Knock metalness down so the facades
-    // read as proper matte masonry (glass/metal trims stay a touch shiny).
     const mats = Array.isArray(m.material) ? m.material : [m.material];
     for (const mat of mats) {
       const std = mat as THREE.MeshStandardMaterial;
-      if (std.isMeshStandardMaterial) {
+      if (!std.isMeshStandardMaterial) continue;
+      if (std.map) {
         std.metalness = Math.min(std.metalness, 0.1);
         if (std.roughness < 0.5) std.roughness = 0.85;
+      } else {
+        const hex = paletteColor(std.name);
+        if (hex !== null) std.color.setHex(hex);
+        std.metalness = 0;
+        std.roughness = 1;
+        std.flatShading = true;
+        std.needsUpdate = true;
       }
     }
   });
@@ -274,7 +278,7 @@ export function makeBuilding(
     faceRad !== undefined
       ? faceRad + Math.PI
       : (Math.floor(hash2(gx, gz, 7) * 4) * Math.PI) / 2;
-  const proto = tintedProto(zone, lvl);
+  const proto = prototypes.get(zone + lvl);
   const group = new THREE.Group();
   if (proto) {
     const inst = proto.clone(true);
