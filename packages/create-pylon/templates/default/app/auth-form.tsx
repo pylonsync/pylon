@@ -27,11 +27,14 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
     try {
       if (mode === "login") {
         await passwordLogin({ email, password });
+        // Full navigation: the SSR dashboard re-renders with the new cookie.
+        window.location.assign("/dashboard");
       } else {
         await passwordRegister({ email, password });
+        // New accounts have no workspace yet — send them through first-run
+        // onboarding (which redirects to /dashboard once they're in an org).
+        window.location.assign("/onboarding");
       }
-      // Full navigation: the SSR dashboard re-renders with the new cookie.
-      window.location.assign("/dashboard");
     } catch (err) {
       setError(messageFor(err));
       setPending(false); // keep the form up to retry (success navigates away)

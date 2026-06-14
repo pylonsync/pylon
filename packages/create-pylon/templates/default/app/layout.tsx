@@ -106,6 +106,7 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
   const isBare =
     (url ?? "").includes("/login") ||
     (url ?? "").includes("/signup") ||
+    (url ?? "").includes("/onboarding") ||
     (url ?? "").includes("/dashboard");
   return (
     <html lang="en">

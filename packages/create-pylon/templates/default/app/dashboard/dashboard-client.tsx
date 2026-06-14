@@ -27,9 +27,20 @@ export interface OrgMemberRow {
 
 function NoOrg() {
   return (
-    <div className="rounded-xl border border-dashed border-zinc-300 px-6 py-12 text-center text-sm text-zinc-500">
-      Select or create an organization from the sidebar to get started. Each org
-      is an isolated tenant — its projects and members are private to it.
+    <div className="rounded-xl border border-dashed border-zinc-300 px-6 py-12 text-center">
+      <p className="text-sm text-zinc-500">
+        You&apos;re not in a workspace yet. Each one is an isolated tenant — its
+        projects and members are private to it.
+      </p>
+      <a
+        href="/onboarding"
+        className="mt-4 inline-flex h-9 items-center rounded-lg bg-zinc-900 px-4 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
+      >
+        Set up your workspace
+      </a>
+      <p className="mt-3 text-xs text-zinc-400">
+        …or pick one from the switcher in the sidebar.
+      </p>
     </div>
   );
 }
