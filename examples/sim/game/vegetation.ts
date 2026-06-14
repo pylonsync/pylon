@@ -162,13 +162,13 @@ export class Vegetation implements GameSystem {
     const dummy = new THREE.Object3D();
     const tmpC = new THREE.Color();
 
-    const place = (wx: number, wz: number, seed: number) => {
+    const place = (wx: number, wz: number, seed: number, hScale = 1) => {
       // No trees in water or on cliffs.
       const ground = heightAt(wx, wz);
       if (ground < WATER_LEVEL + 0.4 || slopeAt(wx, wz) > 1.3 || ground > 90) return;
       const ti = Math.floor(hash2(seed, 1, 9) * templates.length) % templates.length;
       const tpl = templates[ti];
-      const h = 3 + hash2(seed, 2, 9) * 3.8; // 3–6.8 m
+      const h = (3 + hash2(seed, 2, 9) * 3.8) * hScale; // 3–6.8 m (×hScale)
       const sxz = h * (0.5 + hash2(seed, 5, 9) * 0.25);
       dummy.position.set(wx, ground, wz);
       dummy.rotation.set(0, hash2(seed, 3, 9) * Math.PI * 2, 0);
@@ -216,6 +216,29 @@ export class Vegetation implements GameSystem {
           );
           total++;
         }
+      }
+    }
+
+    // Ordered street trees: a small tree on the planting strip of road cells,
+    // lining the avenues like a CS boulevard. Sparse + deterministic, placed
+    // exactly (no jitter) so they read as a planted row, and shorter than the
+    // forest trees so they sit on the strip without burying the frontage.
+    const STREET_INSET = TILE * 0.46;
+    for (let gx = 0; gx < GRID && total < MAX; gx++) {
+      for (let gz = 0; gz < GRID && total < MAX; gz++) {
+        if (!isRoad(gx, gz)) continue;
+        let h = Math.abs(Math.sin(gx * 33.1 + gz * 61.7) * 5113.3);
+        h -= Math.floor(h);
+        if (h > 0.3) continue; // ~ one in three road cells
+        let ox = 0;
+        let oz = 0;
+        if (!isRoad(gx, gz + 1)) oz = STREET_INSET;
+        else if (!isRoad(gx, gz - 1)) oz = -STREET_INSET;
+        else if (!isRoad(gx + 1, gz)) ox = STREET_INSET;
+        else if (!isRoad(gx - 1, gz)) ox = -STREET_INSET;
+        else continue; // interior of an intersection — no open side
+        place(cellCenterX(gx) + ox, cellCenterZ(gz) + oz, (gx * 977 + gz) * 3 + 5, 0.6);
+        total++;
       }
     }
 
