@@ -107,7 +107,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     };
     let client_path = client_out.unwrap_or("pylon.client.ts").to_string();
 
-    let manifest_json = match run_bun_codegen(entry_file) {
+    let manifest_json = match run_bun_codegen(entry_file, false) {
         Ok(json) => json,
         Err(diag) => {
             print_diagnostics(&[diag], json_mode);

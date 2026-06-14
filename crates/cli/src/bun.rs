@@ -17,8 +17,12 @@ use crate::manifest::parse_manifest;
 /// `package.json` straight into a stock runtime image with no
 /// install step of its own. Letting the framework own the install
 /// keeps cloud and self-host on the same footing.
-pub fn run_bun_codegen(entry_file: &str) -> Result<String, Diagnostic> {
-    ensure_npm_deps_installed(entry_file)?;
+/// `frozen` controls `bun install --frozen-lockfile`: pass `false` for the
+/// local dev loop (`pylon dev` / `codegen`) so adding a dependency to
+/// package.json just installs + updates the lockfile, and `true` for
+/// deploy/prod (`pylon start` / `build`) so the resolved tree is reproducible.
+pub fn run_bun_codegen(entry_file: &str, frozen: bool) -> Result<String, Diagnostic> {
+    ensure_npm_deps_installed(entry_file, frozen)?;
 
     // `--` before the entry file stops Bun from interpreting a filename
     // that starts with `-` as a flag. Without this, an attacker able to
@@ -249,17 +253,17 @@ fn find_nearest_package_json(entry_file: &str) -> Option<PathBuf> {
 /// deploy log can distinguish "dep install broke" from "schema eval
 /// broke" — same surfacing as the existing `SCHEMA_EVAL_FAILED`,
 /// distinguishable cause for the operator.
-pub fn ensure_npm_deps_installed(entry_file: &str) -> Result<(), Diagnostic> {
+pub fn ensure_npm_deps_installed(entry_file: &str, frozen: bool) -> Result<(), Diagnostic> {
     let Some(pkg_dir) = find_nearest_package_json(entry_file) else {
         return Ok(());
     };
-    bun_install_in_dir(&pkg_dir)
+    bun_install_in_dir(&pkg_dir, frozen)
 }
 
 /// Public wrapper kept for back-compat — root install path doesn't
 /// know about a "source" web dir, so just delegates.
-fn bun_install_in_dir(pkg_dir: &Path) -> Result<(), Diagnostic> {
-    bun_install_in_dir_with_source(pkg_dir, None)
+fn bun_install_in_dir(pkg_dir: &Path, frozen: bool) -> Result<(), Diagnostic> {
+    bun_install_in_dir_with_source(pkg_dir, None, frozen)
 }
 
 /// Workhorse used by both the root install ([`ensure_npm_deps_installed`])
@@ -287,6 +291,7 @@ fn bun_install_in_dir(pkg_dir: &Path) -> Result<(), Diagnostic> {
 fn bun_install_in_dir_with_source(
     pkg_dir: &Path,
     source_web_dir: Option<&Path>,
+    frozen: bool,
 ) -> Result<(), Diagnostic> {
     let pkg_json = pkg_dir.join("package.json");
     let node_modules = pkg_dir.join("node_modules");
@@ -410,7 +415,10 @@ fn bun_install_in_dir_with_source(
     let has_lockfile = lockfile_text.is_file() || lockfile_bin.is_file();
     let mut cmd = std::process::Command::new("bun");
     cmd.arg("install").current_dir(pkg_dir);
-    if has_lockfile && !restore_after {
+    // Frozen only for deploy/prod (reproducible tree). In the dev loop we let
+    // bun resolve + update the lockfile so adding a dep to package.json just
+    // works instead of dying with "lockfile is frozen".
+    if frozen && has_lockfile && !restore_after {
         cmd.arg("--frozen-lockfile");
     }
 
@@ -494,7 +502,7 @@ fn bun_install_in_dir_with_source(
 /// `BUN_INSTALL_FAILED` / `FRONTEND_BUILD_FAILED` diagnostics give
 /// the operator a clear distinction between dep-install issues vs
 /// build-script failures.
-pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
+pub fn ensure_frontend_built(entry_file: &str, frozen: bool) -> Result<(), Diagnostic> {
     let entry_dir = Path::new(entry_file)
         .parent()
         .and_then(|p| {
@@ -617,7 +625,7 @@ pub fn ensure_frontend_built(entry_file: &str) -> Result<(), Diagnostic> {
     // the strip-deps gate fires reliably.
     stage_workspace_symlinks(&build_dir, &source_web_dir);
 
-    bun_install_in_dir_with_source(&build_dir, Some(&source_web_dir))?;
+    bun_install_in_dir_with_source(&build_dir, Some(&source_web_dir), frozen)?;
 
     // Run the build script. Use the explicit `bun run build` form so
     // the call works against any framework whose package.json defines
@@ -961,7 +969,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         write(&marker_path, "");
 
-        let result = ensure_npm_deps_installed(root.join("app.ts").to_str().unwrap());
+        let result = ensure_npm_deps_installed(root.join("app.ts").to_str().unwrap(), true);
         assert!(
             result.is_ok(),
             "fresh marker path should not invoke bun: {result:?}"

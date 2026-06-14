@@ -359,7 +359,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let entry_path = api_dir.join("app.ts");
     let manifest_path = api_dir.join("pylon.manifest.json");
     let entry_str = entry_path.to_string_lossy().to_string();
-    match run_bun_codegen(&entry_str) {
+    match run_bun_codegen(&entry_str, false) {
         Ok(manifest_json) => {
             let contents = format!("{manifest_json}\n");
             if let Err(e) = std::fs::write(&manifest_path, &contents) {

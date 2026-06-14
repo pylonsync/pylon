@@ -119,7 +119,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     // Build the manifest once. Production never re-reads app.ts.
-    let manifest_json = match crate::bun::run_bun_codegen(&entry_file) {
+    let manifest_json = match crate::bun::run_bun_codegen(&entry_file, true) {
         Ok(json) => json,
         Err(diag) => {
             print_diagnostics(&[diag], json_mode);
@@ -164,7 +164,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 // the operator sees an infinite "Building..." page
                 // with no way to know what went wrong.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::bun::ensure_frontend_built(&entry_file_clone)
+                    crate::bun::ensure_frontend_built(&entry_file_clone, true)
                 }));
                 match result {
                     Ok(Ok(())) => {

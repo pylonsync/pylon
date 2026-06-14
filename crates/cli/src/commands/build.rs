@@ -198,7 +198,7 @@ fn run_codegen_step(
         return Err(ExitCode::Error);
     }
 
-    let manifest_json = match run_bun_codegen(entry_file) {
+    let manifest_json = match run_bun_codegen(entry_file, true) {
         Ok(json) => json,
         Err(diag) => {
             print_diagnostics(&[diag], json_mode);

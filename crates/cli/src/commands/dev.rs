@@ -141,7 +141,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn run_once(entry_file: &str, json_mode: bool) -> ExitCode {
-    let manifest_json = match run_bun_codegen(entry_file) {
+    let manifest_json = match run_bun_codegen(entry_file, false) {
         Ok(json) => json,
         Err(diag) => {
             print_diagnostics(&[diag], json_mode);
@@ -520,7 +520,7 @@ fn run_rebuild_and_get_manifest(
     *count += 1;
     let n = *count;
 
-    let manifest_json = match run_bun_codegen(entry_file) {
+    let manifest_json = match run_bun_codegen(entry_file, false) {
         Ok(json) => json,
         Err(diag) => {
             if json_mode {
