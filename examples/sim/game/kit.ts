@@ -370,18 +370,30 @@ function varyBuildingColor(
   zone: string,
 ): void {
   const hueShift = (hash2(gx, gz, 21) - 0.5) * 0.05;
-  const valShift = 0.85 + hash2(gx, gz, 23) * 0.3;
+  const valShift = 0.95 + hash2(gx, gz, 23) * 0.22; // lean brighter (0.95–1.17)
   const zoneMix = ZONE_MIX[zone] ?? null;
   const recolor = (mat: THREE.Material): THREE.Material => {
     const std = (mat as THREE.MeshStandardMaterial).clone();
-    if (std.map) {
-      // Textured brick/brownstone — its tint multiplies the (dark) map, so
-      // BRIGHTEN it (>1) instead of darkening, or tall facades read as black
-      // blocks from above. Vary per building; keep the map's own hue.
-      std.color.setScalar(1.1 + (hash2(gx, gz, 23) - 0.5) * 0.22);
+    const name = (std.name || "").toLowerCase();
+    if (name.includes("glass")) {
+      // Office glazing ships as a near-black panel (#434343), which is what
+      // makes the towers read as dark blocks. Make it a light reflective
+      // blue curtain wall — the glass towers a CS downtown is built from.
+      std.color.setHex(0xa9c4d8);
+      std.metalness = 0.45;
+      std.roughness = 0.18;
+    } else if (std.map) {
+      // Textured brick / asphalt roof — its tint multiplies a dark map, so
+      // BRIGHTEN it (>1) or tall facades + flat roofs read as black from
+      // above; asphalt roofs start darkest, so lift them hardest.
+      const roof = name.includes("asphalt") || name.includes("roof");
+      std.color.setScalar((roof ? 1.45 : 1.1) + (hash2(gx, gz, 23) - 0.5) * 0.18);
     } else {
       std.color.getHSL(_bhsl);
-      std.color.setHSL((_bhsl.h + hueShift + 1) % 1, _bhsl.s, Math.min(1, _bhsl.l * valShift));
+      // Floor the lightness so dark roof/trim colours (DarkGrey, Brown) don't
+      // read as black boxes from above, then apply the per-building + zone shift.
+      const l = Math.min(1, Math.max(0.3, _bhsl.l * valShift));
+      std.color.setHSL((_bhsl.h + hueShift + 1) % 1, _bhsl.s, l);
       if (zoneMix) std.color.lerp(zoneMix.target, zoneMix.amt);
     }
     return std;
