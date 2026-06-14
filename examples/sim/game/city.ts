@@ -88,7 +88,7 @@ export class City {
     // ACES tone mapping + sRGB so the PBR brick/asphalt read with proper
     // contrast instead of muddy browns.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.92;
+    this.renderer.toneMappingExposure = 1.05;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(this.renderer.domElement);
 

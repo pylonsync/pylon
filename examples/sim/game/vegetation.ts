@@ -33,6 +33,9 @@ interface TreePart {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
   isLeaves: boolean;
+  /** Natural leaf colour (leaf materials are white so the per-instance
+   *  colour — this or a blossom tint — shows true rather than muddied). */
+  leafBase?: THREE.Color;
 }
 interface TreeTemplate {
   parts: TreePart[];
@@ -101,13 +104,19 @@ function buildTemplate(scene: THREE.Object3D): TreeTemplate | null {
     const name = srcMat?.name ?? "";
     const isLeaves = /leaf|leaves/i.test(name);
     const material = new THREE.MeshStandardMaterial({
-      color: isLeaves ? leafColor(name) : barkColor(name),
+      // Leaves: white so the per-instance colour shows true. Bark keeps
+      // its own colour (no per-instance colour).
+      color: isLeaves ? 0xffffff : barkColor(name),
       roughness: 1,
       metalness: 0,
       flatShading: true,
-      vertexColors: false,
     });
-    parts.push({ geometry: geo, material, isLeaves });
+    parts.push({
+      geometry: geo,
+      material,
+      isLeaves,
+      leafBase: isLeaves ? leafColor(name) : undefined,
+    });
   });
   if (parts.length === 0) return null;
   return { parts, height: targetH };
@@ -127,7 +136,9 @@ function forestDensity(gx: number, gz: number): number {
   return lerp(top, bot, fz);
 }
 
-const AUTUMN = [0xc98a2c, 0xb5552f, 0xc77fa0, 0xd9a93a];
+// Cherry-blossom pinks + a few autumn tones — the colour pop CS suburbs
+// are full of. Weighted toward pink.
+const BLOSSOM = [0xefa9c8, 0xf2bcd6, 0xe98fb8, 0xf0c0a0, 0xd98a6a, 0xddb84a];
 
 export class Vegetation implements GameSystem {
   readonly name = "vegetation";
@@ -156,45 +167,50 @@ export class Vegetation implements GameSystem {
       if (ground < WATER_LEVEL + 0.4 || slopeAt(wx, wz) > 1.3 || ground > 90) return;
       const ti = Math.floor(hash2(seed, 1, 9) * templates.length) % templates.length;
       const tpl = templates[ti];
-      const h = 4.5 + hash2(seed, 2, 9) * 5.5; // 4.5–10 m
-      const sxz = h * (0.7 + hash2(seed, 5, 9) * 0.3);
+      const h = 3 + hash2(seed, 2, 9) * 3.8; // 3–6.8 m
+      const sxz = h * (0.5 + hash2(seed, 5, 9) * 0.25);
       dummy.position.set(wx, ground, wz);
       dummy.rotation.set(0, hash2(seed, 3, 9) * Math.PI * 2, 0);
       dummy.scale.set(sxz, h, sxz);
       dummy.updateMatrix();
-      const autumn = hash2(seed, 7, 9) < 0.14;
-      const leafCol = autumn ? tmpC.setHex(AUTUMN[Math.floor(hash2(seed, 8, 9) * AUTUMN.length)]) : null;
+      const blossom = hash2(seed, 7, 9) < 0.2;
       tpl.parts.forEach((p, pi) => {
         mats[ti][pi].push(dummy.matrix.clone());
-        cols[ti][pi].push(p.isLeaves && leafCol ? leafCol.clone() : null);
+        // Leaf instances always carry a colour (blossom tint or the
+        // template's natural green); bark carries none (shows its material).
+        if (!p.isLeaves) {
+          cols[ti][pi].push(null);
+        } else if (blossom) {
+          cols[ti][pi].push(tmpC.setHex(BLOSSOM[Math.floor(hash2(seed, 8, 9) * BLOSSOM.length)]).clone());
+        } else {
+          cols[ti][pi].push((p.leafBase ?? tmpC.setHex(0x4f8438)).clone());
+        }
       });
     };
 
-    // Forest scatter across open land + parkway trees along roads.
+    // Dense scatter: most open land gets trees (forest noise sets the
+    // count), every cell beside a road gets extra yard/street trees. This
+    // carpets the map and fills the gaps between buildings — the lush CS
+    // look — rather than leaving bare grass.
     let total = 0;
-    const MAX = 6000;
+    const MAX = 18000;
     for (let gx = 0; gx < GRID && total < MAX; gx++) {
       for (let gz = 0; gz < GRID && total < MAX; gz++) {
         if (occupied.has(cellKey(gx, gz))) continue;
         const cx = cellCenterX(gx);
         const cz = cellCenterZ(gz);
-        // Parkway: an empty cell next to a road gets a street tree.
+        const d = forestDensity(gx, gz);
+        // Thick away from the city (real forest), a yard tree or two near
+        // the streets — but never so dense it buries the houses.
+        let count = d > 0.78 ? 2 : d > 0.5 ? 1 : 0;
         const nextToRoad =
           isRoad(gx + 1, gz) || isRoad(gx - 1, gz) || isRoad(gx, gz + 1) || isRoad(gx, gz - 1);
-        if (nextToRoad) {
-          place(cx + (hash2(gx, gz, 21) - 0.5) * TILE * 0.5, cz + (hash2(gx, gz, 22) - 0.5) * TILE * 0.5, gx * 131 + gz);
-          total++;
-          continue;
-        }
-        // Forest: density noise → 0–3 trees per cell.
-        const d = forestDensity(gx, gz);
-        if (d < 0.4) continue;
-        const count = d > 0.78 ? 3 : d > 0.6 ? 2 : 1;
+        if (nextToRoad) count = Math.max(count, hash2(gx, gz, 31) < 0.6 ? 1 : 0);
         for (let k = 0; k < count && total < MAX; k++) {
           const seed = (gx * 131 + gz) * 7 + k;
           place(
-            cx + (hash2(gx, gz + k, 21) - 0.5) * TILE * 0.85,
-            cz + (hash2(gx + k, gz, 22) - 0.5) * TILE * 0.85,
+            cx + (hash2(gx, gz + k * 3, 21) - 0.5) * TILE * 0.6,
+            cz + (hash2(gx + k * 3, gz, 22) - 0.5) * TILE * 0.6,
             seed,
           );
           total++;

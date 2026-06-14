@@ -103,7 +103,9 @@ export class Sky implements GameSystem {
     scene.add(this.moon);
     scene.add(this.moon.target);
 
-    scene.fog = new THREE.Fog(0xaed2ea, WORLD_HALF * 1.4, WORLD_HALF * 3.2);
+    // Closer, brighter fog → atmospheric haze that fades the distant
+    // hills and skyline into the sky (the CS depth cue).
+    scene.fog = new THREE.Fog(0xcfe2ef, WORLD_HALF * 0.55, WORLD_HALF * 2.4);
   }
 
   update(ctx: FrameCtx): void {
@@ -143,8 +145,10 @@ export class Sky implements GameSystem {
     this.hemi.groundColor.copy(lerpCol(col(0x1a2018), col(0x55603f), day));
     this.scene.environmentIntensity = 0.18 + day * 0.55;
 
-    // Fog tracks the horizon so distance fades into the sky.
-    if (this.scene.fog instanceof THREE.Fog) this.scene.fog.color.copy(horizon);
+    // Haze sits a touch brighter than the horizon so the far hills read
+    // as atmospheric depth rather than vanishing into a flat band.
+    const haze = lerpCol(horizon, col(0xf2f6f8), 0.32 * day);
+    if (this.scene.fog instanceof THREE.Fog) this.scene.fog.color.copy(haze);
     if (this.scene.background instanceof THREE.Color) this.scene.background.copy(horizon);
 
     // --- Positions: lights from their directions, around the focus ---
