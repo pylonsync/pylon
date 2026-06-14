@@ -270,7 +270,7 @@ function assertBaseUrlSafeForEnv(): void {
  */
 function transportConfig(): import("@pylonsync/sync").TransportConfig {
   return {
-    baseUrl: _baseUrl,
+    baseUrl: getBaseUrl(),
     getToken: () => currentAuthToken() ?? undefined,
   };
 }
@@ -348,7 +348,7 @@ export async function getAuthContext(
   token?: string
 ): Promise<{ user_id: string | null }> {
   return pylonFetch<{ user_id: string | null }>(
-    { baseUrl: _baseUrl, token },
+    { baseUrl: getBaseUrl(), token },
     "/api/auth/me",
   );
 }
@@ -369,7 +369,7 @@ export async function refreshSession(
       token: string;
       user_id: string;
       expires_at: number;
-    }>({ baseUrl: _baseUrl, token }, "/api/auth/refresh", { method: "POST" });
+    }>({ baseUrl: getBaseUrl(), token }, "/api/auth/refresh", { method: "POST" });
   } catch {
     return null;
   }
@@ -473,7 +473,7 @@ export async function callFn<T = unknown>(
 ): Promise<T> {
   return pylonFetch<T>(
     {
-      baseUrl: _baseUrl,
+      baseUrl: getBaseUrl(),
       getToken: () => options.token ?? currentAuthToken() ?? undefined,
     },
     `/api/fn/${name}`,
@@ -501,7 +501,7 @@ export async function* streamFn(
   // transport.
   const res = await pylonFetchRaw(
     {
-      baseUrl: _baseUrl,
+      baseUrl: getBaseUrl(),
       getToken: () => options.token ?? currentAuthToken() ?? undefined,
     },
     `/api/fn/${name}`,
@@ -625,7 +625,7 @@ export async function uploadFile(
 
   return pylonFetch<UploadedFile>(
     {
-      baseUrl: _baseUrl,
+      baseUrl: getBaseUrl(),
       getToken: () => options.token ?? currentAuthToken() ?? undefined,
     },
     "/api/files/upload",
@@ -658,7 +658,7 @@ export async function uploadFileMultipart(
 
   return pylonFetch<UploadedFile>(
     {
-      baseUrl: _baseUrl,
+      baseUrl: getBaseUrl(),
       getToken: () => options.token ?? currentAuthToken() ?? undefined,
     },
     "/api/files/upload",
