@@ -1,16 +1,17 @@
 /**
  * Pylon Sim — a co-op SimCity-style city builder.
  *
- * Every browser tab is a co-mayor of ONE shared city. The map is a
- * grid; players paint roads and zones, and the simulation grows
- * buildings, population and tax income on its own. All of it syncs:
- * a road you lay or a tower that rises shows up for everyone, live.
+ * The lobby lists every city; you start a new one or join an existing one.
+ * Within a city, every browser tab is a co-mayor: players paint roads and
+ * zones, and the simulation grows buildings, population and tax income on
+ * its own. All of it syncs — a road you lay or a tower that rises shows up
+ * for everyone in that city, live.
  *
  * Two entities carry the whole game:
- *   - Tile  — one row per painted grid cell (road or R/C/I zone). A
- *             zone tile's `level` is its building's growth stage,
- *             advanced server-side by the simulation tick.
- *   - City  — a single shared row: funds, population, jobs, the
+ *   - Tile  — one row per painted grid cell (road or R/C/I zone), scoped to
+ *             a city by `cityId`. A zone tile's `level` is its building's
+ *             growth stage, advanced server-side by the simulation tick.
+ *   - City  — one row per city: a name, funds, population, jobs, the
  *             economic clock. Server-authoritative.
  */
 import { buildManifest, discoverAppRoutes, entity, field, policy } from "@pylonsync/sdk";
@@ -18,6 +19,9 @@ import { buildManifest, discoverAppRoutes, entity, field, policy } from "@pylons
 const Tile = entity(
   "Tile",
   {
+    // The city this tile belongs to (City.key). Every read/write is scoped
+    // to one city, so multiple cities share the Tile table without bleeding.
+    cityId: field.string(),
     gx: field.int(), // grid column
     gz: field.int(), // grid row
     // "road" | "res" | "com" | "ind"
@@ -30,16 +34,17 @@ const Tile = entity(
     updatedAt: field.datetime(),
   },
   {
-    // One tile per cell — the unique index makes placement idempotent
-    // and lets the planner upsert by (gx,gz).
-    indexes: [{ name: "by_cell", fields: ["gx", "gz"], unique: true }],
+    // One tile per cell PER CITY — the unique index keeps placement
+    // idempotent within a city and lets the planner upsert by (city,gx,gz).
+    indexes: [{ name: "by_cell", fields: ["cityId", "gx", "gz"], unique: true }],
   },
 );
 
 const City = entity(
   "City",
   {
-    key: field.string(), // always "main" — the one shared city
+    key: field.string(), // unique city id / slug (one row per city)
+    name: field.string(), // display name shown in the lobby
     funds: field.float(),
     population: field.float(),
     jobs: field.float(),
@@ -53,9 +58,10 @@ const City = entity(
   },
 );
 
-// The city is shared by design — every player reads and edits the same
-// map. Reads still require a session (guests get a userId from
-// /api/auth/guest), so anonymous scrapers can't pull the map.
+// Cities are co-op by design — every player reads and edits the shared maps.
+// The client scopes its live query to one city (where: { cityId }); the read
+// policy just gates on a session (guests get a userId from /api/auth/guest),
+// so anonymous scrapers can't pull the maps.
 const tilePolicy = policy({
   name: "tile_shared",
   entity: "Tile",

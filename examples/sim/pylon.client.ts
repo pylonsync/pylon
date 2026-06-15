@@ -6,6 +6,7 @@ export const ENTITIES: EntityName[] = ["Tile", "City"];
 
 export interface Tile {
   id: string;
+  cityId: string;
   gx: number;
   gz: number;
   kind: string;
@@ -17,6 +18,7 @@ export interface Tile {
 export interface City {
   id: string;
   key: string;
+  name: string;
   funds: number;
   population: number;
   jobs: number;

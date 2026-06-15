@@ -22,7 +22,10 @@ export class Net implements GameSystem {
   private lastFlush = 0;
   private mutWindow: number[] = [];
 
-  constructor(events: EventBus) {
+  constructor(
+    events: EventBus,
+    private readonly cityId: string,
+  ) {
     events.on("tilesPainted", ({ kind, cells }) => {
       let m = this.place.get(kind);
       if (!m) {
@@ -65,7 +68,7 @@ export class Net implements GameSystem {
         const cells = [...m.values()].slice(0, 96).map((c) => ({ gx: c.gx, gz: c.gz, kind }));
         const keys = cells.map((c) => cellKey(c.gx, c.gz));
         this.placeInFlight = true;
-        this.track(callFn("placeTiles", { cells }))
+        this.track(callFn("placeTiles", { cityId: this.cityId, cells }))
           .then(() => {
             for (const k of keys) m.delete(k);
           })
@@ -83,7 +86,7 @@ export class Net implements GameSystem {
       const cells = [...this.clear.values()].slice(0, 96).map((c) => ({ gx: c.gx, gz: c.gz }));
       const keys = cells.map((c) => cellKey(c.gx, c.gz));
       this.clearInFlight = true;
-      this.track(callFn("bulldozeTiles", { cells }))
+      this.track(callFn("bulldozeTiles", { cityId: this.cityId, cells }))
         .then(() => {
           for (const k of keys) this.clear.delete(k);
         })

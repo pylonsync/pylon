@@ -7,6 +7,12 @@
       "name": "Tile",
       "fields": [
         {
+          "name": "cityId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
           "name": "gx",
           "type": "int",
           "optional": false,
@@ -47,6 +53,7 @@
         {
           "name": "by_cell",
           "fields": [
+            "cityId",
             "gx",
             "gz"
           ],
@@ -59,6 +66,12 @@
       "fields": [
         {
           "name": "key",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
           "type": "string",
           "optional": false,
           "unique": false

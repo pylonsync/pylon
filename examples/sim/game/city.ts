@@ -120,7 +120,10 @@ export class City {
   private fpsFrames = 0;
   private statsAccum = 0;
 
-  constructor(private readonly container: HTMLElement) {
+  constructor(
+    private readonly container: HTMLElement,
+    private readonly cityId: string,
+  ) {
     const rect = container.getBoundingClientRect();
     this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
@@ -182,7 +185,7 @@ export class City {
     // Engine systems (update order).
     this.rig = this.engine.add(new CameraRig(this.camera, this.renderer.domElement));
     this.tiles = this.engine.add(new TileMap(this.engine.events));
-    this.net = this.engine.add(new Net(this.engine.events));
+    this.net = this.engine.add(new Net(this.engine.events, this.cityId));
     this.vegetation = this.engine.add(new Vegetation());
     this.traffic = this.engine.add(new Traffic());
     this.lamps = this.engine.add(new StreetLamps());

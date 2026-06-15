@@ -5,15 +5,16 @@ import type { City, CityStats, Tool } from "../game/city";
 /**
  * Pylon Sim — co-op city builder on Pylon SSR.
  *
- * The page SSRs as a light shell, then a client-only effect
- * dynamic-imports the three.js city engine (it never loads during
- * SSR). Pylon live queries (<SyncBridge/>) feed the shared Tile + City
- * rows into the engine; the tool palette drives placement, which the
- * engine batches back to the server.
+ * Opens to a LOBBY: start a new city or join an existing one (every city is
+ * its own co-op map). Picking a city boots the three.js engine scoped to that
+ * city; Pylon live queries feed only that city's Tile + City rows into it.
+ * The page SSRs as a light shell — the engine is dynamic-imported client-side
+ * and never loads during SSR.
  */
 
 interface TileRow {
   id: string;
+  cityId: string;
   gx: number;
   gz: number;
   kind: string;
@@ -22,11 +23,13 @@ interface TileRow {
 interface CityRow {
   id: string;
   key: string;
+  name: string;
   funds: number;
   population: number;
   jobs: number;
   happiness: number;
   tick: number;
+  updatedAt: string;
 }
 
 async function newGuestSession(): Promise<string> {
@@ -60,26 +63,163 @@ async function ensureGuestSession(): Promise<string> {
   return newGuestSession();
 }
 
-/** Pushes the shared Tile + City live queries into the engine. */
-function SyncBridge({ game }: { game: City }) {
-  const { data: tiles } = db.useQuery<TileRow>("Tile");
-  const { data: city } = db.useQuery<CityRow>("City");
-
-  useEffect(() => {
-    if (tiles) game.setTiles(tiles);
-  }, [game, tiles]);
-
-  useEffect(() => {
-    const main = city?.find((c) => c.key === "main");
-    if (main) game.setCity(main);
-  }, [game, city]);
-
-  return null;
+// Initialise the pylon client once, on the client, before any db hook
+// subscribes. Done in render (guarded) rather than an effect so the lobby's
+// City query namespaces correctly on its very first read.
+let _inited = false;
+function useClientInit() {
+  if (typeof window !== "undefined" && !_inited) {
+    init({ appName: "sim" });
+    _inited = true;
+  }
 }
 
-/** Inline lucide icons (MIT) — stroked, currentColor. */
+// ---------------------------------------------------------------------------
+// Lobby — start a new city or join an existing one
+// ---------------------------------------------------------------------------
+
+function Lobby({
+  authReady,
+  authError,
+  onEnter,
+}: {
+  authReady: boolean;
+  authError: string | null;
+  onEnter: (cityId: string) => void;
+}) {
+  const { data: cities, loading } = db.useQuery<CityRow>("City", {
+    orderBy: { updatedAt: "desc" },
+  });
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Make sure the always-on demo city exists so "Load a city" is never empty
+  // on a fresh server (idempotent server-side; safe to fire on every visit).
+  useEffect(() => {
+    if (!authReady) return;
+    callFn("seedDemoCity", {}).catch(() => {});
+  }, [authReady]);
+
+  const create = useCallback(async () => {
+    if (busy || !authReady) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await callFn<{ cityId: string }>("createCity", {
+        name: name.trim() || "New City",
+      });
+      if (!res?.cityId) throw new Error("city creation returned no id");
+      onEnter(res.cityId);
+    } catch (e) {
+      setErr(String(e));
+      setBusy(false);
+    }
+  }, [busy, authReady, name, onEnter]);
+
+  const load = useCallback(
+    async (cityId: string) => {
+      if (busy) return;
+      setBusy(true);
+      // Revive the city's sim chain (no-op if already running), then enter.
+      try {
+        await callFn("ensureCity", { cityId });
+      } catch {
+        /* the city still loads; the tick revives on next interaction */
+      }
+      onEnter(cityId);
+    },
+    [busy, onEnter],
+  );
+
+  return (
+    <div className="fixed inset-0 flex items-center justify-center bg-gradient-to-b from-[#0b1018] to-[#070b11] p-6 text-zinc-100">
+      <div className="w-full max-w-md rounded-2xl border border-white/10 bg-black/40 p-7 shadow-2xl backdrop-blur-md">
+        <div className="mb-1 font-mono text-[10px] font-semibold uppercase tracking-[0.3em] text-zinc-500">
+          Pylon · Sim
+        </div>
+        <h1 className="text-2xl font-semibold tracking-tight text-white">Co-op City Builder</h1>
+        <p className="mt-1 text-sm leading-6 text-zinc-400">
+          Start a new city or jump into one already being built. Every city is a
+          shared map — anyone who joins is a co-mayor, live.
+        </p>
+
+        {/* New city */}
+        <div className="mt-6">
+          <label className="mb-1.5 block font-mono text-[11px] uppercase tracking-wider text-zinc-500">
+            New city
+          </label>
+          <div className="flex gap-2">
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") create();
+              }}
+              maxLength={40}
+              placeholder="Name your city…"
+              className="min-w-0 flex-1 rounded-lg border border-white/10 bg-black/40 px-3 py-2.5 text-sm text-white placeholder:text-zinc-600 outline-none focus:border-emerald-400/60"
+            />
+            <button
+              type="button"
+              onClick={create}
+              disabled={busy || !authReady}
+              className="shrink-0 rounded-lg bg-emerald-500 px-4 py-2.5 text-sm font-semibold text-emerald-950 transition-colors hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busy ? "…" : "Create"}
+            </button>
+          </div>
+        </div>
+
+        {/* Existing cities */}
+        <div className="mt-6">
+          <label className="mb-1.5 block font-mono text-[11px] uppercase tracking-wider text-zinc-500">
+            Load a city
+          </label>
+          <div className="max-h-64 space-y-1.5 overflow-y-auto pr-1">
+            {loading ? (
+              <div className="px-1 py-3 text-sm text-zinc-500">loading cities…</div>
+            ) : cities.length === 0 ? (
+              <div className="px-1 py-3 text-sm text-zinc-500">
+                No cities yet. Name one above to begin.
+              </div>
+            ) : (
+              cities.map((c) => (
+                <button
+                  key={c.key}
+                  type="button"
+                  onClick={() => load(c.key)}
+                  disabled={busy}
+                  className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/5 bg-white/[0.03] px-3 py-2.5 text-left transition-colors hover:border-white/15 hover:bg-white/[0.07] disabled:opacity-50"
+                >
+                  <span className="truncate text-sm font-medium text-zinc-100">{c.name}</span>
+                  <span className="shrink-0 font-mono text-[11px] tabular-nums text-zinc-500">
+                    {Math.round(c.population).toLocaleString()} pop
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        {(err || authError) && (
+          <div className="mt-4 rounded-lg bg-red-950/70 px-3 py-2 font-mono text-xs text-red-200">
+            {err ?? authError}
+          </div>
+        )}
+        {!authReady && !authError && (
+          <div className="mt-4 font-mono text-[11px] text-zinc-600">connecting…</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tool palette icons (inline lucide, MIT)
+// ---------------------------------------------------------------------------
+
 const ICON_PATHS: Record<string, React.ReactNode> = {
-  // road: signpost-free road with a dashed centreline
   road: (
     <>
       <path d="M4 19 8 5h8l4 14" />
@@ -88,14 +228,12 @@ const ICON_PATHS: Record<string, React.ReactNode> = {
       <path d="M12 16v2" />
     </>
   ),
-  // home
   res: (
     <>
       <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
       <path d="M9 22V12h6v10" />
     </>
   ),
-  // building-2
   com: (
     <>
       <path d="M6 22V4a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v18Z" />
@@ -104,14 +242,12 @@ const ICON_PATHS: Record<string, React.ReactNode> = {
       <path d="M10 6h4M10 10h4M10 14h4M10 18h4" />
     </>
   ),
-  // factory
   ind: (
     <>
       <path d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7 5V8l-7 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z" />
       <path d="M17 18h1M12 18h1M7 18h1" />
     </>
   ),
-  // trash-2
   bulldoze: (
     <>
       <path d="M3 6h18" />
@@ -147,7 +283,11 @@ const TOOLS: Array<{ id: Tool; label: string; key: string; color: string }> = [
   { id: "bulldoze", label: "Bulldoze", key: "5", color: "#ff6b5a" },
 ];
 
-export default function SimPage() {
+// ---------------------------------------------------------------------------
+// GameView — the three.js city, scoped to one cityId
+// ---------------------------------------------------------------------------
+
+function GameView({ cityId, onLeave }: { cityId: string; onLeave: () => void }) {
   const mountRef = useRef<HTMLDivElement | null>(null);
   const gameRef = useRef<City | null>(null);
   const [game, setGame] = useState<City | null>(null);
@@ -155,31 +295,35 @@ export default function SimPage() {
   const [stats, setStats] = useState<CityStats | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
 
+  // Live data for THIS city only.
+  const { data: tiles } = db.useQuery<TileRow>("Tile", { where: { cityId } });
+  const { data: cityRows } = db.useQuery<CityRow>("City", { where: { key: cityId } });
+  const cityName = cityRows?.[0]?.name ?? "City";
+
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
     let disposed = false;
-    init({ appName: "sim" });
 
     (async () => {
       const { City } = await import("../game/city");
       if (disposed) return;
-      const g = new City(mount);
+      const g = new City(mount, cityId);
       gameRef.current = g;
       (window as unknown as Record<string, unknown>).__sim = { game: g };
       g.onStats(setStats);
       g.start();
       setGame(g);
 
+      // Make sure this city's simulation chain is alive (revive after a
+      // server restart). Retry a few times behind the guest session.
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
-          await ensureGuestSession();
-          if (disposed) return;
-          await callFn("ensureCity", {});
+          await callFn("ensureCity", { cityId });
           if (!disposed) setBootError(null);
           break;
         } catch (err) {
-          console.error(`[sim] boot failed (attempt ${attempt + 1})`, err);
+          console.error(`[sim] ensureCity failed (attempt ${attempt + 1})`, err);
           if (disposed) return;
           if (attempt === 4) setBootError(String(err));
           else await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
@@ -194,8 +338,18 @@ export default function SimPage() {
       disposed = true;
       gameRef.current?.dispose();
       gameRef.current = null;
+      (window as unknown as Record<string, unknown>).__sim = undefined;
     };
-  }, []);
+  }, [cityId]);
+
+  // Feed live data into the engine once it's up.
+  useEffect(() => {
+    if (game && tiles) game.setTiles(tiles);
+  }, [game, tiles]);
+  useEffect(() => {
+    const c = cityRows?.[0];
+    if (game && c) game.setCity(c);
+  }, [game, cityRows]);
 
   const pick = useCallback((t: Tool) => {
     setTool(t);
@@ -213,8 +367,8 @@ export default function SimPage() {
   }, [pick]);
 
   const resetCity = useCallback(() => {
-    callFn("resetCity", {}).catch(() => {});
-  }, []);
+    callFn("resetCity", { cityId }).catch(() => {});
+  }, [cityId]);
 
   return (
     <div className="fixed inset-0">
@@ -242,12 +396,12 @@ export default function SimPage() {
         )}
       </div>
 
-      {/* Top-right: title / co-op hint */}
+      {/* Top-right: city name / co-op hint */}
       <div className="absolute right-4 top-4 max-w-xs select-none rounded-lg bg-black/45 px-4 py-3 text-right text-xs text-zinc-300 backdrop-blur-sm">
-        <div className="text-sm font-semibold text-white">Co-op City</div>
+        <div className="truncate text-sm font-semibold text-white">{cityName}</div>
         <div className="mt-1 leading-5 text-zinc-400">
-          Every tab is a co-mayor of one shared city. Roads, zones and the
-          skyline sync live. Zones only grow next to a road.
+          Every tab is a co-mayor of this city. Roads, zones and the skyline
+          sync live. Zones only grow next to a road.
         </div>
       </div>
 
@@ -278,14 +432,21 @@ export default function SimPage() {
         </div>
       </div>
 
-      {/* Bottom-right: reset */}
-      <div className="absolute bottom-5 right-4">
+      {/* Bottom-right: re-roll layout + back to lobby */}
+      <div className="absolute bottom-5 right-4 flex gap-2">
         <button
           type="button"
           onClick={resetCity}
           className="rounded-md bg-black/45 px-3 py-1.5 font-mono text-xs text-zinc-300 backdrop-blur-sm transition-colors hover:bg-black/65 hover:text-white"
         >
-          new city
+          reset
+        </button>
+        <button
+          type="button"
+          onClick={onLeave}
+          className="rounded-md bg-black/45 px-3 py-1.5 font-mono text-xs text-zinc-300 backdrop-blur-sm transition-colors hover:bg-black/65 hover:text-white"
+        >
+          ← menu
         </button>
       </div>
 
@@ -294,10 +455,72 @@ export default function SimPage() {
           {bootError}
         </div>
       )}
-
-      {game && <SyncBridge game={game} />}
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// SimPage — lobby ↔ game, with ?city= resume
+// ---------------------------------------------------------------------------
+
+export default function SimPage() {
+  useClientInit();
+  const [authReady, setAuthReady] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [activeCityId, setActiveCityId] = useState<string | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+
+  // Establish a guest session once.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await ensureGuestSession();
+          if (alive) setAuthReady(true);
+          return;
+        } catch (err) {
+          if (attempt === 4) {
+            if (alive) setAuthError(String(err));
+          } else {
+            await new Promise((r) => setTimeout(r, 700 * (attempt + 1)));
+          }
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Resume into ?city= if present (so a refresh mid-game doesn't dump you back
+  // to the lobby), but a fresh open with no param shows the lobby. Done in an
+  // effect to keep SSR and the first client render identical (no mismatch).
+  useEffect(() => {
+    const id = new URLSearchParams(window.location.search).get("city");
+    if (id) setActiveCityId(id);
+    setHydrated(true);
+  }, []);
+
+  const enter = useCallback((cityId: string) => {
+    setActiveCityId(cityId);
+    const u = new URL(window.location.href);
+    u.searchParams.set("city", cityId);
+    window.history.replaceState({}, "", u);
+  }, []);
+
+  const leave = useCallback(() => {
+    setActiveCityId(null);
+    const u = new URL(window.location.href);
+    u.searchParams.delete("city");
+    window.history.replaceState({}, "", u);
+  }, []);
+
+  if (!hydrated) return <div className="fixed inset-0 bg-[#0a0e14]" />;
+  if (!activeCityId) {
+    return <Lobby authReady={authReady} authError={authError} onEnter={enter} />;
+  }
+  return <GameView key={activeCityId} cityId={activeCityId} onLeave={leave} />;
 }
 
 function Stat({ label, value }: { label: string; value: string }) {

@@ -1,10 +1,11 @@
-import { mutation } from "@pylonsync/functions";
+import { mutation, v } from "@pylonsync/functions";
 
 /**
- * The simulation. A self-perpetuating scheduled chain (same pattern as
- * the world3d building-rebuild sweep): each run advances the economy
- * and grows buildings, then reschedules itself. Persisted jobs survive
- * restarts; ensureCity revives the chain if its heartbeat goes stale.
+ * The simulation, scoped to one city. A self-perpetuating scheduled chain
+ * (same pattern as the world3d building-rebuild sweep): each run advances that
+ * city's economy and grows its buildings, then reschedules itself with the
+ * same cityId. Persisted jobs survive restarts; ensureCity revives the chain
+ * if its heartbeat goes stale.
  *
  * Growth rules (legible on purpose):
  *   - a zone tile only develops if it's adjacent to a road
@@ -28,12 +29,14 @@ function bucket(demand: number): number {
 
 export default mutation({
   auth: "guest",
-  args: {},
-  async handler(ctx) {
+  args: { cityId: v.string() },
+  async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
-    await ctx.db.advisoryLock("sim.cityTick");
+    const cityId = String(args.cityId ?? "");
+    if (!cityId) return { ticked: false, reason: "no_city_id" };
+    await ctx.db.advisoryLock(`sim.cityTick.${cityId}`);
 
-    const city = await ctx.db.lookup("City", "key", "main");
+    const city = await ctx.db.lookup("City", "key", cityId);
     if (!city) return { ticked: false, reason: "no_city" };
 
     const now = Date.now();
@@ -44,7 +47,7 @@ export default mutation({
       return { ticked: false, reason: "duplicate_chain" };
     }
 
-    const tiles = await ctx.db.list("Tile");
+    const tiles = await ctx.db.query("Tile", { cityId });
     const roadSet = new Set<string>();
     for (const t of tiles) {
       if (t.kind === "road" || t.kind === "avenue") roadSet.add(`${t.gx},${t.gz}`);
@@ -136,7 +139,7 @@ export default mutation({
       updatedAt: nowIso,
     });
 
-    await ctx.scheduler.runAfter(TICK_MS, "cityTick", {});
+    await ctx.scheduler.runAfter(TICK_MS, "cityTick", { cityId });
     return { ticked: true, grown, population, jobs, funds };
   },
 });

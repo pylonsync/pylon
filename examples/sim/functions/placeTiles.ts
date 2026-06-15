@@ -1,11 +1,11 @@
 import { mutation, v } from "@pylonsync/functions";
 
 /**
- * Paint tiles onto the shared map and charge the shared treasury.
+ * Paint tiles onto a city's map and charge that city's treasury.
  *
  * Server-authoritative on money and occupancy: each cell is bounds-
- * and kind-checked, skipped if already occupied (placement never
- * overwrites — bulldoze first), and charged only if the city can
+ * and kind-checked, skipped if already occupied IN THIS CITY (placement
+ * never overwrites — bulldoze first), and charged only if the city can
  * afford it. Funds are written via ctx.db.unsafe because the City row
  * is policy-locked; tile inserts go through the normal surface (the
  * Tile insert policy is "any signed-in player").
@@ -18,17 +18,20 @@ const COST: Record<string, number> = { road: 10, res: 20, com: 30, ind: 25 };
 export default mutation({
   auth: "guest",
   args: {
+    cityId: v.string(),
     cells: v.array(
       v.object({ gx: v.int(), gz: v.int(), kind: v.string() }),
     ),
   },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
+    const cityId = String(args.cityId ?? "");
+    if (!cityId) throw ctx.error("INVALID_ARGS", "cityId required");
     const cells = args.cells as Array<{ gx: number; gz: number; kind: string }>;
     if (cells.length === 0) return { placed: 0, spent: 0, funds: 0 };
     if (cells.length > 128) throw ctx.error("INVALID_ARGS", "too many cells in one call");
 
-    const city = await ctx.db.lookup("City", "key", "main");
+    const city = await ctx.db.lookup("City", "key", cityId);
     if (!city) throw ctx.error("NOT_FOUND", "city not initialised");
     let funds = city.funds as number;
 
@@ -41,10 +44,11 @@ export default mutation({
       const cost = COST[kind];
       if (cost === undefined) continue; // unknown kind
       if (funds < cost) break; // out of money — stop here
-      const existing = await ctx.db.query("Tile", { gx, gz });
+      const existing = await ctx.db.query("Tile", { cityId, gx, gz });
       if (existing.length > 0) continue; // occupied; bulldoze first
 
       await ctx.db.insert("Tile", {
+        cityId,
         gx,
         gz,
         kind,
