@@ -23,6 +23,7 @@ import * as os from "node:os";
 
 import {
   buildClientBundle,
+  nearestBoundaryComponent,
   type PylonBundleManifest,
 } from "./ssr-client-bundler";
 
@@ -232,5 +233,117 @@ describe("ssr-client-bundler (Phase 1.5e)", () => {
     );
     const unique = new Set(sharedImports);
     expect(unique.size).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Client error/not-found boundary. Regression coverage for the blank-page bug:
+// a notFound() (or any error) thrown DURING a client render — the normal case
+// when an async lookup 404s after hydration — used to propagate uncaught and
+// blank the whole document because the client runtime wrapped pages in NO
+// error boundary. nearestBoundaryComponent() is the resolution the runtime
+// inlines; the build test guards the boundary wiring + not-found.tsx entry.
+// ---------------------------------------------------------------------------
+
+describe("nearestBoundaryComponent (client boundary resolution)", () => {
+  const routes = new Set([
+    "web/app/not-found",
+    "web/app/dashboard/not-found",
+    "web/app/dashboard/error",
+    "web/app/dashboard/orgs/[slug]/page",
+    "web/app/page",
+  ]);
+
+  test("returns the NEAREST ancestor boundary, not a farther one", () => {
+    // [slug]/page has no own boundary → nearest not-found is dashboard's,
+    // NOT the app-root one.
+    expect(
+      nearestBoundaryComponent(
+        "web/app/dashboard/orgs/[slug]/page",
+        "not-found",
+        routes,
+      ),
+    ).toBe("web/app/dashboard/not-found");
+  });
+
+  test("falls back to a farther ancestor when no nearer one exists", () => {
+    // A page outside /dashboard only has the app-root not-found.
+    expect(
+      nearestBoundaryComponent("web/app/page", "not-found", routes),
+    ).toBe("web/app/not-found");
+    // settings/page is under /dashboard but above no closer boundary → dashboard.
+    expect(
+      nearestBoundaryComponent(
+        "web/app/dashboard/settings/page",
+        "not-found",
+        routes,
+      ),
+    ).toBe("web/app/dashboard/not-found");
+  });
+
+  test("resolves error.tsx independently of not-found.tsx", () => {
+    expect(
+      nearestBoundaryComponent(
+        "web/app/dashboard/orgs/[slug]/page",
+        "error",
+        routes,
+      ),
+    ).toBe("web/app/dashboard/error");
+    // No error.tsx outside /dashboard → null (runtime renders its default).
+    expect(nearestBoundaryComponent("web/app/page", "error", routes)).toBeNull();
+  });
+
+  test("returns null when the app ships no boundary at all", () => {
+    expect(
+      nearestBoundaryComponent("web/app/page", "not-found", new Set(["web/app/page"])),
+    ).toBeNull();
+  });
+
+  test("does not match a boundary in a sibling/unrelated subtree", () => {
+    const r = new Set(["web/app/admin/not-found", "web/app/dashboard/page"]);
+    // dashboard/page must NOT pick up admin's not-found.
+    expect(
+      nearestBoundaryComponent("web/app/dashboard/page", "not-found", r),
+    ).toBeNull();
+  });
+});
+
+const NOT_FOUND_BODY = `
+import React from "react";
+export default function NotFound() {
+  return <div data-boundary="not-found">Not found</div>;
+}
+`;
+
+describe("client boundary is wired into the build", () => {
+  test("not-found.tsx gets its own manifest entry AND the runtime wraps pages in the error boundary", async () => {
+    tempDir = makeFixture(
+      {
+        "page.tsx": PAGE_BODY("Home"),
+        "dashboard/page.tsx": PAGE_BODY("Dash"),
+        "dashboard/not-found.tsx": NOT_FOUND_BODY,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const { manifestPath, outdir } = await buildClientBundle();
+    const manifest = JSON.parse(
+      fs.readFileSync(manifestPath, "utf8"),
+    ) as PylonBundleManifest;
+
+    // The not-found boundary must be a first-class route entry so the client
+    // can resolve + dynamically load it on a client-thrown notFound().
+    expect(manifest.routes["app/dashboard/not-found"]).toBeTruthy();
+
+    // The shared runtime chunk must contain the boundary wiring — without it,
+    // a client-thrown notFound() blanks the page (the bug this fixes).
+    const sharedChunks = fs
+      .readdirSync(path.join(outdir, "chunks"))
+      .map((n) => fs.readFileSync(path.join(outdir, "chunks", n), "utf8"));
+    const allShared = sharedChunks.join("\n");
+    expect(allShared).toContain("PYLON_NOT_FOUND");
+    expect(allShared).toContain("getDerivedStateFromError");
   });
 });
