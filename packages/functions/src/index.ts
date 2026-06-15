@@ -46,4 +46,7 @@ export type {
   AuthMode,
   AuthRequirement,
   FnDefinition,
+  RequireMember,
+  RequireMemberOptions,
+  MemberRow,
 } from "./types";

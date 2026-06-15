@@ -467,6 +467,59 @@ export interface Connections {
 // Context objects — what handlers receive
 // ---------------------------------------------------------------------------
 
+/** Options for `ctx.requireMember()`. */
+export interface RequireMemberOptions {
+  /**
+   * Allowed role(s). The caller's membership role must be one of these.
+   * Omit to require ANY membership regardless of role.
+   */
+  role?: string | string[];
+  /**
+   * The membership entity to check. Default `"OrgMember"` — the same entity
+   * the framework's org/tenant machinery uses. Override for a custom model.
+   */
+  entity?: string;
+  /** Field on the membership entity holding the org/tenant id. Default `"orgId"`. */
+  orgField?: string;
+  /** Field holding the user id. Default `"userId"`. */
+  userField?: string;
+  /** Field holding the role. Default `"role"`. */
+  roleField?: string;
+}
+
+/** The membership row returned by `ctx.requireMember()`. */
+export type MemberRow = Record<string, unknown> & { role?: string };
+
+/**
+ * Assert the caller is a member of `orgId` (optionally with one of `role`),
+ * returning the membership row. Throws a typed error otherwise:
+ * `UNAUTHENTICATED` (no signed-in user), `MISSING_ORG` (no orgId), or
+ * `FORBIDDEN` (not a member / wrong role).
+ *
+ * This is the authoritative authorization gate for org-scoped writes —
+ * actions + mutations BYPASS entity read policies, so a function that trusts
+ * an attacker-supplied `orgId`/`projectId` is an IDOR unless it re-checks
+ * membership. `requireMember` makes the safe path the default path.
+ *
+ * ```ts
+ * export default mutation({
+ *   args: { orgId: v.id("Organization"), name: v.string() },
+ *   async handler(ctx, args) {
+ *     await ctx.requireMember(args.orgId, { role: ["owner", "admin"] });
+ *     // …safe to mutate org-scoped data now…
+ *   },
+ * });
+ * ```
+ *
+ * The membership entity must let the caller read their OWN membership row
+ * (the standard `auth.userId == data.userId` read policy) — the check runs
+ * with the caller's identity.
+ */
+export type RequireMember = (
+  orgId: string,
+  opts?: RequireMemberOptions,
+) => Promise<MemberRow>;
+
 /** Context for query handlers (read-only).
  *
  * NOTE: `ctx.llm` is NOT exposed here. Queries are reactive: a
@@ -481,6 +534,8 @@ export interface QueryCtx<R extends AuthRequirement = "optional"> {
   auth: AuthInfo<R>;
   /** Environment variables / secrets. */
   env: Record<string, string>;
+  /** Assert org membership (optionally a role) — see {@link RequireMember}. */
+  requireMember: RequireMember;
 }
 
 /** Context for mutation handlers (read + write, transactional). */
@@ -497,6 +552,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   connections: Connections;
   /** Create a typed error that triggers rollback. */
   error(code: string, message: string): Error;
+  /** Assert org membership (optionally a role) — see {@link RequireMember}. */
+  requireMember: RequireMember;
 }
 
 /** Context for action handlers (external I/O, non-transactional). */
@@ -524,6 +581,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   ): Promise<T>;
   /** Create a typed error. */
   error(code: string, message: string): Error;
+  /** Assert org membership (optionally a role) — see {@link RequireMember}. */
+  requireMember: RequireMember;
   /**
    * HTTP request metadata — present only when the action was invoked via
    * a `defineRoute` HTTP binding. Missing when the action is called from

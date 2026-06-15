@@ -31,6 +31,7 @@ import type {
   FnDefinition,
   AuthInfo,
 } from "./types";
+import { makeRequireMember } from "./member";
 import { validateArgs } from "./validators";
 import { readdirSync } from "fs";
 import { join, basename } from "path";
@@ -741,6 +742,15 @@ function buildActionCtx(
       (err as any).code = code;
       return err;
     },
+    // Actions have no ctx.db; read membership via the built-in internal query.
+    requireMember: makeRequireMember(auth.userId, (entity, filter) =>
+      rpc(callId, {
+        type: "run_fn",
+        fn_name: "__pylonMemberLookup",
+        fn_type: "query",
+        args: { entity, filter },
+      }) as Promise<any[]>,
+    ),
     request: normalizedRequest,
   };
 }
@@ -750,6 +760,19 @@ function buildActionCtx(
 // ---------------------------------------------------------------------------
 
 const registry = new Map<string, FnDefinition>();
+
+// Built-in internal query backing `ctx.requireMember` on ACTION ctx — actions
+// have no `ctx.db`, so they read membership via `runQuery` to this. Registered
+// before app fns load (so the host sees it in the registration list and an
+// action's runQuery dispatches back here); app fns load by filename basename so
+// they can't collide with this reserved name. The read is policy-gated like any
+// ctx.db read, which is fine: a member can always read their own membership row.
+registry.set("__pylonMemberLookup", {
+  type: "query",
+  internal: true,
+  handler: async (ctx: any, args: any) =>
+    ctx.db.query(args.entity, { ...(args.filter ?? {}), $limit: 1 }),
+} as FnDefinition);
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -845,15 +868,25 @@ async function handleCall(msg: CallMessage): Promise<void> {
 
   let ctx: QueryCtx | MutationCtx | ActionCtx;
   switch (def.type) {
-    case "query":
+    case "query": {
       // ctx.llm is intentionally absent on queries — reactive
       // re-runs would re-bill the LLM call on every dep change.
       // Move LLM calls into actions / mutations.
-      ctx = { db: buildDbReader(msg.call_id), auth, env };
-      break;
-    case "mutation":
+      const reader = buildDbReader(msg.call_id);
       ctx = {
-        db: buildDbWriter(msg.call_id),
+        db: reader,
+        auth,
+        env,
+        requireMember: makeRequireMember(auth.userId, (entity, filter) =>
+          reader.query(entity, { ...filter, $limit: 1 }),
+        ),
+      };
+      break;
+    }
+    case "mutation": {
+      const writer = buildDbWriter(msg.call_id);
+      ctx = {
+        db: writer,
         auth,
         stream,
         scheduler,
@@ -865,8 +898,12 @@ async function handleCall(msg: CallMessage): Promise<void> {
           (err as any).code = code;
           return err;
         },
+        requireMember: makeRequireMember(auth.userId, (entity, filter) =>
+          writer.query(entity, { ...filter, $limit: 1 }),
+        ),
       };
       break;
+    }
     case "action":
       ctx = buildActionCtx(
         msg.call_id,
