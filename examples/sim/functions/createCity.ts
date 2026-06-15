@@ -1,11 +1,12 @@
 import { mutation, v } from "@pylonsync/functions";
-import { seedTiles } from "./lib/seed";
 
 /**
  * Start a brand-new city from the lobby. Creates a City row with a fresh,
- * unique id, lays down a randomised starter neighbourhood scoped to that city,
- * and kicks off the city's self-perpetuating simulation tick. Returns the new
- * cityId so the client can enter it.
+ * unique id and a starting treasury, and kicks off the city's self-
+ * perpetuating simulation tick. The map starts EMPTY — no roads, no zones,
+ * nothing auto-built; the player lays everything down themselves, and the sim
+ * grows buildings only once roads + zones exist. Returns the new cityId so the
+ * client can enter it.
  */
 const TICK_MS = 6000;
 const START_FUNDS = 8000;
@@ -34,7 +35,8 @@ export default mutation({
     const nowIso = new Date(now).toISOString();
     const nextTickAt = new Date(now + TICK_MS).toISOString();
 
-    // unsafe: City is policy-locked to server functions.
+    // unsafe: City is policy-locked to server functions. No tiles are seeded —
+    // a new city is a blank canvas the player builds from scratch.
     await ctx.db.unsafe.insert("City", {
       key: cityId,
       name,
@@ -46,19 +48,6 @@ export default mutation({
       nextTickAt,
       updatedAt: nowIso,
     });
-
-    // Seed the starter neighbourhood, scoped to this city (server-owned).
-    for (const t of seedTiles()) {
-      await ctx.db.unsafe.insert("Tile", {
-        cityId,
-        gx: t.gx,
-        gz: t.gz,
-        kind: t.kind,
-        level: t.level,
-        userId: "seed",
-        updatedAt: nowIso,
-      });
-    }
 
     await ctx.scheduler.runAfter(TICK_MS, "cityTick", { cityId });
     return { cityId, name };
