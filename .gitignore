@@ -3,8 +3,10 @@
 .idea/
 .vscode/
 
-# Rust
-/target/
+# Rust — match `target/` at any depth (the root-anchored `/target/` missed
+# nested Cargo projects like benchmarks/search/target, which committed ~389MB
+# of build artifacts and blew past the cloud deploy's 50MB tarball cap).
+target/
 
 # Swift / SPM — build artifacts and IDE state
 .build/
