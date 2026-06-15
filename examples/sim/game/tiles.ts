@@ -460,6 +460,56 @@ export class TileMap implements GameSystem {
     }
   }
 
+  /**
+   * Which way a building should face. It fronts the adjacent street it lines
+   * up along, not just the first road clockwise: ~half of all cells touch
+   * roads on two sides (corners / through-lots), and a fixed N/E/S/W priority
+   * made a row of buildings lining one avenue alternate facing the cross-
+   * streets instead. So among the adjacent roads we pick the one with the
+   * longest *streetwall* — the run of neighbouring buildings that front the
+   * same side — biased toward avenues (a building naturally faces the bigger
+   * road). Returns undefined only when no road is adjacent (kept centred +
+   * randomly rotated by makeBuilding).
+   */
+  private frontageFaceRad(gx: number, gz: number): number | undefined {
+    // [faceRad, road dir (dx,dz), streetwall axis (px,pz) perpendicular to it]
+    const sides: Array<[number, number, number, number, number]> = [
+      [0, 0, 1, 1, 0], // N road (+z); wall runs E-W
+      [Math.PI / 2, 1, 0, 0, 1], // E road (+x); wall runs N-S
+      [Math.PI, 0, -1, 1, 0], // S road (-z); wall runs E-W
+      [-Math.PI / 2, -1, 0, 0, 1], // W road (-x); wall runs N-S
+    ];
+    const isZone = (x: number, z: number): boolean => {
+      const k = this.state.get(cellKey(x, z))?.kind;
+      return k === "res" || k === "com" || k === "ind";
+    };
+    let bestRad: number | undefined;
+    let bestScore = -1;
+    for (const [rad, dx, dz, px, pz] of sides) {
+      const rx = gx + dx;
+      const rz = gz + dz;
+      if (!this.isRoadAt(rx, rz)) continue;
+      // Streetwall length: this cell plus the contiguous neighbours along the
+      // frontage axis that also front this same road side.
+      let wall = 1;
+      for (const sign of [1, -1]) {
+        for (let step = 1; step < 24; step++) {
+          const cx = gx + px * sign * step;
+          const cz = gz + pz * sign * step;
+          if (!isZone(cx, cz) || !this.isRoadAt(cx + dx, cz + dz)) break;
+          wall++;
+        }
+      }
+      const avenue = this.state.get(cellKey(rx, rz))?.kind === "avenue";
+      const score = wall + (avenue ? 1.5 : 0);
+      if (score > bestScore) {
+        bestScore = score;
+        bestRad = rad;
+      }
+    }
+    return bestRad;
+  }
+
   /** (Re)create building meshes to match `this.state`. Buildings whose
    *  level is unchanged are left alone. */
   private syncBuildings(): void {
@@ -478,12 +528,7 @@ export class TileMap implements GameSystem {
       const existing = this.buildings.get(key);
       if (!existing || existing.level !== t.level) {
         if (existing) this.buildGroup.remove(existing.obj);
-        // Face the building toward an adjacent road (N/E/S/W priority).
-        let faceRad: number | undefined;
-        if (this.isRoadAt(gx, gz + 1)) faceRad = 0;
-        else if (this.isRoadAt(gx + 1, gz)) faceRad = Math.PI / 2;
-        else if (this.isRoadAt(gx, gz - 1)) faceRad = Math.PI;
-        else if (this.isRoadAt(gx - 1, gz)) faceRad = -Math.PI / 2;
+        const faceRad = this.frontageFaceRad(gx, gz);
         const obj = makeBuilding(t.kind as BuildingZone, t.level, gx, gz, faceRad);
         const cx = cellCenterX(gx);
         const cz = cellCenterZ(gz);
