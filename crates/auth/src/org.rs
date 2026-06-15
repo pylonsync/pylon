@@ -248,7 +248,11 @@ impl OrgStore {
             return false;
         }
         self.store
-            .update(&self.cfg.entity, org_id, &serde_json::json!({ "name": name }))
+            .update(
+                &self.cfg.entity,
+                org_id,
+                &serde_json::json!({ "name": name }),
+            )
             .unwrap_or(false)
     }
 
@@ -989,7 +993,8 @@ mod tests {
         assert!(no_tenant.roles.is_empty());
 
         // Active tenant but the caller isn't a member → no role granted.
-        let mut stranger = crate::AuthContext::user("u-stranger".into()).with_tenant(org.id.clone());
+        let mut stranger =
+            crate::AuthContext::user("u-stranger".into()).with_tenant(org.id.clone());
         enrich_active_org_role(&s, &mut stranger);
         assert!(stranger.roles.is_empty());
 
@@ -1001,9 +1006,8 @@ mod tests {
 
         // A scoped API-key context must not pick up org roles it wasn't
         // minted with, even for a real member user.
-        let mut api_key =
-            crate::AuthContext::from_api_key("u-alice".into(), "key_1".into(), None)
-                .with_tenant(org.id.clone());
+        let mut api_key = crate::AuthContext::from_api_key("u-alice".into(), "key_1".into(), None)
+            .with_tenant(org.id.clone());
         enrich_active_org_role(&s, &mut api_key);
         assert!(api_key.roles.is_empty());
     }

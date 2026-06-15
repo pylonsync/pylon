@@ -3611,11 +3611,19 @@ pub(crate) fn handle(
                     Err(e) => {
                         return Some((
                             400,
-                            json_error_safe("INVALID_JSON", "Invalid request body", &format!("{e}")),
+                            json_error_safe(
+                                "INVALID_JSON",
+                                "Invalid request body",
+                                &format!("{e}"),
+                            ),
                         ));
                     }
                 };
-                let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+                let name = data
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
                 if name.is_empty() {
                     return Some((400, json_error("INVALID_NAME", "name is required")));
                 }
