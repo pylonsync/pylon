@@ -270,6 +270,13 @@ function buildTree(Page, Layouts, props) {
 // ---------------------------------------------------------------------------
 
 let navEpoch = 0;
+// The props the active page was rendered with (auth, serverData, params, …).
+// The boundary reuses them so a boundary module AND its layout chain — e.g. an
+// auth-guarding dashboard layout that reads props.auth — render with the SAME
+// context the page had. The server renders boundaries with the page props too;
+// a minimal hand-built props object would make such a layout see no auth and
+// (for instance) redirect to /login instead of showing the not-found page.
+let currentPageProps = {};
 
 // Walk up the active route's component path to the nearest boundary module
 // (<dir>/not-found or <dir>/error) present in the manifest. Manifest route
@@ -372,14 +379,12 @@ function BoundaryView(props) {
   }, [component, kind]);
   if (!resolved) return null;
   if (resolved.missing) return createElement(DefaultBoundary, { kind });
-  const bProps = {
-    params: currentParams,
-    searchParams: Object.fromEntries(new URLSearchParams(location.search)),
-    url: location.pathname + location.search,
-    reset,
-  };
-  // error.tsx receives the SAFE error projection (message + digest) — never a
-  // raw Error/stack, matching the server boundary's #270 posture.
+  // Reuse the page's props (auth, serverData, params, url, …) so the boundary's
+  // layout chain renders with the SAME context the page had — an auth-guarding
+  // layout that reads props.auth must not see undefined and redirect away. Add
+  // reset (+ the SAFE error projection for error.tsx — message + digest only,
+  // never a raw Error/stack, matching the server boundary's #270 posture).
+  const bProps = { ...currentPageProps, reset };
   if (kind === "error" && error) {
     bProps.error = {
       message: String((error && error.message) || error),
@@ -632,8 +637,9 @@ export function hydrate(component, Page, Layouts) {
       return;
     }
     setNavParams(data);
+    currentPageProps = withClientProps(data);
     const tree = withBoundary(
-      buildTree(Page, Layouts, withClientProps(data)),
+      buildTree(Page, Layouts, currentPageProps),
       data.component,
     );
     activeRoot = hydrateRoot(document, tree);
@@ -713,8 +719,9 @@ async function navigate(href, opts) {
   syncHeadMeta(doc);
   setNavParams(data);
   navEpoch++;
+  currentPageProps = withClientProps(data);
   const tree = withBoundary(
-    buildTree(route.Page, route.Layouts, withClientProps(data)),
+    buildTree(route.Page, route.Layouts, currentPageProps),
     data.component,
   );
   activeRoot.render(tree);
