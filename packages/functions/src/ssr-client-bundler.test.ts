@@ -23,9 +23,9 @@ import * as os from "node:os";
 
 import {
   buildClientBundle,
-  nearestBoundaryComponent,
   type PylonBundleManifest,
 } from "./ssr-client-bundler";
+import { nearestBoundaryComponent } from "./ssr-client-boundary";
 
 // State that needs cleanup between tests.
 let originalCwd: string | null = null;
