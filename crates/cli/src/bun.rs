@@ -525,6 +525,16 @@ pub fn ensure_frontend_built(entry_file: &str, frozen: bool) -> Result<(), Diagn
         return Ok(());
     }
 
+    // If a dist/ already ships alongside the source, it was pre-built (Pylon
+    // Cloud's deploy builder runs the frontend build before the flip). Serve it
+    // as-is — don't rebuild at boot. This makes the build atomic (a frontend
+    // build failure fails the deploy in the builder, never touching the live
+    // machine) and skips the slow cold build. frontend.rs's discover_dist_dir
+    // checks <app>/web/dist first, so the pre-built output is picked up.
+    if source_web_dir.join("dist").join("index.html").is_file() {
+        return Ok(());
+    }
+
     // Resolve where to actually do the install + build. In a stock
     // dev or self-host monorepo, this is source_web_dir directly
     // (in-place, fast). On Pylon Cloud / Fly the source ships via

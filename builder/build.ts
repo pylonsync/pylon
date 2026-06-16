@@ -161,6 +161,41 @@ async function main() {
 		console.log("[builder] no build script — skipping");
 	}
 
+	// 3b. Pre-build the SPA frontend (Pylon's `web/` / `apps/web/` convention).
+	//     The runtime builds this at boot otherwise — but that happens on the
+	//     LIVE machine AFTER the deploy flips, so a frontend build failure ships
+	//     a broken app. Building it HERE makes the deploy atomic: a failure
+	//     throws → no COMPLETE marker → the control plane marks the deploy failed
+	//     and never touches the live machine. The built dist/ rides along in the
+	//     bundle (step 4) and frontend.rs serves `<app>/web/dist` first, so the
+	//     runtime skips its cold build entirely (bun.rs ensure_frontend_built).
+	//
+	//     Only for WORKSPACE deploys: there `web/` is a real workspace member
+	//     (root install resolves its `workspace:*` / `@pylonsync/*` deps against
+	//     the bundled siblings, exactly like dev). A single-app deploy has no
+	//     workspace root, so `web/`'s workspace specifiers wouldn't resolve here
+	//     — leave those to the runtime, which stages the symlinks itself.
+	if (isWorkspaceDeploy) {
+		for (const rel of ["web", "apps/web"]) {
+			const webDir = `${appDir}/${rel}`;
+			const webPkgFile = Bun.file(`${webDir}/package.json`);
+			if (!(await webPkgFile.exists())) continue;
+			const webPkg = (await webPkgFile
+				.json()
+				.catch(() => ({}))) as { scripts?: Record<string, string> };
+			if (!webPkg.scripts?.build) continue;
+			if (await Bun.file(`${webDir}/dist/index.html`).exists()) {
+				console.log(
+					`[builder] ${rel}/dist already built — skipping frontend build`,
+				);
+				break;
+			}
+			console.log(`[builder] building frontend: ${rel}`);
+			await sh(["bun", "run", "build"], webDir);
+			break;
+		}
+	}
+
 	// 4. Assemble the FULL-PREBUILT bundle: everything the runtime needs at
 	//    boot (app.ts, functions/, lib/, node_modules/, web/dist/, public/, …),
 	//    minus VCS + dev/build-cache debris. Deterministic-ish: sorted names.
