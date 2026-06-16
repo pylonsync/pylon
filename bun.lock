@@ -407,34 +407,34 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
       "optionalDependencies": {
-        "@pylonsync/cli-darwin-arm64": "0.3.273",
-        "@pylonsync/cli-linux-x64": "0.3.273",
+        "@pylonsync/cli-darwin-arm64": "0.3.274",
+        "@pylonsync/cli-linux-x64": "0.3.274",
       },
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.3.273",
+      "version": "0.3.274",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.3.273",
+      "version": "0.3.274",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.3.273",
+      "version": "0.3.274",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.3.273",
+      "version": "0.3.274",
     },
     "packages/client": {
       "name": "@pylonsync/client",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -449,14 +449,14 @@
     },
     "packages/create-pylon": {
       "name": "@pylonsync/create-pylon",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "bin": {
         "create-pylon": "./bin/create-pylon.js",
       },
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -493,7 +493,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -513,7 +513,7 @@
     },
     "packages/plugins/feature-flags": {
       "name": "@pylonsync/feature-flags",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -527,7 +527,7 @@
     },
     "packages/plugins/stripe": {
       "name": "@pylonsync/stripe",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -541,7 +541,7 @@
     },
     "packages/plugins/webhooks": {
       "name": "@pylonsync/webhooks",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -555,7 +555,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -569,7 +569,7 @@
     },
     "packages/react-native": {
       "name": "@pylonsync/react-native",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -587,11 +587,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.273",
+      "version": "0.3.274",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.273",
+      "version": "0.3.274",
       "devDependencies": {
         "fake-indexeddb": "^6.2.5",
       },
