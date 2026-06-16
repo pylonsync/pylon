@@ -1,7 +1,7 @@
 import { mutation } from "@pylonsync/functions";
 import { emailMatchesOwner } from "../lib/owner";
 import { siteConfig } from "../lib/site.config";
-import { slugify, type ProjectRow } from "../lib/agency";
+import { lineItemsTotal, slugify, type ProjectRow } from "../lib/agency";
 
 // seedStudioBackoffice — owner-only, idempotent. Fills the dashboard's CRM +
 // billing with the demo clients/invoices from config so it isn't an empty shell
@@ -59,7 +59,8 @@ export default mutation<Record<string, never>, { seeded: boolean }>({
         clientName: inv.client,
         projectId: project?.id ?? null,
         projectTitle: project?.title ?? (inv.projectSlug ? titleBySlug.get(inv.projectSlug) ?? null : null),
-        amountCents: inv.amountCents,
+        lineItems: JSON.stringify(inv.lineItems),
+        amountCents: lineItemsTotal(inv.lineItems),
         status: inv.status ?? "draft",
         issuedAt: inv.issuedAt ?? null,
         dueAt: inv.dueAt ?? null,

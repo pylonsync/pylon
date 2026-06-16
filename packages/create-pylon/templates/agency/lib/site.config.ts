@@ -68,10 +68,19 @@ export type InvoiceSeed = {
   number: string;
   client: string; // matches a clients[].name
   projectSlug?: string; // matches a work.items[].slug
-  amountCents: number;
+  // Line items drive the total — `amountCents` is computed from them on seed.
+  lineItems: { description: string; quantity: number; unitCents: number }[];
   status?: "draft" | "sent" | "paid" | "overdue";
   issuedAt?: string; // "2026-04-01"
   dueAt?: string;
+};
+
+// The studio's billing identity — the "from" block + terms on every invoice and
+// its PDF. Edit these to make the invoices yours.
+export type Billing = {
+  addressLines: string[]; // shown under the studio name on the invoice
+  paymentTerms: string; // e.g. "Net 30"
+  footerNote: string; // a thank-you / payment note in the invoice footer
 };
 
 export type AgencyConfig = BaseConfig & {
@@ -89,6 +98,8 @@ export type AgencyConfig = BaseConfig & {
   logos: { eyebrow: string; names: string[] };
   services: { eyebrow: string; headline: string; items: Service[] };
   work: { eyebrow: string; headline: string; items: CaseStudy[] };
+  // The studio's invoice "from" identity + terms.
+  billing: Billing;
   // Demo CRM + billing rows seeded into the owner dashboard on first visit.
   backoffice: { clients: ClientSeed[]; invoices: InvoiceSeed[] };
   process: { eyebrow: string; headline: string; steps: ProcessStep[] };
@@ -285,7 +296,9 @@ export const siteConfig: AgencyConfig = {
         number: "INV-001",
         client: "Erin Caldwell",
         projectSlug: "ledger",
-        amountCents: 4800000,
+        lineItems: [
+          { description: "Product design & iOS build — Ledger (12-week engagement)", quantity: 1, unitCents: 4800000 },
+        ],
         status: "paid",
         issuedAt: "2026-01-15",
         dueAt: "2026-02-14",
@@ -294,7 +307,10 @@ export const siteConfig: AgencyConfig = {
         number: "INV-002",
         client: "Tom Reyes",
         projectSlug: "atlas-health",
-        amountCents: 6200000,
+        lineItems: [
+          { description: "Platform rebuild & design system", quantity: 1, unitCents: 5500000 },
+          { description: "Discovery & scoping sprint", quantity: 1, unitCents: 700000 },
+        ],
         status: "paid",
         issuedAt: "2026-03-01",
         dueAt: "2026-03-31",
@@ -303,7 +319,9 @@ export const siteConfig: AgencyConfig = {
         number: "INV-003",
         client: "Tom Reyes",
         projectSlug: "atlas-health",
-        amountCents: 850000,
+        lineItems: [
+          { description: "Maintenance retainer — June", quantity: 1, unitCents: 850000 },
+        ],
         status: "sent",
         issuedAt: "2026-06-01",
         dueAt: "2026-07-01",
@@ -312,12 +330,21 @@ export const siteConfig: AgencyConfig = {
         number: "INV-004",
         client: "Sofia Marin",
         projectSlug: "cohort",
-        amountCents: 2400000,
+        lineItems: [
+          { description: "Brand identity & system", quantity: 1, unitCents: 1400000 },
+          { description: "Marketing site design & build", quantity: 1, unitCents: 1000000 },
+        ],
         status: "overdue",
         issuedAt: "2026-04-10",
         dueAt: "2026-05-10",
       },
     ],
+  },
+
+  billing: {
+    addressLines: ["Halyard Studio", "Dallas, TX", "hello@halyard.example"],
+    paymentTerms: "Net 30",
+    footerNote: "Thank you. Please reference the invoice number with payment.",
   },
 
   process: {

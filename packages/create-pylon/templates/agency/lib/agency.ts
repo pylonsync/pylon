@@ -63,8 +63,17 @@ export interface ClientRow {
   createdAt: string;
 }
 
+// One line on an invoice. `unitCents` is the per-unit price in integer cents;
+// the line total is `quantity * unitCents`.
+export interface InvoiceLineItem {
+  description: string;
+  quantity: number;
+  unitCents: number;
+}
+
 // A bill tied to a client, + optional project (owner-only — money + PII).
-// `amountCents` is integer cents.
+// `amountCents` is the integer-cents total; `lineItems` is the JSON-encoded
+// breakdown (parse with `parseLineItems`).
 export interface InvoiceRow {
   id: string;
   number: string;
@@ -72,6 +81,7 @@ export interface InvoiceRow {
   clientName: string;
   projectId?: string | null;
   projectTitle?: string | null;
+  lineItems?: string | null; // JSON array of InvoiceLineItem
   amountCents: number;
   status: string; // "draft" | "sent" | "paid" | "overdue"
   issuedAt?: string | null;
@@ -111,6 +121,29 @@ export function money(cents: number): string {
     minimumFractionDigits: whole ? 0 : 2,
     maximumFractionDigits: 2,
   });
+}
+
+// Parse the JSON line-item blob off an invoice into a clean, typed array.
+// Tolerant: bad JSON or missing fields yield an empty list / zeroed fields
+// rather than throwing, so a malformed row never crashes the dashboard or PDF.
+export function parseLineItems(raw?: string | null): InvoiceLineItem[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((it) => ({
+      description: String(it?.description ?? ""),
+      quantity: Number(it?.quantity) || 0,
+      unitCents: Math.trunc(Number(it?.unitCents) || 0),
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// Total of a line-item list, in integer cents.
+export function lineItemsTotal(items: InvoiceLineItem[]): number {
+  return items.reduce((sum, it) => sum + Math.round(it.quantity * it.unitCents), 0);
 }
 
 // Slugify a project title for its /work/[slug] URL.

@@ -141,6 +141,11 @@ const Invoice = entity(
     clientName: field.string().default(""),
     projectId: field.string().optional(),
     projectTitle: field.string().optional(),
+    // Line items as a JSON-encoded array of { description, quantity, unitCents }
+    // (Pylon has no JSON column type, so it's a string). `amountCents` is the
+    // computed total, kept in sync on write so the list + totals don't have to
+    // re-parse every row. The case-study PDF + the invoice view render the items.
+    lineItems: field.string().optional(),
     amountCents: field.int().default(0),
     status: field.string().default("draft"), // "draft" | "sent" | "paid" | "overdue"
     issuedAt: field.string().optional(), // ISO date "2026-06-01"

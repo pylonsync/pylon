@@ -1,17 +1,23 @@
 import { mutation, v } from "@pylonsync/functions";
 import { emailMatchesOwner } from "../lib/owner";
-import type { ClientRow, ProjectRow } from "../lib/agency";
+import { lineItemsTotal, type ClientRow, type InvoiceLineItem, type ProjectRow } from "../lib/agency";
 
 // upsertInvoice — owner-only. Create a bill or edit one (pass `id`). The client
 // is referenced by id and must exist; we denormalize its name onto the invoice
 // (`clientName`) so the list renders without a join, and so the bill keeps the
 // name it was issued under even if the contact is renamed later. An optional
-// project link works the same way (`projectTitle`). Amount is integer cents.
+// project link works the same way (`projectTitle`).
+//
+// `lineItems` is the source of truth for the amount: when present we store it
+// (JSON) and compute `amountCents = Σ quantity × unitCents` server-side, so the
+// total can never disagree with the breakdown the client sent. When omitted we
+// fall back to the explicit `amountCents` (a one-line bill). Amounts are cents.
 type Args = {
   id?: string;
   number: string;
   clientId: string;
   projectId?: string;
+  lineItems?: InvoiceLineItem[];
   amountCents: number;
   status?: string;
   issuedAt?: string;
@@ -30,6 +36,11 @@ export default mutation<Args, { ok: boolean; id: string }>({
     number: v.string(),
     clientId: v.string(),
     projectId: v.optional(v.string()),
+    lineItems: v.optional(
+      v.array(
+        v.object({ description: v.string(), quantity: v.number(), unitCents: v.int() }),
+      ),
+    ),
     amountCents: v.int(),
     status: v.optional(v.string()),
     issuedAt: v.optional(v.string()),
@@ -59,7 +70,17 @@ export default mutation<Args, { ok: boolean; id: string }>({
       }
     }
 
-    const amountCents = Math.max(0, Math.trunc(args.amountCents || 0));
+    // Normalize line items; when present they define the total.
+    const items: InvoiceLineItem[] = (args.lineItems ?? [])
+      .map((it) => ({
+        description: (it.description ?? "").trim().slice(0, 300),
+        quantity: Math.max(0, Number(it.quantity) || 0),
+        unitCents: Math.max(0, Math.trunc(Number(it.unitCents) || 0)),
+      }))
+      .filter((it) => it.description.length > 0 || it.unitCents > 0);
+
+    const amountCents =
+      items.length > 0 ? lineItemsTotal(items) : Math.max(0, Math.trunc(args.amountCents || 0));
     const status = STATUSES.has((args.status ?? "").trim()) ? args.status!.trim() : "draft";
 
     const patch = {
@@ -68,6 +89,7 @@ export default mutation<Args, { ok: boolean; id: string }>({
       clientName: client.name,
       projectId,
       projectTitle,
+      lineItems: items.length > 0 ? JSON.stringify(items) : null,
       amountCents,
       status,
       issuedAt: clip(args.issuedAt, 20),
