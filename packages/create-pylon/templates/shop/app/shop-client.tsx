@@ -208,6 +208,34 @@ function ProductCard({
   );
 }
 
+// Product image. `image` in lib/site.config.ts is either a real photo URL (or
+// /public path) — rendered as an <img> — or an emoji stand-in, which we render
+// big AND tag "sample image" so it's obvious it's a placeholder to replace with
+// a real product photo. Swap the config value for a URL and the photo shows up.
+function ProductImage({ image, soldOut }: { image: string; soldOut: boolean }) {
+  const isPhoto = /^(https?:\/\/|\/)/.test(image);
+  if (isPhoto) {
+    return (
+      <div className="aspect-[4/3] overflow-hidden bg-paper">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={image}
+          alt=""
+          className={"size-full object-cover " + (soldOut ? "opacity-40 grayscale" : "")}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="relative grid aspect-[4/3] place-items-center bg-paper">
+      <span className={"text-6xl " + (soldOut ? "opacity-40 grayscale" : "")}>{image}</span>
+      <span className="absolute left-2 top-2 rounded-full border border-dashed border-zinc-300 bg-white/70 px-2 py-0.5 text-[10px] font-medium text-zinc-400">
+        sample image
+      </span>
+    </div>
+  );
+}
+
 function StockBadge({ stock }: { stock: number }) {
   if (stock <= 0) {
     return (

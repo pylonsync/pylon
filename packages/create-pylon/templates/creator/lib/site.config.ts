@@ -34,7 +34,6 @@ export type CreatorConfig = BaseConfig & {
     name: string; // the person / personal brand
     tagline: string; // one-line "what you do"
     intro: string; // a short paragraph
-    photoInitials: string; // shown in the avatar tile (drop in a real photo later)
   };
   about: { eyebrow: string; headline: string; paragraphs: string[] };
   offerings: { eyebrow: string; headline: string; items: Offering[] };
@@ -92,7 +91,6 @@ export const siteConfig: CreatorConfig = {
     tagline: "Product design coach & writer.",
     intro:
       "I help product designers get unstuck, sharpen their portfolios, and do the bravest work of their careers. Fifteen years in the room; now I spend it in yours.",
-    photoInitials: "MR",
   },
 
   about: {

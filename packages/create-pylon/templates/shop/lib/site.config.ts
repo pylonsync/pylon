@@ -29,7 +29,7 @@ export type ProductItem = {
   name: string;
   priceCents: number;
   description?: string;
-  image: string; // emoji or image URL (rendered big in the card)
+  image: string; // a product photo URL/path → shown as the photo; or an emoji stand-in (tagged "sample image")
   stock: number; // STARTING stock — seeded once, then live in the DB
 };
 
