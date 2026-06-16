@@ -23,6 +23,11 @@ export type BaseConfig = {
   seo: { title: string; description: string };
 };
 
+// A selectable model. `id` is what's sent to /api/ai/stream; `provider` is just
+// a label for the picker. Which models are actually accepted is gated server-side
+// by PYLON_AI_MODELS_ALLOWED (+ the configured provider / gateway) — see README.
+export type ChatModel = { id: string; label: string; provider: string };
+
 export type ChatConfig = BaseConfig & {
   chat: {
     assistantName: string;
@@ -34,6 +39,11 @@ export type ChatConfig = BaseConfig & {
     inputPlaceholder: string;
     // Starter prompts shown on the empty state; clicking one sends it.
     suggestions: string[];
+    // The model picker. Curate to your setup: a single provider's models, or —
+    // with an OpenRouter-style gateway (PYLON_AI_PROVIDER=custom) — models across
+    // providers in one list. The selected id is sent as `model` per request.
+    models: ChatModel[];
+    defaultModel: string;
   };
 };
 
@@ -77,5 +87,17 @@ export const siteConfig: ChatConfig = {
       "Give me 5 dinner ideas using chicken and rice.",
       "What's the difference between SSR and SSG?",
     ],
+    // Latest models as of this writing. Edit freely; whichever you keep here must
+    // be in PYLON_AI_MODELS_ALLOWED for switching to work (see .env.example).
+    // To offer models across providers in one list, route through an
+    // OpenRouter-style gateway (PYLON_AI_PROVIDER=custom + PYLON_AI_BASE_URL).
+    models: [
+      { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "Anthropic" },
+      { id: "claude-opus-4-8", label: "Claude Opus 4.8", provider: "Anthropic" },
+      { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", provider: "Anthropic" },
+      { id: "gpt-4o", label: "GPT-4o", provider: "OpenAI" },
+      { id: "gpt-4o-mini", label: "GPT-4o mini", provider: "OpenAI" },
+    ],
+    defaultModel: "claude-sonnet-4-6",
   },
 };

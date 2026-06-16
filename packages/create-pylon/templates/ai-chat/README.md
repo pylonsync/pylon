@@ -27,11 +27,34 @@ it and shows a friendly notice):
 # .env
 PYLON_AI_PROVIDER=anthropic        # or "openai" / "custom"
 PYLON_AI_API_KEY=sk-ant-...
-PYLON_AI_MODEL=claude-sonnet-4-6   # or gpt-4o-mini, etc.
+PYLON_AI_MODEL=claude-sonnet-4-6   # default when none is picked
 ```
 
 `/api/ai/stream` is auth-gated (a guest session is enough) and rate-limited
 per user, so a drive-by caller can't burn your budget.
+
+### Switching models / providers
+
+The composer has a **model picker** — its options live in `lib/site.config.ts`
+(`chat.models`, each with a provider label), and the chosen id is sent per
+request. Client-chosen models must be allow-listed server-side:
+
+```bash
+PYLON_AI_MODELS_ALLOWED=claude-sonnet-4-6,claude-opus-4-8,gpt-4o
+```
+
+`/api/ai/stream` talks to **one** provider. To offer models from **multiple
+providers** in one picker, route through an OpenAI-compatible gateway like
+[OpenRouter](https://openrouter.ai):
+
+```bash
+PYLON_AI_PROVIDER=custom
+PYLON_AI_BASE_URL=https://openrouter.ai/api/v1
+PYLON_AI_API_KEY=<openrouter key>
+```
+
+then set `chat.models` + `PYLON_AI_MODELS_ALLOWED` to the gateway's slugs
+(`anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.5-pro`, …).
 
 ## How it works
 

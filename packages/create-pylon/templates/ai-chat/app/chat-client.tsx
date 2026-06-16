@@ -57,6 +57,7 @@ function ChatInner() {
   const [sending, setSending] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [model, setModel] = useState(chat.defaultModel);
   const scrollRef = useRef<HTMLDivElement>(null);
   const initialized = useRef(false);
 
@@ -113,7 +114,7 @@ function ChatInner() {
 
     let acc = "";
     try {
-      await streamCompletion(payload, (delta) => {
+      await streamCompletion(payload, model, (delta) => {
         acc += delta;
         setStreaming(acc);
       });
@@ -125,6 +126,10 @@ function ChatInner() {
       if (code === "AI_NOT_CONFIGURED") {
         setNotice(
           "AI isn't configured yet. Set PYLON_AI_PROVIDER and PYLON_AI_API_KEY in .env, then restart — see the README.",
+        );
+      } else if (code === "MODEL_OVERRIDE_FORBIDDEN" || code === "MODEL_NOT_ALLOWED") {
+        setNotice(
+          "That model isn't enabled. Add it to PYLON_AI_MODELS_ALLOWED in .env (comma-separated), then restart.",
         );
       } else if (code === "RATE_LIMITED") {
         setNotice("You've hit the AI rate limit — try again in a little while.");
@@ -174,6 +179,8 @@ function ChatInner() {
           onSend={() => send(input)}
           disabled={sending}
           placeholder={chat.inputPlaceholder}
+          model={model}
+          onModelChange={setModel}
         />
       </div>
     </div>
@@ -286,13 +293,18 @@ function Composer({
   onSend,
   disabled,
   placeholder,
+  model,
+  onModelChange,
 }: {
   value: string;
   onChange: (v: string) => void;
   onSend: () => void;
   disabled: boolean;
   placeholder: string;
+  model: string;
+  onModelChange: (m: string) => void;
 }) {
+  const { models } = siteConfig.chat;
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -321,9 +333,24 @@ function Composer({
           <SendIcon />
         </button>
       </div>
-      <p className="mx-auto mt-1.5 max-w-3xl text-center text-[11px] text-zinc-400">
-        Enter to send · Shift+Enter for a new line
-      </p>
+      <div className="mx-auto mt-1.5 flex max-w-3xl items-center justify-between gap-3">
+        <label className="flex items-center gap-1.5 text-[11px] text-zinc-400">
+          <span className="hidden sm:inline">Model</span>
+          <select
+            value={model}
+            onChange={(e) => onModelChange(e.target.value)}
+            aria-label="Model"
+            className="rounded-md border border-zinc-200 bg-white px-1.5 py-1 text-[11.5px] text-zinc-600 outline-none focus:border-brand"
+          >
+            {models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label} · {m.provider}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="text-[11px] text-zinc-400">Enter to send · Shift+Enter for a new line</span>
+      </div>
     </div>
   );
 }
@@ -333,12 +360,13 @@ function Composer({
 // Throws { code } on the 503 (AI not configured) / 429 (rate limited) shims.
 async function streamCompletion(
   messages: { role: string; content: string }[],
+  model: string,
   onDelta: (delta: string) => void,
 ): Promise<void> {
   const res = await fetch("/api/ai/stream", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ messages }),
+    body: JSON.stringify({ messages, model }),
   });
   if (!res.ok || !res.body) {
     let code = `HTTP_${res.status}`;
