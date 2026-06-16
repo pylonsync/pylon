@@ -165,6 +165,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	"ai-chat": {
+		blurb:
+			"Streaming AI chat — token streaming via the built-in /api/ai/stream (your key stays server-side), multi-conversation history that's owner-scoped + synced across tabs in realtime, guest or signed-in. Set PYLON_AI_API_KEY to enable. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
@@ -238,6 +244,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template agency       # studio/agency + live project availability
   npm create @pylonsync/pylon my-app --template marketplace  # two-sided marketplace + realtime offers
   npm create @pylonsync/pylon my-app --template directory    # searchable directory + facets + live upvotes
+  npm create @pylonsync/pylon my-app --template ai-chat      # streaming LLM chat + synced history
 `);
 	exit(0);
 }

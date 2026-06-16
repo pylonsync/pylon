@@ -281,6 +281,24 @@ examples/store/client/Catalog.tsx).
 
 ---
 
+# 10. `ai-chat` — streaming AI assistant
+
+**Who:** any LLM chat product / internal assistant.
+**Sections:** a full-screen chat — conversation sidebar + streaming thread +
+composer (`/`), optional `/login`.
+**Realtime feature:** token streaming from the built-in `POST /api/ai/stream`
+(SSE; the API key never leaves the server), PLUS owner-scoped `Conversation` +
+`Message` synced across the user's tabs via `db.useQuery`.
+**Entities:** `Conversation` + `Message` (both `userId: field.owner()`,
+owner-scoped read/write — private per user; messages written with optimistic
+`db.insert`, no custom functions) + `User`. Multi-user (guest or signed-in).
+**Config:** `PYLON_AI_PROVIDER` + `PYLON_AI_API_KEY` + `PYLON_AI_MODEL` enable
+replies; without them the app boots and shows a friendly "configure AI" notice.
+**SSE contract:** `data: {"choices":[{"delta":{"content":"…"}}]}` … `data:
+[DONE]`; 503 `AI_NOT_CONFIGURED` / 429 `RATE_LIMITED` shims handled in the client.
+
+---
+
 ## Build order
 1. **`waitlist`** — smallest, proves the whole pipeline, already the dogfood
    target. (`Signup` + counter + `joinWaitlist`.)
