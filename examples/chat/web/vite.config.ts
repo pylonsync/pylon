@@ -2,7 +2,6 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import wasm from "vite-plugin-wasm";
-import topLevelAwait from "vite-plugin-top-level-await";
 
 // Pylon hosts this app from `localhost:4321` in dev (and in prod with
 // CloudFlare in front). The Vite dev server still runs separately on
@@ -23,9 +22,13 @@ import topLevelAwait from "vite-plugin-top-level-await";
 // needs, plus loro-crdt (which uses sync XHR for WASM init and
 // otherwise emits a "Synchronous XMLHttpRequest" console warning).
 export default defineConfig({
-  // wasm + topLevelAwait let Vite 7 handle loro-crdt's ESM `.wasm` import
-  // (Vite 7 no longer transforms WebAssembly ESM imports out of the box).
-  plugins: [wasm(), topLevelAwait(), react(), tailwindcss()],
+  // wasm() lets Vite 7 handle loro-crdt's ESM `.wasm` import (Vite 7 no
+  // longer transforms WebAssembly ESM imports out of the box). It emits
+  // top-level await, which the `build.target: "esnext"` below keeps
+  // natively — we used to need vite-plugin-top-level-await for that, but
+  // that plugin crashes under Bun's `vite build` (the cloud runtime builds
+  // the SPA with Bun): `virtualModule.require is not a function`.
+  plugins: [wasm(), react(), tailwindcss()],
   server: {
     port: 5173,
     strictPort: true,
@@ -66,5 +69,9 @@ export default defineConfig({
   build: {
     outDir: "dist",
     emptyOutDir: true,
+    // loro-crdt + vite-plugin-wasm emit top-level await; esnext keeps it
+    // natively so we don't need vite-plugin-top-level-await (which breaks
+    // under Bun). All evergreen browsers support TLA.
+    target: "esnext",
   },
 });
