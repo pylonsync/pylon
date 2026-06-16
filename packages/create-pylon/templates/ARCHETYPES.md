@@ -35,7 +35,7 @@ Each archetype below is `BaseConfig & { ...archetype slots }`.
 ## Mast classifier contract
 Input: the business description. Output:
 ```ts
-{ template: "waitlist" | "local-service" | "saas" | "restaurant" | "shop" | "creator",
+{ template: "waitlist" | "local-service" | "saas" | "restaurant" | "shop" | "creator" | "agency",
   siteConfig: <that template's typed config>,
   seed?: { services?: [...]; menu?: [...] }  // list rows for archetypes that have them
 }
@@ -217,6 +217,27 @@ booking).
 `portfolio?`, `newsletter` (reuse waitlist counter), `booking?` (reuse
 local-service).
 **Entities:** `Signup` and/or `Booking`, reused from the other archetypes.
+
+---
+
+# 7. `agency` — design / dev / marketing studio
+
+**Who:** boutique product/design/dev/marketing studios that take on a limited
+number of clients at once.
+**Sections:** hero (+ live availability pill), logo cloud, services, **work /
+case-study grid** (marked project-shot placeholders), process, **team** (marked
+headshot placeholders), testimonials, **project inquiry form** (#contact), footer.
+**Realtime feature:** scarcity — a public `Capacity` row holds the booking window
++ open project slots; the hero pill (`db.useQuery("Capacity")`) shows "N slots
+open" live, and the owner booking a lead from the dashboard decrements it for
+everyone instantly (same shape as `shop` inventory).
+**Config highlights:** `hero`, `capacity: { label; openSlots }` (seed), `logos`,
+`services`, `work: CaseStudy[]`, `process`, `team: TeamMember[]`, `testimonials?`,
+`contact: { projectTypes[]; budgets[]; confirmationMessage }`.
+**Entities:** `Inquiry` (PII deny-all: name/email/company/budget/message + status),
+`Capacity` (public-read single row, live openSlots), `User`.
+**Placeholders:** hero photo, each case-study project shot, each team headshot —
+all clearly marked via the shared `ImagePlaceholder`.
 
 ---
 

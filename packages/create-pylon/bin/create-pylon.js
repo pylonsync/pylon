@@ -147,6 +147,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	agency: {
+		blurb:
+			"Design/dev studio — services, case-study portfolio, team + a project inquiry form. LIVE availability (hero shows open project slots; booking a lead from the dashboard drops it instantly) + owner pipeline. Clearly-marked photo placeholders. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
@@ -217,6 +223,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template restaurant   # restaurant menu + live reservation availability
   npm create @pylonsync/pylon my-app --template creator      # personal brand + live newsletter subscriber count
   npm create @pylonsync/pylon my-app --template shop         # DTC store + live inventory
+  npm create @pylonsync/pylon my-app --template agency       # studio/agency + live project availability
 `);
 	exit(0);
 }
