@@ -70,7 +70,7 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
                   </span>
                 </Link>
                 <nav className="flex items-center gap-1 sm:gap-2">
-                  <a href="/#work" className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex">
+                  <a href="/work" className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex">
                     Work
                   </a>
                   <a href="/#services" className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex">

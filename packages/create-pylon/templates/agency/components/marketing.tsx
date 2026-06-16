@@ -1,4 +1,6 @@
 import React from "react";
+import { Link } from "@pylonsync/react";
+import type { ProjectView } from "@/lib/agency";
 
 // Reusable presentational pieces for the landing page. All server-rendered —
 // no client JS. Restyle here and the whole page follows. The brand accent
@@ -93,6 +95,43 @@ export function initials(name: string) {
     .join("")
     .slice(0, 2)
     .toUpperCase();
+}
+
+// A linked portfolio card — the project's cover, title, client label, summary,
+// and tag chips, linking to its /work/[slug] case study. Used on the homepage
+// "Selected work" grid and the full /work index, so both stay in lockstep.
+export function ProjectCard({ p }: { p: ProjectView }) {
+  return (
+    <Link href={`/work/${p.slug}`} className="group block">
+      {/* Case-study cover — drop in a real project screenshot. */}
+      <ImagePlaceholder
+        shape="landscape"
+        title={`${p.title} — project shot`}
+        hint="Swap for an <img> per case study"
+      />
+      <div className="mt-4 flex items-baseline justify-between gap-3">
+        <h3 className="text-[16px] font-semibold text-zinc-900 transition-colors group-hover:text-brand">
+          {p.title}
+        </h3>
+        <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-zinc-400">
+          {p.client}
+        </span>
+      </div>
+      <p className="mt-1.5 text-[14px] leading-relaxed text-zinc-500">{p.summary}</p>
+      {p.tags.length > 0 ? (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {p.tags.map((t) => (
+            <span key={t} className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-[11px] font-medium text-zinc-600">
+              {t}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <span className="mt-3 inline-flex items-center gap-1 text-[13px] font-medium text-brand opacity-0 transition-opacity group-hover:opacity-100">
+        Read case study →
+      </span>
+    </Link>
+  );
 }
 
 // A deliberately-obvious image placeholder. Real sites drop a photo here; this

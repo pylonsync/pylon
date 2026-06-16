@@ -1,15 +1,18 @@
-import React from "react";
-import { type Metadata } from "@pylonsync/react";
+import React, { Suspense, use } from "react";
+import { Link, type Metadata, type PageProps, type ServerData } from "@pylonsync/react";
 import {
   WRAP,
   Eyebrow,
   Divider,
   SectionHead,
   ImagePlaceholder,
+  ProjectCard,
   initials,
 } from "@/components/marketing";
 import { LiveSlots, ContactForm } from "./contact-form";
+import { SeedProjects } from "./seeder";
 import { siteConfig } from "@/lib/site.config";
+import { slugify, viewFromRow, type ProjectRow, type ProjectView } from "@/lib/agency";
 
 export const metadata: Metadata = {
   title: siteConfig.seo.title,
@@ -17,12 +20,46 @@ export const metadata: Metadata = {
   openGraph: { title: siteConfig.seo.title, description: siteConfig.seo.description, type: "website" },
 };
 
+// The homepage "Selected work" grid reads the live Project portfolio on the
+// server (the `selected` + `published` ones, ordered), so curating it in the
+// dashboard re-curates the homepage. Before the portfolio is seeded, it falls
+// back to the config case studies so the section is never empty on first paint.
+function selectedFromConfig(): ProjectView[] {
+  return siteConfig.work.items
+    .filter((c) => c.selected)
+    .map((c) => ({
+      slug: c.slug || slugify(c.title),
+      title: c.title,
+      client: c.client,
+      summary: c.summary,
+      year: c.year ?? null,
+      tags: c.tags,
+    }));
+}
+
+function SelectedWork({ serverData }: { serverData: ServerData }) {
+  const rows = use(serverData.list<ProjectRow>("Project"));
+  const fromDb = rows
+    .filter((p) => p.selected && p.published)
+    .sort((a, b) => a.order - b.order || (a.createdAt < b.createdAt ? -1 : 1))
+    .map(viewFromRow);
+  const projects = fromDb.length > 0 ? fromDb : selectedFromConfig();
+
+  return (
+    <div className="mt-10 grid gap-6 sm:grid-cols-2">
+      {projects.map((p) => (
+        <ProjectCard key={p.slug} p={p} />
+      ))}
+    </div>
+  );
+}
+
 // `app/page.tsx` → `/`. Server-rendered studio site. Hero, services, work,
 // process, team, and testimonials are static server HTML (SEO + first paint);
 // the live "slots open" pill and the contact form (#contact) are client islands
-// driven by the public Capacity row. All copy comes from siteConfig. Doesn't
-// read `auth`, so the public page stays cacheable.
-export default function LandingPage() {
+// driven by the public Capacity row. The "Selected work" grid reads the Project
+// portfolio server-side. All other copy comes from siteConfig.
+export default function LandingPage({ serverData }: PageProps) {
   const { hero, logos, services, work, process, team, testimonials, contact } = siteConfig;
 
   return (
@@ -97,32 +134,34 @@ export default function LandingPage() {
       {/* ============================== WORK ============================= */}
       <Divider />
       <section id="work" className={`${WRAP} py-16`}>
-        <SectionHead eyebrow={work.eyebrow} title={work.headline} />
-        <div className="mt-10 grid gap-6 sm:grid-cols-2">
-          {work.items.map((c) => (
-            <div key={c.title} className="group">
-              {/* Case-study image — drop in a real project screenshot. */}
-              <ImagePlaceholder
-                shape="landscape"
-                title={`${c.title} — project shot`}
-                hint="Swap for an <img> per case study"
-              />
-              <div className="mt-4 flex items-baseline justify-between gap-3">
-                <h3 className="text-[16px] font-semibold text-zinc-900">{c.title}</h3>
-                <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-zinc-400">
-                  {c.client}
-                </span>
-              </div>
-              <p className="mt-1.5 text-[14px] leading-relaxed text-zinc-500">{c.summary}</p>
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {c.tags.map((t) => (
-                  <span key={t} className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-[11px] font-medium text-zinc-600">
-                    {t}
-                  </span>
-                ))}
-              </div>
+        <div className="flex items-end justify-between gap-4">
+          <SectionHead eyebrow={work.eyebrow} title={work.headline} />
+          <Link
+            href="/work"
+            className="hidden shrink-0 text-[13.5px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex"
+          >
+            All work →
+          </Link>
+        </div>
+        <Suspense
+          fallback={
+            <div className="mt-10 grid gap-6 sm:grid-cols-2">
+              {[0, 1].map((i) => (
+                <div key={i}>
+                  <div className="aspect-[4/3] animate-pulse rounded-2xl bg-zinc-100" />
+                  <div className="mt-4 h-4 w-1/3 animate-pulse rounded bg-zinc-100" />
+                  <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-zinc-100" />
+                </div>
+              ))}
             </div>
-          ))}
+          }
+        >
+          <SelectedWork serverData={serverData} />
+        </Suspense>
+        <div className="mt-8 sm:hidden">
+          <Link href="/work" className="text-[14px] font-medium text-brand">
+            See all work →
+          </Link>
         </div>
       </section>
 
@@ -202,6 +241,9 @@ export default function LandingPage() {
           <ContactForm />
         </div>
       </section>
+
+      {/* Seeds the public portfolio on first visit (idempotent, zero UI). */}
+      <SeedProjects />
     </div>
   );
 }

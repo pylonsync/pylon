@@ -28,10 +28,51 @@ export type BaseConfig = {
 };
 
 export type Service = { title: string; body: string; icon?: string };
-export type CaseStudy = { title: string; client: string; summary: string; tags: string[] };
+
+// A portfolio piece + case study. `seedProjects` writes these into the public
+// Project entity on first visit; after that the owner curates them from the
+// dashboard. `selected` features it on the homepage; the challenge/approach/
+// outcome render on the /work/[slug] case-study page. `slug` is the URL segment
+// (auto-derived from the title if omitted).
+export type CaseStudy = {
+  title: string;
+  slug?: string;
+  client: string; // display label, e.g. "Fintech · 0→1"
+  summary: string;
+  year?: string;
+  tags: string[];
+  selected?: boolean; // featured on the homepage "Selected work" grid
+  challenge?: string;
+  approach?: string;
+  outcome?: string;
+  liveUrl?: string;
+};
+
 export type ProcessStep = { title: string; body: string };
 export type TeamMember = { name: string; role: string };
 export type Testimonial = { quote: string; name: string; role: string };
+
+// Demo back-office rows. `seedStudioBackoffice` (owner-gated) writes these into
+// the private Client + Invoice entities on the owner's first dashboard visit, so
+// the dashboard isn't an empty shell. `invoices[].client` matches a `clients[]`
+// name; `invoices[].projectSlug` (optional) ties a bill to a case study.
+export type ClientSeed = {
+  name: string;
+  company?: string;
+  email?: string;
+  phone?: string;
+  status?: "prospect" | "active" | "past";
+  notes?: string;
+};
+export type InvoiceSeed = {
+  number: string;
+  client: string; // matches a clients[].name
+  projectSlug?: string; // matches a work.items[].slug
+  amountCents: number;
+  status?: "draft" | "sent" | "paid" | "overdue";
+  issuedAt?: string; // "2026-04-01"
+  dueAt?: string;
+};
 
 export type AgencyConfig = BaseConfig & {
   hero: {
@@ -48,6 +89,8 @@ export type AgencyConfig = BaseConfig & {
   logos: { eyebrow: string; names: string[] };
   services: { eyebrow: string; headline: string; items: Service[] };
   work: { eyebrow: string; headline: string; items: CaseStudy[] };
+  // Demo CRM + billing rows seeded into the owner dashboard on first visit.
+  backoffice: { clients: ClientSeed[]; invoices: InvoiceSeed[] };
   process: { eyebrow: string; headline: string; steps: ProcessStep[] };
   team: { eyebrow: string; headline: string; members: TeamMember[] };
   testimonials?: { eyebrow: string; headline: string; items: Testimonial[] };
@@ -143,27 +186,136 @@ export const siteConfig: AgencyConfig = {
     items: [
       {
         title: "Ledger",
+        slug: "ledger",
         client: "Fintech · 0→1",
+        year: "2026",
         summary: "A consumer banking app from first sketch to App Store launch in one quarter.",
         tags: ["Product design", "iOS", "Brand"],
+        selected: true,
+        challenge:
+          "A two-founder fintech had funding and a thesis, but no product, no brand, and a hard 12-week runway to a launchable app the App Store would approve.",
+        approach:
+          "We ran a one-week scope sprint, then designed and built in parallel — a clickable prototype on real data by week three, weekly TestFlight builds after that. Brand and UI moved together so nothing felt bolted on.",
+        outcome:
+          "Shipped to the App Store in the 11th week with a 4.8★ launch rating. The founders closed their seed round two weeks later using the live app as the demo.",
+        liveUrl: "https://example.com",
       },
       {
         title: "Atlas Health",
+        slug: "atlas-health",
         client: "Healthcare · Platform",
+        year: "2025",
         summary: "Rebuilt a clinical scheduling tool used by 4,000 providers, with zero downtime.",
         tags: ["Web", "Design system"],
+        selected: true,
+        challenge:
+          "A scheduling platform 4,000 clinicians depended on daily had become impossible to change — every release risked an outage no hospital could tolerate.",
+        approach:
+          "We introduced a typed design system and migrated screen by screen behind feature flags, shipping to a few clinics at a time and watching the metrics before widening the rollout.",
+        outcome:
+          "Replaced the entire front end over a quarter with zero scheduled downtime, and cut the time to ship a new screen from two weeks to two days.",
       },
       {
         title: "Cohort",
+        slug: "cohort",
         client: "B2B SaaS · Rebrand",
+        year: "2025",
         summary: "New identity and marketing site that lifted demo requests 40% in six weeks.",
         tags: ["Brand", "Web"],
+        selected: true,
+        challenge:
+          "A profitable B2B SaaS had outgrown the brand it launched with — the site read like a side project and was quietly losing enterprise deals at the first click.",
+        approach:
+          "A focused rebrand: new name treatment, a confident visual system, and a marketing site rebuilt around the two proof points buyers actually asked about.",
+        outcome:
+          "Demo requests rose 40% in the first six weeks, and the sales team stopped apologizing for the website on calls.",
       },
       {
         title: "Vela",
+        slug: "vela",
         client: "Logistics · Mobile",
+        year: "2024",
         summary: "A driver app with live routing that cut dispatch calls in half.",
         tags: ["Product design", "Android"],
+        selected: false,
+        challenge:
+          "Dispatchers spent their day on the phone because drivers had no live view of their own routes — every change meant a call.",
+        approach:
+          "We designed an offline-first driver app with live routing and a single, glanceable 'what's next' screen, built for one-handed use in a moving vehicle.",
+        outcome:
+          "Dispatch calls dropped by half within a month, and on-time delivery climbed eight points.",
+      },
+    ],
+  },
+
+  backoffice: {
+    clients: [
+      {
+        name: "Erin Caldwell",
+        company: "Ledger",
+        email: "erin@ledger.example",
+        phone: "+1 (214) 555-0142",
+        status: "active",
+        notes: "Founder. Seed round closed; discussing a phase-2 retainer for Q4.",
+      },
+      {
+        name: "Tom Reyes",
+        company: "Atlas Health",
+        email: "tom@atlashealth.example",
+        status: "active",
+        notes: "VP Product. Rollout complete; on a monthly maintenance retainer.",
+      },
+      {
+        name: "Sofia Marin",
+        company: "Cohort",
+        email: "sofia@cohort.example",
+        status: "past",
+        notes: "Rebrand shipped. Happy to be a reference.",
+      },
+      {
+        name: "Grant Whitaker",
+        company: "Northwind",
+        email: "grant@northwind.example",
+        status: "prospect",
+        notes: "Inbound about a 0→1 mobile app. Sent a proposal; awaiting reply.",
+      },
+    ],
+    invoices: [
+      {
+        number: "INV-001",
+        client: "Erin Caldwell",
+        projectSlug: "ledger",
+        amountCents: 4800000,
+        status: "paid",
+        issuedAt: "2026-01-15",
+        dueAt: "2026-02-14",
+      },
+      {
+        number: "INV-002",
+        client: "Tom Reyes",
+        projectSlug: "atlas-health",
+        amountCents: 6200000,
+        status: "paid",
+        issuedAt: "2026-03-01",
+        dueAt: "2026-03-31",
+      },
+      {
+        number: "INV-003",
+        client: "Tom Reyes",
+        projectSlug: "atlas-health",
+        amountCents: 850000,
+        status: "sent",
+        issuedAt: "2026-06-01",
+        dueAt: "2026-07-01",
+      },
+      {
+        number: "INV-004",
+        client: "Sofia Marin",
+        projectSlug: "cohort",
+        amountCents: 2400000,
+        status: "overdue",
+        issuedAt: "2026-04-10",
+        dueAt: "2026-05-10",
       },
     ],
   },
