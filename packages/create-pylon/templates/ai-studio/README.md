@@ -2,11 +2,12 @@
 
 A generative **AI media studio** (image / audio / video) built with
 [Pylon](https://pylonsync.com) — a live gallery that fills in as each generation
-finishes, from one binary on one port. No Next.js, no job queue service.
+finishes, from one binary on one port. No Next.js, no separate job service.
 
-Kick off a generation and a "generating…" card appears instantly, then flips to
-the finished result the moment the server-side `generate` action resolves — live,
-across every open tab. The provider call (and your API key) stays on the server.
+Kick off a generation and a card appears instantly, then flips to the finished
+result the moment the generation completes — live, across every open tab. The
+generation runs in a **background job** (so even a minutes-long video never
+blocks your request), and the provider call + API token stay on the server.
 
 ## Develop
 
@@ -14,42 +15,46 @@ across every open tab. The provider call (and your API key) stays on the server.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321 and generate something — it works with **no config**:
-image + audio return a clearly-labeled placeholder. Add an OpenAI key for real
-media (below). Then **open a second tab** — your gallery stays in sync.
+Open http://localhost:4321 and generate something — it works with **no config**
+(a clearly-labeled placeholder). Add a Replicate token for real media (below).
+Then **open a second tab** — your gallery stays in sync.
 
-## Enable real generation
+## Enable real generation (Replicate)
 
 ```bash
-# .env
-OPENAI_API_KEY=sk-...
-# optional overrides:
-OPENAI_IMAGE_MODEL=dall-e-3
-OPENAI_TTS_MODEL=tts-1
+# .env  — get a token at https://replicate.com/account/api-tokens
+REPLICATE_API_TOKEN=r8_...
+# optional model overrides (defaults shown):
+REPLICATE_IMAGE_MODEL=black-forest-labs/flux-schnell
+REPLICATE_AUDIO_MODEL=meta/musicgen
+REPLICATE_VIDEO_MODEL=minimax/video-01
 ```
 
-- **Image** → OpenAI Images (`dall-e-3`), rendered from the returned URL.
-- **Audio** → OpenAI text-to-speech, played from an inline `data:` URL.
-- **Video** → a stubbed extension point. Wire a provider (Replicate / fal.ai /
-  Runway / Luma) in `functions/generate.ts` where marked, and set its key.
+One provider, all three media. Models run via Replicate's model-name endpoint
+(latest version — no version hashes to maintain). Results are the provider's
+hosted URLs.
 
-## How it works
+## How it works (background jobs + realtime)
 
 - `Generation` is an **owner-scoped** entity read with `db.useQuery` — private
   per user. Clients can't write it; only the server-side pipeline does.
-- `functions/generate.ts` (a public `action`) brackets the provider call with
-  two internal mutations: `_createGeneration` inserts a `pending` row (it appears
-  in the gallery instantly), then `_finishGeneration` flips it to `done`/`failed`
-  — and that change syncs to every open tab, so the card updates live.
-- `<EnsureGuest>` lets anyone generate (and own their gallery); signing in is
-  optional and carries the gallery across devices.
+- `functions/generate.ts` (a `mutation`) inserts a `pending` row and enqueues a
+  job with `ctx.scheduler.runAfter` — then returns. No network I/O on the
+  request path, so slow models can't time it out.
+- `functions/pollGeneration.ts` (a scheduled `action`) starts the Replicate
+  prediction, then **reschedules itself** every few seconds until it settles,
+  writing the result via the internal `_updateGeneration` mutation. Each write
+  syncs to the owner's gallery — `pending → processing → done` — live.
 
 ## Notes
 
-- With a key, image results use the provider's **hosted URL** (small to sync,
-  valid ~1h — fine for a live studio). For permanent results, request `b64_json`
-  and persist via `/api/files`.
-- Audio is stored as an inline `data:` URL so it's self-contained.
+- Without a token, image generations return an SVG placeholder; audio/video
+  cards show a "add a token" note. The whole flow (and the background job) still
+  runs, so you can see the realtime gallery with zero config.
+- Results are Replicate's hosted URLs (fine for a live studio). For permanent
+  storage, download the asset in the job and persist via `/api/files`.
+- Video is genuinely wired (Replicate has text-to-video models) — it just takes
+  longer, which is exactly why the work runs in a background job.
 
 ## Rebrand it
 
@@ -59,13 +64,14 @@ Brand, colors, the generation kinds, and the starter prompts all live in
 ## Layout
 
 ```
-app.ts                  Generation (owner-scoped) + User
-lib/site.config.ts      brand + kinds + example prompts (edit this)
-lib/studio.ts           types + the no-key placeholder generator
-functions/generate.ts   public action: provider call + graceful placeholder
-functions/_createGeneration.ts, _finishGeneration.ts   internal mutations
-app/page.tsx            header + studio island
-app/studio-client.tsx   prompt bar + kind selector + live gallery
+app.ts                          Generation (owner-scoped) + User
+lib/site.config.ts              brand + kinds + example prompts (edit this)
+lib/studio.ts                   types + the no-token placeholder generator
+functions/generate.ts           mutation: insert pending + enqueue the job
+functions/pollGeneration.ts     scheduled action: Replicate call + self-poll
+functions/_getGeneration.ts, _updateGeneration.ts   internal read/write
+app/page.tsx                    header + studio island
+app/studio-client.tsx           prompt bar + kind selector + live gallery
 ```
 
 ## Deploy

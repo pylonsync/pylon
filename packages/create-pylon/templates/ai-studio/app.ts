@@ -34,10 +34,14 @@ const Generation = entity(
     userId: field.string(),
     kind: field.string(), // "image" | "audio" | "video"
     prompt: field.string(),
-    status: field.string().default("pending"), // "pending" | "done" | "failed"
-    // The result: an image/audio URL or data: URL, ready to drop into <img>/<audio>.
+    status: field.string().default("pending"), // "pending" | "processing" | "done" | "failed"
+    // The result: an image/audio/video URL (or data: URL), ready to drop into
+    // an <img>/<audio>/<video>.
     resultUrl: field.string().optional(),
     error: field.string().optional(),
+    // The Replicate prediction id, while a generation is "processing" — the
+    // client polls checkGeneration with the row's id until it settles.
+    predictionId: field.string().optional(),
     // True when this is the no-API-key placeholder (the UI shows a "demo" badge).
     demo: field.boolean().default(false),
     createdAt: field.datetime().defaultNow(),

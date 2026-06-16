@@ -68,13 +68,13 @@ export const siteConfig: StudioConfig = {
     kinds: [
       { id: "image", label: "Image", wired: true },
       { id: "audio", label: "Audio", wired: true },
-      { id: "video", label: "Video", wired: false },
+      { id: "video", label: "Video", wired: true },
     ],
     examples: [
       "A cozy reading nook in a treehouse, golden hour, watercolor",
-      "An upbeat 10-second jingle welcoming you to the studio",
+      "An upbeat lo-fi hip-hop loop with mellow piano",
       "Isometric illustration of a tiny island data center",
-      "A calm voice reading a haiku about the ocean",
+      "A timelapse of a city skyline as day turns to night",
     ],
   },
 };

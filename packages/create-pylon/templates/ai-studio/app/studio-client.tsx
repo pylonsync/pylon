@@ -145,11 +145,11 @@ function GenerationCard({ g }: { g: GenerationRow }) {
 }
 
 function Media({ g }: { g: GenerationRow }) {
-  if (g.status === "pending") {
+  if (g.status === "pending" || g.status === "processing") {
     return (
       <div className="flex flex-col items-center gap-2 text-zinc-400">
         <Spinner />
-        <span className="text-[12px]">Generating…</span>
+        <span className="text-[12px]">{g.status === "processing" ? "Generating…" : "Queued…"}</span>
       </div>
     );
   }
@@ -172,11 +172,15 @@ function Media({ g }: { g: GenerationRow }) {
         <audio controls src={g.resultUrl} className="mt-3 w-full" />
       </div>
     ) : (
-      <DemoNote text="Audio needs OPENAI_API_KEY — set it to hear real speech." />
+      <DemoNote text="Add REPLICATE_API_TOKEN to generate real audio." />
     );
   }
   if (g.kind === "video") {
-    return <DemoNote text="Video isn't wired yet — add a provider in functions/generate.ts (Replicate / fal / Runway)." />;
+    return g.resultUrl ? (
+      <video controls src={g.resultUrl} className="size-full object-cover" />
+    ) : (
+      <DemoNote text="Add REPLICATE_API_TOKEN to generate real video." />
+    );
   }
   return <DemoNote text="No result." />;
 }
