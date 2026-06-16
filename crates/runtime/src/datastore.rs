@@ -2018,20 +2018,40 @@ use pylon_auth::email::{ConsoleTransport, EmailTransport, HttpEmailTransport};
 
 /// Picks an email backend based on environment variables.
 /// Falls back to `ConsoleTransport` (prints to stderr) when no provider is configured.
+///
+/// Two constructors read DIFFERENT env so the two kinds of email can be
+/// backed by different credentials:
+/// - [`Self::from_env`] (`PYLON_EMAIL_*`) backs the app-facing
+///   `ctx.email.send` — arbitrary recipient + body, so it must be the
+///   customer's own provider (left unset on Pylon Cloud unless they
+///   configure one).
+/// - [`Self::for_auth`] (`PYLON_AUTH_EMAIL_*`, else `PYLON_EMAIL_*`)
+///   backs auth flows (codes/reset/invites) — a self-selected recipient
+///   and a fixed template, so it's safe to back with a shared,
+///   locked-down platform key on a dedicated sending subdomain.
 pub struct EmailAdapter {
     transport: Box<dyn EmailTransport>,
 }
 
 impl EmailAdapter {
+    /// App-facing `ctx.email` transport (`PYLON_EMAIL_*` only).
     pub fn from_env() -> Self {
-        if let Some(http) = HttpEmailTransport::from_env() {
-            Self {
-                transport: Box::new(http),
-            }
-        } else {
-            Self {
+        Self::wrap(HttpEmailTransport::from_env())
+    }
+
+    /// Auth-flow transport (`PYLON_AUTH_EMAIL_*`, else `PYLON_EMAIL_*`).
+    pub fn for_auth() -> Self {
+        Self::wrap(HttpEmailTransport::from_env_auth())
+    }
+
+    fn wrap(http: Option<HttpEmailTransport>) -> Self {
+        match http {
+            Some(t) => Self {
+                transport: Box::new(t),
+            },
+            None => Self {
                 transport: Box::new(ConsoleTransport),
-            }
+            },
         }
     }
 }

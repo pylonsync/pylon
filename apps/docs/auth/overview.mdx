@@ -205,6 +205,25 @@ PYLON_EMAIL_API_KEY=sk_live_...
 PYLON_EMAIL_FROM=noreply@yourdomain.com
 ```
 
+Auth flows (magic codes, password reset, invitations) fall back to this
+`PYLON_EMAIL_*` provider, so a single config covers both auth and your
+app's own `ctx.email`. To give auth its **own** sending identity —
+separate key, separate from-address, separate sending domain/reputation —
+set the `PYLON_AUTH_EMAIL_*` family, which takes precedence for auth email
+only:
+
+```bash
+PYLON_AUTH_EMAIL_PROVIDER=stack0
+PYLON_AUTH_EMAIL_API_KEY=sk_live_...
+PYLON_AUTH_EMAIL_FROM=noreply@auth.yourdomain.com
+```
+
+When `PYLON_AUTH_EMAIL_*` is set, app code's `ctx.email` does **not** see
+it — it reads only `PYLON_EMAIL_*`. That separation lets a host back auth
+email with a shared, locked-down key (e.g. on a dedicated sending
+subdomain) without exposing it to arbitrary app sends. (This is exactly
+how Pylon Cloud configures auth email.)
+
 Cookie auth (browser apps):
 
 ```bash

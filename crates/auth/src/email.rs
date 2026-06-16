@@ -63,12 +63,47 @@ pub enum HttpEmailProvider {
 }
 
 impl HttpEmailTransport {
-    /// Create from environment variables.
+    /// App-facing transport, read from `PYLON_EMAIL_*`.
+    ///
+    /// Backs the `ctx.email.send` primitive available to app code —
+    /// arbitrary recipient and body. Because that's a spam/phishing
+    /// surface, it must be the customer's OWN provider: on Pylon Cloud
+    /// this family is intentionally left UNSET unless the customer
+    /// configures one, so arbitrary app email is never sent on a shared
+    /// platform key. Auth-flow email is configured separately via
+    /// [`Self::from_env_auth`].
     ///
     /// Reads: PYLON_EMAIL_PROVIDER (sendgrid|resend|stack0|webhook),
     /// PYLON_EMAIL_API_KEY, PYLON_EMAIL_FROM, PYLON_EMAIL_ENDPOINT
     pub fn from_env() -> Option<Self> {
-        let provider_str = std::env::var("PYLON_EMAIL_PROVIDER").ok()?;
+        Self::from_env_prefixed("PYLON_EMAIL")
+    }
+
+    /// Auth-flow transport, read from `PYLON_AUTH_EMAIL_*` with a
+    /// back-compat fallback to `PYLON_EMAIL_*`.
+    ///
+    /// Auth flows (magic codes, password reset, invitations) only ever
+    /// email the address a user just entered into a form — a
+    /// self-selected recipient — with a fixed, framework-controlled
+    /// template. That makes this the one email channel safe to back with
+    /// a shared, locked-down platform key on a dedicated sending
+    /// subdomain (e.g. `noreply@apps.pyln.dev`). Pylon Cloud injects
+    /// `PYLON_AUTH_EMAIL_*` here WITHOUT setting `PYLON_EMAIL_*`, so the
+    /// shared key is unreachable from app code via `ctx.email`.
+    ///
+    /// Falling back to `PYLON_EMAIL_*` keeps single-provider self-hosters
+    /// working unchanged: set one family and both auth + app email use it.
+    pub fn from_env_auth() -> Option<Self> {
+        Self::from_env_prefixed("PYLON_AUTH_EMAIL")
+            .or_else(|| Self::from_env_prefixed("PYLON_EMAIL"))
+    }
+
+    /// Read a `{prefix}_PROVIDER` / `{prefix}_API_KEY` / `{prefix}_FROM` /
+    /// `{prefix}_ENDPOINT` env family into a transport. `None` when the
+    /// provider (or a required field) is unset, so callers fall back to
+    /// `ConsoleTransport`.
+    fn from_env_prefixed(prefix: &str) -> Option<Self> {
+        let provider_str = std::env::var(format!("{prefix}_PROVIDER")).ok()?;
         let provider = match provider_str.as_str() {
             "sendgrid" => HttpEmailProvider::SendGrid,
             "resend" => HttpEmailProvider::Resend,
@@ -81,13 +116,13 @@ impl HttpEmailTransport {
             HttpEmailProvider::SendGrid => "https://api.sendgrid.com/v3/mail/send".to_string(),
             HttpEmailProvider::Resend => "https://api.resend.com/emails".to_string(),
             HttpEmailProvider::Stack0 => "https://api.stack0.dev/mail/send".to_string(),
-            HttpEmailProvider::Webhook => std::env::var("PYLON_EMAIL_ENDPOINT").ok()?,
+            HttpEmailProvider::Webhook => std::env::var(format!("{prefix}_ENDPOINT")).ok()?,
         };
 
         Some(Self {
             endpoint,
-            api_key: std::env::var("PYLON_EMAIL_API_KEY").ok()?,
-            from: std::env::var("PYLON_EMAIL_FROM")
+            api_key: std::env::var(format!("{prefix}_API_KEY")).ok()?,
+            from: std::env::var(format!("{prefix}_FROM"))
                 .unwrap_or_else(|_| "noreply@pylonsync.com".into()),
             provider,
         })
@@ -247,4 +282,114 @@ mod tests {
     }
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII: clears every email-related env var on construction and
+    /// restores the prior values on drop (panic-safe, so a failing
+    /// assertion can't leak env into another test). Hold ENV_LOCK for
+    /// the duration alongside this guard.
+    struct EmailEnvGuard {
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EmailEnvGuard {
+        const KEYS: [&'static str; 8] = [
+            "PYLON_EMAIL_PROVIDER",
+            "PYLON_EMAIL_API_KEY",
+            "PYLON_EMAIL_FROM",
+            "PYLON_EMAIL_ENDPOINT",
+            "PYLON_AUTH_EMAIL_PROVIDER",
+            "PYLON_AUTH_EMAIL_API_KEY",
+            "PYLON_AUTH_EMAIL_FROM",
+            "PYLON_AUTH_EMAIL_ENDPOINT",
+        ];
+
+        fn clean() -> Self {
+            let saved = Self::KEYS
+                .iter()
+                .map(|k| (*k, std::env::var(k).ok()))
+                .collect();
+            for k in Self::KEYS {
+                std::env::remove_var(k);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for EmailEnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
+        }
+    }
+
+    /// The abuse fence: the app-facing `ctx.email` transport
+    /// (`from_env`) must NEVER read `PYLON_AUTH_EMAIL_*`. Otherwise a
+    /// shared platform auth key injected on Pylon Cloud would be
+    /// reachable by app code to send arbitrary mail.
+    #[test]
+    fn auth_email_key_is_not_reachable_by_app_ctx_email() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EmailEnvGuard::clean();
+
+        // Platform configures ONLY the auth channel (shared, locked-down
+        // key on a dedicated sending subdomain).
+        std::env::set_var("PYLON_AUTH_EMAIL_PROVIDER", "stack0");
+        std::env::set_var("PYLON_AUTH_EMAIL_API_KEY", "sk_shared_auth");
+        std::env::set_var("PYLON_AUTH_EMAIL_FROM", "noreply@apps.pyln.dev");
+
+        // Auth flows pick it up...
+        let auth = HttpEmailTransport::from_env_auth().expect("auth transport");
+        assert_eq!(auth.endpoint, "https://api.stack0.dev/mail/send");
+        assert_eq!(auth.from, "noreply@apps.pyln.dev");
+        assert!(matches!(auth.provider, HttpEmailProvider::Stack0));
+
+        // ...but the app-facing ctx.email transport sees NOTHING, so it
+        // falls back to ConsoleTransport at the adapter — arbitrary app
+        // mail is never sent on the shared key.
+        assert!(
+            HttpEmailTransport::from_env().is_none(),
+            "ctx.email must not read PYLON_AUTH_EMAIL_*"
+        );
+    }
+
+    /// Back-compat: a single-provider self-hoster sets only
+    /// `PYLON_EMAIL_*`, and auth email falls back to it.
+    #[test]
+    fn auth_email_falls_back_to_app_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EmailEnvGuard::clean();
+
+        std::env::set_var("PYLON_EMAIL_PROVIDER", "resend");
+        std::env::set_var("PYLON_EMAIL_API_KEY", "sk_self_hosted");
+        std::env::set_var("PYLON_EMAIL_FROM", "noreply@example.com");
+
+        let auth = HttpEmailTransport::from_env_auth().expect("falls back to PYLON_EMAIL_*");
+        assert_eq!(auth.endpoint, "https://api.resend.com/emails");
+        assert_eq!(auth.from, "noreply@example.com");
+        assert!(matches!(auth.provider, HttpEmailProvider::Resend));
+    }
+
+    /// When both families are set, auth email prefers its own
+    /// (`PYLON_AUTH_EMAIL_*`) over the app fallback.
+    #[test]
+    fn auth_email_prefers_auth_env_over_app() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = EmailEnvGuard::clean();
+
+        std::env::set_var("PYLON_EMAIL_PROVIDER", "resend");
+        std::env::set_var("PYLON_EMAIL_API_KEY", "sk_app");
+        std::env::set_var("PYLON_EMAIL_FROM", "app@example.com");
+        std::env::set_var("PYLON_AUTH_EMAIL_PROVIDER", "stack0");
+        std::env::set_var("PYLON_AUTH_EMAIL_API_KEY", "sk_auth");
+        std::env::set_var("PYLON_AUTH_EMAIL_FROM", "noreply@apps.pyln.dev");
+
+        let auth = HttpEmailTransport::from_env_auth().expect("auth transport");
+        assert!(matches!(auth.provider, HttpEmailProvider::Stack0));
+        assert_eq!(auth.from, "noreply@apps.pyln.dev");
+        assert_eq!(auth.api_key, "sk_auth");
+    }
 }

@@ -293,6 +293,14 @@ export interface Scheduler {
  * webhook). Available on action ctx only — sending email is external
  * I/O, not allowed in mutation transactions.
  *
+ * This is the APP email channel (`PYLON_EMAIL_*`): arbitrary recipient
+ * and body, so it must be the app's own provider. It is deliberately
+ * separate from Pylon's built-in auth emails (codes / password reset /
+ * invitations), which send via a `PYLON_AUTH_EMAIL_*` channel. On Pylon
+ * Cloud the auth channel may be a shared, locked-down platform key, so
+ * `ctx.email` stays inert until you set `PYLON_EMAIL_*` yourself — the
+ * shared auth key can never be used to send arbitrary mail.
+ *
  * The runtime owns provider config + credentials; functions only
  * supply the (to, subject, body) tuple. Failures are surfaced as
  * thrown errors; on success the return is void.

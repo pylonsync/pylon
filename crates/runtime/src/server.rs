@@ -1403,12 +1403,13 @@ fn start_server(
         Some(Arc::clone(&reactive_registry)),
         Some(Arc::clone(&policy_engine)),
     );
-    // Single EmailAdapter for the whole runtime: the function runner's
-    // ctx.email.send hook + the per-request route handlers below both
-    // share it. Constructing per-request was fine when adapters were
-    // pure; once we pass it across the FFI boundary into the function
-    // runner we want one identity for cleaner logs + future request
-    // batching.
+    // App-facing email: backs the function runner's ctx.email.send hook,
+    // reading PYLON_EMAIL_* only (arbitrary recipient + body → must be the
+    // customer's own provider). One identity across the FFI boundary into
+    // the runner for cleaner logs + future request batching. Auth-flow
+    // email (codes/reset/invites) is a SEPARATE channel built per-request
+    // via EmailAdapter::for_auth() so a shared platform auth key never
+    // backs app code's ctx.email.
     let fn_email_adapter = Arc::new(crate::datastore::EmailAdapter::from_env());
     let fn_ops_maybe = crate::datastore::try_spawn_functions(
         Arc::clone(&runtime),
@@ -5833,7 +5834,12 @@ fn start_server(
                 let file_ops = LocalFileOps::new_default();
                 let cache_adapter = CacheAdapter(Arc::clone(&ca));
                 let pubsub_adapter = PubSubAdapter(Arc::clone(&ps));
-                let email_adapter = EmailAdapter::from_env();
+                // Auth routes (magic codes / reset / invites) use the auth
+                // email channel: PYLON_AUTH_EMAIL_* if set, else PYLON_EMAIL_*.
+                // Kept distinct from the app's ctx.email (fn_email_adapter,
+                // PYLON_EMAIL_* only) so a shared platform auth key can't be
+                // reached by app code to send arbitrary mail.
+                let email_adapter = EmailAdapter::for_auth();
                 let fn_ops: Option<&dyn pylon_router::FnOps> =
                     fn_ops_ref.as_deref().map(|f| f as &dyn pylon_router::FnOps);
                 let shard_adapter = shards_ref.as_ref().map(|reg| ShardOpsAdapter {

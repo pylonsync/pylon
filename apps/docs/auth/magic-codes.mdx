@@ -108,6 +108,8 @@ If you're on **Pylon Cloud**, magic-link email is included — no provider confi
 
 If you set `PYLON_EMAIL_PROVIDER=webhook`, also set `PYLON_EMAIL_ENDPOINT` to your custom URL — Pylon POSTs `{ to, from, subject, body }` to it.
 
+To give auth email its own key and from-address — separate from your app's `ctx.email` — set the `PYLON_AUTH_EMAIL_*` family (`_PROVIDER`, `_API_KEY`, `_FROM`, `_ENDPOINT`); it overrides `PYLON_EMAIL_*` for auth flows only. See [Auth → Configuration](/auth/overview#configuration).
+
 See [Stack0](https://www.stack0.dev), [Resend](https://resend.com), [SendGrid](https://sendgrid.com) for transactional sending services.
 
 ## Customizing the email
