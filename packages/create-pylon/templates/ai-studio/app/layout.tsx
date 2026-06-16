@@ -13,9 +13,9 @@ interface LayoutProps {
 }
 
 export default function RootLayout({ children, url, auth }: LayoutProps) {
-  // A guest session (minted by <EnsureGuest> so anyone can chat) has a `guest_…`
-  // user id — that's anonymous, not a real signed-in account.
-  const signedIn = Boolean(auth?.user_id && !auth.user_id.startsWith("guest_"));
+  // Resolved server-side from the session cookie. The app requires sign-in, so
+  // this is set on every in-app page; the header reflects it with no flash.
+  const signedIn = Boolean(auth?.user_id);
   const { brand, colors } = siteConfig;
 
   // The auth screen brings its own chrome → render it bare.

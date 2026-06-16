@@ -30,7 +30,7 @@ PYLON_AI_API_KEY=sk-ant-...
 PYLON_AI_MODEL=claude-sonnet-4-6   # default when none is picked
 ```
 
-`/api/ai/stream` is auth-gated (a guest session is enough) and rate-limited
+`/api/ai/stream` is auth-gated (it uses your signed-in session) and rate-limited
 per user, so a drive-by caller can't burn your budget.
 
 ### Switching models / providers
@@ -65,8 +65,9 @@ then set `chat.models` + `PYLON_AI_MODELS_ALLOWED` to the gateway's slugs
   read with `db.useQuery` — private to each user and synced across their tabs.
   Messages are written with optimistic `db.insert` (userId is stamped from the
   session via `field.owner()`), so no custom write functions are needed.
-- **Guest or signed-in.** `<EnsureGuest>` lets anyone chat immediately; signing
-  in (optional) carries your history across devices.
+- **Sign-in required.** Chats are tied to your account, so the home page
+  redirects unauthenticated visitors to `/login`. Once signed in, your history
+  follows you across tabs and devices.
 
 ## Privacy
 

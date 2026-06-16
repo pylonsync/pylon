@@ -87,16 +87,16 @@ export const siteConfig: ChatConfig = {
       "Give me 5 dinner ideas using chicken and rice.",
       "What's the difference between SSR and SSG?",
     ],
-    // Latest models as of this writing. Edit freely; whichever you keep here must
-    // be in PYLON_AI_MODELS_ALLOWED for switching to work (see .env.example).
-    // To offer models across providers in one list, route through an
-    // OpenRouter-style gateway (PYLON_AI_PROVIDER=custom + PYLON_AI_BASE_URL).
+    // Current Claude models (verify the ids for your provider before shipping —
+    // model names move fast). Whichever you keep here must be in
+    // PYLON_AI_MODELS_ALLOWED for switching to work (see .env.example). To offer
+    // models from OTHER providers (OpenAI, Google, …) in the same list, route
+    // through an OpenRouter-style gateway (PYLON_AI_PROVIDER=custom +
+    // PYLON_AI_BASE_URL) and use that gateway's slugs here.
     models: [
       { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "Anthropic" },
       { id: "claude-opus-4-8", label: "Claude Opus 4.8", provider: "Anthropic" },
-      { id: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5", provider: "Anthropic" },
-      { id: "gpt-4o", label: "GPT-4o", provider: "OpenAI" },
-      { id: "gpt-4o-mini", label: "GPT-4o mini", provider: "OpenAI" },
+      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", provider: "Anthropic" },
     ],
     defaultModel: "claude-sonnet-4-6",
   },

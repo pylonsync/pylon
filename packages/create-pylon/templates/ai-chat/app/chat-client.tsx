@@ -2,17 +2,14 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { db } from "@pylonsync/react";
-import { EnsureGuest } from "@pylonsync/client";
 import { siteConfig } from "@/lib/site.config";
 
-// The chat app — a client island. Conversations + messages are sync-backed
-// owner-scoped entities (`db.useQuery`), so your history is private and stays in
-// lockstep across every open tab. Sending streams tokens from the built-in
-// `POST /api/ai/stream` (SSE) — your PYLON_AI_API_KEY never reaches the browser.
-//
-// Wrapped in <EnsureGuest> so an anonymous visitor gets a session: enough to own
-// private chats AND to authenticate the (auth-gated, rate-limited) stream call.
-// Sign in to keep the same history on another device.
+// The chat app — a client island, rendered only for a SIGNED-IN user (the page
+// redirects anyone else to /login). Conversations + messages are sync-backed
+// owner-scoped entities (`db.useQuery`), so your history is private to your
+// account and stays in lockstep across your tabs + devices. Sending streams
+// tokens from the built-in `POST /api/ai/stream` (SSE) — your PYLON_AI_API_KEY
+// never reaches the browser.
 //
 // All state lives in <ChatInner> (which owns `currentId`) — the thread is a
 // presentational child. That's deliberate: creating a conversation mid-send
@@ -35,11 +32,7 @@ interface MessageRow {
 }
 
 export function ChatApp() {
-  return (
-    <EnsureGuest fallback={<BootSkeleton />}>
-      <ChatInner />
-    </EnsureGuest>
-  );
+  return <ChatInner />;
 }
 
 function ChatInner() {
@@ -419,13 +412,3 @@ function SendIcon() {
   );
 }
 
-function BootSkeleton() {
-  return (
-    <div className="flex h-[calc(100vh-3.5rem)]">
-      <div className="hidden w-64 shrink-0 border-r border-zinc-200 bg-paper p-3 sm:block">
-        <div className="h-9 w-full animate-pulse rounded-lg bg-zinc-200" />
-      </div>
-      <div className="flex-1" />
-    </div>
-  );
-}

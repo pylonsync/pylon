@@ -8,10 +8,10 @@ export const metadata: Metadata = {
   robots: "noindex",
 };
 
-// `app/login/page.tsx` → `/login`. Optional sign-in (guests can chat without
-// it). Rendered bare. Already signed in? Skip back to the chat —
-// `response.redirect` in the synchronous shell render is a real 307 before any
-// HTML is sent.
+// `app/login/page.tsx` → `/login`. Sign-in is required to use the studio
+// (generations are tied to your account). Rendered bare. Already signed in? Skip
+// back to the studio — `response.redirect` in the synchronous shell render is a
+// real 307 before any HTML is sent.
 export default function LoginPage({ auth, response }: PageProps) {
   // Already signed in (a real account, not an anonymous guest)? Skip the form.
   if (auth.user_id && !auth.user_id.startsWith("guest_")) response.redirect("/");
@@ -28,7 +28,7 @@ export default function LoginPage({ auth, response }: PageProps) {
           Sign in to {brand.name}
         </h1>
         <p className="mt-1 text-[13px] text-zinc-500">
-          Optional — it keeps your gallery in sync across devices.
+          Create an account or sign in to start generating.
         </p>
         <div className="mt-6">
           <AuthForm />

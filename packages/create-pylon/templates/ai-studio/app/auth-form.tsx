@@ -11,14 +11,12 @@ import {
 // The email/password form — one form, two modes. It calls the built-in auth API
 // directly (`passwordLogin` / `passwordRegister` POST to `/api/auth/password/*`),
 // then `persistSession` writes the freshly-minted token to local storage so the
-// sync engine authenticates as the real account on the next load. This matters
-// here: the studio mints an anonymous guest session so anyone can generate, and
-// without persisting the real session that stale guest token would shadow it —
-// your guest gallery wouldn't migrate to your account. We then do a full
-// navigation to "/" so the SSR runtime re-resolves auth from the HttpOnly cookie.
+// sync engine authenticates as the real account on the next load. We then do a
+// full navigation to "/" so the SSR runtime re-resolves auth from the HttpOnly
+// cookie and renders the studio.
 //
-// Sign-in is OPTIONAL: a guest can generate immediately. Signing in just makes
-// your gallery follow you across devices (it's owner-scoped to your id).
+// Sign-in is REQUIRED to use the studio: generations are owner-scoped to your
+// account, so the home page redirects unauthenticated visitors here.
 export function AuthForm() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");
@@ -95,7 +93,7 @@ export function AuthForm() {
           }}
           className="font-medium text-zinc-900 underline underline-offset-2"
         >
-          {mode === "login" ? "Create the owner account" : "Sign in"}
+          {mode === "login" ? "Create an account" : "Sign in"}
         </button>
       </p>
     </div>

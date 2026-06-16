@@ -7,13 +7,14 @@ import { mutation, v } from "@pylonsync/functions";
 // out the call. The pending row syncs to the gallery instantly; the job flips it
 // to the result when it's ready.
 //
-// `auth: "public"` so a guest can generate (the studio mints a guest session).
+// `auth: "user"` — generating requires a signed-in account (the page already
+// redirects anyone else to /login).
 export default mutation<{ kind: string; prompt: string }, { id: string }>({
-  auth: "public",
+  auth: "user",
   args: { kind: v.string(), prompt: v.string() },
   async handler(ctx, args) {
     const userId = ctx.auth.userId;
-    if (!userId) throw ctx.error("AUTH_REQUIRED", "A session is required to generate.");
+    if (!userId) throw ctx.error("AUTH_REQUIRED", "Sign in to generate.");
     const kind = args.kind;
     const prompt = args.prompt.trim();
     if (!["image", "audio", "video"].includes(kind)) {

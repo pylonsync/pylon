@@ -2,23 +2,19 @@
 
 import React, { useState } from "react";
 import { db, callFn } from "@pylonsync/react";
-import { EnsureGuest } from "@pylonsync/client";
 import { siteConfig } from "@/lib/site.config";
 import type { GenerationKind, GenerationRow } from "@/lib/studio";
 
-// The studio — a client island. `Generation` is an owner-scoped entity read with
-// `db.useQuery`, so your gallery is private and updates live: the generate action
-// inserts a "pending" row (it appears instantly), runs the provider call on the
-// server, then flips the row to the finished result — and that change syncs to
-// every open tab. <EnsureGuest> gives an anonymous visitor a session so they can
-// generate + own their gallery; the API key stays on the server.
+// The studio — a client island, rendered only for a SIGNED-IN user (the page
+// redirects anyone else to /login). `Generation` is an owner-scoped entity read
+// with `db.useQuery`, so your gallery is private to your account and updates
+// live: the generate mutation inserts a "pending" row (it appears instantly), a
+// background job runs the provider call, then flips the row to the finished
+// result — and that change syncs to every open tab. The API token stays on the
+// server.
 
 export function Studio() {
-  return (
-    <EnsureGuest fallback={<GallerySkeleton />}>
-      <StudioInner />
-    </EnsureGuest>
-  );
+  return <StudioInner />;
 }
 
 function StudioInner() {
@@ -216,15 +212,3 @@ function Spinner() {
   );
 }
 
-function GallerySkeleton() {
-  return (
-    <div className="mx-auto max-w-5xl px-4 py-8">
-      <div className="h-28 w-full animate-pulse rounded-2xl bg-zinc-100" />
-      <div className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <div key={i} className="aspect-square animate-pulse rounded-2xl bg-zinc-100" />
-        ))}
-      </div>
-    </div>
-  );
-}
