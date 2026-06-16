@@ -153,6 +153,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	marketplace: {
+		blurb:
+			"Two-sided marketplace — SSR browse grid + listing detail pages (SEO) with REALTIME offers, a live 'just listed' ticker, buy-now/make-offer/watch, and per-user inbox. Email/password auth, owner-stamped listings/offers. Multi-user (no single owner). One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
@@ -224,6 +230,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template creator      # personal brand + live newsletter subscriber count
   npm create @pylonsync/pylon my-app --template shop         # DTC store + live inventory
   npm create @pylonsync/pylon my-app --template agency       # studio/agency + live project availability
+  npm create @pylonsync/pylon my-app --template marketplace  # two-sided marketplace + realtime offers
 `);
 	exit(0);
 }

@@ -35,7 +35,7 @@ Each archetype below is `BaseConfig & { ...archetype slots }`.
 ## Mast classifier contract
 Input: the business description. Output:
 ```ts
-{ template: "waitlist" | "local-service" | "saas" | "restaurant" | "shop" | "creator" | "agency",
+{ template: "waitlist" | "local-service" | "saas" | "restaurant" | "shop" | "creator" | "agency" | "marketplace",
   siteConfig: <that template's typed config>,
   seed?: { services?: [...]; menu?: [...] }  // list rows for archetypes that have them
 }
@@ -238,6 +238,27 @@ everyone instantly (same shape as `shop` inventory).
 `Capacity` (public-read single row, live openSlots), `User`.
 **Placeholders:** hero photo, each case-study project shot, each team headshot —
 all clearly marked via the shared `ImagePlaceholder`.
+
+---
+
+# 8. `marketplace` — two-sided buy/sell platform  (ported from examples/market)
+
+**Who:** local/vertical marketplaces, classifieds, gear resale, any buyer↔seller
+platform.
+**Sections:** SSR browse grid + category facets (`/`), listing detail (`/listing/:slug`),
+sell form (`/sell`, sign-in gated), per-user inbox (`/me`).
+**Realtime feature:** a live "just listed" ticker + live offers on a listing +
+your `/me` inbox, all via `db.useQuery` over public `Listing`/`Offer` (and
+private `Watch`). List in one tab → it appears in another instantly.
+**Entities:** `User`, `Listing` (`sellerId: field.owner()`, slug, price,
+category, condition, status, seed-gradient photo), `Offer` (`buyerId:
+field.owner()`, amount, status), `Watch` (private). Public-read listings/offers,
+owner-scoped writes; accept-marks-sold-and-declines-siblings in
+`respondToOffer`. **Multi-user** (email/password, no single owner) — unlike the
+single-tenant archetypes above.
+**Note:** ported from `examples/market` (not config-driven — rebrand in
+`app/layout.tsx` + `functions/seedMarket.ts`). Listing photos are generated
+gradients; swap for real `<img>` + `/api/files` upload for production.
 
 ---
 
