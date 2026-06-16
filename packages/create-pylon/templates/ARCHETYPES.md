@@ -35,7 +35,7 @@ Each archetype below is `BaseConfig & { ...archetype slots }`.
 ## Mast classifier contract
 Input: the business description. Output:
 ```ts
-{ template: "waitlist" | "local-service" | "saas" | "restaurant" | "shop" | "creator" | "agency" | "marketplace",
+{ template: "waitlist" | "local-service" | "saas" | "restaurant" | "shop" | "creator" | "agency" | "marketplace" | "directory",
   siteConfig: <that template's typed config>,
   seed?: { services?: [...]; menu?: [...] }  // list rows for archetypes that have them
 }
@@ -259,6 +259,25 @@ single-tenant archetypes above.
 **Note:** ported from `examples/market` (not config-driven — rebrand in
 `app/layout.tsx` + `functions/seedMarket.ts`). Listing photos are generated
 gradients; swap for real `<img>` + `/api/files` upload for production.
+
+---
+
+# 9. `directory` — curated, searchable listing site
+
+**Who:** "best X" lists, tool/company/local directories, awesome-lists with a UI.
+**Sections:** hero + a live faceted-search browse (`#browse`), a `/submit` page,
+a `/dashboard` moderation queue.
+**Realtime feature:** the showcase for Pylon **FTS + facets** — `db.useSearch`
+re-runs on every keystroke AND on every write, so it doubles as the live layer;
+public `upvote` bumps `Listing.votes` and the count ticks up across all tabs.
+**Entities:** `Listing` (public-read, no PII; `search: { text, facets, sortable }`
+→ FTS5 + facet shadow tables) + `Submission` (deny-all PII: submitter
+name/email + proposed entry, status) + `User`. submitListing/upvote public;
+submissionsForOwner/approveSubmission/rejectSubmission owner-gated;
+approveSubmission copies ONLY public fields into a Listing (PII never published).
+**Key API:** `db.useSearch<T>(entity, { query, filters, facets, sort:[field,dir],
+page, pageSize })` → `{ hits, facetCounts, total, loading }` (reference:
+examples/store/client/Catalog.tsx).
 
 ---
 

@@ -159,6 +159,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	directory: {
+		blurb:
+			"Curated directory — LIVE full-text search + category facets (db.useSearch), community upvotes that tick up across tabs, and a moderated submit flow (deny-all PII → curator approves → public). Showcases Pylon FTS. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
@@ -231,6 +237,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template shop         # DTC store + live inventory
   npm create @pylonsync/pylon my-app --template agency       # studio/agency + live project availability
   npm create @pylonsync/pylon my-app --template marketplace  # two-sided marketplace + realtime offers
+  npm create @pylonsync/pylon my-app --template directory    # searchable directory + facets + live upvotes
 `);
 	exit(0);
 }
