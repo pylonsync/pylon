@@ -115,7 +115,7 @@ impl HttpEmailTransport {
         let endpoint = match provider {
             HttpEmailProvider::SendGrid => "https://api.sendgrid.com/v3/mail/send".to_string(),
             HttpEmailProvider::Resend => "https://api.resend.com/emails".to_string(),
-            HttpEmailProvider::Stack0 => "https://api.stack0.dev/mail/send".to_string(),
+            HttpEmailProvider::Stack0 => "https://api.stack0.dev/v1/mail/send".to_string(),
             HttpEmailProvider::Webhook => std::env::var(format!("{prefix}_ENDPOINT")).ok()?,
         };
 
@@ -262,7 +262,7 @@ mod tests {
         std::env::set_var("PYLON_EMAIL_FROM", "noreply@example.com");
 
         let t = HttpEmailTransport::from_env().expect("should construct");
-        assert_eq!(t.endpoint, "https://api.stack0.dev/mail/send");
+        assert_eq!(t.endpoint, "https://api.stack0.dev/v1/mail/send");
         assert_eq!(t.from, "noreply@example.com");
         assert!(matches!(t.provider, HttpEmailProvider::Stack0));
 
@@ -343,7 +343,7 @@ mod tests {
 
         // Auth flows pick it up...
         let auth = HttpEmailTransport::from_env_auth().expect("auth transport");
-        assert_eq!(auth.endpoint, "https://api.stack0.dev/mail/send");
+        assert_eq!(auth.endpoint, "https://api.stack0.dev/v1/mail/send");
         assert_eq!(auth.from, "noreply@apps.pyln.dev");
         assert!(matches!(auth.provider, HttpEmailProvider::Stack0));
 
