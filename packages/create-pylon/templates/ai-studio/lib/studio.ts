@@ -31,10 +31,10 @@ function escapeXml(s: string): string {
     .replace(/'/g, "&apos;");
 }
 
-// A self-contained SVG "image" data URL — used when no OPENAI_API_KEY is set, so
-// the gallery + realtime flow work with zero config. Clearly a placeholder (it
-// renders the prompt over a gradient), not a fake photo. Returns a `data:` URL
-// that drops straight into an <img>.
+// A self-contained SVG "image" data URL — used when no REPLICATE_API_TOKEN is
+// set, so the gallery + realtime flow work with zero config. Clearly a
+// placeholder (it renders the prompt over a gradient), not a fake photo. Returns
+// a `data:` URL that drops straight into an <img>.
 export function placeholderImage(prompt: string): string {
   const hue = hashHue(prompt);
   const hue2 = (hue + 60) % 360;
@@ -46,7 +46,7 @@ export function placeholderImage(prompt: string): string {
   </linearGradient></defs>
   <rect width="640" height="640" fill="url(#g)"/>
   <text x="50%" y="44%" fill="rgba(255,255,255,0.95)" font-family="system-ui,sans-serif" font-size="26" font-weight="600" text-anchor="middle">${text}</text>
-  <text x="50%" y="54%" fill="rgba(255,255,255,0.7)" font-family="system-ui,sans-serif" font-size="15" text-anchor="middle">placeholder · set OPENAI_API_KEY for real images</text>
+  <text x="50%" y="54%" fill="rgba(255,255,255,0.7)" font-family="system-ui,sans-serif" font-size="15" text-anchor="middle">placeholder · set REPLICATE_API_TOKEN for real images</text>
 </svg>`;
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }

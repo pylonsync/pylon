@@ -20,10 +20,10 @@ import {
 //                  can't insert), and read live via `db.useQuery`.
 //   • User       — the account (email/password is built in).
 //
-// Multi-user: every signed-in (or guest) visitor gets their own private studio.
-// Image + audio call OpenAI when OPENAI_API_KEY is set; with no key the studio
-// returns a clearly-labeled placeholder so the whole flow + live gallery work
-// with zero config. Video is a stubbed extension point — see functions/generate.ts.
+// Multi-user: every signed-in visitor gets their own private studio. Image,
+// audio, AND video generate via Replicate when REPLICATE_API_TOKEN is set; with
+// no token the studio returns a clearly-labeled placeholder so the whole flow +
+// background job + live gallery work with zero config (see functions/).
 // ---------------------------------------------------------------------------
 
 const Generation = entity(
@@ -76,9 +76,9 @@ const generationPolicy = policy({
   name: "generation_owner_read",
   entity: "Generation",
   allowRead: "auth.userId == data.userId",
-  allowInsert: "false",
-  allowUpdate: "false",
-  allowDelete: "false",
+  allowInsert: "false", // created only by the generate pipeline (server-side)
+  allowUpdate: "false", // updated only by the pollGeneration job
+  allowDelete: "auth.userId == data.userId", // you can delete your own from the gallery
 });
 
 const userPolicy = policy({
