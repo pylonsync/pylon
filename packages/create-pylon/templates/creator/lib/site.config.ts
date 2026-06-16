@@ -137,7 +137,7 @@ export const siteConfig: CreatorConfig = {
       {
         quote:
           "Our whole team got sharper after Maya's critique workshop. Calmer feedback, better work, less ego.",
-        name: "Priya Sharma",
+        name: "Hannah Brooks",
         role: "Design Manager",
       },
       {

@@ -180,7 +180,7 @@ export const siteConfig: ShopConfig = {
       },
       {
         quote: "You can tell these are made by hand. The ceramic vessel is on my shelf forever now.",
-        name: "Priya S.",
+        name: "Hannah K.",
         rating: 5,
       },
     ],

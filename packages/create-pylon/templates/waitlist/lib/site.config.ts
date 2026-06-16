@@ -147,7 +147,7 @@ export const siteConfig: WaitlistConfig = {
       {
         quote:
           "It's fast, it's quiet, and it stays out of my way. I joined the waitlist the day I saw the first demo.",
-        name: "Priya Sharma",
+        name: "Hannah Brooks",
         role: "Writer",
       },
     ],

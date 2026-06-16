@@ -195,7 +195,7 @@ export const siteConfig: LocalServiceConfig = {
       {
         quote:
           "Took my son for his first real haircut. Patient, friendly, and the chair was ready right on time.",
-        name: "Priya S.",
+        name: "Hannah K.",
         rating: 5,
       },
     ],

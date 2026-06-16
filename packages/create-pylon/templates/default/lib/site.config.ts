@@ -248,7 +248,7 @@ export const siteConfig: SiteConfig = {
       {
         quote:
           "Acme noticeably improved how we plan. Instead of piecing together five tools, we have one hub for everything.",
-        name: "Priya Sharma",
+        name: "Hannah Brooks",
         role: "Founder, OpenLane",
       },
       {

@@ -181,7 +181,7 @@ export const siteConfig: RestaurantConfig = {
       {
         quote:
           "Took my parents for their anniversary. The team held a quiet corner table — exactly what I asked for in the notes.",
-        name: "Priya S.",
+        name: "Hannah K.",
         rating: 5,
       },
     ],
