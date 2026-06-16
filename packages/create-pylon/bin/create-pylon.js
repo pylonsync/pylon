@@ -171,6 +171,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	"ai-studio": {
+		blurb:
+			"Generative media studio (image/audio/video) — a LIVE gallery that fills in as each generation finishes (pending card → result, synced across tabs). Owner-scoped generations; provider call + key stay server-side. Boots with a no-key placeholder; set OPENAI_API_KEY for real image+audio. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
@@ -245,6 +251,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template marketplace  # two-sided marketplace + realtime offers
   npm create @pylonsync/pylon my-app --template directory    # searchable directory + facets + live upvotes
   npm create @pylonsync/pylon my-app --template ai-chat      # streaming LLM chat + synced history
+  npm create @pylonsync/pylon my-app --template ai-studio    # generative media studio + live gallery
 `);
 	exit(0);
 }

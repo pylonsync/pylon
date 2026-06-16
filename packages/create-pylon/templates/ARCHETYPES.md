@@ -299,6 +299,27 @@ replies; without them the app boots and shows a friendly "configure AI" notice.
 
 ---
 
+# 11. `ai-studio` — generative media studio (image / audio / video)
+
+**Who:** AI image/audio/video generators, creative tools.
+**Sections:** a prompt bar + medium selector over a live gallery (`/`), optional
+`/login`.
+**Realtime feature:** the generation gallery — the `generate` action inserts a
+`pending` Generation (card appears instantly), runs the provider call
+server-side, then flips the row to `done`/`failed`; `db.useQuery` syncs that to
+every open tab so the card updates live.
+**Entities:** `Generation` (owner-scoped READ, `allowInsert:"false"` — only the
+server pipeline writes it) + `User`. Multi-user (guest or signed-in).
+**Functions:** `generate` (public action) brackets the provider call with
+internal `_createGeneration` / `_finishGeneration` mutations. Image → OpenAI
+Images, audio → OpenAI TTS (both when `OPENAI_API_KEY` is set), video → a labeled
+extension point. **No key → a clearly-labeled placeholder** (SVG for image) so
+the flow + gallery work with zero config. Key + media stay server-side.
+**Note:** image uses the provider's hosted URL (small to sync, ~1h TTL);
+persist via `/api/files` for permanence. lib/studio.ts holds the placeholder gen.
+
+---
+
 ## Build order
 1. **`waitlist`** — smallest, proves the whole pipeline, already the dogfood
    target. (`Signup` + counter + `joinWaitlist`.)
