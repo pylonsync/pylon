@@ -88,7 +88,8 @@ export type {
 	SubscriptionAction,
 } from "./types";
 export type { StripeManifestFragment } from "./manifest";
-export { StripeError } from "./client";
+export { StripeError, stripeRequest, encodeFormBody } from "./client";
+export type { StripeClientConfig } from "./client";
 export { verifyStripeSignature } from "./signature";
 export { assertSafeRedirectUrl } from "./safe-url";
 

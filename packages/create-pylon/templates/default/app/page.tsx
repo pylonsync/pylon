@@ -13,19 +13,18 @@ import {
   Portrait,
   Terminal,
 } from "@/components/marketing";
-import { PRODUCTS, productBySlug } from "@/lib/products";
+import { siteConfig, productBySlug, type Product } from "@/lib/site.config";
 
 // SEO metadata. Exported `metadata` is rendered into <head> on the server, so
 // this marketing page is fully indexable — view source and the copy is in the
-// HTML. Swap "Acme" for your product throughout.
+// HTML. All copy lives in lib/site.config.ts; edit it there.
 export const metadata: Metadata = {
-  title: "Acme — the workspace where work gets done",
-  description:
-    "Acme brings your projects, your people, and your updates into one fast, real-time workspace. Plan together, ship together, keep everyone in the loop.",
+  title: siteConfig.seo.title,
+  description: siteConfig.seo.description,
 };
 
-// The three products the homepage features inline. Each links to its own
-// /products/[slug] page for the full story. (Defined once in lib/products.ts.)
+// The products the homepage features inline. Each links to its own
+// /products/[slug] page for the full story. (Defined once in lib/site.config.ts.)
 const projects = productBySlug("projects")!;
 const tasks = productBySlug("tasks")!;
 const docs = productBySlug("docs")!;
@@ -34,24 +33,39 @@ const automations = productBySlug("automations")!;
 // `app/page.tsx` → `/`. A server-rendered marketing landing page. It reads
 // `auth` (resolved from the session cookie during the render) so the call to
 // action is right on the first byte — "Get started" for visitors, "Open
-// dashboard" once you're signed in. No client fetch, no flash.
+// dashboard" once you're signed in. No client fetch, no flash. Every string is
+// sourced from `siteConfig` so the whole page rebrands from one file.
 export default function LandingPage({ auth }: PageProps) {
   const signedIn = Boolean(auth.user_id);
   const primaryHref = signedIn ? "/dashboard" : "/signup";
   const primaryLabel = signedIn ? "Open dashboard" : "Get started";
 
+  const {
+    hero,
+    logoCloud,
+    outcomes,
+    featuredTestimonial,
+    entryPoints,
+    engagement,
+    customers,
+    gettingStarted,
+    pricing,
+    team,
+    finalCta,
+    faq,
+    brand,
+  } = siteConfig;
+
   return (
     <div className="bg-white text-zinc-900">
       {/* ============================ HERO ============================ */}
       <section className={`${WRAP} pt-20 pb-16 sm:pt-28`}>
-        <Badge>Acme for teams is here →</Badge>
+        <Badge>{hero.badge}</Badge>
         <h1 className="mt-6 max-w-2xl text-balance text-[2.75rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[3.5rem]">
-          The workspace where work gets done.
+          {hero.headline}
         </h1>
         <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-zinc-500">
-          Acme brings your projects, your people, and your updates into one
-          fast, real-time workspace. Plan together, ship together, and keep
-          everyone in the loop without the busywork.
+          {hero.subcopy}
         </p>
         <div className="mt-8 flex flex-wrap items-center gap-4">
           <PrimaryButton href={primaryHref}>{primaryLabel}</PrimaryButton>
@@ -59,30 +73,28 @@ export default function LandingPage({ auth }: PageProps) {
         </div>
 
         <div className="mt-16">
-          <Shot url="acme.app/dashboard" label="Dashboard preview" />
+          <Shot url={`${brand.domain}/dashboard`} label={hero.mockupLabel} />
         </div>
       </section>
 
       {/* ========================= LOGO CLOUD ========================= */}
       <section className={`${WRAP} pb-16`}>
         <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-zinc-400">
-          Powering fast-moving teams
+          {logoCloud.label}
         </p>
         <div className="mt-6 flex flex-wrap items-center gap-x-10 gap-y-4">
-          {["Northwind", "Globex", "Initech", "Umbrella", "Soylent", "Hooli"].map(
-            (name) => (
-              <div
-                key={name}
-                className="flex items-center gap-2 text-zinc-400"
-                title={name}
-              >
-                <span className="size-5 rounded bg-zinc-200" />
-                <span className="text-[13px] font-semibold uppercase tracking-wide">
-                  {name}
-                </span>
-              </div>
-            ),
-          )}
+          {logoCloud.companies.map((name) => (
+            <div
+              key={name}
+              className="flex items-center gap-2 text-zinc-400"
+              title={name}
+            >
+              <span className="size-5 rounded bg-zinc-200" />
+              <span className="text-[13px] font-semibold uppercase tracking-wide">
+                {name}
+              </span>
+            </div>
+          ))}
         </div>
       </section>
 
@@ -91,17 +103,15 @@ export default function LandingPage({ auth }: PageProps) {
       <section className={`${WRAP} py-20`}>
         <div className="grid gap-12 lg:grid-cols-[0.9fr_1.1fr]">
           <div>
-            <Eyebrow>Why Acme</Eyebrow>
+            <Eyebrow>{outcomes.eyebrow}</Eyebrow>
             <h2 className="mt-4 text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-              Everything your team needs to stay in motion.
+              {outcomes.headline}
             </h2>
             <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-              Most teams lose work somewhere between the kickoff and the ship
-              date. Acme keeps the whole path in one place, so every idea has a
-              clear route from planned, to in progress, to done.
+              {outcomes.body}
             </p>
           </div>
-          <FeatureGrid columns={2} items={OUTCOMES} />
+          <FeatureGrid columns={2} items={outcomes.items} />
         </div>
       </section>
 
@@ -109,20 +119,20 @@ export default function LandingPage({ auth }: PageProps) {
       <Divider />
       <section className={`${WRAP} py-20`}>
         <div className="grid items-center gap-12 lg:grid-cols-[0.8fr_1.2fr]">
-          <Portrait name="Maya Chen" />
+          <Portrait name={featuredTestimonial.name} />
           <figure>
             <div className="font-serif text-4xl leading-none text-brand">
               &ldquo;
             </div>
             <blockquote className="mt-4 text-balance text-2xl font-medium leading-[1.35] tracking-[-0.01em] sm:text-[1.75rem]">
-              Our whole team finally works in one place. Acme made it easy to see
-              what is happening, decide what is next, and keep everyone moving in
-              the same direction.
+              {featuredTestimonial.quote}
             </blockquote>
             <figcaption className="mt-8 border-t border-zinc-200/70 pt-6">
-              <div className="text-sm font-semibold">Maya Chen</div>
+              <div className="text-sm font-semibold">
+                {featuredTestimonial.name}
+              </div>
               <div className="text-sm text-zinc-500">
-                Head of Product, Northwind
+                {featuredTestimonial.role}
               </div>
             </figcaption>
           </figure>
@@ -137,12 +147,12 @@ export default function LandingPage({ auth }: PageProps) {
       <Divider />
       <section className={`${WRAP} py-20`}>
         <SectionHead
-          eyebrow="Anywhere"
-          title="Meet your team where they already are."
-          body="Web, desktop, and a typed API all share the same workspace underneath, so nothing lives in two places."
+          eyebrow={entryPoints.eyebrow}
+          title={entryPoints.title}
+          body={entryPoints.body}
         />
         <div className="mt-12 grid gap-5 sm:grid-cols-2">
-          {ENTRY_POINTS.map((c, i) => (
+          {entryPoints.items.map((c, i) => (
             <div
               key={c.title}
               className="rounded-2xl border border-zinc-200 bg-paper p-7"
@@ -175,29 +185,18 @@ export default function LandingPage({ auth }: PageProps) {
       {/* ============== ENGAGEMENT (prose + numbered) ============== */}
       <Divider />
       <section className={`${WRAP} py-20`}>
-        <Eyebrow>Momentum</Eyebrow>
+        <Eyebrow>{engagement.eyebrow}</Eyebrow>
         <h2 className="mt-4 max-w-2xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          Most tools go quiet after the kickoff.
+          {engagement.headline}
         </h2>
         <div className="mt-12 grid gap-12 lg:grid-cols-2">
           <div className="space-y-5 text-[15px] leading-relaxed text-zinc-500">
-            <p>
-              Someone shares an idea, it lands in a list, and that is the last
-              anyone hears of it. Acme treats every idea as the start of a loop,
-              not the end of one.
-            </p>
-            <p>
-              When the status moves to planned, the people who care hear about
-              it. When it ships, they hear about it first. And every week a
-              digest pulls them back with the work worth weighing in on.
-            </p>
-            <p>
-              None of it is something you configure. Turn Acme on, and the loop
-              starts running the same day.
-            </p>
+            {engagement.paragraphs.map((p) => (
+              <p key={p}>{p}</p>
+            ))}
           </div>
           <ol className="space-y-7">
-            {ENGAGEMENT.map((e, i) => (
+            {engagement.items.map((e, i) => (
               <li key={e.title} className="flex gap-4">
                 <span className="mt-0.5 font-mono text-[11px] text-zinc-300">
                   0{i + 1}
@@ -228,7 +227,7 @@ export default function LandingPage({ auth }: PageProps) {
         <FeatureGrid className="mt-14" items={automations.features} />
         <div className="mt-8">
           <GhostLink href="/products/automations">
-            Explore Automations →
+            Explore {automations.title} →
           </GhostLink>
         </div>
         <div className="mt-12">
@@ -240,12 +239,12 @@ export default function LandingPage({ auth }: PageProps) {
       <Divider />
       <section id="customers" className={`${WRAP} py-20`}>
         <SectionHead
-          eyebrow="Customers"
-          title="Teams that ship with Acme."
-          body="A few words from the people who run their work in Acme every day."
+          eyebrow={customers.eyebrow}
+          title={customers.title}
+          body={customers.body}
         />
         <div className="mt-12 grid gap-5 sm:grid-cols-3">
-          {QUOTES.map((q) => (
+          {customers.quotes.map((q) => (
             <figure
               key={q.name + q.role}
               className="flex flex-col rounded-2xl border border-zinc-200 bg-paper p-6"
@@ -270,19 +269,18 @@ export default function LandingPage({ auth }: PageProps) {
       {/* ===================== GETTING STARTED ==================== */}
       <Divider />
       <section className={`${WRAP} py-20`}>
-        <Eyebrow>Get started</Eyebrow>
+        <Eyebrow>{gettingStarted.eyebrow}</Eyebrow>
         <h2 className="mt-4 max-w-xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          Up and running in 60 seconds.
+          {gettingStarted.headline}
         </h2>
         <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-          No credit card, no sales call, no setup wizard. An email and a
-          workspace name are all it takes to start.
+          {gettingStarted.body}
         </p>
         <div className="mt-8">
           <PrimaryButton href={primaryHref}>{primaryLabel}</PrimaryButton>
         </div>
         <ol className="mt-14 max-w-xl space-y-8">
-          {STEPS.map((s, i) => (
+          {gettingStarted.steps.map((s, i) => (
             <li key={s.title} className="flex gap-5">
               <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-brand-soft font-mono text-[11px] text-brand">
                 0{i + 1}
@@ -301,16 +299,15 @@ export default function LandingPage({ auth }: PageProps) {
       {/* ========================= PRICING ======================== */}
       <Divider />
       <section id="pricing" className={`${WRAP} py-20`}>
-        <Eyebrow>Pricing</Eyebrow>
+        <Eyebrow>{pricing.eyebrow}</Eyebrow>
         <h2 className="mt-4 max-w-xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          Simple pricing. Every plan.
+          {pricing.headline}
         </h2>
         <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-          Start free and upgrade when your team grows. No per-seat surprises, no
-          annual lock-in.
+          {pricing.body}
         </p>
         <div className="mt-12 grid gap-5 lg:grid-cols-3">
-          {PLANS.map((p) => (
+          {pricing.plans.map((p) => (
             <div
               key={p.name}
               className={`flex flex-col rounded-2xl border p-7 ${
@@ -369,54 +366,47 @@ export default function LandingPage({ auth }: PageProps) {
       <section className={`${WRAP} py-20`}>
         <div className="grid gap-12 lg:grid-cols-[0.9fr_1.1fr]">
           <div>
-            <Eyebrow>The team</Eyebrow>
+            <Eyebrow>{team.eyebrow}</Eyebrow>
             <h2 className="mt-4 text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-              Built by people who use it every day.
+              {team.headline}
             </h2>
             <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-              Acme is built by a small team that got tired of clunky, overpriced
-              tools. Every feature earns its place by being something worth using
-              every day.
+              {team.body}
             </p>
           </div>
-          <FeatureGrid columns={2} items={TEAM} />
+          <FeatureGrid columns={2} items={team.items} />
         </div>
       </section>
 
       {/* ======================= FINAL CTA ======================== */}
       <Divider />
       <section className={`${WRAP} py-24`}>
-        <Eyebrow>Start building</Eyebrow>
+        <Eyebrow>{finalCta.eyebrow}</Eyebrow>
         <h2 className="mt-4 max-w-xl text-balance text-[2.5rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[3rem]">
-          Stop losing momentum to busywork.
+          {finalCta.headline}
         </h2>
         <p className="mt-6 max-w-lg text-[16px] leading-relaxed text-zinc-500">
-          When your team can see the work, decide what is next, and ship in one
-          place, momentum takes care of itself. This is what{" "}
+          {finalCta.bodyLead}
           <span className="rounded bg-brand-soft px-1.5 py-0.5 font-medium text-brand">
-            working in flow
-          </span>{" "}
-          looks like.
+            {finalCta.highlight}
+          </span>
+          {finalCta.bodyTail}
         </p>
         <div className="mt-8">
-          <PrimaryButton href={primaryHref}>
-            Start building with Acme
-          </PrimaryButton>
+          <PrimaryButton href={primaryHref}>{finalCta.cta}</PrimaryButton>
         </div>
-        <p className="mt-4 text-[12px] text-zinc-400">
-          Free to start · No credit card · Cancel anytime
-        </p>
+        <p className="mt-4 text-[12px] text-zinc-400">{finalCta.footnote}</p>
       </section>
 
       {/* ========================== FAQ =========================== */}
       <Divider />
       <section id="faq" className={`${WRAP} py-20`}>
-        <Eyebrow>Questions</Eyebrow>
+        <Eyebrow>{faq.eyebrow}</Eyebrow>
         <h2 className="mt-4 text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          Frequently asked.
+          {faq.headline}
         </h2>
         <div className="mt-10 divide-y divide-zinc-200/70 border-y border-zinc-200/70">
-          {FAQ.map((f) => (
+          {faq.items.map((f) => (
             <details key={f.q} className="group py-5">
               <summary className="flex cursor-pointer items-center justify-between text-[15px] font-medium text-zinc-900 marker:hidden [&::-webkit-details-marker]:hidden">
                 {f.q}
@@ -442,7 +432,7 @@ function ProductSection({
   primaryHref,
   id,
 }: {
-  product: (typeof PRODUCTS)[number];
+  product: Product;
   primaryHref: string;
   id?: string;
 }) {
@@ -477,177 +467,3 @@ function initials(name: string) {
     .slice(0, 2)
     .toUpperCase();
 }
-
-/* ---------------------------------------------------------------- */
-/* Homepage-specific content — fictional demo copy; swap for yours.  */
-/* ---------------------------------------------------------------- */
-
-const OUTCOMES = [
-  {
-    title: "Work in one place",
-    body: "Plans, tasks, and docs live together, so nothing gets lost between tools.",
-  },
-  {
-    title: "Clear priorities",
-    body: "Everyone can see what is planned, in progress, and done — and why.",
-  },
-  {
-    title: "Real-time by default",
-    body: "Every change syncs instantly, so the workspace is the same on every screen.",
-  },
-  {
-    title: "Less busywork",
-    body: "Automations handle the routine, so your team focuses on the work that matters.",
-  },
-];
-
-const ENTRY_POINTS = [
-  {
-    icon: "◇",
-    title: "Cloud workspace",
-    body: "Your whole team works in the browser. Nothing to install, always up to date, and secure by default.",
-  },
-  {
-    icon: "◆",
-    title: "Open API",
-    body: "A typed API and webhooks for everything in Acme, so you can wire it into the rest of your stack.",
-  },
-];
-
-const ENGAGEMENT = [
-  {
-    title: "The loop",
-    body: "Submission, acknowledgment, progress, launch. Four moments every person gets to feel heard.",
-  },
-  {
-    title: "Instant alerts",
-    body: "The moment someone votes or comments on their idea, social proof brings them back.",
-  },
-  {
-    title: "Launch alerts",
-    body: "The note that tells a person the thing they asked for just shipped. Nothing builds loyalty faster.",
-  },
-  {
-    title: "Weekly digest",
-    body: "The top ideas across your boards, delivered every week, with a one-click way to weigh in.",
-  },
-];
-
-const QUOTES = [
-  {
-    quote:
-      "We finally have one source of truth for the work. The whole team can see what is happening without a status meeting.",
-    name: "Daniel Reyes",
-    role: "Founder, Globex",
-  },
-  {
-    quote:
-      "Acme noticeably improved how we plan. Instead of piecing together five tools, we have one hub for everything.",
-    name: "Priya Sharma",
-    role: "Founder, OpenLane",
-  },
-  {
-    quote:
-      "Ever since we added Acme, people actually feel heard. It has helped us build a loyal community of users.",
-    name: "Marcus Bell",
-    role: "Cofounder, Initech",
-  },
-];
-
-const STEPS = [
-  {
-    title: "Create a workspace",
-    body: "Sign up with just an email. Pick a name. That is the entire form.",
-  },
-  {
-    title: "Invite your team",
-    body: "Add teammates, share the board URL, or link it from your site. Work starts flowing in.",
-  },
-  {
-    title: "Watch the loop start",
-    body: "People add ideas, votes pile up, you ship, and everyone hears about it and comes back with more.",
-  },
-];
-
-const PLANS = [
-  {
-    name: "Free",
-    tagline: "For getting started.",
-    price: "$0",
-    unit: "forever",
-    cta: "Get started",
-    featured: false,
-    features: [
-      "Up to 3 projects",
-      "Unlimited members",
-      "Real-time board",
-      "Community support",
-    ],
-  },
-  {
-    name: "Team",
-    tagline: "For small teams.",
-    price: "$29",
-    unit: "/ month",
-    cta: "Start free trial",
-    featured: true,
-    features: [
-      "Unlimited projects",
-      "Roadmap and updates",
-      "Private boards",
-      "Priority support",
-    ],
-  },
-  {
-    name: "Business",
-    tagline: "For growing teams.",
-    price: "$59",
-    unit: "/ month",
-    cta: "Start free trial",
-    featured: false,
-    features: [
-      "Everything in Team",
-      "SSO and audit log",
-      "Custom domain",
-      "Onboarding help",
-    ],
-  },
-];
-
-const TEAM = [
-  {
-    title: "A small team",
-    body: "No committees. Every feature ships because someone decided it was worth building.",
-  },
-  {
-    title: "Design first",
-    body: "Beautiful software makes people want to use it. Every screen is built with that in mind.",
-  },
-  {
-    title: "Ships every week",
-    body: "Updates go out weekly, often based on work posted directly to our own board.",
-  },
-  {
-    title: "Customer funded",
-    body: "We optimize for your renewal, not an exit. If Acme works for you, it works for us.",
-  },
-];
-
-const FAQ = [
-  {
-    q: "Is Acme a fit for my team?",
-    a: "Acme works for any team that plans and ships work together — product, design, engineering, or ops.",
-  },
-  {
-    q: "What about migrating from another tool?",
-    a: "Import your existing projects and pick up where you left off.",
-  },
-  {
-    q: "Is there an API or a way to script this?",
-    a: "Yes — every action in Acme is available over a typed API and an MCP server.",
-  },
-  {
-    q: "Do you offer SSO?",
-    a: "SSO and audit logging are included on the Business plan.",
-  },
-];

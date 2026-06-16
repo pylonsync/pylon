@@ -111,6 +111,42 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	waitlist: {
+		blurb:
+			"Coming-soon landing — email capture + a LIVE signup counter (two tabs, no refresh) + owner dashboard. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
+	"local-service": {
+		blurb:
+			"Appointment business — services + booking with LIVE slot availability (a slot greys out for everyone the instant it's booked) + owner dashboard. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
+	saas: {
+		blurb:
+			"SaaS app — marketing landing + multi-tenant dashboard (orgs, members, tenant-scoped data). The 'saas' archetype; identical to the default template.",
+		platforms: [],
+		unified: true,
+	},
+	restaurant: {
+		blurb:
+			"Restaurant — menu + reservations with LIVE table availability (each seating shows tables-left, greys to 'Full' instantly) + owner dashboard. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
+	creator: {
+		blurb:
+			"Personal brand / creator — bio + offerings + a newsletter signup with a LIVE subscriber counter + owner dashboard. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
+	shop: {
+		blurb:
+			"DTC store — product grid with LIVE inventory (stock ticks down, flips to 'Sold out' instantly), cart + real Stripe checkout (graceful no-key fallback) + owner dashboard (orders + stock). One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
@@ -176,6 +212,11 @@ Examples:
   npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
   npm create @pylonsync/pylon my-app --template b2b          # minimal multi-tenant (orgs, members, RBAC)
   npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
+  npm create @pylonsync/pylon my-app --template waitlist     # coming-soon landing + live signup counter
+  npm create @pylonsync/pylon my-app --template local-service # appointment business + live booking availability
+  npm create @pylonsync/pylon my-app --template restaurant   # restaurant menu + live reservation availability
+  npm create @pylonsync/pylon my-app --template creator      # personal brand + live newsletter subscriber count
+  npm create @pylonsync/pylon my-app --template shop         # DTC store + live inventory
 `);
 	exit(0);
 }
@@ -201,6 +242,10 @@ if (!flags.template) {
 // `ssr` was the original name of the default template; keep it working as a
 // quiet alias so older `--template ssr` invocations don't break.
 if (flags.template === "ssr") flags.template = "default";
+// `saas` is the archetype NAME for the default template (a SaaS landing +
+// multi-tenant dashboard). It scaffolds the exact same app as `default`; we
+// alias rather than duplicate the whole tree so there's one source of truth.
+if (flags.template === "saas") flags.template = "default";
 // `unified` templates (default) are a single app, not a monorepo — they take
 // no platforms. Skip the platform prompt + validation for them entirely.
 const isUnified = TEMPLATE_REGISTRY[flags.template]?.unified === true;

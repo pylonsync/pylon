@@ -910,12 +910,18 @@ async function _doBuildInner(
     // rather than an inline string in CLIENT_RUNTIME_SOURCE that nothing
     // could render. Bun pulls it into the shared chunk via the runtime's
     // static `import { createPylonBoundary } from "./client-boundary"`.
+    //
+    // Resolve THIS module's directory from the standard `import.meta.url`
+    // (via node:url) rather than Bun's `import.meta.dir` — the latter is a
+    // Bun-only extension that `tsc` doesn't know about, so any app that
+    // imports `@pylonsync/functions` and runs `tsc` would otherwise fail
+    // type-checking on this file. `import.meta.url` works in Bun and Node.
+    const urlMod: any = await import("node:url");
+    const fileURLToPath = urlMod.fileURLToPath ?? urlMod.default?.fileURLToPath;
+    const here = path.dirname(fileURLToPath(import.meta.url));
     fs.writeFileSync(
       path.join(stageDir, "client-boundary.ts"),
-      fs.readFileSync(
-        path.join(import.meta.dir, "ssr-client-boundary.ts"),
-        "utf8",
-      ),
+      fs.readFileSync(path.join(here, "ssr-client-boundary.ts"), "utf8"),
       "utf8",
     );
 

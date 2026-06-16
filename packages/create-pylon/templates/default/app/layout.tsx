@@ -2,6 +2,7 @@ import React from "react";
 import { Link, type PageAuth } from "@pylonsync/react";
 import { PRODUCTS } from "@/lib/products";
 import { SOLUTIONS, RESOURCES, COMPANY, COMPARISONS } from "@/lib/site";
+import { siteConfig } from "@/lib/site.config";
 
 // A layout receives the page props plus `children`. `auth.user_id` is null for
 // anonymous visitors and the signed-in user's id otherwise — resolved
@@ -27,11 +28,11 @@ const PRODUCT_MENU: MenuItem[] = PRODUCTS.map((p) => ({
 }));
 
 const RESOURCES_MENU: MenuItem[] = [
-  { icon: "▢", title: "Docs", desc: "Set up and use Acme.", href: "/resources/docs" },
+  { icon: "▢", title: "Docs", desc: `Set up and use ${siteConfig.brand.name}.`, href: "/resources/docs" },
   { icon: "✎", title: "Guides", desc: "Playbooks and walkthroughs.", href: "/resources/guides" },
-  { icon: "✦", title: "Changelog", desc: "What's new in Acme.", href: "/resources/changelog" },
-  { icon: "⌘", title: "API reference", desc: "Build on the Acme API.", href: "/resources/api" },
-  { icon: "◈", title: "Compare", desc: "See how Acme stacks up.", href: `/compare/${COMPARISONS[0].slug}` },
+  { icon: "✦", title: "Changelog", desc: `What's new in ${siteConfig.brand.name}.`, href: "/resources/changelog" },
+  { icon: "⌘", title: "API reference", desc: `Build on the ${siteConfig.brand.name} API.`, href: "/resources/api" },
+  { icon: "◈", title: "Compare", desc: `See how ${siteConfig.brand.name} stacks up.`, href: `/compare/${COMPARISONS[0].slug}` },
 ];
 
 // A hover/focus dropdown — pure CSS via `group`, so the nav stays a server
@@ -184,7 +185,19 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
   const BARE_PREFIXES = ["/login", "/signup", "/onboarding", "/dashboard"];
   const isBare = BARE_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
   return (
-    <html lang="en">
+    <html
+      lang="en"
+      // Marketing theme colors come from the single site config (lib/site.config.ts).
+      // Set as inline CSS vars on <html> so they override globals.css defaults and
+      // the whole site re-themes from one place — no CSS edit needed.
+      style={
+        {
+          "--brand": siteConfig.colors.brand,
+          "--brand-soft": siteConfig.colors.brandSoft,
+          "--paper": siteConfig.colors.paper,
+        } as React.CSSProperties
+      }
+    >
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -217,10 +230,10 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
             <div className="flex items-center gap-8">
               <Link href="/" className="flex items-center gap-2">
                 <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-                  A
+                  {siteConfig.brand.letter}
                 </span>
                 <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-                  Acme
+                  {siteConfig.brand.name}
                 </span>
               </Link>
               <nav className="hidden items-center gap-6 md:flex">
@@ -369,19 +382,6 @@ function FooterGroup({
   );
 }
 
-const SOCIALS = [
-  {
-    label: "X",
-    href: "https://x.com/pylonsync",
-    path: "M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z",
-  },
-  {
-    label: "GitHub",
-    href: "https://github.com/pylonsync/pylon",
-    path: "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12",
-  },
-];
-
 function SiteFooter() {
   return (
     <footer className="border-t border-zinc-200/70 bg-white">
@@ -390,18 +390,17 @@ function SiteFooter() {
         <div className="max-w-xs">
           <Link href="/" className="inline-flex items-center gap-2">
             <span className="flex size-7 items-center justify-center rounded-lg bg-zinc-900 text-sm font-bold text-white">
-              A
+              {siteConfig.brand.letter}
             </span>
             <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-              Acme
+              {siteConfig.brand.name}
             </span>
           </Link>
           <p className="mt-4 text-[13px] leading-relaxed text-zinc-500">
-            The workspace where your team plans, builds, and ships together —
-            projects, docs, and automation in one place.
+            {siteConfig.brand.footerBlurb}
           </p>
           <div className="mt-5 flex items-center gap-4">
-            {SOCIALS.map((s) => (
+            {siteConfig.brand.socials.map((s) => (
               <a
                 key={s.label}
                 href={s.href}
@@ -414,7 +413,7 @@ function SiteFooter() {
               </a>
             ))}
             <a
-              href="mailto:hello@acme.example"
+              href={`mailto:${siteConfig.brand.email}`}
               aria-label="Email"
               className="text-zinc-400 transition-colors hover:text-zinc-900"
             >
@@ -449,7 +448,7 @@ function SiteFooter() {
         </div>
 
         <div className="mt-14 flex flex-col items-start justify-between gap-3 border-t border-zinc-200/70 pt-6 text-[12px] text-zinc-400 sm:flex-row sm:items-center">
-          <span>© {new Date().getFullYear()} Acme, Inc.</span>
+          <span>© {new Date().getFullYear()} {siteConfig.brand.copyrightName}</span>
           <span>
             Built with{" "}
             <a
