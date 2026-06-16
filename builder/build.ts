@@ -45,6 +45,20 @@ async function sh(cmd: string[], cwd?: string): Promise<void> {
 	}
 }
 
+// Like `sh` but returns success instead of throwing — for steps that are
+// allowed to fail without failing the deploy (e.g. probing whether a
+// frontend's deps are installable in this bundle).
+async function trySh(cmd: string[], cwd?: string): Promise<boolean> {
+	console.log(`[builder] $ ${cmd.join(" ")}`);
+	const proc = Bun.spawn(cmd, {
+		cwd,
+		stdout: "inherit",
+		stderr: "inherit",
+		env: process.env as Record<string, string>,
+	});
+	return (await proc.exited) === 0;
+}
+
 async function sha256(path: string): Promise<{ hex: string; size: number }> {
 	const file = Bun.file(path);
 	const size = file.size;
@@ -187,6 +201,20 @@ async function main() {
 			if (await Bun.file(`${webDir}/dist/index.html`).exists()) {
 				console.log(
 					`[builder] ${rel}/dist already built — skipping frontend build`,
+				);
+				break;
+			}
+			// Ensure web/'s own deps are present (its build tool + npm deps).
+			// The root install covers it when web/ is a real workspace member
+			// (git deploys of the full monorepo); a CLI-pruned bundle may not
+			// install web/, so install it here. If that can't resolve (e.g. a
+			// pruned bundle where web/'s `workspace:*` deps aren't satisfiable),
+			// DON'T fail the deploy — leave the frontend to the runtime, which
+			// stages workspace symlinks the builder can't. A real build failure
+			// (deps present, build broken) DOES fail the deploy, atomically.
+			if (!(await trySh(["bun", "install"], webDir))) {
+				console.log(
+					`[builder] ${rel}: deps not installable here (pruned bundle?) — leaving frontend build to the runtime`,
 				);
 				break;
 			}
