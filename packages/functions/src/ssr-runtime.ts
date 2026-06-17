@@ -357,6 +357,9 @@ export interface SsrMetadata {
     imageAlt?: string;
     url?: string;
     type?: string;
+    /** `og:site_name` — the brand the page belongs to (e.g. "Pylon").
+     *  Discord and other unfurlers show this above the title. */
+    siteName?: string;
   };
   twitter?: {
     card?: string;
@@ -417,6 +420,7 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
     }
     if (og.url) kids.push(el("meta", { key: "ogu", property: "og:url", content: og.url }));
     if (og.type) kids.push(el("meta", { key: "ogy", property: "og:type", content: og.type }));
+    if (og.siteName) kids.push(el("meta", { key: "ogsn", property: "og:site_name", content: og.siteName }));
   }
   const tw = m.twitter;
   if (tw) {

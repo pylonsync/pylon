@@ -285,6 +285,24 @@ describe("renderMetadata head-tag marking (client-nav sync)", () => {
     expect(titles[0].children).toEqual(["Hello"]);
   });
 
+  test("emits og:site_name when openGraph.siteName is set", () => {
+    const frag = renderMetadata(fakeReact, {
+      openGraph: { title: "OG", siteName: "Pylon" },
+    });
+    const metas: any[] = frag.children.filter((k: any) => k.type === "meta");
+    const siteName = metas.find((m) => m.props.property === "og:site_name");
+    expect(siteName).toBeDefined();
+    expect(siteName.props.content).toBe("Pylon");
+    // It's a head tag like the rest, so it must carry the nav-swap marker.
+    expect(siteName.props["data-pylon-meta"]).toBe("");
+  });
+
+  test("omits og:site_name when not provided", () => {
+    const frag = renderMetadata(fakeReact, { openGraph: { title: "OG" } });
+    const metas: any[] = frag.children.filter((k: any) => k.type === "meta");
+    expect(metas.some((m) => m.props.property === "og:site_name")).toBe(false);
+  });
+
   test("returns null when there's nothing to emit", () => {
     expect(renderMetadata(fakeReact, undefined)).toBeNull();
     expect(renderMetadata(fakeReact, {})).toBeNull();

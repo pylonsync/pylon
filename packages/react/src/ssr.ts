@@ -181,6 +181,9 @@ export interface Metadata {
     imageAlt?: string;
     url?: string;
     type?: string;
+    /** `og:site_name` — the brand the page belongs to (e.g. "Pylon").
+     *  Discord and other unfurlers show this above the title. */
+    siteName?: string;
   };
   twitter?: {
     card?: string;
