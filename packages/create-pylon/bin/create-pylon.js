@@ -173,7 +173,7 @@ const TEMPLATE_REGISTRY = {
 	},
 	"ai-studio": {
 		blurb:
-			"Generative media studio (image/audio/video) — a LIVE gallery that fills in as each generation finishes (pending card → result, synced across tabs). Owner-scoped generations; provider call + key stay server-side. Boots with a no-key placeholder; set OPENAI_API_KEY for real image+audio. One SSR app.",
+			"Generative media studio (image/audio/video) — a LIVE gallery that fills in as each background job finishes (pending card → result, synced across tabs). Owner-scoped generations; provider call + key stay server-side. Boots with a no-key placeholder; set REPLICATE_API_TOKEN for real image/audio/video. One SSR app.",
 		platforms: [],
 		unified: true,
 	},
