@@ -386,6 +386,73 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
+/// Split an http(s) URL into `(host, path)` for allowlist matching.
+/// Returns `None` for any non-http(s) scheme — so a redirect to
+/// `file://`, `gopher://`, etc. is rejected. Strips `user:pass@`
+/// userinfo and the `:port` suffix off the host, mirroring the
+/// original inline parser.
+fn extract_host_path(url: &str) -> Option<(&str, &str)> {
+    let after_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let (host_with_port, path_with_query) =
+        match after_scheme.find(|c: char| c == '/' || c == '?' || c == '#') {
+            Some(i) => (&after_scheme[..i], &after_scheme[i..]),
+            None => (after_scheme, ""),
+        };
+    let path = match path_with_query.find(|c: char| c == '?' || c == '#') {
+        Some(i) => &path_with_query[..i],
+        None => path_with_query,
+    };
+    let host_no_auth = match host_with_port.rsplit_once('@') {
+        Some((_, h)) => h,
+        None => host_with_port,
+    };
+    let host = match host_no_auth.rsplit_once(':') {
+        Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host_no_auth,
+    };
+    Some((host, path))
+}
+
+/// Resolve a redirect `Location` against the current absolute URL.
+/// Returns an absolute http(s) URL, or `None` if it can't be resolved to
+/// one (the caller then rejects the redirect — fail closed). Handles
+/// absolute, scheme-relative (`//host/..`), origin-relative (`/path`),
+/// and bare-relative locations.
+fn resolve_redirect(base: &str, loc: &str) -> Option<String> {
+    let loc = loc.trim();
+    if loc.is_empty() {
+        return None;
+    }
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return Some(loc.to_string());
+    }
+    let scheme = if base.starts_with("https://") {
+        "https"
+    } else {
+        "http"
+    };
+    let after_scheme = base
+        .strip_prefix("http://")
+        .or_else(|| base.strip_prefix("https://"))?;
+    let authority = after_scheme
+        .split(|c| c == '/' || c == '?' || c == '#')
+        .next()
+        .unwrap_or(after_scheme);
+    if let Some(rest) = loc.strip_prefix("//") {
+        return Some(format!("{scheme}://{rest}"));
+    }
+    if loc.starts_with('/') {
+        return Some(format!("{scheme}://{authority}{loc}"));
+    }
+    // Bare relative path — resolve against the base URL's directory.
+    let base_path = &after_scheme[authority.len()..];
+    let path_only = base_path.split(['?', '#']).next().unwrap_or(base_path);
+    let dir_end = path_only.rfind('/').map(|i| i + 1).unwrap_or(0);
+    Some(format!("{scheme}://{authority}{}{loc}", &path_only[..dir_end]))
+}
+
 /// Read the source bytes — either off the local frontend dir or
 /// over HTTP for remote allowlisted URLs. Enforces the byte cap
 /// from [`ImageConfig::max_bytes`] for both paths.
@@ -400,42 +467,55 @@ fn load_source(
                 "remote image source not allowed (set PYLON_IMAGE_REMOTE_ALLOWLIST): {src}"
             ));
         }
-        // Hand-extract the host + path. `src` starts with http:// or
-        // https://. Skip scheme, split host from path on the first
-        // `/`. Strip any `user:pass@` prefix from the host. Strip
-        // any `:port` suffix.
-        let after_scheme = src
-            .strip_prefix("http://")
-            .or_else(|| src.strip_prefix("https://"))
-            .unwrap_or("");
-        let (host_with_port, path_with_query) =
-            match after_scheme.find(|c: char| c == '/' || c == '?' || c == '#') {
-                Some(i) => (&after_scheme[..i], &after_scheme[i..]),
-                None => (after_scheme, ""),
-            };
-        let path = match path_with_query.find(|c: char| c == '?' || c == '#') {
-            Some(i) => &path_with_query[..i],
-            None => path_with_query,
-        };
-        let host_no_auth = match host_with_port.rsplit_once('@') {
-            Some((_, h)) => h,
-            None => host_with_port,
-        };
-        let host = match host_no_auth.rsplit_once(':') {
-            Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
-            _ => host_no_auth,
+        // SSRF-hardened fetch:
+        //   - `.redirects(0)` so ureq never auto-follows. We follow
+        //     manually and re-run the allowlist check on EVERY hop —
+        //     otherwise an allowlisted host that 302s to
+        //     `http://169.254.169.254/…` (cloud metadata) or an internal
+        //     service would be fetched (the allowlist only ever validated
+        //     the first URL).
+        //   - a guarded resolver that refuses to connect to any
+        //     private/loopback/link-local address, on every hop and after
+        //     any DNS rebind (ureq connects to exactly what it returns).
+        let agent = ureq::AgentBuilder::new()
+            .redirects(0)
+            .resolver(|netloc: &str| pylon_kernel::net_guard::resolve_guarded(netloc))
+            .build();
+
+        const MAX_HOPS: u32 = 3;
+        let mut url = src.to_string();
+        let mut hops = 0u32;
+        let res = loop {
+            let (host, path) = extract_host_path(&url)
+                .ok_or_else(|| format!("remote image URL is not http(s): {url}"))?;
+            if !cfg.remote_allowlist.iter().any(|p| p.matches(host, path)) {
+                return Err(format!(
+                    "host {host} (path {path}) not allowed by PYLON_IMAGE_REMOTE_ALLOWLIST"
+                ));
+            }
+            let resp = agent
+                .get(&url)
+                .timeout(cfg.fetch_timeout)
+                .call()
+                .map_err(|e| format!("fetch failed: {e}"))?;
+            let status = resp.status();
+            if (300..400).contains(&status) {
+                hops += 1;
+                if hops > MAX_HOPS {
+                    return Err(format!(
+                        "too many redirects fetching remote image (> {MAX_HOPS})"
+                    ));
+                }
+                let loc = resp
+                    .header("location")
+                    .ok_or_else(|| "redirect response without a Location header".to_string())?;
+                url = resolve_redirect(&url, loc)
+                    .ok_or_else(|| format!("unfollowable redirect Location: {loc}"))?;
+                continue;
+            }
+            break resp;
         };
 
-        let ok = cfg.remote_allowlist.iter().any(|p| p.matches(host, path));
-        if !ok {
-            return Err(format!(
-                "host {host} (path {path}) not allowed by PYLON_IMAGE_REMOTE_ALLOWLIST"
-            ));
-        }
-        let res = ureq::get(src)
-            .timeout(cfg.fetch_timeout)
-            .call()
-            .map_err(|e| format!("fetch failed: {e}"))?;
         let mut buf: Vec<u8> = Vec::new();
         // `.take(N)` silently truncates; we want a hard error so
         // the operator knows their cap is too tight or the source
@@ -748,3 +828,78 @@ fn respond_err(request: Request, status: u16, msg: &str) {
 
 // std::io::Read needs to be in scope for `into_reader().read_to_end`.
 use std::io::Read;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_host_path_strips_userinfo_and_port() {
+        assert_eq!(
+            extract_host_path("https://user:pass@cdn.example.com:8443/a/b.png?x=1"),
+            Some(("cdn.example.com", "/a/b.png"))
+        );
+        assert_eq!(
+            extract_host_path("http://cdn.example.com/img"),
+            Some(("cdn.example.com", "/img"))
+        );
+        assert_eq!(
+            extract_host_path("https://cdn.example.com"),
+            Some(("cdn.example.com", ""))
+        );
+    }
+
+    #[test]
+    fn extract_host_path_rejects_non_http_schemes() {
+        // A redirect to one of these must be refused (returns None ->
+        // caller errors), never fetched.
+        assert_eq!(extract_host_path("file:///etc/passwd"), None);
+        assert_eq!(extract_host_path("gopher://169.254.169.254/"), None);
+        assert_eq!(extract_host_path("/local/path.png"), None);
+    }
+
+    #[test]
+    fn redirect_revalidation_rejects_metadata_host() {
+        // The classic bypass: an allowlisted host 302s to the cloud
+        // metadata endpoint. The allowlist only permits cdn.example.com,
+        // so the resolved redirect target must NOT match.
+        let allow = RemotePattern::parse("cdn.example.com").unwrap();
+        let evil = resolve_redirect(
+            "https://cdn.example.com/img",
+            "http://169.254.169.254/latest/meta-data/",
+        )
+        .unwrap();
+        let (host, path) = extract_host_path(&evil).unwrap();
+        assert_eq!(host, "169.254.169.254");
+        assert!(
+            !allow.matches(host, path),
+            "metadata redirect target must fail the allowlist re-check"
+        );
+    }
+
+    #[test]
+    fn resolve_redirect_forms() {
+        // Absolute.
+        assert_eq!(
+            resolve_redirect("https://a.com/x", "https://b.com/y").as_deref(),
+            Some("https://b.com/y")
+        );
+        // Scheme-relative inherits the base scheme.
+        assert_eq!(
+            resolve_redirect("https://a.com/x", "//b.com/y").as_deref(),
+            Some("https://b.com/y")
+        );
+        // Origin-relative keeps the base authority.
+        assert_eq!(
+            resolve_redirect("https://a.com:9000/x/y", "/z.png").as_deref(),
+            Some("https://a.com:9000/z.png")
+        );
+        // Bare-relative resolves against the base directory.
+        assert_eq!(
+            resolve_redirect("https://a.com/x/y.png", "z.png").as_deref(),
+            Some("https://a.com/x/z.png")
+        );
+        // Empty Location is unfollowable.
+        assert_eq!(resolve_redirect("https://a.com/x", ""), None);
+    }
+}

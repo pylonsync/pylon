@@ -365,9 +365,19 @@ pub fn discover_endpoints(issuer_url: &str) -> Result<DiscoveredEndpoints, Strin
         return Err(format!("issuer URL must use https:// (got `{trimmed}`)"));
     }
     let url = format!("{trimmed}/.well-known/openid-configuration");
+    // SSRF guard: `issuer_url` is attacker-influenced (any org owner sets
+    // it), so refuse to connect to private/loopback/link-local addresses —
+    // otherwise `https://169.254.169.254/…` (cloud metadata) or an internal
+    // service is reachable from the auth server. The guarded resolver runs
+    // on the discovery fetch AND any redirect hop, and after a DNS rebind
+    // (ureq connects to exactly the addresses it returns).
+    let agent = ureq::AgentBuilder::new()
+        .resolver(|netloc: &str| pylon_kernel::net_guard::resolve_guarded(netloc))
+        .build();
     // 5-second timeout — discovery is a blocking call on the config-
     // write path, and IdPs that take longer than that are misconfigured.
-    let body = ureq::get(&url)
+    let body = agent
+        .get(&url)
         .timeout(std::time::Duration::from_secs(5))
         .call()
         .map_err(|e| format!("discovery fetch failed: {e}"))?
