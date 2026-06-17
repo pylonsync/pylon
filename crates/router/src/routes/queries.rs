@@ -404,16 +404,30 @@ pub(crate) fn handle(
                 ));
             }
         };
-        // Gate every entity named in the graph against the read policy.
+        let manifest = ctx.store.manifest();
+
+        // Gate EVERY entity the graph can read: the named top-level
+        // entities AND, recursively, the target entity of every `include`
+        // relation. `query_graph` traverses relations to arbitrary target
+        // entities with no `AuthContext` of its own, so the per-row read
+        // policy can't run inside it — we authorize the whole shape here,
+        // up front. An `include` target whose read policy is row-dependent
+        // (or denies) for this caller can't be proven row-independently
+        // readable with `data: None`, so the request is denied — same
+        // posture as `/api/aggregate` + `/api/search` — rather than
+        // leaking the target's rows (the include-bypass class).
         if let Some(obj) = query.as_object() {
-            for entity_name in obj.keys() {
-                let check = ctx
-                    .policy_engine
-                    .check_entity_read(entity_name, ctx.auth_ctx, None);
+            let mut touched: Vec<String> = Vec::new();
+            for (entity_name, opts) in obj {
+                collect_graph_entities(entity_name, opts, manifest, &mut touched);
+            }
+            for entity_name in &touched {
                 if let pylon_policy::PolicyResult::Denied {
                     policy_name,
                     reason,
-                } = check
+                } = ctx
+                    .policy_engine
+                    .check_entity_read(entity_name, ctx.auth_ctx, None)
                 {
                     tracing::warn!(
                         "[policy] graph query on {entity_name} denied by \"{policy_name}\": {reason}"
@@ -422,14 +436,116 @@ pub(crate) fn handle(
                 }
             }
         }
-        return Some(match ctx.store.query_graph(&query) {
-            Ok(result) => (
-                200,
-                serde_json::to_string(&result).unwrap_or_else(|_| "{}".into()),
-            ),
-            Err(e) => (400, json_error(&e.code, &e.message)),
-        });
+
+        let mut result = match ctx.store.query_graph(&query) {
+            Ok(r) => r,
+            Err(e) => return Some((400, json_error(&e.code, &e.message))),
+        };
+        // Project every row for the wire BEFORE serialization — top-level
+        // rows AND `include`d relation rows. `query_graph` returns raw
+        // stored rows; without this, the User entity's `passwordHash` and
+        // any `serverOnly` column leak through the graph surface even
+        // though every other read path (`/api/query/:entity`, lookup,
+        // entities) projects.
+        project_graph_result(&mut result, &query, manifest, &manifest.auth.user);
+        return Some((
+            200,
+            serde_json::to_string(&result).unwrap_or_else(|_| "{}".into()),
+        ));
     }
 
     None
+}
+
+/// Collect every entity a graph query can read: the named entity plus,
+/// recursively, the target entity of each `include` relation. The route
+/// authorizes this whole set before dispatch because `query_graph`
+/// expands relations with no policy context of its own. Dedups so a
+/// shared target isn't checked twice.
+fn collect_graph_entities(
+    entity_name: &str,
+    opts: &serde_json::Value,
+    manifest: &pylon_kernel::AppManifest,
+    out: &mut Vec<String>,
+) {
+    if !out.iter().any(|e| e == entity_name) {
+        out.push(entity_name.to_string());
+    }
+    let Some(include) = opts.get("include").and_then(|v| v.as_object()) else {
+        return;
+    };
+    let Some(ent) = manifest.entities.iter().find(|e| e.name == entity_name) else {
+        return;
+    };
+    for (rel_name, sub_opts) in include {
+        if let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) {
+            collect_graph_entities(&rel.target, sub_opts, manifest, out);
+        }
+    }
+}
+
+/// Project every row in a graph-query result for the wire: strip
+/// `serverOnly` columns and User-entity secrets from the top-level rows
+/// AND from every `include`d relation's rows (each keyed by relation
+/// name and projected against the relation's *target* entity).
+fn project_graph_result(
+    result: &mut serde_json::Value,
+    query: &serde_json::Value,
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+) {
+    let Some(result_obj) = result.as_object_mut() else {
+        return;
+    };
+    for (entity_name, rows_val) in result_obj.iter_mut() {
+        let include_map = query
+            .get(entity_name)
+            .and_then(|q| q.get("include"))
+            .and_then(|v| v.as_object());
+        let ent = manifest.entities.iter().find(|e| e.name == *entity_name);
+        let Some(rows) = rows_val.as_array_mut() else {
+            continue;
+        };
+        for row in rows.iter_mut() {
+            // Project the nested relation rows FIRST (against their target
+            // entity), then the parent row. The nested values are plain
+            // extra object keys, so a non-User parent projection preserves
+            // them; doing nested-first guarantees the target entity's
+            // `serverOnly`/secret fields are stripped regardless of order.
+            if let (Some(include_map), Some(ent)) = (include_map, ent) {
+                for rel_name in include_map.keys() {
+                    if let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) {
+                        if let Some(slot) = row.get_mut(rel_name) {
+                            project_related_in_place(slot, manifest, auth_user, &rel.target);
+                        }
+                    }
+                }
+            }
+            let taken = std::mem::replace(row, serde_json::Value::Null);
+            *row = crate::project_row_for_wire(manifest, auth_user, entity_name, taken);
+        }
+    }
+}
+
+/// Project an `include`d relation slot in place — either a single object
+/// (to-one) or an array of objects (to-many) — against `target` entity.
+fn project_related_in_place(
+    slot: &mut serde_json::Value,
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    target: &str,
+) {
+    match slot {
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                let taken = std::mem::replace(item, serde_json::Value::Null);
+                *item = crate::project_row_for_wire(manifest, auth_user, target, taken);
+            }
+        }
+        serde_json::Value::Object(_) => {
+            let taken = std::mem::replace(slot, serde_json::Value::Null);
+            *slot = crate::project_row_for_wire(manifest, auth_user, target, taken);
+        }
+        _ => {}
+    }
 }

@@ -2429,7 +2429,23 @@ pub(crate) fn require_gdpr_tenant_scope(
 /// /api/auth/email/send-verification. Adds one extra DB read per
 /// gated request — the user lookup. Acceptable: this is opt-in.
 fn email_verification_gate(ctx: &RouterContext, url: &str) -> Option<(u16, String)> {
-    if std::env::var("PYLON_REQUIRE_EMAIL_VERIFICATION").as_deref() != Ok("1") {
+    let required = std::env::var("PYLON_REQUIRE_EMAIL_VERIFICATION").as_deref() == Ok("1");
+    email_verification_gate_inner(ctx, url, required)
+}
+
+/// Pure gate logic, with the "is verification required" decision passed
+/// in. Split out from [`email_verification_gate`] so tests inject the
+/// flag directly instead of mutating the process-global
+/// `PYLON_REQUIRE_EMAIL_VERIFICATION` env var — a `set_var` in one test
+/// raced every concurrent `route()` call in the binary (any
+/// authenticated-unverified caller would spuriously 403), making the
+/// whole suite flaky. Production reads the env once, here.
+fn email_verification_gate_inner(
+    ctx: &RouterContext,
+    url: &str,
+    required: bool,
+) -> Option<(u16, String)> {
+    if !required {
         return None;
     }
     // Anonymous + admin contexts: nothing to verify.
@@ -3465,49 +3481,50 @@ mod auth_gate_tests {
         let admin = AuthContext::admin();
         let anon = AuthContext::anonymous();
 
-        // env unset: gate never fires
-        std::env::remove_var("PYLON_REQUIRE_EMAIL_VERIFICATION");
+        // Inject the "required" flag directly via the _inner gate — never
+        // touch the process-global PYLON_REQUIRE_EMAIL_VERIFICATION env
+        // var, which would race every concurrent route() in the binary.
+
+        // not required: gate never fires
         with_ctx(true, &user, |ctx| {
-            assert!(email_verification_gate(ctx, "/api/fn").is_none());
+            assert!(email_verification_gate_inner(ctx, "/api/fn", false).is_none());
         });
 
-        // env set, unverified user, non-auth route: blocked
-        std::env::set_var("PYLON_REQUIRE_EMAIL_VERIFICATION", "1");
+        // required, unverified user, non-auth route: blocked
         with_ctx(true, &user, |ctx| {
-            let r = email_verification_gate(ctx, "/api/fn");
+            let r = email_verification_gate_inner(ctx, "/api/fn", true);
             assert!(r.is_some(), "gate must trigger for unverified user");
             let (status, body) = r.unwrap();
             assert_eq!(status, 403);
             assert!(body.contains("EMAIL_NOT_VERIFIED"));
         });
 
-        // env set, unverified user, /api/auth/me: bypassed
+        // required, unverified user, /api/auth/me: bypassed
         with_ctx(true, &user, |ctx| {
             assert!(
-                email_verification_gate(ctx, "/api/auth/me").is_none(),
+                email_verification_gate_inner(ctx, "/api/auth/me", true).is_none(),
                 "/api/auth/me must bypass"
             );
             assert!(
-                email_verification_gate(ctx, "/api/auth/email/send-verification").is_none(),
+                email_verification_gate_inner(ctx, "/api/auth/email/send-verification", true)
+                    .is_none(),
                 "/api/auth/email/send-verification must bypass"
             );
             assert!(
-                email_verification_gate(ctx, "/api/manifest").is_none(),
+                email_verification_gate_inner(ctx, "/api/manifest", true).is_none(),
                 "/api/manifest must bypass (chrome needs it to render)"
             );
         });
 
-        // env set, admin: bypassed
+        // required, admin: bypassed
         with_ctx(true, &admin, |ctx| {
-            assert!(email_verification_gate(ctx, "/api/fn").is_none());
+            assert!(email_verification_gate_inner(ctx, "/api/fn", true).is_none());
         });
 
-        // env set, anonymous: bypassed (nothing to verify)
+        // required, anonymous: bypassed (nothing to verify)
         with_ctx(true, &anon, |ctx| {
-            assert!(email_verification_gate(ctx, "/api/fn").is_none());
+            assert!(email_verification_gate_inner(ctx, "/api/fn", true).is_none());
         });
-
-        std::env::remove_var("PYLON_REQUIRE_EMAIL_VERIFICATION");
     }
 
     #[test]
@@ -4714,6 +4731,354 @@ mod auth_gate_tests {
             "another owner's row MUST be filtered out (cross-tenant list leak); got {ids:?}"
         );
         assert_eq!(data.len(), 1, "only the caller's row should be returned");
+    }
+
+    // -----------------------------------------------------------------------
+    // POST /api/query (graph) read-policy + projection regression.
+    //
+    // The graph route used to authorize ONLY the top-level entity keys and
+    // return `query_graph`'s output raw — so `include`-ing a relation to a
+    // restricted entity (e.g. `Post.author -> User`) skipped that target's
+    // read policy AND its wire projection, leaking `passwordHash` /
+    // `serverOnly` columns cross-tenant to any caller. These two tests pin
+    // both halves of the fix: the recursive include-target gate, and the
+    // nested + top-level projection.
+    // -----------------------------------------------------------------------
+
+    /// A store whose graph query returns a public `Post` with an embedded
+    /// `author` (a `User` row carrying `passwordHash`) plus a `serverOnly`
+    /// `secret` column on the post itself.
+    struct GraphLeakStore {
+        manifest: pylon_kernel::AppManifest,
+    }
+    impl pylon_http::DataStore for GraphLeakStore {
+        fn manifest(&self) -> &pylon_kernel::AppManifest {
+            &self.manifest
+        }
+        fn insert(
+            &self,
+            _e: &str,
+            _d: &serde_json::Value,
+        ) -> Result<String, pylon_http::DataError> {
+            Ok("id".into())
+        }
+        fn get_by_id(
+            &self,
+            _e: &str,
+            _i: &str,
+        ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+            Ok(None)
+        }
+        fn list(&self, _e: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+            Ok(Vec::new())
+        }
+        fn list_after(
+            &self,
+            _e: &str,
+            _a: Option<&str>,
+            _l: usize,
+        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+            Ok(Vec::new())
+        }
+        fn update(
+            &self,
+            _e: &str,
+            _i: &str,
+            _d: &serde_json::Value,
+        ) -> Result<bool, pylon_http::DataError> {
+            Ok(true)
+        }
+        fn delete(&self, _e: &str, _i: &str) -> Result<bool, pylon_http::DataError> {
+            Ok(true)
+        }
+        fn lookup(
+            &self,
+            _e: &str,
+            _f: &str,
+            _v: &str,
+        ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+            Ok(None)
+        }
+        fn link(
+            &self,
+            _e: &str,
+            _i: &str,
+            _r: &str,
+            _t: &str,
+        ) -> Result<bool, pylon_http::DataError> {
+            Ok(true)
+        }
+        fn unlink(&self, _e: &str, _i: &str, _r: &str) -> Result<bool, pylon_http::DataError> {
+            Ok(true)
+        }
+        fn query_filtered(
+            &self,
+            _e: &str,
+            _f: &serde_json::Value,
+        ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+            Ok(Vec::new())
+        }
+        fn query_graph(
+            &self,
+            _q: &serde_json::Value,
+        ) -> Result<serde_json::Value, pylon_http::DataError> {
+            // Raw stored rows, exactly as query_graph assembles them:
+            // the `secret` (serverOnly) column and the embedded `author`
+            // User row with `passwordHash` are present and MUST be
+            // stripped by the route before it serializes.
+            Ok(serde_json::json!({
+                "Post": [{
+                    "id": "p1",
+                    "authorId": "u-2",
+                    "secret": "TOP_SECRET_SERVERONLY",
+                    "author": {
+                        "id": "u-2",
+                        "email": "victim@example.com",
+                        "passwordHash": "HASHED_PASSWORD_LEAK"
+                    }
+                }]
+            }))
+        }
+        fn transact(
+            &self,
+            _o: &[serde_json::Value],
+        ) -> Result<(bool, Vec<serde_json::Value>), pylon_http::DataError> {
+            Ok((true, Vec::new()))
+        }
+    }
+
+    /// Build a Post(+serverOnly secret, author->User relation) / User
+    /// manifest with the given read policies.
+    fn graph_leak_manifest(post_read: &str, user_read: &str) -> pylon_kernel::AppManifest {
+        use pylon_kernel::{
+            AppManifest, ManifestEntity, ManifestField, ManifestPolicy, ManifestRelation,
+            MANIFEST_VERSION,
+        };
+        let post = ManifestEntity {
+            name: "Post".into(),
+            fields: vec![
+                ManifestField {
+                    name: "id".into(),
+                    field_type: "string".into(),
+                    ..Default::default()
+                },
+                ManifestField {
+                    name: "authorId".into(),
+                    field_type: "string".into(),
+                    ..Default::default()
+                },
+                ManifestField {
+                    name: "secret".into(),
+                    field_type: "string".into(),
+                    server_only: true,
+                    ..Default::default()
+                },
+            ],
+            relations: vec![ManifestRelation {
+                name: "author".into(),
+                target: "User".into(),
+                field: "authorId".into(),
+                many: false,
+            }],
+            ..Default::default()
+        };
+        let user = ManifestEntity {
+            name: "User".into(),
+            fields: vec![
+                ManifestField {
+                    name: "id".into(),
+                    field_type: "string".into(),
+                    ..Default::default()
+                },
+                ManifestField {
+                    name: "email".into(),
+                    field_type: "string".into(),
+                    ..Default::default()
+                },
+                ManifestField {
+                    name: "passwordHash".into(),
+                    field_type: "string".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![post, user],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![
+                ManifestPolicy {
+                    name: "postRead".into(),
+                    entity: Some("Post".into()),
+                    allow_read: Some(post_read.into()),
+                    ..Default::default()
+                },
+                ManifestPolicy {
+                    name: "userRead".into(),
+                    entity: Some("User".into()),
+                    allow_read: Some(user_read.into()),
+                    ..Default::default()
+                },
+            ],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        }
+    }
+
+    /// Run `route()` against a freshly-built RouterContext wrapping `store`
+    /// with `manifest` + `auth`. Centralizes the (verbose) stub-service
+    /// wiring so the graph tests stay focused on the assertion.
+    fn run_route_with(
+        manifest: &pylon_kernel::AppManifest,
+        store: &dyn pylon_http::DataStore,
+        auth: &AuthContext,
+        method: HttpMethod,
+        url: &str,
+        body: &str,
+    ) -> (u16, String) {
+        let session_store = SessionStore::new();
+        let magic_codes = MagicCodeStore::new();
+        let oauth_state = OAuthStateStore::new();
+        let account_store = pylon_auth::AccountStore::new();
+        let api_keys = pylon_auth::api_key::ApiKeyStore::new();
+        let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
+            std::sync::Arc::new(StubDataStore {
+                manifest: manifest.clone(),
+            });
+        let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
+        let siwe = pylon_auth::siwe::NonceStore::new();
+        let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
+        let passkeys = pylon_auth::webauthn::PasskeyStore::new();
+        let verification = pylon_auth::verification::VerificationStore::new();
+        let audit = pylon_auth::audit::AuditStore::new();
+        let trusted_devices = pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new();
+        let org_sso = pylon_auth::org_sso::InMemoryOrgSsoStore::new();
+        let saml = pylon_auth::saml::InMemorySamlStore::new();
+        let policy_engine = PolicyEngine::from_manifest(manifest);
+        let change_log = ChangeLog::new();
+        let notifier = NoopNotifier;
+        let rooms = StubRooms;
+        let cache = StubCache;
+        let pubsub = StubPubSub;
+        let jobs = StubJobs;
+        let scheduler = StubScheduler;
+        let workflows = StubWorkflows;
+        let files = StubFiles;
+        let openapi = StubOpenApi;
+        let email = StubEmail;
+        let cookie_config = CookieConfig::from_env(&CookieConfig::default_name_for("test"));
+        let ctx = RouterContext {
+            store,
+            session_store: &session_store,
+            magic_codes: &magic_codes,
+            oauth_state: &oauth_state,
+            account_store: &account_store,
+            api_keys: &api_keys,
+            orgs: &orgs,
+            siwe: &*siwe,
+            phone_codes: &phone_codes,
+            passkeys: &passkeys,
+            verification: &verification,
+            audit: &audit,
+            trusted_devices: &trusted_devices,
+            org_sso: &org_sso,
+            saml: &saml,
+            trusted_origins: &[],
+            policy_engine: &policy_engine,
+            change_log: &change_log,
+            notifier: &notifier,
+            rooms: &rooms,
+            cache: &cache,
+            pubsub: &pubsub,
+            jobs: &jobs,
+            scheduler: &scheduler,
+            workflows: &workflows,
+            files: &files,
+            openapi: &openapi,
+            functions: None,
+            email: &email,
+            shards: None,
+            plugin_hooks: &NoopPluginHooks,
+            auth_ctx: auth,
+            is_dev: false,
+            request_headers: &[],
+            peer_ip: "127.0.0.1",
+            cookie_config: &cookie_config,
+            response_headers: RefCell::new(Vec::new()),
+        };
+        let (status, body, _ct) = route(&ctx, method, url, body, None);
+        (status, body)
+    }
+
+    #[test]
+    fn graph_query_include_denies_unreadable_target() {
+        // Post is world-readable; User is not readable by this caller.
+        // include-ing `author` (-> User) must deny the WHOLE request, not
+        // leak the User rows. (Anonymous caller; "false" is an
+        // unambiguous deny — a real `auth.userId == data.id` policy
+        // likewise denies under the gate's `data: None` probe.)
+        let manifest = graph_leak_manifest("true", "false");
+        let store = GraphLeakStore {
+            manifest: manifest.clone(),
+        };
+        let anon = AuthContext::anonymous();
+        let (status, body) = run_route_with(
+            &manifest,
+            &store,
+            &anon,
+            HttpMethod::Post,
+            "/api/query",
+            r#"{"Post":{"include":{"author":{}}}}"#,
+        );
+        assert_eq!(
+            status, 403,
+            "include of an unreadable relation target must 403, got {status}: {body}"
+        );
+        assert!(
+            !body.contains("HASHED_PASSWORD_LEAK") && !body.contains("victim@example.com"),
+            "denied response must not leak the target rows; body: {body}"
+        );
+    }
+
+    #[test]
+    fn graph_query_projects_serveronly_and_user_secrets() {
+        // Both Post and User are world-readable (e.g. public profile +
+        // public posts). The response MUST still strip the serverOnly
+        // `secret` column and the User `passwordHash` — from the nested
+        // `author` AND the top-level Post row.
+        let manifest = graph_leak_manifest("true", "true");
+        let store = GraphLeakStore {
+            manifest: manifest.clone(),
+        };
+        let user = AuthContext::authenticated("u-1".into());
+        let (status, body) = run_route_with(
+            &manifest,
+            &store,
+            &user,
+            HttpMethod::Post,
+            "/api/query",
+            r#"{"Post":{"include":{"author":{}}}}"#,
+        );
+        assert_eq!(status, 200, "readable graph query should 200, got: {body}");
+        assert!(
+            !body.contains("passwordHash") && !body.contains("HASHED_PASSWORD_LEAK"),
+            "nested include MUST strip User passwordHash; body: {body}"
+        );
+        assert!(
+            !body.contains("TOP_SECRET_SERVERONLY") && !body.contains("\"secret\""),
+            "top-level row MUST strip serverOnly `secret`; body: {body}"
+        );
+        // Non-secret fields survive the projection.
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let author = &parsed["Post"][0]["author"];
+        assert_eq!(author["email"], "victim@example.com", "email must survive");
+        assert_eq!(author["id"], "u-2", "id must survive");
     }
 
     /// One-shot audit of every admin-required GET route. Every entry
