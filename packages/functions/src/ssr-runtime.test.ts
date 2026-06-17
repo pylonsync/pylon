@@ -11,6 +11,7 @@ import {
   buildHydrationTail,
   errorDigest,
   resolveOrigin,
+  isSafeRedirect,
   asRouteControl,
   PylonRouteControl,
 } from "./ssr-runtime";
@@ -429,5 +430,44 @@ describe("asRouteControl — route-control normalization (redirect/notFound)", (
     expect(asRouteControl(null)).toBeNull();
     expect(asRouteControl(undefined)).toBeNull();
     expect(asRouteControl("PYLON_NOT_FOUND")).toBeNull(); // a bare string, not an error
+  });
+});
+
+describe("isSafeRedirect — open-redirect guard for response.redirect()", () => {
+  const trusted = {
+    publicUrl: "https://app.example.com",
+    trustedHostsCsv: "checkout.stripe.com, other.example.com",
+  };
+
+  test("allows same-site relative paths", () => {
+    expect(isSafeRedirect("/", trusted)).toBe(true);
+    expect(isSafeRedirect("/dashboard", trusted)).toBe(true);
+    expect(isSafeRedirect("/a/b?x=1#h", trusted)).toBe(true);
+    // %2F in a path stays a path segment (browsers don't change origin on it).
+    expect(isSafeRedirect("/%2F%2Fevil.com", trusted)).toBe(true);
+  });
+
+  test("rejects the classic open-redirect vectors", () => {
+    expect(isSafeRedirect("//evil.com", trusted)).toBe(false); // protocol-relative
+    expect(isSafeRedirect("/\\evil.com", trusted)).toBe(false); // backslash trick
+    expect(isSafeRedirect("\\/evil.com", trusted)).toBe(false);
+    expect(isSafeRedirect("https://evil.com", trusted)).toBe(false); // other origin
+    expect(isSafeRedirect("https://evil.com/path", trusted)).toBe(false);
+    expect(isSafeRedirect("javascript:alert(1)", trusted)).toBe(false);
+    expect(isSafeRedirect("data:text/html,x", trusted)).toBe(false);
+    expect(isSafeRedirect("dashboard", trusted)).toBe(false); // bare-relative → reject
+  });
+
+  test("allows absolute URLs to a trusted host (public origin / PYLON_TRUSTED_HOSTS / loopback)", () => {
+    expect(isSafeRedirect("https://app.example.com/next", trusted)).toBe(true);
+    expect(isSafeRedirect("https://checkout.stripe.com/pay/abc", trusted)).toBe(true);
+    expect(isSafeRedirect("http://localhost:3000/x", trusted)).toBe(true);
+    expect(isSafeRedirect("http://127.0.0.1/x", trusted)).toBe(true);
+  });
+
+  test("with no trusted config, only relative paths + loopback are allowed", () => {
+    expect(isSafeRedirect("/ok", {})).toBe(true);
+    expect(isSafeRedirect("http://localhost/x", {})).toBe(true);
+    expect(isSafeRedirect("https://app.example.com/x", {})).toBe(false);
   });
 });

@@ -264,6 +264,24 @@ export function makeResponseController(
       if (!Number.isInteger(status) || status < 300 || status > 399) {
         throw new Error(`pylon ssr: redirect() status must be 3xx, got ${status}`);
       }
+      // SECURITY: refuse open redirects. A relative path or a trusted-host
+      // absolute is fine; anything else (//evil.com, https://evil.com,
+      // javascript:, …) throws — surfaced as a render error, never a silent
+      // off-site redirect from `redirect(request-derived-url)`.
+      const env = (globalThis as any).process?.env ?? {};
+      if (
+        !isSafeRedirect(url, {
+          publicUrl: env.PYLON_PUBLIC_URL,
+          canonicalHost: env.PYLON_CANONICAL_HOST,
+          trustedHostsCsv: env.PYLON_TRUSTED_HOSTS,
+        })
+      ) {
+        throw new Error(
+          `pylon ssr: redirect() refused an untrusted target ${JSON.stringify(url)} — ` +
+            `use a same-site path (e.g. "/dashboard") or add the host to ` +
+            `PYLON_TRUSTED_HOSTS. (Refusing to emit an open redirect.)`,
+        );
+      }
       const e = new PylonRouteControl("redirect");
       e.url = url;
       e.redirectStatus = status;
@@ -698,6 +716,47 @@ function resolveRequestOrigin(headers: Record<string, string> | undefined): stri
     canonicalHost: env.PYLON_CANONICAL_HOST,
     trustedHostsCsv: env.PYLON_TRUSTED_HOSTS,
   });
+}
+
+/** SECURITY: validate a `response.redirect()` target to prevent OPEN REDIRECTS.
+ *  Mirrors the OAuth-layer `validate_trusted_redirect` (crates/auth). A relative
+ *  same-site path is always allowed; an absolute URL only when it's http(s) to a
+ *  trusted host — the app's public/canonical origin, a `PYLON_TRUSTED_HOSTS`
+ *  entry, or loopback. Everything else is rejected: protocol-relative
+ *  `//evil.com`, backslash tricks (`/\evil.com` — browsers normalize `\`→`/`),
+ *  other-origin absolutes, and `javascript:`/`data:` schemes. So the natural
+ *  `response.redirect(searchParams.get("next"))` can't be turned into an
+ *  off-site redirect by attacker-supplied input. Exported for tests. */
+export function isSafeRedirect(
+  url: string,
+  opts: { publicUrl?: string; canonicalHost?: string; trustedHostsCsv?: string },
+): boolean {
+  // Relative same-site path: exactly one leading slash. Reject protocol-
+  // relative (`//host`) and backslash variants that resolve cross-origin.
+  if (url.startsWith("/")) {
+    return url.length < 2 || (url[1] !== "/" && url[1] !== "\\");
+  }
+  if (url.startsWith("\\")) return false; // `\\host` / `\/host`
+  // Absolute: only http(s) to a trusted host. A bare-relative ("dashboard"),
+  // opaque, or unparseable target throws here → rejected (fail closed).
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  const host = parsed.host.toLowerCase();
+  if (LOOPBACK_HOST.test(host)) return true;
+  const allow = new Set<string>();
+  const add = (v: string) => {
+    const h = hostOf(v);
+    if (h) allow.add(h);
+  };
+  add(opts.publicUrl || "");
+  add(opts.canonicalHost || "");
+  for (const x of (opts.trustedHostsCsv || "").split(",")) add(x);
+  return allow.has(host);
 }
 
 /** Merge auto-discovered social-card images into a page's metadata. An
