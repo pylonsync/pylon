@@ -1,8 +1,9 @@
 //! [`DataStore`] implementation backed by Postgres.
 //!
-//! Only available with the `postgres-live` feature. Wraps
-//! [`LivePostgresAdapter`] behind a mutex to match the synchronous
-//! `DataStore` trait contract.
+//! Only available with the `postgres-live` feature. Holds a pool of
+//! [`LivePostgresAdapter`] connections and checks one out per operation,
+//! so concurrent reads (and writes against distinct rows) run in parallel
+//! instead of serializing behind a single connection.
 //!
 //! SQL dialect differences from SQLite:
 //! - Parameters use `$1, $2, ...` instead of `?1, ?2, ...`
@@ -15,31 +16,94 @@
 
 #![cfg(feature = "postgres-live")]
 
-use std::sync::Mutex;
+use std::time::Duration;
 
 use pylon_http::{DataError, DataStore};
 use pylon_kernel::AppManifest;
 
 use crate::pg_tx_store;
+use crate::pool::{ConnectionPool, PooledConnection};
 use crate::postgres::live::LivePostgresAdapter;
 
-/// Wrapper that implements `DataStore` around `LivePostgresAdapter`.
+/// Number of pooled connections when `PYLON_PG_POOL_SIZE` is unset.
+const DEFAULT_POOL_SIZE: usize = 8;
+/// How long `checkout` waits for a free connection before returning a
+/// `PG_POOL_TIMEOUT` error, when `PYLON_PG_CHECKOUT_TIMEOUT_MS` is unset.
+const DEFAULT_CHECKOUT_TIMEOUT_MS: u64 = 10_000;
+
+/// Wrapper that implements `DataStore` around a pool of
+/// `LivePostgresAdapter` connections.
 ///
-/// Writes go through a mutex to align with the sync trait. This matches
-/// SQLite's single-writer model. For true concurrent writes under Postgres,
-/// a future enhancement can use a connection pool.
+/// Each `DataStore` read checks out its own connection, so N reads run on
+/// N connections concurrently. Transactions (`with_transaction*`, `transact`)
+/// pin ONE connection for the closure body — different transactions take
+/// different connections, so they no longer serialize behind a global lock;
+/// Postgres' own row locking arbitrates conflicts. Pool size is governed by
+/// `PYLON_PG_POOL_SIZE` (default 8).
 pub struct PostgresDataStore {
-    inner: Mutex<LivePostgresAdapter>,
+    pool: ConnectionPool<LivePostgresAdapter>,
+    /// Held so `checkout` can reconnect a dropped slot in place.
+    url: String,
+    /// How long a checkout blocks before timing out.
+    checkout_timeout: Duration,
     manifest: AppManifest,
 }
 
 impl PostgresDataStore {
     pub fn connect(url: &str, manifest: AppManifest) -> Result<Self, DataError> {
-        let adapter = LivePostgresAdapter::connect(url).map_err(Self::map_err)?;
+        let size = pool_size_from_env();
+        let pool = ConnectionPool::new(size);
+
+        // The first connection must succeed — a dead database should fail
+        // boot loudly, exactly like the old single-connection path did.
+        let first = LivePostgresAdapter::connect(url).map_err(Self::map_err)?;
+        pool.add(first);
+
+        // Open the remaining connections eagerly. A later failure is
+        // non-fatal: the pool runs with fewer connections (still correct,
+        // just less parallel) and `checkout` heals slots over time. We keep
+        // going rather than `break` so one transient failure doesn't cap the
+        // pool below what the database can actually serve.
+        for i in 1..size {
+            match LivePostgresAdapter::connect(url) {
+                Ok(conn) => pool.add(conn),
+                Err(e) => {
+                    eprintln!(
+                        "[pylon] PG pool: connection {}/{} failed to open ({}); \
+                         starting with fewer",
+                        i + 1,
+                        size,
+                        e.message
+                    );
+                }
+            }
+        }
+
         Ok(Self {
-            inner: Mutex::new(adapter),
+            pool,
+            url: url.to_string(),
+            checkout_timeout: checkout_timeout_from_env(),
             manifest,
         })
+    }
+
+    /// Acquire a live connection from the pool, blocking up to
+    /// `checkout_timeout`. If the slot we get is known-dead (server restart,
+    /// idle timeout), reconnect it in place so the caller always receives a
+    /// usable client and the slot stays in rotation — a dropped connection
+    /// heals on next use instead of permanently shrinking the pool.
+    fn checkout(&self) -> Result<PooledConnection<'_, LivePostgresAdapter>, DataError> {
+        let mut conn = self
+            .pool
+            .get(self.checkout_timeout)
+            .map_err(|e| DataError {
+                code: "PG_POOL_TIMEOUT".into(),
+                message: e.to_string(),
+            })?;
+        if conn.is_closed() {
+            *conn = LivePostgresAdapter::connect(&self.url).map_err(Self::map_err)?;
+        }
+        Ok(conn)
     }
 
     fn map_err(e: crate::StorageError) -> DataError {
@@ -49,40 +113,20 @@ impl PostgresDataStore {
         }
     }
 
-    /// Run `body` inside a real Postgres transaction. The closure
-    /// receives a `&dyn DataStore` that routes every read/write
-    /// through the transaction's connection — reads see uncommitted
-    /// writes from earlier in the same closure, just like SQLite's
-    /// in-handler behavior.
-    ///
-    /// Commit on `Ok`, rollback on `Err`. Errors from the transaction
-    /// infrastructure itself (mutex poisoning, BEGIN failure, COMMIT
-    /// failure) propagate as `E::from(DataError)`.
-    ///
-    /// Used by `pylon-runtime` to wire TS-function `Mutation`
-    /// handlers through PG transactions — the SQLite path uses
-    /// BEGIN/COMMIT on a held connection; this is the equivalent.
-    /// The mutex is held for the entire closure body, so concurrent
-    /// PG mutations serialize. Acceptable given mutation handlers
-    /// are usually fast and pylon's PG sessions are single-shard.
-    /// Borrow the underlying postgres client for the duration of the
-    /// closure. Used for one-shot bootstrap work (e.g. creating the
-    /// CRDT sidecar table on runtime open) that doesn't need an
-    /// explicit transaction. Held connection mutex prevents concurrent
-    /// PG ops from racing — same single-writer model as every other
-    /// CRUD path here.
+    /// Borrow one pooled postgres client for the duration of the closure.
+    /// Used for one-shot bootstrap work (e.g. creating the CRDT sidecar
+    /// table on runtime open) that doesn't need an explicit transaction.
+    /// The connection is checked out for the closure body and returned to
+    /// the pool on return, so other operations keep running on the other
+    /// connections. Errors acquiring a connection (checkout timeout)
+    /// propagate as `E::from(DataError)`.
     pub fn with_client<F, T, E>(&self, body: F) -> Result<T, E>
     where
         F: FnOnce(&mut postgres::Client) -> Result<T, E>,
         E: From<DataError>,
     {
-        let mut guard = self.inner.lock().map_err(|_| {
-            E::from(DataError {
-                code: "LOCK_POISONED".into(),
-                message: "connection mutex poisoned".into(),
-            })
-        })?;
-        body(guard.client_mut())
+        let mut conn = self.checkout().map_err(E::from)?;
+        body(conn.client_mut())
     }
 
     /// Run `body` inside a real Postgres transaction, exposing the
@@ -95,29 +139,24 @@ impl PostgresDataStore {
     /// from the materialized columns.
     ///
     /// Commits on `Ok`, rolls back (via Drop) on `Err`. Errors from
-    /// the transaction infrastructure itself (lock poisoning, BEGIN,
+    /// the transaction infrastructure itself (checkout timeout, BEGIN,
     /// COMMIT) propagate as `E::from(DataError)`.
     ///
-    /// **Do not nest.** This holds the inner connection mutex for
-    /// the whole closure. Calling `with_transaction`, `with_client`,
-    /// or another `with_transaction_raw` from inside the closure (or
-    /// from any code that runs while `body` is on the stack) will
-    /// deadlock — `std::sync::Mutex` is not re-entrant. The runtime
-    /// path enforces this by structure: the closures only call free
-    /// functions in `pg_tx_store` and `pg_search` that take the
-    /// `&mut Transaction` directly.
+    /// **Don't re-enter the store from inside the closure.** This pins
+    /// one pooled connection for the whole closure; calling back into
+    /// `with_transaction`/`with_client`/`transact` from `body` checks out
+    /// a SECOND connection, and deep nesting can exhaust the pool (a
+    /// checkout then blocks up to the timeout). The runtime path enforces
+    /// this by structure: the closures only call free functions in
+    /// `pg_tx_store` and `pg_search` that take the `&mut Transaction`
+    /// directly.
     pub fn with_transaction_raw<F, T, E>(&self, body: F) -> Result<T, E>
     where
         F: FnOnce(&mut postgres::Transaction<'_>) -> Result<T, E>,
         E: From<DataError>,
     {
-        let mut guard = self.inner.lock().map_err(|_| {
-            E::from(DataError {
-                code: "LOCK_POISONED".into(),
-                message: "connection mutex poisoned".into(),
-            })
-        })?;
-        let mut tx = guard.client_mut().transaction().map_err(|e| {
+        let mut conn = self.checkout().map_err(E::from)?;
+        let mut tx = conn.client_mut().transaction().map_err(|e| {
             E::from(DataError {
                 code: "PG_BEGIN_FAILED".into(),
                 message: format!("BEGIN failed: {e}"),
@@ -143,20 +182,20 @@ impl PostgresDataStore {
     }
 
     /// Run a search query against an entity's PG-side FTS shadow
-    /// (`_fts_<entity>`). Held connection is locked for the duration
-    /// of the three round-trips (hits / total / facet counts) — same
-    /// serialization model as every other read here.
+    /// (`_fts_<entity>`). Checks out one connection for the three
+    /// round-trips (hits / total / facet counts); concurrent searches run
+    /// on the other pooled connections.
     pub fn run_search(
         &self,
         entity: &str,
         config: &crate::search::SearchConfig,
         query: &crate::search::SearchQuery,
     ) -> Result<crate::search::SearchResult, crate::StorageError> {
-        let mut guard = self.inner.lock().map_err(|_| crate::StorageError {
-            code: "LOCK_POISONED".into(),
-            message: "connection mutex poisoned".into(),
+        let mut conn = self.checkout().map_err(|e| crate::StorageError {
+            code: e.code,
+            message: e.message,
         })?;
-        crate::pg_search::run_search(guard.client_mut(), entity, config, query)
+        crate::pg_search::run_search(conn.client_mut(), entity, config, query)
     }
 
     pub fn with_transaction<F, T, E>(&self, body: F) -> Result<T, E>
@@ -195,13 +234,8 @@ impl PostgresDataStore {
         F: FnOnce(&dyn DataStore) -> Result<T, E>,
         E: From<DataError>,
     {
-        let mut guard = self.inner.lock().map_err(|_| {
-            E::from(DataError {
-                code: "LOCK_POISONED".into(),
-                message: "connection mutex poisoned".into(),
-            })
-        })?;
-        let tx = guard.client_mut().transaction().map_err(|e| {
+        let mut conn = self.checkout().map_err(E::from)?;
+        let tx = conn.client_mut().transaction().map_err(|e| {
             E::from(DataError {
                 code: "PG_BEGIN_FAILED".into(),
                 message: format!("BEGIN failed: {e}"),
@@ -244,19 +278,13 @@ impl DataStore for PostgresDataStore {
     }
 
     fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
-        let mut guard = self.inner.lock().map_err(|_| DataError {
-            code: "LOCK_POISONED".into(),
-            message: "connection mutex poisoned".into(),
-        })?;
-        guard.get_by_id(entity, id).map_err(Self::map_err)
+        let mut conn = self.checkout()?;
+        conn.get_by_id(entity, id).map_err(Self::map_err)
     }
 
     fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
-        let mut guard = self.inner.lock().map_err(|_| DataError {
-            code: "LOCK_POISONED".into(),
-            message: "connection mutex poisoned".into(),
-        })?;
-        guard.list(entity).map_err(Self::map_err)
+        let mut conn = self.checkout()?;
+        conn.list(entity).map_err(Self::map_err)
     }
 
     fn list_after(
@@ -265,13 +293,8 @@ impl DataStore for PostgresDataStore {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, DataError> {
-        let mut guard = self.inner.lock().map_err(|_| DataError {
-            code: "LOCK_POISONED".into(),
-            message: "connection mutex poisoned".into(),
-        })?;
-        guard
-            .list_after(entity, after, limit)
-            .map_err(Self::map_err)
+        let mut conn = self.checkout()?;
+        conn.list_after(entity, after, limit).map_err(Self::map_err)
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
@@ -312,12 +335,8 @@ impl DataStore for PostgresDataStore {
             });
         }
 
-        let mut guard = self.inner.lock().map_err(|_| DataError {
-            code: "LOCK_POISONED".into(),
-            message: "connection mutex poisoned".into(),
-        })?;
-        guard
-            .lookup_field(entity, field, value)
+        let mut conn = self.checkout()?;
+        conn.lookup_field(entity, field, value)
             .map_err(Self::map_err)
     }
 
@@ -387,12 +406,8 @@ impl DataStore for PostgresDataStore {
             })?;
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
 
-        let mut guard = self.inner.lock().map_err(|_| DataError {
-            code: "LOCK_POISONED".into(),
-            message: "connection mutex poisoned".into(),
-        })?;
-        guard
-            .aggregate(entity, spec, &columns)
+        let mut conn = self.checkout()?;
+        conn.aggregate(entity, spec, &columns)
             .map_err(Self::map_err)
     }
 
@@ -412,12 +427,8 @@ impl DataStore for PostgresDataStore {
             })?;
         let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
 
-        let mut guard = self.inner.lock().map_err(|_| DataError {
-            code: "LOCK_POISONED".into(),
-            message: "connection mutex poisoned".into(),
-        })?;
-        guard
-            .query_filtered(entity, filter, &columns)
+        let mut conn = self.checkout()?;
+        conn.query_filtered(entity, filter, &columns)
             .map_err(Self::map_err)
     }
 
@@ -596,5 +607,89 @@ impl DataStore for PostgresDataStore {
             }
             Ok((true, json_results))
         })
+    }
+}
+
+/// Pool size from `PYLON_PG_POOL_SIZE`, clamped to at least 1 (the pool
+/// rejects a zero capacity). Falls back to [`DEFAULT_POOL_SIZE`].
+fn pool_size_from_env() -> usize {
+    parse_pool_size(std::env::var("PYLON_PG_POOL_SIZE").ok().as_deref())
+}
+
+/// Checkout timeout from `PYLON_PG_CHECKOUT_TIMEOUT_MS` (must be > 0).
+/// Falls back to [`DEFAULT_CHECKOUT_TIMEOUT_MS`].
+fn checkout_timeout_from_env() -> Duration {
+    parse_checkout_timeout(
+        std::env::var("PYLON_PG_CHECKOUT_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// Pure parse of the pool-size config (split out so it's testable without
+/// touching the process-global environment). Unparseable / zero / negative
+/// values fall back: a zero would panic `ConnectionPool::new`.
+fn parse_pool_size(raw: Option<&str>) -> usize {
+    raw.and_then(|v| v.trim().parse::<usize>().ok())
+        .map(|n| n.max(1))
+        .unwrap_or(DEFAULT_POOL_SIZE)
+}
+
+/// Pure parse of the checkout-timeout config. Zero / unparseable falls back
+/// to the default so a misconfigured `0` can't turn every checkout into an
+/// instant timeout.
+fn parse_checkout_timeout(raw: Option<&str>) -> Duration {
+    let ms = raw
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_CHECKOUT_TIMEOUT_MS);
+    Duration::from_millis(ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_pool_size_defaults_when_absent_or_garbage() {
+        assert_eq!(parse_pool_size(None), DEFAULT_POOL_SIZE);
+        assert_eq!(parse_pool_size(Some("")), DEFAULT_POOL_SIZE);
+        assert_eq!(parse_pool_size(Some("not-a-number")), DEFAULT_POOL_SIZE);
+        assert_eq!(parse_pool_size(Some("-3")), DEFAULT_POOL_SIZE);
+    }
+
+    #[test]
+    fn parse_pool_size_honors_valid_values() {
+        assert_eq!(parse_pool_size(Some("1")), 1);
+        assert_eq!(parse_pool_size(Some("16")), 16);
+        assert_eq!(parse_pool_size(Some("  4  ")), 4);
+    }
+
+    #[test]
+    fn parse_pool_size_clamps_zero_to_one() {
+        // 0 would panic ConnectionPool::new("max_size must be at least 1").
+        assert_eq!(parse_pool_size(Some("0")), 1);
+    }
+
+    #[test]
+    fn parse_checkout_timeout_defaults_and_parses() {
+        assert_eq!(
+            parse_checkout_timeout(None),
+            Duration::from_millis(DEFAULT_CHECKOUT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            parse_checkout_timeout(Some("garbage")),
+            Duration::from_millis(DEFAULT_CHECKOUT_TIMEOUT_MS)
+        );
+        // A misconfigured 0 must NOT become a zero-duration (instant-timeout)
+        // checkout — fall back to the default instead.
+        assert_eq!(
+            parse_checkout_timeout(Some("0")),
+            Duration::from_millis(DEFAULT_CHECKOUT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            parse_checkout_timeout(Some("250")),
+            Duration::from_millis(250)
+        );
     }
 }

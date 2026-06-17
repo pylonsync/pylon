@@ -1082,6 +1082,15 @@ pub mod live {
             &mut self.client
         }
 
+        /// True if the underlying connection is known-dead (server restart,
+        /// idle timeout, network drop — the postgres crate's background task
+        /// has ended). `PostgresDataStore::checkout` checks this on every pool
+        /// acquire and reconnects the slot in place, so a dropped connection
+        /// heals on the next use instead of poisoning the pool.
+        pub(crate) fn is_closed(&self) -> bool {
+            self.client.is_closed()
+        }
+
         /// Connect to a Postgres database.
         ///
         /// Honors libpq-style URL params the Rust postgres crate doesn't
