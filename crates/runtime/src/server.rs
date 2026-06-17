@@ -1,7 +1,7 @@
 #[allow(unused_imports)]
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use pylon_auth::SessionStore;
@@ -301,14 +301,89 @@ pub fn request_shutdown() {
     SHUTDOWN.store(true, Ordering::SeqCst);
     // If a server handle is available, unblock the request loop so it can
     // observe the flag immediately rather than waiting for the next request.
-    if let Some(srv) = SERVER_HANDLE.get() {
+    if let Some(srv) = current_server_handle() {
         srv.unblock();
     }
 }
 
-/// Global handle to the `tiny_http::Server` so `request_shutdown()` can call
-/// `unblock()` without requiring callers to hold a reference.
-static SERVER_HANDLE: std::sync::OnceLock<Arc<Server>> = std::sync::OnceLock::new();
+/// Global handle to the *current* `tiny_http::Server` so `request_shutdown()`
+/// can call `unblock()` without holding a reference — and so the request loop
+/// can swap in a freshly-built server after a recv() give-up (see
+/// `build_http_server` / the recv loop below) without losing the shutdown wire.
+///
+/// A `Mutex<Option<_>>` rather than a `OnceLock`: the handle is *replaced* when
+/// the listener is rebuilt, which OnceLock's set-once contract forbids.
+static SERVER_HANDLE: Mutex<Option<Arc<Server>>> = Mutex::new(None);
+
+/// Snapshot the live server handle (clones the Arc under the lock so callers
+/// don't hold the mutex across `unblock()`).
+fn current_server_handle() -> Option<Arc<Server>> {
+    SERVER_HANDLE.lock().ok().and_then(|g| g.clone())
+}
+
+/// Install `srv` as the live server handle, replacing any previous one.
+fn set_server_handle(srv: &Arc<Server>) {
+    if let Ok(mut g) = SERVER_HANDLE.lock() {
+        *g = Some(Arc::clone(srv));
+    }
+}
+
+/// Build a `tiny_http::Server` bound dual-stack (`[::]:port`), falling back to
+/// v4-only (`0.0.0.0:port`) when IPv6 sockets aren't available. Shared by the
+/// initial boot and the recv-loop rebuild path so both bind identically.
+fn build_http_server(port: u16) -> Result<Arc<Server>, String> {
+    // Dual-stack bind. `[::]:port` accepts IPv6 AND (on Linux, by default)
+    // IPv4-mapped connections to the same socket. Without this, a v4-only
+    // `0.0.0.0:port` bind silently breaks Fly.io — their fly-proxy reaches
+    // machines via the private IPv6 net, sees no listener, and reports "no
+    // known healthy instances". Falls back to v4-only when v6 isn't available
+    // (older test environments without IPv6 socket support).
+    let addr = format!("[::]:{port}");
+    let server = match Server::http(&addr) {
+        Ok(s) => s,
+        Err(_) => {
+            let v4_addr = format!("0.0.0.0:{port}");
+            Server::http(&v4_addr).map_err(|e| format!("Failed to start server: {e}"))?
+        }
+    };
+    Ok(Arc::new(server))
+}
+
+/// Rebuild the HTTP listener after `recv()` returned an error that wasn't a
+/// shutdown — tiny_http gives up its accept loop and drops its listener after
+/// ~64 consecutive `EINVAL`s (e.g. a sustained connection-reset storm on
+/// macOS's `[::]` dual-stack socket), which would otherwise silently kill the
+/// dev server. We re-bind the same port with bounded exponential backoff and
+/// return the new handle. Returns `None` only if a shutdown is requested while
+/// we're retrying.
+fn rebuild_with_retry(port: u16) -> Option<Arc<Server>> {
+    let mut delay_ms = 50u64;
+    loop {
+        if SHUTDOWN.load(Ordering::Relaxed) {
+            return None;
+        }
+        match build_http_server(port) {
+            Ok(server) => {
+                tracing::warn!(
+                    "HTTP listener rebuilt on port {port} after recv() give-up \
+                     (connection-reset storm or transient accept error)"
+                );
+                return Some(server);
+            }
+            Err(e) => {
+                // Bind may transiently fail while the old socket lingers in
+                // TIME_WAIT. Back off (capped at 2s) and keep trying — the dev
+                // server staying up is worth the wait.
+                tracing::warn!(
+                    "HTTP listener rebuild on port {port} failed ({e}); \
+                     retrying in {delay_ms}ms"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                delay_ms = (delay_ms * 2).min(2000);
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Security headers
@@ -1019,25 +1094,13 @@ fn start_server(
     // the route's admin-auth check.
     crate::log_ring::init_log_ring();
 
-    // Dual-stack bind. `[::]:port` accepts IPv6 AND (on Linux, by
-    // default) IPv4-mapped connections to the same socket. Without
-    // this, a v4-only `0.0.0.0:port` bind silently breaks Fly.io —
-    // their fly-proxy reaches machines via the private IPv6 net,
-    // sees no listener, and reports "no known healthy instances".
-    // Falls back to v4-only when v6 isn't available (older test
-    // environments without IPv6 socket support).
-    let addr = format!("[::]:{port}");
-    let server = match Server::http(&addr) {
-        Ok(s) => s,
-        Err(_) => {
-            let v4_addr = format!("0.0.0.0:{port}");
-            Server::http(&v4_addr).map_err(|e| format!("Failed to start server: {e}"))?
-        }
-    };
-    let server = Arc::new(server);
+    // Bind the HTTP listener (dual-stack `[::]`, v4-only fallback). `mut`
+    // because the recv loop below rebuilds it in place if tiny_http gives up
+    // its accept loop under a connection-reset storm (see `rebuild_with_retry`).
+    let mut server = build_http_server(port)?;
 
     // Stash a handle so `request_shutdown()` can unblock the loop.
-    let _ = SERVER_HANDLE.set(Arc::clone(&server));
+    set_server_handle(&server);
 
     let session_lifetime = runtime.manifest().auth.session.expires_in;
     // Boot-time warning: at-rest encryption (per-org SSO + SAML
@@ -1900,8 +1963,23 @@ fn start_server(
         let mut request = match server.recv() {
             Ok(rq) => rq,
             Err(_) => {
-                // recv() returns Err when unblocked or the socket is closed.
-                break;
+                // recv() errors on either an intentional `unblock()` (shutdown)
+                // or tiny_http giving up its accept loop and dropping the
+                // listener after ~64 consecutive accept errors (an EINVAL /
+                // connection-reset storm on the `[::]` dual-stack socket). The
+                // former: exit. The latter: rebuild the listener so the dev
+                // server keeps serving instead of silently going dark.
+                if SHUTDOWN.load(Ordering::Relaxed) {
+                    break;
+                }
+                match rebuild_with_retry(port) {
+                    Some(new_server) => {
+                        set_server_handle(&new_server);
+                        server = new_server;
+                        continue;
+                    }
+                    None => break, // shutdown requested mid-rebuild
+                }
             }
         };
 
@@ -6820,3 +6898,93 @@ fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
 // legacy `POST /api/files/upload` endpoint. The new 3-step flow
 // (init → client PUT → confirm) never goes through a multipart body,
 // so the parser had no remaining caller.
+
+#[cfg(test)]
+mod http_listener_rebuild_tests {
+    use super::build_http_server;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream};
+    use std::time::Duration;
+    use tiny_http::Response;
+
+    /// #346: when tiny_http gives up its accept loop under a connection-reset
+    /// storm and drops its listener, the recv loop rebuilds a fresh `Server` on
+    /// the same port and keeps serving instead of silently going dark. The
+    /// recv-loop rebuild rests on one property: that `build_http_server` can
+    /// re-bind the same port after the old listener is gone and serve a real
+    /// request over it. This proves exactly that. (tiny_http's internal
+    /// 64-EINVAL give-up can't be forced deterministically, so we stand in for
+    /// it by dropping the first listener explicitly.)
+    #[test]
+    fn rebuilt_listener_binds_same_port_and_serves() {
+        // Bind an ephemeral port, learn it, then drop the server to free the
+        // port — standing in for tiny_http dropping its listener on give-up.
+        let first = build_http_server(0).expect("initial bind");
+        let port = first.server_addr().to_ip().expect("ip addr").port();
+        drop(first);
+
+        // Rebuild on the SAME port. A freshly-vacated port can briefly linger
+        // in TIME_WAIT, so retry with a short backoff — the same shape as
+        // `rebuild_with_retry`, but bounded so the test can never hang.
+        let mut rebuilt = None;
+        for _ in 0..100 {
+            match build_http_server(port) {
+                Ok(s) => {
+                    rebuilt = Some(s);
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        let server = rebuilt.expect("rebuild on same port within budget");
+        let bound = server.server_addr().to_ip().expect("rebuilt addr");
+
+        // Serve exactly one request on a worker thread, then exit.
+        let worker = std::thread::spawn(move || {
+            if let Ok(req) = server.recv() {
+                let _ = req.respond(Response::from_string("pong"));
+            }
+        });
+
+        // Connect to the rebuilt listener over the loopback of the bound
+        // family (`[::1]` for a dual-stack `[::]` bind, `127.0.0.1` for the
+        // v4-only fallback) so the test holds on both macOS and Linux.
+        let connect_addr: SocketAddr = if bound.is_ipv6() {
+            (Ipv6Addr::LOCALHOST, port).into()
+        } else {
+            (Ipv4Addr::LOCALHOST, port).into()
+        };
+        let mut stream = None;
+        for _ in 0..100 {
+            match TcpStream::connect(connect_addr) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        let mut stream = stream.expect("connect to rebuilt listener");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // HTTP/1.0 (no keep-alive) so the server closes after one response and
+        // `read_to_string` returns rather than blocking on a kept-alive socket.
+        stream
+            .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+
+        assert!(
+            response.contains("200 OK"),
+            "rebuilt listener should serve 200; got: {response}"
+        );
+        assert!(
+            response.contains("pong"),
+            "rebuilt listener should serve the body; got: {response}"
+        );
+
+        worker.join().expect("worker thread joins");
+    }
+}
