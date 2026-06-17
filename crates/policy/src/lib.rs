@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use pylon_auth::AuthContext;
@@ -83,6 +84,14 @@ impl PolicyResult {
 pub struct PolicyEngine {
     entity_policies: Vec<ManifestPolicy>,
     action_policies: Vec<ManifestPolicy>,
+    /// Pre-parsed AST for every policy expression, keyed by the raw
+    /// expression string. Populated once at `from_manifest`, so per-row
+    /// evaluation (list / query / search / the up-to-50k-row snapshot pull)
+    /// is a map lookup instead of re-tokenizing + re-parsing the same
+    /// constant expression on every single row. `Err` holds a ready-to-
+    /// surface parse-error reason so a malformed expression still denies
+    /// exactly as the uncached path did.
+    compiled: HashMap<String, Result<Arc<Ast>, String>>,
     /// Set by the runtime after the row store comes up. None during
     /// boot + in unit tests that don't need `exists(...)` evaluation.
     /// `OnceLock` so set-once semantics are enforced (engine is shared
@@ -97,6 +106,7 @@ impl PolicyEngine {
         let mut entity_policies = Vec::new();
         let mut action_policies = Vec::new();
 
+        let mut compiled: HashMap<String, Result<Arc<Ast>, String>> = HashMap::new();
         for policy in &manifest.policies {
             if policy.entity.is_some() {
                 entity_policies.push(policy.clone());
@@ -104,12 +114,48 @@ impl PolicyEngine {
             if policy.action.is_some() {
                 action_policies.push(policy.clone());
             }
+            // Pre-parse every expression this policy can present (the base
+            // `allow` + all the `allow_*` overrides) so per-row evaluation
+            // never re-parses.
+            for expr in [
+                policy.allow.as_str(),
+                policy.allow_read.as_deref().unwrap_or(""),
+                policy.allow_insert.as_deref().unwrap_or(""),
+                policy.allow_update.as_deref().unwrap_or(""),
+                policy.allow_delete.as_deref().unwrap_or(""),
+                policy.allow_write.as_deref().unwrap_or(""),
+            ] {
+                if !expr.is_empty() && !compiled.contains_key(expr) {
+                    compiled.insert(expr.to_string(), compile_expr(expr).map(Arc::new));
+                }
+            }
         }
 
         Self {
             entity_policies,
             action_policies,
+            compiled,
             resolver: OnceLock::new(),
+        }
+    }
+
+    /// Evaluate a policy expression using the pre-parsed AST cache. Falls
+    /// back to parsing on the fly only if the expression was never
+    /// registered (shouldn't happen — `from_manifest` compiles them all).
+    fn eval_cached(
+        &self,
+        expr: &str,
+        auth: &AuthContext,
+        data: Option<&serde_json::Value>,
+        input: Option<&serde_json::Value>,
+    ) -> PolicyResult {
+        match self.compiled.get(expr) {
+            Some(Ok(ast)) => evaluate_ast(ast, auth, data, input, self.resolver()),
+            Some(Err(reason)) => PolicyResult::Denied {
+                policy_name: String::new(),
+                reason: reason.clone(),
+            },
+            None => evaluate_allow_inner(expr, auth, data, input, self.resolver()),
         }
     }
 
@@ -237,7 +283,7 @@ impl PolicyEngine {
                 continue;
             }
             any_rule_for_action = true;
-            match evaluate_allow_inner(expr, auth, data, None, self.resolver()) {
+            match self.eval_cached(expr, auth, data, None) {
                 PolicyResult::Denied { .. } => {
                     return PolicyResult::Denied {
                         policy_name: policy.name.clone(),
@@ -352,7 +398,7 @@ impl PolicyEngine {
             if expr.contains("data.") {
                 continue;
             }
-            match evaluate_allow_inner(expr, auth, None, None, self.resolver()) {
+            match self.eval_cached(expr, auth, None, None) {
                 PolicyResult::Denied { .. } => {
                     return PolicyResult::Denied {
                         policy_name: policy.name.clone(),
@@ -479,7 +525,7 @@ impl PolicyEngine {
         }
 
         for policy in &policies {
-            match evaluate_allow_inner(&policy.allow, auth, None, input, self.resolver()) {
+            match self.eval_cached(&policy.allow, auth, None, input) {
                 PolicyResult::Denied { .. } => {
                     return PolicyResult::Denied {
                         policy_name: policy.name.clone(),
@@ -568,6 +614,45 @@ fn evaluate_allow(
     evaluate_allow_inner(expr, auth, data, input, None)
 }
 
+/// Tokenize + parse + at-end check an expression into an `Ast`. `Err` is a
+/// ready-to-surface "Policy parse error" / "Trailing tokens" reason. Split
+/// out from evaluation so the parsed AST can be cached once (see
+/// `PolicyEngine.compiled`) rather than re-parsed on every row.
+fn compile_expr(expr: &str) -> Result<Ast, String> {
+    let tokens = tokenize(expr).map_err(|e| format!("Policy parse error: {e} (in {expr:?})"))?;
+    let mut parser = Parser::new(&tokens);
+    let ast = parser
+        .parse_expr()
+        .map_err(|e| format!("Policy parse error: {e} (in {expr:?})"))?;
+    if !parser.at_end() {
+        return Err(format!("Trailing tokens in expression: {expr:?}"));
+    }
+    Ok(ast)
+}
+
+/// Evaluate an already-parsed `Ast` against the auth/data/input context.
+fn evaluate_ast(
+    ast: &Ast,
+    auth: &AuthContext,
+    data: Option<&serde_json::Value>,
+    input: Option<&serde_json::Value>,
+    resolver: Option<&dyn PolicyDataResolver>,
+) -> PolicyResult {
+    let env = EvalEnv {
+        auth,
+        data,
+        input,
+        resolver,
+    };
+    match env.eval(ast) {
+        EvalResult::True => PolicyResult::Allowed,
+        EvalResult::False(reason) => PolicyResult::Denied {
+            policy_name: String::new(),
+            reason,
+        },
+    }
+}
+
 fn evaluate_allow_inner(
     expr: &str,
     auth: &AuthContext,
@@ -575,40 +660,9 @@ fn evaluate_allow_inner(
     input: Option<&serde_json::Value>,
     resolver: Option<&dyn PolicyDataResolver>,
 ) -> PolicyResult {
-    let tokens = match tokenize(expr) {
-        Ok(t) => t,
-        Err(e) => {
-            return PolicyResult::Denied {
-                policy_name: String::new(),
-                reason: format!("Policy parse error: {e} (in {expr:?})"),
-            };
-        }
-    };
-    let mut parser = Parser::new(&tokens);
-    let ast = match parser.parse_expr() {
-        Ok(a) => a,
-        Err(e) => {
-            return PolicyResult::Denied {
-                policy_name: String::new(),
-                reason: format!("Policy parse error: {e} (in {expr:?})"),
-            };
-        }
-    };
-    if !parser.at_end() {
-        return PolicyResult::Denied {
-            policy_name: String::new(),
-            reason: format!("Trailing tokens in expression: {expr:?}"),
-        };
-    }
-    let env = EvalEnv {
-        auth,
-        data,
-        input,
-        resolver,
-    };
-    match env.eval(&ast) {
-        EvalResult::True => PolicyResult::Allowed,
-        EvalResult::False(reason) => PolicyResult::Denied {
+    match compile_expr(expr) {
+        Ok(ast) => evaluate_ast(&ast, auth, data, input, resolver),
+        Err(reason) => PolicyResult::Denied {
             policy_name: String::new(),
             reason,
         },
@@ -1687,6 +1741,66 @@ mod tests {
         let engine = PolicyEngine::from_manifest(&test_manifest());
         assert_eq!(engine.entity_policies.len(), 1); // ownerReadTodos
         assert_eq!(engine.action_policies.len(), 2); // authenticatedCreate, ownerToggle
+    }
+
+    #[test]
+    fn cached_policy_eval_is_correct_and_cache_is_populated() {
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![
+                ManifestPolicy {
+                    name: "pub".into(),
+                    entity: Some("Pub".into()),
+                    allow_read: Some("true".into()),
+                    ..Default::default()
+                },
+                ManifestPolicy {
+                    name: "own".into(),
+                    entity: Some("Own".into()),
+                    allow_read: Some("auth.userId == data.ownerId".into()),
+                    ..Default::default()
+                },
+                ManifestPolicy {
+                    name: "broken".into(),
+                    entity: Some("Broken".into()),
+                    allow_read: Some("auth.userId ==".into()),
+                    ..Default::default()
+                },
+            ],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let eng = PolicyEngine::from_manifest(&manifest);
+        let u1 = AuthContext::authenticated("u1".into());
+        let anon = AuthContext::anonymous();
+
+        // Public read allowed via the cached AST.
+        assert!(eng.check_entity_read("Pub", &anon, None).is_allowed());
+
+        // Row-dependent ownership: the cached AST evaluates per row.
+        let mine = serde_json::json!({ "ownerId": "u1" });
+        let theirs = serde_json::json!({ "ownerId": "u2" });
+        assert!(eng.check_entity_read("Own", &u1, Some(&mine)).is_allowed());
+        assert!(!eng
+            .check_entity_read("Own", &u1, Some(&theirs))
+            .is_allowed());
+
+        // A malformed expression still denies (cached Err path == uncached).
+        assert!(!eng.check_entity_read("Broken", &u1, None).is_allowed());
+
+        // The cache was populated at construction — every distinct expression
+        // compiled once, so per-row eval is a lookup, never a re-parse.
+        assert!(eng.compiled.contains_key("true"));
+        assert!(eng.compiled.contains_key("auth.userId == data.ownerId"));
+        assert!(eng.compiled.get("auth.userId ==").unwrap().is_err());
     }
 
     #[test]
