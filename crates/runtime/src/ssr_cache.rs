@@ -291,6 +291,9 @@ pub fn put(
         return;
     }
     let _ = atomic_write(&dir.join(format!("{key}.meta")), &meta_json);
+    // Keep the on-disk namespace bounded (throttled readdir-based eviction) so
+    // path enumeration can't fill the disk.
+    maybe_sweep_disk(&dir);
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -309,6 +312,107 @@ fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
         f.sync_all()?;
     }
     std::fs::rename(&tmp, path)
+}
+
+/// On-disk namespace bounds: `(max_entries, max_bytes)`. Without these, a
+/// cacheable dynamic/catch-all route lets a client enumerate distinct paths and
+/// write one `.html`+`.meta` pair each, forever — filling the disk and wedging
+/// the machine (`wipe_stale_namespaces` only reclaims OTHER deploys). The
+/// in-memory layer is already bounded; this mirrors that to disk. A bound of
+/// `0` disables it. Read once.
+fn disk_cache_limits() -> (usize, u64) {
+    static LIMITS: std::sync::OnceLock<(usize, u64)> = std::sync::OnceLock::new();
+    *LIMITS.get_or_init(|| {
+        let entries = std::env::var("PYLON_SSR_DISK_CACHE_MAX_ENTRIES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(4096);
+        let bytes = std::env::var("PYLON_SSR_DISK_CACHE_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(512 * 1024 * 1024);
+        (entries, bytes)
+    })
+}
+
+/// Run the disk sweep on roughly 1 write in `DISK_SWEEP_INTERVAL`. The sweep
+/// does a readdir + stat, so amortize it rather than paying per write; between
+/// sweeps the namespace can overshoot the cap by at most this many entries —
+/// a bounded, negligible excess relative to the cap.
+const DISK_SWEEP_INTERVAL: u64 = 64;
+
+fn maybe_sweep_disk(dir: &Path) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // n == 0 (first write) sweeps too, so the bound holds from the start.
+    if n % DISK_SWEEP_INTERVAL != 0 {
+        return;
+    }
+    let (max_entries, max_bytes) = disk_cache_limits();
+    if max_entries == 0 && max_bytes == 0 {
+        return; // both bounds disabled
+    }
+    sweep_disk_cache(dir, max_entries, max_bytes);
+}
+
+/// Evict oldest-by-mtime `.html`/`.meta` pairs until the namespace is within
+/// BOTH `max_entries` and `max_bytes` (`0` = that bound disabled). Best-effort:
+/// the cache is a perf layer, so any error just leaves the entry in place. A
+/// concurrently-read victim degrades to a live re-render (get() returns None on
+/// a missing `.meta`), never a 500.
+fn sweep_disk_cache(dir: &Path, max_entries: usize, max_bytes: u64) {
+    struct Entry {
+        html: PathBuf,
+        meta: PathBuf,
+        mtime: SystemTime,
+        bytes: u64,
+    }
+    let rd = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    let mut entries: Vec<Entry> = Vec::new();
+    let mut total_bytes: u64 = 0;
+    for ent in rd.flatten() {
+        let path = ent.path();
+        // One record per completed `.html`; `.meta` is counted with its pair,
+        // and in-flight `.tmp.*` files (and anything else) are ignored.
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let md = match ent.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let meta_path = path.with_extension("meta");
+        let meta_bytes = std::fs::metadata(&meta_path).map(|m| m.len()).unwrap_or(0);
+        let bytes = md.len() + meta_bytes;
+        total_bytes += bytes;
+        entries.push(Entry {
+            html: path,
+            meta: meta_path,
+            mtime: md.modified().unwrap_or(UNIX_EPOCH),
+            bytes,
+        });
+    }
+    let over = (max_entries != 0 && entries.len() > max_entries)
+        || (max_bytes != 0 && total_bytes > max_bytes);
+    if !over {
+        return;
+    }
+    entries.sort_by_key(|e| e.mtime); // oldest first
+    let mut count = entries.len();
+    for e in &entries {
+        let within = (max_entries == 0 || count <= max_entries)
+            && (max_bytes == 0 || total_bytes <= max_bytes);
+        if within {
+            break;
+        }
+        let _ = std::fs::remove_file(&e.html);
+        let _ = std::fs::remove_file(&e.meta);
+        count -= 1;
+        total_bytes = total_bytes.saturating_sub(e.bytes);
+    }
 }
 
 /// At boot, remove cache namespaces from previous deploys so old HTML can't be
@@ -507,5 +611,77 @@ mod tests {
         std::env::remove_var("PYLON_SSR_CACHE_ROOT");
         std::env::remove_var("PYLON_ARTIFACT_ID");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Unique temp dir for the sweep tests — they operate on a dir directly
+    /// (no env / process-global state), so they need no ENV_LOCK.
+    fn unique_tmp(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("pylon_ssr_sweep_{tag}_{nanos}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn disk_sweep_evicts_oldest_until_within_entry_cap() {
+        use std::time::Duration;
+        let dir = unique_tmp("entries");
+        // 10 entries with strictly increasing mtimes so eviction order is
+        // deterministic (oldest = key0 ... newest = key9).
+        let t0 = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for i in 0..10u64 {
+            let html = dir.join(format!("key{i}.html"));
+            std::fs::write(&html, vec![b'x'; 100]).unwrap();
+            std::fs::write(dir.join(format!("key{i}.meta")), b"{}").unwrap();
+            let f = std::fs::File::options().write(true).open(&html).unwrap();
+            f.set_modified(t0 + Duration::from_secs(i)).unwrap();
+        }
+
+        // Cap at 4 entries; byte bound disabled.
+        sweep_disk_cache(&dir, 4, 0);
+
+        let remaining: Vec<u64> = (0..10)
+            .filter(|i| dir.join(format!("key{i}.html")).exists())
+            .collect();
+        assert_eq!(remaining, vec![6, 7, 8, 9], "4 newest survive, oldest evicted");
+        assert!(
+            !dir.join("key0.meta").exists(),
+            "evicted entry's paired .meta is removed too"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn disk_sweep_enforces_byte_cap_and_is_noop_under_cap() {
+        let dir = unique_tmp("bytes");
+        // 5 entries of ~1000 bytes each (html 1000 + meta 2).
+        for i in 0..5u64 {
+            std::fs::write(dir.join(format!("k{i}.html")), vec![b'x'; 1000]).unwrap();
+            std::fs::write(dir.join(format!("k{i}.meta")), b"{}").unwrap();
+        }
+        // Byte cap ~2.5 entries; entry bound disabled. Must drop to <= cap.
+        sweep_disk_cache(&dir, 0, 2500);
+        let survivors = (0..5)
+            .filter(|i| dir.join(format!("k{i}.html")).exists())
+            .count();
+        assert!(survivors <= 3, "byte cap enforced (survivors={survivors})");
+
+        // Under cap → no-op.
+        let dir2 = unique_tmp("under");
+        for i in 0..3u64 {
+            std::fs::write(dir2.join(format!("k{i}.html")), b"x").unwrap();
+            std::fs::write(dir2.join(format!("k{i}.meta")), b"{}").unwrap();
+        }
+        sweep_disk_cache(&dir2, 4096, 512 * 1024 * 1024);
+        let count = (0..3)
+            .filter(|i| dir2.join(format!("k{i}.html")).exists())
+            .count();
+        assert_eq!(count, 3, "nothing evicted when under both caps");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
     }
 }
