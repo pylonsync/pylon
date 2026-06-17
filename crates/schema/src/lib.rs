@@ -71,6 +71,21 @@ pub struct Index {
 // Validation
 // ---------------------------------------------------------------------------
 
+/// A name is a valid SQL identifier: starts with an ASCII letter or `_`,
+/// followed by ASCII letters, digits, or `_`. Entity / field / index names
+/// are interpolated into DDL + the FTS/search/staticgen SQL, so a name with
+/// a quote, space, or other punctuation could break out of (or just break)
+/// the generated SQL. Enforcing this at validation time fails LOUD at build
+/// instead of producing broken/injectable SQL at runtime.
+fn is_valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
@@ -108,6 +123,22 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
             });
         }
 
+        // Invalid characters in the entity name (SQLi / broken-DDL guard).
+        if !entity.name.is_empty() && !is_valid_identifier(&entity.name) {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Error,
+                code: "ENTITY_NAME_INVALID".into(),
+                message: format!(
+                    "Entity name \"{}\" contains invalid characters",
+                    entity.name
+                ),
+                span: None,
+                hint: Some(
+                    "Entity names must be a valid identifier: a letter or underscore, then letters, digits, or underscores (no quotes, spaces, or punctuation)".into(),
+                ),
+            });
+        }
+
         let mut seen_field_names = std::collections::HashSet::new();
         for field in &entity.fields {
             // Empty field name
@@ -132,6 +163,22 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                     ),
                     span: None,
                     hint: Some("Field names must be unique within an entity".into()),
+                });
+            }
+
+            // Invalid characters in the field name (SQLi / broken-DDL guard).
+            if !field.name.is_empty() && !is_valid_identifier(&field.name) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "FIELD_NAME_INVALID".into(),
+                    message: format!(
+                        "Field name \"{}\" in entity \"{}\" contains invalid characters",
+                        field.name, entity.name
+                    ),
+                    span: None,
+                    hint: Some(
+                        "Field names must be a valid identifier: a letter or underscore, then letters, digits, or underscores".into(),
+                    ),
                 });
             }
         }
@@ -162,6 +209,23 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                     ),
                     span: None,
                     hint: Some("Index names must be unique within an entity".into()),
+                });
+            }
+
+            // Invalid characters in the index name (it lands in CREATE INDEX
+            // "{name}" DDL).
+            if !index.name.is_empty() && !is_valid_identifier(&index.name) {
+                diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "INDEX_NAME_INVALID".into(),
+                    message: format!(
+                        "Index name \"{}\" in entity \"{}\" contains invalid characters",
+                        index.name, entity.name
+                    ),
+                    span: None,
+                    hint: Some(
+                        "Index names must be a valid identifier: a letter or underscore, then letters, digits, or underscores".into(),
+                    ),
                 });
             }
 
@@ -738,6 +802,54 @@ mod tests {
         };
         let diags = validate(&schema);
         assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+    }
+
+    #[test]
+    fn invalid_identifier_names_are_rejected() {
+        // Entity + field names with quote / space — the SQLi / broken-DDL
+        // vector for the FTS/search/staticgen `"{name}"` interpolation.
+        let schema = Schema {
+            entities: vec![Entity {
+                name: "Po\"st".into(),
+                fields: vec![make_field("ti tle", FieldType::String)],
+                indexes: vec![],
+            }],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            routes: vec![],
+        };
+        let diags = validate(&schema);
+        assert!(
+            diags.iter().any(|d| d.code == "ENTITY_NAME_INVALID"),
+            "quote in entity name must be rejected: {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "FIELD_NAME_INVALID"),
+            "space in field name must be rejected: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn underscore_prefixed_framework_names_stay_valid() {
+        // `_PylonJobs` / `created_at` etc. must still pass — the charset check
+        // allows a leading underscore and underscores within.
+        let schema = Schema {
+            entities: vec![Entity {
+                name: "_PylonJobs".into(),
+                fields: vec![make_field("created_at", FieldType::String)],
+                indexes: vec![],
+            }],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            routes: vec![],
+        };
+        let diags = validate(&schema);
+        assert!(
+            !diags.iter().any(|d| d.code.ends_with("_INVALID")),
+            "valid identifiers must not trip the charset check: {diags:?}"
+        );
     }
 
     #[test]
