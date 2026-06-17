@@ -80,12 +80,40 @@ impl RespValue {
     }
 }
 
+/// Hard caps on attacker-declared sizes, enforced BEFORE allocation. The
+/// RESP parser runs before the AUTH gate (`resp_server` parses the command
+/// frame, then checks the password), so an unauthenticated client must not
+/// be able to make us allocate — or recurse — without bound from a single
+/// frame. Values mirror Redis defaults where applicable
+/// (`proto-max-bulk-len` = 512 MiB, multi-bulk = 1M elements).
+const MAX_BULK_LEN: usize = 512 * 1024 * 1024;
+const MAX_ARRAY_COUNT: usize = 1024 * 1024;
+/// Cap on a single header/inline line (`$<len>\r\n`, `+<status>\r\n`, …).
+/// Without it, a stream that never sends `\n` grows `line` without bound.
+const MAX_LINE_LEN: u64 = 64 * 1024;
+/// RESP command frames are flat (`*N` of bulk strings); deep nesting only
+/// appears in a malicious frame and would otherwise recurse to stack
+/// exhaustion.
+const MAX_DEPTH: usize = 32;
+
 /// Parse a single RESP value from a buffered reader.
 ///
 /// Returns `Err` on I/O errors, malformed input, or EOF.
 pub fn parse_resp<R: BufRead>(reader: &mut R) -> Result<RespValue, String> {
+    parse_resp_depth(reader, 0)
+}
+
+fn parse_resp_depth<R: BufRead>(reader: &mut R, depth: usize) -> Result<RespValue, String> {
+    if depth > MAX_DEPTH {
+        return Err(format!("RESP nesting too deep (> {MAX_DEPTH})"));
+    }
     let mut line = String::new();
-    let bytes_read = reader
+    // Bound the header/inline line read — past `MAX_LINE_LEN` the line
+    // can't end with `\r\n`, so the malformed check below rejects it
+    // instead of letting `line` grow to exhaust memory. UFCS + the
+    // `&mut *reader` reborrow so `take` (which consumes its receiver)
+    // doesn't move `reader`, which we still need for `read_exact`.
+    let bytes_read = std::io::Read::take(&mut *reader, MAX_LINE_LEN)
         .read_line(&mut line)
         .map_err(|e| format!("Read error: {e}"))?;
 
@@ -117,6 +145,11 @@ pub fn parse_resp<R: BufRead>(reader: &mut R) -> Result<RespValue, String> {
                 return Ok(RespValue::BulkString(None));
             }
             let len = len as usize;
+            if len > MAX_BULK_LEN {
+                return Err(format!(
+                    "bulk string too large: {len} bytes (max {MAX_BULK_LEN})"
+                ));
+            }
             let mut buf = vec![0u8; len + 2]; // data + trailing \r\n
             reader
                 .read_exact(&mut buf)
@@ -135,9 +168,15 @@ pub fn parse_resp<R: BufRead>(reader: &mut R) -> Result<RespValue, String> {
             if count < 0 {
                 return Ok(RespValue::Array(None));
             }
-            let mut items = Vec::with_capacity(count as usize);
+            let count = count as usize;
+            if count > MAX_ARRAY_COUNT {
+                return Err(format!(
+                    "array too large: {count} elements (max {MAX_ARRAY_COUNT})"
+                ));
+            }
+            let mut items = Vec::with_capacity(count);
             for _ in 0..count {
-                items.push(parse_resp(reader)?);
+                items.push(parse_resp_depth(reader, depth + 1)?);
             }
             Ok(RespValue::Array(Some(items)))
         }
@@ -409,5 +448,46 @@ mod tests {
 
         let v3 = parse_resp(&mut reader).unwrap();
         assert_eq!(v3, RespValue::bulk("hello"));
+    }
+
+    // -- Pre-auth allocation / recursion bounds (DoS guards) --
+
+    #[test]
+    fn rejects_oversized_bulk_length() {
+        // `$2000000000\r\n` would have allocated ~2 GB before this cap. The
+        // guard fires on the header line, before any data is read/allocated.
+        let frame = format!("${}\r\n", MAX_BULK_LEN + 1);
+        let err = parse(frame.as_bytes()).unwrap_err();
+        assert!(err.contains("bulk string too large"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_oversized_array_count() {
+        let frame = format!("*{}\r\n", MAX_ARRAY_COUNT + 1);
+        let err = parse(frame.as_bytes()).unwrap_err();
+        assert!(err.contains("array too large"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_deeply_nested_arrays() {
+        // `*1\r\n` repeated past MAX_DEPTH would recurse the stack to
+        // exhaustion without the depth guard.
+        let mut input = Vec::new();
+        for _ in 0..(MAX_DEPTH + 2) {
+            input.extend_from_slice(b"*1\r\n");
+        }
+        let err = parse(&input).unwrap_err();
+        assert!(err.contains("nesting too deep"), "got: {err}");
+    }
+
+    #[test]
+    fn rejects_unbounded_header_line() {
+        // An infinite stream that never sends `\n` must not grow `line`
+        // without bound. The `take(MAX_LINE_LEN)` cap makes read_line stop
+        // and the frame is rejected as malformed. WITHOUT the cap this
+        // test hangs / OOMs — that's the regression it guards.
+        let mut reader = BufReader::new(std::io::repeat(b'a'));
+        let err = parse_resp(&mut reader).unwrap_err();
+        assert!(err.contains("Malformed RESP line"), "got: {err}");
     }
 }

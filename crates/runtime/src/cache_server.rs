@@ -130,8 +130,31 @@ pub fn start_cache_server_with_options(
         let cache = Arc::clone(&cache);
         let pubsub = Arc::clone(&pubsub);
 
+        // Cap the body read. This runs BEFORE the bearer gate below, so an
+        // unauthenticated client must not be able to stream an unbounded
+        // body into memory (`read_to_string` with no cap would OOM the
+        // process). 32 MiB is generous for any cache value.
+        const MAX_CACHE_BODY: u64 = 32 * 1024 * 1024;
         let mut body = String::new();
-        let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+        let mut limited = std::io::Read::take(request.as_reader(), MAX_CACHE_BODY + 1);
+        let _ = std::io::Read::read_to_string(&mut limited, &mut body);
+        drop(limited);
+        if body.len() as u64 > MAX_CACHE_BODY {
+            let response = Response::from_string(
+                serde_json::json!({
+                    "error": {
+                        "code": "PAYLOAD_TOO_LARGE",
+                        "message": "request body exceeds 32 MiB"
+                    }
+                })
+                .to_string(),
+            )
+            .with_status_code(413)
+            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+            .with_header(Header::from_bytes("Access-Control-Allow-Origin", "*").unwrap());
+            let _ = request.respond(response);
+            continue;
+        }
 
         let method = request.method().clone();
         let url = request.url().to_string();
