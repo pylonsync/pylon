@@ -646,7 +646,11 @@ mod tests {
         let remaining: Vec<u64> = (0..10)
             .filter(|i| dir.join(format!("key{i}.html")).exists())
             .collect();
-        assert_eq!(remaining, vec![6, 7, 8, 9], "4 newest survive, oldest evicted");
+        assert_eq!(
+            remaining,
+            vec![6, 7, 8, 9],
+            "4 newest survive, oldest evicted"
+        );
         assert!(
             !dir.join("key0.meta").exists(),
             "evicted entry's paired .meta is removed too"

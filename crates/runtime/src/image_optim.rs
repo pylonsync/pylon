@@ -450,7 +450,10 @@ fn resolve_redirect(base: &str, loc: &str) -> Option<String> {
     let base_path = &after_scheme[authority.len()..];
     let path_only = base_path.split(['?', '#']).next().unwrap_or(base_path);
     let dir_end = path_only.rfind('/').map(|i| i + 1).unwrap_or(0);
-    Some(format!("{scheme}://{authority}{}{loc}", &path_only[..dir_end]))
+    Some(format!(
+        "{scheme}://{authority}{}{loc}",
+        &path_only[..dir_end]
+    ))
 }
 
 /// Read the source bytes — either off the local frontend dir or

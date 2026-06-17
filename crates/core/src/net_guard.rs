@@ -137,7 +137,11 @@ mod tests {
 
     #[test]
     fn allows_public_ipv6() {
-        for ip in ["2606:4700:4700::1111", "2001:4860:4860::8888", "::ffff:8.8.8.8"] {
+        for ip in [
+            "2606:4700:4700::1111",
+            "2001:4860:4860::8888",
+            "::ffff:8.8.8.8",
+        ] {
             assert!(!blocked(ip), "{ip} must be allowed");
         }
     }
