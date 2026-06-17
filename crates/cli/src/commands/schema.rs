@@ -1,42 +1,11 @@
 use std::collections::{BTreeSet, HashMap};
 
+use pylon_kernel::util::redact_dsn;
 use pylon_kernel::{AppManifest, Diagnostic, ExitCode, Severity};
 use serde::Serialize;
 
 use crate::manifest::{load_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
-
-/// Redact the password out of a Postgres DSN before printing it.
-///
-/// `postgres://user:secret@host:5432/db` → `postgres://user:***@host:5432/db`.
-/// Malformed DSNs return unchanged — better to leak the raw value than to
-/// silently hide a configuration problem. Callers must still treat the
-/// output as "might include the url shape" and not the credentials.
-fn redact_dsn(dsn: &str) -> String {
-    // Find the first `@` that separates userinfo from host. A `:` inside
-    // the userinfo denotes password.
-    let scheme_end = match dsn.find("://") {
-        Some(i) => i + 3,
-        None => return dsn.to_string(),
-    };
-    let rest = &dsn[scheme_end..];
-    let at = match rest.find('@') {
-        Some(i) => i,
-        None => return dsn.to_string(),
-    };
-    let userinfo = &rest[..at];
-    let host_and_rest = &rest[at..]; // starts with '@'
-    let redacted_userinfo = match userinfo.find(':') {
-        Some(i) => format!("{}:***", &userinfo[..i]),
-        None => userinfo.to_string(),
-    };
-    format!(
-        "{}{}{}",
-        &dsn[..scheme_end],
-        redacted_userinfo,
-        host_and_rest
-    )
-}
 
 // ---------------------------------------------------------------------------
 // schema check

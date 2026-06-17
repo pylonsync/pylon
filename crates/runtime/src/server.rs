@@ -6653,9 +6653,13 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
 /// separate connections avoids a "oauth lookup blocks an entity write"
 /// false-sharing scenario at the cost of a few idle PG connections.
 fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> Result<AuthStores, String> {
+    // Never log/return the raw DSN — it carries the DB password. Redact
+    // once and use the masked form in both the error string and the
+    // boot log below.
+    let url_safe = pylon_kernel::util::redact_dsn(url);
     let map_err = |what: &str, e: String| {
         format!(
-            "[pylon] {what} Postgres backend at {url}: {e}. \
+            "[pylon] {what} Postgres backend at {url_safe}: {e}. \
              DATABASE_URL is set but the connection failed — pylon refuses \
              to boot rather than silently fall back to in-memory state \
              that would lose every OAuth flow on restart."
@@ -6667,7 +6671,7 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> Result<AuthStores, 
             .map_err(|e| map_err("session", e))?,
     ))
     .with_lifetime(session_lifetime);
-    tracing::info!("[pylon] Auth state (Postgres): {url}");
+    tracing::info!("[pylon] Auth state (Postgres): {url_safe}");
     let magic_codes = pylon_auth::MagicCodeStore::with_backend(Box::new(
         crate::magic_code_backend::PostgresMagicCodeBackend::connect(url)
             .map_err(|e| map_err("magic-code", e))?,

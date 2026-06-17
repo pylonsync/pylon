@@ -207,9 +207,78 @@ pub fn is_safe_file_id(id: &str) -> bool {
         && !id.starts_with('.')
 }
 
+// ---------------------------------------------------------------------------
+// DSN redaction (keep DB passwords out of logs / error strings)
+// ---------------------------------------------------------------------------
+
+/// Redact the password out of a connection-string DSN before logging it.
+///
+/// `postgres://user:secret@host:5432/db` → `postgres://user:***@host:5432/db`.
+///
+/// Malformed DSNs (no `://` or no `@`) return unchanged — better to surface
+/// the raw value than to silently hide a configuration problem. Callers
+/// should still treat the output as "may reveal the URL shape" and never as
+/// safe-to-share credentials. Shared in `pylon-kernel` so the runtime
+/// (boot logs) and CLI (schema/dev output) redact identically.
+pub fn redact_dsn(dsn: &str) -> String {
+    let scheme_end = match dsn.find("://") {
+        Some(i) => i + 3,
+        None => return dsn.to_string(),
+    };
+    let rest = &dsn[scheme_end..];
+    // The userinfo ends at the first `@` BEFORE any `/` (the path can
+    // legitimately contain `@`). If `@` only appears in the path, there's
+    // no userinfo to redact.
+    let host_path = rest.split('/').next().unwrap_or(rest);
+    // userinfo is everything before the LAST `@` in the authority — an
+    // unencoded `@` inside the password must not be mistaken for the
+    // host separator (`admin:p@ss@host` → userinfo `admin:p@ss`).
+    let at = match host_path.rfind('@') {
+        Some(i) => i,
+        None => return dsn.to_string(),
+    };
+    let userinfo = &rest[..at];
+    let host_and_rest = &rest[at..]; // starts with '@'
+    let redacted_userinfo = match userinfo.find(':') {
+        Some(i) => format!("{}:***", &userinfo[..i]),
+        None => userinfo.to_string(),
+    };
+    format!("{}{}{}", &dsn[..scheme_end], redacted_userinfo, host_and_rest)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redact_dsn_masks_password() {
+        assert_eq!(
+            redact_dsn("postgres://user:secret@host:5432/db"),
+            "postgres://user:***@host:5432/db"
+        );
+        assert_eq!(
+            redact_dsn("postgresql://admin:p@ss:word@db.internal/app"),
+            "postgresql://admin:***@db.internal/app"
+        );
+    }
+
+    #[test]
+    fn redact_dsn_no_password_or_malformed_unchanged() {
+        // No password component.
+        assert_eq!(
+            redact_dsn("postgres://user@host/db"),
+            "postgres://user@host/db"
+        );
+        // No userinfo at all.
+        assert_eq!(redact_dsn("postgres://host:5432/db"), "postgres://host:5432/db");
+        // Not a URL — returned verbatim rather than silently blanked.
+        assert_eq!(redact_dsn("/var/lib/sessions.db"), "/var/lib/sessions.db");
+        // An `@` only in the path must not be treated as userinfo.
+        assert_eq!(
+            redact_dsn("postgres://host/db@weird"),
+            "postgres://host/db@weird"
+        );
+    }
 
     #[test]
     fn quote_ident_basic() {

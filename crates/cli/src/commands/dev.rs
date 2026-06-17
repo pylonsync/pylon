@@ -347,7 +347,11 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                                 eprintln!("[dev] Postgres schema apply failed: {e}");
                             }
                         } else if !json_mode && !plan.is_empty() {
-                            println!("  Database: {db_str} (postgres, schema synced)");
+                            // Redact the DSN password before printing.
+                            println!(
+                                "  Database: {} (postgres, schema synced)",
+                                pylon_kernel::util::redact_dsn(&db_str)
+                            );
                             println!();
                         }
                     }
