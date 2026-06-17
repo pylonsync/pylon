@@ -611,7 +611,24 @@ fn handle_push(ctx: &RouterContext, body: &str) -> (u16, String) {
         let mctx = MutationCtx::from_router(ctx);
         let op_id_opt = change.op_id.clone();
         let kind_label = change_kind_label(&change.kind);
-        let outcome = run_push_op(&mctx, change);
+        // Wrap the mutation pipeline so a panic inside it (a plugin/policy/
+        // store `.unwrap()`) can't unwind past the complete/forget bookkeeping
+        // below and leave this op_id stuck `Pending` forever — every client
+        // retry would then wedge on `InFlight` until 10k other ops evict it.
+        // A caught panic becomes a retryable 500 and the `Err` branch frees the
+        // op_id. `AssertUnwindSafe` is sound here: on panic we read no mutation
+        // state (the store mutation runs in a transaction that rolls back) — we
+        // only free the op_id and return a fixed error.
+        let outcome = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_push_op(&mctx, change)
+        })) {
+            Ok(o) => o,
+            Err(_panic) => Err(MutationError::Hook {
+                status: 500,
+                code: "INTERNAL_ERROR".into(),
+                message: "internal error processing change".into(),
+            }),
+        };
 
         let result_envelope = |status: &str,
                                row_id: Option<&str>,
