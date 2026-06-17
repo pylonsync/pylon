@@ -208,6 +208,37 @@ pub fn is_safe_file_id(id: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Query row cap (bound filtered-query / list result sets)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of rows a single filtered query / list may return. A
+/// client-supplied `$limit` is clamped to this, AND a query with no `$limit`
+/// defaults to it — so `{}` (or a forgotten paginate) can't stream an entire
+/// table into memory and, on Postgres, pin the single connection for the
+/// whole scan. Generous by default (10k) so typical UI lists are unaffected;
+/// override with `PYLON_QUERY_MAX_LIMIT`. Read once.
+pub fn query_max_limit() -> u64 {
+    use std::sync::OnceLock;
+    static CAP: OnceLock<u64> = OnceLock::new();
+    *CAP.get_or_init(|| {
+        std::env::var("PYLON_QUERY_MAX_LIMIT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(10_000)
+    })
+}
+
+/// The LIMIT a filtered query / list should actually use: a client-supplied
+/// `$limit` clamped to [`query_max_limit`], or the cap itself when the client
+/// gave none. The single chokepoint every query builder (SQLite + Postgres)
+/// routes through so the bound is identical across backends.
+pub fn effective_query_limit(client_limit: Option<u64>) -> u64 {
+    let cap = query_max_limit();
+    client_limit.map(|n| n.min(cap)).unwrap_or(cap)
+}
+
+// ---------------------------------------------------------------------------
 // DSN redaction (keep DB passwords out of logs / error strings)
 // ---------------------------------------------------------------------------
 
@@ -243,12 +274,32 @@ pub fn redact_dsn(dsn: &str) -> String {
         Some(i) => format!("{}:***", &userinfo[..i]),
         None => userinfo.to_string(),
     };
-    format!("{}{}{}", &dsn[..scheme_end], redacted_userinfo, host_and_rest)
+    format!(
+        "{}{}{}",
+        &dsn[..scheme_end],
+        redacted_userinfo,
+        host_and_rest
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_query_limit_clamps_and_defaults() {
+        // Default cap is 10_000 (no PYLON_QUERY_MAX_LIMIT in the test env).
+        let cap = query_max_limit();
+        assert_eq!(cap, 10_000);
+        // No client $limit → defaults to the cap (so `{}` can't be unbounded).
+        assert_eq!(effective_query_limit(None), cap);
+        // A client $limit below the cap is preserved.
+        assert_eq!(effective_query_limit(Some(25)), 25);
+        // A client $limit above the cap is clamped down.
+        assert_eq!(effective_query_limit(Some(1_000_000)), cap);
+        // Exactly at the cap stays.
+        assert_eq!(effective_query_limit(Some(cap)), cap);
+    }
 
     #[test]
     fn redact_dsn_masks_password() {
@@ -270,7 +321,10 @@ mod tests {
             "postgres://user@host/db"
         );
         // No userinfo at all.
-        assert_eq!(redact_dsn("postgres://host:5432/db"), "postgres://host:5432/db");
+        assert_eq!(
+            redact_dsn("postgres://host:5432/db"),
+            "postgres://host:5432/db"
+        );
         // Not a URL — returned verbatim rather than silently blanked.
         assert_eq!(redact_dsn("/var/lib/sessions.db"), "/var/lib/sessions.db");
         // An `@` only in the path must not be treated as userinfo.

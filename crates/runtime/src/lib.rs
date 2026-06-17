@@ -2462,6 +2462,11 @@ impl Runtime {
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut order_clause = String::new();
         let mut limit_clause = String::new();
+        // Captured raw, then bounded after the loop (see query_max_limit):
+        // a client $limit is clamped to the cap and a missing one defaults
+        // to it, so an uncapped SELECT can't materialize a whole table.
+        let mut client_limit: Option<u64> = None;
+        let mut client_offset: Option<u64> = None;
         let mut join_clause = String::new();
         let mut fts_order = false;
         let mut idx = 1;
@@ -2486,16 +2491,12 @@ impl Runtime {
                 }
                 "$limit" => {
                     if let Some(n) = val.as_u64() {
-                        limit_clause = format!(" LIMIT {n}");
+                        client_limit = Some(n);
                     }
                 }
                 "$offset" => {
                     if let Some(n) = val.as_u64() {
-                        // SQLite requires LIMIT before OFFSET; add a default.
-                        if limit_clause.is_empty() {
-                            limit_clause = " LIMIT -1".into();
-                        }
-                        limit_clause = format!("{limit_clause} OFFSET {n}");
+                        client_offset = Some(n);
                     }
                 }
                 "$search" => {
@@ -2608,6 +2609,13 @@ impl Runtime {
             };
         }
 
+        // Bound the result set: clamp a client $limit and default a missing
+        // one to the cap, so `{}` can't stream the whole table into memory.
+        let effective_limit = pylon_kernel::util::effective_query_limit(client_limit);
+        limit_clause = match client_offset {
+            Some(off) => format!(" LIMIT {effective_limit} OFFSET {off}"),
+            None => format!(" LIMIT {effective_limit}"),
+        };
         let select_prefix = format!("{}.*", quote_ident(entity));
         let sql = format!(
             "SELECT {} FROM {}{}{}{}{}",
@@ -3099,6 +3107,11 @@ impl Runtime {
         let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut order_clause = String::new();
         let mut limit_clause = String::new();
+        // Captured raw, then bounded after the loop (see query_max_limit):
+        // a client $limit is clamped to the cap and a missing one defaults
+        // to it, so an uncapped SELECT can't materialize a whole table.
+        let mut client_limit: Option<u64> = None;
+        let mut client_offset: Option<u64> = None;
         let mut idx = 1;
 
         for (key, val) in obj {
@@ -3121,15 +3134,12 @@ impl Runtime {
                 }
                 "$limit" => {
                     if let Some(n) = val.as_u64() {
-                        limit_clause = format!(" LIMIT {n}");
+                        client_limit = Some(n);
                     }
                 }
                 "$offset" => {
                     if let Some(n) = val.as_u64() {
-                        if limit_clause.is_empty() {
-                            limit_clause = " LIMIT -1".into();
-                        }
-                        limit_clause = format!("{limit_clause} OFFSET {n}");
+                        client_offset = Some(n);
                     }
                 }
                 _ => {
@@ -3207,6 +3217,13 @@ impl Runtime {
             order_clause = " ORDER BY \"id\"".into();
         }
 
+        // Bound the result set: clamp a client $limit and default a missing
+        // one to the cap, so `{}` can't stream the whole table into memory.
+        let effective_limit = pylon_kernel::util::effective_query_limit(client_limit);
+        limit_clause = match client_offset {
+            Some(off) => format!(" LIMIT {effective_limit} OFFSET {off}"),
+            None => format!(" LIMIT {effective_limit}"),
+        };
         let sql = format!(
             "SELECT * FROM {}{}{}{}",
             quote_ident(entity),

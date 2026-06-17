@@ -1438,6 +1438,12 @@ pub mod live {
             let mut order_clause = String::new();
             let mut limit_clause = String::new();
             let mut offset_clause = String::new();
+            // Captured raw, then bounded before the SQL is built (see
+            // query_max_limit): clamp a client $limit and default a missing
+            // one to the cap so an uncapped SELECT can't scan a whole table
+            // into memory (and, here, pin the connection for the whole scan).
+            let mut client_limit: Option<u64> = None;
+            let mut client_offset: Option<u64> = None;
             // Collect (col, op, value) so placeholder numbers can be assigned
             // in a single materialization pass after the parse loop. Values
             // are now JsonParam (typed) instead of String — see `value_to_pg`.
@@ -1498,12 +1504,12 @@ pub mod live {
                     }
                     "$limit" => {
                         if let Some(n) = val.as_u64() {
-                            limit_clause = format!(" LIMIT {}", n);
+                            client_limit = Some(n);
                         }
                     }
                     "$offset" => {
                         if let Some(n) = val.as_u64() {
-                            offset_clause = format!(" OFFSET {}", n);
+                            client_offset = Some(n);
                         }
                     }
                     field => {
@@ -1625,6 +1631,14 @@ pub mod live {
                 format!(" ORDER BY {}", quote_ident("id"))
             } else {
                 order_clause
+            };
+            // Bound the result set: clamp a client $limit and default a
+            // missing one to the cap.
+            let effective_limit = pylon_kernel::util::effective_query_limit(client_limit);
+            limit_clause = format!(" LIMIT {effective_limit}");
+            offset_clause = match client_offset {
+                Some(off) => format!(" OFFSET {off}"),
+                None => String::new(),
             };
             let sql = format!(
                 "SELECT * FROM {}{}{}{}{}",
