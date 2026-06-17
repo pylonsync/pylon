@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -32,18 +32,39 @@ pub struct PubSubBroker {
     next_id: Mutex<u64>,
     /// Recent messages per channel for late joiners.
     history: Mutex<HashMap<String, Vec<PubSubMessage>>>,
+    /// FIFO insertion order of the channels currently in `history`, so the
+    /// NUMBER of distinct channels can be bounded. `max_history` bounds
+    /// messages *within* a channel, but the channel name is attacker-
+    /// controlled — without this, publishing to high-cardinality names
+    /// (`room:<uuid>`, …) leaks one history entry each, forever.
+    history_order: Mutex<VecDeque<String>>,
     max_history: usize,
+    max_history_channels: usize,
 }
 
 impl PubSubBroker {
     /// Create a new broker that retains up to `max_history_per_channel`
     /// messages per channel.
     pub fn new(max_history_per_channel: usize) -> Self {
+        // Cap on distinct channels retained in history. Generous default so
+        // legit pub/sub is unaffected; override with PYLON_PUBSUB_MAX_CHANNELS.
+        let max_history_channels = std::env::var("PYLON_PUBSUB_MAX_CHANNELS")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(10_000);
+        Self::with_channel_cap(max_history_per_channel, max_history_channels)
+    }
+
+    /// Like [`new`](Self::new) but with an explicit channel cap (no env read).
+    pub fn with_channel_cap(max_history_per_channel: usize, max_history_channels: usize) -> Self {
         Self {
             subscriptions: Mutex::new(HashMap::new()),
             next_id: Mutex::new(1),
             history: Mutex::new(HashMap::new()),
+            history_order: Mutex::new(VecDeque::new()),
             max_history: max_history_per_channel,
+            max_history_channels: max_history_channels.max(1),
         }
     }
 
@@ -59,10 +80,27 @@ impl PubSubBroker {
         // Save to history.
         {
             let mut history = self.history.lock().unwrap();
+            let is_new_channel = !history.contains_key(channel);
             let channel_history = history.entry(channel.to_string()).or_default();
             channel_history.push(msg.clone());
             if channel_history.len() > self.max_history {
                 channel_history.remove(0);
+            }
+            // Bound the number of distinct channels (attacker-controlled
+            // names). FIFO-evict the oldest-inserted channels — O(1) per
+            // eviction, no scan. `history_order` is only ever touched here
+            // while holding `history`, so the lock order is consistent.
+            if is_new_channel {
+                let mut order = self.history_order.lock().unwrap();
+                order.push_back(channel.to_string());
+                while history.len() > self.max_history_channels {
+                    match order.pop_front() {
+                        Some(victim) => {
+                            history.remove(&victim);
+                        }
+                        None => break,
+                    }
+                }
             }
         }
 
@@ -384,6 +422,30 @@ mod tests {
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[0].message, "headline 1");
         assert_eq!(msgs[2].message, "headline 3");
+    }
+
+    #[test]
+    fn history_channel_count_is_bounded() {
+        // Per-channel cap 5, distinct-channel cap 3. Publishing to 6 distinct
+        // (attacker-controlled) channel names must not grow history past 3 —
+        // the oldest-inserted channels are FIFO-evicted.
+        let broker = PubSubBroker::with_channel_cap(5, 3);
+        for i in 0..6 {
+            broker.publish(&format!("c{i}"), "x");
+        }
+        let chans = broker.channels_with_history();
+        assert_eq!(
+            chans.len(),
+            3,
+            "history channel count capped; got {chans:?}"
+        );
+        assert_eq!(broker.history("c5", 10).len(), 1, "newest channel retained");
+        assert_eq!(broker.history("c3", 10).len(), 1, "recent channel retained");
+        assert!(
+            broker.history("c0", 10).is_empty(),
+            "oldest channel evicted"
+        );
+        assert!(broker.history("c1", 10).is_empty(), "2nd-oldest evicted");
     }
 
     #[test]
