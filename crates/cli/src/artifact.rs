@@ -39,9 +39,12 @@ use sha2::{Digest, Sha256};
 
 /// Marker file written (last) inside a fully-extracted artifact dir.
 const COMPLETE_MARKER: &str = ".pylon-artifact-complete";
-/// How many extracted artifacts to keep on the volume (current + rollback
-/// targets). Older ones are pruned to bound disk use.
-const KEEP_ARTIFACTS: usize = 3;
+/// How many PRIOR extracted artifacts to keep for rollback (the current one is
+/// always kept on top of this). Deliberately small: the `/data` volume is sized
+/// for roughly current + this many bundles, and each prebuilt bundle (with
+/// node_modules) is large — keeping too many is exactly what let stale
+/// artifacts fill the volume and wedge boots (unpack-fails-on-full-disk).
+const KEEP_ARTIFACTS: usize = 1;
 /// Default extraction base on Pylon Cloud (the persistent Fly volume).
 const DEFAULT_BASE: &str = "/data/.pylon-artifact";
 /// Hard cap on the downloaded bundle (compressed). Full-prebuilt bundles with
@@ -199,6 +202,15 @@ fn fetch_and_install(cfg: &Cfg) -> Result<PathBuf, String> {
     // have left on the size-bounded volume.
     sweep_debris(&cfg.base);
 
+    // Prune old artifacts BEFORE downloading/unpacking the new one. Pruning used
+    // to run only AFTER a successful install — so once the volume filled, the
+    // unpack failed, prune never ran, and every later boot re-failed identically
+    // (a permanent wedge: "failed to unpack … No space left on device"). Doing it
+    // here lets a full volume self-heal — drop stale bundles first, then install
+    // into the reclaimed room. (The post-install prune still runs to drop the
+    // bundle this deploy supersedes.)
+    prune_old(&cfg.base, &cfg.id);
+
     let url = resolve_url(cfg)?;
     // Per-pid temp name so overlapping boots don't clobber each other.
     let pid = std::process::id();
@@ -299,43 +311,38 @@ fn install_bundle(cfg: &Cfg, tarball: &Path) -> Result<PathBuf, String> {
     let pid = std::process::id();
     let staging = cfg.base.join(format!(".staging-{}-{pid}", cfg.id));
 
-    if staging.exists() {
-        fs::remove_dir_all(&staging)
-            .map_err(|e| format!("clean staging {}: {e}", staging.display()))?;
-    }
-    fs::create_dir_all(&staging)
-        .map_err(|e| format!("create staging {}: {e}", staging.display()))?;
-    let _staging_guard = ScopedRemoveDir(staging.clone());
-
-    let file = fs::File::open(tarball).map_err(|e| format!("open bundle: {e}"))?;
-    let gz = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(gz);
-    // Do NOT preserve permissions/ownership: a bundle is JS + assets and has no
-    // business carrying setuid/setgid/world-writable bits onto the volume.
-    archive.set_preserve_permissions(false);
-    archive.set_preserve_ownerships(false);
-    archive.set_overwrite(true);
-
-    // Extract entry-by-entry so we can enforce a total decompressed-size cap
-    // (decompression-bomb guard). `unpack_in` keeps the tar crate's
-    // path-traversal + symlink-escape defenses.
-    let mut total: u64 = 0;
-    let entries = archive
-        .entries()
-        .map_err(|e| format!("read bundle entries: {e}"))?;
-    for entry in entries {
-        let mut entry = entry.map_err(|e| format!("read bundle entry: {e}"))?;
-        total = total.saturating_add(entry.size());
-        if total > MAX_EXTRACT_BYTES {
-            return Err(format!(
-                "bundle exceeds {} byte extracted-size cap",
-                MAX_EXTRACT_BYTES
-            ));
+    // Unpack into staging, retrying ONCE after an aggressive space reclaim if the
+    // volume runs out of room mid-extract. On a full disk we'd rather drop the
+    // local rollback cache (re-fetchable from object storage) than leave the
+    // deploy wedged — so the new bundle always wins the last of the space.
+    let mut freed_for_space = false;
+    loop {
+        if staging.exists() {
+            fs::remove_dir_all(&staging)
+                .map_err(|e| format!("clean staging {}: {e}", staging.display()))?;
         }
-        entry
-            .unpack_in(&staging)
-            .map_err(|e| format!("unpack entry into {}: {e}", staging.display()))?;
+        fs::create_dir_all(&staging)
+            .map_err(|e| format!("create staging {}: {e}", staging.display()))?;
+
+        match unpack_archive(tarball, &staging) {
+            Ok(()) => break,
+            Err(e) if !freed_for_space && is_no_space(&e) => {
+                eprintln!(
+                    "[artifact] out of space unpacking {}; reclaiming other bundles and retrying",
+                    cfg.id
+                );
+                let _ = fs::remove_dir_all(&staging);
+                free_artifact_space(&cfg.base, &staging);
+                freed_for_space = true;
+                // loop: retry the unpack with the reclaimed room.
+            }
+            Err(e) => {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(e);
+            }
+        }
     }
+    let _staging_guard = ScopedRemoveDir(staging.clone());
 
     // A concurrent boot may have won the race and already produced the target.
     if target.join(COMPLETE_MARKER).is_file() {
@@ -446,6 +453,67 @@ fn prune_old(base: &Path, keep_id: &str) {
             if !is_current {
                 kept += 1;
             }
+            continue;
+        }
+        let _ = fs::remove_dir_all(&path);
+    }
+}
+
+/// Unpack the gzip-tar `tarball` into `staging`, enforcing the decompressed-size
+/// cap (decompression-bomb guard) and the tar crate's path-traversal/symlink
+/// defenses. Split out of `install_bundle` so the caller can retry it after
+/// reclaiming space. Does NOT preserve permissions/ownership: a bundle is JS +
+/// assets and has no business carrying setuid/setgid/world-writable bits.
+fn unpack_archive(tarball: &Path, staging: &Path) -> Result<(), String> {
+    let file = fs::File::open(tarball).map_err(|e| format!("open bundle: {e}"))?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(gz);
+    archive.set_preserve_permissions(false);
+    archive.set_preserve_ownerships(false);
+    archive.set_overwrite(true);
+
+    let mut total: u64 = 0;
+    let entries = archive
+        .entries()
+        .map_err(|e| format!("read bundle entries: {e}"))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| format!("read bundle entry: {e}"))?;
+        total = total.saturating_add(entry.size());
+        if total > MAX_EXTRACT_BYTES {
+            return Err(format!(
+                "bundle exceeds {} byte extracted-size cap",
+                MAX_EXTRACT_BYTES
+            ));
+        }
+        entry
+            .unpack_in(staging)
+            .map_err(|e| format!("unpack entry into {}: {e}", staging.display()))?;
+    }
+    Ok(())
+}
+
+/// Does this error string indicate the volume ran out of space?
+fn is_no_space(err: &str) -> bool {
+    err.contains("No space left") || err.contains("os error 28") || err.contains("ENOSPC")
+}
+
+/// Last-resort reclaim when an unpack runs the volume out of space: remove every
+/// extracted artifact dir under `base` except the in-progress `staging` (and
+/// other in-flight `.staging-*` / `.download-*` temps, which their own guards
+/// own). The local rollback cache is sacrificed — it's re-fetchable from object
+/// storage — so the deploy in flight can finish rather than wedge a full disk.
+fn free_artifact_space(base: &Path, staging: &Path) {
+    let Ok(rd) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || path == *staging {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with(".staging-") || name.starts_with(".download-") {
             continue;
         }
         let _ = fs::remove_dir_all(&path);
@@ -592,5 +660,42 @@ mod tests {
             .filter(|e| e.path().join(COMPLETE_MARKER).is_file())
             .count();
         assert_eq!(complete, KEEP_ARTIFACTS + 1);
+    }
+
+    #[test]
+    fn is_no_space_matches_enospc() {
+        assert!(is_no_space(
+            "unpack entry into /data/.staging-x: No space left on device (os error 28)"
+        ));
+        assert!(is_no_space("stream artifact: No space left on device (os error 28)"));
+        assert!(!is_no_space("sha256 mismatch: expected a, got b"));
+        assert!(!is_no_space("read bundle entry: unexpected EOF"));
+    }
+
+    #[test]
+    fn free_artifact_space_clears_others_keeps_staging_and_temps() {
+        let base = tempfile::tempdir().unwrap();
+        // Two old extracted artifacts (the reclaimable rollback cache).
+        for id in ["dep-old1", "dep-old2"] {
+            let d = base.path().join(id);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join(COMPLETE_MARKER), b"").unwrap();
+        }
+        // The in-progress staging for the deploy we're installing.
+        let staging = base.path().join(".staging-dep-new-1");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("app.ts"), b"x").unwrap();
+        // Another boot's download temp — left to its own guard.
+        fs::write(base.path().join(".download-dep-new-2.tar.gz"), b"junk").unwrap();
+
+        free_artifact_space(base.path(), &staging);
+
+        assert!(!base.path().join("dep-old1").exists(), "old artifact reclaimed");
+        assert!(!base.path().join("dep-old2").exists(), "old artifact reclaimed");
+        assert!(staging.join("app.ts").is_file(), "in-progress staging preserved");
+        assert!(
+            base.path().join(".download-dep-new-2.tar.gz").exists(),
+            "other in-flight temp left alone"
+        );
     }
 }
