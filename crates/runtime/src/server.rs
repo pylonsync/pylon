@@ -2106,6 +2106,12 @@ fn start_server(
         // `cors_origin` isn't `*`.
         let allow_credentials = allow_credentials || cors_origin != "*";
         let is_dev = is_dev;
+        // Dev mode keeps /admin/* + /metrics open for local convenience — but
+        // ONLY when no operator token is configured (see
+        // `dev_admin_endpoints_open`).
+        let dev_metrics_token = std::env::var("PYLON_METRICS_TOKEN").ok();
+        let dev_admin_open =
+            dev_admin_endpoints_open(is_dev, admin_token.as_deref(), dev_metrics_token.as_deref());
 
         let method = request.method().clone();
         let url = request.url().to_string();
@@ -2324,7 +2330,7 @@ fn start_server(
             //      the bare admin token.
             // Dev-mode keeps the endpoint open so local Prometheus
             // scrapers just work.
-            if !is_dev
+            if !dev_admin_open
                 && !verify_admin_or_metrics_auth(
                     &request,
                     admin_token.as_deref(),
@@ -2446,7 +2452,7 @@ fn start_server(
         // ~64k Tinybird queries/day per actively-tailed project. The
         // ring serves the same shape directly from process memory.
         if url.starts_with("/admin/logs/tail") && method == Method::Get {
-            if !is_dev
+            if !dev_admin_open
                 && !verify_admin_or_metrics_auth(
                     &request,
                     admin_token.as_deref(),
@@ -2526,7 +2532,7 @@ fn start_server(
         // manifest separately. Read-only, same auth as the
         // per-entity browse route below.
         if url == "/admin/entities" && method == Method::Get {
-            if !is_dev
+            if !dev_admin_open
                 && !verify_admin_or_metrics_auth(
                     &request,
                     admin_token.as_deref(),
@@ -2602,7 +2608,7 @@ fn start_server(
             // follow-up; v1 is read-only browse.
             let is_list = !path.is_empty() && !path.contains('/');
             if is_list && method == Method::Get {
-                if !is_dev
+                if !dev_admin_open
                     && !verify_admin_or_metrics_auth(
                         &request,
                         admin_token.as_deref(),
@@ -2703,7 +2709,7 @@ fn start_server(
         // auth shape as /admin/logs/tail, no behavior change on the
         // existing one.
         if url.starts_with("/admin/fn/traces") && method == Method::Get {
-            if !is_dev
+            if !dev_admin_open
                 && !verify_admin_or_metrics_auth(
                     &request,
                     admin_token.as_deref(),
@@ -2778,7 +2784,7 @@ fn start_server(
         //   GET /admin/jobs/dead              → dead-letter queue
         //   GET /admin/jobs/<id>              → one job detail
         if url.starts_with("/admin/jobs") && method == Method::Get {
-            if !is_dev
+            if !dev_admin_open
                 && !verify_admin_or_metrics_auth(
                     &request,
                     admin_token.as_deref(),
@@ -2870,7 +2876,7 @@ fn start_server(
         //   GET /admin/workflows              → instances (optional ?status=)
         //   GET /admin/workflows/<id>         → one instance detail
         if url.starts_with("/admin/workflows") && method == Method::Get {
-            if !is_dev
+            if !dev_admin_open
                 && !verify_admin_or_metrics_auth(
                     &request,
                     admin_token.as_deref(),
@@ -6204,6 +6210,39 @@ fn build_cluster_bus() -> Arc<dyn pylon_cluster::ClusterBus> {
 /// Dev-mode bypass is the caller's responsibility — this helper
 /// always enforces, so test harnesses that want open access in dev
 /// must check `is_dev` before calling.
+/// Whether dev mode should leave the `/admin/*` + `/metrics` endpoints open
+/// (no auth). True ONLY in dev AND when no operator token is configured —
+/// an empty-string token counts as unset. In production a token is always
+/// set, so an accidental `PYLON_DEV_MODE=true` there still enforces auth
+/// instead of silently exposing admin/metrics data.
+fn dev_admin_endpoints_open(
+    is_dev: bool,
+    admin_token: Option<&str>,
+    metrics_token: Option<&str>,
+) -> bool {
+    let unset = |t: Option<&str>| t.map(|s| s.trim().is_empty()).unwrap_or(true);
+    is_dev && unset(admin_token) && unset(metrics_token)
+}
+
+#[cfg(test)]
+mod dev_admin_gate_tests {
+    use super::dev_admin_endpoints_open;
+
+    #[test]
+    fn dev_admin_open_only_when_dev_and_no_token() {
+        // Prod: always enforce (never open), token or not.
+        assert!(!dev_admin_endpoints_open(false, None, None));
+        assert!(!dev_admin_endpoints_open(false, Some("tok"), None));
+        // Dev, no token configured → open (local convenience).
+        assert!(dev_admin_endpoints_open(true, None, None));
+        assert!(dev_admin_endpoints_open(true, Some("  "), Some("")));
+        // Dev BUT a token is configured (the accidental-prod case) → enforce.
+        assert!(!dev_admin_endpoints_open(true, Some("admintok"), None));
+        assert!(!dev_admin_endpoints_open(true, None, Some("metricstok")));
+        assert!(!dev_admin_endpoints_open(true, Some("a"), Some("m")));
+    }
+}
+
 fn verify_admin_or_metrics_auth(
     request: &tiny_http::Request,
     admin_token: Option<&str>,
