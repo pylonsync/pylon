@@ -37,6 +37,7 @@ function makeRig(opts: { isLeader?: boolean } = {}) {
       onMutationsFailed: record("mutationsFailed"),
       onBinaryReceived: record("binary"),
       onPeerLeft: record("peerLeft"),
+      onReplayForwardedMutations: record("replayForwardedMutations"),
     },
   );
   return { orch, events, serverSubs, subs };
@@ -87,6 +88,26 @@ describe("MultiTabOrchestrator dispatch", () => {
     // No event because this rig isn't leader. The orchestrator's
     // leader gate filtered it out.
     expect(follower.events.length).toBe(0);
+  });
+
+  test("request-sub-replay re-forwards a follower's pending mutations (#341)", () => {
+    // A new leader broadcasts request-sub-replay after a handoff. Followers
+    // must re-forward their pending mutations — an op forwarded to the
+    // previous (now-dead) leader is otherwise stranded, since the new leader
+    // only drains its OWN queue on promotion. makeRig's orchestrator never
+    // ran init(), so _isLeader is false → it acts as a follower here.
+    const { orch, events } = makeRig();
+    orch.handleMessage({ type: "request-sub-replay" }, "new-leader");
+    expect(events.map((e) => e.kind)).toContain("replayForwardedMutations");
+  });
+
+  test("request-sub-replay does NOT re-forward on the leader (#341)", () => {
+    const { orch, events } = makeRig();
+    // Promote this rig to leader; a leader receiving the replay request (its
+    // own echo, or a stale broadcast) owns the network and must not act.
+    (orch as unknown as { _isLeader: boolean })._isLeader = true;
+    orch.handleMessage({ type: "request-sub-replay" }, "x");
+    expect(events.map((e) => e.kind)).not.toContain("replayForwardedMutations");
   });
 
   test("mutations-acked + mutations-failed both fire their hooks", () => {

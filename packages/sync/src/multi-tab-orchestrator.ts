@@ -125,6 +125,12 @@ export interface MultiTabOrchestratorHooks {
   /** New leader → followers: re-declare your observed entities so the
    *  new leader's reconcile sweep covers them. */
   onReplayObservedEntities?(): void;
+  /** New leader → followers: re-forward your pending mutation batch. A
+   *  mutation a follower forwarded to a leader that died before acking is
+   *  otherwise stranded — the new leader only drains its OWN queue on
+   *  promotion, and the other replay hooks cover subs/rooms/entities but
+   *  not mutations. op_id makes the re-forward idempotent. */
+  onReplayForwardedMutations?(): void;
 }
 
 export interface MultiTabOrchestratorConfig {
@@ -404,6 +410,11 @@ export class MultiTabOrchestrator {
         // ...and re-declare observed entities so the new leader's
         // reconcile sweep covers them.
         this.hooks.onReplayObservedEntities?.();
+        // ...and re-forward any pending mutations. A mutation forwarded to
+        // a now-dead leader (which never acked) is otherwise stranded as an
+        // optimistic ghost until this follower's next write — the new
+        // leader only drained its own queue on promotion.
+        this.hooks.onReplayForwardedMutations?.();
         break;
       }
       case "entity-observe": {

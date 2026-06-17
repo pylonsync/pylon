@@ -483,3 +483,88 @@ describe("sync hardening: multi-tab follower coverage", () => {
     expect(row?.title).toBe("keep");
   });
 });
+
+describe("#341: leader-handoff re-forwards a follower's pending mutations", () => {
+  let env: TestEnv | null = null;
+  afterEach(async () => {
+    if (env) await env.dispose();
+    env = null;
+  });
+
+  // The engine-side half of the fix: a follower's onReplayForwardedMutations
+  // hook (fired when a new leader broadcasts request-sub-replay) re-forwards
+  // its pending batch. Pre-fix the hook didn't exist, so an op forwarded to a
+  // now-dead leader was stranded until the follower's next local write.
+  test("a follower re-forwards its pending batch on replay", async () => {
+    env = createTestEnv();
+    env.signIn({ userId: "u1" });
+    await env.start();
+
+    const engine = env.engine as unknown as {
+      isMultiTabLeader: boolean;
+      multiTabHooks(): { onReplayForwardedMutations?: () => void };
+      broadcastToTabs(payload: unknown): void;
+      mutations: { add(change: unknown): string };
+    };
+
+    // Become a follower holding an op we'd forwarded to a leader that died
+    // before acking — it's still pending here with nothing pushing it.
+    engine.isMultiTabLeader = false;
+    engine.mutations.add({
+      op_id: "op-stranded",
+      entity: "Todo",
+      row_id: "x",
+      kind: "insert",
+      data: { id: "x", text: "stranded" },
+    });
+
+    const forwarded: { ops: { change: { op_id: string } }[] }[] = [];
+    const orig = engine.broadcastToTabs.bind(engine);
+    engine.broadcastToTabs = (p: unknown) => {
+      if ((p as { type?: string }).type === "mutations") {
+        forwarded.push(p as { ops: { change: { op_id: string } }[] });
+      }
+      orig(p);
+    };
+
+    // New leader → followers: re-forward your subs/rooms/entities AND your
+    // pending mutations. This is the hook the request-sub-replay handler now
+    // invokes.
+    engine.multiTabHooks().onReplayForwardedMutations?.();
+
+    expect(forwarded.length).toBe(1);
+    expect(forwarded[0].ops.map((o) => o.change.op_id)).toContain("op-stranded");
+  });
+
+  test("the leader does NOT re-forward on replay (it owns the network)", async () => {
+    env = createTestEnv(); // multiTab:false → this engine is the leader
+    env.signIn({ userId: "u1" });
+    await env.start();
+
+    const engine = env.engine as unknown as {
+      isMultiTabLeader: boolean;
+      multiTabHooks(): { onReplayForwardedMutations?: () => void };
+      broadcastToTabs(payload: unknown): void;
+      mutations: { add(change: unknown): string };
+    };
+
+    expect(engine.isMultiTabLeader).toBe(true);
+    engine.mutations.add({
+      op_id: "op-leader",
+      entity: "Todo",
+      row_id: "y",
+      kind: "insert",
+      data: { id: "y", text: "mine" },
+    });
+
+    const forwarded: unknown[] = [];
+    const orig = engine.broadcastToTabs.bind(engine);
+    engine.broadcastToTabs = (p: unknown) => {
+      if ((p as { type?: string }).type === "mutations") forwarded.push(p);
+      orig(p);
+    };
+
+    engine.multiTabHooks().onReplayForwardedMutations?.();
+    expect(forwarded.length).toBe(0);
+  });
+});

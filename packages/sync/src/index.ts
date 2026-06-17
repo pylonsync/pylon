@@ -1033,6 +1033,20 @@ export class SyncEngine {
           this.broadcastToTabs({ type: "entity-observe", entity });
         }
       },
+      onReplayForwardedMutations: () => {
+        // Follower path: re-forward our pending batch to the new leader.
+        // If we'd forwarded an op to the previous (now-dead) leader, it
+        // died before acking, so the op is still pending here as an
+        // optimistic ghost with nothing pushing it. The new leader only
+        // drains its OWN queue on promotion, so without this re-forward the
+        // op is silently lost until our next local write. The leader's
+        // `onMutationsForwarded` re-adds by op_id (idempotent) and pushes.
+        if (this.isMultiTabLeader) return;
+        const pending = this.mutations.pending();
+        if (pending.length > 0) {
+          this.broadcastToTabs({ type: "mutations", ops: pending });
+        }
+      },
     };
   }
 
