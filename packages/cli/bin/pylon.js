@@ -47,6 +47,23 @@ const UNSUPPORTED_HINTS = {
 };
 
 function resolveBinary() {
+	// Escape hatch for a locally-built binary (esbuild's ESBUILD_BINARY_PATH
+	// pattern). Without this, a `cargo install`ed or hand-built `pylon` is
+	// invisible to `bun dev` / `npm run dev`, because bun puts node_modules/.bin
+	// first on PATH and the script resolves THIS shim → the published prebuilt.
+	// Point PYLON_BIN at your build to test a fix before it ships:
+	//   PYLON_BIN=$HOME/.cargo/bin/pylon bun dev
+	const override = process.env.PYLON_BIN;
+	if (override) {
+		if (!existsSync(override)) {
+			throw new Error(
+				`@pylonsync/cli: PYLON_BIN is set to "${override}" but no file ` +
+					`exists there.`,
+			);
+		}
+		return override;
+	}
+
 	const key = `${process.platform}-${process.arch}`;
 	const pkg = PLATFORM_PACKAGES[key];
 	if (!pkg) {
