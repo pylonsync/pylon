@@ -683,7 +683,10 @@ pub fn try_handle(
                 && !session_cookie_present(cfg, &request);
             if cacheable_eligible {
                 let (path_only, _) = url.split_once('?').unwrap_or((url.as_str(), ""));
-                if let Some(entry) = crate::ssr_cache::get(&matched.route.path, path_only, &[]) {
+                let cache_vary = ssr_cache_vary(request_host(&request).as_deref());
+                if let Some(entry) =
+                    crate::ssr_cache::get(&matched.route.path, path_only, &cache_vary)
+                {
                     if entry.fresh {
                         tracing::debug!(url = %url, "SSR cache hit (disk)");
                         return serve_cached_ssr(entry, cors_origin, request);
@@ -1351,6 +1354,12 @@ fn serve_via_ssr_rpc(
         headers_map.insert(name, value);
     }
 
+    // ISR cache key host dimension (see `ssr_cache_host_bucket`). Computed once
+    // from this request's Host and threaded identically through the write +
+    // stale-on-error paths so they key the same way the read path (in
+    // `serve_frontend`) does.
+    let cache_vary = ssr_cache_vary(headers_map.get("host").map(String::as_str));
+
     let params_json =
         serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
     let search_params_json = parse_query_string(&query);
@@ -1385,6 +1394,7 @@ fn serve_via_ssr_rpc(
             &matched.route.path,
             &path_only,
             cacheable_eligible,
+            &cache_vary,
             cors_origin,
             request,
         ) {
@@ -1553,6 +1563,7 @@ fn serve_via_ssr_rpc(
                 &matched.route.path,
                 &path_only,
                 cacheable_eligible,
+                &cache_vary,
                 cors_origin,
                 request,
             ) {
@@ -1585,6 +1596,7 @@ fn serve_via_ssr_rpc(
         maybe_cache_render(
             &matched.route.path,
             &path_only,
+            &cache_vary,
             status,
             &page_headers,
             buf,
@@ -1593,6 +1605,102 @@ fn serve_via_ssr_rpc(
         );
     }
     Ok(())
+}
+
+/// Lowercase `host[:port]` from a bare host or a full URL; `""` when empty.
+/// Mirrors `hostOf()` in ssr-runtime.ts so the Rust cache key agrees with the
+/// origin the TS render bakes into og:image / canonical URLs.
+fn host_of(value: &str) -> String {
+    let t = value.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let host = match t.find("://") {
+        // scheme://host/path… → take the authority up to the next '/'.
+        Some(i) => t[i + 3..].split('/').next().unwrap_or("").to_string(),
+        None => t.trim_matches('/').to_string(),
+    };
+    host.to_ascii_lowercase()
+}
+
+/// Loopback host? Mirrors `LOOPBACK_HOST` in ssr-runtime.ts:
+/// `/^(localhost|127\.|\[?::1|0\.0\.0\.0)/`.
+fn is_loopback_host(host: &str) -> bool {
+    host.starts_with("localhost")
+        || host.starts_with("127.")
+        || host.starts_with("::1")
+        || host.starts_with("[::1")
+        || host.starts_with("0.0.0.0")
+}
+
+/// The cache-key "host bucket" for an SSR render.
+///
+/// A cacheable (force-static / `revalidate`) render bakes an ABSOLUTE origin
+/// into its og:image + canonical URLs. `resolveOrigin` (ssr-runtime.ts) derives
+/// that origin from the request `Host` ONLY when the host is allowlisted (the
+/// `PYLON_PUBLIC_URL` host, `PYLON_CANONICAL_HOST`, a `PYLON_TRUSTED_HOSTS`
+/// entry, or loopback); any other Host is clamped to the configured public
+/// origin. So the cached HTML varies by the *trusted* host, and the on-disk ISR
+/// key MUST include that dimension — otherwise on a multi-trusted-host deploy
+/// (e.g. apex + www served from one app) the first host to render bakes its
+/// absolute URLs into the shared entry and every other trusted host serves them.
+///
+/// Every UNtrusted host collapses to the same `""` bucket: they all render
+/// identical canonical-origin URLs, so they share one entry AND an attacker
+/// spraying arbitrary `Host` headers can't multiply cache entries. Only the
+/// finite set of operator-configured trusted hosts gets its own bucket.
+///
+/// MUST stay in sync with `resolveOrigin`'s allowlist in
+/// packages/functions/src/ssr-runtime.ts (same env vars + loopback rule).
+fn ssr_cache_host_bucket(request_host: Option<&str>) -> String {
+    let host = host_of(request_host.unwrap_or(""));
+    if host.is_empty() {
+        return String::new();
+    }
+    if is_loopback_host(&host) {
+        return host;
+    }
+    let mut allow: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut add = |v: &str| {
+        let h = host_of(v);
+        if !h.is_empty() {
+            allow.insert(h);
+        }
+    };
+    if let Ok(v) = std::env::var("PYLON_PUBLIC_URL") {
+        add(&v);
+    }
+    if let Ok(v) = std::env::var("PYLON_CANONICAL_HOST") {
+        add(&v);
+    }
+    if let Ok(v) = std::env::var("PYLON_TRUSTED_HOSTS") {
+        for part in v.split(',') {
+            add(part);
+        }
+    }
+    if allow.contains(&host) {
+        host
+    } else {
+        String::new()
+    }
+}
+
+/// Cache-key `vary` for a render, derived from its request `Host`: a single
+/// `("host", bucket)` pair (see `ssr_cache_host_bucket`). Threaded identically
+/// through the read, write, and stale-on-error paths so their keys agree.
+fn ssr_cache_vary(request_host: Option<&str>) -> Vec<(String, String)> {
+    vec![("host".to_string(), ssr_cache_host_bucket(request_host))]
+}
+
+/// The request `Host` header value, if present.
+fn request_host(request: &Request) -> Option<String> {
+    request.headers().iter().find_map(|h| {
+        if h.field.as_str().as_str().eq_ignore_ascii_case("host") {
+            Some(h.value.as_str().to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// #277 Stage 2: the host-edge shareability verdict. Returns `Some(revalidate
@@ -1627,6 +1735,7 @@ fn ssr_cache_verdict(
 fn maybe_cache_render(
     route_path: &str,
     pathname: &str,
+    vary: &[(String, String)],
     status: u16,
     page_headers: &std::collections::HashMap<String, String>,
     buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
@@ -1647,7 +1756,7 @@ fn maybe_cache_render(
         return;
     }
     // Single-flight: skip if another request is already writing this key.
-    let _claim = match crate::ssr_cache::try_claim_write(route_path, pathname, &[]) {
+    let _claim = match crate::ssr_cache::try_claim_write(route_path, pathname, vary) {
         Some(c) => c,
         None => return,
     };
@@ -1664,7 +1773,7 @@ fn maybe_cache_render(
     crate::ssr_cache::put(
         route_path,
         pathname,
-        &[],
+        vary,
         status,
         &headers_vec,
         &body,
@@ -1712,10 +1821,11 @@ fn try_serve_stale_on_error(
     route_path: &str,
     pathname: &str,
     cacheable_eligible: bool,
+    vary: &[(String, String)],
     cors_origin: &str,
     request: Request,
 ) -> Result<(), Request> {
-    match stale_on_error_candidate(route_path, pathname, cacheable_eligible) {
+    match stale_on_error_candidate(route_path, pathname, cacheable_eligible, vary) {
         Some(entry) => {
             tracing::warn!(
                 route = %route_path,
@@ -1738,11 +1848,12 @@ fn stale_on_error_candidate(
     route_path: &str,
     pathname: &str,
     cacheable_eligible: bool,
+    vary: &[(String, String)],
 ) -> Option<crate::ssr_cache::CacheEntry> {
     if !cacheable_eligible {
         return None;
     }
-    crate::ssr_cache::get(route_path, pathname, &[])
+    crate::ssr_cache::get(route_path, pathname, vary)
 }
 
 /// Serve a cached entry as a stale-on-error fallback. Like `serve_cached_ssr`
@@ -3419,6 +3530,87 @@ mod tests {
     }
 
     #[test]
+    fn cache_host_bucket_trusts_only_allowlisted_and_loopback_hosts() {
+        // Drives global env; CI runs --test-threads=1 so this is safe.
+        std::env::remove_var("PYLON_PUBLIC_URL");
+        std::env::remove_var("PYLON_CANONICAL_HOST");
+        std::env::set_var("PYLON_TRUSTED_HOSTS", "www.example.com, apex.example.com");
+        std::env::set_var("PYLON_CANONICAL_HOST", "canon.example.com");
+        std::env::set_var("PYLON_PUBLIC_URL", "https://public.example.com:8443/base");
+
+        // Allowlisted hosts get their OWN bucket (they bake distinct absolute
+        // URLs and must not share a cache entry).
+        assert_eq!(
+            ssr_cache_host_bucket(Some("www.example.com")),
+            "www.example.com"
+        );
+        assert_eq!(
+            ssr_cache_host_bucket(Some("apex.example.com")),
+            "apex.example.com"
+        );
+        // PYLON_PUBLIC_URL contributes its host:port (parsed from the URL).
+        assert_eq!(
+            ssr_cache_host_bucket(Some("public.example.com:8443")),
+            "public.example.com:8443"
+        );
+        // PYLON_CANONICAL_HOST is trusted too.
+        assert_eq!(
+            ssr_cache_host_bucket(Some("canon.example.com")),
+            "canon.example.com"
+        );
+        // Case-insensitive match.
+        assert_eq!(
+            ssr_cache_host_bucket(Some("WWW.Example.COM")),
+            "www.example.com"
+        );
+        // Loopback always trusted (dev).
+        assert_eq!(
+            ssr_cache_host_bucket(Some("localhost:4321")),
+            "localhost:4321"
+        );
+        assert_eq!(
+            ssr_cache_host_bucket(Some("127.0.0.1:4321")),
+            "127.0.0.1:4321"
+        );
+
+        // UNtrusted / spoofed / absent hosts ALL collapse to the "" bucket —
+        // they render identical canonical-origin URLs (so sharing is correct)
+        // and an attacker spraying distinct Host values can't multiply entries.
+        assert_eq!(ssr_cache_host_bucket(Some("evil.com")), "");
+        assert_eq!(ssr_cache_host_bucket(Some("attacker.example.net")), "");
+        assert_eq!(ssr_cache_host_bucket(None), "");
+        assert_eq!(ssr_cache_host_bucket(Some("")), "");
+
+        std::env::remove_var("PYLON_TRUSTED_HOSTS");
+        std::env::remove_var("PYLON_CANONICAL_HOST");
+        std::env::remove_var("PYLON_PUBLIC_URL");
+    }
+
+    #[test]
+    fn cache_key_host_dimension_separates_distinct_buckets() {
+        // The mechanism #347 relies on: the host bucket actually changes the
+        // ISR cache key, so two trusted hosts land on DIFFERENT entries (each
+        // serves its own absolute URLs) while everything in the "" untrusted
+        // bucket shares ONE entry. Env-free — bucket *derivation* from the
+        // allowlist is covered by
+        // `cache_host_bucket_trusts_only_allowlisted_and_loopback_hosts`.
+        let k = |bucket: &str| {
+            crate::ssr_cache::cache_key("/p", "/p", &[("host".to_string(), bucket.to_string())])
+        };
+        assert_ne!(
+            k("a.example.com"),
+            k("b.example.com"),
+            "distinct trusted host buckets → distinct cache keys"
+        );
+        assert_ne!(
+            k("a.example.com"),
+            k(""),
+            "trusted host vs the untrusted bucket differ"
+        );
+        assert_eq!(k(""), k(""), "the untrusted bucket is one shared entry");
+    }
+
+    #[test]
     fn stale_on_error_prefers_a_stale_cached_entry_over_an_error() {
         // Reliability: when the live render can't produce a response, a page
         // that was EVER rendered should stay up. The fallback deliberately
@@ -3439,17 +3631,17 @@ mod tests {
 
         // Cacheable-eligible + a stale entry exists → it's a valid fallback,
         // and it's the STALE entry (the whole point of stale-on-error).
-        let cand = stale_on_error_candidate(rp, rp, true).expect("stale entry is a candidate");
+        let cand = stale_on_error_candidate(rp, rp, true, &[]).expect("stale entry is a candidate");
         assert!(!cand.fresh, "fallback is the stale entry");
         assert_eq!(cand.body, b"<html>old</html>");
 
         // NOT cacheable-eligible (authed / has query) → never serve a shared
         // anonymous page as a fallback, even though one is cached.
-        assert!(stale_on_error_candidate(rp, rp, false).is_none());
+        assert!(stale_on_error_candidate(rp, rp, false, &[]).is_none());
 
         // Cacheable-eligible but nothing cached for this route → no fallback;
         // the caller emits its 503/500.
-        assert!(stale_on_error_candidate("/__never_oe__", "/__never_oe__", true).is_none());
+        assert!(stale_on_error_candidate("/__never_oe__", "/__never_oe__", true, &[]).is_none());
 
         std::env::remove_var("PYLON_SSR_CACHE_ROOT");
         std::env::remove_var("PYLON_ARTIFACT_ID");
