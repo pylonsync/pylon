@@ -40,9 +40,13 @@ import { join, basename } from "path";
 // consuming apps type-check this source under node/DOM where the `Bun` global
 // is absent — so declare the surface we touch (mirrors the ambient in
 // ssr-client-bundler.ts). Keeps `tsc` clean in a scaffolded app.
+interface BunFileSink {
+  write(chunk: string): number;
+  flush(): number | Promise<number>;
+}
 declare const Bun: {
   write(destination: unknown, input: string): Promise<number>;
-  stdout: unknown;
+  stdout: { writer(): BunFileSink };
   stderr: unknown;
   stdin: { stream(): ReadableStream<Uint8Array> };
 };
@@ -71,9 +75,27 @@ interface ResultMessage {
 // Send
 // ---------------------------------------------------------------------------
 
+// Protocol frames go through ONE FileSink over stdout. The old
+// `Bun.write(Bun.stdout, line)` returned an UNAWAITED promise, so once a
+// runner multiplexes concurrent calls (since the v0.3.259 runner change) two
+// handlers emitting frames larger than PIPE_BUF (~4KB) could race their
+// write() syscalls and interleave on stdout — the host's NDJSON reader then
+// failed to parse the corrupted line and dropped the frame, hanging the caller
+// to its timeout. A single sink appends every frame to one ordered buffer, so
+// writes can't interleave; `send` is the only stdout writer.
+let stdoutSink: BunFileSink | undefined;
 function send(msg: Record<string, unknown>): void {
   const line = JSON.stringify(msg) + "\n";
-  Bun.write(Bun.stdout, line);
+  if (!stdoutSink) stdoutSink = Bun.stdout.writer();
+  stdoutSink.write(line);
+  // flush() can return a Promise under pipe backpressure. The single sink
+  // already preserves frame order, so we don't await — just keep a flush
+  // error (e.g. EPIPE after the host exits) from becoming an unhandled
+  // rejection.
+  const flushed = stdoutSink.flush();
+  if (flushed && typeof (flushed as Promise<number>).then === "function") {
+    (flushed as Promise<number>).then(undefined, () => {});
+  }
 }
 
 /**

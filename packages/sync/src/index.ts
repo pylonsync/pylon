@@ -1686,6 +1686,12 @@ export class SyncEngine {
    *  reconcile sweep them too. See `observeEntity`. */
   private observedEntities = new Set<string>();
 
+  /** Per-entity count of CONSECUTIVE 403s seen during reconcile, reset on
+   *  any successful fetch. A single 403 can be transient (a bearer caught
+   *  mid-refresh, a momentary policy blip) and must NOT wipe the local cache;
+   *  we only drop an entity's rows after two in a row. See `reconcile`. */
+  private reconcile403Streak = new Map<string, number>();
+
   /**
    * Reconcile the local replica against server truth.
    *
@@ -1833,14 +1839,41 @@ export class SyncEngine {
           // Network errors are expected (offline, transient 5xx). Skip
           // this entity; the next reconcile trigger will retry.
           const status = (err as { status?: number })?.status;
-          if (status === 403 || status === 404) {
-            // Entity is no longer readable (policy revoked) or removed
-            // from the manifest. Drop every local row for it — keeping
-            // them around just leaks invisible state.
+          if (status === 404) {
+            // Entity removed from the manifest — definitive. Drop its rows.
+            this.reconcile403Streak.delete(entity);
+            await this.dropEntity(entity, tombstoneSeq);
+            return;
+          }
+          if (status === 403) {
+            // A 403 can be TRANSIENT — a bearer caught mid-refresh, a tenant
+            // flip that raced the fetch, or a momentary server-side policy
+            // blip. Nuking every local row on the first one makes the data
+            // flash away and reappear next reconcile (the "rows vanish on
+            // load" bug, on the error path this time). Two gates before we
+            // drop:
+            //   1. If the session flipped during the fetch, the 403 reflects
+            //      the OLD context — never drop; the next reconcile under the
+            //      new session decides (mirrors the success-path guard below).
+            if (this.session.signature() !== sessionBeforeFetch) {
+              return;
+            }
+            //   2. Otherwise require TWO consecutive 403s for this entity, so
+            //      a one-off blip can't wipe the cache. A successful fetch
+            //      (below) resets the streak.
+            const streak = (this.reconcile403Streak.get(entity) ?? 0) + 1;
+            if (streak < 2) {
+              this.reconcile403Streak.set(entity, streak);
+              return;
+            }
+            this.reconcile403Streak.delete(entity);
             await this.dropEntity(entity, tombstoneSeq);
           }
           return;
         }
+        // Successful fetch — the entity is readable, so any prior 403 streak
+        // is broken (even if a drift guard below makes us skip the apply).
+        this.reconcile403Streak.delete(entity);
         if (this.cursor.last_seq !== cursorBeforeFetch) {
           // Cursor moved during fetch — at least one WS event for this
           // (or another) entity landed and might have a fresher value

@@ -247,6 +247,52 @@ describe("SyncEngine.reconcile", () => {
     await engine.reconcile(["DeletedEntity"]);
     expect(engine.store.list("DeletedEntity").length).toBe(0);
   });
+
+  test("transient 403 keeps rows; two consecutive 403s drop them (#343)", async () => {
+    // A single 403 can be a bearer caught mid-refresh or a momentary policy
+    // blip; nuking the cache on the first one made rows flash away and return
+    // next reconcile. The first 403 must keep the rows.
+    const status = 403;
+    restore = installFetch(async () => ({ status, body: {} }));
+    const engine = makeEngine();
+    seedStore(engine, "Recording", [{ id: "r1", title: "alive" }]);
+
+    await engine.reconcile(["Recording"]);
+    expect(engine.store.list("Recording").length).toBe(1);
+
+    // A second consecutive 403 confirms access is really gone — now drop.
+    await engine.reconcile(["Recording"]);
+    expect(engine.store.list("Recording").length).toBe(0);
+  });
+
+  test("a successful fetch resets the 403 streak (#343)", async () => {
+    let status = 403;
+    restore = installFetch(async () =>
+      status === 200
+        ? {
+            status: 200,
+            body: {
+              data: [{ id: "r1", title: "alive" }],
+              next_cursor: null,
+              has_more: false,
+            },
+          }
+        : { status: 403, body: {} },
+    );
+    const engine = makeEngine();
+    seedStore(engine, "Recording", [{ id: "r1", title: "alive" }]);
+
+    await engine.reconcile(["Recording"]); // 403 #1 — kept
+    expect(engine.store.list("Recording").length).toBe(1);
+
+    status = 200;
+    await engine.reconcile(["Recording"]); // success — streak resets
+    expect(engine.store.list("Recording").length).toBe(1);
+
+    status = 403;
+    await engine.reconcile(["Recording"]); // a fresh lone 403 must NOT drop
+    expect(engine.store.list("Recording").length).toBe(1);
+  });
 });
 
 describe("LocalStore.reconcileRemove", () => {
