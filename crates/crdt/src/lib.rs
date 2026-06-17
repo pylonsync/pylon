@@ -724,7 +724,19 @@ fn json_to_loro_inner(v: &Value, depth: u32) -> Option<LoroValue> {
     match v {
         Value::Null => Some(LoroValue::Null),
         Value::Bool(b) => Some(LoroValue::Bool(*b)),
-        Value::Number(n) => n.as_f64().map(LoroValue::Double),
+        // Preserve integers as I64 instead of collapsing every number to a
+        // double. Forcing f64 corrupted integers above 2^53 (9007199254740993
+        // → ...992) and turned every int into a float, so a List<int> field's
+        // projected shape drifted (1 → 1.0) and churned rowsDiffer. i64 covers
+        // any value up to ~9.2e18; a real float or a huge u64 (> i64::MAX) has
+        // no lossless int form and keeps the f64 path.
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Some(LoroValue::I64(i))
+            } else {
+                n.as_f64().map(LoroValue::Double)
+            }
+        }
         Value::String(s) => Some(LoroValue::String(s.clone().into())),
         Value::Array(arr) => {
             let mut out: Vec<LoroValue> = Vec::with_capacity(arr.len());
@@ -761,10 +773,10 @@ pub fn project_doc_to_json(doc: &LoroDoc, fields: &[CrdtField]) -> Value {
                 Value::String(t.to_string())
             }
             Some(ValueOrContainer::Container(loro::Container::Counter(c))) => {
-                // Counters project as their current absolute value
-                // even though writes are delta-shaped. Number is
-                // always representable as f64.
-                serde_json::Number::from_f64(c.get_value())
+                // Counters project as their current absolute value even
+                // though writes are delta-shaped. An overflow to ±Inf is
+                // clamped to a finite number rather than wiped to null.
+                serde_json::Number::from_f64(json_safe_f64(c.get_value()))
                     .map(Value::Number)
                     .unwrap_or(Value::Null)
             }
@@ -861,6 +873,27 @@ fn project_tree(tree: &loro::LoroTree) -> Value {
     Value::Array(out)
 }
 
+/// JSON numbers can't be `Infinity`/`NaN`. A non-finite f64 — a Counter that
+/// overflowed (sum of deltas → ±Inf), or a `Double` smuggled in via the raw
+/// Loro API — would otherwise project to `null` (a silent field wipe) or get
+/// dropped from a list (a silent index shift). Clamp to the nearest finite
+/// value so the field stays a number and an overflow shows up as a huge
+/// magnitude instead of vanishing. `NaN` (which a delta-sum can't reach
+/// normally) maps to 0.
+fn json_safe_f64(n: f64) -> f64 {
+    if n.is_nan() {
+        0.0
+    } else if n.is_infinite() {
+        if n > 0.0 {
+            f64::MAX
+        } else {
+            f64::MIN
+        }
+    } else {
+        n
+    }
+}
+
 fn loro_to_json(v: LoroValue) -> Option<Value> {
     loro_to_json_inner(v, 0)
 }
@@ -876,7 +909,11 @@ fn loro_to_json_inner(v: LoroValue, depth: u32) -> Option<Value> {
     match v {
         LoroValue::Null => Some(Value::Null),
         LoroValue::Bool(b) => Some(Value::Bool(b)),
-        LoroValue::Double(n) => serde_json::Number::from_f64(n).map(Value::Number),
+        LoroValue::Double(n) => {
+            // Clamp non-finite (see json_safe_f64) so a stray Inf/NaN doesn't
+            // drop the element and silently shift later array indices.
+            serde_json::Number::from_f64(json_safe_f64(n)).map(Value::Number)
+        }
         LoroValue::I64(n) => Some(Value::Number(n.into())),
         LoroValue::String(s) => Some(Value::String(s.to_string())),
         LoroValue::Binary(_) => None,
@@ -1608,6 +1645,87 @@ mod tests {
         let projected = project_doc_to_json(&doc, &fields());
         assert_eq!(projected["body"], "hi");
         assert!(projected["qty"].is_null());
+    }
+
+    // ---- #342: List integer precision + Counter overflow -----------------
+
+    fn list_fields() -> Vec<CrdtField> {
+        vec![CrdtField {
+            name: "data".into(),
+            kind: CrdtFieldKind::List,
+        }]
+    }
+
+    #[test]
+    fn list_numbers_keep_integer_shape_and_precision() {
+        // Pre-fix every number was forced to f64: integers above 2^53 were
+        // corrupted (9007199254740993 → ...992) and every int became a float
+        // (1 → 1.0), churning rowsDiffer on List fields.
+        let doc = LoroDoc::new();
+        apply_patch(
+            &doc,
+            &list_fields(),
+            &serde_json::json!({ "data": [1, 2.5, 9007199254740993_i64] }),
+        )
+        .unwrap();
+        let projected = project_doc_to_json(&doc, &list_fields());
+        let arr = projected["data"].as_array().expect("data is an array");
+
+        // Integer stays an integer (not 1.0) — the shape clients diff on.
+        assert!(
+            arr[0].is_i64(),
+            "small int should stay an integer, got {}",
+            arr[0]
+        );
+        assert_eq!(arr[0].as_i64(), Some(1));
+        // Float stays a float.
+        assert_eq!(arr[1].as_f64(), Some(2.5));
+        // Big int survives with full precision (the f64 path returned
+        // 9007199254740992).
+        assert_eq!(arr[2].as_i64(), Some(9007199254740993));
+
+        // Whole-value round-trip is byte-identical.
+        assert_eq!(
+            projected["data"],
+            serde_json::json!([1, 2.5, 9007199254740993_i64])
+        );
+    }
+
+    fn counter_fields() -> Vec<CrdtField> {
+        vec![CrdtField {
+            name: "score".into(),
+            kind: CrdtFieldKind::Counter,
+        }]
+    }
+
+    #[test]
+    fn counter_overflow_clamps_to_finite_not_null() {
+        // A counter is the sum of its deltas; two near-max increments overflow
+        // it to +Inf. Pre-fix the projection ran Number::from_f64(Inf) → None
+        // → null, silently wiping the field. It must clamp to a finite number
+        // instead — the field stays present and visibly huge.
+        let doc = LoroDoc::new();
+        apply_patch(
+            &doc,
+            &counter_fields(),
+            &serde_json::json!({ "score": f64::MAX }),
+        )
+        .unwrap();
+        apply_patch(
+            &doc,
+            &counter_fields(),
+            &serde_json::json!({ "score": f64::MAX }),
+        )
+        .unwrap();
+
+        let projected = project_doc_to_json(&doc, &counter_fields());
+        assert!(
+            !projected["score"].is_null(),
+            "overflowed counter must not project to null"
+        );
+        let v = projected["score"].as_f64().expect("score is a number");
+        assert!(v.is_finite(), "projected counter must be finite, got {v}");
+        assert!(v > 0.0);
     }
 
     #[test]
