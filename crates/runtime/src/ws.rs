@@ -1523,26 +1523,27 @@ pub fn start_ws_server(
 
     let ip_counter = Arc::new(IpConnCounter::default());
 
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(s) => s,
-            Err(_) => continue,
+    loop {
+        // Panic-proof accept. libstd's accept/peer_addr `sockaddr` conversion
+        // ASSERTS (panics, not errors) when the kernel returns a short
+        // address — observed on macOS dual-stack `[::]` when the peer
+        // disconnects mid-accept. crate::accept_tcp accepts with a null addr
+        // (nothing to parse) and decodes the peer IP defensively.
+        let (stream, peer_ip) = match crate::accept_tcp(&listener) {
+            Ok(v) => v,
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
         };
 
         // Per-IP connection cap: reject BEFORE the handshake so a cheap
         // connect storm doesn't force us through tungstenite's HTTP parse
         // and the session-resolve round trip. The guard is dropped when
-        // the reader thread exits (or fails to start), freeing the slot.
-        // catch_unwind: std's sockaddr conversion ASSERTS (panics, not
-        // errors) when getpeername returns a short address — observed
-        // on macOS when the peer disconnects mid-accept. Treat it like
-        // any other dead-on-arrival connection.
-        let peer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| stream.peer_addr()))
-            .unwrap_or_else(|_| Err(std::io::Error::other("peer_addr panicked")));
-        let ip = match peer {
-            Ok(addr) => addr.ip(),
-            Err(_) => continue,
-        };
+        // the reader thread exits (or fails to start), freeing the slot. An
+        // unparseable peer (the truncation case) buckets under the
+        // unspecified address so the cap still bounds it.
+        let ip = peer_ip.unwrap_or(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
         let guard = match ip_counter.acquire(ip) {
             Some(g) => g,
             None => {

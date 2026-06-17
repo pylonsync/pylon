@@ -97,10 +97,15 @@ pub fn start_resp_server(
 
     let requirepass = requirepass.map(Arc::new);
 
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(s) => s,
-            Err(_) => continue,
+    loop {
+        // Panic-proof accept: libstd's accept asserts (panics) on a truncated
+        // macOS dual-stack sockaddr. See crate::accept_tcp.
+        let (stream, _peer_ip) = match crate::accept_tcp(&listener) {
+            Ok(v) => v,
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
         };
 
         let cache = Arc::clone(&cache);

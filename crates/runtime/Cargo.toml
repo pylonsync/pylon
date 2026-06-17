@@ -35,6 +35,9 @@ pylon-realtime = { path = "../realtime", version = "0.3.275" }
 pylon-cluster = { path = "../cluster", version = "0.3.275", features = ["redis-bus"] }
 postgres = { workspace = true }
 rusqlite = { workspace = true }
+# Raw accept() with a null address — see `accept_tcp` (panic-proof accept
+# around libstd's macOS dual-stack sockaddr assertion).
+libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tiny_http = { workspace = true }

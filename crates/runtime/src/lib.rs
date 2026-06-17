@@ -84,6 +84,89 @@ pub fn bind_dual_stack_tcp(port: u16) -> Result<TcpListener, std::io::Error> {
     }
 }
 
+/// Accept one connection without tripping libstd's `sockaddr` assertion.
+///
+/// On macOS a dual-stack `[::]` listener (see [`bind_dual_stack_tcp`]) can
+/// have `accept()` / `getpeername()` hand back an `AF_INET6` address whose
+/// length is shorter than `sockaddr_in6` — a peer that RSTs between `listen`
+/// and `accept`, and some v4-mapped cases. libstd's `sockaddr_to_addr` does
+/// `assert!(len >= size_of::<sockaddr_in6>())`, which PANICS (not errors) and
+/// kills the accept thread — the crash a fresh `pylon dev` hit on macOS.
+/// `TcpListener::incoming()` builds that `SocketAddr` even though it discards
+/// it, so the panic happens at accept time, before any `peer_addr()` guard.
+///
+/// We sidestep it: accept with a NULL address pointer (the kernel writes no
+/// peer address, so there is nothing to parse or assert), then read the peer
+/// IP via `getpeername` and decode it ourselves with an explicit length check
+/// — an address we can't make sense of yields `None` instead of a panic.
+///
+/// Returns the accepted (blocking) stream plus a best-effort peer IP. Callers
+/// enforcing a per-IP cap should bucket a `None` peer under a sentinel.
+pub fn accept_tcp(
+    listener: &TcpListener,
+) -> Result<(std::net::TcpStream, Option<std::net::IpAddr>), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        // SAFETY: `accept` with null addr/len pointers is explicitly valid —
+        // it tells the kernel not to write a peer address. The returned fd is
+        // owned by us; we hand it straight to `TcpStream::from_raw_fd`.
+        let fd = unsafe {
+            libc::accept(
+                listener.as_raw_fd(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
+        Ok((stream, peer_ip_unix(fd)))
+    }
+    #[cfg(not(unix))]
+    {
+        // Other platforms (Windows): libstd's accept doesn't carry the Unix
+        // sockaddr assertion, so the plain path is panic-safe.
+        let (stream, addr) = listener.accept()?;
+        Ok((stream, Some(addr.ip())))
+    }
+}
+
+/// Best-effort peer IP for an accepted fd, decoded with a strict length
+/// check so a truncated address (the very thing that panics libstd) returns
+/// `None` instead of reading past what the kernel wrote.
+#[cfg(unix)]
+fn peer_ip_unix(fd: std::os::unix::io::RawFd) -> Option<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `storage` is a zeroed sockaddr_storage with `len` set to its
+    // size; getpeername writes at most `len` bytes and updates `len`.
+    let rc =
+        unsafe { libc::getpeername(fd, &mut storage as *mut _ as *mut libc::sockaddr, &mut len) };
+    if rc != 0 {
+        return None;
+    }
+    let len = len as usize;
+    match storage.ss_family as libc::c_int {
+        libc::AF_INET if len >= std::mem::size_of::<libc::sockaddr_in>() => {
+            // SAFETY: family is AF_INET and the kernel wrote at least a full
+            // sockaddr_in, so this reinterpret reads only initialized bytes.
+            let a = unsafe { &*(&storage as *const _ as *const libc::sockaddr_in) };
+            // `s_addr` is network byte order; its in-memory bytes are the
+            // dotted-quad octets, which `to_ne_bytes` returns verbatim.
+            Some(IpAddr::V4(Ipv4Addr::from(a.sin_addr.s_addr.to_ne_bytes())))
+        }
+        libc::AF_INET6 if len >= std::mem::size_of::<libc::sockaddr_in6>() => {
+            // SAFETY: family is AF_INET6 with a full sockaddr_in6 written.
+            let a = unsafe { &*(&storage as *const _ as *const libc::sockaddr_in6) };
+            Some(IpAddr::V6(Ipv6Addr::from(a.sin6_addr.s6_addr)))
+        }
+        _ => None,
+    }
+}
+
 use pylon_kernel::{AppManifest, ManifestEntity, StudioConfig};
 use rusqlite::Connection;
 
@@ -4673,5 +4756,95 @@ mod tests {
 
         // Clean up.
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- accept_tcp (#345: macOS dual-stack accept panic) -----------------
+
+    #[test]
+    fn accept_tcp_yields_a_live_stream_and_peer_ip() {
+        use std::io::{Read, Write};
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().unwrap();
+        let client = std::thread::spawn(move || {
+            let mut s = std::net::TcpStream::connect(addr).unwrap();
+            s.write_all(b"hi").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        });
+
+        let (mut stream, ip) = accept_tcp(&listener).expect("accept");
+        // The peer IP is decoded (loopback), not dropped.
+        assert!(
+            ip.is_some(),
+            "peer IP should decode for a normal connection"
+        );
+        assert!(ip.unwrap().is_loopback());
+        // And it's a real, readable connection.
+        let mut buf = [0u8; 2];
+        stream.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"hi");
+        client.join().unwrap();
+    }
+
+    /// The fix's core guarantee: an accept loop built on `accept_tcp` keeps
+    /// running through a burst of connections that abort immediately — the
+    /// exact churn that made libstd's asserting accept panic on macOS
+    /// dual-stack `[::]`. We can't deterministically force the kernel to
+    /// return a truncated sockaddr, but `accept_tcp` never parses one, so the
+    /// loop must survive the burst and still serve a final good client.
+    #[test]
+    fn accept_tcp_loop_survives_aborted_connections() {
+        use std::io::{Read, Write};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        // Dual-stack bind — the configuration that triggered the crash.
+        let listener = bind_dual_stack_tcp(0).expect("dual-stack bind");
+        let addr = listener.local_addr().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let stop_srv = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            // Mirror the production loops: accept_tcp + best-effort IP, never
+            // panicking on a bad address.
+            while !stop_srv.load(Ordering::Relaxed) {
+                match accept_tcp(&listener) {
+                    Ok((mut stream, _ip)) => {
+                        let mut buf = [0u8; 4];
+                        if stream
+                            .read(&mut buf)
+                            .map(|n| &buf[..n] == b"ping")
+                            .unwrap_or(false)
+                        {
+                            let _ = stream.write_all(b"pong");
+                        }
+                    }
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                }
+            }
+        });
+
+        // Burst of connect-then-immediately-drop clients — the dead-on-arrival
+        // churn behind the macOS sockaddr truncation that panicked the old
+        // accept path.
+        for _ in 0..50 {
+            if let Ok(s) = std::net::TcpStream::connect(addr) {
+                drop(s);
+            }
+        }
+
+        // The loop must still be alive: a real client round-trips.
+        let mut good = std::net::TcpStream::connect(addr).expect("good connect");
+        good.write_all(b"ping").unwrap();
+        let mut resp = [0u8; 4];
+        good.read_exact(&mut resp)
+            .expect("server still serving after the burst");
+        assert_eq!(&resp, b"pong");
+
+        stop.store(true, Ordering::Relaxed);
+        // Unblock the server's accept() so the thread can observe `stop`.
+        let _ = std::net::TcpStream::connect(addr);
+        server.join().unwrap();
     }
 }

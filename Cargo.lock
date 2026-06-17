@@ -2532,6 +2532,7 @@ dependencies = [
  "base64",
  "fast_image_resize",
  "image",
+ "libc",
  "mozjpeg",
  "postgres",
  "pylon-auth",

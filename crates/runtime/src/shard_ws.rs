@@ -53,15 +53,21 @@ pub fn start_shard_ws_server(
     // many tabs/devices per household still get 64 concurrent shards.
     let ip_counter = Arc::new(IpConnCounter::default());
 
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(s) => s,
-            Err(_) => continue,
+    loop {
+        // Panic-proof accept: libstd's accept/peer_addr assert (panic) on a
+        // truncated macOS dual-stack sockaddr. See crate::accept_tcp.
+        let (stream, peer_ip) = match crate::accept_tcp(&listener) {
+            Ok(v) => v,
+            Err(_) => {
+                // Transient accept error — keep serving. A 1ms nap avoids a
+                // hot spin if the error is sticky (e.g. fd pressure).
+                thread::sleep(std::time::Duration::from_millis(1));
+                continue;
+            }
         };
-        let ip = match stream.peer_addr() {
-            Ok(addr) => addr.ip(),
-            Err(_) => continue,
-        };
+        // An unparseable peer (the truncation case) buckets under the
+        // unspecified address so the per-IP cap still bounds it.
+        let ip = peer_ip.unwrap_or(std::net::IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED));
         let guard = match ip_counter.acquire(ip) {
             Some(g) => g,
             None => continue,
