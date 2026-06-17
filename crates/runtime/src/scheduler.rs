@@ -236,6 +236,37 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_handler_actually_runs_via_queue() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Regression: the server used to `job_queue.register(name, real)` and
+        // THEN `scheduler.schedule(name, cron, no_op)`, but schedule() also
+        // registers (last-write-wins) — so the no-op clobbered the real
+        // handler and the cleanup never ran. Passing the real handler to
+        // schedule() must make it the one the queue executes.
+        let q = Arc::new(JobQueue::new(100));
+        let sched = Scheduler::new(Arc::clone(&q));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs2 = Arc::clone(&runs);
+        sched
+            .schedule(
+                "cleanup",
+                "* * * * *",
+                Arc::new(move |_| {
+                    runs2.fetch_add(1, Ordering::SeqCst);
+                    JobResult::Success
+                }),
+            )
+            .unwrap();
+        q.enqueue("cleanup", serde_json::json!({}));
+        assert!(q.process_one(), "a job should have been processed");
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            1,
+            "the handler passed to schedule() must run, not a no-op"
+        );
+    }
+
+    #[test]
     fn schedule_rejects_bad_cron() {
         let q = Arc::new(JobQueue::new(100));
         let sched = Scheduler::new(Arc::clone(&q));

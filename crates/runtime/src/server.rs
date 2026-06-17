@@ -1253,38 +1253,33 @@ fn start_server(
         }
     }
 
-    // Register built-in framework jobs.
+    let scheduler = Arc::new(Scheduler::new(Arc::clone(&job_queue)));
+    // Schedule built-in cleanup tasks. Pass the REAL handler to `schedule()`,
+    // which registers it with the job queue itself — a separate
+    // `job_queue.register(name, real)` BEFORE the schedule call is silently
+    // OVERWRITTEN by schedule()'s own registration (last-write-wins HashMap),
+    // so the prior pattern (register real handler, then schedule a no-op) made
+    // the cache + rooms cleanup never actually run → unbounded growth.
     {
         let cache_ref = Arc::clone(&cache);
-        job_queue.register(
+        let _ = scheduler.schedule(
             "pylon.cache.cleanup",
+            "*/10 * * * *",
             Arc::new(move |_job| {
                 cache_ref.cleanup_expired();
                 JobResult::Success
             }),
         );
         let rooms_ref = Arc::clone(&room_mgr);
-        job_queue.register(
+        let _ = scheduler.schedule(
             "pylon.rooms.cleanup",
+            "*/5 * * * *",
             Arc::new(move |_job| {
                 rooms_ref.cleanup_idle();
                 JobResult::Success
             }),
         );
     }
-
-    let scheduler = Arc::new(Scheduler::new(Arc::clone(&job_queue)));
-    // Schedule built-in tasks.
-    let _ = scheduler.schedule(
-        "pylon.cache.cleanup",
-        "*/10 * * * *",
-        Arc::new(|_| JobResult::Success),
-    );
-    let _ = scheduler.schedule(
-        "pylon.rooms.cleanup",
-        "*/5 * * * *",
-        Arc::new(|_| JobResult::Success),
-    );
 
     // Start 2 background workers.
     let _worker_handles: Vec<_> = (0..2)
@@ -1351,6 +1346,27 @@ fn start_server(
         .and_then(|v| v.parse().ok())
         .unwrap_or(3600);
     let ai_rate_limiter = Arc::new(RateLimiter::new(ai_rl_max, ai_rl_window));
+
+    // Periodically drop idle per-IP buckets from the rate limiters. `check()`
+    // prunes timestamps within each bucket, but only `cleanup()` removes the
+    // now-empty IP keys — without this the bucket map grows one entry per
+    // distinct client IP forever. The scheduler reads its task list each tick,
+    // so registering after `start()` (the limiters are built post-start) works.
+    {
+        let rl = Arc::clone(&rate_limiter);
+        let frl = Arc::clone(&fn_rate_limiter);
+        let arl = Arc::clone(&ai_rate_limiter);
+        let _ = scheduler.schedule(
+            "pylon.ratelimit.cleanup",
+            "*/10 * * * *",
+            Arc::new(move |_job| {
+                rl.cleanup();
+                frl.cleanup();
+                arl.cleanup();
+                JobResult::Success
+            }),
+        );
+    }
 
     // LlmClient built once at boot — env reads + ureq agent
     // construction (with connection pooling) happen here. The route

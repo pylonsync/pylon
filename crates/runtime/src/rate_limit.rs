@@ -34,7 +34,7 @@ impl RateLimiter {
     /// accepted.
     pub fn check(&self, ip: &str) -> Result<(), u64> {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().unwrap();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         let timestamps = buckets.entry(ip.to_string()).or_default();
 
         // Remove entries outside the sliding window.
@@ -58,7 +58,7 @@ impl RateLimiter {
     /// memory growth from IPs that stop sending requests.
     pub fn cleanup(&self) {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().unwrap();
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
 
         // Remove expired timestamps, then drop empty buckets entirely.
         buckets.retain(|_ip, timestamps| {
@@ -70,7 +70,7 @@ impl RateLimiter {
     /// Get the current request count for an IP within the active window.
     pub fn current_count(&self, ip: &str) -> u32 {
         let now = Instant::now();
-        let buckets = self.buckets.lock().unwrap();
+        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         match buckets.get(ip) {
             Some(timestamps) => timestamps
                 .iter()
