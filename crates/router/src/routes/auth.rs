@@ -717,6 +717,23 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
 }
 
+#[cfg(test)]
+mod truncate_chars_tests {
+    use super::truncate_chars;
+
+    #[test]
+    fn truncates_on_a_char_boundary_without_panicking() {
+        // A naive `&s[..max]` panics here: byte index `max` would land inside
+        // the 3-byte '€'. truncate_chars must cut on a CHAR boundary.
+        let s = "€".repeat(600); // 600 chars, 1800 bytes
+        let out = truncate_chars(&s, 500);
+        assert_eq!(out.chars().count(), 500);
+        assert!(out.is_char_boundary(out.len()), "result is valid UTF-8");
+        // Shorter-than-limit strings pass through untouched.
+        assert_eq!(truncate_chars("ok", 500), "ok");
+    }
+}
+
 fn maybe_merge_anonymous(
     ctx: &RouterContext,
     to_user_id: &str,
@@ -1994,11 +2011,10 @@ pub(crate) fn handle(
                         err.code,
                         err.message
                     );
-                    let msg = if err.message.len() > 500 {
-                        format!("{}…", &err.message[..500])
-                    } else {
-                        err.message.clone()
-                    };
+                    // Char-safe truncation — `&err.message[..500]` panics when
+                    // byte 500 lands inside a multi-byte UTF-8 char. Use the
+                    // same helper the rest of this file already uses.
+                    let msg = truncate_chars(&err.message, 500);
                     let sep = if state_record.error_callback_url.contains('?') {
                         '&'
                     } else {
