@@ -204,6 +204,21 @@ impl AuthContext {
         self.tenant_id.as_deref()
     }
 
+    /// True when this admin gets the UNCONDITIONAL read bypass — an admin with
+    /// NO active tenant (operator token / Studio global view). An admin WITH an
+    /// active tenant is scoped to that tenant like any member and must NOT
+    /// bypass per-row read policy.
+    ///
+    /// This mirrors the policy engine's `admin_read_scoped_to_tenant` gate so
+    /// that read paths which fast-path on admin (e.g. the WS/SSE broadcast
+    /// fanout) agree with `check_entity_read` instead of skipping the tenant
+    /// scoping. Read fences should gate their admin bypass on THIS, not bare
+    /// `is_admin` (the bare-`is_admin` shortcut was the cross-tenant list leak
+    /// fixed in the entity-list route).
+    pub fn is_unscoped_admin(&self) -> bool {
+        self.is_admin && self.tenant_id.is_none()
+    }
+
     /// Attach a tenant id to the context (chainable).
     pub fn with_tenant(mut self, tenant_id: String) -> Self {
         self.tenant_id = Some(tenant_id);
@@ -3150,6 +3165,25 @@ mod tests {
     fn authenticated_not_admin() {
         let ctx = AuthContext::authenticated("user-1".into());
         assert!(!ctx.is_admin);
+    }
+
+    #[test]
+    fn is_unscoped_admin_gates_the_read_bypass_on_no_active_tenant() {
+        // The read-bypass fast path (WS/SSE broadcast, etc.) must use this, not
+        // bare is_admin: an admin WITHOUT a tenant bypasses; an admin WITH a
+        // tenant is scoped like a member; non-admins never bypass.
+        assert!(
+            AuthContext::admin().is_unscoped_admin(),
+            "operator admin (no tenant) bypasses"
+        );
+        assert!(
+            !AuthContext::admin()
+                .with_tenant("t-1".into())
+                .is_unscoped_admin(),
+            "admin WITH an active tenant must NOT get the unconditional bypass"
+        );
+        assert!(!AuthContext::authenticated("u-1".into()).is_unscoped_admin());
+        assert!(!AuthContext::anonymous().is_unscoped_admin());
     }
 
     // -- Magic codes --

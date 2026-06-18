@@ -492,8 +492,12 @@ impl Shard {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            // `is_admin` bypasses every policy gate.
-            let payload: &Arc<str> = if auth.is_admin {
+            // An admin with NO active tenant bypasses every policy gate; an
+            // admin WITH an active tenant is scoped like a member (matches the
+            // policy engine + the entity-list/sync read paths — see
+            // AuthContext::is_unscoped_admin). A bare `is_admin` here would let
+            // an admin-with-tenant receive every tenant's change events.
+            let payload: &Arc<str> = if auth.is_unscoped_admin() {
                 json
             } else {
                 let post_allowed = matches!(
@@ -603,7 +607,9 @@ impl Shard {
                 Ok(g) => g,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if auth.is_admin {
+            // Unscoped admin (no active tenant) bypasses; admin-with-tenant is
+            // scoped via check_entity_read below. See is_unscoped_admin.
+            if auth.is_unscoped_admin() {
                 allowed.push(id);
                 continue;
             }

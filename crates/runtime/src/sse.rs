@@ -140,7 +140,9 @@ impl SseShard {
             // delete payload is available AND pre allows, ship the
             // synthesized Delete instead so the subscriber drops
             // the stale row from their local replica.
-            let payload: &str = if client.auth.is_admin {
+            // Unscoped admin (no active tenant) bypasses; admin-with-tenant is
+            // scoped like a member via check_entity_read. See is_unscoped_admin.
+            let payload: &str = if client.auth.is_unscoped_admin() {
                 &sse_data
             } else {
                 let post_allowed = matches!(
