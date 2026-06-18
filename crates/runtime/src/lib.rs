@@ -61,7 +61,7 @@ use std::collections::HashMap;
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Bind a TCP listener that accepts BOTH IPv4 and IPv6 connections.
 ///
@@ -459,7 +459,11 @@ impl<'a> std::ops::Deref for ReadConnGuard<'a> {
 /// other string is treated as a SQLite filesystem path.
 pub struct Runtime {
     backend: RuntimeBackend,
-    manifest: AppManifest,
+    /// `Arc` so the per-call clone on the transactional-function path is a
+    /// refcount bump, not a deep copy of every entity/field/policy (see
+    /// `manifest_arc`). Field access still derefs transparently to
+    /// `&AppManifest`.
+    manifest: Arc<AppManifest>,
     entities: HashMap<String, ManifestEntity>,
     /// True only for the SQLite in-memory variant. Postgres mode reports false.
     /// Gates the test-reset endpoint — a false positive here would let
@@ -686,7 +690,7 @@ impl Runtime {
                 store,
                 crdt: std::sync::Arc::new(crate::pg_loro_store::PgLoroStore::new()),
             }),
-            manifest,
+            manifest: Arc::new(manifest),
             entities,
             is_in_memory: false,
             studio_config_path: RwLock::new(None),
@@ -1587,7 +1591,7 @@ impl Runtime {
                 read_counter: AtomicUsize::new(0),
                 crdt: crate::loro_store::LoroStore::new(),
             }),
-            manifest,
+            manifest: Arc::new(manifest),
             entities,
             is_in_memory,
             studio_config_path: RwLock::new(None),
@@ -1755,7 +1759,15 @@ impl Runtime {
     }
 
     pub fn manifest(&self) -> &AppManifest {
-        &self.manifest
+        self.manifest.as_ref()
+    }
+
+    /// Cheap shared handle to the manifest — an `Arc` refcount bump, not a deep
+    /// clone. Use this where a caller needs to OWN an `Arc<AppManifest>` (e.g.
+    /// the transactional-function store, which previously deep-cloned the whole
+    /// manifest per call).
+    pub fn manifest_arc(&self) -> Arc<AppManifest> {
+        Arc::clone(&self.manifest)
     }
 
     /// Point the runtime at a `studio.config.json` written by the CLI.
@@ -3723,7 +3735,7 @@ impl Runtime {
         let crdt_hook: std::sync::Arc<dyn pylon_storage::pg_tx_store::PgCrdtHook> =
             std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
                 crdt: std::sync::Arc::clone(&pg_backend.crdt),
-                manifest: std::sync::Arc::new(self.manifest.clone()),
+                manifest: Arc::clone(&self.manifest),
             });
         pg_backend.store.with_transaction_crdt(crdt_hook, body)
     }
@@ -4784,6 +4796,23 @@ mod tests {
         assert_eq!(graph["Vault"][0]["secret"], "123-45-6789");
 
         std::env::remove_var("PYLON_ENCRYPTION_KEY");
+    }
+
+    #[test]
+    fn manifest_arc_shares_one_allocation_not_a_deep_clone() {
+        // #353: the transactional-function path takes an owned
+        // Arc<AppManifest> via manifest_arc(). It must hand out the SAME
+        // allocation (a refcount bump), not a fresh deep clone of every
+        // entity/field/policy — two handles point at one buffer.
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let a = rt.manifest_arc();
+        let b = rt.manifest_arc();
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "manifest_arc must share the allocation, not deep-clone"
+        );
+        // And it observes the same data the borrowing accessor returns.
+        assert_eq!(a.entities.len(), rt.manifest().entities.len());
     }
 
     #[test]

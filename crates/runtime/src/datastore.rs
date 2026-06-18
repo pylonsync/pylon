@@ -3844,7 +3844,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                     let crdt_hook: std::sync::Arc<dyn pylon_storage::pg_tx_store::PgCrdtHook> =
                         std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
                             crdt: std::sync::Arc::clone(&pg_backend.crdt),
-                            manifest: std::sync::Arc::new(self.runtime.manifest().clone()),
+                            manifest: self.runtime.manifest_arc(),
                         });
 
                     let pg = &pg_backend.store;
@@ -5142,7 +5142,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                             dyn pylon_storage::pg_tx_store::PgCrdtHook,
                         > = std::sync::Arc::new(crate::pg_loro_store::PgCrdtHookImpl {
                             crdt: std::sync::Arc::clone(&pg_backend.crdt),
-                            manifest: std::sync::Arc::new(ops.runtime.manifest().clone()),
+                            manifest: ops.runtime.manifest_arc(),
                         });
                         let plugins = Arc::clone(&ops.plugins);
                         let tx_result: Result<
