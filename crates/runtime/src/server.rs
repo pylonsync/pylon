@@ -584,6 +584,28 @@ fn canonical_redirect_target(canonical: &str, host: &str, url: &str) -> Option<S
     Some(format!("https://{canonical}{path}"))
 }
 
+/// Whether a WebSocket upgrade that authenticated via the AMBIENT session
+/// cookie may proceed, given its `Origin` header. CSWSH defense: a browser
+/// auto-attaches the victim's cookie to a cross-origin WS handshake, so a
+/// cookie-authed upgrade must come from a trusted Origin or it could let any
+/// website drive an authenticated socket as the victim. Mirrors the CORS
+/// reflect allowlist (localhost OR explicit allowlist OR wildcard `*`).
+///
+/// Absent Origin → NOT trusted (fail closed): real browsers always send
+/// Origin on a WS handshake, and this gates ONLY the ambient-cookie path —
+/// non-browser/native clients authenticate with an explicit bearer token
+/// (Authorization / `bearer.<token>` subprotocol), which is non-ambient and
+/// never reaches this check. So a missing Origin on a cookie-authed upgrade
+/// is a crafted client trying to dodge the gate, not a legitimate caller.
+fn ws_cookie_origin_trusted(origin: Option<&str>, allowlist: &[String]) -> bool {
+    match origin {
+        Some(o) => {
+            pylon_auth::is_localhost_origin(o) || allowlist.iter().any(|a| a == o || a == "*")
+        }
+        None => false,
+    }
+}
+
 /// Authorization decision for `GET /api/files/<id>` on an ownership-tracking
 /// backend. FAIL CLOSED: serve only when the asset has a recorded owner that
 /// matches the caller. A missing owner (`Ok(None)` — written-but-unconfirmed,
@@ -713,6 +735,54 @@ mod file_auth_tests {
         // Explicit opt-in (PYLON_SESSION_IN_MEMORY=1) → allowed even in prod.
         assert!(ephemeral_sessions_boot_check(true, false).is_ok());
         assert!(ephemeral_sessions_boot_check(true, true).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod ws_origin_tests {
+    use super::ws_cookie_origin_trusted;
+
+    #[test]
+    fn cookie_authed_ws_requires_a_trusted_origin() {
+        let allow = vec!["https://app.example.com".to_string()];
+
+        // Same-origin (in the allowlist) → trusted.
+        assert!(ws_cookie_origin_trusted(
+            Some("https://app.example.com"),
+            &allow
+        ));
+        // Localhost dev origins → trusted (mirrors CORS reflection).
+        assert!(ws_cookie_origin_trusted(
+            Some("http://localhost:3000"),
+            &allow
+        ));
+        assert!(ws_cookie_origin_trusted(
+            Some("http://127.0.0.1:5173"),
+            &allow
+        ));
+
+        // The CSWSH case: an attacker page's Origin is NOT in the allowlist
+        // → rejected, so its (browser-attached) cookie can't drive the socket.
+        assert!(!ws_cookie_origin_trusted(
+            Some("https://evil.example"),
+            &allow
+        ));
+        // A near-miss sibling subdomain is still untrusted unless allowlisted.
+        assert!(!ws_cookie_origin_trusted(
+            Some("https://evil.app.example.com"),
+            &allow
+        ));
+        // Absent Origin on a cookie-authed upgrade → fail closed.
+        assert!(!ws_cookie_origin_trusted(None, &allow));
+
+        // Wildcard allowlist (dev only — prod boot refuses `*`) → reflect any.
+        let star = vec!["*".to_string()];
+        assert!(ws_cookie_origin_trusted(
+            Some("https://anything.test"),
+            &star
+        ));
+        // …but absent Origin is still fail-closed even under wildcard.
+        assert!(!ws_cookie_origin_trusted(None, &star));
     }
 }
 
@@ -2325,6 +2395,35 @@ fn start_server(
             if let Some(upgrade_req) =
                 crate::ws::inspect_ws_upgrade(request.headers(), &cookie_config.name)
             {
+                // CSWSH defense: an upgrade authenticated by the AMBIENT
+                // session cookie must originate from a trusted Origin.
+                // Browsers auto-attach the victim's cookie to a cross-origin
+                // WS handshake, so without this gate an attacker page could
+                // open an authenticated socket as the victim (the HTTP API is
+                // already CORS/allowlist-gated; the WS upgrade was not).
+                // Explicit bearer/subprotocol auth is non-ambient and exempt.
+                if upgrade_req.cookie_auth
+                    && !ws_cookie_origin_trusted(req_origin_header.as_deref(), &cors_allowlist)
+                {
+                    tracing::warn!(
+                        "[ws] rejected cookie-authed upgrade from untrusted origin {:?} — \
+                         add it to manifest.auth.trustedOrigins or PYLON_CORS_ORIGIN",
+                        req_origin_header
+                    );
+                    let response = with_security_headers(
+                        Response::from_string(json_error(
+                            "WS_ORIGIN_FORBIDDEN",
+                            "WebSocket upgrade with cookie auth requires a trusted Origin",
+                        ))
+                        .with_status_code(403u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 403);
+                    return;
+                }
                 let hub = Arc::clone(&ws_hub);
                 let auth = Arc::clone(&ws_auth);
                 let fetcher = snapshot_fetcher.clone();

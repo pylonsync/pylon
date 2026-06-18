@@ -2489,6 +2489,16 @@ pub struct WsUpgradeRequest {
     /// echo back. Browsers refuse the connection if a subprotocol
     /// they offered isn't echoed.
     pub chosen_protocol: Option<String>,
+    /// True when `bearer_token` was resolved from the ambient session
+    /// COOKIE (priority 3) rather than an explicit `Authorization` /
+    /// `bearer.<token>` subprotocol. The dispatch site Origin-gates this
+    /// path to defeat cross-site WebSocket hijacking (CSWSH): a browser
+    /// auto-attaches the victim's cookie to a cross-origin WS handshake,
+    /// so cookie-authed upgrades from an untrusted Origin must be
+    /// rejected. Explicit bearer auth is non-ambient (an attacker page
+    /// can't read the victim's token to set the subprotocol), so it
+    /// stays Origin-agnostic for native clients that send no Origin.
+    pub cookie_auth: bool,
 }
 
 /// Pull the headers we need to perform a WS upgrade. Returns `None`
@@ -2546,9 +2556,13 @@ pub fn inspect_ws_upgrade(
     // Cookie fallback runs ONLY if no bearer was found via the
     // header / subprotocol path — bearer wins so explicit auth can
     // override the ambient cookie when both are present.
+    let mut cookie_auth = false;
     if bearer_token.is_none() {
         if let Some(cookies) = cookie_header.as_deref() {
-            bearer_token = pylon_auth::extract_session_cookie(cookies, cookie_name);
+            if let Some(tok) = pylon_auth::extract_session_cookie(cookies, cookie_name) {
+                bearer_token = Some(tok);
+                cookie_auth = true;
+            }
         }
     }
     if !upgrade_ok {
@@ -2558,6 +2572,7 @@ pub fn inspect_ws_upgrade(
         sec_key,
         bearer_token,
         chosen_protocol,
+        cookie_auth,
     })
 }
 
@@ -2690,6 +2705,56 @@ mod tests {
         assert_eq!(presence_target(true, false, false), PresenceTarget::Drop);
         // Opt-in flag never widens a non-member's room frame.
         assert_eq!(presence_target(true, false, true), PresenceTarget::Drop);
+    }
+
+    #[test]
+    fn inspect_ws_upgrade_flags_cookie_auth_only_for_ambient_cookie() {
+        // CSWSH gate input: `cookie_auth` MUST be true iff the token came
+        // from the ambient session cookie (priority 3) and false for the
+        // explicit, non-ambient Authorization / `bearer.<token>` paths.
+        // The dispatch site Origin-gates only the cookie path.
+        fn hdr(name: &str, value: &str) -> tiny_http::Header {
+            tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
+        }
+        let base = || {
+            vec![
+                hdr("Upgrade", "websocket"),
+                hdr("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ]
+        };
+
+        // Ambient cookie only → cookie_auth = true.
+        let mut h = base();
+        h.push(hdr("Cookie", "app_session=tok-cookie"));
+        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
+        assert_eq!(r.bearer_token.as_deref(), Some("tok-cookie"));
+        assert!(r.cookie_auth, "ambient cookie must set cookie_auth");
+
+        // Explicit Authorization bearer → cookie_auth = false.
+        let mut h = base();
+        h.push(hdr("Authorization", "Bearer tok-hdr"));
+        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
+        assert_eq!(r.bearer_token.as_deref(), Some("tok-hdr"));
+        assert!(!r.cookie_auth, "Authorization bearer is non-ambient");
+
+        // `bearer.<token>` subprotocol → cookie_auth = false.
+        let mut h = base();
+        h.push(hdr("Sec-WebSocket-Protocol", "bearer.tok-proto"));
+        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
+        assert_eq!(r.bearer_token.as_deref(), Some("tok-proto"));
+        assert!(!r.cookie_auth, "subprotocol bearer is non-ambient");
+
+        // BOTH explicit bearer AND cookie present → explicit wins, NOT ambient,
+        // so cookie_auth stays false (no Origin gate on an explicit token).
+        let mut h = base();
+        h.push(hdr("Authorization", "Bearer tok-hdr"));
+        h.push(hdr("Cookie", "app_session=tok-cookie"));
+        let r = inspect_ws_upgrade(&h, "app_session").unwrap();
+        assert_eq!(r.bearer_token.as_deref(), Some("tok-hdr"));
+        assert!(
+            !r.cookie_auth,
+            "explicit bearer must win over the ambient cookie"
+        );
     }
 
     #[test]
