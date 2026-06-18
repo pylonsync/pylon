@@ -2794,36 +2794,94 @@ impl Runtime {
                         "entity \"{entity_name}\" missing from registry during include expansion"
                     ),
                 })?;
-                rows.into_iter()
-                    .map(|mut row| {
-                        for (rel_name, _sub_query) in include {
-                            if let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) {
-                                let fk_value = row
-                                    .get(&rel.field)
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string());
-                                if let Some(fk) = fk_value {
-                                    if rel.many {
-                                        // One-to-many: find rows in target where field matches id.
-                                        let sub_filter = serde_json::json!({ &rel.field: &fk });
-                                        if let Ok(related) =
-                                            self.query_filtered(&rel.target, &sub_filter)
-                                        {
-                                            row[rel_name] = serde_json::json!(related);
-                                        }
-                                    } else {
-                                        // One-to-one / many-to-one: get by id.
-                                        if let Ok(Some(related)) = self.get_by_id(&rel.target, &fk)
-                                        {
-                                            row[rel_name] = related;
-                                        }
-                                    }
+                // Expand each relation with ONE batched child query instead of
+                // a separate query PER PARENT ROW (the old N+1). For M parents
+                // we collect the M foreign-key values, fetch every matching
+                // child in a single `$in` query, bucket them by the join key,
+                // then hand each parent its bucket. M×K queries become K.
+                //
+                // Behavior note: the batched child query shares the standard
+                // query LIMIT across ALL parents (vs. a per-parent limit
+                // before), so an include that fans out to more than
+                // `query_max_limit` total children is now capped in aggregate.
+                // That bounds a graph query's response rather than letting it
+                // balloon, and only affects pathological fan-outs.
+                let mut rows = rows;
+                for (rel_name, _sub_query) in include {
+                    let Some(rel) = ent.relations.iter().find(|r| r.name == *rel_name) else {
+                        continue;
+                    };
+                    // Distinct foreign keys across all parents (first-seen
+                    // order — keeps the `$in` list deterministic).
+                    let mut fks: Vec<String> = Vec::new();
+                    let mut seen: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for row in rows.iter() {
+                        if let Some(fk) = row.get(&rel.field).and_then(|v| v.as_str()) {
+                            if seen.insert(fk.to_string()) {
+                                fks.push(fk.to_string());
+                            }
+                        }
+                    }
+                    if fks.is_empty() {
+                        continue;
+                    }
+
+                    if rel.many {
+                        // One-to-many: children whose `rel.field` matches the
+                        // parent's `rel.field`. Bucket by that same join key.
+                        let filter = serde_json::json!({ &rel.field: { "$in": &fks } });
+                        let related = match self.query_filtered(&rel.target, &filter) {
+                            Ok(r) => r,
+                            Err(_) => continue, // matches old: a failed child query left the field unset
+                        };
+                        let mut buckets: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+                        for child in related {
+                            if let Some(k) = child
+                                .get(&rel.field)
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                            {
+                                buckets.entry(k).or_default().push(child);
+                            }
+                        }
+                        for row in rows.iter_mut() {
+                            if let Some(fk) = row
+                                .get(&rel.field)
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                            {
+                                let mine = buckets.get(&fk).cloned().unwrap_or_default();
+                                row[rel_name.as_str()] = serde_json::json!(mine);
+                            }
+                        }
+                    } else {
+                        // Many-to-one / one-to-one: child keyed by its `id`.
+                        let filter = serde_json::json!({ "id": { "$in": &fks } });
+                        let related = match self.query_filtered(&rel.target, &filter) {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
+                        let mut by_id: HashMap<String, serde_json::Value> = HashMap::new();
+                        for child in related {
+                            if let Some(id) =
+                                child.get("id").and_then(|v| v.as_str()).map(String::from)
+                            {
+                                by_id.insert(id, child);
+                            }
+                        }
+                        for row in rows.iter_mut() {
+                            if let Some(fk) = row.get(&rel.field).and_then(|v| v.as_str()) {
+                                if let Some(child) = by_id.get(fk) {
+                                    // Only assign on a match — same as the old
+                                    // get_by_id, which left the field unset on None.
+                                    row[rel_name.as_str()] = child.clone();
                                 }
                             }
                         }
-                        row
-                    })
-                    .collect()
+                    }
+                }
+                rows
             } else {
                 rows
             };
@@ -4813,6 +4871,123 @@ mod tests {
         );
         // And it observes the same data the borrowing accessor returns.
         assert_eq!(a.entities.len(), rt.manifest().entities.len());
+    }
+
+    #[test]
+    fn query_graph_include_batches_and_is_correct_across_parents() {
+        // #349: include expansion fetches children in ONE batched `$in` query
+        // per relation (not one per parent) and must still produce the right
+        // nested results. Two parents — a many-relation with DIFFERENT bucket
+        // sizes (2 vs 1) proves per-parent bucketing isn't cross-assigned; a
+        // one-relation by id proves id-keyed assignment.
+        use pylon_kernel::{ManifestEntity, ManifestField, ManifestRelation};
+        let f = |name: &str| ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        };
+        let ent = |name: &str, fields: Vec<ManifestField>, relations: Vec<ManifestRelation>| {
+            ManifestEntity {
+                name: name.into(),
+                fields,
+                indexes: vec![],
+                relations,
+                search: None,
+                crdt: false,
+            }
+        };
+        let manifest = AppManifest {
+            manifest_version: 1,
+            name: "G".into(),
+            version: "0".into(),
+            entities: vec![
+                ent(
+                    "Parent",
+                    vec![f("groupKey"), f("ownerId")],
+                    vec![
+                        ManifestRelation {
+                            name: "members".into(),
+                            target: "Child".into(),
+                            field: "groupKey".into(),
+                            many: true,
+                        },
+                        ManifestRelation {
+                            name: "owner".into(),
+                            target: "Owner".into(),
+                            field: "ownerId".into(),
+                            many: false,
+                        },
+                    ],
+                ),
+                ent("Child", vec![f("groupKey"), f("label")], vec![]),
+                ent("Owner", vec![f("ownerName")], vec![]),
+            ],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let rt = Runtime::in_memory(manifest).unwrap();
+        let o1 = rt
+            .insert("Owner", &serde_json::json!({"ownerName": "Alice"}))
+            .unwrap();
+        let o2 = rt
+            .insert("Owner", &serde_json::json!({"ownerName": "Bob"}))
+            .unwrap();
+        // group A has two children, group B has one.
+        rt.insert(
+            "Child",
+            &serde_json::json!({"groupKey": "A", "label": "a1"}),
+        )
+        .unwrap();
+        rt.insert(
+            "Child",
+            &serde_json::json!({"groupKey": "A", "label": "a2"}),
+        )
+        .unwrap();
+        rt.insert(
+            "Child",
+            &serde_json::json!({"groupKey": "B", "label": "b1"}),
+        )
+        .unwrap();
+        rt.insert(
+            "Parent",
+            &serde_json::json!({"groupKey": "A", "ownerId": &o1}),
+        )
+        .unwrap();
+        rt.insert(
+            "Parent",
+            &serde_json::json!({"groupKey": "B", "ownerId": &o2}),
+        )
+        .unwrap();
+
+        let graph = rt
+            .query_graph(&serde_json::json!({
+                "Parent": { "include": { "members": {}, "owner": {} } }
+            }))
+            .unwrap();
+        let parents = graph["Parent"].as_array().unwrap();
+        assert_eq!(parents.len(), 2);
+        let p_a = parents.iter().find(|p| p["groupKey"] == "A").unwrap();
+        let p_b = parents.iter().find(|p| p["groupKey"] == "B").unwrap();
+
+        // many: A's bucket has 2 members, B's has exactly 1 — no cross-bleed.
+        assert_eq!(p_a["members"].as_array().unwrap().len(), 2);
+        assert_eq!(p_b["members"].as_array().unwrap().len(), 1);
+        assert_eq!(p_b["members"][0]["label"], "b1");
+        // one: each parent's owner resolved by id.
+        assert_eq!(p_a["owner"]["ownerName"], "Alice");
+        assert_eq!(p_b["owner"]["ownerName"], "Bob");
     }
 
     #[test]
