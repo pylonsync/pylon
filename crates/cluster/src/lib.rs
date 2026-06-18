@@ -180,6 +180,17 @@ pub trait ClusterBus: Send + Sync {
     fn publish(&self, envelope: &Envelope);
     fn subscribe(&self, handler: SubscriberHandler);
     fn instance_id(&self) -> &str;
+
+    /// Whether a publish can actually reach another machine. `false` on the
+    /// single-machine [`NoopBus`], where `publish` is a no-op. Callers gate
+    /// envelope CONSTRUCTION on this — building an [`Envelope::change`] for a
+    /// mutation serializes the whole row (data + prev_data) to JSON, which is
+    /// pure waste when nothing is listening (the common single-machine
+    /// per-project deploy). Defaults to `true` so any real transport publishes
+    /// unless it opts out.
+    fn is_active(&self) -> bool {
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +223,9 @@ impl ClusterBus for NoopBus {
     fn subscribe(&self, _handler: SubscriberHandler) {}
     fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+    fn is_active(&self) -> bool {
+        false
     }
 }
 
@@ -311,5 +325,30 @@ mod tests {
         // Handler should never fire — Noop is a sink, not a loopback.
         std::thread::sleep(std::time::Duration::from_millis(50));
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn noop_bus_is_inactive_real_bus_defaults_active() {
+        // Callers gate envelope CONSTRUCTION on is_active() to skip serializing
+        // a row no peer will receive. NoopBus (single-machine) must report
+        // inactive; any real transport defaults to active.
+        assert!(
+            !NoopBus::new().is_active(),
+            "single-machine bus is inactive"
+        );
+
+        struct StubBus;
+        impl ClusterBus for StubBus {
+            fn publish(&self, _e: &Envelope) {}
+            fn subscribe(&self, _h: SubscriberHandler) {}
+            fn instance_id(&self) -> &str {
+                "stub"
+            }
+            // Intentionally does NOT override is_active → exercises the default.
+        }
+        assert!(
+            StubBus.is_active(),
+            "a real transport defaults to active (publishes)"
+        );
     }
 }

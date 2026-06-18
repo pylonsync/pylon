@@ -1149,10 +1149,15 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         // server-side callers.
         self.ws.broadcast(event);
         self.sse.broadcast(event);
-        self.cluster_bus.publish(&pylon_cluster::Envelope::change(
-            self.cluster_bus.instance_id(),
-            event,
-        ));
+        // Building the change envelope serializes the whole row (data +
+        // prev_data) to JSON; skip it entirely when no cross-machine transport
+        // is configured (single-machine deploy → NoopBus).
+        if self.cluster_bus.is_active() {
+            self.cluster_bus.publish(&pylon_cluster::Envelope::change(
+                self.cluster_bus.instance_id(),
+                event,
+            ));
+        }
     }
 
     fn notify_presence(&self, json: &str) {
@@ -1171,11 +1176,15 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(json) {
             translate_and_push_room_event(&self.ws, &payload);
             // Presence relays are cross-machine too — a typing indicator
-            // on machine A should reach clients on machine B.
-            self.cluster_bus.publish(&pylon_cluster::Envelope::presence(
-                self.cluster_bus.instance_id(),
-                payload,
-            ));
+            // on machine A should reach clients on machine B. Skip the relay
+            // build on a single-machine bus (local clients already got it via
+            // the WS push above).
+            if self.cluster_bus.is_active() {
+                self.cluster_bus.publish(&pylon_cluster::Envelope::presence(
+                    self.cluster_bus.instance_id(),
+                    payload,
+                ));
+            }
         }
     }
 
@@ -1283,13 +1292,16 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         // filter + per-tenant policy gate as the local fanout above,
         // so a User-entity CRDT frame (already short-circuited locally
         // by the early return) never crosses machines — by virtue of
-        // never reaching this line for `User`.
-        self.cluster_bus.publish(&pylon_cluster::Envelope::crdt(
-            self.cluster_bus.instance_id(),
-            entity,
-            row_id,
-            snapshot,
-        ));
+        // never reaching this line for `User`. Skip the base64 encode +
+        // envelope build when no peer can receive it (single-machine bus).
+        if self.cluster_bus.is_active() {
+            self.cluster_bus.publish(&pylon_cluster::Envelope::crdt(
+                self.cluster_bus.instance_id(),
+                entity,
+                row_id,
+                snapshot,
+            ));
+        }
     }
 
     /// Push a `session-changed` envelope to every WS client connected
@@ -1337,12 +1349,15 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         })
         .to_string();
         self.ws.send_text_to_user(user_id, &envelope);
-        self.cluster_bus
-            .publish(&pylon_cluster::Envelope::session_changed(
-                self.cluster_bus.instance_id(),
-                user_id,
-                tenant_id,
-            ));
+        // Cross-machine only — local sockets already got the envelope above.
+        if self.cluster_bus.is_active() {
+            self.cluster_bus
+                .publish(&pylon_cluster::Envelope::session_changed(
+                    self.cluster_bus.instance_id(),
+                    user_id,
+                    tenant_id,
+                ));
+        }
     }
 }
 
