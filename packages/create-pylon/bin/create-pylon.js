@@ -262,22 +262,35 @@ Examples:
 }
 
 const rl = createInterface({ input: stdin, output: stdout });
+// Non-interactive stdin (CI, piped, `| npm create …`): never block on a prompt.
+// Fall back to the same defaults the interactive path uses. The skill-install
+// below already gates on `stdin.isTTY`; the INPUT prompts must too — without
+// this, `npm create @pylonsync/pylon my-app` (or any partial-flag invocation)
+// HANGS forever in CI waiting on input that never comes.
+const isInteractive = !!stdin.isTTY;
 if (!projectName) {
-	projectName = (await rl.question("Project name: ")).trim() || "my-pylon-app";
+	projectName =
+		(isInteractive ? (await rl.question("Project name: ")).trim() : "") ||
+		"my-pylon-app";
 }
 if (!flags.template) {
-	const lines = Object.entries(TEMPLATE_REGISTRY)
-		.map(([k, v]) => `  ${k.padEnd(10)} ${v.blurb}`)
-		.join("\n");
-	process.stdout.write(`\n${lines}\n`);
-	const ans = (
-		await rl.question(
-			`Template (${TEMPLATES_AVAILABLE.join(", ")}) [default]: `,
+	if (isInteractive) {
+		const lines = Object.entries(TEMPLATE_REGISTRY)
+			.map(([k, v]) => `  ${k.padEnd(10)} ${v.blurb}`)
+			.join("\n");
+		process.stdout.write(`\n${lines}\n`);
+		const ans = (
+			await rl.question(
+				`Template (${TEMPLATES_AVAILABLE.join(", ")}) [default]: `,
+			)
 		)
-	)
-		.trim()
-		.toLowerCase();
-	flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "default";
+			.trim()
+			.toLowerCase();
+		flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "default";
+	} else {
+		console.log("Non-interactive stdin — using --template default.");
+		flags.template = "default";
+	}
 }
 // `ssr` was the original name of the default template; keep it working as a
 // quiet alias so older `--template ssr` invocations don't break.
@@ -291,32 +304,44 @@ if (flags.template === "saas") flags.template = "default";
 const isUnified = TEMPLATE_REGISTRY[flags.template]?.unified === true;
 if (!isUnified && !flags.platforms) {
 	const supported = TEMPLATE_REGISTRY[flags.template].platforms.join(", ");
-	const ans = (
-		await rl.question(
-			`Platforms for ${flags.template} (${supported}, comma-separated) [web]: `,
-		)
-	).trim();
+	const ans = isInteractive
+		? (
+				await rl.question(
+					`Platforms for ${flags.template} (${supported}, comma-separated) [web]: `,
+				)
+			).trim()
+		: "";
 	flags.platforms = ans || "web";
 }
 if (!flags.pm) {
 	const detected = detectPackageManager();
 	const def = detected ?? "bun";
-	const choice = (
-		await rl.question(`Package manager (bun, pnpm, yarn, npm) [${def}]: `)
-	)
-		.trim()
-		.toLowerCase();
-	flags.pm = ["bun", "pnpm", "yarn", "npm"].includes(choice) ? choice : def;
+	if (isInteractive) {
+		const choice = (
+			await rl.question(`Package manager (bun, pnpm, yarn, npm) [${def}]: `)
+		)
+			.trim()
+			.toLowerCase();
+		flags.pm = ["bun", "pnpm", "yarn", "npm"].includes(choice) ? choice : def;
+	} else {
+		flags.pm = def;
+	}
 }
 if (flags.skill === undefined) {
-	const ans = (
-		await rl.question(
-			"Add the Pylon skill to your coding agent (Claude Code / Codex / Cursor)? [Y/n]: ",
+	if (isInteractive) {
+		const ans = (
+			await rl.question(
+				"Add the Pylon skill to your coding agent (Claude Code / Codex / Cursor)? [Y/n]: ",
+			)
 		)
-	)
-		.trim()
-		.toLowerCase();
-	flags.skill = ans !== "n" && ans !== "no";
+			.trim()
+			.toLowerCase();
+		flags.skill = ans !== "n" && ans !== "no";
+	} else {
+		// Non-interactive: can't prompt. The actual install is TTY-gated below,
+		// so this only controls whether the footer prints the one-liner hint.
+		flags.skill = true;
+	}
 }
 rl.close();
 

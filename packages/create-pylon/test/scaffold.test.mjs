@@ -65,6 +65,30 @@ test("scaffolds a real unified template into a bootable tree", () => {
 	assert.ok(!pkg.includes("__APP_NAME__"), "placeholder left unsubstituted");
 });
 
+test("non-interactive run with NO optional flags completes on defaults (never hangs)", () => {
+	// #360: the name/template/platforms/pm/skill prompts must not block on a
+	// non-TTY stdin. spawnSync gives the child a piped (non-TTY) stdin, so this
+	// reproduces CI. Pre-fix it hung on the template prompt forever; the 30s
+	// timeout would fire and spawnSync returns signal=SIGTERM, status=null.
+	const dir = mkdtempSync(join(tmpdir(), "cp-noninteractive-"));
+	const res = spawnSync(
+		process.execPath,
+		// ONLY the project name — every other choice must fall back to a default.
+		[CLI, "myapp", "--skip-install"],
+		{ cwd: dir, env: { ...process.env }, encoding: "utf8", input: "", timeout: 30000 },
+	);
+	assert.equal(
+		res.signal,
+		null,
+		`scaffolder hung on a prompt in non-TTY (killed by timeout): signal=${res.signal}`,
+	);
+	assert.equal(res.status, 0, `expected clean exit, got ${res.status}\n${res.stderr}`);
+	const root = join(dir, "myapp");
+	// Defaulted to --template default → a bootable unified app.
+	assert.ok(existsSync(join(root, "package.json")), "package.json missing");
+	assert.ok(existsSync(join(root, "app.ts")), "app.ts missing (default template)");
+});
+
 test("missing template dir fails LOUD instead of scaffolding an empty project", () => {
 	// Point the scaffolder at an empty templates dir so `barebones` (a valid
 	// registry name) has no files on disk — the exact shape of a tarball
