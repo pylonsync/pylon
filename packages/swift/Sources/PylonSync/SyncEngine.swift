@@ -101,6 +101,46 @@ public actor SyncEngine {
     private var reconcileInFlight = false
     private var lastPullStartedFromZero = false
 
+    // Initial-sync loading signal (TS parity — `_initialSyncSettled` in
+    // packages/sync/src/index.ts). A query's `loading` must stay true through
+    // the window where the local cache has hydrated (possibly EMPTY) but the
+    // first SERVER pull hasn't landed yet — otherwise a cold launch, or a
+    // post-`resetReplica` org switch, flashes the empty state for the seconds
+    // the snapshot takes. `isInitialSyncSettled()` flips true after the first
+    // successful pull settles; a 12s fallback guarantees it can never pin
+    // (offline, or an empty entity that never receives a pull). Reset to false
+    // on `resetReplica` so an org switch re-enters loading until the re-pull
+    // lands.
+    private var _initialSyncSettled = false
+    private var initialSyncFallback: Task<Void, Never>?
+
+    /// True after the first server pull settles (or the fallback fires). Drives
+    /// `PylonQuery.loading` — mirrors `SyncEngine.isInitialSyncSettled()` in TS.
+    public func isInitialSyncSettled() -> Bool { _initialSyncSettled }
+
+    /// Flip the signal true (idempotent) + notify observers so a `PylonQuery`
+    /// re-reads and drops its `loading`. Cancels any armed fallback.
+    private func markInitialSyncSettled() {
+        initialSyncFallback?.cancel()
+        initialSyncFallback = nil
+        if _initialSyncSettled { return }
+        _initialSyncSettled = true
+        store.notify()
+    }
+
+    /// Safety net so `loading` never pins: settle after a deadline even if no
+    /// pull lands (offline; an empty entity whose pull errors). The real pull
+    /// settles it far sooner in the normal case. Re-armable — a replica wipe
+    /// (org switch / identity flip) resets the signal and re-arms this.
+    private func armInitialSyncFallback() {
+        initialSyncFallback?.cancel()
+        initialSyncFallback = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            if Task.isCancelled { return }
+            await self?.markInitialSyncSettled()
+        }
+    }
+
     /// Optional WebSocket factory. Default is `URLSessionWebSocket`.
     private let webSocketFactory: @Sendable (URL, String?) -> PylonWebSocket
 
@@ -172,6 +212,10 @@ public actor SyncEngine {
         }
 
         await refreshResolvedSession()
+        // Re-enter loading until the FIRST pull lands rows (or the fallback
+        // fires). pull()'s success path flips the signal; this arms the safety
+        // net so an offline launch (pull errors) still settles within 12s.
+        armInitialSyncFallback()
         await pull()
         hydrated = true
         if let persistence {
@@ -203,6 +247,8 @@ public actor SyncEngine {
         sseStream = nil
         sseTask?.cancel()
         sseTask = nil
+        initialSyncFallback?.cancel()
+        initialSyncFallback = nil
     }
 
     /// True when the WebSocket transport is currently connected. SSE/poll
@@ -263,6 +309,10 @@ public actor SyncEngine {
                 }
             }
             lastPullStartedFromZero = startedFromZero
+            // First successful pull settled — drop query `loading`. Idempotent:
+            // a no-op on every pull after the first (until the next resetReplica
+            // flips the signal back to false).
+            markInitialSyncSettled()
         } catch let error as PylonError {
             switch error.httpStatus {
             case 429:
@@ -764,6 +814,14 @@ public actor SyncEngine {
         if wipeMutations {
             await mutations.wipeAll()
         }
+        // Replica wiped + cursor reset to 0 — the next pull re-snapshots from
+        // scratch. Re-enter loading so an org switch shows a skeleton (not an
+        // empty list) until that re-pull lands; re-arm the fallback so it can't
+        // pin. The next pull's success re-settles it. (TS resetReplicaInner
+        // parity — the useQuery loading-flash fix, framework #315.)
+        _initialSyncSettled = false
+        store.notify()
+        armInitialSyncFallback()
     }
 
     // MARK: - Presence + topics
