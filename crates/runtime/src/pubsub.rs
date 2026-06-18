@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ---------------------------------------------------------------------------
@@ -18,7 +18,10 @@ pub struct PubSubMessage {
 // Subscriber callback
 // ---------------------------------------------------------------------------
 
-type Callback = Box<dyn Fn(&PubSubMessage) + Send + Sync>;
+/// `Arc` (not `Box`) so `publish` can snapshot the handles under the
+/// subscriptions lock and invoke them AFTER releasing it — a subscriber
+/// callback must never run while the registry mutex is held (see `publish`).
+type Callback = Arc<dyn Fn(&PubSubMessage) + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // PubSubBroker
@@ -104,16 +107,25 @@ impl PubSubBroker {
             }
         }
 
-        // Notify subscribers.
-        let subs = self.subscriptions.lock().unwrap();
-        if let Some(subscribers) = subs.get(channel) {
-            for (_, callback) in subscribers {
-                callback(&msg);
+        // Notify subscribers. Snapshot the callback handles under the lock,
+        // then DROP the guard before invoking them. A subscriber callback is
+        // arbitrary user code: holding `subscriptions` across the loop let one
+        // slow callback serialize every publish/subscribe/unsubscribe, and a
+        // callback that re-entered the broker (subscribe/unsubscribe/publish)
+        // deadlocked on this non-reentrant mutex. Cloning Arcs is cheap; the
+        // brief over-snapshot (a sub removed concurrently still gets this
+        // in-flight message) matches the WS hub's snapshot-then-release model.
+        let callbacks: Vec<Callback> = {
+            let subs = self.subscriptions.lock().unwrap();
+            match subs.get(channel) {
+                Some(subscribers) => subscribers.iter().map(|(_, cb)| Arc::clone(cb)).collect(),
+                None => Vec::new(),
             }
-            subscribers.len()
-        } else {
-            0
+        };
+        for callback in &callbacks {
+            callback(&msg);
         }
+        callbacks.len()
     }
 
     /// Subscribe to a channel. Returns a subscription ID that can be used
@@ -208,13 +220,12 @@ impl PubSubBroker {
 
         let all_channels: Vec<String> = matching.into_iter().chain(history_channels).collect();
 
-        // We need to create a shared callback that can be used across
-        // multiple subscriptions. We wrap it in an Arc.
-        let shared_cb = std::sync::Arc::new(callback);
+        // The callback is already an `Arc` (the `Callback` alias), so it's
+        // shared across every matched channel's subscription by cloning the
+        // handle — no extra wrapper needed.
         let mut ids = Vec::new();
         for ch in &all_channels {
-            let cb = std::sync::Arc::clone(&shared_cb);
-            let id = self.subscribe(ch, Box::new(move |msg| cb(msg)));
+            let id = self.subscribe(ch, Arc::clone(&callback));
             ids.push(id);
         }
         ids
@@ -350,7 +361,7 @@ mod tests {
         let c = Arc::clone(&count);
         broker.subscribe(
             "chat",
-            Box::new(move |_msg| {
+            Arc::new(move |_msg| {
                 c.fetch_add(1, Ordering::SeqCst);
             }),
         );
@@ -374,7 +385,7 @@ mod tests {
             let c = Arc::clone(&count);
             broker.subscribe(
                 "events",
-                Box::new(move |_msg| {
+                Arc::new(move |_msg| {
                     c.fetch_add(1, Ordering::SeqCst);
                 }),
             );
@@ -391,7 +402,7 @@ mod tests {
         let c = Arc::clone(&count);
         let id = broker.subscribe(
             "ch",
-            Box::new(move |_msg| {
+            Arc::new(move |_msg| {
                 c.fetch_add(1, Ordering::SeqCst);
             }),
         );
@@ -484,9 +495,9 @@ mod tests {
     #[test]
     fn channels_list() {
         let broker = PubSubBroker::new(10);
-        broker.subscribe("alpha", Box::new(|_| {}));
-        broker.subscribe("alpha", Box::new(|_| {}));
-        broker.subscribe("beta", Box::new(|_| {}));
+        broker.subscribe("alpha", Arc::new(|_| {}));
+        broker.subscribe("alpha", Arc::new(|_| {}));
+        broker.subscribe("beta", Arc::new(|_| {}));
 
         let channels = broker.channels();
         assert_eq!(channels.len(), 2);
@@ -501,8 +512,8 @@ mod tests {
     fn subscriber_count() {
         let broker = PubSubBroker::new(10);
         assert_eq!(broker.subscriber_count("ch"), 0);
-        broker.subscribe("ch", Box::new(|_| {}));
-        broker.subscribe("ch", Box::new(|_| {}));
+        broker.subscribe("ch", Arc::new(|_| {}));
+        broker.subscribe("ch", Arc::new(|_| {}));
         assert_eq!(broker.subscriber_count("ch"), 2);
     }
 
@@ -518,7 +529,7 @@ mod tests {
         let c = Arc::clone(&count);
         let ids = broker.psubscribe(
             "user:*",
-            Box::new(move |_msg| {
+            Arc::new(move |_msg| {
                 c.fetch_add(1, Ordering::SeqCst);
             }),
         );
@@ -536,7 +547,7 @@ mod tests {
         let r = Arc::clone(&received);
         broker.subscribe(
             "meta",
-            Box::new(move |msg| {
+            Arc::new(move |msg| {
                 *r.lock().unwrap() = Some(msg.clone());
             }),
         );
@@ -549,6 +560,65 @@ mod tests {
         // Timestamp should look like ISO 8601.
         assert!(msg.timestamp.contains('T'));
         assert!(msg.timestamp.ends_with('Z'));
+    }
+
+    #[test]
+    fn callback_can_reenter_the_broker_without_deadlock() {
+        // #353: publish must invoke callbacks AFTER releasing the
+        // subscriptions lock. A subscriber that re-enters the broker
+        // (subscribe / unsubscribe / publish on another channel) used to
+        // deadlock on the non-reentrant mutex. Running under a watchdog
+        // thread so a regression hangs the test (caught) rather than the
+        // suite forever.
+        let broker = std::sync::Arc::new(PubSubBroker::new(10));
+        let fired = Arc::new(AtomicUsize::new(0));
+
+        let b2 = std::sync::Arc::clone(&broker);
+        let f2 = Arc::clone(&fired);
+        // On a message to "in", the callback subscribes a new handler AND
+        // publishes to "out" — both re-enter the broker mid-publish.
+        broker.subscribe(
+            "in",
+            Arc::new(move |_msg| {
+                f2.fetch_add(1, Ordering::SeqCst);
+                let f3 = Arc::clone(&f2);
+                b2.subscribe(
+                    "out",
+                    Arc::new(move |_m| {
+                        f3.fetch_add(1, Ordering::SeqCst);
+                    }),
+                );
+                // Re-entrant publish to a different channel.
+                b2.publish("out", "from-callback");
+            }),
+        );
+
+        let done = Arc::new(AtomicUsize::new(0));
+        let d = Arc::clone(&done);
+        let b = std::sync::Arc::clone(&broker);
+        let worker = std::thread::spawn(move || {
+            b.publish("in", "hello");
+            d.store(1, Ordering::SeqCst);
+        });
+
+        // Watchdog: if the publish re-entry deadlocked, this join never
+        // returns — bound it so the test FAILS instead of hanging.
+        for _ in 0..100 {
+            if done.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            1,
+            "publish deadlocked on a re-entrant subscriber callback"
+        );
+        worker.join().unwrap();
+        // The "in" callback fired once; the first re-entrant publish had no
+        // "out" subscriber yet (it subscribes THEN publishes), so on this
+        // single publish only the "in" handler is guaranteed to have run.
+        assert!(fired.load(Ordering::SeqCst) >= 1);
     }
 
     #[test]
