@@ -659,6 +659,49 @@ mod file_auth_tests {
     }
 
     #[test]
+    fn file_fences_scope_admin_acting_within_a_tenant() {
+        // Regression for the #354/#355 class on the FILE paths: every file
+        // owner-check fence (local-put WRITE, DELETE, GET — server.rs — and the
+        // router get_file path) now consumes `is_unscoped_admin()`, NOT bare
+        // `is_admin`. An admin with an active tenant must be held to the owner
+        // check; only an admin with NO active tenant keeps the cross-owner
+        // bypass. Pre-fix these fences used bare `is_admin`, letting an
+        // admin-with-tenant read/overwrite/delete any user's file on the local
+        // backend — bypassing the tenant-impersonation scoping #354 established.
+        use pylon_auth::AuthContext;
+
+        // Unscoped admin (no active tenant) — full bypass preserved.
+        let admin = AuthContext::admin();
+        assert!(admin.is_unscoped_admin());
+        // WRITE: may overwrite anyone's asset.
+        assert!(!local_put_owned_by_other(
+            &owner("victim"),
+            "anyone",
+            admin.is_unscoped_admin()
+        ));
+
+        // Admin acting WITHIN a tenant — must be SCOPED like a normal user.
+        let admin_scoped = AuthContext {
+            tenant_id: Some("t-acme".into()),
+            ..AuthContext::admin()
+        };
+        assert!(!admin_scoped.is_unscoped_admin());
+        // WRITE: cannot overwrite a victim's asset.
+        assert!(local_put_owned_by_other(
+            &owner("victim"),
+            admin_scoped.user_id.as_deref().unwrap_or_default(),
+            admin_scoped.is_unscoped_admin(),
+        ));
+        // READ: the GET gate is `requires_owner_check() && !is_unscoped_admin()`,
+        // so with the tenant active the owner check runs and a non-owned asset
+        // is denied.
+        assert!(!file_read_authorized(
+            &owner("victim"),
+            admin_scoped.user_id.as_deref()
+        ));
+    }
+
+    #[test]
     fn in_memory_sessions_refused_in_prod_allowed_in_dev_or_optin() {
         // Production boot (not dev) with NO persistent backend + no explicit
         // opt-in → MUST refuse (the silent footgun: sessions evaporate on
@@ -3952,7 +3995,11 @@ fn start_server(
                 use pylon_storage::files::FileStorage as _;
                 let caller = auth_ctx.user_id.clone().unwrap_or_default();
                 let prior_owner = local.owner_of(asset_id);
-                if local_put_owned_by_other(&prior_owner, &caller, auth_ctx.is_admin) {
+                // `is_unscoped_admin()`, not bare `is_admin`: an admin acting
+                // WITHIN a tenant context must stay scoped to the owner check
+                // (the #354/#355 access-control rule). Only an admin with NO
+                // active tenant may overwrite another user's asset.
+                if local_put_owned_by_other(&prior_owner, &caller, auth_ctx.is_unscoped_admin()) {
                     // 404 (not 403) to avoid confirming the asset exists —
                     // matches the GET/DELETE owner-mismatch behaviour.
                     let err = json_error("NOT_FOUND", "File not found");
@@ -4046,7 +4093,11 @@ fn start_server(
                 if storage.requires_owner_check() {
                     match storage.owner_of(asset_id) {
                         Ok(Some(owner)) => {
-                            if !auth_ctx.is_admin
+                            // `is_unscoped_admin()`, not bare `is_admin`: an
+                            // admin acting within a tenant context stays scoped
+                            // to the owner check (#354/#355). Only an admin with
+                            // no active tenant may delete another user's asset.
+                            if !auth_ctx.is_unscoped_admin()
                                 && Some(&owner.user_id) != auth_ctx.user_id.as_ref()
                             {
                                 let err = json_error("NOT_FOUND", "File not found");
@@ -4173,7 +4224,11 @@ fn start_server(
                     // sidecar). That let any authenticated user read those
                     // assets (IDOR). The sibling DELETE handler already fails
                     // closed on Ok(None); GET now matches it.
-                    if storage.requires_owner_check() && !auth_ctx.is_admin {
+                    // `is_unscoped_admin()`, not bare `is_admin`: an admin
+                    // acting within a tenant context stays scoped to the owner
+                    // check (#354/#355). Only an admin with no active tenant
+                    // gets the cross-owner read bypass.
+                    if storage.requires_owner_check() && !auth_ctx.is_unscoped_admin() {
                         let owned_by_caller = file_read_authorized(
                             &storage.owner_of(asset_id),
                             auth_ctx.user_id.as_deref(),
