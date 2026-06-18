@@ -1449,13 +1449,18 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
     // entity whose read policy passed the (data-less) edge check leaked every
     // row, including other tenants'. Mirror the cursor path: keep only rows
     // the caller is actually allowed to read, BEFORE counting or projecting.
+    // Rely purely on check_entity_read — same as the /cursor and /query paths.
+    // It ALREADY bypasses admin without an active tenant (full operator read)
+    // and SCOPES admin-with-active-tenant to that tenant via per-row policy
+    // eval. An `is_admin ||` short-circuit here would skip that scoping and let
+    // an admin-with-tenant (e.g. Studio's tenant view) list every tenant's
+    // rows — the cross-tenant leak the per-row fence exists to close.
     let row_visible = |row: &serde_json::Value| -> bool {
-        ctx.auth_ctx.is_admin
-            || matches!(
-                ctx.policy_engine
-                    .check_entity_read(entity, ctx.auth_ctx, Some(row)),
-                pylon_policy::PolicyResult::Allowed
-            )
+        matches!(
+            ctx.policy_engine
+                .check_entity_read(entity, ctx.auth_ctx, Some(row)),
+            pylon_policy::PolicyResult::Allowed
+        )
     };
     let qp = parse_query_params(url);
 
@@ -4775,6 +4780,227 @@ mod auth_gate_tests {
             "another owner's row MUST be filtered out (cross-tenant list leak); got {ids:?}"
         );
         assert_eq!(data.len(), 1, "only the caller's row should be returned");
+    }
+
+    // #354: an ADMIN with an active tenant must be SCOPED to that tenant on the
+    // list route — same as the /cursor + /query paths. handle_list's row_visible
+    // used `is_admin || check_entity_read(...)`, which short-circuited on
+    // is_admin and skipped the per-row tenant scoping the policy engine applies
+    // to admin-with-tenant, leaking every tenant's rows. Reverting the fix
+    // (re-adding the `is_admin ||`) makes this return BOTH rows → test fails.
+    #[test]
+    fn handle_list_scopes_admin_with_active_tenant() {
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+
+        struct TwoTenantStore {
+            manifest: AppManifest,
+        }
+        impl pylon_http::DataStore for TwoTenantStore {
+            fn manifest(&self) -> &AppManifest {
+                &self.manifest
+            }
+            fn insert(
+                &self,
+                _e: &str,
+                _d: &serde_json::Value,
+            ) -> Result<String, pylon_http::DataError> {
+                Ok("id".into())
+            }
+            fn get_by_id(
+                &self,
+                _e: &str,
+                _i: &str,
+            ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+                Ok(None)
+            }
+            fn list(&self, _e: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(Vec::new())
+            }
+            fn list_after(
+                &self,
+                _e: &str,
+                _a: Option<&str>,
+                _l: usize,
+            ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(Vec::new())
+            }
+            fn update(
+                &self,
+                _e: &str,
+                _i: &str,
+                _d: &serde_json::Value,
+            ) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn delete(&self, _e: &str, _i: &str) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn lookup(
+                &self,
+                _e: &str,
+                _f: &str,
+                _v: &str,
+            ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
+                Ok(None)
+            }
+            fn link(
+                &self,
+                _e: &str,
+                _i: &str,
+                _r: &str,
+                _t: &str,
+            ) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn unlink(&self, _e: &str, _i: &str, _r: &str) -> Result<bool, pylon_http::DataError> {
+                Ok(true)
+            }
+            fn query_filtered(
+                &self,
+                _e: &str,
+                _f: &serde_json::Value,
+            ) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
+                Ok(vec![
+                    serde_json::json!({"id": "d1", "orgId": "t-1", "body": "my tenant"}),
+                    serde_json::json!({"id": "d2", "orgId": "t-2", "body": "OTHER tenant"}),
+                ])
+            }
+            fn query_graph(
+                &self,
+                _q: &serde_json::Value,
+            ) -> Result<serde_json::Value, pylon_http::DataError> {
+                Ok(serde_json::json!({}))
+            }
+            fn transact(
+                &self,
+                _o: &[serde_json::Value],
+            ) -> Result<(bool, Vec<serde_json::Value>), pylon_http::DataError> {
+                Ok((true, Vec::new()))
+            }
+        }
+
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![ManifestPolicy {
+                name: "docTenant".into(),
+                entity: Some("Doc".into()),
+                allow_read: Some("auth.tenantId == data.orgId".into()),
+                ..Default::default()
+            }],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let store = TwoTenantStore {
+            manifest: manifest.clone(),
+        };
+        let session_store = SessionStore::new();
+        let magic_codes = MagicCodeStore::new();
+        let oauth_state = OAuthStateStore::new();
+        let account_store = pylon_auth::AccountStore::new();
+        let api_keys = pylon_auth::api_key::ApiKeyStore::new();
+        let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
+            std::sync::Arc::new(StubDataStore {
+                manifest: manifest.clone(),
+            });
+        let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
+        let siwe = pylon_auth::siwe::NonceStore::new();
+        let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
+        let passkeys = pylon_auth::webauthn::PasskeyStore::new();
+        let verification = pylon_auth::verification::VerificationStore::new();
+        let audit = pylon_auth::audit::AuditStore::new();
+        let trusted_devices = pylon_auth::trusted_device::InMemoryTrustedDeviceStore::new();
+        let org_sso = pylon_auth::org_sso::InMemoryOrgSsoStore::new();
+        let saml = pylon_auth::saml::InMemorySamlStore::new();
+        let policy_engine = PolicyEngine::from_manifest(&manifest);
+        let change_log = ChangeLog::new();
+        let notifier = NoopNotifier;
+        let rooms = StubRooms;
+        let cache = StubCache;
+        let pubsub = StubPubSub;
+        let jobs = StubJobs;
+        let scheduler = StubScheduler;
+        let workflows = StubWorkflows;
+        let files = StubFiles;
+        let openapi = StubOpenApi;
+        let email = StubEmail;
+        let cookie_config = CookieConfig::from_env(&CookieConfig::default_name_for("test"));
+
+        // Admin WITH an active tenant t-1 — must see ONLY t-1's rows.
+        let admin_t1 = AuthContext::admin().with_tenant("t-1".into());
+        let ctx = RouterContext {
+            store: &store,
+            session_store: &session_store,
+            magic_codes: &magic_codes,
+            oauth_state: &oauth_state,
+            account_store: &account_store,
+            api_keys: &api_keys,
+            orgs: &orgs,
+            siwe: &*siwe,
+            phone_codes: &phone_codes,
+            passkeys: &passkeys,
+            verification: &verification,
+            audit: &audit,
+            trusted_devices: &trusted_devices,
+            org_sso: &org_sso,
+            saml: &saml,
+            trusted_origins: &[],
+            policy_engine: &policy_engine,
+            change_log: &change_log,
+            notifier: &notifier,
+            rooms: &rooms,
+            cache: &cache,
+            pubsub: &pubsub,
+            jobs: &jobs,
+            scheduler: &scheduler,
+            workflows: &workflows,
+            files: &files,
+            openapi: &openapi,
+            functions: None,
+            email: &email,
+            shards: None,
+            plugin_hooks: &NoopPluginHooks,
+            auth_ctx: &admin_t1,
+            is_dev: false,
+            request_headers: &[],
+            peer_ip: "127.0.0.1",
+            cookie_config: &cookie_config,
+            response_headers: RefCell::new(Vec::new()),
+        };
+
+        let (status, body, _ct) = route(&ctx, HttpMethod::Get, "/api/entities/Doc", "", None);
+        assert_eq!(
+            status, 200,
+            "list should succeed for admin-with-tenant: {body}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let data = parsed
+            .get("data")
+            .and_then(|d| d.as_array())
+            .expect("data array");
+        let ids: Vec<&str> = data
+            .iter()
+            .filter_map(|r| r.get("id").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            ids.contains(&"d1"),
+            "admin's active-tenant row must be present"
+        );
+        assert!(
+            !ids.contains(&"d2"),
+            "another tenant's row MUST be scoped out for admin-with-tenant; got {ids:?}"
+        );
+        assert_eq!(
+            data.len(),
+            1,
+            "admin-with-tenant sees ONLY their tenant's row"
+        );
     }
 
     // -----------------------------------------------------------------------
