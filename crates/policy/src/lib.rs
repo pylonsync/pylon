@@ -82,7 +82,13 @@ impl PolicyResult {
 /// from the manifest contract. Complex expressions are treated as denied
 /// with a clear message.
 pub struct PolicyEngine {
-    entity_policies: Vec<ManifestPolicy>,
+    /// Entity policies bucketed by entity name, built once at `from_manifest`.
+    /// Every per-row read check (list / query / snapshot pull / delta pull /
+    /// broadcast fanout) needs "the policies for THIS entity" — a flat `Vec`
+    /// forced an O(P) scan + a fresh `Vec` allocation on every single row. The
+    /// map makes it an O(1) lookup returning a borrowed slice: no scan, no
+    /// per-row allocation. (Mirrors the AST cache rationale on `compiled`.)
+    entity_policies_by_name: HashMap<String, Vec<ManifestPolicy>>,
     action_policies: Vec<ManifestPolicy>,
     /// Pre-parsed AST for every policy expression, keyed by the raw
     /// expression string. Populated once at `from_manifest`, so per-row
@@ -103,13 +109,16 @@ pub struct PolicyEngine {
 impl PolicyEngine {
     /// Build a policy engine from a manifest.
     pub fn from_manifest(manifest: &AppManifest) -> Self {
-        let mut entity_policies = Vec::new();
+        let mut entity_policies_by_name: HashMap<String, Vec<ManifestPolicy>> = HashMap::new();
         let mut action_policies = Vec::new();
 
         let mut compiled: HashMap<String, Result<Arc<Ast>, String>> = HashMap::new();
         for policy in &manifest.policies {
-            if policy.entity.is_some() {
-                entity_policies.push(policy.clone());
+            if let Some(entity) = policy.entity.as_deref() {
+                entity_policies_by_name
+                    .entry(entity.to_string())
+                    .or_default()
+                    .push(policy.clone());
             }
             if policy.action.is_some() {
                 action_policies.push(policy.clone());
@@ -132,11 +141,22 @@ impl PolicyEngine {
         }
 
         Self {
-            entity_policies,
+            entity_policies_by_name,
             action_policies,
             compiled,
             resolver: OnceLock::new(),
         }
+    }
+
+    /// The policies registered for `entity_name` as a borrowed slice — O(1),
+    /// no allocation. Empty slice when none are registered (the default-deny
+    /// path keys off `is_empty()`). Replaces the per-call
+    /// `entity_policies.iter().filter(…).collect()` on every read row.
+    fn entity_policies_for(&self, entity_name: &str) -> &[ManifestPolicy] {
+        self.entity_policies_by_name
+            .get(entity_name)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Evaluate a policy expression using the pre-parsed AST cache. Falls
@@ -241,11 +261,7 @@ impl PolicyEngine {
             return PolicyResult::Allowed;
         }
 
-        let policies: Vec<&ManifestPolicy> = self
-            .entity_policies
-            .iter()
-            .filter(|p| p.entity.as_deref() == Some(entity_name))
-            .collect();
+        let policies = self.entity_policies_for(entity_name);
 
         // Default-deny: an entity with NO policy is admin-only. The
         // alternative (default-allow) is the same Supabase RLS footgun
@@ -277,7 +293,7 @@ impl PolicyEngine {
         // hole where partial policies — `allowRead` only — silently
         // permitted writes).
         let mut any_rule_for_action = false;
-        for policy in &policies {
+        for policy in policies {
             let expr = Self::expr_for(policy, action);
             if expr.is_empty() {
                 continue;
@@ -363,11 +379,7 @@ impl PolicyEngine {
             return PolicyResult::Allowed;
         }
 
-        let policies: Vec<&ManifestPolicy> = self
-            .entity_policies
-            .iter()
-            .filter(|p| p.entity.as_deref() == Some(entity_name))
-            .collect();
+        let policies = self.entity_policies_for(entity_name);
 
         // Default-deny / framework-internal handling mirrors
         // check_entity (kept in sync with that method's branch).
@@ -384,7 +396,7 @@ impl PolicyEngine {
         }
 
         let mut any_rule_for_action = false;
-        for policy in &policies {
+        for policy in policies {
             let expr = Self::expr_for(policy, EntityAction::Read);
             if expr.is_empty() {
                 continue;
@@ -437,9 +449,8 @@ impl PolicyEngine {
     /// no-id-ceiling pager) never converges → a since=0 resync storm.
     pub fn is_read_statically_denied(&self, entity_name: &str) -> bool {
         let read_exprs: Vec<&str> = self
-            .entity_policies
+            .entity_policies_for(entity_name)
             .iter()
-            .filter(|p| p.entity.as_deref() == Some(entity_name))
             .map(|p| Self::expr_for(p, EntityAction::Read))
             .filter(|e| !e.is_empty())
             .collect();
@@ -1739,7 +1750,9 @@ mod tests {
     #[test]
     fn engine_from_manifest() {
         let engine = PolicyEngine::from_manifest(&test_manifest());
-        assert_eq!(engine.entity_policies.len(), 1); // ownerReadTodos
+        let entity_policy_count: usize =
+            engine.entity_policies_by_name.values().map(Vec::len).sum();
+        assert_eq!(entity_policy_count, 1); // ownerReadTodos
         assert_eq!(engine.action_policies.len(), 2); // authenticatedCreate, ownerToggle
     }
 
@@ -1801,6 +1814,64 @@ mod tests {
         assert!(eng.compiled.contains_key("true"));
         assert!(eng.compiled.contains_key("auth.userId == data.ownerId"));
         assert!(eng.compiled.get("auth.userId ==").unwrap().is_err());
+    }
+
+    #[test]
+    fn entity_policies_bucketed_by_name_and_every_policy_enforced() {
+        // #350: the by-name index must bucket ALL policies for an entity
+        // together (the old per-call `iter().filter()` returned every matching
+        // policy), and the lookup must be exact. A second policy on the SAME
+        // entity is an additional AND-gate — if it denies, the whole denies —
+        // so this also proves the index didn't drop the 2nd policy.
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![
+                ManifestPolicy {
+                    name: "doc_open".into(),
+                    entity: Some("Doc".into()),
+                    allow_read: Some("true".into()),
+                    ..Default::default()
+                },
+                ManifestPolicy {
+                    name: "doc_locked".into(),
+                    entity: Some("Doc".into()), // 2nd gate on the SAME entity
+                    allow_read: Some("false".into()),
+                    ..Default::default()
+                },
+                ManifestPolicy {
+                    name: "other".into(),
+                    entity: Some("Other".into()),
+                    allow_read: Some("true".into()),
+                    ..Default::default()
+                },
+            ],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let eng = PolicyEngine::from_manifest(&manifest);
+
+        // Exact, bucketed lookup — no per-call scan/alloc.
+        assert_eq!(eng.entity_policies_for("Doc").len(), 2);
+        assert_eq!(eng.entity_policies_for("Other").len(), 1);
+        assert!(eng.entity_policies_for("Missing").is_empty());
+
+        // Both Doc gates run: doc_open allows, doc_locked denies → denied.
+        // If the index had dropped the 2nd same-entity policy, this would
+        // wrongly allow.
+        let anon = AuthContext::anonymous();
+        assert!(
+            !eng.check_entity_read("Doc", &anon, None).is_allowed(),
+            "a second same-entity policy must still gate the read"
+        );
+        assert!(eng.check_entity_read("Other", &anon, None).is_allowed());
     }
 
     #[test]
