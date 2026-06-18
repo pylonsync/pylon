@@ -1934,14 +1934,22 @@ fn start_server(
         let acknowledged = std::env::var("PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        if in_prod_for_sse && !acknowledged {
+        // The dedicated SSE port authenticates every connection (401 for
+        // anonymous callers in prod) and per-client policy-filters every change
+        // event — see `sse::handle_sse_connection`. The ONLY way it serves
+        // anonymous clients is when the operator sets
+        // PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1, which DISABLES the auth gate. So
+        // warn loudly in THAT (and only that) case — the inverse of the old
+        // warning, which fired on the SAFE default and told operators to
+        // "silence" it by setting the very flag that opens the leak.
+        if sse_unauth_warning_warranted(in_prod_for_sse, acknowledged) {
             tracing::warn!(
-                "[sse] Dedicated SSE port :{sse_port} is binding WITHOUT authentication or \
-                 per-client tenant filtering — every connected client receives every change \
-                 event from every tenant. If you do not need this port (most deploys do not), \
-                 set PYLON_SSE_PORT_DISABLE=1. If you need it and accept the leak risk, set \
-                 PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1 to silence this warning. Per-client \
-                 filter + auth gate ships in v0.3.72."
+                "[sse] PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1 — the dedicated SSE port \
+                 :{sse_port} accepts UNAUTHENTICATED clients (the per-connection auth gate \
+                 is disabled). Authenticated clients are still per-client policy-filtered, \
+                 but anonymous clients receive every change event your read policies expose \
+                 to anonymous callers. Unset the flag to require auth, or set \
+                 PYLON_SSE_PORT_DISABLE=1 if you don't use this port (most deploys don't)."
             );
         }
         let hub = Arc::clone(&sse_hub);
@@ -6472,6 +6480,36 @@ mod dev_admin_gate_tests {
         assert!(!dev_admin_endpoints_open(true, Some("admintok"), None));
         assert!(!dev_admin_endpoints_open(true, None, Some("metricstok")));
         assert!(!dev_admin_endpoints_open(true, Some("a"), Some("m")));
+    }
+}
+
+/// Whether to warn at boot that the dedicated SSE port serves UNAUTHENTICATED
+/// clients. The port authenticates every connection by default (401 for anon
+/// in prod) and per-client policy-filters every event — see
+/// `sse::handle_sse_connection`. The ONLY way it serves anonymous clients is
+/// when the operator sets `PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1`, which DISABLES
+/// that auth gate. So the warning must fire on that opt-in, NOT on the safe
+/// default. (Pre-fix the warning was inverted: it fired on the safe default and
+/// told operators to "silence" it by setting the very flag that opens the leak
+/// — remediation advice that created the vulnerability.)
+fn sse_unauth_warning_warranted(in_prod: bool, acknowledged_unauth: bool) -> bool {
+    in_prod && acknowledged_unauth
+}
+
+#[cfg(test)]
+mod sse_unauth_warning_tests {
+    use super::sse_unauth_warning_warranted;
+
+    #[test]
+    fn warns_only_when_the_unauth_flag_is_actually_set() {
+        // Safe default (prod, flag unset): the port requires auth → NO warning.
+        // Pre-fix this case warned falsely AND advised the leak-opening flag.
+        assert!(!sse_unauth_warning_warranted(true, false));
+        // Operator opted into anonymous SSE (flag set) in prod → WARN loudly.
+        assert!(sse_unauth_warning_warranted(true, true));
+        // Dev: anonymous SSE is expected locally → no prod-leak warning either way.
+        assert!(!sse_unauth_warning_warranted(false, false));
+        assert!(!sse_unauth_warning_warranted(false, true));
     }
 }
 
