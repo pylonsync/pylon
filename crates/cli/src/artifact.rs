@@ -667,7 +667,9 @@ mod tests {
         assert!(is_no_space(
             "unpack entry into /data/.staging-x: No space left on device (os error 28)"
         ));
-        assert!(is_no_space("stream artifact: No space left on device (os error 28)"));
+        assert!(is_no_space(
+            "stream artifact: No space left on device (os error 28)"
+        ));
         assert!(!is_no_space("sha256 mismatch: expected a, got b"));
         assert!(!is_no_space("read bundle entry: unexpected EOF"));
     }
@@ -690,9 +692,18 @@ mod tests {
 
         free_artifact_space(base.path(), &staging);
 
-        assert!(!base.path().join("dep-old1").exists(), "old artifact reclaimed");
-        assert!(!base.path().join("dep-old2").exists(), "old artifact reclaimed");
-        assert!(staging.join("app.ts").is_file(), "in-progress staging preserved");
+        assert!(
+            !base.path().join("dep-old1").exists(),
+            "old artifact reclaimed"
+        );
+        assert!(
+            !base.path().join("dep-old2").exists(),
+            "old artifact reclaimed"
+        );
+        assert!(
+            staging.join("app.ts").is_file(),
+            "in-progress staging preserved"
+        );
         assert!(
             base.path().join(".download-dep-new-2.tar.gz").exists(),
             "other in-flight temp left alone"
