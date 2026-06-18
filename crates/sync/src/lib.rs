@@ -812,15 +812,25 @@ impl ChangeLog {
             }
         }
 
-        let changes: Vec<ChangeEvent> = events
-            .iter()
-            .filter(|e| e.seq > cursor.last_seq)
-            .take(limit)
-            .cloned()
-            .collect();
+        // `events` is kept strictly seq-ascending (append via push_back with a
+        // monotonic seq; evict via pop_front), so binary-search for the first
+        // event past the cursor instead of linear-scanning from the front. A
+        // caught-up tip client — the steady state for every connected realtime
+        // client — would otherwise walk all `capacity` (default 10k) events on
+        // every delta pull just to return nothing, and do it twice (the old
+        // `has_more` re-scanned), all under the `events` lock that also gates
+        // the append hot path. `range(start..)` is O(1) to set up (NOT
+        // `.skip(start)`, which would re-introduce the O(start) walk). Net:
+        // O(log N + limit) per pull, behavior identical.
+        let start = events.partition_point(|e| e.seq <= cursor.last_seq);
+        let changes: Vec<ChangeEvent> = events.range(start..).take(limit).cloned().collect();
 
         let last_seq = changes.last().map(|e| e.seq).unwrap_or(cursor.last_seq);
-        let has_more = events.iter().any(|e| e.seq > last_seq);
+        // Sorted-ring corollary: everything past the slice we took has a
+        // strictly greater seq, so "are there more?" is index arithmetic, not a
+        // second scan. `start + changes.len()` is where the returned page ends;
+        // if that's short of the ring length there are unsent newer events.
+        let has_more = start + changes.len() < events.len();
 
         Ok(PullResponse {
             changes,
@@ -928,6 +938,63 @@ mod tests {
         let resp2 = log.pull(&resp.cursor, 2).unwrap();
         assert_eq!(resp2.changes.len(), 1);
         assert!(!resp2.has_more);
+    }
+
+    #[test]
+    fn caught_up_tip_pull_returns_nothing_and_no_more() {
+        // The realtime steady state: a client whose cursor is AT the newest seq
+        // pulls and gets an empty page with has_more=false. The binary-search
+        // path must short-circuit here (start == len) instead of scanning.
+        let log = ChangeLog::new();
+        for i in 0..50 {
+            log.append("User", &format!("u{i}"), ChangeKind::Insert, None);
+        }
+        let tip = log.pull(&SyncCursor::beginning(), 1000).unwrap();
+        assert_eq!(tip.cursor.last_seq, 50);
+        assert!(!tip.has_more);
+
+        // Now caught up — re-pull from the tip cursor: empty, no more.
+        let again = log.pull(&tip.cursor, 1000).unwrap();
+        assert!(again.changes.is_empty());
+        assert!(!again.has_more);
+        assert_eq!(again.cursor.last_seq, 50, "cursor holds at the tip");
+    }
+
+    #[test]
+    fn binary_search_pull_matches_linear_filter_at_every_cursor() {
+        // Property: the partition_point + range page must equal the naive
+        // `filter(seq > cursor).take(limit)` for EVERY cursor position and a
+        // couple of limits, and has_more must equal "events remain past the
+        // page". Guards the O(log N) rewrite against off-by-one vs the old
+        // O(N) linear scan.
+        let n: u64 = 200;
+        let log = ChangeLog::new();
+        for i in 0..n {
+            log.append("E", &format!("r{i}"), ChangeKind::Insert, None);
+        }
+        let all: Vec<u64> = (1..=n).collect(); // seqs are 1..=n, ascending
+
+        for &limit in &[1usize, 7, 50, 1000] {
+            for cursor in 0..=n {
+                let resp = log.pull(&SyncCursor { last_seq: cursor }, limit).unwrap();
+                let expected: Vec<u64> = all
+                    .iter()
+                    .copied()
+                    .filter(|&s| s > cursor)
+                    .take(limit)
+                    .collect();
+                let got: Vec<u64> = resp.changes.iter().map(|e| e.seq).collect();
+                assert_eq!(got, expected, "cursor={cursor} limit={limit}");
+
+                let expected_more = all
+                    .iter()
+                    .any(|&s| s > expected.last().copied().unwrap_or(cursor));
+                assert_eq!(
+                    resp.has_more, expected_more,
+                    "has_more cursor={cursor} limit={limit}"
+                );
+            }
+        }
     }
 
     #[test]
