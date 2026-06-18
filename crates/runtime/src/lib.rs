@@ -2529,8 +2529,14 @@ impl Runtime {
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
-            return pylon_http::DataStore::query_filtered(&pg.store, entity, filter)
-                .map_err(data_err_to_runtime);
+            let mut rows = pylon_http::DataStore::query_filtered(&pg.store, entity, filter)
+                .map_err(data_err_to_runtime)?;
+            // Decrypt `field.encrypted()` columns, same as get_by_id/list/lookup
+            // — a server-side ctx.db.query() must see plaintext, not ciphertext.
+            for r in rows.iter_mut() {
+                self.maybe_decrypt_row(entity, r);
+            }
+            return Ok(rows);
         }
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
@@ -2726,7 +2732,11 @@ impl Runtime {
 
         let mut result = Vec::new();
         for row in rows {
-            if let Ok(val) = row {
+            if let Ok(mut val) = row {
+                // Decrypt `field.encrypted()` columns — see the PG branch above
+                // and get_by_id/list/lookup. maybe_decrypt_row self-guards, so
+                // entities with no encrypted fields pay nothing.
+                self.maybe_decrypt_row(entity, &mut val);
                 result.push(val);
             }
         }
@@ -4681,6 +4691,99 @@ mod tests {
             )
             .unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn query_filtered_and_graph_decrypt_encrypted_fields_like_get() {
+        // #353: a server-side ctx.db.query() / queryGraph() must return
+        // PLAINTEXT for field.encrypted() columns, exactly like ctx.db.get().
+        // Before the fix query_filtered skipped maybe_decrypt_row and returned
+        // the raw `enc:v1:...` ciphertext — so a function that queried then
+        // read a "decrypted" SSN got garbage. CI runs --test-threads=1, so
+        // mutating the key env here is safe.
+        std::env::set_var(
+            "PYLON_ENCRYPTION_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let mk_field = |name: &str, server_only: bool, encrypted: bool| ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted,
+        };
+        let manifest = AppManifest {
+            manifest_version: 1,
+            name: "Test".into(),
+            version: "0.1.0".into(),
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Vault".into(),
+                // encrypted() requires serverOnly() (validated at boot).
+                fields: vec![
+                    mk_field("label", false, false),
+                    mk_field("secret", true, true),
+                ],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: false,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let rt = Runtime::in_memory(manifest).unwrap();
+        // Guard against a vacuous pass: encryption must actually be configured.
+        assert!(
+            rt.encrypted_fields
+                .get("Vault")
+                .map(|v| v.iter().any(|f| f == "secret"))
+                .unwrap_or(false),
+            "Vault.secret must be a configured encrypted field"
+        );
+
+        let id = rt
+            .insert(
+                "Vault",
+                &serde_json::json!({"label": "l1", "secret": "123-45-6789"}),
+            )
+            .unwrap();
+
+        // Baseline: get_by_id already decrypts.
+        let got = rt.get_by_id("Vault", &id).unwrap().unwrap();
+        assert_eq!(got["secret"], "123-45-6789");
+
+        // The fix: query_filtered must decrypt too (was leaking ciphertext).
+        let rows = rt
+            .query_filtered("Vault", &serde_json::json!({"label": "l1"}))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let secret = rows[0]["secret"].as_str().unwrap();
+        assert_eq!(
+            secret, "123-45-6789",
+            "query_filtered must return plaintext"
+        );
+        assert!(
+            !secret.starts_with("enc:"),
+            "query_filtered must not leak ciphertext: {secret}"
+        );
+
+        // query_graph routes through query_filtered → decrypts now too.
+        let graph = rt
+            .query_graph(&serde_json::json!({"Vault": {"where": {"label": "l1"}}}))
+            .unwrap();
+        assert_eq!(graph["Vault"][0]["secret"], "123-45-6789");
+
+        std::env::remove_var("PYLON_ENCRYPTION_KEY");
     }
 
     #[test]
