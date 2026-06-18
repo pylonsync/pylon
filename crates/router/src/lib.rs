@@ -2270,20 +2270,19 @@ pub fn strip_server_only_fields(
         Some(e) => e,
         None => return row,
     };
-    let server_only_fields: Vec<&str> = entity_def
-        .fields
-        .iter()
-        .filter(|f| f.server_only)
-        .map(|f| f.name.as_str())
-        .collect();
-    if server_only_fields.is_empty() {
+    // Nothing to strip → return as-is. The common case (most entities have no
+    // serverOnly fields) skips both the row destructure and — more importantly
+    // on the per-row sync/WS/SSE/list projection hot path — the `Vec<&str>` of
+    // field names the old `.filter().collect()` allocated for EVERY projected
+    // row. We iterate the (already-borrowed) field list inline instead.
+    if !entity_def.fields.iter().any(|f| f.server_only) {
         return row;
     }
     let serde_json::Value::Object(mut obj) = row else {
         return row;
     };
-    for f in server_only_fields {
-        obj.remove(f);
+    for field in entity_def.fields.iter().filter(|f| f.server_only) {
+        obj.remove(field.name.as_str());
     }
     serde_json::Value::Object(obj)
 }
@@ -2601,6 +2600,51 @@ mod field_gate_tests {
         assert!(stripped.get("authorId").is_some());
         // Crucial: the secret never leaves.
         assert!(stripped.get("stripeCustomerId").is_none());
+    }
+
+    #[test]
+    fn strip_server_only_removes_every_marked_field() {
+        // The inline strip loop must drop ALL serverOnly fields, not just the
+        // first — two secrets on one entity both have to be stripped.
+        let mk = |name: &str, server_only: bool| ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            server_only,
+            ..Default::default()
+        };
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.0.1".into(),
+            entities: vec![ManifestEntity {
+                name: "Acct".into(),
+                fields: vec![mk("label", false), mk("apiKey", true), mk("ssn", true)],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+        };
+        let row = serde_json::json!({
+            "label": "ok", "apiKey": "sk_secret", "ssn": "123-45-6789"
+        });
+        let stripped = strip_server_only_fields(&manifest, "Acct", row);
+        assert!(stripped.get("label").is_some());
+        assert!(
+            stripped.get("apiKey").is_none(),
+            "first secret must be stripped"
+        );
+        assert!(
+            stripped.get("ssn").is_none(),
+            "second secret must be stripped too"
+        );
     }
 
     #[test]
