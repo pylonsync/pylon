@@ -9,6 +9,9 @@
   "bin": {
     "create-pylon": "./bin/create-pylon.js"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "bin",
     "templates"

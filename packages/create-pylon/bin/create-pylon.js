@@ -42,7 +42,12 @@ import { stdin, stdout, exit, argv, cwd } from "node:process";
 // ---------------------------------------------------------------------------
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const TEMPLATES = resolve(HERE, "..", "templates");
+// PYLON_CREATE_TEMPLATES_DIR overrides the template source dir. Only used by
+// the scaffolder's own tests (to point at a fixture / empty dir and exercise
+// the missing-template guard); undocumented + irrelevant in normal use.
+const TEMPLATES = process.env.PYLON_CREATE_TEMPLATES_DIR
+	? resolve(process.env.PYLON_CREATE_TEMPLATES_DIR)
+	: resolve(HERE, "..", "templates");
 
 // ---------------------------------------------------------------------------
 // Version pin — every generated dep references this version of @pylonsync/*.
@@ -462,6 +467,26 @@ function copyTemplate(srcSubpath, destSubpath = "") {
 	return true;
 }
 
+// Like copyTemplate but FATAL when the source is missing. A required
+// template dir that isn't on disk means a corrupt/partial create-pylon
+// install (or a published tarball that dropped files) — historically this
+// scaffolded an EMPTY project and STILL printed "✓ Created", sending the
+// user to a dead `pylon dev` with no clue why. Fail loud + actionable
+// instead. (The @pylonsync/client publish-drop that broke the default
+// scaffold is exactly this failure mode.)
+function mustCopy(srcSubpath, destSubpath = "", label = srcSubpath) {
+	if (!copyTemplate(srcSubpath, destSubpath)) {
+		console.error(
+			`\nError: template files for "${label}" are missing from this install\n` +
+				`       (expected ${join(TEMPLATES, srcSubpath)}).\n` +
+				`       This usually means a corrupt or partial create-pylon install.\n` +
+				`       Re-run with @latest:  npm create @pylonsync/pylon@latest\n` +
+				`       or report it:         https://github.com/pylonsync/pylon/issues\n`,
+		);
+		exit(1);
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Apply templates in order:
 //   1. _root            — gitignore, env.example, README
@@ -475,24 +500,24 @@ if (isUnified) {
 	// Single unified app: app.ts + app/ routes + functions/, served by
 	// `pylon dev` (frontend + API, one port). The template ships its own
 	// package.json — no monorepo root, no turbo, no workspaces.
-	copyTemplate(flags.template);
+	mustCopy(flags.template);
 } else {
-	copyTemplate("_root");
-	copyTemplate(`backend/${flags.template}`);
+	mustCopy("_root");
+	mustCopy(`backend/${flags.template}`);
 
 	// `web` (Next.js) and `vite` are alternative web-frontend toolchains;
 	// the mutex check above guarantees at most one of them is set. Either
 	// way we also pull in packages/ui so the shared primitives are present.
 	if (platforms.includes("web")) {
-		copyTemplate("ui");
-		copyTemplate(`web/${flags.template}`);
+		mustCopy("ui");
+		mustCopy(`web/${flags.template}`);
 	}
 	if (platforms.includes("vite")) {
-		copyTemplate("ui");
-		copyTemplate(`vite/${flags.template}`);
+		mustCopy("ui");
+		mustCopy(`vite/${flags.template}`);
 	}
 	for (const p of ["ios", "mac", "expo"]) {
-		if (platforms.includes(p)) copyTemplate(`${p}/${flags.template}`);
+		if (platforms.includes(p)) mustCopy(`${p}/${flags.template}`);
 	}
 }
 
