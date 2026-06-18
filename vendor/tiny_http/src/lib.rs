@@ -87,7 +87,11 @@
 //! # let response = tiny_http::Response::from_file(File::open(&Path::new("image.png")).unwrap());
 //! let _ = request.respond(response);
 //! ```
-#![forbid(unsafe_code)]
+// Pylon patch: relaxed from `forbid` to `deny` so the panic-safe accept() on
+// Unix (src/connection.rs) can use `libc::accept` with a null addr ptr — the
+// one place unsafe is needed, scoped tightly with `#[allow(unsafe_code)]`.
+// `deny` still flags any other unsafe introduced in the crate.
+#![deny(unsafe_code)]
 #![deny(rust_2018_idioms)]
 #![allow(clippy::match_like_matches_macro)]
 

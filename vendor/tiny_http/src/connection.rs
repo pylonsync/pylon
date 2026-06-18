@@ -22,14 +22,86 @@ impl Listener {
         }
     }
 
+    #[allow(unsafe_code)] // libc::accept(null) — see the Tcp arm below.
     pub(crate) fn accept(&self) -> std::io::Result<(Connection, Option<SocketAddr>)> {
         match self {
+            // Pylon patch: on Unix, accept via libc with a NULL address pointer
+            // instead of std's `TcpListener::accept()`. libstd's accept builds a
+            // `SocketAddr` from the kernel's sockaddr and `assert!`s its length
+            // is `>= size_of::<sockaddr_in6>()`. On macOS a dual-stack `[::]`
+            // listener can hand back a SHORTER sockaddr for a peer that RSTs
+            // mid-handshake (and some v4-mapped cases), so that assert PANICS —
+            // killing this accept thread and the whole dev server (the crash a
+            // fresh `pylon dev` hits on macOS). A null addr ptr tells the kernel
+            // to write nothing, so there is nothing to parse or assert; we then
+            // read the peer address ourselves with an explicit length check
+            // (`peer_sockaddr_unix`), yielding `None` rather than a panic for an
+            // address we can't make sense of. Mirrors pylon_runtime::accept_tcp,
+            // which already covers the WS/SSE/shard listeners.
+            #[cfg(unix)]
+            Self::Tcp(l) => {
+                use std::os::unix::io::{AsRawFd, FromRawFd};
+                // SAFETY: `accept` with null addr/len pointers is explicitly
+                // valid (POSIX) — the kernel writes no peer address. The
+                // returned fd is owned by us; we hand it to `from_raw_fd`.
+                let fd = unsafe {
+                    libc::accept(l.as_raw_fd(), std::ptr::null_mut(), std::ptr::null_mut())
+                };
+                if fd < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let stream = unsafe { TcpStream::from_raw_fd(fd) };
+                let addr = peer_sockaddr_unix(fd);
+                Ok((Connection::from(stream), addr))
+            }
+            #[cfg(not(unix))]
             Self::Tcp(l) => l
                 .accept()
                 .map(|(conn, addr)| (Connection::from(conn), Some(addr))),
             #[cfg(unix)]
             Self::Unix(l) => l.accept().map(|(conn, _)| (Connection::from(conn), None)),
         }
+    }
+}
+
+/// Best-effort peer `SocketAddr` for an accepted fd, decoded with a strict
+/// length check so a truncated address (the very thing that panics libstd's
+/// accept) yields `None` instead of reading past what the kernel wrote.
+#[cfg(unix)]
+#[allow(unsafe_code)] // getpeername + strict-length sockaddr decode.
+fn peer_sockaddr_unix(fd: std::os::unix::io::RawFd) -> Option<SocketAddr> {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddrV4, SocketAddrV6};
+    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    // SAFETY: `storage` is a zeroed sockaddr_storage with `len` set to its
+    // size; getpeername writes at most `len` bytes and updates `len`.
+    let rc =
+        unsafe { libc::getpeername(fd, &mut storage as *mut _ as *mut libc::sockaddr, &mut len) };
+    if rc != 0 {
+        return None;
+    }
+    let len = len as usize;
+    match storage.ss_family as libc::c_int {
+        libc::AF_INET if len >= std::mem::size_of::<libc::sockaddr_in>() => {
+            // SAFETY: family is AF_INET and the kernel wrote a full sockaddr_in.
+            let a = unsafe { &*(&storage as *const _ as *const libc::sockaddr_in) };
+            let ip = Ipv4Addr::from(a.sin_addr.s_addr.to_ne_bytes());
+            let port = u16::from_be(a.sin_port);
+            Some(SocketAddr::V4(SocketAddrV4::new(ip, port)))
+        }
+        libc::AF_INET6 if len >= std::mem::size_of::<libc::sockaddr_in6>() => {
+            // SAFETY: family is AF_INET6 with a full sockaddr_in6 written.
+            let a = unsafe { &*(&storage as *const _ as *const libc::sockaddr_in6) };
+            let ip = Ipv6Addr::from(a.sin6_addr.s6_addr);
+            let port = u16::from_be(a.sin6_port);
+            Some(SocketAddr::V6(SocketAddrV6::new(
+                ip,
+                port,
+                a.sin6_flowinfo,
+                a.sin6_scope_id,
+            )))
+        }
+        _ => None,
     }
 }
 impl From<TcpListener> for Listener {

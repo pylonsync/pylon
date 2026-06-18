@@ -7179,4 +7179,75 @@ mod http_listener_rebuild_tests {
 
         worker.join().expect("worker thread joins");
     }
+
+    /// #361: the main HTTP server runs on tiny_http, whose internal (unnamed)
+    /// accept thread used std `TcpListener::accept()` — which PANICS on a
+    /// truncated macOS dual-stack `[::]` sockaddr (a peer that RSTs mid-accept).
+    /// #345 fixed our ws/sse/shard accept loops via `accept_tcp` but NOT
+    /// tiny_http's, so a fresh `pylon dev` on macOS still crashed
+    /// (`assertion failed: len >= size_of::<sockaddr_in6>()`). The vendored
+    /// `Listener::accept()` is now panic-safe (libc::accept with a null addr +
+    /// a strict-length getpeername). Boot the REAL server (`build_http_server`,
+    /// the production dual-stack bind), hammer it with connect-then-abort, then
+    /// confirm a normal request is STILL served — proving the accept thread
+    /// survived. On macOS this drives the truncation path directly; on Linux
+    /// it's a survives-aborts smoke test (Linux accept never truncates).
+    #[test]
+    fn server_accept_survives_a_burst_of_aborted_connections() {
+        let server = build_http_server(0).expect("bind");
+        let bound = server.server_addr().to_ip().expect("addr");
+        let port = bound.port();
+        let connect_addr: SocketAddr = if bound.is_ipv6() {
+            (Ipv6Addr::LOCALHOST, port).into()
+        } else {
+            (Ipv4Addr::LOCALHOST, port).into()
+        };
+
+        // Serve exactly one REAL request. Aborted connections never reach
+        // recv() — tiny_http discards them inside its accept thread, the very
+        // place that used to panic.
+        let worker = std::thread::spawn(move || {
+            if let Ok(req) = server.recv() {
+                let _ = req.respond(Response::from_string("pong"));
+            }
+        });
+
+        // Hammer: open then immediately drop a burst of connections to hit the
+        // accept-time truncation window. A rapid open/close burst (the shape of
+        // a browser / HMR client reconnecting) is exactly what crashed the
+        // original `pylon dev` on macOS ::1.
+        for _ in 0..300 {
+            if let Ok(s) = TcpStream::connect(connect_addr) {
+                drop(s);
+            }
+        }
+
+        // A normal request must still be accepted + answered. If the accept
+        // thread had panicked, recv() would never fire and this read would
+        // block until the timeout, failing the test.
+        let mut stream = None;
+        for _ in 0..100 {
+            match TcpStream::connect(connect_addr) {
+                Ok(s) => {
+                    stream = Some(s);
+                    break;
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(20)),
+            }
+        }
+        let mut stream = stream.expect("connect a real request after the abort burst");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")
+            .expect("write request");
+        let mut response = String::new();
+        stream.read_to_string(&mut response).expect("read response");
+        assert!(
+            response.contains("200 OK") && response.contains("pong"),
+            "server did not serve after the abort burst (accept thread died?); got: {response}"
+        );
+        worker.join().expect("worker thread joins");
+    }
 }

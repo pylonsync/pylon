@@ -43,6 +43,12 @@ version = "1.0.2"
 [dependencies.log]
 version = "0.4.4"
 
+# Pylon patch: panic-safe accept() on Unix. libstd's TcpListener::accept()
+# asserts (panics) on a truncated macOS dual-stack `[::]` sockaddr; we accept
+# via libc with a null addr ptr instead. See src/connection.rs.
+[target.'cfg(unix)'.dependencies.libc]
+version = "0.2"
+
 [dependencies.openssl]
 version = "0.10"
 optional = true
