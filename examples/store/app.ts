@@ -12,7 +12,13 @@
  * Auth uses Pylon's password endpoints (`/api/auth/password/register`,
  * `/api/auth/password/login`) plus guest sessions for anonymous browsing.
  */
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import {
+  entity,
+  field,
+  policy,
+  buildManifest,
+  discoverAppRoutes,
+} from "@pylonsync/sdk";
 
 // User row backing the password endpoints. The fields below match what
 // `/api/auth/password/register` writes; auth itself is handled by the
@@ -227,7 +233,10 @@ const manifest = buildManifest({
     orderPolicy,
     orderItemPolicy,
   ],
-  routes: [],
+  // File-based SSR routing: app/**/page.tsx. Without this the manifest ships
+  // zero routes and the native-SSR pages 404 (store served `/` from its now-
+  // deleted legacy web/ frontend before the migration was completed).
+  routes: await discoverAppRoutes(),
 });
 
 console.log(JSON.stringify(manifest, null, 2));

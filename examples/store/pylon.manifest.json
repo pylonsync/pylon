@@ -414,7 +414,16 @@
       ]
     }
   ],
-  "routes": [],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
   "queries": [],
   "actions": [],
   "policies": [
