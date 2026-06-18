@@ -1,6 +1,15 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+/// Number of independent shards the IP map is split across. A power of two so
+/// the shard index is a cheap bit-mask of the IP hash. 16 keeps the per-shard
+/// lock contention low under high concurrency without wasting memory on empty
+/// maps.
+const SHARD_COUNT: usize = 16;
+
+type Bucket = HashMap<String, Vec<Instant>>;
 
 /// Per-IP rate limiter using a sliding window.
 ///
@@ -8,10 +17,17 @@ use std::time::{Duration, Instant};
 /// entries (older than `window`) are pruned, and the remaining count is checked
 /// against `max_requests`. If the limit is exceeded, `check()` returns `Err`
 /// with the number of seconds the caller should wait before retrying.
+///
+/// The IP→bucket map is SHARDED across [`SHARD_COUNT`] independently-locked
+/// `HashMap`s, keyed by a hash of the IP. A single global `Mutex<HashMap>` was
+/// a hard serialization point — every request funneled through one lock
+/// regardless of client IP, which shows up immediately under `wrk -c 256`.
+/// Sharding spreads that contention so requests from different IPs usually take
+/// different locks.
 pub struct RateLimiter {
     window: Duration,
     max_requests: u32,
-    buckets: Mutex<HashMap<String, Vec<Instant>>>,
+    shards: Box<[Mutex<Bucket>]>,
 }
 
 impl RateLimiter {
@@ -20,11 +36,23 @@ impl RateLimiter {
     /// - `max_requests`: maximum number of requests allowed within the window.
     /// - `window_secs`: sliding window duration in seconds.
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
+        let shards = std::iter::repeat_with(|| Mutex::new(HashMap::new()))
+            .take(SHARD_COUNT)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Self {
             window: Duration::from_secs(window_secs),
             max_requests,
-            buckets: Mutex::new(HashMap::new()),
+            shards,
         }
+    }
+
+    /// The shard that owns `ip`. `& (SHARD_COUNT - 1)` is a valid mask because
+    /// `SHARD_COUNT` is a power of two.
+    fn shard_for(&self, ip: &str) -> &Mutex<Bucket> {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        ip.hash(&mut hasher);
+        &self.shards[(hasher.finish() as usize) & (SHARD_COUNT - 1)]
     }
 
     /// Check if a request from this IP is allowed.
@@ -34,21 +62,27 @@ impl RateLimiter {
     /// accepted.
     pub fn check(&self, ip: &str) -> Result<(), u64> {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-        let timestamps = buckets.entry(ip.to_string()).or_default();
+        let mut buckets = self.shard_for(ip).lock().unwrap_or_else(|e| e.into_inner());
 
-        // Remove entries outside the sliding window.
-        timestamps.retain(|t| now.duration_since(*t) < self.window);
-
-        if timestamps.len() as u32 >= self.max_requests {
-            let oldest = timestamps.first().unwrap();
-            let elapsed = now.duration_since(*oldest).as_secs();
-            let retry_after = self.window.as_secs().saturating_sub(elapsed);
-            // Ensure we always return at least 1 second.
-            return Err(retry_after.max(1));
+        // Look up by &str first and only allocate an owned key on a genuine
+        // miss. The `entry(ip.to_string())` form forced a fresh String on
+        // EVERY request, including the common already-present-IP hit.
+        if let Some(timestamps) = buckets.get_mut(ip) {
+            // Remove entries outside the sliding window.
+            timestamps.retain(|t| now.duration_since(*t) < self.window);
+            if timestamps.len() as u32 >= self.max_requests {
+                let oldest = timestamps.first().unwrap();
+                let elapsed = now.duration_since(*oldest).as_secs();
+                let retry_after = self.window.as_secs().saturating_sub(elapsed);
+                // Ensure we always return at least 1 second.
+                return Err(retry_after.max(1));
+            }
+            timestamps.push(now);
+            return Ok(());
         }
 
-        timestamps.push(now);
+        // First request from this IP (in this shard) — now we pay for the key.
+        buckets.insert(ip.to_string(), vec![now]);
         Ok(())
     }
 
@@ -58,19 +92,20 @@ impl RateLimiter {
     /// memory growth from IPs that stop sending requests.
     pub fn cleanup(&self) {
         let now = Instant::now();
-        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
-
-        // Remove expired timestamps, then drop empty buckets entirely.
-        buckets.retain(|_ip, timestamps| {
-            timestamps.retain(|t| now.duration_since(*t) < self.window);
-            !timestamps.is_empty()
-        });
+        for shard in self.shards.iter() {
+            let mut buckets = shard.lock().unwrap_or_else(|e| e.into_inner());
+            // Remove expired timestamps, then drop empty buckets entirely.
+            buckets.retain(|_ip, timestamps| {
+                timestamps.retain(|t| now.duration_since(*t) < self.window);
+                !timestamps.is_empty()
+            });
+        }
     }
 
     /// Get the current request count for an IP within the active window.
     pub fn current_count(&self, ip: &str) -> u32 {
         let now = Instant::now();
-        let buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        let buckets = self.shard_for(ip).lock().unwrap_or_else(|e| e.into_inner());
         match buckets.get(ip) {
             Some(timestamps) => timestamps
                 .iter()
@@ -150,6 +185,21 @@ mod tests {
         // After cleanup, counts should be zero (expired entries removed).
         assert_eq!(rl.current_count("10.0.0.1"), 0);
         assert_eq!(rl.current_count("10.0.0.2"), 0);
+    }
+
+    #[test]
+    fn many_distinct_ips_across_shards_are_independent() {
+        // With SHARD_COUNT=16, exercise far more IPs than shards so multiple
+        // IPs collide on the same shard — each must still get its own bucket
+        // and its own independent limit (no cross-IP bleed from sharing a lock).
+        let rl = RateLimiter::new(2, 60);
+        for i in 0..200u32 {
+            let ip = format!("10.0.{}.{}", i / 256, i % 256);
+            assert!(rl.check(&ip).is_ok(), "1st for {ip}");
+            assert!(rl.check(&ip).is_ok(), "2nd for {ip}");
+            assert!(rl.check(&ip).is_err(), "3rd over limit for {ip}");
+            assert_eq!(rl.current_count(&ip), 2, "count for {ip}");
+        }
     }
 
     #[test]
