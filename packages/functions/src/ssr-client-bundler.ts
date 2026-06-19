@@ -756,9 +756,30 @@ async function _prebuiltBundle(): Promise<BuildOutput | null> {
   const path = pathMod.default ?? pathMod;
   const outdir = path.join(process.cwd(), ".pylon", "client-build");
   const manifestPath = path.join(outdir, "manifest.json");
+  if (!fs.existsSync(manifestPath)) return null;
+
+  // Reuse a prebuilt bundle when it's explicitly marked (`.prebuilt`) OR when
+  // its manifest already targets an ABSOLUTE (CDN) `public_prefix`. The builder
+  // bakes an absolute prefix only when it pre-built for the CDN, and it
+  // published the hashed assets under THOSE exact hashes — so the runtime must
+  // serve this exact manifest verbatim (a local rebuild emits different hashes
+  // that would 404 on the CDN). The manifest is a regular file that always
+  // ships with the build; keying on it (not just the `.prebuilt` dotfile, which
+  // can be dropped in transit) makes reuse robust. A same-origin
+  // `/_pylon/build/` manifest is a normal dev/local build → don't short-circuit
+  // (let dev hot-rebuild).
   const marker = path.join(outdir, ".prebuilt");
-  if (fs.existsSync(marker) && fs.existsSync(manifestPath)) {
-    return { manifestPath, outdir };
+  if (fs.existsSync(marker)) return { manifestPath, outdir };
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (
+      typeof m.public_prefix === "string" &&
+      /^https?:\/\//i.test(m.public_prefix)
+    ) {
+      return { manifestPath, outdir };
+    }
+  } catch {
+    /* unreadable/partial manifest → fall through and rebuild */
   }
   return null;
 }
