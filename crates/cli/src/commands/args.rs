@@ -72,6 +72,38 @@ pub fn collect_positional<'a>(args: &'a [String], subcommand: &str) -> Vec<&'a s
     out
 }
 
+/// Resolve the listen port for dev/start commands.
+///
+/// Precedence is intentionally explicit: a command-line flag beats
+/// `PYLON_PORT`, and `PYLON_PORT` beats the command default.
+pub fn parse_port(args: &[String], default: u16) -> u16 {
+    parse_port_with_env(args, default, std::env::var("PYLON_PORT").ok())
+}
+
+fn parse_port_with_env(args: &[String], default: u16, env_value: Option<String>) -> u16 {
+    parse_port_arg(args)
+        .or_else(|| env_value.and_then(|v| v.parse().ok()))
+        .unwrap_or(default)
+}
+
+fn parse_port_arg(args: &[String]) -> Option<u16> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--port" || a == "-p" {
+            return args.get(i + 1).and_then(|v| v.parse().ok());
+        }
+        if let Some(v) = a.strip_prefix("--port=") {
+            return v.parse().ok();
+        }
+        if let Some(v) = a.strip_prefix("-p=") {
+            return v.parse().ok();
+        }
+        i += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,5 +174,47 @@ mod tests {
     fn handles_multiple_value_flags() {
         let args = s(&["start", "--port", "3001", "--host", "0.0.0.0", "app.ts"]);
         assert_eq!(collect_positional(&args, "start"), vec!["app.ts"]);
+    }
+
+    #[test]
+    fn parse_port_uses_default_without_flag_or_env() {
+        let args = s(&["start", "app.ts"]);
+        assert_eq!(parse_port_with_env(&args, 4321, None), 4321);
+    }
+
+    #[test]
+    fn parse_port_uses_env_when_flag_missing() {
+        let args = s(&["start", "app.ts"]);
+        assert_eq!(parse_port_with_env(&args, 4321, Some("8080".into())), 8080);
+    }
+
+    #[test]
+    fn parse_port_flag_beats_env() {
+        let args = s(&["start", "--port", "3000", "app.ts"]);
+        assert_eq!(parse_port_with_env(&args, 4321, Some("8080".into())), 3000);
+    }
+
+    #[test]
+    fn parse_port_short_flag_beats_env() {
+        let args = s(&["start", "-p", "3000", "app.ts"]);
+        assert_eq!(parse_port_with_env(&args, 4321, Some("8080".into())), 3000);
+    }
+
+    #[test]
+    fn parse_port_handles_inline_long_flag() {
+        let args = s(&["start", "--port=3000", "app.ts"]);
+        assert_eq!(parse_port_with_env(&args, 4321, Some("8080".into())), 3000);
+    }
+
+    #[test]
+    fn parse_port_handles_inline_short_flag() {
+        let args = s(&["start", "-p=3000", "app.ts"]);
+        assert_eq!(parse_port_with_env(&args, 4321, Some("8080".into())), 3000);
+    }
+
+    #[test]
+    fn parse_port_ignores_invalid_env() {
+        let args = s(&["start", "app.ts"]);
+        assert_eq!(parse_port_with_env(&args, 4321, Some("nope".into())), 4321);
     }
 }

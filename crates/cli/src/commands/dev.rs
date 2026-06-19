@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::bun::run_bun_codegen;
 use crate::client_codegen::generate_client_ts;
-use crate::commands::args::collect_positional;
+use crate::commands::args::{collect_positional, parse_port};
 use crate::manifest::{parse_manifest, validate_all};
 use crate::output::{print_diagnostics, print_json};
 use crate::studio_config;
@@ -71,11 +71,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     }
 
-    let port: u16 = args
-        .windows(2)
-        .find(|w| w[0] == "--port" || w[0] == "-p")
-        .and_then(|w| w[1].parse().ok())
-        .unwrap_or(DEFAULT_PORT);
+    let port = parse_port(args, DEFAULT_PORT);
 
     let positional: Vec<&str> = collect_positional(args, "dev");
 
