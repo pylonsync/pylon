@@ -1018,7 +1018,12 @@ export function buildHydrationTail(args: {
     .replace(/\u2029/g, "\\u2029");
   let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
   if (args.manifestRoute) {
-    tail += `<script type="module" src="${args.publicPrefix}${args.manifestRoute.file}"></script>`;
+    // A cross-origin CDN module (`public_prefix` is an absolute http(s) URL) is
+    // fetched in CORS mode; `crossorigin` makes the matching modulepreload
+    // reusable (no double fetch) and surfaces load errors. No-op for the
+    // same-origin `/_pylon/build/` default.
+    const co = /^https?:\/\//i.test(args.publicPrefix) ? " crossorigin" : "";
+    tail += `<script type="module"${co} src="${args.publicPrefix}${args.manifestRoute.file}"></script>`;
   } else {
     tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${args.manifestErr}`)})</script>`;
   }
@@ -1117,11 +1122,12 @@ async function renderBoundaryToClient(
     }
   }
   if (manifestRoute) {
+    const co = /^https?:\/\//i.test(publicPrefix) ? " crossorigin" : "";
     for (const css of manifestRoute.css) {
       headBlob += `<link rel="stylesheet" href="${publicPrefix}${css}">`;
     }
     for (const chunk of manifestRoute.imports) {
-      headBlob += `<link rel="modulepreload" href="${publicPrefix}${chunk}">`;
+      headBlob += `<link rel="modulepreload"${co} href="${publicPrefix}${chunk}">`;
     }
   } else {
     // No per-boundary entry → fall back to the global stylesheet union so the
@@ -1884,11 +1890,12 @@ export async function handleRenderRoute(
     // (it needs the inline __PYLON_DATA__ to have been parsed first).
     let headBlob = "";
     if (preloadManifestRoute) {
+      const co = /^https?:\/\//i.test(preloadPublicPrefix) ? " crossorigin" : "";
       for (const css of preloadManifestRoute.css) {
         headBlob += `<link rel="stylesheet" href="${preloadPublicPrefix}${css}">`;
       }
       for (const chunk of preloadManifestRoute.imports) {
-        headBlob += `<link rel="modulepreload" href="${preloadPublicPrefix}${chunk}">`;
+        headBlob += `<link rel="modulepreload"${co} href="${preloadPublicPrefix}${chunk}">`;
       }
     } else {
       // No per-route client entry. This is the unmatched-URL not-found

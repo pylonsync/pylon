@@ -16,7 +16,8 @@
 //   PYLON_ARTIFACT_COMPLETE_PUT_URL signed PUT ← .complete JSON {sha256,size}
 //   PYLON_BUILD_ID                  for logs
 
-import { rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { readFile, readdir, rm } from "node:fs/promises";
 
 const SRC = "/build/src";
 const SOURCE_TAR = "/build/source.tar.gz";
@@ -224,9 +225,85 @@ async function main() {
 		}
 	}
 
+	// 3c. Pre-build the SSR client bundle (.pylon/client-build/) ONCE here, and —
+	//     when a CDN is configured — publish its content-hashed assets so they're
+	//     served off the app machines entirely (CDN), not rebuilt lazily on every
+	//     machine at boot. Building it once means every machine serves IDENTICAL
+	//     hashed asset names (no cross-machine 404 during a rollout), and lets the
+	//     manifest bake absolute CDN urls (PYLON_PUBLIC_PREFIX). The runtime
+	//     reuses this prebuilt bundle via the `.prebuilt` marker.
+	//
+	//     STRICTLY OPT-IN + ATOMIC: only when PYLON_PUBLIC_PREFIX + the assets
+	//     upload url are set (CDN mode) AND every step succeeds do we ship the
+	//     prebuilt client-build + report `clientAssets:true`. Any miss → we remove
+	//     the partial build, report `clientAssets:false`, and the runtime falls
+	//     back to its own lazy per-machine build (today's behavior). A broken or
+	//     unconfigured pre-build never ships a broken app.
+	let clientAssetsPublished = false;
+	const publicPrefix = process.env.PYLON_PUBLIC_PREFIX ?? "";
+	const assetsPutUrl = process.env.PYLON_ASSETS_PUT_URL ?? "";
+	const clientBuildDir = `${appDir}/.pylon/client-build`;
+	if (publicPrefix && assetsPutUrl && existsSync(`${appDir}/app`)) {
+		try {
+			console.log(`[builder] pre-building SSR client bundle (public_prefix=${publicPrefix})`);
+			// Run the bundler in-process from the app dir so process.cwd() — and the
+			// PYLON_PUBLIC_PREFIX it bakes into the manifest — are the app's.
+			await sh(
+				[
+					"bun",
+					"-e",
+					'await (await import("@pylonsync/functions/client-bundler")).buildClientBundle();',
+				],
+				appDir,
+			);
+			if (!existsSync(`${clientBuildDir}/manifest.json`)) {
+				throw new Error("client bundle produced no manifest.json");
+			}
+			// Collect the content-hashed assets (NOT manifest.json — that stays
+			// served same-origin by the app machine for client-side navigation) as
+			// a small {files:[{path,b64}]} payload and PUT it to the presigned url;
+			// the control plane fans it out to the public CDN bucket.
+			const files: Array<{ path: string; b64: string }> = [];
+			const walk = async (rel: string): Promise<void> => {
+				const dir = rel ? `${clientBuildDir}/${rel}` : clientBuildDir;
+				for (const ent of await readdir(dir, { withFileTypes: true })) {
+					const childRel = rel ? `${rel}/${ent.name}` : ent.name;
+					if (ent.isDirectory()) {
+						await walk(childRel);
+					} else if (ent.name !== "manifest.json" && ent.name !== ".prebuilt") {
+						const buf = await readFile(`${clientBuildDir}/${childRel}`);
+						files.push({ path: childRel, b64: buf.toString("base64") });
+					}
+				}
+			};
+			await walk("");
+			const resp = await fetch(assetsPutUrl, {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ files }),
+			});
+			if (!resp.ok) throw new Error(`upload client assets: HTTP ${resp.status}`);
+			// Marker LAST: the runtime only reuses a COMPLETE prebuilt bundle.
+			await Bun.write(`${clientBuildDir}/.prebuilt`, "1");
+			clientAssetsPublished = true;
+			console.log(`[builder] published ${files.length} client assets for CDN`);
+		} catch (err) {
+			console.error(
+				`[builder] client pre-build/publish failed (${err}); runtime will build lazily`,
+			);
+			clientAssetsPublished = false;
+			// Drop the partial build so it isn't shipped and the runtime rebuilds
+			// cleanly with its own (local-prefix) manifest.
+			await rm(clientBuildDir, { recursive: true, force: true }).catch(() => {});
+		}
+	}
+
 	// 4. Assemble the FULL-PREBUILT bundle: everything the runtime needs at
 	//    boot (app.ts, functions/, lib/, node_modules/, web/dist/, public/, …),
 	//    minus VCS + dev/build-cache debris. Deterministic-ish: sorted names.
+	//    `.pylon` is dropped EXCEPT `.pylon/client-build` — which ships only when
+	//    the CDN pre-build above succeeded (else it was removed), carrying the
+	//    prebuilt manifest + `.prebuilt` marker the runtime reuses.
 	await sh([
 		"tar",
 		"czf",
@@ -235,7 +312,10 @@ async function main() {
 		SRC,
 		"--exclude=./.git",
 		"--exclude=./.github",
-		"--exclude=./.pylon",
+		"--exclude=./.pylon/*.db",
+		"--exclude=./.pylon/*.db-shm",
+		"--exclude=./.pylon/*.db-wal",
+		"--exclude=./.pylon/cache",
 		"--exclude=./.cache",
 		"--exclude=./node_modules/.cache",
 		"--exclude=./.turbo",
@@ -262,6 +342,10 @@ async function main() {
 		size,
 		buildId,
 		ok: true,
+		// True only when the SSR client assets were pre-built + uploaded for the
+		// CDN (step 3c). The control plane uses this to decide whether to fan the
+		// assets out to the public bucket and point machines at the CDN.
+		clientAssets: clientAssetsPublished,
 	});
 	const completeResp = await fetch(completeUrl, {
 		method: "PUT",

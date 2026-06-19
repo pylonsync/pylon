@@ -10,7 +10,8 @@
       "types": "./src/index.ts",
       "default": "./src/index.ts"
     },
-    "./runtime": "./src/runtime.ts"
+    "./runtime": "./src/runtime.ts",
+    "./client-bundler": "./src/ssr-client-bundler.ts"
   },
   "bin": {
     "pylon-functions-runtime": "src/runtime.ts"

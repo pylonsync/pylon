@@ -743,6 +743,27 @@ export interface BuildOutput {
 let _inflightBuild: Promise<BuildOutput> | null = null;
 
 /**
+ * If a complete prebuilt client-build is present on disk (Pylon Cloud: shipped
+ * in the artifact by the builder, marked with `.prebuilt` written last), return
+ * its manifest + outdir so callers skip the rebuild entirely. Returns null when
+ * there's no prebuilt bundle (dev, or a deploy that didn't pre-build) — callers
+ * then build normally.
+ */
+async function _prebuiltBundle(): Promise<BuildOutput | null> {
+  const fsMod: any = await import("node:fs");
+  const pathMod: any = await import("node:path");
+  const fs = fsMod.default ?? fsMod;
+  const path = pathMod.default ?? pathMod;
+  const outdir = path.join(process.cwd(), ".pylon", "client-build");
+  const manifestPath = path.join(outdir, "manifest.json");
+  const marker = path.join(outdir, ".prebuilt");
+  if (fs.existsSync(marker) && fs.existsSync(manifestPath)) {
+    return { manifestPath, outdir };
+  }
+  return null;
+}
+
+/**
  * Run the bundler in-process and return the manifest path + outdir.
  * Used from `handleBundleClient` (protocol RPC path from Rust) AND
  * from `getManifest` (in-process SSR path).
@@ -750,6 +771,18 @@ let _inflightBuild: Promise<BuildOutput> | null = null;
 export async function buildClientBundle(
   appDirRel: string = "app",
 ): Promise<BuildOutput> {
+  // Prebuilt bundle (Pylon Cloud): the builder already produced a complete,
+  // content-hashed client-build with `public_prefix` baked to the CDN, shipped
+  // it in the artifact, and published the hashed assets to the CDN. Reuse it
+  // verbatim instead of rebuilding on the app machine — rebuilding would (a)
+  // burn cold-start CPU on every machine on every boot and (b) risk emitting a
+  // manifest whose hashes don't match the assets already on the CDN. The
+  // `.prebuilt` marker is written LAST by the builder, so a torn/partial copy
+  // is never mistaken for complete. Dev never writes the marker, so local
+  // hot-rebuild is unaffected.
+  const prebuilt = await _prebuiltBundle();
+  if (prebuilt) return prebuilt;
+
   if (_inflightBuild) return _inflightBuild;
   _inflightBuild = (async () => {
     try {
@@ -1211,4 +1244,29 @@ let _buildCounter = 0;
 function makeBuildId(): string {
   _buildCounter += 1;
   return `${process.pid.toString(36)}-${Date.now().toString(36)}-${_buildCounter}`;
+}
+
+/**
+ * Base URL/path prepended to every SSR-emitted asset reference (the entry
+ * `<script type="module">`, `<link rel="stylesheet">`, and `modulepreload`s)
+ * and to client-side chunk loads — baked into the bundle manifest as
+ * `public_prefix`.
+ *
+ * Defaults to `/_pylon/build/`, which the Rust host serves from the build's
+ * local `outdir`. That keeps dev and any deploy that doesn't opt in unchanged.
+ *
+ * Set `PYLON_PUBLIC_PREFIX` to an ABSOLUTE base (a CDN / object-storage URL for
+ * this build's content-hashed assets, e.g. `https://assets.pyln.dev/<build>/`)
+ * to serve assets off the app machines entirely. This is what makes hashed
+ * assets survive an artifact prune and resolve IDENTICALLY across every Fly
+ * machine: the entry filename SSR emits becomes an absolute URL that always
+ * exists, instead of a machine-local path a prune/rollover can 404 (the bug
+ * where a stale machine emitted `client-entry-…-<oldhash>.js` after that file
+ * was pruned, breaking hydration). A trailing slash is enforced so
+ * `${prefix}${file}` always joins correctly.
+ */
+function resolvePublicPrefix(): string {
+  const raw = (process.env.PYLON_PUBLIC_PREFIX ?? "").trim();
+  if (!raw) return "/_pylon/build/";
+  return raw.endsWith("/") ? raw : `${raw}/`;
 }
