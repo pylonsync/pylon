@@ -1541,6 +1541,18 @@ fn start_server(
                 JobResult::Success
             }),
         );
+        // Prune the jobs table itself. The cleanups above each leave a
+        // `completed` row every run; unpruned they accumulate into thousands of
+        // rows + a multi-MB WAL that slows boot. Keep ~1h of history.
+        let jq_ref = Arc::clone(&job_queue);
+        let _ = scheduler.schedule(
+            "pylon.jobs.cleanup",
+            "*/15 * * * *",
+            Arc::new(move |_job| {
+                jq_ref.cleanup_completed_jobs(3600);
+                JobResult::Success
+            }),
+        );
     }
 
     // Start 2 background workers.

@@ -194,6 +194,23 @@ impl JobQueue {
         }
     }
 
+    /// Prune completed/dead job rows older than `max_age_secs` from the backing
+    /// store; returns the number deleted (0 if no store is attached).
+    ///
+    /// Without this the jobs table grows unbounded: every run of the built-in
+    /// recurring jobs (`pylon.cache.cleanup`, `pylon.rooms.cleanup`,
+    /// `pylon.ratelimit.cleanup`) leaves a `completed` row forever. On a
+    /// long-lived app that's thousands of rows + a multi-MB WAL, which slowed
+    /// boot (the store is read + WAL-recovered before the HTTP listener binds).
+    /// `JobStore::cleanup_completed` existed but nothing called it.
+    pub fn cleanup_completed_jobs(&self, max_age_secs: u64) -> usize {
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            store.cleanup_completed(max_age_secs)
+        } else {
+            0
+        }
+    }
+
     /// Register a handler for a job type.
     pub fn register(&self, job_name: &str, handler: JobHandler) {
         self.handlers
@@ -765,6 +782,37 @@ fn is_ready(job: &Job, now: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleanup_completed_jobs_delegates_and_noops_without_store() {
+        let q = JobQueue::new(10);
+        // No store attached → safe no-op (never panics).
+        assert_eq!(q.cleanup_completed_jobs(0), 0);
+
+        let store = std::sync::Arc::new(crate::job_store::JobStore::in_memory().unwrap());
+        let job = Job {
+            id: "old".to_string(),
+            name: "pylon.cache.cleanup".to_string(),
+            payload: serde_json::json!({}),
+            priority: Priority::Normal,
+            status: JobStatus::Completed,
+            max_retries: 3,
+            retry_count: 0,
+            queue: "default".to_string(),
+            delay_secs: 0,
+            error: None,
+            created_at: "1000Z".to_string(),
+            started_at: None,
+            completed_at: Some("1000Z".to_string()), // ancient → prunable
+            auth: None,
+        };
+        store.save(&job).unwrap();
+        q.attach_store(std::sync::Arc::clone(&store));
+
+        // max_age 0 → prune everything completed before now.
+        assert_eq!(q.cleanup_completed_jobs(0), 1);
+        assert_eq!(store.count_by_status("completed"), 0);
+    }
 
     #[test]
     fn enqueue_and_dequeue() {
