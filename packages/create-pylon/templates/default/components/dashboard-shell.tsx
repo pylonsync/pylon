@@ -63,6 +63,7 @@ export function DashboardShell({
               A soft client navigation (router.push) re-fetches the SSR page —
               all data updates — without the full-reload white flash. */}
           <OrganizationSwitcher
+            hidePersonal
             initialActiveName={orgName}
             onSwitched={() => router.push("/dashboard")}
           />

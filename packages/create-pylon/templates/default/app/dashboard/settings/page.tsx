@@ -20,10 +20,12 @@ export default function SettingsPage({ auth, response, serverData }: PageProps) 
     response.redirect("/login");
     return null;
   }
+  if (!auth.tenant_id) {
+    response.redirect("/dashboard");
+    return null;
+  }
   const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
-  const org = auth.tenant_id
-    ? use(serverData.get<OrgInfo>("Org", auth.tenant_id))
-    : null;
+  const org = use(serverData.get<OrgInfo>("Org", auth.tenant_id));
   const members = use(serverData.list<OrgMemberRow>("OrgMember"));
   const memberCount = members.filter(
     (m) => m.orgId === auth.tenant_id,

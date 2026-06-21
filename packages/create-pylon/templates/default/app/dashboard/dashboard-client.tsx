@@ -46,7 +46,7 @@ function NoOrg() {
         projects and members are private to it.
       </p>
       <a
-        href="/onboarding"
+        href="/dashboard"
         className="mt-4 inline-flex h-9 items-center rounded-lg bg-zinc-900 px-4 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
       >
         Set up your workspace
@@ -570,8 +570,8 @@ function SettingsView({
 }
 
 // Real, irreversible delete: type the workspace name to confirm, then call the
-// framework's owner-gated DELETE endpoint, drop the active org, and bounce back
-// to onboarding.
+// framework's owner-gated DELETE endpoint, drop the active org, and bounce to
+// the dashboard — which selects another workspace or provisions a fresh one.
 function DeleteOrg({
   org,
   onDeleted,
@@ -591,7 +591,7 @@ function DeleteOrg({
     try {
       await deleteOrg(org.id);
       await onDeleted();
-      window.location.assign("/onboarding");
+      window.location.assign("/dashboard");
     } catch {
       setError("Delete failed. Try again.");
       setDeleting(false);

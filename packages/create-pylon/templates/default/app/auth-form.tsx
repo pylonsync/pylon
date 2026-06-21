@@ -1,19 +1,29 @@
 "use client";
 
 import React, { useState } from "react";
-import { passwordLogin, passwordRegister, ApiError } from "@pylonsync/client";
+import { db } from "@pylonsync/react";
+import {
+  passwordLogin,
+  passwordRegister,
+  persistSession,
+  createOrg,
+  ApiError,
+} from "@pylonsync/client";
 
 // The email/password form, shared by /login and /signup. It calls the built-in
 // auth API directly — `passwordLogin` / `passwordRegister` (from
 // @pylonsync/client) POST to `/api/auth/password/*`.
 //
-// On success the server sets an HttpOnly session cookie on the response. We do
-// a full navigation to /dashboard rather than a client transition: the fresh
-// page load hands that cookie to the SSR runtime (which resolves auth and
-// renders the dashboard server-side) and to the sync engine (which
-// authenticates with the same cookie via `credentials: include`). Because the
-// cookie is HttpOnly it can never be read by JavaScript, so there is no session
-// token sitting in `localStorage` for an XSS to lift.
+// On success the server sets a session cookie (used by the SSR runtime to
+// resolve auth on the next full navigation) AND returns the session token. We
+// call `persistSession` with that token so the sync engine adopts the new
+// identity: it writes the token to storage (overwriting any earlier guest
+// token a demo flow may have left behind) and re-fetches `/api/auth/me`.
+//
+// Skipping this was a real footgun: a stale anonymous guest token left in
+// localStorage would be sent as a `Bearer` on the engine's auth calls, where
+// the server prefers it over the cookie — so `selectOrg` would 401 with
+// "anonymous session" even though the cookie was a valid user.
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -26,14 +36,27 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
     setPending(true);
     try {
       if (mode === "login") {
-        await passwordLogin({ email, password });
+        const session = await passwordLogin({ email, password });
+        // Adopt the real identity locally before navigating — otherwise a
+        // leftover guest token shadows this session on the sync engine's calls.
+        persistSession(session);
         // Full navigation: the SSR dashboard re-renders with the new cookie.
         window.location.assign("/dashboard");
       } else {
-        await passwordRegister({ email, password });
-        // New accounts have no workspace yet — send them through first-run
-        // onboarding (which redirects to /dashboard once they're in an org).
-        window.location.assign("/onboarding");
+        const session = await passwordRegister({ email, password });
+        persistSession(session);
+        // Auto-provision a first workspace so new accounts land in a ready
+        // dashboard instead of an empty first-run screen. Named "My Workspace"
+        // (renamable in Settings) and made the active tenant. Either way we land
+        // on /dashboard — if provisioning failed here, the dashboard's org-less
+        // safety net retries it.
+        try {
+          const org = await createOrg("My Workspace");
+          await db.sync.selectOrg(org.id);
+        } catch {
+          // Swallowed — the dashboard provisions on load if there's still no org.
+        }
+        window.location.assign("/dashboard");
       }
     } catch (err) {
       setError(messageFor(err));

@@ -1,6 +1,7 @@
 import React, { use } from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
 import { DashboardShell } from "@/components/dashboard-shell";
+import { ProvisionWorkspace } from "./provision-workspace";
 import {
   Overview,
   type Project,
@@ -28,10 +29,14 @@ export default function DashboardPage({
     response.redirect("/login");
     return null;
   }
+  // No active workspace (signup's auto-provision failed, or the user left/
+  // deleted their last org). Every read below is tenant-scoped, so instead of
+  // an empty shell, provision one client-side and reload into a ready dashboard.
+  if (!auth.tenant_id) {
+    return <ProvisionWorkspace />;
+  }
   const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
-  const org = auth.tenant_id
-    ? use(serverData.get<{ name?: string }>("Org", auth.tenant_id))
-    : null;
+  const org = use(serverData.get<{ name?: string }>("Org", auth.tenant_id));
   const projects = use(serverData.list<Project>("Project"));
   const members = use(serverData.list<OrgMemberRow>("OrgMember"));
   // The OrgMember read policy returns this user's memberships across every org,
@@ -39,9 +44,7 @@ export default function DashboardPage({
   const memberCount = members.filter((m) => m.orgId === auth.tenant_id).length;
   // Active-plan badge from the workspace's Stripe subscription (Free until one
   // exists). Scoped to the active tenant by the plugin's read policy.
-  const subs = auth.tenant_id
-    ? use(serverData.list<Subscription>("StripeSubscription"))
-    : [];
+  const subs = use(serverData.list<Subscription>("StripeSubscription"));
   const active = subs.find((s) =>
     ["active", "trialing", "past_due"].includes(s.status),
   );

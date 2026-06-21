@@ -182,7 +182,7 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
   // (not a substring) so a future marketing slug that happens to contain one
   // of these words — e.g. /products/dashboard-tools — keeps its chrome.
   const path = (url ?? "").split("?")[0];
-  const BARE_PREFIXES = ["/login", "/signup", "/onboarding", "/dashboard"];
+  const BARE_PREFIXES = ["/login", "/signup", "/dashboard"];
   const isBare = BARE_PREFIXES.some((p) => path === p || path.startsWith(p + "/"));
   return (
     <html

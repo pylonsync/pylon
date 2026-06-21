@@ -19,13 +19,13 @@ export default function BillingPage({ auth, response, serverData }: PageProps) {
     response.redirect("/login");
     return null;
   }
+  if (!auth.tenant_id) {
+    response.redirect("/dashboard");
+    return null;
+  }
   const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
-  const org = auth.tenant_id
-    ? use(serverData.get<{ name?: string }>("Org", auth.tenant_id))
-    : null;
-  const subs = auth.tenant_id
-    ? use(serverData.list<Subscription>("StripeSubscription"))
-    : [];
+  const org = use(serverData.get<{ name?: string }>("Org", auth.tenant_id));
+  const subs = use(serverData.list<Subscription>("StripeSubscription"));
   const subscription =
     subs.find(
       (s) => s.referenceId === auth.tenant_id && ACTIVE.includes(s.status),
