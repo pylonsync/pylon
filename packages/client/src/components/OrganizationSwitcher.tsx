@@ -26,7 +26,7 @@ export interface OrganizationSwitcherProps {
 	/** Called after a switch lands. Useful for analytics / route changes. */
 	onSwitched?: (orgId: string | null) => void;
 	/** Called after a new org is created (post-creation, pre-switch). */
-	onCreated?: (org: OrgSummary) => void;
+	onCreated?: (org: OrgSummary) => void | Promise<void>;
 	/**
 	 * Active org name resolved on the server (e.g. `serverData.get("Org", …)`
 	 * in an SSR layout). Seeds the trigger label so it renders the real name on
@@ -281,7 +281,7 @@ function CreateOrgInline({
 	onCreated,
 	onCancel,
 }: {
-	onCreated: (org: OrgSummary) => void;
+	onCreated: (org: OrgSummary) => void | Promise<void>;
 	onCancel: () => void;
 }) {
 	return (
@@ -303,7 +303,7 @@ function CreateOrgInline({
 // ---------------------------------------------------------------------------
 
 export interface CreateOrganizationProps {
-	onCreated?: (org: OrgSummary) => void;
+	onCreated?: (org: OrgSummary) => void | Promise<void>;
 	/** Title shown above the form. */
 	title?: ReactNode;
 	className?: string;
@@ -332,7 +332,7 @@ export function CreateOrganization({
 function CreateOrganizationForm({
 	onCreated,
 }: {
-	onCreated?: (org: OrgSummary) => void;
+	onCreated?: (org: OrgSummary) => void | Promise<void>;
 }) {
 	const [name, setName] = useState("");
 	const [error, setError] = useState<string | null>(null);
@@ -350,7 +350,10 @@ function CreateOrganizationForm({
 		try {
 			const org = await createOrg(trimmed);
 			setName("");
-			onCreated?.(org);
+			// Await the callback so anything it does (selectOrg, navigation,
+			// step advance) that rejects surfaces here as an error instead of
+			// an unhandled rejection that leaves the form looking inert.
+			await onCreated?.(org);
 		} catch (err) {
 			setError(messageFromError(err));
 		} finally {
