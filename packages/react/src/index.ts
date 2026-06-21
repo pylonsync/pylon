@@ -31,6 +31,8 @@ export type {
   FormDb,
   FormRequest,
   RouteHandler,
+  RawRouteHandler,
+  RawResponse,
 } from "./ssr";
 
 // Client navigation hooks for SSR pages (Next-style).

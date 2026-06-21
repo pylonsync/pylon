@@ -2,9 +2,18 @@
 // host sends a "handle_form" message. Imports the route.ts module, picks the
 // handler by HTTP method, runs it with the parsed form + a read/write `db` +
 // the SsrResponse controller, and replies over the SAME response_start /
-// render_done protocol a render uses. A handler's common job is
+// render_done protocol a render uses. A non-GET handler's common job is
 // POST-redirect-GET: write something, then `response.redirect("/x?ok=1")`
 // (303 by default here) so the no-JS browser follows with a GET.
+//
+// A `GET` export is special: it's a RAW handler. Instead of returning void +
+// shaping the reply through `response`, it returns
+//   { body, contentType?, status?, headers? }
+// which is streamed verbatim — no React render, no hydration tail. This is the
+// mechanism behind dynamic raw GET routes (RSS/Atom feeds, dynamic XML, text,
+// JSON, .well-known files) — the GET analogue of `app/sitemap.ts`/`robots.ts`,
+// but at an arbitrary route path. A GET handler may still throw
+// `response.redirect()`/`notFound()` instead of returning a body.
 import {
   makeResponseController,
   PylonRouteControl,
@@ -67,7 +76,10 @@ function makeFormFields(raw: Record<string, string | string[]>): FormFields {
   };
 }
 
-const HANDLER_METHODS = ["POST", "PUT", "PATCH", "DELETE"] as const;
+// GET is a raw handler (returns a body), the rest are form/mutation handlers
+// (return void + use the response controller). All are dispatched the same way;
+// the list drives the 405 `Allow` header advertising which a route.ts exports.
+const HANDLER_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 const isDev = () =>
   process.env.PYLON_DEV_MODE === "1" || process.env.PYLON_DEV_MODE === "true";
@@ -133,8 +145,47 @@ export async function handleForm(
     return;
   }
 
+  // A raw GET handler returns its body; the default status is 200 (not the
+  // POST-redirect-GET 303 that form handlers use). The handler can still
+  // override via the returned object or `response.setStatus`.
+  if (method === "GET") {
+    responseState.status = 200;
+  }
+
   try {
-    await handler(req);
+    const out = await handler(req);
+    if (method === "GET") {
+      // Raw GET: stream `out.body` with the handler's content-type/status/
+      // headers (merged with anything set via the response controller). No
+      // React, no hydration tail — verbatim bytes, like sitemap/robots.
+      const raw = (out ?? {}) as {
+        body?: unknown;
+        contentType?: string;
+        status?: number;
+        headers?: Record<string, string>;
+      };
+      const extra: Record<string, string> = {};
+      extra["content-type"] =
+        raw.contentType ??
+        responseState.headers["content-type"] ??
+        "text/plain; charset=utf-8";
+      for (const [k, v] of Object.entries(raw.headers ?? {})) {
+        extra[k.toLowerCase()] = String(v);
+      }
+      send({
+        type: "response_start",
+        call_id: msg.call_id,
+        status: raw.status ?? responseState.status,
+        headers: finalizeHeaders(responseState, extra),
+      });
+      if (raw.body != null) {
+        const bodyStr =
+          typeof raw.body === "string" ? raw.body : String(raw.body);
+        send({ type: "render_chunk", call_id: msg.call_id, data: b64(bodyStr) });
+      }
+      send({ type: "render_done", call_id: msg.call_id });
+      return;
+    }
     // No redirect()/notFound() thrown → commit the handler's response: its
     // status (default 303) + headers + cookies. A 303 with no explicit
     // Location redirects back to the route path (POST-redirect-GET).

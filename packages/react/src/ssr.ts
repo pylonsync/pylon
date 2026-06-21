@@ -396,3 +396,41 @@ export type RouteHandler<
   TParams extends Record<string, string> = Record<string, string>,
   TSearchParams extends Record<string, string> = Record<string, string>,
 > = (req: FormRequest<TParams, TSearchParams>) => void | Promise<void>;
+
+/**
+ * What a `route.ts` `GET` (raw) handler returns. The body is streamed verbatim
+ * with `contentType` (default `text/plain; charset=utf-8`), `status` (default
+ * 200), and any extra `headers` — no React render, no hydration tail. This is
+ * the GET analogue of `sitemap.ts`/`robots.ts`, at an arbitrary route path:
+ * RSS/Atom feeds, dynamic XML, plain text, JSON, `.well-known` documents.
+ */
+export interface RawResponse {
+  body?: string;
+  /** Defaults to `text/plain; charset=utf-8`. */
+  contentType?: string;
+  /** Defaults to 200. */
+  status?: number;
+  /** Extra response headers (e.g. `cache-control`). Lower-cased by the host. */
+  headers?: Record<string, string>;
+}
+
+/**
+ * Signature of a `route.ts` `GET` export — a RAW handler. Return a
+ * {@link RawResponse} to stream a body, or use `response.redirect()` /
+ * `response.notFound()` and return nothing.
+ *
+ * ```ts
+ * import type { RawRouteHandler } from "@pylonsync/react";
+ * export const GET: RawRouteHandler = async () => ({
+ *   body: "<rss>…</rss>",
+ *   contentType: "application/xml; charset=utf-8",
+ *   headers: { "cache-control": "public, max-age=300" },
+ * });
+ * ```
+ */
+export type RawRouteHandler<
+  TParams extends Record<string, string> = Record<string, string>,
+  TSearchParams extends Record<string, string> = Record<string, string>,
+> = (
+  req: FormRequest<TParams, TSearchParams>,
+) => RawResponse | void | Promise<RawResponse | void>;

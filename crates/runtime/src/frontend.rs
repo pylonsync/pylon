@@ -695,6 +695,19 @@ pub fn try_handle(
             }
             return serve_via_ssr_rpc(cfg, matched, request, cors_origin, None, cacheable_eligible);
         }
+        // Raw GET routes: a `route.ts` exporting `GET` (kind:"route") matched
+        // on this path. No page lives here (Next forbids page.tsx + route.ts in
+        // one segment), so this only fires when the page match above missed.
+        // The handler returns a body that the Bun runtime streams verbatim with
+        // a custom content-type — the GET analogue of sitemap/robots, at an
+        // arbitrary path (RSS/Atom, dynamic XML, .well-known, etc.). A route.ts
+        // with no GET export answers 405 (Allow lists the methods it does have).
+        if matches!(request.method(), Method::Get) {
+            if let Some(matched) = match_form_route(&url, &cfg.ssr_routes) {
+                tracing::debug!(url = %url, route = %matched.route.path, "SSR raw GET route");
+                return serve_via_form_rpc(cfg, matched, request, cors_origin);
+            }
+        }
         // No page matched. If the app defines a `not-found.tsx` boundary
         // and this looks like a document navigation (not a static asset),
         // render the boundary at HTTP 404 instead of silently SPA-falling-
@@ -1916,6 +1929,10 @@ fn serve_via_form_rpc(
         None => return Err(request),
     };
     let method = match request.method() {
+        // GET reaches here only via the raw-route dispatch below (a `route.ts`
+        // exporting `GET`) — the Bun runtime streams that handler's returned
+        // body verbatim. POST/PUT/PATCH/DELETE are the form/mutation handlers.
+        Method::Get => "GET",
         Method::Post => "POST",
         Method::Put => "PUT",
         Method::Patch => "PATCH",
