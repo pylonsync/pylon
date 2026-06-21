@@ -48,7 +48,7 @@ const port = portArg || "4321";
 if (!template) {
   console.error(
     "usage: node packages/create-pylon/dev.mjs <template> [port]\n" +
-      "       template is a unified template dir name (default, todo, barebones, consumer, chat, b2b, waitlist, local-service, restaurant, creator, shop, agency, marketplace, directory, ai-chat, ai-studio)",
+      "       template is a unified template dir name (default, todo, barebones, consumer, chat, waitlist, local-service, restaurant, creator, shop, agency, marketplace, directory, ai-chat, ai-studio)",
   );
   process.exit(1);
 }

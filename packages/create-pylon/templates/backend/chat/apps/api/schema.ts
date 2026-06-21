@@ -15,7 +15,7 @@ import {
 //
 // Public reads inside a room (anyone can browse). Writes require a
 // signed-in user. For private rooms in production, add a Membership
-// entity and gate Room reads on it (mirrors the b2b pattern).
+// entity and gate Room reads on it (the standard multi-tenant pattern).
 // ---------------------------------------------------------------------------
 
 const Room = entity("Room", {

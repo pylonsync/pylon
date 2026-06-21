@@ -63,10 +63,10 @@ const PYLON_VERSION = JSON.parse(
 // ---------------------------------------------------------------------------
 // Templates + platforms registry
 //
-// Each template declares which platforms it supports — `b2b` is web/mac
-// only because the demo flow (org switcher, member invite, RBAC admin
-// panel) is desktop-shaped and porting it to mobile would be busy work
-// without value. Pick a different template if you want mobile.
+// Each template declares which platforms it supports. Unified templates
+// (the default and every archetype) are a single full-stack SSR app and
+// take no platforms at all. The few non-unified monorepo templates list
+// the platforms whose demo flow they actually ship.
 // ---------------------------------------------------------------------------
 
 // `web` and `vite` both render into apps/web — they're mutually
@@ -95,12 +95,6 @@ const TEMPLATE_REGISTRY = {
 	todo: {
 		blurb:
 			"Live, optimistic todo list — guest auth, owner-scoped, one server, no Next.js.",
-		platforms: [],
-		unified: true,
-	},
-	b2b: {
-		blurb:
-			"Multi-tenant SaaS — orgs, members, roles, tenant-scoped data. One SSR app.",
 		platforms: [],
 		unified: true,
 	},
@@ -245,7 +239,6 @@ ${tmplLines.join("\n")}
 Examples:
   npm create @pylonsync/pylon my-app                        # default — SaaS landing + multi-tenant dashboard
   npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
-  npm create @pylonsync/pylon my-app --template b2b          # minimal multi-tenant (orgs, members, RBAC)
   npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
   npm create @pylonsync/pylon my-app --template waitlist     # coming-soon landing + live signup counter
   npm create @pylonsync/pylon my-app --template local-service # appointment business + live booking availability
@@ -383,8 +376,8 @@ if (!TEMPLATES_AVAILABLE.includes(flags.template)) {
 }
 
 // Reject combos a template doesn't yet support — better to fail loud
-// than to scaffold an incomplete tree (e.g. b2b + expo would skip
-// frontend entirely and leave the user with a half-empty workspace).
+// than to scaffold an incomplete tree (e.g. a web-only template + expo
+// would skip frontend entirely and leave a half-empty workspace).
 const supportedPlatforms = TEMPLATE_REGISTRY[flags.template].platforms;
 const invalidForTemplate = platforms.filter(
 	(p) => !supportedPlatforms.includes(p),
