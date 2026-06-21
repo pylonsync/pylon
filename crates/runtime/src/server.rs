@@ -400,24 +400,109 @@ fn rebuild_with_retry(port: u16) -> Option<Arc<Server>> {
 /// observed. Honoring the leftmost (or just trusting the whole
 /// header) lets any caller spoof their source IP by sending an
 /// `X-Forwarded-For: 1.2.3.4` header themselves.
-/// Optional explicit client-IP header (`PYLON_CLIENT_IP_HEADER`), e.g.
-/// `cf-connecting-ip` / `true-client-ip`. When a trusted edge (Cloudflare) is
-/// in front, this header carries the real client IP regardless of how many
-/// proxy hops X-Forwarded-For accumulates — more robust than counting hops.
-/// SECURITY: only honored because the operator opted in; only set it when the
-/// origin is unreachable EXCEPT through that edge (Authenticated Origin Pulls /
-/// CF-IP allowlist), otherwise a request hitting the origin directly could
-/// spoof the header. Unset → the X-Forwarded-For + trust-hops logic below
-/// (default; self-hosted unaffected).
-fn client_ip_header() -> Option<&'static str> {
-    static H: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+/// Priority list of client-IP headers (`PYLON_CLIENT_IP_HEADER`, comma-
+/// separated, e.g. `cf-connecting-ip,fly-client-ip`). `resolve_client_ip`
+/// returns the first one present + valid on the request, so an app reachable
+/// BOTH through CloudFlare (real client in `CF-Connecting-IP`) AND directly
+/// via Fly (real client in `Fly-Client-IP`) keys per-real-client on either
+/// path — a single header can't.
+///
+/// Default when unset:
+///  - On Fly (`FLY_APP_NAME` / `FLY_MACHINE_ID` present): `["fly-client-ip"]`.
+///    Fly's proxy is always the last hop and stamps the connecting client
+///    there; a client can't forge it, so it's safe with no origin lockdown.
+///    This alone turns the rate-limiter from ONE global bucket (the Fly proxy
+///    IP every request shares) into per-client. CloudFlare-fronted deploys
+///    should prepend `cf-connecting-ip` (Pylon Cloud sets the full chain).
+///  - Otherwise: empty → fall through to the X-Forwarded-For + trust-hops
+///    logic below (self-hosted behavior unchanged).
+///
+/// SECURITY: any header earlier than `fly-client-ip` in the chain (e.g.
+/// `cf-connecting-ip`) is honored even on a request that reached the origin
+/// directly, so it's spoofable unless the origin is reachable ONLY through
+/// that edge (Authenticated Origin Pulls / CF-IP allowlist). That's an
+/// accepted tradeoff for rate-limit *bucket keying* — the global dispatch +
+/// per-IP concurrency caps still bound total load; the spoofer can only
+/// scatter their own requests across buckets. For strict per-IP enforcement,
+/// lock the origin to the edge or pin a single unspoofable header.
+fn client_ip_headers() -> &'static [String] {
+    static H: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     H.get_or_init(|| {
-        std::env::var("PYLON_CLIENT_IP_HEADER")
-            .ok()
-            .map(|s| s.trim().to_ascii_lowercase())
-            .filter(|s| !s.is_empty())
+        let on_fly = std::env::var_os("FLY_APP_NAME").is_some()
+            || std::env::var_os("FLY_MACHINE_ID").is_some();
+        parse_client_ip_headers(
+            std::env::var("PYLON_CLIENT_IP_HEADER").ok().as_deref(),
+            on_fly,
+        )
     })
-    .as_deref()
+}
+
+/// Pure parse of the client-IP-header chain (split out so it's testable
+/// without touching process env). Explicit config always wins; otherwise a
+/// Fly deploy defaults to the unspoofable `fly-client-ip`.
+fn parse_client_ip_headers(raw: Option<&str>, on_fly: bool) -> Vec<String> {
+    let explicit: Vec<String> = raw
+        .unwrap_or("")
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !explicit.is_empty() {
+        return explicit;
+    }
+    if on_fly {
+        return vec!["fly-client-ip".to_string()];
+    }
+    Vec::new()
+}
+
+#[cfg(test)]
+mod client_ip_header_tests {
+    use super::parse_client_ip_headers;
+
+    #[test]
+    fn explicit_single_header_lowercased() {
+        assert_eq!(
+            parse_client_ip_headers(Some("CF-Connecting-IP"), false),
+            vec!["cf-connecting-ip"]
+        );
+    }
+
+    #[test]
+    fn explicit_chain_preserves_priority_order_trims_blanks() {
+        assert_eq!(
+            parse_client_ip_headers(Some(" CF-Connecting-IP , , Fly-Client-IP "), true),
+            vec!["cf-connecting-ip", "fly-client-ip"]
+        );
+    }
+
+    #[test]
+    fn explicit_overrides_the_fly_default() {
+        // Operator pinned a single header — Fly default must NOT be appended.
+        assert_eq!(
+            parse_client_ip_headers(Some("true-client-ip"), true),
+            vec!["true-client-ip"]
+        );
+    }
+
+    #[test]
+    fn unset_on_fly_defaults_to_fly_client_ip() {
+        assert_eq!(parse_client_ip_headers(None, true), vec!["fly-client-ip"]);
+        assert_eq!(
+            parse_client_ip_headers(Some(""), true),
+            vec!["fly-client-ip"]
+        );
+        assert_eq!(
+            parse_client_ip_headers(Some("  , "), true),
+            vec!["fly-client-ip"]
+        );
+    }
+
+    #[test]
+    fn unset_off_fly_is_empty_preserving_xff_behavior() {
+        assert!(parse_client_ip_headers(None, false).is_empty());
+        assert!(parse_client_ip_headers(Some(""), false).is_empty());
+    }
 }
 
 fn resolve_client_ip(request: &tiny_http::Request, trust_proxy_hops: usize) -> String {
@@ -425,11 +510,12 @@ fn resolve_client_ip(request: &tiny_http::Request, trust_proxy_hops: usize) -> S
         .remote_addr()
         .map(|a| a.ip().to_string())
         .unwrap_or_default();
-    // Explicit edge client-IP header takes precedence when configured (e.g.
-    // Cloudflare's CF-Connecting-IP). If it's configured but absent/invalid on
-    // this request (a direct origin hit that bypassed the edge), fall through
-    // to the X-Forwarded-For logic rather than trusting a missing value.
-    if let Some(hdr) = client_ip_header() {
+    // Edge client-IP header(s) take precedence, tried in priority order (e.g.
+    // Cloudflare's CF-Connecting-IP, then Fly-Client-IP). Use the first one
+    // present + parseable on this request; a configured header that's absent
+    // (a direct hit that bypassed that edge) falls through to the next, then
+    // to the X-Forwarded-For logic — never trust a missing value.
+    for hdr in client_ip_headers() {
         if let Some(v) = request
             .headers()
             .iter()
