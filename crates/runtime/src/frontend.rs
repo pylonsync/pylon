@@ -2479,10 +2479,31 @@ pub fn derive_app_dir(routes: &[pylon_kernel::ManifestRoute]) -> String {
     fn parent_dir(module: &str) -> Option<&str> {
         module.rfind('/').map(|i| &module[..i])
     }
-    // Prefer the root page — unambiguous: `<appDir>/page`.
+    // Prefer the root page. Its component is `<appDir>/<(group)>*/page` — the
+    // "/" route has NO dynamic/static route segments, only optional route
+    // GROUPS like `(home)`. Strip the trailing `/page` and any `(group)`
+    // segments to recover the appDir. (Bare `parent_dir` here returned
+    // `app/(home)` for a grouped home page, so the client bundler only walked
+    // the group dir and emitted ONE route's hydration entry.)
     if let Some(root) = routes.iter().find(|r| r.path == "/") {
-        if let Some(dir) = root.component.as_deref().and_then(parent_dir) {
-            return dir.to_string();
+        if let Some(comp) = root.component.as_deref() {
+            let mut dir = comp.strip_suffix("/page").unwrap_or(comp);
+            while let Some(i) = dir.rfind('/') {
+                let last = &dir[i + 1..];
+                if last.starts_with('(') && last.ends_with(')') {
+                    dir = &dir[..i];
+                } else {
+                    break;
+                }
+            }
+            if !dir.is_empty() && dir != comp {
+                return dir.to_string();
+            }
+            // No trailing group (component was `<appDir>/page`): the bare
+            // parent is correct.
+            if let Some(dir) = parent_dir(comp) {
+                return dir.to_string();
+            }
         }
     }
     // Fallback (no literal `/` route): the appDir is the longest common
@@ -3186,6 +3207,30 @@ mod tests {
 
         // Empty / componentless → safe default.
         assert_eq!(derive_app_dir(&[]), "app");
+
+        // Route GROUP on the root page: `/` → `app/(home)/page`. The appDir is
+        // `app`, NOT `app/(home)` — else the client bundler walks only the
+        // group dir and emits one route's hydration entry (the yapless bug).
+        let grouped = |comp: &str, path: &str| pylon_kernel::ManifestRoute {
+            path: path.into(),
+            mode: "ssr".into(),
+            component: Some(comp.into()),
+            layouts: vec!["app/layout".into()],
+            ..Default::default()
+        };
+        let groups = vec![
+            grouped("app/(home)/page", "/"),
+            grouped("app/(auth)/login/page", "/login"),
+            grouped("app/dashboard/page", "/dashboard"),
+        ];
+        assert_eq!(derive_app_dir(&groups), "app");
+
+        // Grouped root under a namespaced subdir.
+        let web_groups = vec![
+            grouped("web/app/(home)/page", "/"),
+            grouped("web/app/(marketing)/pricing/page", "/pricing"),
+        ];
+        assert_eq!(derive_app_dir(&web_groups), "web/app");
     }
 
     #[test]
