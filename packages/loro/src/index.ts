@@ -17,7 +17,8 @@
 // don't lose data the way LWW would.
 // ---------------------------------------------------------------------------
 
-import { useSyncExternalStore, useEffect } from "react";
+import { useSyncExternalStore, useEffect, useRef } from "react";
+import type { FormEvent, RefObject } from "react";
 import type { LoroDoc, LoroText, LoroMap } from "loro-crdt";
 import { db, getBaseUrl, getReactStorage, storageKey } from "@pylonsync/react";
 import { pylonFetch, type SyncEngine } from "@pylonsync/sync";
@@ -195,6 +196,141 @@ export function useCollabText(
     void pushCrdtUpdate(entity, id, update);
   };
   return [value, setValue];
+}
+
+/**
+ * Diff-aware collaborative binding for a `<textarea>` / `<input>` — the
+ * editor-grade counterpart to {@link useCollabText}.
+ *
+ * `useCollabText`'s `setValue` deletes the whole field and re-inserts it on
+ * every keystroke, which converges but moves the caret — fine for a one-line
+ * topic, jarring in a document editor. This hook instead computes the MINIMAL
+ * single splice between the old and new value (shared prefix + shared suffix)
+ * and applies just that `insert`/`delete` to the `LoroText`, shipping only the
+ * incremental delta. Remote frames are merged back into the element with the
+ * local caret remapped across the change, so two people typing in the same
+ * document don't fight over the cursor.
+ *
+ * LoroText indices are UTF-16 (matching JS string offsets and
+ * `selectionStart`/`selectionEnd`), so the prefix/suffix diff computed on the
+ * raw element value lines up with Loro exactly — no codepoint conversion, and
+ * astral characters (emoji) splice correctly.
+ *
+ * Spread the returned `ref` + `onInput` onto the element, and use
+ * `defaultValue` (NOT `value`) so the element stays uncontrolled and React
+ * re-renders never clobber the caret. `value` is the live text, handy for a
+ * side-by-side preview:
+ *
+ * ```tsx
+ * const { ref, value, onInput } = useCollabTextarea("Document", id, "content");
+ * return (
+ *   <>
+ *     <textarea ref={ref} defaultValue={value} onInput={onInput} />
+ *     <MarkdownPreview source={value} />
+ *   </>
+ * );
+ * ```
+ */
+export function useCollabTextarea<
+  T extends HTMLTextAreaElement | HTMLInputElement = HTMLTextAreaElement,
+>(
+  entity: string,
+  id: string,
+  field: string,
+): {
+  ref: RefObject<T | null>;
+  value: string;
+  onInput: (e: FormEvent<T>) => void;
+} {
+  const doc = useLoroDoc(entity, id);
+  const text = doc.getText(field);
+  const value = text.toString(); // re-renders on every applied frame
+  const ref = useRef<T | null>(null);
+  // The value we last reconciled into the DOM element. Lets us tell our own
+  // edits (element already correct — skip) from remote frames (patch the DOM).
+  const domValue = useRef<string>(value);
+
+  // Apply REMOTE changes to the element, preserving the caret. Runs after each
+  // render whose doc text differs from what the element currently shows.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (el.value === value) {
+      domValue.current = value;
+      return;
+    }
+    const prev = el.value;
+    const selStart = el.selectionStart ?? prev.length;
+    const selEnd = el.selectionEnd ?? prev.length;
+    el.value = value;
+    try {
+      el.setSelectionRange(
+        remapCaret(prev, value, selStart),
+        remapCaret(prev, value, selEnd),
+      );
+    } catch {
+      // Some element types don't support setSelectionRange — ignore.
+    }
+    domValue.current = value;
+  }, [value]);
+
+  const onInput = (e: FormEvent<T>): void => {
+    const next = (e.target as T).value;
+    const prev = domValue.current;
+    if (next === prev) return;
+    const { index, deleteCount, insert } = spliceDiff(prev, next);
+    // Capture the version vector BEFORE mutating so we ship exactly the new ops.
+    const beforeVv = doc.oplogVersion();
+    if (deleteCount > 0) text.delete(index, deleteCount);
+    if (insert.length > 0) text.insert(index, insert);
+    doc.commit();
+    domValue.current = next;
+    const update = doc.export({ mode: "update", from: beforeVv });
+    if (update.length > 0) void pushCrdtUpdate(entity, id, update);
+  };
+
+  return { ref, value, onInput };
+}
+
+/**
+ * The minimal single splice that turns `prev` into `next`: shared prefix of
+ * length `index`, shared suffix, with the differing middle of `prev`
+ * (`deleteCount` chars) replaced by `insert`. UTF-16 units throughout to match
+ * LoroText.
+ */
+function spliceDiff(
+  prev: string,
+  next: string,
+): { index: number; deleteCount: number; insert: string } {
+  const max = Math.min(prev.length, next.length);
+  let p = 0;
+  while (p < max && prev.charCodeAt(p) === next.charCodeAt(p)) p++;
+  let s = 0;
+  while (
+    s < max - p &&
+    prev.charCodeAt(prev.length - 1 - s) === next.charCodeAt(next.length - 1 - s)
+  ) {
+    s++;
+  }
+  return {
+    index: p,
+    deleteCount: prev.length - p - s,
+    insert: next.slice(p, next.length - s),
+  };
+}
+
+/**
+ * Map a caret offset in `prev` to the equivalent offset in `next` across the
+ * single splice between them. Before the change → unchanged; after → shifted
+ * by the length delta; inside the replaced region → clamped to the splice end.
+ */
+function remapCaret(prev: string, next: string, caret: number): number {
+  const { index, deleteCount, insert } = spliceDiff(prev, next);
+  if (caret <= index) return caret;
+  if (caret >= index + deleteCount) {
+    return caret + (insert.length - deleteCount);
+  }
+  return index + insert.length;
 }
 
 // ---------------------------------------------------------------------------
