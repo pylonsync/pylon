@@ -2924,6 +2924,29 @@ impl Runtime {
         } else {
             data
         };
+
+        // Seed the per-row LoroDoc for CRDT entities, in the SAME transaction
+        // as the SQL insert, so the CRDT sidecar and the materialized columns
+        // agree from the very first write. `Runtime::insert` already does this;
+        // the `*_with_conn` family — the transaction-bound store path behind
+        // EVERY action/mutation `ctx.db.insert` — silently didn't. The gap was
+        // invisible until a row inserted by a server function later received a
+        // `/api/crdt/<entity>/<id>` update: with an empty LoroDoc, the
+        // post-merge projection wrote NULLs over every non-CRDT column
+        // (orgId, foreign keys, …), failing NOT NULL constraints and clobbering
+        // data. Seeding here makes server-created rows first-class CRDT rows,
+        // identical to client-sync inserts. SQLite-only path (rusqlite
+        // Connection), so `crdt_store()` never hits its Postgres panic.
+        if ent.crdt {
+            let crdt_fields = self.crdt_fields_for(ent)?;
+            self.crdt_store()
+                .apply_patch(conn, entity, &id, &crdt_fields, data)
+                .map_err(|e| RuntimeError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("crdt seed {entity}/{id}: {e}"),
+                })?;
+        }
+
         let obj = data.as_object().ok_or_else(|| RuntimeError {
             code: "INVALID_DATA".into(),
             message: "Insert data must be a JSON object".into(),
@@ -4532,6 +4555,52 @@ mod tests {
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["displayName"], "Eric C");
         assert_eq!(row["email"], "x@y.com");
+    }
+
+    /// Regression: the transaction-bound insert path (`insert_with_conn`, which
+    /// sits behind EVERY server-function / action `ctx.db.insert`) must seed the
+    /// row's LoroDoc the same way `Runtime::insert` does. Before the fix it did
+    /// a raw SQL insert with no CRDT seeding, so a row created by a server
+    /// function had an EMPTY LoroDoc — and the first `/api/crdt` update projected
+    /// NULLs over every non-CRDT column (foreign keys, tenant scope, …), failing
+    /// NOT NULL constraints and clobbering data. Asserting a sidecar snapshot
+    /// exists after `insert_with_conn` fails loudly if the seeding regresses.
+    #[test]
+    fn insert_with_conn_seeds_crdt_sidecar() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let id = {
+            let conn = rt.lock_write_conn().unwrap();
+            with_write_tx(&conn, || {
+                rt.insert_with_conn(
+                    &conn,
+                    "User",
+                    &serde_json::json!({"email": "tx@y.com", "displayName": "Tx"}),
+                )
+            })
+            .unwrap()
+        };
+
+        // A CRDT snapshot exists for the row → the LoroDoc was seeded in the
+        // same transaction. Pre-fix this count was 0.
+        let conn = rt.lock_write_conn().unwrap();
+        let snap_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM _pylon_crdt_snapshots
+                 WHERE entity = 'User' AND row_id = ?1",
+                rusqlite::params![&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            snap_count, 1,
+            "insert_with_conn must seed the CRDT sidecar (one snapshot row)"
+        );
+
+        // And the materialized row carries every field the seed captured.
+        drop(conn);
+        let row = rt.get_by_id("User", &id).unwrap().unwrap();
+        assert_eq!(row["email"], "tx@y.com");
+        assert_eq!(row["displayName"], "Tx");
     }
 
     /// Regression: when the SQL INSERT step inside Runtime::insert fails
