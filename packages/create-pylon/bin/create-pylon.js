@@ -465,6 +465,12 @@ function walkAndSubstitute(dir) {
 		// scaffold time — otherwise the new project has no ignore file
 		// and node_modules / .pylon / *.db get committed.
 		if (renamed === "gitignore") renamed = ".gitignore";
+		// `bun publish` (which the release uses) strips a literal
+		// `bunfig.toml` — it treats it as Bun's own runtime config and
+		// refuses to ship it in a package. Templates ship it as `bunfig`
+		// and we restore the `.toml` here, so the happy-dom test preload
+		// actually lands and component tests can render.
+		if (renamed === "bunfig") renamed = "bunfig.toml";
 		let target = abs;
 		if (renamed !== entry) {
 			target = join(dir, renamed);
