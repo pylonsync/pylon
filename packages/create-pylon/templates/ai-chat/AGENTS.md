@@ -39,9 +39,9 @@ Operating rules for a coding agent in this Pylon app. Pylon is a Rails-like fram
 
 ## Testing
 
-`pylon test` discovers every `*.test.ts` (or `.test.js`) file under `tests/` (or `functions/`) and runs it with **Bun's test runner** (`import { test, expect } from "bun:test"`) against an in-memory Pylon. Run the whole suite with `pylon test`, or `npm test`; filter with `pylon test <substring>`. A starter test ships in `tests/example.test.ts` — replace it with your own.
+`pylon test` discovers every `*.test.ts` / `*.test.tsx` file under `tests/` (or `functions/`) and runs it with **Bun's test runner** (`import { test, expect } from "bun:test"`). Run the suite with `pylon test` (or `npm test`); filter with `pylon test <substring>`. This template ships `bunfig.toml` + `tests/setup.ts` (registers happy-dom) so component tests render out of the box, plus starter tests under `tests/` — replace them with your own.
 
-**Pure logic — no server needed.** Import the helper and assert. This is the cheapest, fastest shape; use it for validators, formatters, and data transforms.
+**Tier 1 — pure logic (reach for this first).** Keep the decisions that matter — access/plan gating, pricing, credit math, validation, formatting — in pure functions in `lib/`, and test those exhaustively. No server, instant, and it's where the real bugs live. Keep your `query`/`mutation`/`action` handlers as thin wrappers around them, so the logic is testable without a running app.
 
 ```ts
 import { expect, test } from "bun:test";
@@ -52,7 +52,25 @@ test("unknown slug → undefined", () => {
 });
 ```
 
-**Functions + the database — over HTTP against a running dev server.** A function's real behavior (policies, `ctx.db`, auth) lives in the running app, so test it the way a client calls it: start `pylon dev` in another terminal, then hit the API. Use `resetDb()` from `@pylonsync/functions` to clear the in-memory DB between cases (no-ops safely if the server isn't up, and refuses to run against production).
+**Tier 2 — React components.** `@testing-library/react` + happy-dom are already wired (`tests/setup.ts`). Render and assert. The template uses the classic JSX transform, so add `import React from "react"` in `.tsx` tests. For a component that reads Pylon data hooks, **mock the boundary**, then dynamic-`import` the component so the mock is in place first:
+
+```tsx
+import { test, expect, mock } from "bun:test";
+import React from "react";
+import { render, screen } from "@testing-library/react";
+
+mock.module("@pylonsync/react", () => ({
+  db: { useQuery: () => ({ data: [{ id: "1", name: "Acme" }], loading: false }) },
+}));
+const { OrgList } = await import("../app/orgs/org-list"); // your component
+
+test("renders orgs from the query", () => {
+  render(<OrgList />);
+  expect(screen.getByText("Acme")).toBeDefined();
+});
+```
+
+**Tier 3 — functions over HTTP (only when Tier 1 can't cover it).** A handler's full behavior (policies, `ctx.db`, auth) lives in the running app. Start `pylon dev` in another terminal and call the API; `resetDb()` from `@pylonsync/functions` clears the in-memory DB between cases (no-ops if the server's down, refuses production).
 
 ```ts
 import { afterEach, expect, test } from "bun:test";
@@ -61,16 +79,14 @@ import { resetDb } from "@pylonsync/functions";
 const BASE = "http://localhost:4321";
 afterEach(() => resetDb(BASE)); // or installTestIsolation(BASE) once at top-of-file
 
-test("createThing then it shows up", async () => {
-  const created = await fetch(`${BASE}/api/fn/createThing`, {
+test("createThing then read it back", async () => {
+  const t = await fetch(`${BASE}/api/fn/createThing`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name: "hello" }),
   }).then((r) => r.json());
-  expect(created.name).toBe("hello");
-
   const rows = await fetch(`${BASE}/api/entities/Thing`).then((r) => r.json());
-  expect(rows.some((t: { id: string }) => t.id === created.id)).toBe(true);
+  expect(rows.some((r: { id: string }) => r.id === t.id)).toBe(true);
 });
 ```
 
