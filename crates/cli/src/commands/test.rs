@@ -71,11 +71,28 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
         // `--` separates Bun options from the positional file path so a
         // filename starting with `-` isn't parsed as a flag.
-        let status = Command::new("bun")
-            .args(["test", "--", file])
+        let mut cmd = Command::new("bun");
+        cmd.args(["test", "--", file])
             .env("PYLON_IN_MEMORY", "1")
-            .env("PYLON_DEV_MODE", "1")
-            .status();
+            .env("PYLON_DEV_MODE", "1");
+        // In --json mode the parent's stdout must carry ONLY our summary
+        // object, but Bun writes its own banner/results to stdout. Capture the
+        // child's output and echo it to stderr (still visible to a human) so
+        // stdout stays valid JSON for scripts. In human mode, inherit as usual.
+        let status = if json_mode {
+            match cmd.output() {
+                Ok(out) => {
+                    use std::io::Write;
+                    let mut err = std::io::stderr();
+                    let _ = err.write_all(&out.stdout);
+                    let _ = err.write_all(&out.stderr);
+                    Ok(out.status)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            cmd.status()
+        };
 
         match status {
             Ok(s) if s.success() => {
