@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "pylon dev",
     "deploy": "pylon deploy",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "pylon test"
   },
   "dependencies": {
     "@pylonsync/react": "^__PYLON_VERSION__",

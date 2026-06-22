@@ -339,6 +339,8 @@ fn print_usage() {
         "  deploy                    Deploy to Pylon Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
     );
     println!("  cache                     Run standalone cache server");
+    println!("  test [filter]             Run *.test.ts files against an in-memory Pylon");
+    println!("  test:security             Adversarial security probe against a running app");
     println!();
     println!("  login                     Authenticate against Pylon Cloud");
     println!("  logout                    Remove stored Pylon Cloud credentials");

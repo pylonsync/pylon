@@ -37,6 +37,45 @@ Operating rules for a coding agent in this Pylon app. Pylon is a Rails-like fram
 - **It's `db.useQueryOne`, not `useOne`.** Validators and field types have aliases: `v.bool`/`v.boolean`, `v.float`/`v.number`.
 - **There is no `ctx.files` or `defineWorkflow`/`defineJob`.** Files go through `<FileUpload>` + `/api/files/*`; deferred execution is `ctx.scheduler.runAfter/runAt/cancel`.
 
+## Testing
+
+`pylon test` discovers every `*.test.ts` (or `.test.js`) file under `tests/` (or `functions/`) and runs it with **Bun's test runner** (`import { test, expect } from "bun:test"`) against an in-memory Pylon. Run the whole suite with `pylon test`, or `npm test`; filter with `pylon test <substring>`. A starter test ships in `tests/example.test.ts` — replace it with your own.
+
+**Pure logic — no server needed.** Import the helper and assert. This is the cheapest, fastest shape; use it for validators, formatters, and data transforms.
+
+```ts
+import { expect, test } from "bun:test";
+import { productBySlug } from "../lib/site.config";
+
+test("unknown slug → undefined", () => {
+  expect(productBySlug("nope")).toBeUndefined();
+});
+```
+
+**Functions + the database — over HTTP against a running dev server.** A function's real behavior (policies, `ctx.db`, auth) lives in the running app, so test it the way a client calls it: start `pylon dev` in another terminal, then hit the API. Use `resetDb()` from `@pylonsync/functions` to clear the in-memory DB between cases (no-ops safely if the server isn't up, and refuses to run against production).
+
+```ts
+import { afterEach, expect, test } from "bun:test";
+import { resetDb } from "@pylonsync/functions";
+
+const BASE = "http://localhost:4321";
+afterEach(() => resetDb(BASE)); // or installTestIsolation(BASE) once at top-of-file
+
+test("createThing then it shows up", async () => {
+  const created = await fetch(`${BASE}/api/fn/createThing`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: "hello" }),
+  }).then((r) => r.json());
+  expect(created.name).toBe("hello");
+
+  const rows = await fetch(`${BASE}/api/entities/Thing`).then((r) => r.json());
+  expect(rows.some((t: { id: string }) => t.id === created.id)).toBe(true);
+});
+```
+
+`pylon test:security` is a separate adversarial probe — it hits a running app and reports auth/policy holes (run `pylon dev`, then `pylon test:security`).
+
 ## Use the CLI — don't guess
 
 | Need | Command |
