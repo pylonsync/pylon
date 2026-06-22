@@ -1,8 +1,8 @@
 //! `pylon test` — run tests against functions in an in-memory runtime.
 //!
-//! Discovers `*.test.ts` files in the `functions/` and `tests/` directories,
-//! spawns Bun with the test runner, runs against an in-memory pylon,
-//! and reports results.
+//! Discovers `*.test.ts` / `*.test.tsx` (and `.js`/`.jsx`) files in the
+//! `tests/` and `functions/` directories, spawns Bun with the test runner,
+//! runs against an in-memory pylon, and reports results.
 
 use std::path::Path;
 use std::process::Command;
@@ -28,7 +28,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     if !Path::new(&test_dir).exists() {
         output::print_error(&format!("No test directory found: {test_dir}"));
-        eprintln!("Create a `tests/` or `functions/` directory with `*.test.ts` files.");
+        eprintln!("Create a `tests/` or `functions/` directory with `*.test.ts` / `*.test.tsx` files.");
         return ExitCode::Error;
     }
 
@@ -130,7 +130,14 @@ fn discover_test_files(dir: &str) -> Vec<String> {
             let p = entry.path();
             if p.is_file() {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.ends_with(".test.ts") || name.ends_with(".test.js") {
+                // Include .tsx/.jsx so React component tests (the natural home
+                // for @testing-library + happy-dom) are discovered, not just
+                // pure-logic .ts files.
+                if name.ends_with(".test.ts")
+                    || name.ends_with(".test.tsx")
+                    || name.ends_with(".test.js")
+                    || name.ends_with(".test.jsx")
+                {
                     if let Some(s) = p.to_str() {
                         out.push(s.to_string());
                     }
@@ -157,11 +164,16 @@ mod tests {
         std::fs::write(dir.join("a.test.ts"), "// test").unwrap();
         std::fs::write(dir.join("b.ts"), "// not a test").unwrap();
         std::fs::write(dir.join("c.test.js"), "// test").unwrap();
+        std::fs::write(dir.join("d.test.tsx"), "// component test").unwrap();
+        std::fs::write(dir.join("e.test.jsx"), "// component test").unwrap();
 
         let files = discover_test_files(dir.to_str().unwrap());
-        assert_eq!(files.len(), 2);
+        assert_eq!(files.len(), 4);
         assert!(files.iter().any(|f| f.ends_with("a.test.ts")));
         assert!(files.iter().any(|f| f.ends_with("c.test.js")));
+        // .tsx / .jsx component tests must be discovered too.
+        assert!(files.iter().any(|f| f.ends_with("d.test.tsx")));
+        assert!(files.iter().any(|f| f.ends_with("e.test.jsx")));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
