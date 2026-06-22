@@ -28,7 +28,9 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     if !Path::new(&test_dir).exists() {
         output::print_error(&format!("No test directory found: {test_dir}"));
-        eprintln!("Create a `tests/` or `functions/` directory with `*.test.ts` / `*.test.tsx` files.");
+        eprintln!(
+            "Create a `tests/` or `functions/` directory with `*.test.ts` / `*.test.tsx` files."
+        );
         return ExitCode::Error;
     }
 
