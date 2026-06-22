@@ -5369,6 +5369,24 @@ fn spawn_runtime_supervisor(ops: Arc<FnOpsImpl>) {
     }
 }
 
+/// Default wedge-probe window (seconds) when `PYLON_FN_WEDGE_PROBE_SECS` is
+/// unset. The supervisor force-respawns a runner after `strikes` consecutive
+/// failed io_lock probes (≈ `probe_secs * strikes`). That coarse backstop must
+/// never fire BEFORE a single call's own deadline: a function the operator
+/// allows `call_timeout_secs` (PYLON_FN_CALL_TIMEOUT, default 30s — e.g. a
+/// cloud deploy that cold-pulls a builder image and legitimately runs ~20s) is
+/// recycled cleanly by its own call-timeout; the supervisor should only catch a
+/// runtime still wedged AFTER that. So size the default probe window so
+/// `probe_secs * strikes` exceeds the call timeout (plus one probe of margin).
+/// An explicit PYLON_FN_WEDGE_PROBE_SECS overrides this entirely.
+fn default_wedge_probe_secs(call_timeout_secs: u64, strikes: u32) -> u64 {
+    const FLOOR_SECS: u64 = 8;
+    let strikes = (strikes.max(1)) as u64;
+    // ceil(call_timeout / strikes) + 1 probe of margin.
+    let per_strike = (call_timeout_secs + strikes - 1) / strikes + 1;
+    per_strike.max(FLOOR_SECS)
+}
+
 fn spawn_runner_supervisor(
     ops: Arc<FnOpsImpl>,
     runner: Arc<FnRunner>,
@@ -5391,17 +5409,27 @@ fn spawn_runner_supervisor(
     // within `probe` — a stuck call makes it fail. We respawn only after
     // `strikes` CONSECUTIVE failures so a merely-busy runtime (sub-`probe`
     // calls that briefly hold the lock) never trips a needless restart.
-    let probe_secs: u64 = std::env::var("PYLON_FN_WEDGE_PROBE_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .filter(|&n: &u64| n > 0)
-        .unwrap_or(8);
-    let probe = Duration::from_secs(probe_secs);
     let wedge_strikes: u32 = std::env::var("PYLON_FN_WEDGE_STRIKES")
         .ok()
         .and_then(|s| s.parse().ok())
         .filter(|&n: &u32| n > 0)
         .unwrap_or(3);
+    // A single call is allowed up to its call timeout (PYLON_FN_CALL_TIMEOUT,
+    // default 30s) before its OWN deadline recycles the runner. The wedge
+    // backstop below must not pre-empt that, or a legitimately-long call (a
+    // cloud deploy spinning up a cold builder machine) gets force-killed
+    // mid-flight at the old 8s×3=24s default while still within budget.
+    let effective_call_timeout_secs: u64 = std::env::var("PYLON_FN_CALL_TIMEOUT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &u64| n > 0)
+        .unwrap_or(30); // mirrors functions::runner::DEFAULT_CALL_TIMEOUT
+    let probe_secs: u64 = std::env::var("PYLON_FN_WEDGE_PROBE_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&n: &u64| n > 0)
+        .unwrap_or_else(|| default_wedge_probe_secs(effective_call_timeout_secs, wedge_strikes));
+    let probe = Duration::from_secs(probe_secs);
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
@@ -5502,6 +5530,46 @@ fn respawn_runner(
             });
             *backoff = (*backoff * 2).min(max_backoff);
         }
+    }
+}
+
+#[cfg(test)]
+mod wedge_probe_tests {
+    //! The runner-wedge supervisor's backstop must never fire before a single
+    //! call's own deadline — otherwise a legitimately-long call (a cloud deploy
+    //! cold-pulling a builder image, ~20s) is force-killed mid-flight while
+    //! still within its PYLON_FN_CALL_TIMEOUT budget. `default_wedge_probe_secs`
+    //! sizes the probe window so `probe_secs * strikes` clears the call timeout.
+    use super::default_wedge_probe_secs;
+
+    fn wedge_total(call_timeout: u64, strikes: u32) -> u64 {
+        default_wedge_probe_secs(call_timeout, strikes) * strikes as u64
+    }
+
+    #[test]
+    fn wedge_window_exceeds_call_timeout_at_defaults() {
+        // Default call timeout 30s, default 3 strikes: the backstop must clear
+        // 30s. The old fixed 8×3=24s killed calls still within their 30s budget.
+        assert!(
+            wedge_total(30, 3) > 30,
+            "wedge window must exceed the default call timeout"
+        );
+    }
+
+    #[test]
+    fn wedge_window_exceeds_raised_call_timeout() {
+        // The control-plane deploy case: PYLON_FN_CALL_TIMEOUT=120.
+        assert!(wedge_total(120, 3) > 120);
+        // ...and a single-strike configuration.
+        assert!(wedge_total(120, 1) > 120);
+    }
+
+    #[test]
+    fn never_below_the_floor() {
+        // Tiny / unset call timeouts still keep a sane minimum probe window so a
+        // merely-busy (sub-second) runtime isn't respawned needlessly.
+        assert!(default_wedge_probe_secs(1, 3) >= 8);
+        assert!(default_wedge_probe_secs(0, 8) >= 8);
     }
 }
 
