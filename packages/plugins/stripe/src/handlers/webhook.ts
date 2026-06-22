@@ -31,6 +31,12 @@ import { resolveWebhookSecret } from "./internal";
  */
 export function stripeWebhookHandler(cfg: StripeConfig) {
 	return action({
+		// Webhook receivers are unauthenticated by nature: Stripe POSTs
+		// anonymously, so the default `auth: "user"` 401s every delivery
+		// before the handler runs. The real auth boundary is the signature
+		// check below (verifyStripeSignature against STRIPE_WEBHOOK_SECRET),
+		// not a user session.
+		auth: "public",
 		args: {},
 		async handler(ctx: HandlerCtx) {
 			if (!ctx.request) {

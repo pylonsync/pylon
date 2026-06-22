@@ -117,6 +117,10 @@ export function buildStripeManifest(
 			action("restoreSubscription", {
 				input: [{ name: "referenceId", type: "string", optional: true }],
 			}),
+			// Public-by-handler: the handler factory declares `auth: "public"`
+			// (Stripe POSTs anonymously; the signature check is the real auth
+			// boundary). The manifest action() builder carries input shapes
+			// only — auth lives on the handler, which the runtime gates on.
 			action("stripeWebhook"),
 		],
 	};
