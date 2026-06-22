@@ -44,6 +44,18 @@ pylon projects current             # what's the current context?
 pylon projects use ""              # clear the context
 ```
 
+## Test
+
+```bash
+pylon test                         # run *.test.ts / *.test.tsx under tests/ (or functions/)
+pylon test credits                 # only files whose path contains "credits"
+pylon test --json                  # machine-readable summary
+pylon test:security                # adversarial auth/policy probe vs a running app
+pylon test:security --target https://api.example.com --json
+```
+
+`pylon test` runs each test file with Bun against an in-memory Pylon; it exits non-zero on failure (drops straight into CI). `pylon test:security` is a separate probe that hits a **running** app and reports auth/policy holes. See the [Testing guide](/testing) for the unit / component / HTTP patterns.
+
 ## Deploy
 
 ```bash
