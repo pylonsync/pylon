@@ -1,6 +1,6 @@
 # AGENTS.md — working in a Pylon project
 
-Operating rules for a coding agent in this Pylon app. Pylon is a Rails-like framework for realtime apps: you declare entities, policies, and server functions in TypeScript, and a single Rust binary (`pylon`) serves the API, auth, sync, WebSocket, SSE, and native React 19 SSR — one process, one port. The full API reference is at **/llms-full.txt** (served at `/llms-full.txt`; in the repo at `apps/web/public/llms-full.txt`). Read it before guessing an API name.
+Operating rules for a coding agent in this Pylon app. Pylon is a Rails-like framework for realtime apps: you declare entities, policies, and server functions in TypeScript, and a single Rust binary (`pylon`) serves the API, auth, sync, WebSocket, SSE, and native React 19 SSR — one process, one port. The full API reference is the **llms-full.txt** at https://docs.pylonsync.com/llms-full.txt. Read it before guessing an API name.
 
 ## Directory conventions
 
@@ -50,4 +50,4 @@ Operating rules for a coding agent in this Pylon app. Pylon is a Rails-like fram
 
 `--json` works on every command for machine-readable output. Prefer one-shot/agent-safe flags (`pylon logs --limit N`, not a blocking `--follow`).
 
-For full signatures, env vars, the complete CLI, and SSR/client/server-primitive details: **/llms-full.txt**.
+For full signatures, env vars, the complete CLI, and SSR/client/server-primitive details: **https://docs.pylonsync.com/llms-full.txt**.

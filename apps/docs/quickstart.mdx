@@ -9,13 +9,13 @@ This walkthrough gets a Pylon server running with a schema, one policy, and one 
   **Just want a working app?** Skip the manual setup with one command:
 
   ```bash
-  npm create @pylonsync/pylon@latest my-app -- --template todo --platforms web
-  cd my-app && bun install && bun run dev
+  npm create @pylonsync/pylon@latest my-app -- --template todo
+  cd my-app && npm run dev
   ```
 
-  That scaffolds a Pylon backend + Next.js 16 + React 19 frontend + shared UI package wired together. Templates: `barebones`, `todo`, `consumer`, `chat`. Platforms: `web`, `ios`, `mac`, `expo`.
+  That scaffolds a single full-stack Pylon app — SSR React 19 frontend + API served from one port by `pylon dev`, no Next.js, no monorepo. Templates: `default` (SaaS), `todo`, `chat`, `shop`, `consumer`, `waitlist`, `ai-chat`, and more — run `npm create @pylonsync/pylon@latest` with no args to pick one. Every app ships with a test harness (`pylon test`) wired up.
 
-  Ready to ship to production? See [Deploying to Vercel](/operations/vercel).
+  Ready to ship? `pylon deploy` (see [Deploy](/operations/deploy)).
 </Tip>
 
 ## 1. Install the CLI
