@@ -1228,6 +1228,7 @@ mod change_log_wiring_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 
@@ -1725,6 +1726,10 @@ fn start_server(
     if let Some(ref ops) = fn_ops_maybe {
         let dyn_ops: Arc<dyn pylon_router::FnOps> = Arc::clone(ops) as Arc<dyn pylon_router::FnOps>;
         reactive_registry.set_fn_ops(dyn_ops);
+        // Register app-declared cron jobs (manifest.crons) now that functions
+        // are loaded. The scheduler is already running (started above); adding
+        // tasks to it is picked up on the next tick.
+        crate::datastore::register_app_crons(&scheduler, ops, &runtime.manifest().crons);
     }
     reactive_registry.start_runner();
 

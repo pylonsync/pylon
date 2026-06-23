@@ -1744,6 +1744,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 
@@ -1790,6 +1791,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let eng = PolicyEngine::from_manifest(&manifest);
         let u1 = AuthContext::authenticated("u1".into());
@@ -1855,6 +1857,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let eng = PolicyEngine::from_manifest(&manifest);
 
@@ -1930,6 +1933,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let engine = PolicyEngine::from_manifest(&manifest);
 
@@ -2042,6 +2046,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let engine = PolicyEngine::from_manifest(&m);
         let user = AuthContext::authenticated("user-1".into());
@@ -2090,6 +2095,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let engine = PolicyEngine::from_manifest(&m);
         let anon = AuthContext::anonymous();

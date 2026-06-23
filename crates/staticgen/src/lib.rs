@@ -202,6 +202,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
 
         let pages = generate_static_pages(&m);
@@ -230,6 +231,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
 
         let pages = generate_static_pages(&m);
@@ -262,6 +264,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
 
         let pages = generate_static_pages(&m);
@@ -318,6 +321,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
 
         let pages = generate_static_pages(&m);

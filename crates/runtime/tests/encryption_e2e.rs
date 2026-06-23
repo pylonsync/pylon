@@ -67,6 +67,7 @@ fn manifest_with_encrypted_ssn() -> AppManifest {
         auth: Default::default(),
         llm: Default::default(),
         connections: vec![],
+        crons: vec![],
     }
 }
 

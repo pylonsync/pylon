@@ -136,6 +136,7 @@ fn test_manifest() -> AppManifest {
         auth: Default::default(),
         llm: Default::default(),
         connections: vec![],
+        crons: vec![],
     }
 }
 

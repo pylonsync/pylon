@@ -135,6 +135,24 @@ pub struct AppManifest {
     /// created `_Connection` entity (AEAD-encrypted at rest).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub connections: Vec<ManifestConnection>,
+    /// Recurring jobs declared via the SDK's `cron(schedule, functionName)`
+    /// helper in app.ts. At boot the runtime registers each with the cron
+    /// scheduler, firing the named function every time the schedule matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub crons: Vec<ManifestCron>,
+}
+
+/// One recurring job: run `function` on the `schedule` (a 5-field cron
+/// expression). Emitted by the SDK's `cron(...)` helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestCron {
+    /// 5-field cron expression, e.g. `"0 * * * *"`.
+    pub schedule: String,
+    /// Name of the function (query/mutation/action) to run.
+    pub function: String,
+    /// Optional human description.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// One external OAuth integration. Emitted by the SDK's
@@ -753,6 +771,35 @@ pub struct ManifestPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manifest_deserializes_crons_from_sdk_shape() {
+        // The manifest is built in TS (SDK `cron(schedule, fn)` → buildManifest)
+        // and deserialized here. This pins the field names so a rename on
+        // either side can't silently drop every app cron. Shape mirrors the
+        // SDK's `{ schedule, function, description? }`.
+        let json = r#"{
+            "manifest_version": 1, "name": "t", "version": "0",
+            "entities": [], "routes": [], "queries": [], "actions": [], "policies": [],
+            "crons": [
+              { "schedule": "0 * * * *", "function": "hourlyRollup" },
+              { "schedule": "*/5 * * * *", "function": "pollInbox", "description": "poll" }
+            ]
+        }"#;
+        let m: AppManifest = serde_json::from_str(json).expect("deserialize manifest with crons");
+        assert_eq!(m.crons.len(), 2);
+        assert_eq!(m.crons[0].schedule, "0 * * * *");
+        assert_eq!(m.crons[0].function, "hourlyRollup");
+        assert_eq!(m.crons[0].description, None);
+        assert_eq!(m.crons[1].function, "pollInbox");
+        assert_eq!(m.crons[1].description.as_deref(), Some("poll"));
+
+        // A manifest with no `crons` key (older apps) defaults to empty.
+        let no_crons = r#"{ "manifest_version": 1, "name": "t", "version": "0",
+            "entities": [], "routes": [] }"#;
+        let m2: AppManifest = serde_json::from_str(no_crons).expect("deserialize without crons");
+        assert!(m2.crons.is_empty());
+    }
 
     #[test]
     fn exit_code_values() {

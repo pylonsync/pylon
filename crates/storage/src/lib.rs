@@ -883,6 +883,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 
@@ -949,6 +950,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let plan = adapter.plan_schema(&manifest).unwrap();
         assert!(plan.is_empty());
@@ -1205,6 +1207,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan.is_empty());
@@ -1278,6 +1281,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan.operations.iter().any(|op| matches!(op, SchemaOperation::AddField { entity, field } if entity == "User" && field.name == "name")));
@@ -1342,6 +1346,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(plan
@@ -1448,6 +1453,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
 
@@ -1539,6 +1545,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         assert!(
@@ -1594,6 +1601,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let plan = plan_from_snapshot(&snapshot, &manifest);
         let drops_pkey = plan.operations.iter().any(|op| {
@@ -1678,6 +1686,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 

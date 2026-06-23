@@ -1,0 +1,76 @@
+---
+title: Scheduling
+description: "Recurring cron jobs + one-shot deferred work — run functions on a schedule with no extra infrastructure."
+---
+
+Pylon runs background work with the **same functions** you already write — no separate worker process, queue service, or cron daemon. There are two shapes: **recurring** (cron) and **one-shot** (deferred).
+
+## Recurring: `cron(...)`
+
+Declare a cron in your manifest. It fires a function every time the schedule matches (the scheduler checks once a minute).
+
+```ts app.ts
+import { buildManifest, cron, discoverAppRoutes } from "@pylonsync/sdk";
+
+export default buildManifest({
+  name: "myapp",
+  version: "0.1.0",
+  entities: [/* ... */],
+  routes: await discoverAppRoutes(),
+  crons: [
+    cron("0 * * * *", "hourlyRollup"),      // every hour, on the hour
+    cron("*/5 * * * *", "pollInbox"),       // every 5 minutes
+    cron("0 9 * * 1", "weeklyDigest"),      // Mondays at 09:00
+  ],
+});
+```
+
+The second argument is the name of a function in `functions/` — a normal `query` / `mutation` / `action`:
+
+```ts functions/hourlyRollup.ts
+import { mutation } from "@pylonsync/functions";
+
+export default mutation({
+  internal: true,          // not reachable over HTTP — only the scheduler runs it
+  args: {},
+  async handler(ctx) {
+    ctx.auth.elevate({ admin: true });   // crons run anonymous; elevate to bypass policies
+    // ... do the recurring work ...
+  },
+});
+```
+
+<Note>
+  **Make cron functions `internal: true`.** A cron function is also a regular function, so without `internal: true` it's reachable at `/api/fn/<name>`. Marking it internal means only the scheduler (and `ctx.runMutation`) can invoke it.
+</Note>
+
+**Auth.** A cron has no caller, so it runs with **anonymous** auth — the same as Pylon's own built-in maintenance jobs. If the work needs to bypass entity policies (most maintenance does), call `ctx.auth.elevate({ admin: true })` at the top of the handler. Pylon never grants admin to a cron implicitly.
+
+**Schedule format.** Standard 5-field cron: `minute hour day-of-month month day-of-week`. A schedule that doesn't parse, or a `function` name that isn't registered, is logged loudly at boot and skipped — so a typo fails visibly in `pylon dev` instead of silently never running.
+
+**Durability.** Cron jobs are backed by a persistent job store, so a fire that's in flight survives a restart, and the schedule resumes after a redeploy.
+
+<Warning>
+  **One scheduler per process.** Each running Pylon process schedules crons independently, so an app scaled to **N replicas** fires each cron **N times** per tick (the same as Pylon's built-in maintenance jobs). For a single-machine app — the default — that's exactly once. If you run multiple replicas (`replicas > 1`), either keep cron handlers **idempotent** (guard on a row you write — most maintenance is naturally idempotent) or run the scheduled work on a single machine. Cross-replica leader election for crons is on the roadmap; until then, idempotency is the contract.
+</Warning>
+
+## One-shot: `ctx.scheduler`
+
+To run something later (not on a repeating schedule), schedule it from inside a mutation or action:
+
+```ts
+// run a function after a delay
+await ctx.scheduler.runAfter(60_000, "sendReminder", { todoId });   // 60s later
+
+// run at a specific time
+await ctx.scheduler.runAt(dueDate.getTime(), "expireHold", { holdId });
+
+// cancel a pending run
+await ctx.scheduler.cancel(scheduleId);
+```
+
+The scheduled function runs with the **auth identity of the caller** that scheduled it (the chain-of-custody is enforced at schedule time), and the `args` you pass are delivered verbatim. Like crons, these are durable across restarts.
+
+<Tip>
+  Before `cron(...)` existed, the idiom for recurring work was a **self-perpetuating** function — one that re-armed itself with `ctx.scheduler.runAfter(...)` at the end. That still works, but `cron(...)` is clearer and can't silently stop if a re-arm is missed.
+</Tip>

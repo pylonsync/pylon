@@ -319,6 +319,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 

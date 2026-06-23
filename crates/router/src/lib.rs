@@ -1184,6 +1184,11 @@ pub(crate) fn redact_email(email: &str) -> String {
 /// `allow_insert`, etc. — but keeps policy name + entity + action so
 /// client tooling can map a "policy denied: ownerReadTodos" error to
 /// the human label without seeing the raw rule.
+///
+/// Also drops `crons`: a cron targets an `internal: true` function (which
+/// the `/api/fn/<name>` router already 404s to anonymous callers to avoid
+/// probing), and the schedule reveals the app's internal job cadence —
+/// neither is something the client needs to render or call.
 fn public_manifest(m: &pylon_kernel::AppManifest) -> pylon_kernel::AppManifest {
     let mut out = m.clone();
     for p in out.policies.iter_mut() {
@@ -1193,6 +1198,7 @@ fn public_manifest(m: &pylon_kernel::AppManifest) -> pylon_kernel::AppManifest {
         p.allow_update = None;
         p.allow_delete = None;
     }
+    out.crons.clear();
     out
 }
 
@@ -2588,6 +2594,7 @@ mod field_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 
@@ -2636,6 +2643,7 @@ mod field_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let row = serde_json::json!({
             "label": "ok", "apiKey": "sk_secret", "ssn": "123-45-6789"
@@ -2685,6 +2693,7 @@ mod field_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let row = serde_json::json!({ "id": "p1", "title": "hi", "body": "there" });
         let out = strip_server_only_fields(&manifest, "PublicPost", row.clone());
@@ -2772,6 +2781,7 @@ mod field_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let payload = serde_json::json!({ "title": "new" });
         assert!(reject_readonly_payload(
@@ -3072,6 +3082,7 @@ mod auth_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 
@@ -4302,6 +4313,7 @@ mod auth_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let store = StubDataStore {
             manifest: manifest.clone(),
@@ -4682,6 +4694,7 @@ mod auth_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let store = TwoOwnerStore {
             manifest: manifest.clone(),
@@ -4896,6 +4909,7 @@ mod auth_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let store = TwoTenantStore {
             manifest: manifest.clone(),
@@ -5198,6 +5212,7 @@ mod auth_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 
@@ -5619,6 +5634,11 @@ mod auth_gate_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![pylon_kernel::ManifestCron {
+                schedule: "0 * * * *".into(),
+                function: "internalRollup".into(),
+                description: None,
+            }],
         };
         let pub_m = super::public_manifest(&m);
         let p = &pub_m.policies[0];
@@ -5630,6 +5650,10 @@ mod auth_gate_tests {
         assert_eq!(p.allow, "");
         assert!(p.allow_read.is_none());
         assert!(p.allow_update.is_none());
+        // Crons dropped entirely — internal function names + the job
+        // schedule must not leak to anonymous /api/manifest callers.
+        assert!(pub_m.crons.is_empty());
+        assert_eq!(m.crons.len(), 1, "input manifest not mutated");
         // The full manifest still has them — sanity check the test
         // didn't accidentally mutate the input.
         assert_eq!(
@@ -6036,6 +6060,7 @@ mod user_projection_tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
         let store = LeakyUserStore { manifest };
         let (status, body) = handle_get(&store, "User", "u-1");

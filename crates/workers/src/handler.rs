@@ -412,6 +412,7 @@ fn empty_manifest() -> pylon_kernel::AppManifest {
         auth: Default::default(),
         llm: Default::default(),
         connections: vec![],
+        crons: vec![],
     }
 }
 

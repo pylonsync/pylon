@@ -650,6 +650,20 @@ export interface ManifestPolicy {
 
 export const MANIFEST_VERSION = 1;
 
+/** A recurring job: run a function on a cron schedule. Declared in the
+ *  manifest via `cron(schedule, functionName)`; the runtime fires the named
+ *  function (anonymous auth — `ctx.auth.elevate({ admin: true })` inside if it
+ *  needs to bypass policies) every time the schedule matches. */
+export interface ManifestCron {
+  /** Standard 5-field cron expression, e.g. `"0 * * * *"` (every hour). */
+  schedule: string;
+  /** Name of the function (query/mutation/action) to run. Should be an
+   *  `internal: true` function so it isn't also reachable over HTTP. */
+  function: string;
+  /** Optional human description, surfaced by `pylon status` / tooling. */
+  description?: string;
+}
+
 export interface AppManifest {
   manifest_version: number;
   name: string;
@@ -665,6 +679,42 @@ export interface AppManifest {
   /** Declared OAuth integrations. Auto-creates the `_Connection`
    *  entity at runtime boot. */
   connections?: ManifestConnection[];
+  /** Recurring jobs — run a function on a cron schedule. */
+  crons?: ManifestCron[];
+}
+
+/**
+ * Declare a recurring job. Runs the named function every time the cron
+ * `schedule` matches (the runtime checks once a minute).
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   crons: [
+ *     cron("0 * * * *", "hourlyRollup"),     // every hour, on the hour
+ *     cron("15 3 * * *", "nightlyCleanup"),   // daily at 03:15
+ *   ],
+ * });
+ * ```
+ *
+ * `functionName` is a function in `functions/` — make it `internal: true`
+ * so it isn't also exposed over HTTP. It runs with anonymous auth; call
+ * `ctx.auth.elevate({ admin: true })` inside if it needs to bypass policies.
+ *
+ * Each Pylon process runs its own scheduler, so an app on multiple replicas
+ * fires each cron once per replica — keep handlers idempotent, or run a
+ * single machine.
+ */
+export function cron(
+  schedule: string,
+  functionName: string,
+  opts?: { description?: string }
+): ManifestCron {
+  return {
+    schedule,
+    function: functionName,
+    ...(opts?.description ? { description: opts.description } : {}),
+  };
 }
 
 export function entitiesToManifest(
@@ -1352,6 +1402,7 @@ export function buildManifest(options: {
   auth?: ManifestAuthConfig;
   llm?: ManifestLlmConfig;
   connections?: ManifestConnection[];
+  crons?: ManifestCron[];
 }): AppManifest {
   // Pull policies attached via the fluent `e.entity().policies(...)`
   // chain onto the top-level policies list. Without this, fluent
@@ -1395,6 +1446,9 @@ export function buildManifest(options: {
       : {}),
     ...(options.connections && options.connections.length > 0
       ? { connections: options.connections }
+      : {}),
+    ...(options.crons && options.crons.length > 0
+      ? { crons: options.crons }
       : {}),
   };
 }

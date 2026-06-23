@@ -1148,6 +1148,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         }
     }
 
@@ -1506,6 +1507,7 @@ mod tests {
             auth: Default::default(),
             llm: Default::default(),
             connections: vec![],
+            crons: vec![],
         };
 
         let plan = adapter.plan_schema(&manifest).unwrap();

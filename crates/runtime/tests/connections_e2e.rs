@@ -36,6 +36,7 @@ fn manifest_with_google() -> AppManifest {
             provider: "google".into(),
             scopes: "email profile".into(),
         }],
+        crons: vec![],
     }
 }
 

@@ -5056,6 +5056,86 @@ fn register_function_job_handlers(ops: &Arc<FnOpsImpl>, job_queue: &Arc<crate::j
     }
 }
 
+/// Register app-declared cron jobs (`manifest.crons`) with the cron
+/// `scheduler`. Each task fires the named function every time its schedule
+/// matches (the scheduler checks once a minute).
+///
+/// The function runs with ANONYMOUS auth — same as the framework's built-in
+/// crons — because a cron has no caller. A handler that needs to bypass entity
+/// policies should `ctx.auth.elevate({ admin: true })` itself; we don't grant
+/// admin implicitly. A cron whose function isn't registered, or whose schedule
+/// won't parse, is logged loudly and skipped, so a typo fails visibly at boot
+/// instead of silently never running.
+///
+/// The task is named `cron:<function>` (distinct from the `<function>` handler
+/// registered by `register_function_job_handlers`), so a cron never clobbers
+/// the `ctx.scheduler.runAfter("<function>", …)` one-shot path.
+pub(crate) fn register_app_crons(
+    scheduler: &Arc<crate::scheduler::Scheduler>,
+    ops: &Arc<FnOpsImpl>,
+    crons: &[pylon_kernel::ManifestCron],
+) {
+    use pylon_router::FnOps as _;
+
+    if crons.is_empty() {
+        return;
+    }
+    let known: std::collections::HashSet<String> =
+        ops.registry.list().into_iter().map(|d| d.name).collect();
+
+    for c in crons {
+        if !known.contains(&c.function) {
+            tracing::error!(
+                "[cron] schedule \"{}\" targets function \"{}\" which is not registered — skipping. Add functions/{}.ts (internal: true) or fix the name.",
+                c.schedule,
+                c.function,
+                c.function
+            );
+            continue;
+        }
+
+        let weak = Arc::downgrade(ops);
+        let fn_name = c.function.clone();
+        let task_name = format!("cron:{}", c.function);
+        let handler: crate::jobs::JobHandler = Arc::new(move |_job: &crate::jobs::Job| {
+            let ops = match weak.upgrade() {
+                Some(o) => o,
+                None => {
+                    return crate::jobs::JobResult::Failure(
+                        "RUNTIME_GONE: function ops dropped".into(),
+                    )
+                }
+            };
+            // Anonymous, like the framework crons. The handler can elevate.
+            let auth = FnAuth {
+                user_id: None,
+                is_admin: false,
+                tenant_id: None,
+                roles: Vec::new(),
+            };
+            match ops.call(&fn_name, serde_json::json!({}), auth, None, None) {
+                Ok(_) => crate::jobs::JobResult::Success,
+                Err(e) => crate::jobs::JobResult::Retry(format!("{}: {}", e.code, e.message)),
+            }
+        });
+
+        match scheduler.schedule(&task_name, &c.schedule, handler) {
+            Ok(()) => tracing::info!(
+                "[cron] {} → fires \"{}\" on schedule \"{}\"",
+                task_name,
+                c.function,
+                c.schedule
+            ),
+            Err(e) => tracing::error!(
+                "[cron] invalid schedule \"{}\" for function \"{}\": {} — skipping",
+                c.schedule,
+                c.function,
+                e
+            ),
+        }
+    }
+}
+
 /// Route nested `RunFn` calls (action → query/mutation) through a
 /// transactional wrapper so nested mutations get their own BEGIN/COMMIT.
 ///
