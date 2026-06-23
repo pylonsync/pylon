@@ -5117,12 +5117,7 @@ pub(crate) fn register_app_crons(
             // and must execute on this replica, not be deduped against whatever
             // replica happens to own the current minute's scheduled tick (which
             // would silently report success while doing nothing).
-            let is_manual = job
-                .payload
-                .get("manual_trigger")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !is_manual {
+            if !job_is_manual_trigger(job) {
                 if let CronLease::Skip = claim_cron_lease(&ops, &fn_name, job) {
                     return crate::jobs::JobResult::Success;
                 }
@@ -5176,6 +5171,7 @@ pub(crate) fn register_app_crons(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum CronLease {
     Run,
     Skip,
@@ -5200,50 +5196,39 @@ enum CronLease {
 /// processes on one host share a hostname and would otherwise collide.
 fn replica_id() -> &'static str {
     static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    ID.get_or_init(|| {
-        // Already-unique-per-replica sources: trust verbatim.
-        for key in ["PYLON_REPLICA_ID", "FLY_MACHINE_ID", "FLY_ALLOC_ID"] {
-            if let Ok(v) = std::env::var(key) {
-                let v = v.trim().to_string();
-                if !v.is_empty() {
-                    return v;
-                }
-            }
-        }
-        // Shared-identity sources: disambiguate same-host processes with the
-        // pid so two replicas on one box don't claim the same owner.
-        let base = std::env::var("HOSTNAME")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-            .unwrap_or_else(|| "local".to_string());
-        format!("{base}:{}", std::process::id())
-    })
+    ID.get_or_init(|| compute_replica_id(|k| std::env::var(k).ok(), std::process::id()))
 }
 
-/// Claim the per-minute lease for `fn_name`. Returns `Run` if THIS replica
-/// should fire the cron, `Skip` if a DIFFERENT replica already owns this
-/// `(function, minute)`. The atomicity is the unique `leaseKey` on
-/// `_CronLease`: only one insert of `<fn>:<minute>` succeeds across all
-/// replicas that share a (Postgres) datastore.
-///
-/// On a unique conflict we read the existing row's `owner`: if it's **ours**,
-/// this is our own retry or a job restored after a mid-run crash — re-run it,
-/// because only the election WINNER ever reaches a retry (a loser returned
-/// `Success` and never retried). If the owner is another replica's, that
-/// replica won — `Skip`. On any non-conflict error — including no `_CronLease`
-/// table — we **fail open** and fire, preserving simple per-replica behavior
-/// rather than silently dropping the run.
-///
-/// The minute is derived from the SCHEDULED tick timestamp the scheduler
-/// stamped into the job payload — NOT the wall clock at execution time. Each
-/// replica's scheduler fires a given cron exactly once per matching minute and
-/// stamps a timestamp inside that minute, so every replica computes the same
-/// `leaseKey` for the same logical fire even if their workers run the handler a
-/// few seconds apart (worker latency must never push two replicas onto opposite
-/// sides of a minute boundary and double-fire). Falls back to the wall clock
-/// only if the payload somehow lacks a timestamp.
-fn claim_cron_lease(ops: &Arc<FnOpsImpl>, fn_name: &str, job: &crate::jobs::Job) -> CronLease {
+/// Pure core of [`replica_id`] — extracted so the env precedence + pid-append
+/// rules are unit-testable without touching real env/pid. See [`replica_id`]
+/// for the why.
+fn compute_replica_id(get: impl Fn(&str) -> Option<String>, pid: u32) -> String {
+    let clean = |k: &str| {
+        get(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    // Already-unique-per-replica sources: trust verbatim.
+    for key in ["PYLON_REPLICA_ID", "FLY_MACHINE_ID", "FLY_ALLOC_ID"] {
+        if let Some(v) = clean(key) {
+            return v;
+        }
+    }
+    // Shared-identity sources: disambiguate same-host processes with the pid so
+    // two replicas on one box don't claim the same owner.
+    let base = clean("HOSTNAME").unwrap_or_else(|| "local".to_string());
+    format!("{base}:{pid}")
+}
+
+/// The minute bucket a cron fire belongs to, derived from the SCHEDULED tick
+/// timestamp the scheduler stamped into the job payload — NOT the wall clock at
+/// execution time. Every replica's scheduler fires a given cron once per
+/// matching minute and stamps a timestamp inside that minute, so all replicas
+/// compute the same bucket for the same logical fire even if their workers run
+/// the handler a few seconds apart (worker latency must never push two replicas
+/// onto opposite sides of a minute boundary and double-fire). Falls back to the
+/// wall clock only if the payload somehow lacks a timestamp.
+fn cron_lease_minute(job: &crate::jobs::Job) -> u64 {
     let scheduled_secs = job
         .payload
         .get("timestamp")
@@ -5254,7 +5239,211 @@ fn claim_cron_lease(ops: &Arc<FnOpsImpl>, fn_name: &str, job: &crate::jobs::Job)
                 .map(|d| d.as_secs())
                 .unwrap_or(0)
         });
-    let minute = scheduled_secs / 60;
+    scheduled_secs / 60
+}
+
+/// A MANUAL trigger (`Scheduler::trigger` → `/api/scheduler/trigger`) carries
+/// `manual_trigger: true`. It must bypass the lease entirely — an explicit
+/// admin "run it now" has to execute on this replica, not dedupe against
+/// whatever replica owns the current minute's scheduled tick.
+fn job_is_manual_trigger(job: &crate::jobs::Job) -> bool {
+    job.payload
+        .get("manual_trigger")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// The Run/Skip decision once a lease INSERT lost the unique race. `me` is this
+/// replica's owner; `existing_owner` is what the held row reports. Re-run only
+/// when the lease is ours (own retry / restored-after-crash) — only the
+/// election winner ever reaches a retry, since a loser returned `Success` and
+/// never retried. A different owner means another replica won → `Skip`. An
+/// unreadable owner (raced with the pruner) fails open to `Run` rather than
+/// dropping the fire.
+fn lease_decision_on_conflict(existing_owner: Option<&str>, me: &str) -> CronLease {
+    match existing_owner {
+        Some(o) if o == me => CronLease::Run,
+        Some(_) => CronLease::Skip,
+        None => CronLease::Run,
+    }
+}
+
+#[cfg(test)]
+mod cron_lease_logic_tests {
+    //! Unit coverage for the cron-lease DECISION logic — the parts where the
+    //! Codex review found real bugs. Each test names the regression class it
+    //! locks down. (The data-layer invariants — entity injection, the UNIQUE
+    //! conflict, owner read-back — are covered in tests/cron_lease_e2e.rs.)
+    use super::{
+        compute_replica_id, cron_lease_minute, job_is_manual_trigger, lease_decision_on_conflict,
+        CronLease,
+    };
+
+    fn job_with_payload(payload: serde_json::Value) -> crate::jobs::Job {
+        crate::jobs::Job {
+            id: "j1".into(),
+            name: "cron:tick".into(),
+            payload,
+            priority: crate::jobs::Priority::Normal,
+            status: crate::jobs::JobStatus::Pending,
+            max_retries: 3,
+            retry_count: 0,
+            created_at: "1970-01-01T00:00:00Z".into(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+            delay_secs: 0,
+            queue: "default".into(),
+            auth: None,
+        }
+    }
+
+    // --- owner-match: the multi-replica single-fire core (Codex P1 + P2-B) ---
+
+    #[test]
+    fn conflict_with_another_owner_skips() {
+        // A loser must NOT re-run — that's the double-fire bug.
+        assert_eq!(
+            lease_decision_on_conflict(Some("replica-b"), "replica-a"),
+            CronLease::Skip
+        );
+    }
+
+    #[test]
+    fn conflict_with_own_owner_runs() {
+        // Our own retry / restored-after-crash job re-runs (durability).
+        assert_eq!(
+            lease_decision_on_conflict(Some("replica-a"), "replica-a"),
+            CronLease::Run
+        );
+    }
+
+    #[test]
+    fn conflict_with_unreadable_owner_fails_open() {
+        // Raced with the pruner / read returned no owner → fire rather than
+        // silently drop the run.
+        assert_eq!(
+            lease_decision_on_conflict(None, "replica-a"),
+            CronLease::Run
+        );
+    }
+
+    // --- process-unique owner (Codex P2-B: HOSTNAME collision) ---
+
+    #[test]
+    fn replica_id_prefers_unique_sources_verbatim() {
+        let env = |k: &str| match k {
+            "PYLON_REPLICA_ID" => Some("explicit-1".to_string()),
+            "FLY_MACHINE_ID" => Some("fly-m".to_string()),
+            "HOSTNAME" => Some("box".to_string()),
+            _ => None,
+        };
+        // PYLON_REPLICA_ID wins, and is NOT pid-suffixed (operator owns it).
+        assert_eq!(compute_replica_id(env, 42), "explicit-1");
+    }
+
+    #[test]
+    fn replica_id_uses_fly_machine_when_no_explicit() {
+        let env = |k: &str| match k {
+            "FLY_MACHINE_ID" => Some("fly-m".to_string()),
+            "HOSTNAME" => Some("box".to_string()),
+            _ => None,
+        };
+        assert_eq!(compute_replica_id(env, 42), "fly-m");
+    }
+
+    #[test]
+    fn replica_id_appends_pid_to_shared_hostname() {
+        // Two processes on ONE host share HOSTNAME — the pid suffix keeps their
+        // owners distinct, or the loser would see owner == me and double-fire.
+        let env = |k: &str| match k {
+            "HOSTNAME" => Some("shared-box".to_string()),
+            _ => None,
+        };
+        assert_eq!(compute_replica_id(&env, 100), "shared-box:100");
+        assert_eq!(compute_replica_id(&env, 101), "shared-box:101");
+        assert_ne!(
+            compute_replica_id(&env, 100),
+            compute_replica_id(&env, 101),
+            "same-host processes must get distinct owners"
+        );
+    }
+
+    #[test]
+    fn replica_id_falls_back_to_local_pid() {
+        let env = |_: &str| None;
+        assert_eq!(compute_replica_id(env, 7), "local:7");
+    }
+
+    #[test]
+    fn replica_id_skips_blank_env() {
+        // An exported-but-empty PYLON_REPLICA_ID must not become the owner.
+        let env = |k: &str| match k {
+            "PYLON_REPLICA_ID" => Some("   ".to_string()),
+            "HOSTNAME" => Some("box".to_string()),
+            _ => None,
+        };
+        assert_eq!(compute_replica_id(env, 9), "box:9");
+    }
+
+    // --- scheduled-minute keying (Codex round-1: minute-boundary double-fire) ---
+
+    #[test]
+    fn lease_minute_uses_scheduled_timestamp_not_now() {
+        // 1_680_000_000 is exactly minute 28_000_000.
+        let j = job_with_payload(
+            serde_json::json!({ "scheduled": true, "timestamp": 1_680_000_000_u64 }),
+        );
+        assert_eq!(cron_lease_minute(&j), 28_000_000);
+    }
+
+    #[test]
+    fn lease_minute_is_stable_within_a_minute() {
+        // Two replicas stamping different seconds inside the SAME minute must
+        // bucket identically (same leaseKey) — else worker latency double-fires.
+        let early = job_with_payload(serde_json::json!({ "timestamp": 1_680_000_001_u64 }));
+        let late = job_with_payload(serde_json::json!({ "timestamp": 1_680_000_059_u64 }));
+        assert_eq!(cron_lease_minute(&early), cron_lease_minute(&late));
+        // The next minute is a different bucket (cron fires again).
+        let next = job_with_payload(serde_json::json!({ "timestamp": 1_680_000_060_u64 }));
+        assert_eq!(cron_lease_minute(&next), cron_lease_minute(&early) + 1);
+    }
+
+    // --- manual-trigger bypass (Codex P2-A) ---
+
+    #[test]
+    fn manual_trigger_is_detected() {
+        let manual = job_with_payload(
+            serde_json::json!({ "scheduled": true, "manual_trigger": true, "timestamp": 1_u64 }),
+        );
+        assert!(job_is_manual_trigger(&manual));
+    }
+
+    #[test]
+    fn scheduled_tick_is_not_manual() {
+        let tick = job_with_payload(serde_json::json!({ "scheduled": true, "timestamp": 1_u64 }));
+        assert!(!job_is_manual_trigger(&tick));
+        let empty = job_with_payload(serde_json::json!({}));
+        assert!(!job_is_manual_trigger(&empty));
+    }
+}
+
+/// Claim the per-minute lease for `fn_name`. Returns `Run` if THIS replica
+/// should fire the cron, `Skip` if a DIFFERENT replica already owns this
+/// `(function, minute)`. The atomicity is the unique `leaseKey` on
+/// `_CronLease`: only one insert of `<fn>:<minute>` succeeds across all
+/// replicas that share a (Postgres) datastore.
+///
+/// On a unique conflict we read the existing row's `owner` and defer to
+/// [`lease_decision_on_conflict`] (ours → re-run; another replica's → skip;
+/// unreadable → fail open). On any non-conflict error — including no
+/// `_CronLease` table — we **fail open** and fire, preserving simple
+/// per-replica behavior rather than silently dropping the run.
+///
+/// The minute comes from [`cron_lease_minute`] (the scheduled-tick timestamp,
+/// not execution wall-clock).
+fn claim_cron_lease(ops: &Arc<FnOpsImpl>, fn_name: &str, job: &crate::jobs::Job) -> CronLease {
+    let minute = cron_lease_minute(job);
     let lease_key = format!("{fn_name}:{minute}");
     let me = replica_id();
     match ops.runtime.insert(
@@ -5278,11 +5467,7 @@ fn claim_cron_lease(ops: &Arc<FnOpsImpl>, fn_name: &str, job: &crate::jobs::Job)
                             .first()
                             .and_then(|r| r.get("owner"))
                             .and_then(|v| v.as_str());
-                        match owner {
-                            Some(o) if o == me => CronLease::Run,
-                            Some(_) => CronLease::Skip,
-                            None => CronLease::Run,
-                        }
+                        lease_decision_on_conflict(owner, me)
                     }
                     Err(_) => CronLease::Run,
                 }
