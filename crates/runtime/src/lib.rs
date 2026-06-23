@@ -228,6 +228,75 @@ fn ensure_connection_entity(manifest: &mut AppManifest) {
     manifest.entities.push(connections::connection_entity());
 }
 
+/// Inject the framework-managed `_CronLease` entity when the app
+/// declares any `crons:`. This entity backs the per-(cron, minute)
+/// single-fire lease so an app scaled to N replicas runs each cron
+/// exactly once per tick instead of N times. Default-deny (no
+/// policy) keeps it server-only — it never syncs to clients.
+/// Idempotent: leave any existing `_CronLease` alone.
+fn ensure_cron_lease_entity(manifest: &mut AppManifest) {
+    if manifest.crons.is_empty() {
+        return;
+    }
+    if manifest.entities.iter().any(|e| e.name == "_CronLease") {
+        return;
+    }
+    manifest
+        .entities
+        .push(crate::datastore::cron_lease_entity());
+}
+
+/// Bootstrap the framework-internal `_CronLease` table on Postgres.
+///
+/// `open_postgres` deliberately does NOT auto-create app tables — schema is
+/// applied via `pylon migrate`, which reads the app's `pylon.manifest.json`.
+/// But `_CronLease` is injected at runtime boot and never appears in that
+/// file, so `pylon migrate` would never create it. Mirror the CRDT-sidecar
+/// bootstrap a few lines up: run idempotent `CREATE TABLE / INDEX IF NOT
+/// EXISTS` on every open. Without this, the cross-replica lease insert in
+/// `claim_cron_lease` hits a missing relation, fails open, and every replica
+/// fires the cron — exactly the behavior the lease exists to prevent.
+fn ensure_cron_lease_table_pg(
+    store: &pylon_storage::pg_datastore::PostgresDataStore,
+) -> Result<(), RuntimeError> {
+    let entity = crate::datastore::cron_lease_entity();
+    let fields: Vec<pylon_storage::FieldSpec> = entity
+        .fields
+        .iter()
+        .map(|f| pylon_storage::FieldSpec {
+            name: f.name.clone(),
+            field_type: f.field_type.clone(),
+            optional: f.optional,
+            unique: f.unique,
+        })
+        .collect();
+    let mut stmts = vec![pylon_storage::postgres::create_table_sql(
+        &entity.name,
+        &fields,
+    )];
+    for idx in &entity.indexes {
+        stmts.push(pylon_storage::postgres::create_index_sql(
+            &entity.name,
+            &idx.name,
+            &idx.fields,
+            idx.unique,
+            idx.where_clause.as_deref(),
+        ));
+    }
+    store
+        .with_client(|c| {
+            for stmt in &stmts {
+                c.execute(stmt.as_str(), &[])
+                    .map_err(|e| pylon_http::DataError {
+                        code: "PG_EXEC_FAILED".into(),
+                        message: format!("{e}"),
+                    })?;
+            }
+            Ok::<(), pylon_http::DataError>(())
+        })
+        .map_err(data_err_to_runtime)
+}
+
 /// When an app declares connections, `PYLON_ENCRYPTION_KEY` is
 /// REQUIRED — refresh tokens never live in plaintext. Codex P2
 /// fix: fail boot with a clear error rather than letting the
@@ -661,6 +730,17 @@ impl Runtime {
     /// migrated via a controlled, observable step, not as a side effect
     /// of the server starting up.
     pub fn open_postgres(url: &str, mut manifest: AppManifest) -> Result<Self, RuntimeError> {
+        // Inject framework-managed entities BEFORE building the store. The
+        // PostgresDataStore snapshots the manifest at construction and validates
+        // every insert/query entity name against that snapshot — so anything
+        // injected AFTER `connect` is invisible to the store, and every
+        // `_Connection`/`_CronLease` op fails `ENTITY_NOT_FOUND`. For the cron
+        // lease that's silent double-fire: the insert + the owner read-back both
+        // error, and a non-conflict error fails open to `Run` on every replica.
+        // (SQLite has no separate store snapshot — `from_connection` validates
+        // against the runtime's own manifest — so this only bites Postgres.)
+        ensure_connection_entity(&mut manifest);
+        ensure_cron_lease_entity(&mut manifest);
         let store = pylon_storage::pg_datastore::PostgresDataStore::connect(url, manifest.clone())
             .map_err(data_err_to_runtime)?;
         // Bootstrap the CRDT sidecar table on every open. Idempotent
@@ -674,7 +754,13 @@ impl Runtime {
                 code: "CRDT_SIDECAR_BOOTSTRAP_FAILED".into(),
                 message: format!("ensure pg crdt sidecar: {e}"),
             })?;
-        ensure_connection_entity(&mut manifest);
+        // `pylon migrate` never sees the injected `_CronLease` (it's not in the
+        // app's manifest file), so create its table here — idempotently — the
+        // same way the CRDT sidecar is bootstrapped above. SQLite gets it for
+        // free via `from_connection`'s CREATE TABLE IF NOT EXISTS pass.
+        if !manifest.crons.is_empty() {
+            ensure_cron_lease_table_pg(&store)?;
+        }
         validate_encrypted_fields(&manifest)?;
         // Encryption-key check happens after key load — see below.
         let entities: HashMap<String, ManifestEntity> = manifest
@@ -1396,6 +1482,7 @@ impl Runtime {
         })?;
 
         ensure_connection_entity(&mut manifest);
+        ensure_cron_lease_entity(&mut manifest);
         validate_encrypted_fields(&manifest)?;
         // Encryption key + connections requirement check must run
         // BEFORE schema init — a manifest declaring connections

@@ -139,7 +139,7 @@ Rules of thumb:
 
 - **Plain `ctx.db.*`** — the default. Acts as the caller. Use for anything that should reflect the user's view of the data.
 - **`ctx.db.unsafe.*`** — explicit bypass. Use for webhooks, cron sweeps, admin tooling, and anything that genuinely needs cross-tenant reads. Every call should have a justifying comment.
-- **Admin contexts bypass strict mode** — `auth.isAdmin === true` skips the gate the same way it bypasses entity-route policies. Ops scripts and the `ctx.auth.elevate({ admin: true })` path inside verified webhooks still work everywhere.
+- **Admin contexts bypass strict mode** — `auth.isAdmin === true` skips the gate the same way it bypasses entity-route policies. Ops scripts and the `ctx.auth.elevate({ admin: true, reason: "..." })` path inside verified webhooks still work everywhere (the `reason` is mandatory and audited).
 
 Strict mode is **opt-in for now** (one minor cycle) so existing apps can migrate at their own pace. The rollout plan:
 

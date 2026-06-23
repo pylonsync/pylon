@@ -1556,16 +1556,14 @@ fn start_server(
         );
     }
 
-    // Start 2 background workers.
-    let _worker_handles: Vec<_> = (0..2)
-        .map(|i| {
-            let w = Worker::new(Arc::clone(&job_queue), &format!("worker-{i}"));
-            w.start()
-        })
-        .collect();
-
-    // Start the scheduler.
-    let _scheduler_handle = Arc::clone(&scheduler).start();
+    // NOTE: background workers + the scheduler are intentionally NOT started
+    // here. They start AFTER every job handler is registered (built-in cleanup
+    // crons above, function handlers in `try_spawn_functions`, and app crons in
+    // `register_app_crons` below). Starting them now would let a worker dequeue
+    // a RESTORED function job before its handler exists; `fail()` re-enqueues
+    // with no delay, so the job can burn all its retries in a few hundred ms
+    // and dead-letter before the Bun runner finishes spawning (~1-2s). See the
+    // start site after `register_app_crons`.
 
     // Workflow engine: TS runner URL configurable via env, defaults to local Bun server.
     let wf_runner_url = std::env::var("PYLON_WORKFLOW_RUNNER_URL")
@@ -1731,6 +1729,20 @@ fn start_server(
         // tasks to it is picked up on the next tick.
         crate::datastore::register_app_crons(&scheduler, ops, &runtime.manifest().crons);
     }
+
+    // Now that EVERY job handler is registered (built-in cleanup crons,
+    // function handlers from `try_spawn_functions`, and app crons), start the
+    // background workers and the scheduler. Doing this here — not at queue
+    // construction — closes the boot race where a restored function job could
+    // dead-letter against a not-yet-registered handler.
+    let _worker_handles: Vec<_> = (0..2)
+        .map(|i| {
+            let w = Worker::new(Arc::clone(&job_queue), &format!("worker-{i}"));
+            w.start()
+        })
+        .collect();
+    let _scheduler_handle = Arc::clone(&scheduler).start();
+
     reactive_registry.start_runner();
 
     // Dev mode flag. Gates a *lot* of permissive behavior: magic codes

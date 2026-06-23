@@ -5083,6 +5083,7 @@ pub(crate) fn register_app_crons(
     let known: std::collections::HashSet<String> =
         ops.registry.list().into_iter().map(|d| d.name).collect();
 
+    let mut registered = 0u32;
     for c in crons {
         if !known.contains(&c.function) {
             tracing::error!(
@@ -5097,7 +5098,7 @@ pub(crate) fn register_app_crons(
         let weak = Arc::downgrade(ops);
         let fn_name = c.function.clone();
         let task_name = format!("cron:{}", c.function);
-        let handler: crate::jobs::JobHandler = Arc::new(move |_job: &crate::jobs::Job| {
+        let handler: crate::jobs::JobHandler = Arc::new(move |job: &crate::jobs::Job| {
             let ops = match weak.upgrade() {
                 Some(o) => o,
                 None => {
@@ -5106,6 +5107,26 @@ pub(crate) fn register_app_crons(
                     )
                 }
             };
+            // Single-fire across replicas: only the process that wins the
+            // per-minute `_CronLease` claim runs the function. A single-machine
+            // app always wins; with multiple replicas on a shared datastore
+            // exactly one fires per tick.
+            //
+            // A MANUAL trigger (`Scheduler::trigger` → `/api/scheduler/trigger`)
+            // bypasses the lease entirely: it's an explicit admin "run it now"
+            // and must execute on this replica, not be deduped against whatever
+            // replica happens to own the current minute's scheduled tick (which
+            // would silently report success while doing nothing).
+            let is_manual = job
+                .payload
+                .get("manual_trigger")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !is_manual {
+                if let CronLease::Skip = claim_cron_lease(&ops, &fn_name, job) {
+                    return crate::jobs::JobResult::Success;
+                }
+            }
             // Anonymous, like the framework crons. The handler can elevate.
             let auth = FnAuth {
                 user_id: None,
@@ -5120,12 +5141,15 @@ pub(crate) fn register_app_crons(
         });
 
         match scheduler.schedule(&task_name, &c.schedule, handler) {
-            Ok(()) => tracing::info!(
-                "[cron] {} → fires \"{}\" on schedule \"{}\"",
-                task_name,
-                c.function,
-                c.schedule
-            ),
+            Ok(()) => {
+                registered += 1;
+                tracing::info!(
+                    "[cron] {} → fires \"{}\" on schedule \"{}\"",
+                    task_name,
+                    c.function,
+                    c.schedule
+                );
+            }
             Err(e) => tracing::error!(
                 "[cron] invalid schedule \"{}\" for function \"{}\": {} — skipping",
                 c.schedule,
@@ -5133,6 +5157,206 @@ pub(crate) fn register_app_crons(
                 e
             ),
         }
+    }
+
+    // The single-fire lease writes one `_CronLease` row per cron per minute on
+    // the winning replica; sweep stale ones so the table doesn't grow forever.
+    if registered > 0 {
+        let weak = Arc::downgrade(ops);
+        let _ = scheduler.schedule(
+            "pylon.cronlease.cleanup",
+            "*/30 * * * *",
+            Arc::new(move |_job: &crate::jobs::Job| {
+                if let Some(ops) = weak.upgrade() {
+                    prune_cron_leases(&ops, 7200);
+                }
+                crate::jobs::JobResult::Success
+            }),
+        );
+    }
+}
+
+enum CronLease {
+    Run,
+    Skip,
+}
+
+/// A per-replica identity for THIS process, used as the `_CronLease.owner`.
+///
+/// The owner's ONLY job is to let the conflict path tell "my own retry" from
+/// "another replica won", so the overriding requirement is that it be DISTINCT
+/// per process — two replicas must never share an owner, or the loser reads
+/// `owner == me` and double-fires (the exact bug the lease prevents). A handler
+/// retry runs in the SAME process, so any stable per-process value matches
+/// itself and the retry re-runs; a job restored after a crash gets a fresh
+/// owner and simply skips that one tick (fine for a periodic cron — the next
+/// tick fires).
+///
+/// Resolution prefers an id that is ALREADY unique per replica and stable
+/// across restarts (operator-set `PYLON_REPLICA_ID`, or Fly's per-machine
+/// `FLY_MACHINE_ID` / `FLY_ALLOC_ID` — one Pylon process per machine), which
+/// also preserves restore-after-restart re-runs. For shared-identity sources
+/// (`HOSTNAME`, or none) it appends the OS pid, because multiple Pylon
+/// processes on one host share a hostname and would otherwise collide.
+fn replica_id() -> &'static str {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ID.get_or_init(|| {
+        // Already-unique-per-replica sources: trust verbatim.
+        for key in ["PYLON_REPLICA_ID", "FLY_MACHINE_ID", "FLY_ALLOC_ID"] {
+            if let Ok(v) = std::env::var(key) {
+                let v = v.trim().to_string();
+                if !v.is_empty() {
+                    return v;
+                }
+            }
+        }
+        // Shared-identity sources: disambiguate same-host processes with the
+        // pid so two replicas on one box don't claim the same owner.
+        let base = std::env::var("HOSTNAME")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "local".to_string());
+        format!("{base}:{}", std::process::id())
+    })
+}
+
+/// Claim the per-minute lease for `fn_name`. Returns `Run` if THIS replica
+/// should fire the cron, `Skip` if a DIFFERENT replica already owns this
+/// `(function, minute)`. The atomicity is the unique `leaseKey` on
+/// `_CronLease`: only one insert of `<fn>:<minute>` succeeds across all
+/// replicas that share a (Postgres) datastore.
+///
+/// On a unique conflict we read the existing row's `owner`: if it's **ours**,
+/// this is our own retry or a job restored after a mid-run crash — re-run it,
+/// because only the election WINNER ever reaches a retry (a loser returned
+/// `Success` and never retried). If the owner is another replica's, that
+/// replica won — `Skip`. On any non-conflict error — including no `_CronLease`
+/// table — we **fail open** and fire, preserving simple per-replica behavior
+/// rather than silently dropping the run.
+///
+/// The minute is derived from the SCHEDULED tick timestamp the scheduler
+/// stamped into the job payload — NOT the wall clock at execution time. Each
+/// replica's scheduler fires a given cron exactly once per matching minute and
+/// stamps a timestamp inside that minute, so every replica computes the same
+/// `leaseKey` for the same logical fire even if their workers run the handler a
+/// few seconds apart (worker latency must never push two replicas onto opposite
+/// sides of a minute boundary and double-fire). Falls back to the wall clock
+/// only if the payload somehow lacks a timestamp.
+fn claim_cron_lease(ops: &Arc<FnOpsImpl>, fn_name: &str, job: &crate::jobs::Job) -> CronLease {
+    let scheduled_secs = job
+        .payload
+        .get("timestamp")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0)
+        });
+    let minute = scheduled_secs / 60;
+    let lease_key = format!("{fn_name}:{minute}");
+    let me = replica_id();
+    match ops.runtime.insert(
+        "_CronLease",
+        &serde_json::json!({ "leaseKey": lease_key, "at": (minute * 60) as i64, "owner": me }),
+    ) {
+        Ok(_) => CronLease::Run,
+        Err(e) => {
+            let m = e.to_string();
+            if m.contains("UNIQUE constraint failed") || m.contains("duplicate key") {
+                // Someone holds this minute's lease. Re-run only if it's us
+                // (own retry / restored-after-crash); otherwise another replica
+                // won. If we can't read the owner back (raced with the pruner,
+                // read error), fail open and fire rather than drop the run.
+                match ops
+                    .runtime
+                    .query_filtered("_CronLease", &serde_json::json!({ "leaseKey": lease_key }))
+                {
+                    Ok(rows) => {
+                        let owner = rows
+                            .first()
+                            .and_then(|r| r.get("owner"))
+                            .and_then(|v| v.as_str());
+                        match owner {
+                            Some(o) if o == me => CronLease::Run,
+                            Some(_) => CronLease::Skip,
+                            None => CronLease::Run,
+                        }
+                    }
+                    Err(_) => CronLease::Run,
+                }
+            } else {
+                tracing::warn!(
+                    "[cron] lease claim for \"{fn_name}\" errored ({m}); firing without cross-replica dedupe"
+                );
+                CronLease::Run
+            }
+        }
+    }
+}
+
+/// Delete `_CronLease` rows older than `max_age_secs`. Runs on a background
+/// sweep; best-effort (errors are swallowed — a missed sweep just leaves rows
+/// for the next one).
+fn prune_cron_leases(ops: &Arc<FnOpsImpl>, max_age_secs: u64) {
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_sub(max_age_secs) as i64;
+    let rows = match ops
+        .runtime
+        .query_filtered("_CronLease", &serde_json::json!({}))
+    {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+    for row in rows {
+        if row.get("at").and_then(|v| v.as_i64()).unwrap_or(i64::MAX) < cutoff {
+            if let Some(id) = row.get("id").and_then(|v| v.as_str()) {
+                let _ = ops.runtime.delete("_CronLease", id);
+            }
+        }
+    }
+}
+
+/// Manifest entity for `_CronLease` — the per-(cron, minute) single-fire lease.
+/// Injected at boot only when the app declares crons. No policy is registered
+/// for it, so it's default-denied to clients (it never syncs and isn't readable
+/// over HTTP); the runtime writes it server-side. `leaseKey` is unique, so
+/// concurrent inserts from multiple replicas collapse to one winner per minute;
+/// `owner` records WHICH replica won so its own retries / restored jobs re-run.
+pub(crate) fn cron_lease_entity() -> pylon_kernel::ManifestEntity {
+    use pylon_kernel::{ManifestField, ManifestIndex};
+    let field = |name: &str, ft: &str, unique: bool| ManifestField {
+        name: name.into(),
+        field_type: ft.into(),
+        optional: false,
+        unique,
+        crdt: None,
+        server_only: true,
+        readonly: false,
+        default: None,
+        enum_values: None,
+        encrypted: false,
+    };
+    pylon_kernel::ManifestEntity {
+        name: "_CronLease".into(),
+        fields: vec![
+            field("leaseKey", "string", true),
+            field("at", "int", false),
+            field("owner", "string", false),
+        ],
+        indexes: vec![ManifestIndex {
+            name: "_CronLease_key".into(),
+            fields: vec!["leaseKey".into()],
+            unique: true,
+            where_clause: None,
+        }],
+        relations: vec![],
+        search: None,
+        crdt: false,
     }
 }
 

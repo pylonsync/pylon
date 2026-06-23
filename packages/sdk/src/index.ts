@@ -652,8 +652,9 @@ export const MANIFEST_VERSION = 1;
 
 /** A recurring job: run a function on a cron schedule. Declared in the
  *  manifest via `cron(schedule, functionName)`; the runtime fires the named
- *  function (anonymous auth — `ctx.auth.elevate({ admin: true })` inside if it
- *  needs to bypass policies) every time the schedule matches. */
+ *  function with anonymous auth every time the schedule matches. Server-side
+ *  `ctx.db.*` is trusted, so a maintenance handler reads/writes its entities
+ *  directly without elevating. */
 export interface ManifestCron {
   /** Standard 5-field cron expression, e.g. `"0 * * * *"` (every hour). */
   schedule: string;
@@ -698,12 +699,19 @@ export interface AppManifest {
  * ```
  *
  * `functionName` is a function in `functions/` — make it `internal: true`
- * so it isn't also exposed over HTTP. It runs with anonymous auth; call
- * `ctx.auth.elevate({ admin: true })` inside if it needs to bypass policies.
+ * so it isn't also exposed over HTTP. It runs with anonymous auth, and a
+ * function's own `ctx.db.*` calls are server-side (not policy-gated), so a
+ * maintenance handler writes directly. Only call
+ * `ctx.auth.elevate({ admin: true, reason: "..." })` if it chains an
+ * `internal: true` function via `ctx.scheduler`, or you run with
+ * `PYLON_STRICT_FN_POLICIES=1`. The `reason` is mandatory (audited).
  *
- * Each Pylon process runs its own scheduler, so an app on multiple replicas
- * fires each cron once per replica — keep handlers idempotent, or run a
- * single machine.
+ * Multiple replicas: each Pylon process runs its own scheduler. On a SHARED
+ * datastore (Postgres — the cloud default), the runtime takes a per-minute
+ * lease so each cron fires exactly ONCE per tick across all replicas. On
+ * per-replica SQLite there's no shared lease, so each replica fires — keep
+ * handlers idempotent there (most maintenance work naturally is). A
+ * single-machine app always fires exactly once.
  */
 export function cron(
   schedule: string,
