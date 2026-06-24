@@ -706,6 +706,13 @@ const skillLine = skillInstalled
 		? `\nAdd the Pylon skill to your coding agent:\n  ${SKILL_INSTALL_CMD}\n`
 		: "";
 
+// Surface the in-repo operating manual. Pylon is agent-native: a coding agent
+// (Claude Code / Cursor / Codex) auto-reads AGENTS.md, so point the human at it
+// too. Only the full-stack templates ship one (platform sub-templates don't).
+const agentsLine = existsSync(join(root, "AGENTS.md"))
+	? "AGENTS.md is your coding agent's operating manual for this repo — it reads it first.\n"
+	: "";
+
 console.log(`
 ✓ Created ${projectName}
 
@@ -716,8 +723,7 @@ ${platformLines.join("\n")}
 
 Layout:
 ${layoutLines.join("\n")}
-${skillLine}
-Docs: https://docs.pylonsync.com
+${skillLine}${agentsLine}Docs: https://docs.pylonsync.com
 `);
 
 // ---------------------------------------------------------------------------

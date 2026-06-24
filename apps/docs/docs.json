@@ -2,7 +2,7 @@
   "$schema": "https://mintlify.com/docs.json",
   "theme": "maple",
   "name": "Pylon",
-  "description": "The realtime backend framework. Schema, policies, functions, live queries, auth — one binary.",
+  "description": "The agent-native full-stack framework. Schema, policies, functions, live queries, auth, SSR — one binary. Build real apps, not throwaway capsules.",
   "colors": {
     "primary": "#8B5CF6",
     "light": "#A78BFA",

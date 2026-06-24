@@ -1,6 +1,6 @@
 # AGENTS.md — working in a Pylon project
 
-Operating rules for a coding agent in this Pylon app. Pylon is a Rails-like framework for realtime apps: you declare entities, policies, and server functions in TypeScript, and a single Rust binary (`pylon`) serves the API, auth, sync, WebSocket, SSE, and native React 19 SSR — one process, one port. The full API reference is the **llms-full.txt** at https://docs.pylonsync.com/llms-full.txt. Read it before guessing an API name.
+Operating rules for a coding agent in this Pylon app. You — the agent — are a first-class user of Pylon: one Rust binary (`pylon`) serves the API, auth, sync, WebSocket, SSE, and native React 19 SSR from one process on one port, so you build, run, and ship a whole app without wiring services together or leaving the codebase. This is production infrastructure, not a sandbox — real auth, SQLite or Postgres, row-level policies, jobs, search, and one-command deploy — so build like it ships. You declare entities, policies, and server functions in TypeScript; the binary does the rest. The full API reference is the **llms-full.txt** at https://docs.pylonsync.com/llms-full.txt — read it before guessing an API name.
 
 ## Directory conventions
 

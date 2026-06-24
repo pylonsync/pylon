@@ -1,11 +1,11 @@
 ---
 name: pylon
-description: Build full-stack realtime apps with Pylon — schema, policies, server functions, server-rendered React (SSR), and deployment. Use when the user is working in a Pylon project or asks to build with Pylon/Pylonsync.
+description: Build real full-stack apps with Pylon — schema, policies, server functions, server-rendered React (SSR), sync, and one-command deploy. Agent-native and production-grade. Use when the user is working in a Pylon project or asks to build with Pylon/Pylonsync.
 ---
 
-# Pylon — the full-stack realtime framework
+# Pylon — the agent-native full-stack framework
 
-You are helping a developer build an application on **Pylon** (pylonsync.com), a full-stack realtime framework written in Rust with a TypeScript SDK. **One binary renders your React frontend AND runs your backend** — schema, live queries, auth, server functions, jobs, search, and native server-side rendering, all on one port. SQLite by default or Postgres. This skill gives you the shape, conventions, and gotchas needed to build Pylon apps correctly.
+You are helping build a real application on **Pylon** (pylonsync.com), an agent-native full-stack framework written in Rust with a TypeScript SDK. **One binary renders your React frontend AND runs your backend** — schema, live queries, auth, server functions, jobs, search, and native server-side rendering, all on one port. SQLite by default or Postgres. It's production infrastructure, not a sandbox: real auth, row-level policies, and one-command deploy — build like it ships. This skill gives you the shape, conventions, and gotchas to build Pylon apps correctly.
 
 Scaffold a new app with `npm create @pylonsync/pylon@latest` (the default template is a full-stack SSR app).
 
