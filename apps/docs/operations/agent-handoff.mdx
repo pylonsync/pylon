@@ -1,13 +1,13 @@
 ---
 title: Agent handoff
-description: "Sign your coding agent into Pylon Cloud with a one-time paste — no token in chat history."
+description: "Sign your coding agent into Pylon Cloud with a one-time paste."
 ---
 
 Pylon Cloud's dashboard can mint a one-time 8-character code that signs a coding agent (Claude Code, OpenAI Codex CLI, OpenCode, Cursor, Aider, grok build, anything that runs shell commands from a markdown prompt) into your account, installs the Pylon skill, and hands the agent an opening prompt to riff on. One paste, zero typing.
 
 ## Use it
 
-1. Sign in at [cloud.pylonsync.com](https://cloud.pylonsync.com).
+1. Sign in at [www.pylonsync.com](https://www.pylonsync.com/dashboard).
 2. Open an organization. The first card on the page is **Hand off to your coding agent**.
 3. Click **Generate prompt**. The dialog shows a short code (e.g. `ABCD-1234`) inside a paste-ready blurb.
 4. Click **Copy prompt**, paste into your coding agent, hit return.
@@ -45,7 +45,7 @@ If you're scripting and don't want to click through the UI, the `--code` exchang
 
 ```bash
 # from a script holding an existing CLI token in PYLON_TOKEN
-curl -s https://cloud.pylonsync.com/api/auth/api-keys \
+curl -s https://www.pylonsync.com/api/auth/api-keys \
   -H "Authorization: Bearer $PYLON_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"name":"CI agent · '"$(date +%F)"'"}'
