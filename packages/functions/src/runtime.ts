@@ -1046,6 +1046,13 @@ async function main() {
     // it — secure by default. See `packages/functions/src/define.ts`
     // for the developer-facing AuthMode docs.
     auth: def.auth ?? "user",
+    // Per-function call deadline in seconds. Null → the host uses its
+    // global PYLON_FN_CALL_TIMEOUT default. Drives both the call deadline
+    // and the wedge backstop for this function's worker.
+    timeout_secs:
+      typeof def.timeout === "number" && def.timeout > 0
+        ? Math.floor(def.timeout)
+        : null,
   }));
   send({ type: "ready", functions });
 

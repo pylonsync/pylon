@@ -5957,12 +5957,14 @@ fn spawn_runner_supervisor(
         .and_then(|s| s.parse().ok())
         .filter(|&n: &u64| n > 0)
         .unwrap_or(30); // mirrors functions::runner::DEFAULT_CALL_TIMEOUT
-    let probe_secs: u64 = std::env::var("PYLON_FN_WEDGE_PROBE_SECS")
+                        // An explicit PYLON_FN_WEDGE_PROBE_SECS acts as a FLOOR; the actual probe
+                        // window is computed per-tick below so it can stretch to the longest
+                        // per-function `timeout` the live worker declares (recomputed each loop so a
+                        // redeploy that changes a timeout is honored).
+    let explicit_probe_secs: Option<u64> = std::env::var("PYLON_FN_WEDGE_PROBE_SECS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .filter(|&n: &u64| n > 0)
-        .unwrap_or_else(|| default_wedge_probe_secs(effective_call_timeout_secs, wedge_strikes));
-    let probe = Duration::from_secs(probe_secs);
+        .filter(|&n: &u64| n > 0);
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
@@ -5980,6 +5982,20 @@ fn spawn_runner_supervisor(
                     strikes = 0;
                     continue;
                 }
+                // Size the wedge backstop to the longest call this worker can
+                // legitimately run: max(global call timeout, the largest
+                // per-function `timeout` override among its functions). A heavy
+                // call (e.g. a render that blocks the event loop) keeps the
+                // worker silent while it works, so the backstop must never fire
+                // before that call's own deadline. An explicit
+                // PYLON_FN_WEDGE_PROBE_SECS floors it but can't shorten it below
+                // what a declared-long function needs.
+                let effective_timeout =
+                    effective_call_timeout_secs.max(runner.max_fn_timeout_secs());
+                let probe_secs = explicit_probe_secs
+                    .unwrap_or(0)
+                    .max(default_wedge_probe_secs(effective_timeout, wedge_strikes));
+                let probe = Duration::from_secs(probe_secs);
                 // Alive — but is it WEDGED? Probe the io_lock. A free lock means
                 // the runtime is processing; a held-for->probe lock means a call
                 // is stuck.

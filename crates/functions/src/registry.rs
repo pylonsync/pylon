@@ -86,6 +86,14 @@ pub struct FnDef {
     /// deployments stay safe across a framework upgrade.
     #[serde(default)]
     pub auth: FnAuthMode,
+    /// Per-function call deadline in seconds, from the TS def's `timeout`
+    /// option. `None` → the host uses its global `PYLON_FN_CALL_TIMEOUT`.
+    /// Drives both this function's call deadline and the wedge backstop for
+    /// the worker running it, so a legitimately long call (heavy render, big
+    /// batch) isn't force-killed mid-flight. `#[serde(default)]` keeps older
+    /// TS runtimes (which don't emit the field) deserializing as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_secs: Option<u64>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -188,6 +196,7 @@ mod tests {
             args_schema: None,
             internal: false,
             auth: FnAuthMode::User,
+            timeout_secs: None,
         });
         reg.register(FnDef {
             name: "getLots".into(),
@@ -195,6 +204,7 @@ mod tests {
             args_schema: None,
             internal: false,
             auth: FnAuthMode::User,
+            timeout_secs: None,
         });
 
         assert_eq!(reg.count(), 2);
@@ -215,6 +225,7 @@ mod tests {
                 args_schema: None,
                 internal: false,
                 auth: FnAuthMode::User,
+                timeout_secs: None,
             },
             FnDef {
                 name: "b".into(),
@@ -222,6 +233,7 @@ mod tests {
                 args_schema: None,
                 internal: false,
                 auth: FnAuthMode::User,
+                timeout_secs: None,
             },
             FnDef {
                 name: "c".into(),
@@ -229,6 +241,7 @@ mod tests {
                 args_schema: None,
                 internal: false,
                 auth: FnAuthMode::User,
+                timeout_secs: None,
             },
             FnDef {
                 name: "d".into(),
@@ -236,6 +249,7 @@ mod tests {
                 args_schema: None,
                 internal: false,
                 auth: FnAuthMode::User,
+                timeout_secs: None,
             },
         ]);
 

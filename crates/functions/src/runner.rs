@@ -261,6 +261,13 @@ pub struct FnRunner {
     /// `unsafe_op`. None when the runtime hasn't wired it (older
     /// embeddings / wasm). See [`PolicyGate`] for the contract.
     policy_gate: Mutex<Option<std::sync::Arc<dyn PolicyGate>>>,
+    /// Per-function call deadline overrides (seconds), keyed by function name,
+    /// from each function's `timeout` option. Repopulated from the handshake
+    /// FnDefs on every start/respawn. A call to a function listed here uses its
+    /// timeout instead of the global `call_timeout`; the supervisor reads the
+    /// max (via [`max_fn_timeout_secs`]) so its wedge backstop never pre-empts
+    /// the longest legitimate call.
+    per_fn_timeouts: Mutex<std::collections::HashMap<String, u64>>,
 }
 
 impl FnRunner {
@@ -282,7 +289,46 @@ impl FnRunner {
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
             policy_gate: Mutex::new(None),
+            per_fn_timeouts: Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// Record per-function timeout overrides from the handshake FnDefs. Called
+    /// after every successful start/respawn so the map tracks the live worker's
+    /// functions (a redeploy can change timeouts).
+    pub(crate) fn record_fn_timeouts(&self, defs: &[crate::registry::FnDef]) {
+        let mut map = self.per_fn_timeouts.lock().unwrap();
+        map.clear();
+        for d in defs {
+            if let Some(secs) = d.timeout_secs {
+                if secs > 0 {
+                    map.insert(d.name.clone(), secs);
+                }
+            }
+        }
+    }
+
+    /// The call deadline for `fn_name`: its per-function `timeout` override if
+    /// set, else the global `call_timeout`.
+    fn deadline_for(&self, fn_name: &str) -> Duration {
+        if let Some(&secs) = self.per_fn_timeouts.lock().unwrap().get(fn_name) {
+            return Duration::from_secs(secs);
+        }
+        *self.call_timeout.lock().unwrap()
+    }
+
+    /// The largest per-function timeout (seconds) any registered function
+    /// declares, or 0 if none. The supervisor sizes its wedge backstop to
+    /// `max(global call timeout, this)` so a busy-but-progressing worker
+    /// running a long call isn't respawned out from under it.
+    pub fn max_fn_timeout_secs(&self) -> u64 {
+        self.per_fn_timeouts
+            .lock()
+            .unwrap()
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
     }
 
     /// Install the caller-aware policy gate. The runtime crate
@@ -428,6 +474,10 @@ impl FnRunner {
             command.to_string(),
             args.iter().map(|s| s.to_string()).collect(),
         ));
+        // Record per-function timeout overrides from this handshake so calls +
+        // the supervisor honor them. `respawn()` routes through `start()`, so a
+        // redeploy that changes a timeout is picked up here too.
+        self.record_fn_timeouts(&defs);
 
         Ok(defs)
     }
@@ -1024,7 +1074,10 @@ impl FnRunner {
         let mut caller_is_admin = auth.is_admin;
         let caller_user_id = auth.user_id.clone();
         let caller_tenant_id = auth.tenant_id.clone();
-        let timeout = *self.call_timeout.lock().unwrap();
+        // Per-function `timeout` override wins over the global call timeout, so a
+        // function declared long-running (heavy render, big batch) gets the time
+        // it needs instead of being recycled at the 30s default.
+        let timeout = self.deadline_for(fn_name);
         let deadline = Instant::now() + timeout;
 
         let call_id = format!("c_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
@@ -1953,6 +2006,46 @@ mod tests {
             message: "fail".into(),
         };
         assert_eq!(format!("{e}"), "[TEST] fail");
+    }
+
+    #[test]
+    fn per_function_timeout_overrides_global_and_feeds_supervisor() {
+        use crate::registry::{FnAuthMode, FnDef};
+        let def = |name: &str, t: Option<u64>| FnDef {
+            name: name.into(),
+            fn_type: FnType::Action,
+            args_schema: None,
+            internal: false,
+            auth: FnAuthMode::User,
+            timeout_secs: t,
+        };
+        let runner = FnRunner::new(8);
+        runner.set_call_timeout(Duration::from_secs(30));
+        // A long render, a normal fn, and a `0` (ignored — treated as unset).
+        runner.record_fn_timeouts(&[
+            def("renderSlideshowVariant", Some(300)),
+            def("getBrand", None),
+            def("noop", Some(0)),
+        ]);
+
+        // The declared-long function gets its own deadline; everything else
+        // (declared 0, or absent from the map) falls back to the global 30s.
+        assert_eq!(
+            runner.deadline_for("renderSlideshowVariant"),
+            Duration::from_secs(300)
+        );
+        assert_eq!(runner.deadline_for("getBrand"), Duration::from_secs(30));
+        assert_eq!(runner.deadline_for("noop"), Duration::from_secs(30));
+        assert_eq!(runner.deadline_for("unknownFn"), Duration::from_secs(30));
+
+        // The supervisor reads the MAX so its wedge backstop never fires before
+        // the longest legit call.
+        assert_eq!(runner.max_fn_timeout_secs(), 300);
+
+        // A redeploy with no long functions clears the override.
+        runner.record_fn_timeouts(&[def("getBrand", None)]);
+        assert_eq!(runner.max_fn_timeout_secs(), 0);
+        assert_eq!(runner.deadline_for("getBrand"), Duration::from_secs(30));
     }
 
     #[test]

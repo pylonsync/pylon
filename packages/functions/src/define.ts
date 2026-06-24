@@ -52,6 +52,21 @@ interface CommonDef {
    * own gate.
    */
   internal?: boolean;
+  /**
+   * Max wall-clock SECONDS this function may run before the runtime
+   * recycles its worker as wedged. Defaults to `PYLON_FN_CALL_TIMEOUT`
+   * (30s). Raise it for legitimately long-running work — heavy renders,
+   * big batch jobs, slow external calls — so the call isn't force-killed
+   * mid-flight. This also lifts the runtime's wedge backstop for the
+   * worker while such a call is in flight, so a busy-but-progressing
+   * worker (e.g. one doing synchronous canvas/image work that blocks the
+   * event loop) isn't respawned out from under the work.
+   *
+   * Keep it as small as the work honestly needs: a genuinely stuck call
+   * still ties up its worker until this deadline. Prefer offloading very
+   * heavy CPU work to a dedicated service over setting a huge timeout.
+   */
+  timeout?: number;
 }
 
 interface QueryDefRequired<TArgs, TReturn> extends CommonDef {
@@ -152,6 +167,7 @@ export function query<TArgs, TReturn>(
     handler: def.handler as FnDefinition<TArgs, TReturn>["handler"],
     internal: def.internal,
     auth: def.auth ?? DEFAULT_AUTH,
+    timeout: def.timeout,
   };
 }
 
@@ -201,6 +217,7 @@ export function mutation<TArgs, TReturn>(
     handler: def.handler as FnDefinition<TArgs, TReturn>["handler"],
     internal: def.internal,
     auth: def.auth ?? DEFAULT_AUTH,
+    timeout: def.timeout,
   };
 }
 
@@ -265,5 +282,6 @@ export function action<TArgs, TReturn>(
     handler: def.handler as FnDefinition<TArgs, TReturn>["handler"],
     internal: def.internal,
     auth: def.auth ?? DEFAULT_AUTH,
+    timeout: def.timeout,
   };
 }

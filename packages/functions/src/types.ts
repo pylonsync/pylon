@@ -645,6 +645,13 @@ export interface FnDefinition<TArgs = unknown, TReturn = unknown> {
    * unless explicitly opted out via `auth: "public"`. See [`AuthMode`].
    */
   auth?: AuthMode;
+  /**
+   * Max wall-clock seconds this function may run before the runtime
+   * recycles its worker. Defaults to `PYLON_FN_CALL_TIMEOUT` (30s).
+   * Raise for legitimately long-running work; also lifts the wedge
+   * backstop while the call is in flight. See the `timeout` option docs.
+   */
+  timeout?: number;
 }
 
 // ---------------------------------------------------------------------------
