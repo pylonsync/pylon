@@ -3997,7 +3997,7 @@ fn generate_id() -> String {
 /// `default` on it? If not, skip the clone in `insert()`. Most
 /// app entities don't use defaults, so this keeps the hot path
 /// allocation-free.
-fn entity_has_any_default(manifest: &pylon_kernel::AppManifest, entity: &str) -> bool {
+pub(crate) fn entity_has_any_default(manifest: &pylon_kernel::AppManifest, entity: &str) -> bool {
     manifest
         .entities
         .iter()
@@ -4012,7 +4012,7 @@ fn entity_has_any_default(manifest: &pylon_kernel::AppManifest, entity: &str) ->
 ///
 /// `"now"` is the special marker for `field.datetime().defaultNow()`;
 /// any other literal is stamped as-is.
-fn apply_field_defaults(
+pub(crate) fn apply_field_defaults(
     manifest: &pylon_kernel::AppManifest,
     entity: &str,
     data: &serde_json::Value,

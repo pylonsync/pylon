@@ -463,6 +463,40 @@ impl DataStore for Runtime {
         &self,
         ops: &[serde_json::Value],
     ) -> Result<(bool, Vec<serde_json::Value>), DataError> {
+        // Apply static field defaults (.default()/.defaultNow()) to insert ops
+        // up front, so the batched mutation path (what `ctx.db.insert` inside a
+        // mutation routes through) reaches parity with `Runtime::insert`. The tx
+        // path historically skipped this, so a mutation insert relying on a
+        // defaulted field hit `NOT NULL constraint failed`. Dynamic defaults
+        // (the `.owner()` `$auth` sentinel) are stamped later by the owner hook,
+        // and `apply_field_defaults` deliberately leaves those alone. Both the
+        // Postgres and SQLite paths below consume the defaulted ops.
+        let manifest = self.manifest();
+        let defaulted: Vec<serde_json::Value> = ops
+            .iter()
+            .map(|op| {
+                if op.get("op").and_then(|v| v.as_str()) != Some("insert") {
+                    return op.clone();
+                }
+                let entity = op.get("entity").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(data) = op.get("data") else {
+                    return op.clone();
+                };
+                if !crate::entity_has_any_default(manifest, entity) {
+                    return op.clone();
+                }
+                let mut next = op.clone();
+                if let Some(obj) = next.as_object_mut() {
+                    obj.insert(
+                        "data".into(),
+                        crate::apply_field_defaults(manifest, entity, data),
+                    );
+                }
+                next
+            })
+            .collect();
+        let ops = &defaulted[..];
+
         // Postgres mode: delegate to the runtime-layer wrapper that
         // adds CRDT projection + sidecar maintenance for crdt:true
         // entities. The storage layer's transact (PostgresDataStore::
@@ -2712,6 +2746,16 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
                 code: e.code,
                 message: e.message,
             })?;
+        // Fill static field defaults (`.default()` / `.defaultNow()`) before the
+        // inner transactional write. The tx stores (`TxStore` / `PgBufferedTxStore`)
+        // write raw, unlike `Runtime::insert` — so without this a function
+        // `ctx.db.insert` relying on a defaulted NOT NULL field hit a constraint
+        // error. Runs AFTER `before_insert` so owner/tenant stamps land first;
+        // `apply_field_defaults` skips dynamic (`.owner()` `$auth`) defaults, so it
+        // only fills static literals + `now`.
+        if crate::entity_has_any_default(self.manifest(), entity) {
+            data = crate::apply_field_defaults(self.manifest(), entity, &data);
+        }
         let id = self.inner.insert(entity, &data)?;
         self.plugins
             .run_after_insert(entity, &id, &data, &self.auth);
