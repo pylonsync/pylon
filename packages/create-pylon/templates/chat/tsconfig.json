@@ -7,12 +7,27 @@
     "esModuleInterop": true,
     "strict": true,
     "skipLibCheck": true,
-    "lib": ["ES2022", "DOM"],
-    "types": ["react", "react-dom"],
+    "lib": [
+      "ES2022",
+      "DOM"
+    ],
+    "types": [
+      "react",
+      "react-dom",
+      "node"
+    ],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./*"]
+      "@/*": [
+        "./*"
+      ]
     }
   },
-  "include": ["app.ts", "app/**/*", "components/**/*", "lib/**/*", "functions/**/*"]
+  "include": [
+    "app.ts",
+    "app/**/*",
+    "components/**/*",
+    "lib/**/*",
+    "functions/**/*"
+  ]
 }
