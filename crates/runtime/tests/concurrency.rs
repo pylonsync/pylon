@@ -50,6 +50,7 @@ fn counter_manifest() -> AppManifest {
         llm: Default::default(),
         connections: vec![],
         crons: vec![],
+        fonts: vec![],
     }
 }
 

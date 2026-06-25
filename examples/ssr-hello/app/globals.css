@@ -1,3 +1,10 @@
 @import "tailwindcss";
 
 @source "../app/**/*.{tsx,ts,jsx,js}";
+
+/* Apply the self-hosted Geist font via the variable the runtime injects.
+ * `--font-sans` resolves to "Geist", the zero-CLS "Geist Fallback", then
+ * sans-serif. */
+body {
+  font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
+}

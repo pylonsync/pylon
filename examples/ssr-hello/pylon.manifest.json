@@ -95,5 +95,24 @@
       "disabled": false
     },
     "trusted_origins": []
-  }
+  },
+  "fonts": [
+    {
+      "family": "Geist",
+      "variable": "--font-sans",
+      "weights": [
+        "400",
+        "600"
+      ],
+      "styles": [
+        "normal"
+      ],
+      "subsets": [
+        "latin"
+      ],
+      "display": "swap",
+      "preload": true,
+      "adjust_font_fallback": true
+    }
+  ]
 }

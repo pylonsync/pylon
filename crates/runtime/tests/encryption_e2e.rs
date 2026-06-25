@@ -68,6 +68,7 @@ fn manifest_with_encrypted_ssn() -> AppManifest {
         llm: Default::default(),
         connections: vec![],
         crons: vec![],
+        fonts: vec![],
     }
 }
 

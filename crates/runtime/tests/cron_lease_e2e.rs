@@ -37,6 +37,7 @@ fn manifest_with_cron() -> AppManifest {
             function: "tick".into(),
             description: None,
         }],
+        fonts: vec![],
     }
 }
 

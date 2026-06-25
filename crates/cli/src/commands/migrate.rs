@@ -531,6 +531,7 @@ fn empty_manifest() -> pylon_kernel::AppManifest {
         llm: Default::default(),
         connections: vec![],
         crons: vec![],
+        fonts: vec![],
     }
 }
 

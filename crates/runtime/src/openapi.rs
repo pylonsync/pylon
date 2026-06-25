@@ -763,6 +763,7 @@ mod tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         }
     }
 
@@ -964,6 +965,7 @@ mod tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let spec = generate_openapi(&manifest, "");
 

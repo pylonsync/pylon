@@ -4223,6 +4223,7 @@ mod tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         }
     }
 
@@ -4968,6 +4969,7 @@ mod tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let rt = Runtime::in_memory(manifest).unwrap();
         // Guard against a vacuous pass: encryption must actually be configured.
@@ -5095,6 +5097,7 @@ mod tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let rt = Runtime::in_memory(manifest).unwrap();
         let o1 = rt

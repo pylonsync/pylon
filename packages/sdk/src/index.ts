@@ -665,6 +665,39 @@ export interface ManifestCron {
   description?: string;
 }
 
+/** A self-hosted web font. Declared via `font({...})`; at build the runtime
+ *  fetches the family from Google Fonts, self-hosts the woff2 same-origin,
+ *  generates `@font-face` + a size-adjusted fallback face (zero layout shift),
+ *  and auto-injects the preload + faces into every SSR page's `<head>`. The app
+ *  references the font through the CSS `variable`. */
+export interface ManifestFont {
+  /** Google Fonts family name, e.g. "Geist" or "Inter". */
+  family: string;
+  /** CSS custom property the app uses to apply the font, e.g. "--font-geist".
+   *  Set `font-family: var(--font-geist)` (it resolves to the family + the
+   *  size-adjusted fallback + your `fallback` stack). */
+  variable: string;
+  /** Weights to load — specific (`["400","500","700"]`) or a CSS2 range
+   *  (`["300..700"]`). Defaults to `["400"]`. */
+  weights?: string[];
+  /** Styles to load. Defaults to `["normal"]`. */
+  styles?: ("normal" | "italic")[];
+  /** Unicode subsets, e.g. `["latin"]`. Defaults to `["latin"]`. */
+  subsets?: string[];
+  /** CSS `font-display`. Defaults to `"swap"`. */
+  display?: "auto" | "block" | "swap" | "fallback" | "optional";
+  /** Emit `<link rel="preload">` for the font files so the browser fetches
+   *  them early. Defaults to `true`. */
+  preload?: boolean;
+  /** Fallback stack appended after the family + the adjusted fallback face,
+   *  e.g. `["system-ui", "sans-serif"]`. Defaults to `["sans-serif"]`. */
+  fallback?: string[];
+  /** Generate a size-adjusted fallback `@font-face` (matching x-height +
+   *  metrics) so there's no layout shift when the web font swaps in. Defaults
+   *  to `true`. Serialized snake_case to match the kernel manifest wire shape. */
+  adjust_font_fallback?: boolean;
+}
+
 export interface AppManifest {
   manifest_version: number;
   name: string;
@@ -682,6 +715,9 @@ export interface AppManifest {
   connections?: ManifestConnection[];
   /** Recurring jobs — run a function on a cron schedule. */
   crons?: ManifestCron[];
+  /** Self-hosted web fonts. Fetched + self-hosted at build; preload +
+   *  `@font-face` auto-injected into the SSR `<head>`. */
+  fonts?: ManifestFont[];
 }
 
 /**
@@ -722,6 +758,49 @@ export function cron(
     schedule,
     function: functionName,
     ...(opts?.description ? { description: opts.description } : {}),
+  };
+}
+
+/**
+ * Declare a self-hosted web font (Google Fonts). At build, Pylon fetches the
+ * family, self-hosts the woff2 same-origin, generates `@font-face` + a
+ * size-adjusted fallback face, and auto-injects the preload + faces into every
+ * SSR page's `<head>` — no render-blocking third-party request, no layout shift.
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   fonts: [
+ *     font({ family: "Geist", variable: "--font-sans", weights: ["300..700"], subsets: ["latin"] }),
+ *     font({ family: "Geist Mono", variable: "--font-mono", weights: ["400..600"] }),
+ *   ],
+ * });
+ * ```
+ *
+ * Then use it in CSS: `font-family: var(--font-sans);` (resolves to the family,
+ * the zero-CLS fallback, then your `fallback` stack).
+ */
+export function font(opts: {
+  family: string;
+  variable: string;
+  weights?: string[];
+  styles?: ("normal" | "italic")[];
+  subsets?: string[];
+  display?: "auto" | "block" | "swap" | "fallback" | "optional";
+  preload?: boolean;
+  fallback?: string[];
+  adjustFontFallback?: boolean;
+}): ManifestFont {
+  return {
+    family: opts.family,
+    variable: opts.variable,
+    weights: opts.weights ?? ["400"],
+    styles: opts.styles ?? ["normal"],
+    subsets: opts.subsets ?? ["latin"],
+    display: opts.display ?? "swap",
+    preload: opts.preload ?? true,
+    ...(opts.fallback ? { fallback: opts.fallback } : {}),
+    adjust_font_fallback: opts.adjustFontFallback ?? true,
   };
 }
 
@@ -1411,6 +1490,7 @@ export function buildManifest(options: {
   llm?: ManifestLlmConfig;
   connections?: ManifestConnection[];
   crons?: ManifestCron[];
+  fonts?: ManifestFont[];
 }): AppManifest {
   // Pull policies attached via the fluent `e.entity().policies(...)`
   // chain onto the top-level policies list. Without this, fluent
@@ -1457,6 +1537,9 @@ export function buildManifest(options: {
       : {}),
     ...(options.crons && options.crons.length > 0
       ? { crons: options.crons }
+      : {}),
+    ...(options.fonts && options.fonts.length > 0
+      ? { fonts: options.fonts }
       : {}),
   };
 }

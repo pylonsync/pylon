@@ -465,6 +465,7 @@ mod tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         }
     }
 

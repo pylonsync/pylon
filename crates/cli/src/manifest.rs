@@ -147,6 +147,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_manifest_with_fonts() {
+        // Mirrors the SDK `font()` wire shape (snake_case `adjust_font_fallback`).
+        let json = r#"{
+            "manifest_version": 1,
+            "name": "test",
+            "version": "0.1.0",
+            "entities": [],
+            "routes": [],
+            "fonts": [
+                {
+                    "family": "Geist",
+                    "variable": "--font-sans",
+                    "weights": ["400", "700"],
+                    "styles": ["normal"],
+                    "subsets": ["latin"],
+                    "display": "swap",
+                    "preload": true,
+                    "adjust_font_fallback": true
+                },
+                {
+                    "family": "Lora",
+                    "variable": "--font-serif",
+                    "fallback": ["Georgia", "serif"],
+                    "preload": false,
+                    "adjust_font_fallback": false
+                }
+            ]
+        }"#;
+        let m = parse_manifest(json, "test.json").unwrap();
+        assert_eq!(m.fonts.len(), 2);
+        assert_eq!(m.fonts[0].family, "Geist");
+        assert_eq!(m.fonts[0].variable, "--font-sans");
+        assert_eq!(m.fonts[0].weights, vec!["400", "700"]);
+        assert!(m.fonts[0].preload);
+        assert!(m.fonts[0].adjust_font_fallback);
+        // Defaults: `preload`/`adjust_font_fallback` default true, but here Lora
+        // sets them false; `fallback` carries through.
+        assert!(!m.fonts[1].preload);
+        assert!(!m.fonts[1].adjust_font_fallback);
+        assert_eq!(m.fonts[1].fallback, vec!["Georgia", "serif"]);
+        // Round-trips through serde unchanged.
+        let serialized = serde_json::to_string(&m).unwrap();
+        let m2: AppManifest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(m, m2);
+    }
+
+    #[test]
+    fn manifest_without_fonts_defaults_empty() {
+        let json = r#"{"manifest_version":1,"name":"a","version":"1","entities":[],"routes":[]}"#;
+        let m = parse_manifest(json, "test.json").unwrap();
+        assert!(m.fonts.is_empty());
+    }
+
+    #[test]
     fn parse_invalid_json_returns_diagnostic() {
         let result = parse_manifest("not json", "test.json");
         assert!(result.is_err());

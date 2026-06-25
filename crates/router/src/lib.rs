@@ -2595,6 +2595,7 @@ mod field_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         }
     }
 
@@ -2644,6 +2645,7 @@ mod field_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let row = serde_json::json!({
             "label": "ok", "apiKey": "sk_secret", "ssn": "123-45-6789"
@@ -2694,6 +2696,7 @@ mod field_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let row = serde_json::json!({ "id": "p1", "title": "hi", "body": "there" });
         let out = strip_server_only_fields(&manifest, "PublicPost", row.clone());
@@ -2782,6 +2785,7 @@ mod field_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let payload = serde_json::json!({ "title": "new" });
         assert!(reject_readonly_payload(
@@ -3083,6 +3087,7 @@ mod auth_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         }
     }
 
@@ -4314,6 +4319,7 @@ mod auth_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let store = StubDataStore {
             manifest: manifest.clone(),
@@ -4695,6 +4701,7 @@ mod auth_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let store = TwoOwnerStore {
             manifest: manifest.clone(),
@@ -4910,6 +4917,7 @@ mod auth_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let store = TwoTenantStore {
             manifest: manifest.clone(),
@@ -5213,6 +5221,7 @@ mod auth_gate_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         }
     }
 
@@ -5639,6 +5648,7 @@ mod auth_gate_tests {
                 function: "internalRollup".into(),
                 description: None,
             }],
+            fonts: vec![],
         };
         let pub_m = super::public_manifest(&m);
         let p = &pub_m.policies[0];
@@ -6061,6 +6071,7 @@ mod user_projection_tests {
             llm: Default::default(),
             connections: vec![],
             crons: vec![],
+            fonts: vec![],
         };
         let store = LeakyUserStore { manifest };
         let (status, body) = handle_get(&store, "User", "u-1");

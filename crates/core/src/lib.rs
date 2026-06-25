@@ -140,6 +140,13 @@ pub struct AppManifest {
     /// scheduler, firing the named function every time the schedule matches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub crons: Vec<ManifestCron>,
+    /// Self-hosted web fonts declared via the SDK's `font({...})` helper.
+    /// At build the runtime fetches each family from Google Fonts, self-hosts
+    /// the woff2 same-origin, generates `@font-face` + a size-adjusted fallback
+    /// face (zero layout shift), and auto-injects the preload + faces into every
+    /// SSR page's `<head>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fonts: Vec<ManifestFont>,
 }
 
 /// One recurring job: run `function` on the `schedule` (a 5-field cron
@@ -153,6 +160,47 @@ pub struct ManifestCron {
     /// Optional human description.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+}
+
+/// One self-hosted web font. Emitted by the SDK's `font({...})` helper.
+/// The build fetches the family, self-hosts the woff2 same-origin, and
+/// generates the `@font-face` + size-adjusted fallback faces from the file's
+/// real sfnt metrics so the swap-in produces no layout shift.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestFont {
+    /// Google Fonts family name, e.g. "Geist" or "Inter".
+    pub family: String,
+    /// CSS custom property the app applies the font through, e.g.
+    /// "--font-sans". Resolves to the family + the adjusted fallback +
+    /// the `fallback` stack.
+    pub variable: String,
+    /// Weights to load — specific (`["400","700"]`) or a CSS2 range
+    /// (`["300..700"]`).
+    #[serde(default)]
+    pub weights: Vec<String>,
+    /// Styles to load (`"normal"` / `"italic"`).
+    #[serde(default)]
+    pub styles: Vec<String>,
+    /// Unicode subsets, e.g. `["latin"]`.
+    #[serde(default)]
+    pub subsets: Vec<String>,
+    /// CSS `font-display`. Defaults to `"swap"`.
+    #[serde(default)]
+    pub display: Option<String>,
+    /// Emit `<link rel="preload">` for the font files. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub preload: bool,
+    /// Fallback stack appended after the family + adjusted fallback face.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback: Vec<String>,
+    /// Generate a size-adjusted fallback `@font-face` for zero layout shift.
+    /// Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub adjust_font_fallback: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One external OAuth integration. Emitted by the SDK's

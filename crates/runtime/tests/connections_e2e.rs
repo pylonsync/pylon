@@ -37,6 +37,7 @@ fn manifest_with_google() -> AppManifest {
             scopes: "email profile".into(),
         }],
         crons: vec![],
+        fonts: vec![],
     }
 }
 

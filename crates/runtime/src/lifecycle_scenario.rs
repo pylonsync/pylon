@@ -226,6 +226,7 @@ fn manifest(entities: Vec<ManifestEntity>) -> AppManifest {
         llm: Default::default(),
         connections: vec![],
         crons: vec![],
+        fonts: vec![],
     }
 }
 

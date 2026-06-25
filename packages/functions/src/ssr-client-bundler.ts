@@ -33,6 +33,8 @@
 //     prefetch is a follow-up — splitting is the precondition.
 //   - CSS chunking. No CSS support in SSR yet.
 
+import { buildFonts, readManifestFonts, type ManifestFonts } from "./ssr-fonts";
+
 type Send = (msg: Record<string, unknown>) => void;
 
 interface BundleClientMessage {
@@ -724,6 +726,11 @@ export interface PylonBundleManifest {
       css: string[];
     }
   >;
+  /** Self-hosted fonts (next/font parity): structured `@font-face`s + the
+   *  `:root` CSS variables + the woff2 files to preload. Global (route-
+   *  independent); rendered into every SSR `<head>` against `public_prefix`.
+   *  Absent when the app declares no `font({...})`. */
+  fonts?: ManifestFonts;
 }
 
 /** Result of an in-process build — same shape the protocol returns. */
@@ -1167,6 +1174,24 @@ async function _doBuildInner(
       // warning + ship the bundle without styles so devs can iterate.
       // eslint-disable-next-line no-console
       console.warn(`[pylon ssr] tailwind compile failed: ${twErr?.message ?? twErr}`);
+    }
+
+    // Self-hosted fonts (next/font parity). Reads `fonts` from the app's
+    // pylon.manifest.json, fetches + self-hosts each woff2 into outdir (served
+    // under /_pylon/build/), and bakes the structured faces + size-adjusted
+    // fallback metrics into the bundle manifest for SSR head injection. On
+    // Pylon Cloud the builder runs this same path, so the woff2 + faces ship in
+    // the prebuilt artifact. A fetch/parse failure degrades to a variable-only
+    // entry — it never kills the build.
+    try {
+      const declaredFonts = readManifestFonts(fs, path, cwd);
+      if (declaredFonts.length > 0) {
+        const builtFonts = await buildFonts(fs, path, cwd, outdir, declaredFonts);
+        if (builtFonts) manifest.fonts = builtFonts;
+      }
+    } catch (fErr: any) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pylon ssr] font build failed: ${fErr?.message ?? fErr}`);
     }
 
   const manifestPath = path.join(outdir, "manifest.json");

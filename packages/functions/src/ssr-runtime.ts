@@ -1066,13 +1066,43 @@ async function collectBoundaryHeadBlob(): Promise<string> {
     const manifest = await getManifest();
     const prefix = manifest.public_prefix || "/_pylon/build/";
     const seen = new Set<string>();
-    let blob = "";
+    // Fonts first: the @font-face faces + preloads must be discoverable before
+    // the app stylesheet that references the font family.
+    let blob = await buildFontHeadBlob();
     for (const route of Object.values(manifest.routes || {}) as any[]) {
       for (const css of (route.css || []) as string[]) {
         if (seen.has(css)) continue;
         seen.add(css);
         blob += `<link rel="stylesheet" href="${prefix}${css}">`;
       }
+    }
+    return blob;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Build the self-hosted-font `<head>` blob: the inlined `@font-face` + `:root`
+ * variable `<style>` (so the size-adjusted fallback is defined before first
+ * paint — that's what makes the swap zero-CLS) plus a `<link rel=preload>` for
+ * each woff2. Global / route-independent. Returns "" when the app declares no
+ * fonts. URLs resolve against the live `public_prefix` (same-origin or CDN).
+ */
+async function buildFontHeadBlob(): Promise<string> {
+  try {
+    const { getManifest } = await import("./ssr-client-bundler");
+    const manifest: any = await getManifest();
+    const fonts = manifest?.fonts;
+    if (!fonts) return "";
+    const { renderFontFaceCss } = await import("./ssr-fonts");
+    const prefix = manifest.public_prefix || "/_pylon/build/";
+    const css = renderFontFaceCss(fonts, prefix);
+    let blob = css ? `<style data-pylon-fonts>${css}</style>` : "";
+    for (const href of (fonts.preload || []) as string[]) {
+      // `crossorigin` is REQUIRED on font preloads even same-origin — fonts
+      // fetch in CORS mode, so without it the browser double-fetches.
+      blob += `<link rel="preload" as="font" type="font/woff2" href="${prefix}${href}" crossorigin>`;
     }
     return blob;
   } catch {
@@ -1238,6 +1268,7 @@ async function renderBoundaryToClient(
     }
   }
   if (manifestRoute) {
+    headBlob += await buildFontHeadBlob();
     const co = /^https?:\/\//i.test(publicPrefix) ? " crossorigin" : "";
     for (const css of manifestRoute.css) {
       headBlob += `<link rel="stylesheet" href="${publicPrefix}${css}">`;
@@ -1247,7 +1278,7 @@ async function renderBoundaryToClient(
     }
   } else {
     // No per-boundary entry → fall back to the global stylesheet union so the
-    // page is at least styled (static).
+    // page is at least styled (static). (collectBoundaryHeadBlob emits fonts.)
     headBlob = await collectBoundaryHeadBlob();
   }
   // renderToReadableStream resolved without throwing → safe to commit the
@@ -2006,6 +2037,7 @@ export async function handleRenderRoute(
     // (it needs the inline __PYLON_DATA__ to have been parsed first).
     let headBlob = "";
     if (preloadManifestRoute) {
+      headBlob += await buildFontHeadBlob();
       const co = /^https?:\/\//i.test(preloadPublicPrefix) ? " crossorigin" : "";
       for (const css of preloadManifestRoute.css) {
         headBlob += `<link rel="stylesheet" href="${preloadPublicPrefix}${css}">`;

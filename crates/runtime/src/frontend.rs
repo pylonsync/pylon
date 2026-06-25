@@ -2557,6 +2557,14 @@ fn bundle_content_type_for(name: &str) -> &'static str {
         "application/json; charset=utf-8"
     } else if name.ends_with(".map") {
         "application/json; charset=utf-8"
+    } else if name.ends_with(".woff2") {
+        "font/woff2"
+    } else if name.ends_with(".woff") {
+        "font/woff"
+    } else if name.ends_with(".ttf") {
+        "font/ttf"
+    } else if name.ends_with(".otf") {
+        "font/otf"
     } else {
         "application/octet-stream"
     }
