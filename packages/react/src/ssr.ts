@@ -164,12 +164,26 @@ export interface PageProps<
  * titles) from a `page.tsx` / `layout.tsx`. React 19 hoists the resulting
  * `<title>` / `<meta>` / `<link>` into `<head>`.
  */
+/** A single OpenGraph image (for `openGraph.images` — multiple images). */
+export interface OgImage {
+  url: string;
+  secureUrl?: string;
+  type?: string;
+  width?: number;
+  height?: number;
+  alt?: string;
+}
+
 export interface Metadata {
   title?: string;
   description?: string;
   keywords?: string | string[];
   canonical?: string;
   robots?: string;
+  /** `<meta name="author">` — one tag per author. */
+  authors?: string | string[];
+  /** `<meta name="theme-color">` — browser UI tint for the page. */
+  themeColor?: string;
   openGraph?: {
     title?: string;
     description?: string;
@@ -179,22 +193,50 @@ export interface Metadata {
     imageWidth?: number;
     imageHeight?: number;
     imageAlt?: string;
+    /** Additional images beyond the primary `image` (each emits its own
+     *  `og:image` + dimensions). Provide absolute URLs. */
+    images?: OgImage[];
     url?: string;
     type?: string;
+    /** `og:locale` (e.g. "en_US"). */
+    locale?: string;
     /** `og:site_name` — the brand the page belongs to (e.g. "Pylon").
      *  Discord and other unfurlers show this above the title. */
     siteName?: string;
+    /** `article:*` tags for `og:type=article` pages. */
+    article?: {
+      author?: string | string[];
+      publishedTime?: string;
+      modifiedTime?: string;
+      section?: string;
+      tags?: string | string[];
+    };
   };
   twitter?: {
     card?: string;
     title?: string;
     description?: string;
     image?: string;
+    /** `twitter:site` / `twitter:creator` — @handles. */
+    site?: string;
+    creator?: string;
+    /** `twitter:image:alt` — alt text for the card image. */
+    imageAlt?: string;
   };
   icons?: {
     icon?: { url: string; type?: string; sizes?: string };
     apple?: { url: string; type?: string; sizes?: string };
   };
+  /** Alternate URLs. `languages` emits `<link rel="alternate" hreflang>`
+   *  per locale; `canonical` is an alias for the top-level `canonical`. */
+  alternates?: {
+    canonical?: string;
+    languages?: Record<string, string>;
+  };
+  /** Structured data (schema.org), emitted as `<script type="application/ld+json">`.
+   *  Pass one object or an array (each item gets its own script). The payload is
+   *  serialized with `<`/`>`/`&` escaped so it can't break out of the script. */
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
 }
 
 /**

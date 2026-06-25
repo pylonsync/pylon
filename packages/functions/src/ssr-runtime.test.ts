@@ -307,6 +307,86 @@ describe("renderMetadata head-tag marking (client-nav sync)", () => {
     expect(renderMetadata(fakeReact, undefined)).toBeNull();
     expect(renderMetadata(fakeReact, {})).toBeNull();
   });
+
+  test("emits JSON-LD as an escaped application/ld+json script", () => {
+    const frag = renderMetadata(fakeReact, {
+      jsonLd: {
+        "@context": "https://schema.org",
+        "@type": "Organization",
+        name: "Pylon </script><x>&y",
+      },
+    });
+    const scripts: any[] = frag.children.filter((k: any) => k.type === "script");
+    expect(scripts.length).toBe(1);
+    expect(scripts[0].props.type).toBe("application/ld+json");
+    expect(scripts[0].props["data-pylon-meta"]).toBe("");
+    const body = scripts[0].children[0] as string;
+    // Breakout chars must be \u-escaped — the payload can't contain a literal
+    // `</script>`, `<`, `>`, or `&`.
+    expect(body).not.toContain("</script>");
+    expect(body).not.toMatch(/[<>&]/);
+    expect(body).toContain("\\u003c");
+    // …and it's still valid structured data once a parser decodes it.
+    const parsed = JSON.parse(body);
+    expect(parsed["@type"]).toBe("Organization");
+    expect(parsed.name).toBe("Pylon </script><x>&y");
+  });
+
+  test("JSON-LD array emits one script per item", () => {
+    const frag = renderMetadata(fakeReact, {
+      jsonLd: [{ "@type": "A" }, { "@type": "B" }],
+    });
+    const scripts: any[] = frag.children.filter((k: any) => k.type === "script");
+    expect(scripts.map((s) => JSON.parse(s.children[0])["@type"])).toEqual(["A", "B"]);
+  });
+
+  test("emits the extended SEO/social tags", () => {
+    const frag = renderMetadata(fakeReact, {
+      authors: ["Ada", "Grace"],
+      themeColor: "#0b5fff",
+      openGraph: {
+        locale: "en_US",
+        images: [{ url: "https://x.test/a.png", width: 1200, height: 630, alt: "A" }],
+        article: { author: "Ada", publishedTime: "2026-01-01", tags: ["ai", "ssr"] },
+      },
+      twitter: { card: "summary", site: "@pylon", creator: "@ada", imageAlt: "card" },
+      alternates: {
+        languages: { "en-US": "https://x.test/en", "fr-FR": "https://x.test/fr" },
+      },
+    });
+    const metas: any[] = frag.children.filter((k: any) => k.type === "meta");
+    const links: any[] = frag.children.filter((k: any) => k.type === "link");
+    const find = (sel: (m: any) => boolean) => metas.find(sel);
+
+    expect(
+      metas.filter((m) => m.props.name === "author").map((m) => m.props.content),
+    ).toEqual(["Ada", "Grace"]);
+    expect(find((m) => m.props.name === "theme-color")?.props.content).toBe("#0b5fff");
+    expect(find((m) => m.props.property === "og:locale")?.props.content).toBe("en_US");
+    expect(
+      find((m) => m.props.property === "og:image" && m.props.content === "https://x.test/a.png"),
+    ).toBeDefined();
+    expect(find((m) => m.props.property === "article:author")?.props.content).toBe("Ada");
+    expect(find((m) => m.props.property === "article:published_time")?.props.content).toBe(
+      "2026-01-01",
+    );
+    expect(
+      metas.filter((m) => m.props.property === "article:tag").map((m) => m.props.content),
+    ).toEqual(["ai", "ssr"]);
+    expect(find((m) => m.props.name === "twitter:site")?.props.content).toBe("@pylon");
+    expect(find((m) => m.props.name === "twitter:creator")?.props.content).toBe("@ada");
+    expect(find((m) => m.props.name === "twitter:image:alt")?.props.content).toBe("card");
+
+    const alts = links.filter((l) => l.props.rel === "alternate");
+    expect(alts.map((l) => [l.props.hrefLang, l.props.href])).toEqual([
+      ["en-US", "https://x.test/en"],
+      ["fr-FR", "https://x.test/fr"],
+    ]);
+    // Every emitted meta/link still carries the nav-swap marker.
+    for (const el of [...metas, ...links]) {
+      expect(el.props["data-pylon-meta"]).toBe("");
+    }
+  });
 });
 
 describe("buildHydrationTail — boundary hydration (#279) + strip (#270)", () => {

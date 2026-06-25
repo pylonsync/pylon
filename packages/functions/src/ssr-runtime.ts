@@ -337,12 +337,26 @@ export function finalizeHeaders(
  * `<meta>`, so set `description`/OG in EITHER the layout OR page metadata,
  * not both, to avoid duplicate tags.
  */
+/** A single OpenGraph image (for `openGraph.images` — multiple images). */
+export interface OgImage {
+  url: string;
+  secureUrl?: string;
+  type?: string;
+  width?: number;
+  height?: number;
+  alt?: string;
+}
+
 export interface SsrMetadata {
   title?: string;
   description?: string;
   keywords?: string | string[];
   canonical?: string;
   robots?: string;
+  /** `<meta name="author">` — one tag per author. */
+  authors?: string | string[];
+  /** `<meta name="theme-color">` — browser UI tint for the page. */
+  themeColor?: string;
   openGraph?: {
     title?: string;
     description?: string;
@@ -355,17 +369,35 @@ export interface SsrMetadata {
     imageWidth?: number;
     imageHeight?: number;
     imageAlt?: string;
+    /** Additional images beyond the primary `image` (each emits its own
+     *  `og:image` + dimensions). Provide absolute URLs. */
+    images?: OgImage[];
     url?: string;
     type?: string;
+    /** `og:locale` (e.g. "en_US"). */
+    locale?: string;
     /** `og:site_name` — the brand the page belongs to (e.g. "Pylon").
      *  Discord and other unfurlers show this above the title. */
     siteName?: string;
+    /** `article:*` tags for `og:type=article` pages. */
+    article?: {
+      author?: string | string[];
+      publishedTime?: string;
+      modifiedTime?: string;
+      section?: string;
+      tags?: string | string[];
+    };
   };
   twitter?: {
     card?: string;
     title?: string;
     description?: string;
     image?: string;
+    /** `twitter:site` / `twitter:creator` — @handles. */
+    site?: string;
+    creator?: string;
+    /** `twitter:image:alt` — alt text for the card image. */
+    imageAlt?: string;
   };
   /** `<link rel="icon">` / `<link rel="apple-touch-icon">`. Auto-wired
    *  from the app/icon.* + app/apple-icon.* + app/favicon.ico file
@@ -374,6 +406,16 @@ export interface SsrMetadata {
     icon?: { url: string; type?: string; sizes?: string };
     apple?: { url: string; type?: string; sizes?: string };
   };
+  /** Alternate URLs. `languages` emits `<link rel="alternate" hreflang>`
+   *  per locale; `canonical` is an alias for the top-level `canonical`. */
+  alternates?: {
+    canonical?: string;
+    languages?: Record<string, string>;
+  };
+  /** Structured data, emitted as `<script type="application/ld+json">`.
+   *  One object or an array (each item gets its own script). Serialized with
+   *  `<` escaped so values can't break out of the script element. */
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
 }
 
 /**
@@ -403,8 +445,25 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
   const kw = Array.isArray(m.keywords) ? m.keywords.join(", ") : m.keywords;
   if (kw) kids.push(el("meta", { key: "kw", name: "keywords", content: kw }));
   if (m.robots) kids.push(el("meta", { key: "r", name: "robots", content: m.robots }));
+  const authors = Array.isArray(m.authors) ? m.authors : m.authors ? [m.authors] : [];
+  authors.forEach((a, i) => {
+    if (a) kids.push(el("meta", { key: `au${i}`, name: "author", content: a }));
+  });
+  if (m.themeColor) {
+    kids.push(el("meta", { key: "tc", name: "theme-color", content: m.themeColor }));
+  }
   if (m.canonical) {
     kids.push(el("link", { key: "c", rel: "canonical", href: m.canonical }));
+  } else if (m.alternates?.canonical) {
+    kids.push(el("link", { key: "c", rel: "canonical", href: m.alternates.canonical }));
+  }
+  const langs = m.alternates?.languages;
+  if (langs) {
+    Object.entries(langs).forEach(([lang, href], i) => {
+      if (href) {
+        kids.push(el("link", { key: `alt${i}`, rel: "alternate", hrefLang: lang, href }));
+      }
+    });
   }
   const og = m.openGraph;
   if (og) {
@@ -418,9 +477,35 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
       if (og.imageHeight != null) kids.push(el("meta", { key: "ogih", property: "og:image:height", content: String(og.imageHeight) }));
       if (og.imageAlt) kids.push(el("meta", { key: "ogia", property: "og:image:alt", content: og.imageAlt }));
     }
+    if (Array.isArray(og.images)) {
+      og.images.forEach((img, i) => {
+        if (!img || !img.url) return;
+        kids.push(el("meta", { key: `ogim${i}`, property: "og:image", content: img.url }));
+        if (img.secureUrl) kids.push(el("meta", { key: `ogims${i}`, property: "og:image:secure_url", content: img.secureUrl }));
+        if (img.type) kids.push(el("meta", { key: `ogimt${i}`, property: "og:image:type", content: img.type }));
+        if (img.width != null) kids.push(el("meta", { key: `ogimw${i}`, property: "og:image:width", content: String(img.width) }));
+        if (img.height != null) kids.push(el("meta", { key: `ogimh${i}`, property: "og:image:height", content: String(img.height) }));
+        if (img.alt) kids.push(el("meta", { key: `ogima${i}`, property: "og:image:alt", content: img.alt }));
+      });
+    }
     if (og.url) kids.push(el("meta", { key: "ogu", property: "og:url", content: og.url }));
     if (og.type) kids.push(el("meta", { key: "ogy", property: "og:type", content: og.type }));
+    if (og.locale) kids.push(el("meta", { key: "ogl", property: "og:locale", content: og.locale }));
     if (og.siteName) kids.push(el("meta", { key: "ogsn", property: "og:site_name", content: og.siteName }));
+    const art = og.article;
+    if (art) {
+      const aAuthors = Array.isArray(art.author) ? art.author : art.author ? [art.author] : [];
+      aAuthors.forEach((a, i) => {
+        if (a) kids.push(el("meta", { key: `oga${i}`, property: "article:author", content: a }));
+      });
+      if (art.publishedTime) kids.push(el("meta", { key: "ogpt", property: "article:published_time", content: art.publishedTime }));
+      if (art.modifiedTime) kids.push(el("meta", { key: "ogmt", property: "article:modified_time", content: art.modifiedTime }));
+      if (art.section) kids.push(el("meta", { key: "ogsec", property: "article:section", content: art.section }));
+      const aTags = Array.isArray(art.tags) ? art.tags : art.tags ? [art.tags] : [];
+      aTags.forEach((t, i) => {
+        if (t) kids.push(el("meta", { key: `ogtag${i}`, property: "article:tag", content: t }));
+      });
+    }
   }
   const tw = m.twitter;
   if (tw) {
@@ -428,6 +513,9 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
     if (tw.title != null) kids.push(el("meta", { key: "twt", name: "twitter:title", content: tw.title }));
     if (tw.description != null) kids.push(el("meta", { key: "twd", name: "twitter:description", content: tw.description }));
     if (tw.image) kids.push(el("meta", { key: "twi", name: "twitter:image", content: tw.image }));
+    if (tw.site) kids.push(el("meta", { key: "tws", name: "twitter:site", content: tw.site }));
+    if (tw.creator) kids.push(el("meta", { key: "twcr", name: "twitter:creator", content: tw.creator }));
+    if (tw.imageAlt) kids.push(el("meta", { key: "twia", name: "twitter:image:alt", content: tw.imageAlt }));
   }
   const ic = m.icons;
   if (ic) {
@@ -443,6 +531,34 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
       if (ic.apple.sizes) a.sizes = ic.apple.sizes;
       kids.push(el("link", a));
     }
+  }
+  if (m.jsonLd) {
+    const items = Array.isArray(m.jsonLd) ? m.jsonLd : [m.jsonLd];
+    items.forEach((item, i) => {
+      let json: string;
+      try {
+        json = JSON.stringify(item);
+      } catch {
+        return; // unserializable (cycle) — skip rather than throw the render
+      }
+      if (!json) return;
+      // Escape `<`, `>`, `&` to their \uXXXX JSON forms so the payload can't
+      // break out of the <script> element (e.g. a value containing
+      // `</script>`), no matter how the renderer treats raw-text children.
+      // JSON.parse decodes these back, so the structured data stays valid. This
+      // is why no dangerouslySetInnerHTML is needed: the text child is inert.
+      const safe = json
+        .replace(/</g, "\\u003c")
+        .replace(/>/g, "\\u003e")
+        .replace(/&/g, "\\u0026");
+      kids.push(
+        React.createElement(
+          "script",
+          { key: `ld${i}`, type: "application/ld+json", "data-pylon-meta": "" },
+          safe,
+        ),
+      );
+    });
   }
   return kids.length > 0 ? el(React.Fragment, null, ...kids) : null;
 }
