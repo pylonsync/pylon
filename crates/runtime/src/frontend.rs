@@ -343,13 +343,23 @@ fn pct_decode(s: &str) -> String {
 /// user-supplied images — this endpoint only serves the developer's OWN
 /// colocated convention files (first-party app source), so an inline-
 /// script SVG is no more dangerous than the app's own JS.
-fn is_valid_colocated_asset_rel(rel: &str) -> bool {
+fn is_valid_colocated_asset_rel(rel: &str, app_dir: &str) -> bool {
     if rel.is_empty() || rel.starts_with('/') || rel.starts_with('\\') {
         return false;
     }
     let segs: Vec<&str> = rel.split('/').collect();
-    if segs.first() != Some(&"app") {
+    // Must live UNDER the app's frontend dir — `app` by default, but a subdir
+    // appDir like `web/app` (control-plane / monorepo frontends) is equally
+    // valid. The appDir is server config (derived from the manifest routes),
+    // never request-controlled, so matching against it can't widen the read.
+    let app_segs: Vec<&str> = app_dir.split('/').filter(|s| !s.is_empty()).collect();
+    if app_segs.is_empty() || segs.len() <= app_segs.len() {
         return false;
+    }
+    for (i, a) in app_segs.iter().enumerate() {
+        if segs[i] != *a {
+            return false;
+        }
     }
     for s in &segs {
         if s.is_empty() || *s == "." || *s == ".." || s.contains('\\') {
@@ -378,7 +388,12 @@ fn is_valid_colocated_asset_rel(rel: &str) -> bool {
 /// Serve a colocated `opengraph-image.*` / `twitter-image.*` file for the
 /// SSR file convention. Returns a clean 404 (not an SPA fallthrough) on a
 /// missing / invalid `src` so a broken `<img>` fails cleanly.
-fn serve_og_image(request: Request, url: &str, cors_origin: &str) -> Result<(), Request> {
+fn serve_og_image(
+    request: Request,
+    url: &str,
+    cors_origin: &str,
+    app_dir: &str,
+) -> Result<(), Request> {
     let four_oh_four = |req: Request| -> Result<(), Request> {
         let resp = Response::from_data(Vec::new())
             .with_status_code(404)
@@ -399,15 +414,15 @@ fn serve_og_image(request: Request, url: &str, cors_origin: &str) -> Result<(), 
         .and_then(|s| s.split('&').next())
         .map(pct_decode)
         .unwrap_or_default();
-    if !is_valid_colocated_asset_rel(&rel) {
+    if !is_valid_colocated_asset_rel(&rel, app_dir) {
         return four_oh_four(request);
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Canonicalize both the app root and the candidate, then prefix-check.
-    // The rel is already traversal-free, but a symlink under app/ could
-    // still escape — this closes that.
+    // The rel is already traversal-free, but a symlink under the app dir
+    // could still escape — this closes that.
     let (app_root, canon) = match (
-        cwd.join("app").canonicalize(),
+        cwd.join(app_dir).canonicalize(),
         cwd.join(&rel).canonicalize(),
     ) {
         (Ok(a), Ok(c)) => (a, c),
@@ -628,7 +643,13 @@ pub fn try_handle(
     // basenames with an image extension, under `app/`, canonicalized so
     // the endpoint can't be turned into an arbitrary-file read.
     if path_only == "/_pylon/og" {
-        return serve_og_image(request, &url, cors_origin);
+        // The colocated-asset root is the app's frontend dir, which may be a
+        // subdir (`web/app`) — derive it from the manifest routes so the og
+        // endpoint matches the `src=<appDir>/.../opengraph-image.png` the SSR
+        // metadata renderer emits. (Hardcoding `app/` 404'd every monorepo /
+        // control-plane frontend — e.g. pylonsync.com under `web/app`.)
+        let app_dir = derive_app_dir(&cfg.ssr_routes);
+        return serve_og_image(request, &url, cors_origin, &app_dir);
     }
 
     // Dev-only browser live-reload signal. `pylon dev` injects a tiny
@@ -2965,38 +2986,89 @@ mod tests {
 
     #[test]
     fn social_image_rel_allowlist() {
-        // Valid colocated social-card images.
-        assert!(is_valid_colocated_asset_rel("app/opengraph-image.png"));
-        assert!(is_valid_colocated_asset_rel("app/blog/opengraph-image.jpg"));
+        // Valid colocated social-card images (default `app` appDir).
         assert!(is_valid_colocated_asset_rel(
-            "app/(marketing)/twitter-image.webp"
+            "app/opengraph-image.png",
+            "app"
         ));
         assert!(is_valid_colocated_asset_rel(
-            "app/x/[slug]/opengraph-image.PNG"
+            "app/blog/opengraph-image.jpg",
+            "app"
+        ));
+        assert!(is_valid_colocated_asset_rel(
+            "app/(marketing)/twitter-image.webp",
+            "app"
+        ));
+        assert!(is_valid_colocated_asset_rel(
+            "app/x/[slug]/opengraph-image.PNG",
+            "app"
         ));
         // Wrong basename — must never serve arbitrary source files.
-        assert!(!is_valid_colocated_asset_rel("app/page.tsx"));
-        assert!(!is_valid_colocated_asset_rel("app/secret.png"));
-        assert!(!is_valid_colocated_asset_rel("app/blog/cover.png"));
+        assert!(!is_valid_colocated_asset_rel("app/page.tsx", "app"));
+        assert!(!is_valid_colocated_asset_rel("app/secret.png", "app"));
+        assert!(!is_valid_colocated_asset_rel("app/blog/cover.png", "app"));
         // Icon conventions (svg/ico allowed here).
-        assert!(is_valid_colocated_asset_rel("app/icon.png"));
-        assert!(is_valid_colocated_asset_rel("app/icon.svg"));
-        assert!(is_valid_colocated_asset_rel("app/favicon.ico"));
-        assert!(is_valid_colocated_asset_rel("app/apple-icon.png"));
+        assert!(is_valid_colocated_asset_rel("app/icon.png", "app"));
+        assert!(is_valid_colocated_asset_rel("app/icon.svg", "app"));
+        assert!(is_valid_colocated_asset_rel("app/favicon.ico", "app"));
+        assert!(is_valid_colocated_asset_rel("app/apple-icon.png", "app"));
         // Wrong root / extension.
-        assert!(!is_valid_colocated_asset_rel("public/opengraph-image.png"));
-        assert!(!is_valid_colocated_asset_rel("app/opengraph-image.ts"));
-        assert!(!is_valid_colocated_asset_rel("app/icon.tsx"));
-        assert!(!is_valid_colocated_asset_rel("app/logo.svg"));
+        assert!(!is_valid_colocated_asset_rel(
+            "public/opengraph-image.png",
+            "app"
+        ));
+        assert!(!is_valid_colocated_asset_rel(
+            "app/opengraph-image.ts",
+            "app"
+        ));
+        assert!(!is_valid_colocated_asset_rel("app/icon.tsx", "app"));
+        assert!(!is_valid_colocated_asset_rel("app/logo.svg", "app"));
         // Traversal / absolute / malformed.
         assert!(!is_valid_colocated_asset_rel(
-            "app/../secret/opengraph-image.png"
+            "app/../secret/opengraph-image.png",
+            "app"
         ));
-        assert!(!is_valid_colocated_asset_rel("/app/opengraph-image.png"));
-        assert!(!is_valid_colocated_asset_rel("../app/opengraph-image.png"));
-        assert!(!is_valid_colocated_asset_rel("app/./opengraph-image.png"));
-        assert!(!is_valid_colocated_asset_rel(""));
-        assert!(!is_valid_colocated_asset_rel("opengraph-image.png"));
+        assert!(!is_valid_colocated_asset_rel(
+            "/app/opengraph-image.png",
+            "app"
+        ));
+        assert!(!is_valid_colocated_asset_rel(
+            "../app/opengraph-image.png",
+            "app"
+        ));
+        assert!(!is_valid_colocated_asset_rel(
+            "app/./opengraph-image.png",
+            "app"
+        ));
+        assert!(!is_valid_colocated_asset_rel("", "app"));
+        assert!(!is_valid_colocated_asset_rel("opengraph-image.png", "app"));
+
+        // Subdir appDir (`web/app`) — control-plane / monorepo frontends. This
+        // is the pylonsync.com case that 404'd when the root was hardcoded.
+        assert!(is_valid_colocated_asset_rel(
+            "web/app/opengraph-image.png",
+            "web/app"
+        ));
+        assert!(is_valid_colocated_asset_rel(
+            "web/app/(marketing)/twitter-image.png",
+            "web/app"
+        ));
+        // The src MUST match the configured appDir — an `app/...` src is
+        // rejected when the appDir is `web/app`, and vice-versa.
+        assert!(!is_valid_colocated_asset_rel(
+            "app/opengraph-image.png",
+            "web/app"
+        ));
+        assert!(!is_valid_colocated_asset_rel(
+            "web/app/opengraph-image.png",
+            "app"
+        ));
+        // No escaping the subdir root.
+        assert!(!is_valid_colocated_asset_rel(
+            "web/secret/opengraph-image.png",
+            "web/app"
+        ));
+        assert!(!is_valid_colocated_asset_rel("web/app", "web/app"));
     }
 
     #[test]
