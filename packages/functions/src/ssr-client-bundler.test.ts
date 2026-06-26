@@ -160,6 +160,38 @@ describe("ssr-client-bundler (Phase 1.5e)", () => {
     expect(chunkHasReact).toBe(true);
   });
 
+  test("client runtime wires the nav-fallback guard (uncaught render error → full page load)", async () => {
+    // Regression: a page that renders React-19-hoisted <title>/<meta>/<link> in
+    // its own tree (use the `metadata` export instead) makes a client-side nav
+    // re-render throw in React's commit phase — the URL changes but the page
+    // can't swap (white screen). hydrateRoot must carry an onUncaughtError that
+    // falls back to a full page load of the in-flight destination so nav
+    // degrades gracefully. The distinctive console string is preserved through
+    // minification, so we assert the guard actually ships in the bundle.
+    tempDir = makeFixture(
+      { "page.tsx": PAGE_BODY("Home") },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const { outdir } = await buildClientBundle();
+    // The runtime (hydrateRoot + guard) lands in the shared chunk with multiple
+    // entries, or inlined in the entry with one — read every emitted .js.
+    const readJsRecursive = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((d) => {
+        const full = path.join(dir, d.name);
+        if (d.isDirectory()) return readJsRecursive(full);
+        return d.name.endsWith(".js") ? [fs.readFileSync(full, "utf8")] : [];
+      });
+    const bundled = readJsRecursive(outdir).join("\n");
+
+    // onUncaughtError is a React hydrateRoot option (property name preserved).
+    expect(bundled).toMatch(/onUncaughtError/);
+    // The fallback path: a full page load of the pending destination.
+    expect(bundled).toMatch(/falling back to a full page load/);
+  });
+
   test("manifest names every route, each with a non-empty imports list", async () => {
     tempDir = makeFixture(
       {

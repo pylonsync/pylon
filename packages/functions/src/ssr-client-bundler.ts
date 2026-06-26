@@ -212,6 +212,10 @@ import { createPylonBoundary } from "./client-boundary";
 
 const routeCache = Object.create(null);
 let activeRoot = null;
+// Destination of an in-flight client navigation. Read by hydrateRoot's
+// onUncaughtError so a re-render that throws mid-nav degrades to a full page
+// load instead of a white screen. Null when no nav is in flight.
+let pendingNav = null;
 let manifestPromise = null;
 const prefetchedChunks = new Set();
 
@@ -466,7 +470,30 @@ export function hydrate(component, Page, Layouts) {
       data.component,
       navEpoch,
     );
-    activeRoot = hydrateRoot(document, tree);
+    activeRoot = hydrateRoot(document, tree, {
+      // Safety net for client navigation. If a nav re-render throws an uncaught
+      // error in React's commit phase, the URL has already changed but the page
+      // can't swap — a white/stale screen. The classic trigger is a page that
+      // renders hoisted <title>/<meta>/<link> in its own tree (use the
+      // \`metadata\` export instead); React 19 owns those head nodes on the client
+      // and reconciling them across routes can throw. Rather than strand the
+      // user, fall back to a full page load of the pending destination, which
+      // re-renders it cleanly from SSR. Non-navigation errors keep React's
+      // default reporting.
+      onUncaughtError(error) {
+        if (pendingNav) {
+          const dest = pendingNav;
+          pendingNav = null;
+          console.error(
+            "[pylon ssr] client navigation failed to render; falling back to a full page load:",
+            error,
+          );
+          window.location.href = dest;
+          return;
+        }
+        console.error(error);
+      },
+    });
     installNavHandlers();
     return;
   }
@@ -544,13 +571,21 @@ async function navigate(href, opts) {
   setNavParams(data);
   navEpoch++;
   currentPageProps = withClientProps(data);
+  const target = url.pathname + url.search;
   const tree = withBoundary(
     buildTree(route.Page, route.Layouts, currentPageProps),
     data.component,
     navEpoch,
   );
+  // Track the in-flight destination so hydrateRoot's onUncaughtError can fall
+  // back to a full page load if this re-render throws in React's commit phase
+  // (instead of leaving the URL changed but the page unswapped). Cleared on the
+  // next macrotask once the commit has settled with no error.
+  pendingNav = target;
   activeRoot.render(tree);
-  const target = url.pathname + url.search;
+  setTimeout(() => {
+    if (pendingNav === target) pendingNav = null;
+  }, 0);
   if (opts && opts.replace) {
     history.replaceState({ component: data.component }, "", target);
   } else if (push) {
