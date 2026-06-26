@@ -1,4 +1,4 @@
-import { buildManifest, discoverAppRoutes, entity, field, policy } from "@pylonsync/sdk";
+import { buildManifest, discoverAppRoutes, entity, field, font, policy } from "@pylonsync/sdk";
 
 // Acme — the default Pylon startup template.
 //
@@ -39,6 +39,20 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [leadPolicy],
+  // Self-hosted Inter (next/font parity) — the build fetches the woff2, serves
+  // it same-origin (no third-party request, no FOUT), preloads it, and adds a
+  // size-adjusted fallback. globals.css reads it via `var(--font-sans, …)`;
+  // layout.tsx carries no font <link>.
+  fonts: [
+    font({
+      family: "Inter",
+      variable: "--font-sans",
+      weights: ["400", "500", "600", "700", "800"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
+  ],
   routes: await discoverAppRoutes(),
 });
 

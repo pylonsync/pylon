@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  font,
 } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
@@ -113,6 +114,20 @@ const manifest = buildManifest({
   actions: [],
   policies: [conversationPolicy, messagePolicy, userPolicy],
   auth: auth(),
+  // Self-hosted Inter (next/font parity): the build fetches the woff2, serves it
+  // same-origin (no third-party request, no FOUT), preloads it, and synthesizes a
+  // size-adjusted fallback face so there's no layout shift. globals.css reads it
+  // via `var(--font-sans, …)`; layout.tsx carries no font <link>.
+  fonts: [
+    font({
+      family: "Inter",
+      variable: "--font-sans",
+      weights: ["400", "500", "600", "700"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
+  ],
   routes: await discoverAppRoutes(),
 });
 

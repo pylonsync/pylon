@@ -26,16 +26,9 @@ export default function RootLayout({ children, url }: LayoutProps) {
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link
-          rel="preconnect"
-          href="https://fonts.gstatic.com"
-          crossOrigin="anonymous"
-        />
-        <link
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
-          rel="stylesheet"
-        />
+        {/* Inter is declared in app.ts (fonts: [...]) and self-hosted by the
+            build — the runtime injects @font-face + <link rel=preload> + a
+            size-adjusted fallback here. No third-party request, no layout shift. */}
       </head>
       <body className="min-h-screen antialiased font-sans bg-background text-foreground">
         <Nav url={url} />

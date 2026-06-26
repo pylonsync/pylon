@@ -205,20 +205,12 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
             `generateMetadata` sets it. A hardcoded title in the layout would
             render first and win over the page's, so every tab would read
             "Acme". */}
-        {/* Inter — the marketing pages look best in a clean grotesk. Swap for
-            your own font or drop this link to fall back to the system stack. */}
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link
-          rel="preconnect"
-          href="https://fonts.gstatic.com"
-          crossOrigin="anonymous"
-        />
-        <link
-          rel="stylesheet"
-          href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
-        />
-        {/* Tailwind is compiled by Pylon from app/globals.css and the
-            stylesheet link is injected here automatically. */}
+        {/* Inter is declared in app.ts (`fonts: [font({ family: "Inter", … })]`)
+            and self-hosted by the build — the runtime injects the @font-face,
+            <link rel=preload>, and a size-adjusted fallback here automatically.
+            No third-party Google Fonts request, no layout shift. Swap the family
+            in app.ts to change it. Tailwind's compiled stylesheet is injected
+            here too. */}
       </head>
       <body className="flex min-h-screen flex-col bg-background text-foreground antialiased">
         {isBare ? (

@@ -34,7 +34,7 @@
 
   --font-sans: "Inter", "Inter Placeholder", ui-sans-serif, -apple-system,
     "system-ui", "Segoe UI", Helvetica, Arial, sans-serif;
-  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-sans, "Inter", ui-sans-serif, system-ui, sans-serif);
 
   /* Semantic tokens consumed by @pylonsync/example-ui components. */
   --color-background: #fbfaf7;
