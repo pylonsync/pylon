@@ -868,6 +868,13 @@ async function _doBuild(appDirRel: string): Promise<BuildOutput> {
   return _doBuildInner(fs, path, cwd, appDirRel);
 }
 
+// Monotonic per-process counter for the Tailwind temp filename. `pylon dev`
+// warms the SSR bundle in one runner process while incoming requests can drive
+// their own rebuild in another, so two `buildTailwind` calls may run against the
+// same outdir at once. Combined with the pid it gives every compile a unique
+// temp path, so concurrent builds never rename each other's file away.
+let _styleBuildSeq = 0;
+
 /**
  * Compile `app/globals.css` through Tailwind v4 (`@tailwindcss/cli`)
  * if both are present. Returns the relative output path (under
@@ -875,7 +882,10 @@ async function _doBuild(appDirRel: string): Promise<BuildOutput> {
  * project hasn't opted in to Tailwind — we don't want every SSR
  * project to need Tailwind installed.
  */
-async function buildTailwind(
+// Exported for the concurrency regression test (ssr-client-bundler.test.ts):
+// it drives several compiles at once against one outdir to prove they no longer
+// race on a shared temp file.
+export async function buildTailwind(
   fs: any,
   path: any,
   cwd: string,
@@ -915,7 +925,15 @@ async function buildTailwind(
   //
   // Spawn the CLI. Bun is already running; reuse it as the interpreter so the
   // user doesn't need node on PATH.
-  const tmpPath = path.join(outdir, ".styles.build.css");
+  // PROCESS-UNIQUE temp file. A shared name (`.styles.build.css`) let a
+  // concurrent build rename the file out from under this one — its `renameSync`
+  // then ENOENT'd, the compile threw, the route shipped with no `css`, and the
+  // page rendered UNSTYLED. Worst under cold-boot traffic (a warm build racing
+  // the first requests), which is exactly when it must not happen.
+  const tmpPath = path.join(
+    outdir,
+    `.styles.build.${process.pid}.${_styleBuildSeq++}.css`,
+  );
   const proc = (Bun as any).spawn({
     cmd: [process.execPath, cliPath, "-i", globalsPath, "-o", tmpPath, "--minify"],
     cwd,
@@ -925,6 +943,11 @@ async function buildTailwind(
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
     const err = await new Response(proc.stderr).text();
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {
+      /* nothing to clean up */
+    }
     throw new Error(`tailwindcss build failed (exit ${exitCode}): ${err}`);
   }
 
@@ -942,19 +965,22 @@ async function buildTailwind(
   const stylesName = `styles-${hash.toString(36).padStart(8, "0")}.css`;
   const outPath = path.join(outdir, stylesName);
 
-  // Drop previous styles-*.css so the outdir doesn't accumulate stale builds
-  // (the filename now changes on every class change), then move the freshly
-  // compiled file into place.
+  // Publish our freshly-compiled CSS FIRST (rename replaces atomically on
+  // POSIX, so the asset is never momentarily absent), THEN prune OTHER stale
+  // styles-*.css. The old order pruned before renaming, so a concurrent build
+  // could delete the file we were about to publish; pruning our own name could
+  // delete a concurrent winner's identical output. Excluding `stylesName` keeps
+  // both safe while still clearing builds from earlier class changes.
+  fs.renameSync(tmpPath, outPath);
   try {
     for (const f of fs.readdirSync(outdir) as string[]) {
-      if (f.startsWith("styles-") && f.endsWith(".css")) {
+      if (f.startsWith("styles-") && f.endsWith(".css") && f !== stylesName) {
         fs.rmSync(path.join(outdir, f), { force: true });
       }
     }
   } catch {
     /* outdir may not be listable on the first build — ignore */
   }
-  fs.renameSync(tmpPath, outPath);
   return stylesName;
 }
 

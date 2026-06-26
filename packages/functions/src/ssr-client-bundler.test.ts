@@ -23,6 +23,7 @@ import * as os from "node:os";
 
 import {
   buildClientBundle,
+  buildTailwind,
   type PylonBundleManifest,
 } from "./ssr-client-bundler";
 import { nearestBoundaryComponent } from "./ssr-client-boundary";
@@ -378,4 +379,54 @@ describe("client boundary is wired into the build", () => {
     expect(allShared).toContain("PYLON_NOT_FOUND");
     expect(allShared).toContain("getDerivedStateFromError");
   });
+});
+
+describe("Tailwind compile is concurrency-safe", () => {
+  // Regression: `pylon dev` warms the SSR bundle in one runner process while the
+  // first requests drive their own rebuild in another. Both compiled Tailwind to
+  // a SHARED temp file (`.styles.build.css`); whichever renamed it first won, and
+  // the other's `renameSync` ENOENT'd → the compile threw → the route shipped
+  // with no `css` → the page rendered UNSTYLED. Reproduced ~25% of cold boots
+  // under concurrent load. The fix gives each compile a process-unique temp path
+  // and publishes (rename) before pruning others. Drive several compiles at once
+  // against one outdir and prove they all succeed.
+  test("concurrent compiles against one outdir all produce the stylesheet", async () => {
+    const root = makeFixture(
+      { "page.tsx": PAGE_BODY("Home") },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    tempDir = root; // registers it for afterEach cleanup
+    // Opt into Tailwind: a real globals.css the CLI can compile. `@tailwindcss/cli`
+    // + `tailwindcss` resolve through the fixture's node_modules symlink (it points
+    // at examples/ssr-hello/node_modules, which declares both).
+    fs.writeFileSync(
+      path.join(root, "app", "globals.css"),
+      '@import "tailwindcss";\n@source "../app/**/*.{tsx,ts,jsx,js}";\n',
+      "utf8",
+    );
+    originalCwd = process.cwd();
+    process.chdir(root);
+
+    const outdir = path.join(root, ".pylon", "client-build");
+    fs.mkdirSync(outdir, { recursive: true });
+
+    // Old code: at least one of these rejects with the rename ENOENT.
+    const results = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        buildTailwind(fs, path, root, outdir, "app"),
+      ),
+    );
+
+    for (const name of results) {
+      expect(name).toMatch(/^styles-[a-z0-9]+\.css$/);
+      expect(fs.existsSync(path.join(outdir, name as string))).toBe(true);
+    }
+    // Deterministic output → identical hash → one published asset, no leftover
+    // temp files stranded in the outdir.
+    expect(new Set(results).size).toBe(1);
+    const stranded = (fs.readdirSync(outdir) as string[]).filter((f) =>
+      f.startsWith(".styles.build."),
+    );
+    expect(stranded).toEqual([]);
+  }, 20_000);
 });
