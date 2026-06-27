@@ -675,9 +675,8 @@ impl BundleClientMessage {
     }
 }
 
-/// Hydration — Bun → host after `Bun.build` finishes. Phase 1.5e
-/// switched from a single-file model to per-route entries with
-/// shared chunks, so we now return:
+/// Hydration — Bun → host after `Bun.build` finishes. Uses per-route
+/// entries with shared chunks, returning:
 ///   - `path`: absolute path to the manifest JSON
 ///     (`<cwd>/.pylon/client-build/manifest.json`). The host reads
 ///     this to discover which entry file + chunks each route needs.

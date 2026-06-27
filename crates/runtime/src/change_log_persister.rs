@@ -7,8 +7,8 @@
 //! `write_conn` again to persist the event inline, the call would
 //! deadlock — `std::sync::Mutex` is not reentrant.
 //!
-//! Same deadlock shape as the v0.3.218 seq-persistence regression
-//! (see [`crate::seq_allocator`]). The fix is the same: move the
+//! Same deadlock shape the seq allocator faces (see
+//! [`crate::seq_allocator`]); the answer is the same: move the
 //! write off the mutation thread.
 //!
 //! Shape:

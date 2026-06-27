@@ -47,7 +47,7 @@ pub fn generate_static_pages(manifest: &AppManifest) -> Vec<StaticPage> {
 ///
 /// Rejects any page whose computed path would escape `out_dir`. The page
 /// paths come from `route.path` in the manifest, which is user-authored —
-/// a route of `/../../tmp/pwn` would previously write outside `out_dir`
+/// a route of `/../../tmp/pwn` would write outside `out_dir`
 /// because schema validation only checks "starts with `/`" and uniqueness.
 /// We canonicalize `out_dir`, then canonicalize the write target's parent,
 /// and refuse the write if it doesn't sit under `out_dir`.
@@ -162,13 +162,9 @@ mod tests {
 
     #[test]
     fn no_static_routes_produces_no_pages() {
-        // The todo app has no static routes (all are "server" or "live").
-        // Wait — it has one static route: /todos/:todoId is "server".
-        // Let me check.
+        // The todo app has only server/live routes — no static pages.
         let m = test_manifest();
         let pages = generate_static_pages(&m);
-        // The todo app has server and live routes, no pure static.
-        // Unless we count... let me just test with a custom manifest.
         assert!(pages.is_empty());
     }
 

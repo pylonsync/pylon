@@ -25,11 +25,9 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-// base64url helper. Inlined here (was previously `use
-// crate::apple_jwt::base64_url`) because `apple_jwt` is
-// cfg-gated for wasm32 — pylon-workers needs JWT but can't
-// pull in the Apple ES256/ring code path. Same `impl AsRef<[u8]>`
-// surface as the original so callers don't need adjustment.
+// base64url helper, inlined rather than imported from `apple_jwt`
+// because that module is cfg-gated for wasm32 — pylon-workers needs
+// JWT but can't pull in the Apple ES256/ring code path.
 fn base64_url<T: AsRef<[u8]>>(input: T) -> String {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
     URL_SAFE_NO_PAD.encode(input.as_ref())
@@ -51,7 +49,7 @@ pub struct JwtClaims {
     /// Issuer — `PYLON_JWT_ISSUER` if set, else `pylon`.
     pub iss: String,
     /// Optional tenant id (Pylon-specific extension claim
-    /// `https://pylonsync.com/tenant`).
+    /// `https://www.pylonsync.com/tenant`).
     pub tenant_id: Option<String>,
     /// Optional roles array.
     pub roles: Vec<String>,
@@ -108,11 +106,11 @@ pub fn mint(secret: &[u8], claims: &JwtClaims) -> String {
     claims_obj.insert("exp".into(), claims.exp.into());
     claims_obj.insert("iss".into(), claims.iss.clone().into());
     if let Some(t) = &claims.tenant_id {
-        claims_obj.insert("https://pylonsync.com/tenant".into(), t.clone().into());
+        claims_obj.insert("https://www.pylonsync.com/tenant".into(), t.clone().into());
     }
     if !claims.roles.is_empty() {
         claims_obj.insert(
-            "https://pylonsync.com/roles".into(),
+            "https://www.pylonsync.com/roles".into(),
             serde_json::Value::Array(claims.roles.iter().cloned().map(Into::into).collect()),
         );
     }
@@ -194,11 +192,11 @@ pub fn verify(
         .to_string();
     let iat = claims.get("iat").and_then(|v| v.as_u64()).unwrap_or(0);
     let tenant_id = claims
-        .get("https://pylonsync.com/tenant")
+        .get("https://www.pylonsync.com/tenant")
         .and_then(|v| v.as_str())
         .map(String::from);
     let roles = claims
-        .get("https://pylonsync.com/roles")
+        .get("https://www.pylonsync.com/roles")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()

@@ -1,20 +1,12 @@
 //! Persisted SQLite change-log seq allocator.
 //!
-//! This is the third attempt at solving the "client cursor outlives
-//! server restart → 410 RESYNC_REQUIRED storm" problem. The earlier
-//! shapes:
-//!
-//! - **v0.3.217 and prior** — in-memory atomic only, resets to 0 on
-//!   restart. Every redeploy of chat-api caused a 410 wave (recoverable
-//!   via reset+repull but visibly disruptive).
-//!
-//! - **v0.3.218–0.3.221** — synchronous SQLite UPDATE inside the seq
-//!   provider that the mutation pipeline already holds `write_conn`
-//!   for. Recursive mutex acquisition → deadlock. Symptom on chat-api:
-//!   `markChannelRead` hung forever; only reads succeeded. Shipped + reverted.
-//!
-//! - **v0.3.223 (this)** — high-water-mark reservation done OFF the
-//!   mutation hot path by a background thread with its own conn.
+//! Solves the "client cursor outlives server restart → 410 RESYNC_REQUIRED
+//! storm" problem: an in-memory-only atomic resets to 0 on restart, so every
+//! redeploy caused a 410 wave. Persistence MUST stay off the mutation hot
+//! path — a synchronous SQLite UPDATE inside the seq provider (which the
+//! mutation pipeline calls while holding `write_conn`) recursively acquires
+//! the non-reentrant mutex and deadlocks. So the allocator reserves a
+//! high-water mark off the hot path via a background thread with its own conn.
 //!
 //! ## Design
 //!

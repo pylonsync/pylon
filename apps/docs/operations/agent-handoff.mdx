@@ -14,9 +14,9 @@ Pylon Cloud's dashboard can mint a one-time 8-character code that signs a coding
 
 The agent will:
 
-- install the Pylon CLI (`curl -fsSL https://pylonsync.com/install.sh | bash`)
+- install the Pylon CLI (`curl -fsSL https://www.pylonsync.com/install.sh | bash`)
 - sign in with `pylon login --code ABCD-1234`
-- load `https://pylonsync.com/pylon-skill.md` into wherever it persists project rules (`~/.claude/skills/pylon/SKILL.md` for Claude Code, `.cursor/rules/pylon.mdc` for Cursor, `CONVENTIONS.md` for Aider, etc.)
+- load `https://www.pylonsync.com/pylon-skill.md` into wherever it persists project rules (`~/.claude/skills/pylon/SKILL.md` for Claude Code, `.cursor/rules/pylon.mdc` for Cursor, `CONVENTIONS.md` for Aider, etc.)
 - run `pylon projects list` + `pylon status` so it knows the starting state
 - ask you what you want to build
 
@@ -61,12 +61,12 @@ For reference, the full prompt the dashboard generates:
 I just signed up for Pylon Cloud and want you to help me build. Please run these steps in order:
 
 1. Install the Pylon CLI:
-   curl -fsSL https://pylonsync.com/install.sh | bash
+   curl -fsSL https://www.pylonsync.com/install.sh | bash
 
 2. Sign in to my Pylon Cloud account (single-use code, expires in 5 min):
    pylon login --code ABCD-1234
 
-3. Load https://pylonsync.com/pylon-skill.md as your reference for Pylon
+3. Load https://www.pylonsync.com/pylon-skill.md as your reference for Pylon
    conventions and save it wherever your tool persists project rules.
    Common locations:
    - Claude Code → ~/.claude/skills/pylon/SKILL.md

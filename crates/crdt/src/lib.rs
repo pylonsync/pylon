@@ -401,12 +401,10 @@ fn apply_list_rebuild(
     items: &[Value],
     kind: CrdtFieldKind,
 ) -> Result<(), String> {
-    // Pre-validate every item before touching the list. Pre-fix the
-    // clear ran first, then push-per-item validated; a deeply nested
-    // (json_to_loro depth-bound) or otherwise unsupported item N
-    // would error AFTER wiping the first N-1 items, leaving the
-    // list mutated despite returning Err. Pre-encode to LoroValue
-    // here so the mutation pass below can't fail on shape.
+    // Pre-validate + pre-encode every item before touching the list,
+    // so a deeply nested (json_to_loro depth-bound) or otherwise
+    // unsupported item can't error mid-rebuild and leave the list
+    // mutated. The mutation pass below can't fail on shape.
     let encoded: Vec<LoroValue> = items
         .iter()
         .enumerate()
@@ -473,12 +471,9 @@ fn apply_list_rebuild(
 fn apply_tree_reconcile(map: &loro::LoroMap, name: &str, nodes: &[Value]) -> Result<(), String> {
     // ---- Validation pass — runs BEFORE any tree mutation ----
     //
-    // Pre-fix this function created TreeIDs eagerly, then validated
-    // parents in a second pass. A patch with a bad parent reference
-    // would error AFTER stamping orphan nodes; the outer `doc.commit()`
-    // would then publish those orphans even though apply_patch
-    // returned Err. Validating first means a malformed patch
-    // produces zero side effects.
+    // Validating before mutating means a malformed patch produces
+    // zero side effects: no orphan TreeIDs get stamped (and published
+    // by the outer `doc.commit()`) before an error returns.
     //
     // Pre-flight checks:
     //   - every node is a JSON object with a string `id`
@@ -725,11 +720,11 @@ fn json_to_loro_inner(v: &Value, depth: u32) -> Option<LoroValue> {
         Value::Null => Some(LoroValue::Null),
         Value::Bool(b) => Some(LoroValue::Bool(*b)),
         // Preserve integers as I64 instead of collapsing every number to a
-        // double. Forcing f64 corrupted integers above 2^53 (9007199254740993
-        // → ...992) and turned every int into a float, so a List<int> field's
-        // projected shape drifted (1 → 1.0) and churned rowsDiffer. i64 covers
-        // any value up to ~9.2e18; a real float or a huge u64 (> i64::MAX) has
-        // no lossless int form and keeps the f64 path.
+        // double. f64 can't hold integers above 2^53 exactly (9007199254740993
+        // → ...992) and would turn every int into a float (1 → 1.0), drifting a
+        // List<int> field's projected shape. i64 covers any value up to ~9.2e18;
+        // a real float or a huge u64 (> i64::MAX) has no lossless int form and
+        // keeps the f64 path.
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Some(LoroValue::I64(i))
@@ -1316,12 +1311,9 @@ mod tests {
 
     #[test]
     fn tree_validation_failure_leaves_no_orphan_nodes() {
-        // Regression: pre-fix, the reconcile created TreeIDs in a
-        // first pass and validated parents in a second. A patch with
-        // a bad parent would error AFTER the create, so the outer
-        // doc.commit would publish orphan root nodes. After the
-        // pre-validation refactor, a failed patch produces ZERO
-        // visible tree state.
+        // A patch with a bad parent must produce ZERO visible tree
+        // state: the reconcile validates parents before creating any
+        // TreeID, so doc.commit never publishes orphan root nodes.
         let doc = LoroDoc::new();
         let fields = vec![CrdtField {
             name: "tree".into(),
@@ -1396,8 +1388,7 @@ mod tests {
     fn list_failure_does_not_partial_write() {
         // Seed a list, then issue a patch where the LAST item is
         // too-deep. The pre-validation pass must catch this before
-        // clearing the existing list — pre-fix, the clear ran first
-        // and the existing items got wiped despite the error.
+        // clearing the existing list, so the existing items survive.
         let doc = LoroDoc::new();
         let fields = vec![CrdtField {
             name: "tags".into(),
@@ -1453,9 +1444,9 @@ mod tests {
         // error rather than silently dropping rows.
         //
         // This also subsumes the "cycle through existing parent"
-        // case codex flagged: a→b plus b's existing →a would form a
-        // cycle if both moves landed, but the parent-not-in-input
-        // check fires first and prevents the entire scenario.
+        // case: a→b plus b's existing →a would form a cycle if both
+        // moves landed, but the parent-not-in-input check fires first
+        // and prevents the entire scenario.
         let doc = LoroDoc::new();
         let fields = vec![CrdtField {
             name: "tree".into(),
@@ -1491,9 +1482,8 @@ mod tests {
     #[test]
     fn tree_cycle_rejected_pre_mutation() {
         // a → b → a chain inside the input. The validation pass
-        // catches this; pre-fix the mutation pass would create both
-        // nodes + stamp meta before tree.mov rejected the second
-        // move, leaving partially-applied state in the doc.
+        // catches this before any node gets created or meta stamped,
+        // so no partially-applied state lands in the doc.
         let doc = LoroDoc::new();
         let fields = vec![CrdtField {
             name: "tree".into(),
@@ -1540,8 +1530,8 @@ mod tests {
     #[test]
     fn tree_failure_does_not_create_container() {
         // A failed first-write to a tree field must NOT leave an
-        // empty tree container in the doc — pre-fix the container
-        // got instantiated speculatively before parent validation.
+        // empty tree container in the doc: the container is only
+        // instantiated after parent validation passes.
         let doc = LoroDoc::new();
         let fields = vec![CrdtField {
             name: "tree".into(),
@@ -1658,9 +1648,9 @@ mod tests {
 
     #[test]
     fn list_numbers_keep_integer_shape_and_precision() {
-        // Pre-fix every number was forced to f64: integers above 2^53 were
-        // corrupted (9007199254740993 → ...992) and every int became a float
-        // (1 → 1.0), churning rowsDiffer on List fields.
+        // Integers in a list must keep their integer shape and full
+        // precision: above 2^53 an f64 would corrupt them (9007199254740993
+        // → ...992), and every int would render as a float (1 → 1.0).
         let doc = LoroDoc::new();
         apply_patch(
             &doc,
@@ -1680,8 +1670,7 @@ mod tests {
         assert_eq!(arr[0].as_i64(), Some(1));
         // Float stays a float.
         assert_eq!(arr[1].as_f64(), Some(2.5));
-        // Big int survives with full precision (the f64 path returned
-        // 9007199254740992).
+        // Big int survives with full precision.
         assert_eq!(arr[2].as_i64(), Some(9007199254740993));
 
         // Whole-value round-trip is byte-identical.
@@ -1701,9 +1690,8 @@ mod tests {
     #[test]
     fn counter_overflow_clamps_to_finite_not_null() {
         // A counter is the sum of its deltas; two near-max increments overflow
-        // it to +Inf. Pre-fix the projection ran Number::from_f64(Inf) → None
-        // → null, silently wiping the field. It must clamp to a finite number
-        // instead — the field stays present and visibly huge.
+        // it to +Inf. The projection must clamp that to a finite number rather
+        // than wipe the field to null — it stays present and visibly huge.
         let doc = LoroDoc::new();
         apply_patch(
             &doc,

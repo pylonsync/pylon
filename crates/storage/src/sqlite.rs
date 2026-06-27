@@ -586,9 +586,7 @@ impl SqliteAdapter {
                     // <https://www.sqlite.org/lang_altertable.html#otheralter>.
                     // We're already inside apply_schema's transaction,
                     // so a failure at any step rolls the whole thing
-                    // back. This used to be a warn-and-skip, which left
-                    // columns removed from the manifest stuck at NOT
-                    // NULL — and every subsequent insert failing.
+                    // back.
                     self.rebuild_table_with_nullability(entity, &target.name, target.optional)?;
                 }
                 SchemaOperation::AddIndex {

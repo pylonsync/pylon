@@ -411,9 +411,8 @@ pub fn verify(
         return Err(SiweError::AddressMismatch);
     }
     // Consume the nonce ONLY now that everything else has passed.
-    // Wave-5 codex P1: previously validate_message consumed the
-    // nonce up-front, letting an attacker DoS a victim's sign-in
-    // by repeatedly submitting bad signatures.
+    // Consuming it up-front would let an attacker DoS a victim's
+    // sign-in by repeatedly submitting bad signatures.
     let _ = nonces.take(&message.address);
     Ok(recovered)
 }

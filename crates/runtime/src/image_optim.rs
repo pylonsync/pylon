@@ -638,7 +638,7 @@ fn process(
         )
         .map_err(|e| format!("fast resize src setup: {e}"))?;
         let mut dst_image = fir::images::Image::new(dst_w, dst_h, fir::PixelType::U8x4);
-        // Lanczos3 — matches what we used to use, sharp at downscale.
+        // Lanczos3 — sharp at downscale.
         let mut resizer = fir::Resizer::new();
         let opts = fir::ResizeOptions::new()
             .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::Lanczos3));

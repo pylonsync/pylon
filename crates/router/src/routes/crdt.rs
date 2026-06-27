@@ -2,10 +2,10 @@
 //! into the row's LoroDoc + re-projects to materialized columns +
 //! broadcasts the post-merge snapshot to subscribers.
 //!
-//! Update-policy gated: previously any session (incl. guest, which
-//! auto-mints without credentials) could mutate any addressable CRDT
-//! row. Now the existing row is loaded so policies depending on row
-//! data (`data.ownerId == auth.userId`) can evaluate.
+//! Update-policy gated: the existing row is loaded so policies depending
+//! on row data (`data.ownerId == auth.userId`) can evaluate, blocking
+//! any session (incl. auto-minted guests) from mutating an addressable
+//! CRDT row it doesn't own.
 
 use crate::{
     decode_hex, json_error, json_error_safe, json_error_with_hint, require_auth, RouterContext,

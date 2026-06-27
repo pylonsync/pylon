@@ -101,7 +101,6 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
 
     let mut seen_entity_names = std::collections::HashSet::new();
     for entity in &schema.entities {
-        // Empty entity name
         if entity.name.is_empty() {
             diagnostics.push(Diagnostic {
                 severity: Severity::Error,
@@ -112,7 +111,6 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
             });
         }
 
-        // Duplicate entity name
         if !entity.name.is_empty() && !seen_entity_names.insert(&entity.name) {
             diagnostics.push(Diagnostic {
                 severity: Severity::Error,
@@ -141,7 +139,6 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
 
         let mut seen_field_names = std::collections::HashSet::new();
         for field in &entity.fields {
-            // Empty field name
             if field.name.is_empty() {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Error,
@@ -152,7 +149,6 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
                 });
             }
 
-            // Duplicate field name
             if !field.name.is_empty() && !seen_field_names.insert(&field.name) {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Error,
@@ -486,10 +482,7 @@ pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
         // error boundary can all legitimately share a path — they're dispatched
         // by method + role, not by path alone (the no-JS-form pattern puts a
         // page.tsx + route.ts in the same dir). Only two routes of the SAME
-        // kind at one path is a real duplicate. (Before: "route" fell into the
-        // "page" class and collided with its own page → spurious
-        // ROUTE_PATH_DUPLICATE on every page+route.ts pair, e.g. the SSR
-        // scaffold's /notes.)
+        // kind at one path is a real duplicate.
         let kind_class = match route.kind.as_deref() {
             Some("not-found") => "not-found",
             Some("error") => "error",
@@ -750,7 +743,6 @@ fn validate_manifest_field_id_refs(
 ) {
     for (parent_name, field_name, field_type) in fields {
         if let Some(target) = extract_id_target(field_type) {
-            // Check if any entity matches this target name.
             if !entity_names.iter().any(|e| e.as_str() == target) {
                 diagnostics.push(Diagnostic {
                     severity: Severity::Error,

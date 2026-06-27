@@ -3950,7 +3950,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Wave-8: OAuth refresh-token helpers
+    // OAuth refresh-token helpers
     // -----------------------------------------------------------------
 
     fn fresh_account_with_expiry(expires_in_secs: i64) -> Account {

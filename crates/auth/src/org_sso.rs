@@ -857,11 +857,8 @@ pub fn random_state() -> String {
 ///
 /// Returns Err when:
 /// - PYLON_SECRET is set but unparseable (wrong length, bad hex/base64).
-///   The previous behaviour returned `None` from the resolver and silently
-///   downgraded to `plain:`, leaving operators believing their secrets were
-///   encrypted while the encryption path was off. The seal path now surfaces
-///   the parse error as `PYLON_SECRET_INVALID` instead of pretending the
-///   key was unset.
+///   Surfaced as `PYLON_SECRET_INVALID`; the secret is never silently
+///   downgraded to `plain:` when a key was meant to be present.
 /// - PYLON_SECRET is set but encryption itself fails (CSPRNG nonce-gen,
 ///   ring init).
 ///
@@ -1223,8 +1220,8 @@ mod tests {
 
     /// `parse_key32` is the building block for env-var resolution. Verify
     /// it accepts both encodings and rejects values that aren't 32 bytes —
-    /// these are exactly the inputs that used to silently disable
-    /// encryption when stuffed into PYLON_SECRET.
+    /// these are exactly the inputs that would silently disable encryption
+    /// if accepted into PYLON_SECRET.
     #[test]
     fn parse_key32_accepts_hex_and_base64() {
         let hex_key = "00".repeat(32);
@@ -1298,8 +1295,8 @@ mod secret_resolution_tests {
 
     #[test]
     fn malformed_secret_returns_err_not_ok_none() {
-        // This is the audit finding: a present-but-unparseable PYLON_SECRET
-        // used to fall back to `plain:` silently. Now it errors loudly.
+        // A present-but-unparseable PYLON_SECRET must error loudly, not
+        // fall back to `plain:` silently.
         with_env(Some("not-a-real-key"), None, || {
             let err = resolve_sso_encryption_key()
                 .expect_err("malformed PYLON_SECRET must error, not return None");

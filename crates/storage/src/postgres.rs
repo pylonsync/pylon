@@ -339,13 +339,7 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 //
                 // `name` is the logical (manifest-side) name; the DB
                 // stores it prefixed with `<entity>_` to match the
-                // namespace AddIndex creates. We previously emitted
-                // `DROP INDEX <logical>` here, which silently became
-                // a no-op against the prefixed DB name — auto-migrate
-                // looked like it had run but the index stayed alive,
-                // visible as the pylon-cloud `uniq_hobby_owner` regression
-                // (the index outlived its schema entry and broke org
-                // creation in prod even after the schema change shipped).
+                // namespace AddIndex creates.
                 //
                 // Emit BOTH a DROP CONSTRAINT (for constraint-backed
                 // indexes — PG refuses `DROP INDEX` on those with
@@ -1215,13 +1209,13 @@ pub mod live {
         /// Apply a schema plan to the live database.
         ///
         /// Statements run sequentially WITHOUT a wrapping transaction.
-        /// On failure of a single statement, we now log + continue to
-        /// the next instead of bailing out — pre-0.3.95 a single bad
-        /// statement (e.g. `DROP INDEX` on a constraint-backed index
-        /// PG refuses) aborted the entire plan and every subsequent
-        /// `ADD COLUMN` / `CREATE INDEX` got silently skipped, leading
-        /// to "migration succeeded according to logs but the column
-        /// doesn't exist" failure modes that surface days later.
+        /// On failure of a single statement, log + continue to the next
+        /// rather than bailing out: a single bad statement (e.g. `DROP
+        /// INDEX` on a constraint-backed index PG refuses) would
+        /// otherwise abort the entire plan and silently skip every
+        /// subsequent `ADD COLUMN` / `CREATE INDEX`, leading to
+        /// "migration succeeded according to logs but the column doesn't
+        /// exist" failure modes that surface days later.
         ///
         /// Continuing is safe because pylon's schema ops are designed
         /// to be expand-compatible (no destructive writes that would
@@ -1455,7 +1449,7 @@ pub mod live {
             let mut client_offset: Option<u64> = None;
             // Collect (col, op, value) so placeholder numbers can be assigned
             // in a single materialization pass after the parse loop. Values
-            // are now JsonParam (typed) instead of String — see `value_to_pg`.
+            // are JsonParam (typed) — see `value_to_pg`.
             let mut planned: Vec<(String, String, JsonParam)> = Vec::new();
 
             for (key, val) in obj {

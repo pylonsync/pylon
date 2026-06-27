@@ -461,9 +461,7 @@ pub(crate) fn handle(
             // broadcast of the same events: if useQuery hasn't seen
             // seq N yet, the SDK pulls immediately instead of waiting
             // for the next periodic poll. Kills the need for app
-            // code to call `refetch()` after every mutation (which
-            // was the canonical workaround — see pylon-cloud's
-            // domains/page.tsx pre-2026-05-17 comment).
+            // code to call `refetch()` after every mutation.
             let pre_seq = ctx.change_log.current_seq();
             let result = fn_ops.call(fn_name, args, auth, None, Some(request_info));
             let post_seq = ctx.change_log.current_seq();

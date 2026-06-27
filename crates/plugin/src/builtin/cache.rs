@@ -1847,9 +1847,8 @@ mod tests {
         }
         assert_eq!(c.dbsize(), 100);
 
-        // Now mset 1000 new keys. With the old implementation this took ~5s;
-        // with the O(N + n) eviction it should be well under 100ms even on
-        // slow CI hardware.
+        // Now mset 1000 new keys. With the O(N + n) eviction this should be
+        // well under 100ms even on slow CI hardware.
         let pairs: Vec<(String, String)> = (0..1000)
             .map(|i| (format!("new:{}", i), format!("nv{}", i)))
             .collect();

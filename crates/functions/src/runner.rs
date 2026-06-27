@@ -1614,9 +1614,6 @@ fn kill_and_msg(child: &mut Child, msg: String) -> String {
     msg
 }
 
-/// Background reader thread: parses NDJSON lines from the Bun stdout into
-/// TsMessage values and forwards them to the channel. Exits when stdout
-/// closes (child died or was killed).
 /// Reader thread: parse each NDJSON line and DEMUX it to the waiting call by
 /// `call_id`. The one-shot `Ready` (no call_id) goes to `ready_tx`. Every other
 /// message is routed to its call's channel; a message for an unknown call_id

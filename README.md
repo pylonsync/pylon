@@ -12,7 +12,7 @@ binary you can `scp` to a VPS or run with SQLite or Postgres.
 
 ```sh
 # Install
-curl -fsSL https://pylonsync.com/install.sh | bash
+curl -fsSL https://www.pylonsync.com/install.sh | bash
 
 # New project
 pylon init my-app
@@ -72,7 +72,7 @@ npx skills add pylonsync/pylon
 ### 1. Install
 
 ```sh
-curl -fsSL https://pylonsync.com/install.sh | bash
+curl -fsSL https://www.pylonsync.com/install.sh | bash
 ```
 
 Other install paths:

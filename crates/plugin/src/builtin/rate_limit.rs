@@ -123,9 +123,8 @@ impl Plugin for RateLimitPlugin {
         auth: &AuthContext,
         meta: &RequestMeta<'_>,
     ) -> Result<(), PluginError> {
-        // Per-IP bucket for anonymous traffic fixes the "one attacker
-        // DoSes every anon user" collapse we used to have when all anon
-        // callers shared a single `__anon__` bucket.
+        // Per-IP bucket for anonymous traffic keeps one attacker from
+        // DoSing every anon user via a single shared `__anon__` bucket.
         self.check_request(auth.user_id.as_deref(), meta.peer_ip)
     }
 }
@@ -147,8 +146,7 @@ mod tests {
     fn different_ips_use_different_buckets() {
         let plugin = RateLimitPlugin::new(2, Duration::from_secs(60));
         // Two anonymous clients from different IPs should each get their
-        // own bucket under check_request — previously both collapsed into
-        // `__anon__` and one could burn the other's quota.
+        // own bucket under check_request.
         assert!(plugin.check_request(None, "1.1.1.1").is_ok());
         assert!(plugin.check_request(None, "1.1.1.1").is_ok());
         assert!(plugin.check_request(None, "1.1.1.1").is_err());

@@ -402,11 +402,11 @@ fn handle_saml_start(ctx: &RouterContext, org_id: &str, raw: &str) -> (u16, Stri
             json_error("UNTRUSTED_CALLBACK", &format!("callback rejected: {e}")),
         );
     }
-    // Wave-9 P1 fix: error_callback was previously persisted into
-    // SamlStateRecord without origin validation. Any signature/audience
-    // failure on ACS would then 302 to the attacker-controlled URL,
-    // turning a malformed-Response trigger into open-redirect / CSRF
-    // payload delivery.
+    // Validate error_callback's origin before it's persisted into
+    // SamlStateRecord: otherwise any signature/audience failure on ACS
+    // would 302 to an attacker-controlled URL, turning a
+    // malformed-Response trigger into open-redirect / CSRF payload
+    // delivery.
     if let Err(e) = pylon_auth::validate_trusted_redirect(&error_callback, ctx.trusted_origins) {
         return (
             403,
@@ -2244,7 +2244,7 @@ pub(crate) fn handle(
         // attacker who steals the secret can probe email enumeration
         // (USER_NOT_FOUND vs ACCOUNT_LOCKED vs 200) silently —
         // Tinybird/Loki alerts on `sign_in_failed` rate spikes won't
-        // fire. Codex review caught the gap.
+        // fire.
         let intent_for_audit =
             |intent: &Option<String>| intent.clone().unwrap_or_else(|| "unspecified".into());
         let audit_failed = |code: &str, user: Option<&str>, intent: &Option<String>| {
@@ -2309,13 +2309,12 @@ pub(crate) fn handle(
             .filter(|s| !s.is_empty());
 
         let user_entity = ctx.store.manifest().auth.user.entity.clone();
-        // ISO-8601 timestamp from the kernel helper. The earlier
-        // implementation used `format!("{}Z", unix_secs)` which is
-        // NOT valid ISO-8601 — `new Date("1716177600Z")` returns
-        // Invalid Date, and the storage adapter silently drops
-        // unparseable datetime values, leaving emailVerified null
-        // forever. Documented footgun (see auth/email-verification);
-        // Codex review caught the re-introduction here.
+        // ISO-8601 timestamp from the kernel helper. A raw
+        // `format!("{}Z", unix_secs)` is NOT valid ISO-8601 —
+        // `new Date("1716177600Z")` returns Invalid Date, and the
+        // storage adapter silently drops unparseable datetime values,
+        // leaving emailVerified null forever. Documented footgun
+        // (see auth/email-verification).
         let now_iso = pylon_kernel::util::now_iso();
 
         let existing = ctx

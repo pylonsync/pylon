@@ -25,9 +25,6 @@ pub mod oauth_backend;
 pub mod openapi;
 pub mod reactive;
 pub mod seq_allocator;
-// org_backend removed in v0.3.74 — org/member/invite now flow through
-// the manifest's entity layer via the DataStore. See
-// crates/auth/src/org.rs for the new EntityOrgStore.
 pub mod org_sso_backend;
 pub mod pg_loro_store;
 pub mod presence;
@@ -1851,8 +1848,7 @@ impl Runtime {
 
     /// Cheap shared handle to the manifest — an `Arc` refcount bump, not a deep
     /// clone. Use this where a caller needs to OWN an `Arc<AppManifest>` (e.g.
-    /// the transactional-function store, which previously deep-cloned the whole
-    /// manifest per call).
+    /// the transactional-function store).
     pub fn manifest_arc(&self) -> Arc<AppManifest> {
         Arc::clone(&self.manifest)
     }

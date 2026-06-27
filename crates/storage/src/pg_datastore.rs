@@ -37,7 +37,7 @@ const DEFAULT_CHECKOUT_TIMEOUT_MS: u64 = 10_000;
 /// Each `DataStore` read checks out its own connection, so N reads run on
 /// N connections concurrently. Transactions (`with_transaction*`, `transact`)
 /// pin ONE connection for the closure body — different transactions take
-/// different connections, so they no longer serialize behind a global lock;
+/// different connections, so they don't serialize behind a global lock;
 /// Postgres' own row locking arbitrates conflicts. Pool size is governed by
 /// `PYLON_PG_POOL_SIZE` (default 8).
 pub struct PostgresDataStore {
@@ -55,7 +55,7 @@ impl PostgresDataStore {
         let pool = ConnectionPool::new(size);
 
         // The first connection must succeed — a dead database should fail
-        // boot loudly, exactly like the old single-connection path did.
+        // boot loudly.
         let first = LivePostgresAdapter::connect(url).map_err(Self::map_err)?;
         pool.add(first);
 

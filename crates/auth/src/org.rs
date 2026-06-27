@@ -45,7 +45,7 @@ use pylon_kernel::ManifestAuthOrgConfig;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Types — same surface external callers used pre-v0.3.74
+// Types
 // ---------------------------------------------------------------------------
 
 /// Role within an organization.

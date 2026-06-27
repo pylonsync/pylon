@@ -651,8 +651,8 @@ mod tests {
 
     #[test]
     fn default_authorize_subscribe_requires_matching_user_id() {
-        // Previously the default hook allowed any authenticated user to
-        // subscribe to any sid, which let Alice impersonate Bob.
+        // The default hook requires the auth user_id to match the subscriber
+        // id, so Alice cannot subscribe to Bob's sid.
         let shard: Arc<Shard<Counter>> = Shard::new(
             "t",
             Counter {

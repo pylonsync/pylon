@@ -194,9 +194,7 @@ mod tests {
         // requests, so absent Origin = not-a-browser = no CSRF
         // attack surface. Legitimate server-to-server callers
         // (Next.js SSR, curl --cookie, internal admin tools)
-        // attach the cookie explicitly via Cookie header. Pre-fix
-        // this returned CSRF_NO_ORIGIN and broke server-side POSTs
-        // from the dashboard.
+        // attach the cookie explicitly via Cookie header.
         let csrf = localhost_plugin();
         for method in &["POST", "PUT", "PATCH", "DELETE"] {
             assert!(

@@ -13,12 +13,12 @@ Scaffold a new app with `npm create @pylonsync/pylon@latest` (the default templa
 
 This skill is a starting point, not the ceiling. When the user asks something this skill doesn't cover — a specific error code, an edge case, a feature not discussed below — fetch the source of truth:
 
-- **Full docs index + concept map:** <https://pylonsync.com/llms.txt> — fetch this first for a condensed overview of every doc page with links.
+- **Full docs index + concept map:** <https://docs.pylonsync.com/llms.txt> — fetch this first for a condensed overview of every doc page with links.
 - **Docs site:** <https://docs.pylonsync.com/> — human docs covering Get started, Core concepts, Auth, Plugins, Clients, Cloud, Operations, and Compare-vs-X pages.
 - **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`, and the Swift SDK at `packages/swift/`. When in doubt about a method name or signature, read the source, not your training data.
 - **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — full apps covering CRM, ERP, chat, 3D, dashboards, plus `examples/swift-todo` for the iOS/macOS SDK.
 - **Pylon Cloud:** <https://www.pylonsync.com> — managed Pylon. Same binary, same APIs, no infra to run.
-- **This skill file (latest):** <https://pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
+- **This skill file (latest):** <https://www.pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
 **Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`, `db.useAggregate({sum: ...})`) is probably hallucinated.
 

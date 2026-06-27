@@ -1019,12 +1019,10 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
         // background thread so seqs stay monotonic across process
         // restarts (no 410 RESYNC_REQUIRED storm on redeploy).
         //
-        // The earlier v0.3.218 attempt persisted INLINE inside the
-        // SeqProvider closure, which the mutation pipeline calls while
-        // holding write_conn. That recursive write_conn acquisition
-        // deadlocked every mutation (`markChannelRead` etc. on
-        // chat-api). The current shape moves persistence off the hot
-        // path: an in-memory atomic issues seqs from a reserved
+        // Persistence MUST stay off the hot path: persisting INLINE inside
+        // the SeqProvider closure — which the mutation pipeline calls while
+        // holding write_conn — recursively acquires write_conn and deadlocks
+        // every mutation. So an in-memory atomic issues seqs from a reserved
         // chunk, and a bg thread writes the next chunk's high-water
         // mark to disk before that chunk gets used. The bg thread has
         // its own write_conn lock acquisition, queued behind any
@@ -1099,8 +1097,8 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
     if runtime.is_postgres() {
         // Pg deployment: persistence lives in `pylon_change_log`.
         // Without this, every rolling deploy silently desyncs every
-        // connected client — same bug class the SQLite path fixed
-        // in v0.3.224, just on the cluster path.
+        // connected client (the cluster-path equivalent of the SQLite
+        // high-water-mark persistence above).
         if let Err(e) = runtime.bootstrap_pg_change_log() {
             tracing::warn!(
                 "[change_log] failed to bootstrap pylon_change_log; PG persistent log disabled: {}",
@@ -2055,9 +2053,7 @@ fn start_server(
         // event — see `sse::handle_sse_connection`. The ONLY way it serves
         // anonymous clients is when the operator sets
         // PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1, which DISABLES the auth gate. So
-        // warn loudly in THAT (and only that) case — the inverse of the old
-        // warning, which fired on the SAFE default and told operators to
-        // "silence" it by setting the very flag that opens the leak.
+        // warn loudly in THAT (and only that) case.
         if sse_unauth_warning_warranted(in_prod_for_sse, acknowledged) {
             tracing::warn!(
                 "[sse] PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1 — the dedicated SSE port \
@@ -3835,11 +3831,8 @@ fn start_server(
 
         // --- File upload: 3-step flow (init → client PUT → confirm) ---
         //
-        // Pre-0.3.91 pylon proxied multipart uploads through its own
-        // process: `POST /api/files/upload` parsed the body in memory
-        // then forwarded bytes to Stack0/local. 30MB+ uploads OOM'd
-        // the multipart parser. v0.3.91 switched to a direct-to-S3
-        // flow:
+        // A direct-to-S3 flow so large upload bytes never buffer in pylon's
+        // process (the source of OOMs):
         //
         //   1. POST /api/files/init  →  {uploadUrl, assetId, cdnUrl}
         //   2. client PUTs raw bytes to uploadUrl (S3 for Stack0,
@@ -4561,10 +4554,9 @@ fn start_server(
             }
         }
 
-        // Legacy multipart upload — removed in v0.3.91. The 3-endpoint
-        // flow above replaces it. Returns a clear migration hint so
-        // upgraders don't silently regress (and so any old client
-        // sees a useful error instead of a 404).
+        // Deprecated multipart upload — the 3-endpoint flow above replaces
+        // it. Returns a clear migration hint so any old client sees a
+        // useful error instead of a 404.
         if url == "/api/files/upload" && method == Method::Post {
             let err = json_error(
                 "UPLOAD_DEPRECATED",
@@ -6605,9 +6597,8 @@ mod dev_admin_gate_tests {
 /// `sse::handle_sse_connection`. The ONLY way it serves anonymous clients is
 /// when the operator sets `PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1`, which DISABLES
 /// that auth gate. So the warning must fire on that opt-in, NOT on the safe
-/// default. (Pre-fix the warning was inverted: it fired on the safe default and
-/// told operators to "silence" it by setting the very flag that opens the leak
-/// — remediation advice that created the vulnerability.)
+/// default — warning on the safe default would push operators to "silence" it
+/// by setting the very flag that opens the leak.
 fn sse_unauth_warning_warranted(in_prod: bool, acknowledged_unauth: bool) -> bool {
     in_prod && acknowledged_unauth
 }
@@ -7171,9 +7162,9 @@ fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> Result<AuthStores, 
 /// `PYLON_SESSION_IN_MEMORY=1` opts out. In-memory runtimes (tests)
 /// get an in-memory session store.
 ///
-/// This used to be opt-in, which silently broke every app after a server
-/// restart: tokens in browser localStorage resolved to anonymous, pulls
-/// came back empty under policy, and mutations 400'd with UNAUTHENTICATED.
+/// Persistent by default: without it, tokens in browser localStorage resolve
+/// to anonymous after a restart — pulls come back empty under policy and
+/// mutations 400 with UNAUTHENTICATED.
 #[allow(dead_code)]
 fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
     if std::env::var("PYLON_SESSION_IN_MEMORY")
@@ -7201,11 +7192,6 @@ fn build_session_store(app_db_path: Option<&str>) -> SessionStore {
         }
     }
 }
-
-// Multipart parser + its tests removed in v0.3.91 along with the
-// legacy `POST /api/files/upload` endpoint. The new 3-step flow
-// (init → client PUT → confirm) never goes through a multipart body,
-// so the parser had no remaining caller.
 
 #[cfg(test)]
 mod http_listener_rebuild_tests {

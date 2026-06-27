@@ -150,8 +150,7 @@ impl PolicyEngine {
 
     /// The policies registered for `entity_name` as a borrowed slice — O(1),
     /// no allocation. Empty slice when none are registered (the default-deny
-    /// path keys off `is_empty()`). Replaces the per-call
-    /// `entity_policies.iter().filter(…).collect()` on every read row.
+    /// path keys off `is_empty()`).
     fn entity_policies_for(&self, entity_name: &str) -> &[ManifestPolicy] {
         self.entity_policies_by_name
             .get(entity_name)
@@ -758,15 +757,13 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
             }
             b'"' | b'\'' => {
                 // Parse the literal as chars (not bytes) so multi-byte UTF-8
-                // round-trips intact. Previously `unescaped.push(b as char)`
-                // mangled anything outside ASCII: `"é"` became two garbage
-                // chars. Only a fixed escape set is honored; unknown escapes
-                // now error rather than silently dropping the backslash
-                // (old behavior turned `"\n"` into `"n"`).
+                // round-trips intact. Only a fixed escape set is honored;
+                // unknown escapes error rather than silently dropping the
+                // backslash.
                 let quote = c as char;
                 // Skip opening quote, then walk the rest of the string as
-                // a char iterator. Build `unescaped` directly — we don't
-                // need a raw slice anymore since escapes are resolved inline.
+                // a char iterator. Build `unescaped` directly since escapes
+                // are resolved inline.
                 let rest = &src[i + 1..];
                 let mut chars = rest.char_indices();
                 let mut unescaped = String::new();
@@ -1597,8 +1594,8 @@ mod tests {
 
     #[test]
     fn string_escape_n_is_newline() {
-        // Prior bug: byte-wise unescape turned `\n` into the letter `n`.
-        // Now the scanner honors the standard escape set and preserves UTF-8.
+        // The scanner honors the standard escape set and preserves UTF-8:
+        // `\n` stays a newline, not the letter `n`.
         let auth = AuthContext::anonymous();
         let data = serde_json::json!({ "note": "line1\nline2" });
         assert!(
@@ -1608,9 +1605,8 @@ mod tests {
 
     #[test]
     fn string_escape_unknown_is_error() {
-        // Previously `\q` silently collapsed to `q`. Now it's a parse error
-        // that fails closed — authors get loud feedback instead of a
-        // subtly-wrong rule.
+        // An unknown escape like `\q` is a parse error that fails closed —
+        // authors get loud feedback instead of a subtly-wrong rule.
         let auth = AuthContext::anonymous();
         let r = evaluate_allow("data.x == \"\\q\"", &auth, None, None);
         assert!(!r.is_allowed());
@@ -1823,8 +1819,7 @@ mod tests {
     #[test]
     fn entity_policies_bucketed_by_name_and_every_policy_enforced() {
         // #350: the by-name index must bucket ALL policies for an entity
-        // together (the old per-call `iter().filter()` returned every matching
-        // policy), and the lookup must be exact. A second policy on the SAME
+        // together, and the lookup must be exact. A second policy on the SAME
         // entity is an additional AND-gate — if it denies, the whole denies —
         // so this also proves the index didn't drop the 2nd policy.
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};

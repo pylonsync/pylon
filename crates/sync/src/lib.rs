@@ -718,10 +718,7 @@ impl ChangeLog {
                                 // pruner deleted past retention. Either way the
                                 // client CANNOT advance its cursor across the
                                 // hole — doing so silently skips the missing
-                                // seq forever, with no later 410 to recover
-                                // (the divergence the old code shipped: it set
-                                // last_seq to the max returned and called it a
-                                // gapless delta).
+                                // seq forever, with no later 410 to recover.
                                 //
                                 // This path only runs when the cursor is BEHIND
                                 // the in-memory ring front, i.e. an OLD range

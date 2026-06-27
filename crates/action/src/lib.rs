@@ -84,9 +84,8 @@ mod tests {
     use pylon_kernel::ManifestField;
 
     // Synthesizes a manifest with two actions in memory rather than
-    // reading from an example app — examples evolve independently and
-    // pinning these assertions to one of them produced false failures
-    // every time someone trimmed the demo. The shape mirrors what the
+    // reading from an example app, whose shape evolves independently and
+    // would make these assertions fragile. The shape mirrors what the
     // SDK's buildManifest emits, so it still exercises the real
     // ActionRegistry::from_manifest path.
     fn test_manifest() -> AppManifest {

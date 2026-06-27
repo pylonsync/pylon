@@ -94,8 +94,7 @@ fn json_params_to_d1(params: &[serde_json::Value]) -> Vec<D1Type<'static>> {
             // Plain strings bind as their raw value. NOT
             // serde_json::to_string(s) — that would quote-wrap
             // every column and corrupt D1 lookups against
-            // existing plain-string rows. (Was previously a P1
-            // data-corruption bug.)
+            // existing plain-string rows.
             serde_json::Value::String(s) => D1Type::Text(Box::leak(s.clone().into_boxed_str())),
             // Arrays + objects serialize as their JSON form so
             // the column holds parseable JSON text. Caller is

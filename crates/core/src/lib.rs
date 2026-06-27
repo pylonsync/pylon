@@ -585,7 +585,7 @@ pub struct ManifestField {
     /// - `"now"`     → runtime stamps the current UTC time
     /// - any literal → runtime stamps that exact value
     /// Maps to `field.X().defaultNow()` / `.default(value)` on the
-    /// TS side. None = no default; behaves like before.
+    /// TS side. None = no default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default: Option<serde_json::Value>,
     /// Allowed values when this field was declared as

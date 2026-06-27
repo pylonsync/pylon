@@ -202,12 +202,12 @@ fn fetch_and_install(cfg: &Cfg) -> Result<PathBuf, String> {
     // have left on the size-bounded volume.
     sweep_debris(&cfg.base);
 
-    // Prune old artifacts BEFORE downloading/unpacking the new one. Pruning used
-    // to run only AFTER a successful install — so once the volume filled, the
-    // unpack failed, prune never ran, and every later boot re-failed identically
-    // (a permanent wedge: "failed to unpack … No space left on device"). Doing it
-    // here lets a full volume self-heal — drop stale bundles first, then install
-    // into the reclaimed room. (The post-install prune still runs to drop the
+    // Prune old artifacts BEFORE downloading/unpacking the new one so a full
+    // volume can self-heal: drop stale bundles first, then install into the
+    // reclaimed room. Pruning only after a successful install would wedge the
+    // machine permanently — once the volume fills, the unpack fails, prune never
+    // runs, and every later boot re-fails identically ("failed to unpack … No
+    // space left on device"). (The post-install prune still runs to drop the
     // bundle this deploy supersedes.)
     prune_old(&cfg.base, &cfg.id);
 

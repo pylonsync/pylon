@@ -34,7 +34,6 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         .map(|w| w[1].clone())
         .or_else(|| std::env::var("PYLON_ADMIN_TOKEN").ok());
 
-    // Read the seed file.
     let content = match std::fs::read_to_string(file_path) {
         Ok(c) => c,
         Err(e) => {

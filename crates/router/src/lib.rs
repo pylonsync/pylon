@@ -38,8 +38,7 @@ pub trait ChangeNotifier: Send + Sync {
     /// `check_entity_read` per subscriber on every broadcast — so a
     /// client whose permissions are revoked mid-session stops receiving
     /// CRDT frames even though their subscription wasn't explicitly torn
-    /// down. Codex P1: pre-fix the auth check ran ONLY at subscribe
-    /// time, leaking row state to revoked users until disconnect.
+    /// down.
     ///
     /// Pass `None` when the row data isn't on hand — the notifier falls
     /// back to an entity-level-only policy check (sufficient for the
@@ -928,12 +927,10 @@ pub(crate) fn complete_oauth_login_pkce(
         });
     }
 
-    // Real-world bug this replaces: the previous formatter produced
-    // strings like "1761811234Z" (epoch-seconds with a stray Z) that
-    // SQLite happily stored as TEXT but PostgreSQL rejected as
-    // invalid TIMESTAMPTZ — every Google sign-up against pylon-cloud
-    // failed with USER_CREATE_FAILED. Use the kernel's ISO 8601
-    // formatter for a value both backends parse cleanly.
+    // Use the kernel's ISO 8601 formatter for a timestamp both backends
+    // parse cleanly: an epoch-seconds string with a stray Z (e.g.
+    // "1761811234Z") is valid TEXT in SQLite but an invalid TIMESTAMPTZ
+    // in PostgreSQL.
     let now = chrono_now_iso();
 
     // Resolve user_id in priority order:
@@ -1581,8 +1578,7 @@ pub(crate) fn handle_list(ctx: &RouterContext, entity: &str, url: &str) -> (u16,
     let rows: Vec<serde_json::Value> = rows
         .into_iter()
         // Per-row read-policy fence FIRST — drop rows the caller can't read
-        // before any projection. This is the fix for the cross-tenant list
-        // leak: previously every queried row was returned.
+        // before any projection.
         .filter(|r| row_visible(r))
         .map(|r| maybe_project_user_row(entity, r, auth_user))
         // Every other entity goes through the generic serverOnly
@@ -1867,11 +1863,6 @@ fn cascade_clean_user_auth_stores(ctx: &RouterContext, user_id: &str) {
 /// broadcast of the same events arriving — if the local replica's
 /// cursor is behind `seq`, the SDK triggers a one-shot pull
 /// immediately instead of waiting for its next periodic poll.
-///
-/// Kills the "manual refetch() after every mutation" pattern that
-/// app code used to need (pylon-cloud's domains/page.tsx is the
-/// canonical example — pre-2026-05-17 it called refetch() four
-/// times for the same reason).
 pub(crate) fn emit_change_seq_header(ctx: &RouterContext, seq: u64) {
     ctx.add_response_header("X-Pylon-Change-Seq", seq.to_string());
 }
@@ -2283,9 +2274,9 @@ pub fn strip_server_only_fields(
     };
     // Nothing to strip → return as-is. The common case (most entities have no
     // serverOnly fields) skips both the row destructure and — more importantly
-    // on the per-row sync/WS/SSE/list projection hot path — the `Vec<&str>` of
-    // field names the old `.filter().collect()` allocated for EVERY projected
-    // row. We iterate the (already-borrowed) field list inline instead.
+    // on the per-row sync/WS/SSE/list projection hot path — allocating a
+    // `Vec<&str>` of field names for EVERY projected row; we iterate the
+    // (already-borrowed) field list inline.
     if !entity_def.fields.iter().any(|f| f.server_only) {
         return row;
     }
