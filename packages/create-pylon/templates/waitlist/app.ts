@@ -10,16 +10,18 @@ import {
 
 // ---------------------------------------------------------------------------
 // waitlist — a pre-launch / coming-soon landing page with a LIVE signup
-// counter. The whole point is the realtime hook: open the page in two tabs,
-// submit an email in one, and the counter on the other ticks up with no
-// refresh. That's the proof it's a real live app and not a static page.
+// counter. The realtime hook: open the page in two tabs, submit an email in
+// one, and the counter on the other ticks up with no refresh.
 //
-// The data model is deliberately tiny — two entities:
-//   • Signup  — one row per email. Holds visitor PII, so it denies ALL client
-//               reads/writes (writes go through the joinWaitlist mutation; the
-//               public page only ever sees an aggregate count, never an email).
-//   • User    — the business owner's account (email/password is built in), so
-//               the owner can sign in to the dashboard and see their signups.
+// The data model is deliberately tiny — three entities:
+//   • Signup       — one row per email. Holds visitor PII, so it denies ALL
+//                    client reads/writes (writes go through the joinWaitlist
+//                    mutation; the public page only ever sees an aggregate
+//                    count, never an email).
+//   • WaitlistStat — a single-row, PII-free aggregate (just the count) the
+//                    public page reads live for the counter.
+//   • User         — the business owner's account (email/password is built in),
+//                    so the owner can sign in to the dashboard and see signups.
 // ---------------------------------------------------------------------------
 
 // One waitlist signup. `email` is the only PII; `createdAt` powers the

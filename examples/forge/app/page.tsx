@@ -7,10 +7,8 @@ export const metadata: Metadata = {
   description: "Pylon Forge — Pylon example app",
 };
 
-// `app/page.tsx` → `/`. Forge is a realtime, sync-engine client app, so the
-// page server-renders a light shell and mounts the interactive UI as a
-// client-only island (no sync engine on the server). One binary, one port —
-// no separate Next.js app.
+// `app/page.tsx` → `/`. Forge's sync engine is client-only, so the page
+// server-renders a shell and mounts the interactive UI as a client island.
 export default function Page() {
   return <ForgeIsland />;
 }

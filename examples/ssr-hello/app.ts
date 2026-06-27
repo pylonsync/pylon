@@ -6,10 +6,9 @@ import {
   font,
 } from "@pylonsync/sdk";
 
-// Phase 1 smoke test: file-based SSR routing. The discoverer walks
-// `app/**/page.tsx` and emits one route per page. Drop a new file
-// at `app/about/page.tsx` to add `/about` — no defineRoute() call
-// required.
+// File-based SSR routing: discoverAppRoutes walks `app/**/page.tsx` and
+// emits one route per page. Drop `app/about/page.tsx` to add `/about` —
+// no defineRoute() call required.
 const Marker = entity("Marker", {
   note: field.string(),
 });

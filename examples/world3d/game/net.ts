@@ -24,11 +24,10 @@ export class Net implements GameSystem {
 
   private avatarId: string | null = null;
   private lastSentAt = 0;
-  // Infinity, NOT NaN: the moved-gate compares |current - lastSent|,
-  // and every NaN comparison is false — a NaN seed made `moved` false
-  // FOREVER, so no client ever sent a single moveAvatar (the HUD's
-  // "sync 0/s" was telling us the whole time). Infinity makes the
-  // first comparison true and real deltas take over from there.
+  // Seeded to Infinity, not NaN: the moved-gate compares |current -
+  // lastSent| and every NaN comparison is false, so Infinity makes the
+  // first comparison true (the opening pose always sends) and real
+  // deltas take over from there.
   private lastSent = {
     x: Infinity,
     y: Infinity,

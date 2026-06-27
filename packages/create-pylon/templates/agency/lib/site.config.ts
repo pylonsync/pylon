@@ -1,8 +1,6 @@
-// THE single source of truth for everything business-specific on this agency
-// site. Rebrand the whole studio by editing this ONE file — the landing page,
-// layout, and the seedCapacity function all read from here. The create-pylon
-// scaffolder and Mast target this file: a whole studio site is themed from one
-// typed object.
+// The single source of truth for everything business-specific on this agency
+// site. Rebrand the whole studio by editing this one file — the landing page,
+// layout, and the seedCapacity function all read from here.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
 // Fictional demo copy — replace the values, keep the shape. Anywhere a real

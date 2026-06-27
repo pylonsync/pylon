@@ -248,9 +248,9 @@ export class Vegetation implements GameSystem {
         const list = mats[ti][pi];
         if (list.length === 0) return;
         const im = new THREE.InstancedMesh(part.geometry, part.material, list.length);
-        // Trees DON'T cast shadows: the forest is ~8.5M triangles and putting
-        // it through the shadow pass too doubled its cost for a subtle ground
-        // shadow. They still receive the sun + building shadows.
+        // Trees DON'T cast shadows: the forest is ~8.5M triangles, and putting
+        // it through the shadow pass too would roughly double its cost for a
+        // subtle ground shadow. They still receive the sun + building shadows.
         im.castShadow = false;
         im.receiveShadow = true;
         for (let i = 0; i < list.length; i++) {

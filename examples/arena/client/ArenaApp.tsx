@@ -8,9 +8,8 @@
  *   - Stats HUD (top-left): connected dots, mutations/sec, p50/p95 RTT
  *   - Control bar (top-right): spawn N bots, reset, toggle target ring
  *
- * The interesting bit is the latency histogram — every outgoing
- * moveDot mutation is timed from send → "we observe our row update
- * bounce back in the live query" — a true end-to-end RTT. P95 turns
+ * Latency is end-to-end: each outgoing moveDot mutation is timed from
+ * send until our own row update bounces back in the live query. P95 turns
  * red when it exceeds 100ms, matching the README threshold.
  */
 import { useCallback, useEffect, useRef, useState } from "react";

@@ -18,9 +18,6 @@ import {
   type Listing,
 } from "../../../client/market";
 
-// Data-driven SEO: the title + description come from the listing itself,
-// fetched on the server. `generateMetadata` is handed the same PageProps as
-// the page (params + serverData), so it reads the row directly.
 // Resolve a listing from the URL segment, which is its slug
 // ("herman-miller-aeron-a1f3"). Falls back to a raw id lookup so older
 // id-shaped links keep working.
@@ -34,6 +31,9 @@ async function resolveListing(
   );
 }
 
+// Data-driven SEO: the title + description come from the listing itself,
+// fetched on the server. `generateMetadata` is handed the same PageProps as
+// the page (params + serverData), so it reads the row directly.
 export const generateMetadata: GenerateMetadata = async ({
   params,
   serverData,

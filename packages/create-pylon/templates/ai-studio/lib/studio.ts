@@ -8,7 +8,7 @@ export interface GenerationRow {
   userId: string;
   kind: string;
   prompt: string;
-  status: string; // "pending" | "done" | "failed"
+  status: string; // "pending" | "processing" | "done" | "failed"
   resultUrl?: string | null;
   error?: string | null;
   demo: boolean;

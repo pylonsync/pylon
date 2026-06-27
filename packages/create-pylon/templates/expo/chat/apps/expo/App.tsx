@@ -62,9 +62,8 @@ export default function App() {
 }
 
 function Chat() {
-	// Live subscriptions — sync engine pushes diffs over WebSocket.
-	// New rooms / new messages from any other device or device update
-	// re-render this component without polling.
+	// Live subscriptions — the sync engine pushes diffs over WebSocket, so new
+	// rooms/messages from any device re-render this component without polling.
 	const { data: rooms = [] } = db.useQuery<Room>("Room", {
 		orderBy: { createdAt: "asc" },
 	});

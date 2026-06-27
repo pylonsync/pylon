@@ -1,8 +1,8 @@
 /* ERP back-office class system, expressed as Tailwind utilities so the
    chrome inherits any palette / radius / spacing tweak made to the
-   shadcn @theme block in index.css. The TSX still uses semantic class
-   names (.btn, .table, .modal, .pill) — those names now resolve to
-   stacks of Tailwind utilities instead of bespoke CSS. */
+   shadcn @theme block in globals.css. The TSX uses semantic class
+   names (.btn, .table, .modal, .pill) that resolve to stacks of
+   Tailwind utilities. */
 
 /* Semantic alias vars for inline styles in ErpApp.tsx.
    All values alias to the Tailwind @theme tokens in globals.css. */

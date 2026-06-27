@@ -10,10 +10,6 @@
  *   - latency percentiles (p50, p95, p99)
  *   - connection count, CPU-bound client samples
  *   - hot entity row counts
- *
- * Why bother: "realtime backends" are all trivial at 10 users. The
- * interesting question is how they degrade under load. This demo
- * lets you reproducibly measure that in under a minute.
  */
 import {
   entity,
@@ -81,8 +77,7 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [counterPolicy, samplePolicy],
-  // File-based SSR routing: app/page.tsx → "/". The single binary serves the
-  // frontend and the API on one port — no separate Next.js app.
+  // File-based SSR routing: app/page.tsx → "/".
   routes: await discoverAppRoutes(),
 });
 

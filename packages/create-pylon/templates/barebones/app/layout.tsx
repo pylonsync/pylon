@@ -1,8 +1,8 @@
 import React from "react";
 
-// A layout wraps every page. This one is a header and a centered column —
-// the page renders server-side first (shell + copy in the HTML), then
-// hydrates into the live list.
+// A layout wraps every page. This one is a centered column — the page renders
+// server-side first (shell + copy in the HTML), then hydrates into the live
+// list.
 interface LayoutProps {
   children: React.ReactNode;
 }

@@ -126,8 +126,7 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [primPolicy, cursorPolicy, terrainPolicy],
-  // File-based SSR routing: app/page.tsx → "/". The single binary serves
-  // the frontend and the API on one port — no separate Next.js app.
+  // File-based SSR routing: app/page.tsx → "/".
   routes: await discoverAppRoutes(),
 });
 

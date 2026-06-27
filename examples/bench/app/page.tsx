@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 // `app/page.tsx` → `/`. Bench is a realtime, sync-engine client app (it spawns
 // WebWorker load generators), so the page server-renders a light shell and
 // mounts the interactive UI as a client-only island (no sync engine on the
-// server). One binary, one port — no separate Next.js app.
+// server).
 export default function Page() {
   return <BenchIsland />;
 }

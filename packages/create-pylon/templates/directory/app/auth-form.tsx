@@ -13,15 +13,15 @@ import {
 // `/api/auth/password/*`), then `persistSession` writes the freshly-minted
 // token to local storage so the sync engine + `callFn` authenticate AS THE
 // OWNER on the next load. This step matters here specifically: the landing page
-// mints an anonymous guest session (for the live slot counter), and without
+// mints an anonymous guest session (for the live upvotes), and without
 // persisting the real session that stale guest token would shadow the owner's
-// — so the owner-only `inquiriesForOwner` call would come back as a guest and
+// — so the owner-only `submissionsForOwner` call would come back as a guest and
 // get rejected. We then do a full navigation to /dashboard so the SSR runtime
 // re-resolves auth from the HttpOnly cookie and renders server-side.
 //
-// A studio is single-tenant: there's no public sign-up, just the owner creating
-// their one account. Whoever signs in only sees data if their email matches
-// PYLON_OWNER_EMAIL — enforced by the inquiriesForOwner function.
+// A directory is single-tenant: there's no public sign-up, just the owner
+// creating their one account. Whoever signs in only sees data if their email
+// matches PYLON_OWNER_EMAIL — enforced by the submissionsForOwner function.
 export function AuthForm() {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [email, setEmail] = useState("");

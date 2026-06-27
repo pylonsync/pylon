@@ -218,7 +218,6 @@ export class Weapon implements GameSystem {
     }
   }
 
-
   private throwGrenade(ctx: FrameCtx) {
     const g = this.grenades.find((x) => !x.active);
     if (!g) return;

@@ -48,7 +48,6 @@ export default mutation<MakeOfferArgs, MakeOfferResult>({
       throw ctx.error("INVALID_ARGS", "offer must be greater than zero");
 
     const id = await ctx.db.insert("Offer", {
-      // Reuse the optimistic ghost's id so the broadcast merges in place.
       id: args._optimisticId,
       listingId: args.listingId,
       listingTitle: listing.title,

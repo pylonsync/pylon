@@ -186,7 +186,7 @@ function startHeartbeat(room: SharedRoom): void {
       room.peers = next;
       notify(room);
     } catch {
-      // Swallow — next heartbeat will retry. Matches prior behaviour.
+      // Swallow — next heartbeat will retry.
     }
   }, room.heartbeatInterval);
 }

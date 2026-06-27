@@ -1,11 +1,9 @@
 // THE single source of truth for everything business-specific on this waitlist.
 // Rebrand the whole page by editing this ONE file — the landing page and layout
-// read from here and stay generic. The `create-pylon` scaffolder and automated
-// generators (Mast) target this file too, so a whole site can be themed by
-// producing one typed object.
+// read from here and stay generic.
 //
-// Colors live here (applied as CSS variables on <html> in app/layout.tsx), so
-// you don't touch globals.css to re-theme.
+// Colors live here too (applied as CSS variables on <html> in app/layout.tsx),
+// so you don't touch globals.css to re-theme.
 //
 // Fictional demo copy — replace the values, keep the shape.
 

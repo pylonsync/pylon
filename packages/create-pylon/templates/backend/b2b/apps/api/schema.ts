@@ -27,12 +27,8 @@ import {
 const Org = entity("Org", {
 	slug: field.string(),
 	name: field.string(),
-	// `.readonly()` blocks HTTP PATCH from rewriting ownership — closes
-	// the IDOR-via-update-payload shape where an attacker would
-	// `PATCH /api/entities/Org/<id>` with `{ownerId: <them>}` and the
-	// policy's `existing.ownerId == auth.userId` would already be true
-	// because they read the row. Server-side ctx.db.update still goes
-	// through, so admin migrations + transfers work.
+	// `.readonly()` blocks HTTP PATCH from rewriting ownership. Server-side
+	// ctx.db.update still goes through, so admin migrations + transfers work.
 	ownerId: field.id("User").readonly(),
 	createdAt: field.datetime().readonly(),
 });
@@ -115,13 +111,9 @@ const orgPolicy = policy({
 	name: "org_membership",
 	entity: "Org",
 	// Anyone can read an org if they're a member; only the owner can
-	// update / delete. Update + delete pin `existing.ownerId` (the
-	// current row's value) rather than `data.ownerId` (the proposed
-	// payload) — without this pin, an attacker could PATCH with
-	// `{ownerId: <attacker>}` and the policy would happily compare
-	// the payload value to their own userId. `ownerId` is also marked
-	// `.readonly()` on the entity so updates never get to set it via
-	// HTTP regardless — belt + suspenders.
+	// update / delete. Update + delete pin `existing.ownerId` (the row's
+	// current value) not `data.ownerId` (the payload), so an attacker
+	// can't PATCH `{ownerId: <them>}` past the check.
 	allowRead: "exists(Membership where orgId = data.id and userId = auth.userId)",
 	allowInsert: "auth.userId == data.ownerId",
 	allowUpdate: "existing.ownerId == auth.userId",
@@ -133,11 +125,8 @@ const membershipPolicy = policy({
 	entity: "Membership",
 	// You can see your own memberships, plus all memberships in any org
 	// where you're an owner/admin (so the admin UI can list everyone).
-	// Update/delete pin `existing.orgId` so an attacker can't move a
-	// membership to another org by PATCHing the payload. The entity
-	// also marks `orgId` + `userId` as `.readonly()` so HTTP PATCH
-	// rejects those fields outright — server actions like
-	// `setMemberRole` write only `role`.
+	// Update/delete pin `existing.orgId` (not the payload); `orgId` +
+	// `userId` are `.readonly()` too, so `setMemberRole` writes only `role`.
 	allowRead:
 		"data.userId == auth.userId or exists(Membership where orgId = data.orgId and userId = auth.userId and (role = 'owner' or role = 'admin'))",
 	allowInsert:
@@ -152,12 +141,9 @@ const projectPolicy = policy({
 	name: "project_org_scope",
 	entity: "Project",
 	// Tenant scope: you can only touch a project if you're a member of
-	// its org. `existing.orgId` on update/delete pins the row's
-	// current org — without it, an attacker could PATCH with
-	// `{orgId: <my_org>}` to "import" a project from a foreign org
-	// into one they own. `orgId` is also `.readonly()` on the entity,
-	// so PATCH can't even set it. Insert uses `data.orgId` because
-	// there is no `existing` row yet.
+	// its org. Update/delete pin `existing.orgId` (not the payload) so a
+	// project can't be "imported" into a foreign org; insert uses
+	// `data.orgId` since there's no `existing` row yet.
 	allowRead:
 		"exists(Membership where orgId = data.orgId and userId = auth.userId)",
 	allowInsert:

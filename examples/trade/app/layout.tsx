@@ -4,8 +4,7 @@ import React from "react";
 // injects the compiled Tailwind <link> (from app/globals.css) into <head>
 // automatically — no manual stylesheet wiring. The interactive, sync-engine
 // driven UI mounts as a client island (see app/page.tsx), so this layout
-// stays a thin server-rendered shell. The Inter <link> is preserved from the
-// old Next.js web/ layout.
+// stays a thin server-rendered shell.
 export default function RootLayout({
   children,
 }: {

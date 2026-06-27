@@ -268,8 +268,7 @@ export function createPylonServer(config: PylonServerConfig): PylonServer {
 		// Single round-trip to /api/auth/session — pylon returns
 		// `{ session, user }` where `user` is the User row projected
 		// to safe fields (passwordHash + framework-internal columns
-		// stripped). This replaces the older two-step
-		// /api/auth/me + /api/fn/getMe dance.
+		// stripped).
 		//
 		// Network failures throw PylonUnreachableError (caught by the
 		// route's error.tsx). Older code swallowed them as null which

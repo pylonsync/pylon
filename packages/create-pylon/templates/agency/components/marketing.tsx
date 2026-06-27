@@ -134,10 +134,8 @@ export function ProjectCard({ p }: { p: ProjectView }) {
   );
 }
 
-// A deliberately-obvious image placeholder. Real sites drop a photo here; this
-// makes the spot unmistakable — dashed border, a photo glyph, and a one-line
-// "swap this" instruction telling you exactly what to replace and where. Looks
-// tidy enough to demo, but no one will mistake it for a finished design.
+// A deliberately-obvious image placeholder for spots where a real photo belongs:
+// dashed border, a photo glyph, and a one-line "swap this" instruction.
 //
 //   shape  — "landscape" | "portrait" | "square" | "circle"
 //   title  — what photo belongs here ("Your headshot")

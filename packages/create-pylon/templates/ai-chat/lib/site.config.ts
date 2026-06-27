@@ -1,6 +1,6 @@
-// THE single source of truth for everything brand-specific on this AI chat app.
-// Rebrand the whole thing by editing this ONE file — the layout + chat UI read
-// from here. The create-pylon scaffolder and Mast target this file.
+// Single source of truth for everything brand-specific on this AI chat app —
+// edit this one file to rebrand; the layout + chat UI read from here. The
+// create-pylon scaffolder and Mast target this file.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
 // Fictional demo copy — replace the values, keep the shape.

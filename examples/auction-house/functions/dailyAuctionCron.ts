@@ -124,7 +124,7 @@ const LOTS_PER_AUCTION = 6;
 
 export default action({
 	// Scheduler-driven, but declare guest so a guest-session caller is never
-	// rejected by the post-v0.3.256 auth: "user" default.
+	// rejected by the auth: "user" default.
 	auth: "guest",
 	args: {},
 	async handler(ctx) {

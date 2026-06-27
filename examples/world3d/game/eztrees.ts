@@ -6,7 +6,7 @@
  *
  * We generate ONE tree per species at boot and instance its two
  * meshes (wood + leaves) across the island — a whole forest costs two
- * draw calls per species, same budget as the old blob trees.
+ * draw calls per species.
  */
 import * as THREE from "three";
 import { Tree } from "@dgreenheck/ez-tree";
@@ -67,8 +67,8 @@ export function buildSpecies(
   // Instanced leaves draw in the opaque pass with alpha cutout —
   // depth-sorted transparency doesn't work across instances. Keep the
   // preset's own alphaTest though: bush leaf textures are soft-alpha,
-  // and forcing 0.5 discarded every pixel (bushes rendered as bare
-  // branches until a playtest caught it).
+  // and forcing 0.5 discards every pixel (rendering bushes as bare
+  // branches).
   leafMat.transparent = false;
   if (leafMat.alphaTest < 0.25) leafMat.alphaTest = 0.25;
   leafMat.needsUpdate = true;

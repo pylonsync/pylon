@@ -1,11 +1,11 @@
-// Who owns this studio site? A studio is single-tenant — one business, one
-// owner — so ownership is just "the email the owner signs in with", configured
-// once via the PYLON_OWNER_EMAIL env var. The owner-only functions
-// (inquiriesForOwner etc.) read that env (via `ctx.env`) and compare it here.
+// Who owns this directory? A directory is single-tenant — one curator — so
+// ownership is just "the email the owner signs in with", configured once via
+// the PYLON_OWNER_EMAIL env var. The owner-only functions (submissionsForOwner
+// etc.) read that env (via `ctx.env`) and compare it here.
 //
 // Fail closed: if PYLON_OWNER_EMAIL is unset, NOBODY is the owner and the
 // dashboard stays locked. That's deliberate — an unset owner on a public site
-// must not mean "everyone can read the inquiries". Set it in .env (see
+// must not mean "everyone can read the submissions". Set it in .env (see
 // .env.example) before signing in.
 
 export function normalizeOwner(raw: string | null | undefined): string | null {

@@ -9,8 +9,7 @@ export const metadata: Metadata = {
 
 // `app/page.tsx` → `/`. Linear is a sync-engine client app, so the page
 // server-renders a light shell and mounts the interactive UI as a client-only
-// island (no sync engine on the server). One binary, one port — no separate
-// Next.js app.
+// island (no sync engine on the server).
 export default function Page() {
   return <LinearIsland />;
 }

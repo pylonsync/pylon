@@ -29,12 +29,6 @@ export type CreatePylonProxyOptions = {
 	 * request whose path doesn't match this option — so a consumer
 	 * stacking proxies doesn't accidentally trigger Pylon's
 	 * redirect-to-login on routes Pylon was never supposed to gate.
-	 *
-	 * Before 0.3.96 this option was only used to populate the returned
-	 * `config.matcher`; the runtime function ignored it. Consumers with
-	 * broader outer matchers hit ERR_TOO_MANY_REDIRECTS when an
-	 * unauthenticated user landed on /login (Pylon redirected /login →
-	 * /login?next=/login → /login → …).
 	 */
 	matcher?: string[];
 };
@@ -81,8 +75,6 @@ export function createPylonProxy(opts: CreatePylonProxyOptions = {}) {
 		// hits /login" themselves) gets redirected to
 		// `/login?next=/login`, the browser follows, same proxy runs,
 		// infinite redirect → ERR_TOO_MANY_REDIRECTS in the browser.
-		// Surfaced 2026-05-15 by a pylon-cloud-style consumer with a
-		// composed proxy.
 		if (pathname === loginUrl) return NextResponse.next();
 
 		// Runtime matcher gate. The `matcher` option is now load-bearing

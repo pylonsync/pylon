@@ -68,11 +68,9 @@ const User = entity(
   { indexes: [{ name: "by_email", fields: ["email"], unique: true }] },
 );
 
-// Generations are PRIVATE per user: you can READ only your own, and you can't
-// write them from the client at all — the generate action (which runs the
-// provider call with the server-side key) is the only writer. So the gallery is
-// live (the sync engine ships you your rows as the action updates them) without
-// ever exposing one user's generations to another.
+// Generations are PRIVATE per user: read-your-own, with no client writes at all
+// (the server-side pipeline is the only writer). The gallery stays live via the
+// sync engine without ever exposing one user's generations to another.
 const generationPolicy = policy({
   name: "generation_owner_read",
   entity: "Generation",
@@ -95,8 +93,8 @@ const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Generation, User],
-  // generate (public action) + _createGeneration / _finishGeneration (internal
-  // mutations it calls) live in functions/ and are discovered automatically.
+  // generate (mutation) + pollGeneration (job) + the internal _getGeneration /
+  // _updateGeneration live in functions/ and are discovered automatically.
   queries: [],
   actions: [],
   policies: [generationPolicy, userPolicy],

@@ -7,8 +7,8 @@ import { query, v } from "@pylonsync/functions";
  * even after months of dailies accumulate.
  */
 export default query({
-	// Internal already blocks client calls; declare guest so the post-v0.3.256
-	// auth: "user" default never rejects a guest-session caller.
+	// Internal already blocks client calls; declare guest so the auth: "user"
+	// default never rejects a guest-session caller.
 	auth: "guest",
 	args: { tag: v.string() },
 	internal: true,

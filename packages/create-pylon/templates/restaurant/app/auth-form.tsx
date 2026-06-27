@@ -13,15 +13,15 @@ import {
 // `/api/auth/password/*`), then `persistSession` writes the freshly-minted
 // token to local storage so the sync engine + `callFn` authenticate AS THE
 // OWNER on the next load. This step matters here specifically: the landing page
-// mints an anonymous guest session (for the live counter), and without
+// mints an anonymous guest session (for the live table picker), and without
 // persisting the real session that stale guest token would shadow the owner's
-// — so the owner-only `waitlistStats` call would come back as a guest and get
-// rejected. We then do a full navigation to /dashboard so the SSR runtime
+// — so the owner-only `reservationsForOwner` call would come back as a guest and
+// get rejected. We then do a full navigation to /dashboard so the SSR runtime
 // re-resolves auth from the HttpOnly cookie and renders server-side.
 //
-// A waitlist is single-tenant: there's no public signup funnel, just the owner
+// This site is single-tenant: there's no public signup funnel, just the owner
 // creating their one account. Whoever signs in only sees data if their email
-// matches PYLON_OWNER_EMAIL — enforced by the waitlistStats function.
+// matches PYLON_OWNER_EMAIL — enforced by the reservationsForOwner function.
 export function AuthForm() {
   const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");

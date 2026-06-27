@@ -15,7 +15,7 @@ interface LayoutProps {
 }
 
 export default function RootLayout({ children, url, auth }: LayoutProps) {
-  // A guest session (minted by <EnsureGuest> for the live counter) has a
+  // A guest session (minted by <EnsureGuest> for the live stock grid) has a
   // `guest_…` user id — that's an anonymous visitor, NOT the signed-in owner,
   // so it shouldn't flip the nav to "Dashboard".
   const signedIn = Boolean(auth?.user_id && !auth.user_id.startsWith("guest_"));

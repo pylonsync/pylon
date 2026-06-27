@@ -1,8 +1,7 @@
 // THE single source of truth for everything business-specific in this template.
 // Rebrand the entire site by editing this ONE file — the marketing components
 // (hero, pricing, FAQ, footer, nav) all read from here and stay generic. The
-// `create-pylon` scaffolder and automated generators target this file too, so a
-// whole site can be themed by producing one typed object.
+// `create-pylon` scaffolder and automated generators target this file too.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx), so
 // you don't touch globals.css to re-theme the marketing pages.

@@ -9,9 +9,7 @@ import {
 
 // A chat message in the shared room. `authorId: field.owner()` stamps the
 // signed-in (guest) user's id server-side, so an optimistic
-// `db.insert("Message", { text })` can't forge the sender. The room is
-// public-read — everyone in it sees every message (that's what makes it a
-// chat room) — while delete is owner-only.
+// `db.insert("Message", { text })` can't forge the sender.
 const Message = entity(
   "Message",
   {
@@ -37,12 +35,8 @@ const messagePolicy = policy({
   allowDelete: "auth.userId == data.authorId",
 });
 
-// `pylon dev` serves the SSR room and the realtime API from one port. Guest
-// sessions (via `<EnsureGuest>` on the page) let anyone chat with no login —
-// `db.useQuery("Message")` is a live subscription, so messages appear the
-// instant they're sent, in this tab or another. Natural next steps: a `Room`
-// entity (+ `roomId` on Message) for multiple rooms, and a presence channel
-// (`ctx.connections.*`) for a "who's here" list.
+// buildManifest assembles the entities, policies, auth, and routes into the
+// single manifest `pylon dev` serves — SSR room + realtime API on one port.
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",

@@ -1,7 +1,7 @@
 import React from "react";
 
-// A layout wraps every page. This one is intentionally minimal — a header
-// and a centered column. The page below it is server-rendered first (so the
+// A layout wraps every page. This one is intentionally minimal — just a
+// centered column. The page below it is server-rendered first (so the
 // shell and copy are in the HTML), then hydrates into the live todo UI.
 interface LayoutProps {
   children: React.ReactNode;

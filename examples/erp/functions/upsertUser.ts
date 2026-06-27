@@ -1,9 +1,9 @@
 import { mutation, v } from "@pylonsync/functions";
 
 /**
- * Find-or-create a User row keyed by email. Identical pattern to the chat
- * example. Avatar color is seeded deterministically from the email hash so
- * the same person gets the same color across sessions.
+ * Find-or-create a User row keyed by email. Avatar color is seeded
+ * deterministically from the email hash so the same person gets the same
+ * color across sessions.
  */
 export default mutation<{ email: string; displayName: string }, unknown>({
   auth: "guest",

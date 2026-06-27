@@ -32,9 +32,8 @@ export default mutation({
     const channel = await ctx.db.get("Channel", args.channelId);
     if (!channel) throw ctx.error("CHANNEL_NOT_FOUND", "channel does not exist");
 
-    // Private channels require explicit membership. Public channels allow
-    // any workspace member — we rely on the tenant_scope plugin to bound
-    // access to the workspace, then only check membership for private.
+    // Private channels require explicit membership; public channels are
+    // open to any authenticated user.
     if (channel.isPrivate) {
       const memberships = await ctx.db.query("Membership", {
         channelId: args.channelId,
@@ -60,7 +59,6 @@ export default mutation({
       // validates it's a 40-char hex (the shape generateId() produces)
       // and falls back to its own generator if absent or malformed.
       ...(args._optimisticId ? { id: args._optimisticId } : {}),
-      // tenantId is auto-stamped by the tenant_scope plugin from auth.tenantId
       channelId: args.channelId,
       authorId: ctx.auth.userId,
       parentMessageId: args.parentMessageId ?? null,

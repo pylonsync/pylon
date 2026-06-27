@@ -16,9 +16,7 @@ export default mutation({
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in to react");
 
-    // Normalize emoji key so ":thumbsup:" and "👍" don't collide. Accept both
-    // shortcodes (matching Slack's API) and literal emoji. Clamp to 32 chars
-    // to keep the index small.
+    // Clamp the emoji key to 32 chars to keep the unique index small.
     const emoji = args.emoji.slice(0, 32);
     if (emoji.length === 0) throw ctx.error("EMPTY_EMOJI", "emoji required");
 

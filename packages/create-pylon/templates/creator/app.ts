@@ -10,9 +10,8 @@ import {
 
 // ---------------------------------------------------------------------------
 // newsletter — a pre-launch / coming-soon landing page with a LIVE subscriber
-// counter. The whole point is the realtime hook: open the page in two tabs,
-// submit an email in one, and the counter on the other ticks up with no
-// refresh. That's the proof it's a real live app and not a static page.
+// counter. The realtime hook: open the page in two tabs, submit an email in
+// one, and the counter on the other ticks up with no refresh.
 //
 // The data model is deliberately tiny — two entities:
 //   • Subscriber  — one row per email. Holds visitor PII, so it denies ALL client
@@ -75,13 +74,12 @@ const User = entity(
   { indexes: [{ name: "by_email", fields: ["email"], unique: true }] },
 );
 
-// PRIVACY — the heart of the spec. Subscriber holds visitor emails, so it denies
-// EVERY client read and write. No `db.useQuery("Subscriber")` can ever pull a row,
-// and no client can insert/update/delete directly. Writes happen only inside
-// the server-side `subscribe` mutation (functions bypass policies); reads
-// happen only inside `newsletterCount` (returns a bare integer) and the
-// owner-gated `subscriberStats`. A marketing site must never leak its own
-// customers' emails — this policy is what guarantees it.
+// PRIVACY. Subscriber holds visitor emails, so it denies EVERY client read and
+// write. No `db.useQuery("Subscriber")` can ever pull a row, and no client can
+// insert/update/delete directly. Writes happen only inside the server-side
+// `subscribe` mutation (functions bypass policies); the emails come back only
+// through the owner-gated `subscriberStats`. A marketing site must never leak
+// its own customers' emails — this policy is what guarantees it.
 const subscriberPolicy = policy({
   name: "subscriber_private",
   entity: "Subscriber",

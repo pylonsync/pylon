@@ -1,11 +1,9 @@
 import React from "react";
 
 // Root layout for the native-SSR Linear example. Pylon's SSR head adapter
-// injects the compiled Tailwind <link> (from app/globals.css) into <head>
-// automatically — no manual stylesheet wiring. The interactive, sync-engine
-// driven UI mounts as a client island (see app/page.tsx), so this layout
-// stays a thin server-rendered shell. The Inter <link> is preserved from the
-// original web layout.
+// injects the compiled Tailwind <link> (from app/globals.css) automatically.
+// The interactive UI mounts as a client island (see app/page.tsx), so this
+// layout stays a thin server-rendered shell.
 export default function RootLayout({
   children,
 }: {

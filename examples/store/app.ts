@@ -234,8 +234,7 @@ const manifest = buildManifest({
     orderItemPolicy,
   ],
   // File-based SSR routing: app/**/page.tsx. Without this the manifest ships
-  // zero routes and the native-SSR pages 404 (store served `/` from its now-
-  // deleted legacy web/ frontend before the migration was completed).
+  // zero routes and the native-SSR pages 404.
   routes: await discoverAppRoutes(),
 });
 

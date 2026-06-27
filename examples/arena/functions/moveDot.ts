@@ -6,8 +6,7 @@ import { mutation, v } from "@pylonsync/functions";
  * same authoritative state after interpolation.
  *
  * Pylon's change-log fans this single write out to every subscriber
- * (live query on Dot) in a single server round-trip. Hot path: ~2KB
- * WS frame per broadcast, one IO per mutation.
+ * (live query on Dot) in a single server round-trip.
  */
 export default mutation({
   // Public demo: guest sessions drive the simulation. Defaults to

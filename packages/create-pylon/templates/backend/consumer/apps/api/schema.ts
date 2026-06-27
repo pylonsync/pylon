@@ -82,10 +82,8 @@ const profilePolicy = policy({
 	entity: "Profile",
 	allowRead: "true",
 	allowInsert: "auth.userId == data.userId",
-	// Update + delete pin `existing.userId` so an attacker can't
-	// PATCH `{userId: <attacker>}` to "claim" someone else's profile.
-	// `userId` is also `.readonly()` on the entity so PATCH bounces
-	// the field outright — belt + suspenders.
+	// Update + delete pin `existing.userId` (not the payload) so an
+	// attacker can't PATCH `{userId: <them>}` to claim another profile.
 	allowUpdate: "auth.userId == existing.userId",
 	allowDelete: "auth.userId == existing.userId",
 });
@@ -97,9 +95,8 @@ const postPolicy = policy({
 	// Insert: caller must own a Profile they're claiming as author.
 	allowInsert:
 		"exists(Profile where id = data.authorId and userId = auth.userId)",
-	// Update + delete pin `existing.authorId` so an attacker can't
-	// rewrite the author in the PATCH payload to grant themselves
-	// access. `authorId` is also `.readonly()` on the entity.
+	// Update + delete pin `existing.authorId` (not the payload) so an
+	// attacker can't rewrite the author to grant themselves access.
 	allowUpdate:
 		"exists(Profile where id = existing.authorId and userId = auth.userId)",
 	allowDelete:

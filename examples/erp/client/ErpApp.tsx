@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Dallas Door Designs — custom residential entry doors, designed, fabricated,
+ * Dallas Door Designs — custom residential entry doors.
  *
  * Multi-tenant: every row except User + Organization is scoped to an org.
  * Session carries an active tenantId via /api/auth/select-org so the
@@ -820,7 +820,7 @@ export function ErpApp() {
   // Server session is the single source of truth for the active tenant.
   // `useSession` fetches /api/auth/me, caches it on the engine, and
   // notifies on change — including the replica reset when the tenant
-  // flips. We no longer mirror it in localStorage.
+  // flips.
   const { tenantId: activeOrgId, selectOrg: doSelectOrg, clearOrg, signOut: doSignOut } = useSession(db.sync);
   const [page, setPage] = useState<Page>("dashboard");
 
@@ -837,8 +837,7 @@ export function ErpApp() {
   }
 
   async function selectOrg(orgId: string | null) {
-    // SDK helpers do fetch + engine refresh + replica reset in one
-    // step — no more manual notifySessionChanged dance.
+    // SDK helpers do fetch + engine refresh + replica reset in one step.
     if (orgId == null) {
       await clearOrg();
     } else {

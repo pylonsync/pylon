@@ -147,7 +147,7 @@ export function TradeApp() {
     : null;
 
   async function toggleWatch(symbol: string) {
-    // userId arg removed — server now uses ctx.auth.userId
+    // server derives the user from ctx.auth.userId
     await callFn("toggleWatch", { symbol }).catch(() => {});
   }
 

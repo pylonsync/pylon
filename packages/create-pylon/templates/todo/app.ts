@@ -7,11 +7,10 @@ import {
   discoverAppRoutes,
 } from "@pylonsync/sdk";
 
-// A todo that belongs to one person. `userId: field.owner()` is the key
-// move: the framework stamps the signed-in (here: guest) user's id
-// server-side on insert and rejects any forged value — so the UI can do a
-// plain, optimistic `db.insert("Todo", { title })` (the row shows instantly,
-// no round-trip) while ownership stays unspoofable. No createTodo function to
+// A todo that belongs to one person. `userId: field.owner()` stamps the
+// signed-in (here: guest) user's id server-side on insert and rejects any
+// forged value — so the UI can do a plain, optimistic `db.insert("Todo",
+// { title })` and never send (or spoof) userId. No createTodo function to
 // write — every verb is a direct, policy-checked entity call.
 const Todo = entity(
   "Todo",

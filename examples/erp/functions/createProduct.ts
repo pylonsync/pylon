@@ -26,10 +26,7 @@ export default mutation<
     if (name.length === 0) throw ctx.error("INVALID_NAME", "name is required");
     if (args.basePrice < 0) throw ctx.error("INVALID_PRICE", "price must be ≥ 0");
 
-    // Categories follow Dallas Door Designs' product taxonomy — iron and
-    // wood entry doors, barns, pivots, patios, and fiberglass for exterior;
-    // interior and architectural cover the indoor lines; "other" is the
-    // escape hatch for accessories and services (installation, paint, etc).
+    // Door-shop product taxonomy; "other" covers accessories and services.
     const validCategories = [
       "iron",
       "wood",

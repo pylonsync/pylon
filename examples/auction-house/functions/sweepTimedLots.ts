@@ -13,7 +13,7 @@ const TICK_MS = 2000;
 
 export default mutation({
   // Scheduler-driven, but declare guest so a guest-session caller is never
-  // rejected by the post-v0.3.256 auth: "user" default.
+  // rejected by the auth: "user" default.
   auth: "guest",
   args: {
     auctionId: v.string(),

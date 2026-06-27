@@ -11,9 +11,8 @@ import {
 // ---------------------------------------------------------------------------
 // ai-chat — a streaming AI chat app. Tokens stream from the built-in
 // `POST /api/ai/stream` endpoint (your PYLON_AI_API_KEY never leaves the
-// server); the conversation itself is sync-backed, so your chats follow you
-// across tabs and devices in realtime — open two tabs and a reply you send in
-// one shows up in the other as it's saved.
+// server); the conversation itself is sync-backed, so your chats stay in sync
+// across tabs and devices in realtime.
 //
 // Two data entities (+ User):
 //   • Conversation — a chat thread. Owner-scoped: you only ever see your own.
@@ -75,8 +74,7 @@ const User = entity(
 // Conversations + messages are PRIVATE: a signed-in (or guest) user can only
 // read, create, and modify their OWN rows. `field.owner()` stamps userId from
 // the session on insert, so "create your own" is enforced at write time and
-// reads are scoped by the same id — your chats never leak to anyone else, and
-// the sync engine only ever ships you yours.
+// reads are scoped by the same id.
 const conversationPolicy = policy({
   name: "conversation_owner",
   entity: "Conversation",

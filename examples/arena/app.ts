@@ -4,13 +4,10 @@
  * Every connected client is a dot on a shared 2D plane. Click to set
  * a target; the dot glides there. All other clients see it move in
  * realtime. Stress-test by opening tabs or using the built-in bot
- * spawner — the whole point is to watch latency stay flat as N grows.
+ * spawner.
  *
- * The scaling story this demo tells:
- *   - One entity (`Dot`) with a live query fanned out to every client
- *   - Mutations land in <5ms p99 on a laptop
- *   - Hot path is single-digit KB per second per client
- *   - No sidecar, no Redis, no separate realtime layer
+ * One entity (`Dot`) with a live query fanned out to every client — no
+ * sidecar, no Redis, no separate realtime layer.
  */
 import {
   entity,
@@ -32,7 +29,7 @@ const Dot = entity(
     ty: field.float(),
     color: field.string(),
     label: field.string().optional(),
-    speed: field.float(),          // units per second
+    speed: field.float(), // units per second
     isBot: field.bool(),
     lastSeenAt: field.datetime(),
   },
@@ -84,7 +81,7 @@ const manifest = buildManifest({
   actions: [],
   policies: [dotPolicy, statsPolicy],
   // File-based SSR routing: app/page.tsx → "/". The single binary serves
-  // the frontend and the API on one port — no separate Next.js app.
+  // the frontend and the API on one port.
   routes: await discoverAppRoutes(),
 });
 

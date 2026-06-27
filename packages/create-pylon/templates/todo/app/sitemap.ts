@@ -14,7 +14,7 @@ export default async function sitemap(): Promise<Sitemap> {
     { url: `${SITE}/signup`, changeFrequency: "yearly", priority: 0.5 },
   ];
 
-  // The export is async, so you can enumerate dynamic pages from a DB read:
+  // Example — enumerate dynamic pages from a DB read:
   //
   //   const posts = await fetchPublishedPosts();
   //   const postRoutes: Sitemap = posts.map((p) => ({

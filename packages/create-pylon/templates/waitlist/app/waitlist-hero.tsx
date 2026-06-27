@@ -6,11 +6,10 @@ import { EnsureGuest } from "@pylonsync/client";
 import type { WaitlistConfig } from "@/lib/site.config";
 
 // The interactive top of the landing page: the email-capture form and the LIVE
-// signup counter. This is the realtime proof — the counter is a live
-// `db.useQuery("WaitlistStat")` over the public, PII-free aggregate row, so the
-// moment anyone (this tab or another) submits an email, joinWaitlist updates
-// that row and the new count syncs to every open tab through the replica. No
-// refresh, no polling.
+// signup counter. The counter is a live `db.useQuery("WaitlistStat")` over the
+// public, PII-free aggregate row, so the moment anyone (this tab or another)
+// submits an email, joinWaitlist updates that row and the new count syncs to
+// every open tab through the replica. No refresh, no polling.
 //
 // The signup form (joinWaitlist) is a public mutation, so it works for any
 // anonymous visitor. The counter needs a live sync connection, so it's wrapped

@@ -2,14 +2,10 @@ import { buildManifest, discoverAppRoutes, entity, field, font, policy } from "@
 
 // Acme — the default Pylon startup template.
 //
-// All pages are server-rendered from app/**/page.tsx, layouts
-// compose via app/**/layout.tsx, styles compile from app/globals.css
-// via the bundler's Tailwind v4 integration. Drop this template
-// into a fresh repo, customize the copy, ship.
-//
+// Pages server-render from app/**/page.tsx, layouts compose via
+// app/**/layout.tsx, styles compile from app/globals.css (Tailwind v4).
 // Functions in functions/*.ts are auto-discovered by the runtime —
-// no explicit import here needed. submitLead is auth:"guest" and
-// inserts a Lead row, wired to the early-access + contact forms.
+// no explicit import here needed.
 
 // Leads: inbound interest from the landing page and /contact form.
 // Guest-accessible insert (no login needed), admin-only read.
@@ -39,10 +35,8 @@ const manifest = buildManifest({
   queries: [],
   actions: [],
   policies: [leadPolicy],
-  // Self-hosted Inter (next/font parity) — the build fetches the woff2, serves
-  // it same-origin (no third-party request, no FOUT), preloads it, and adds a
-  // size-adjusted fallback. globals.css reads it via `var(--font-sans, …)`;
-  // layout.tsx carries no font <link>.
+  // Self-hosted Inter (next/font parity) — served same-origin, preloaded,
+  // with a size-adjusted fallback; globals.css reads it via --font-sans.
   fonts: [
     font({
       family: "Inter",

@@ -34,8 +34,7 @@ export default mutation({
       createdAt: now,
     });
 
-    // Auto-join creator as admin. The tenant_scope plugin stamps tenantId
-    // for us so we don't pass it explicitly.
+    // Auto-join the creator as admin.
     await ctx.db.insert("Membership", {
       channelId,
       userId: ctx.auth.userId,

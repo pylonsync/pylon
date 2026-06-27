@@ -810,9 +810,6 @@ function IssueRow({
 }
 
 function StateIcon({ state }: { state: string }) {
-  // Use semantic CSS custom properties where possible. For states that
-  // need a distinct color we compose a Tailwind class from the design system
-  // rather than hard-coding hex values.
   if (state === "done") {
     return <CheckCircle2 className="size-3.5 text-[color:var(--color-state-done,#10b981)]" />;
   }

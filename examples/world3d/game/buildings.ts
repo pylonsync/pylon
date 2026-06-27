@@ -63,9 +63,6 @@ export class Buildings implements GameSystem {
    * greedily keep the flattest, mutually-distant ones. No hard
    * flatness gate — the terrain gets terraformed into a pad under
    * each site (terrain.flattenArea), so "flat enough" always exists.
-   * (The old hard 1.6 m gate found ZERO sites on this island; the HUD
-   * read "ruins 0/0" and nobody noticed until a playtest asked where
-   * the compounds were.)
    */
   static planSites(terrain: Terrain, want: number): THREE.Vector3[] {
     const rng = makeRng(SEED ^ 0xb01d);

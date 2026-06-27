@@ -36,9 +36,8 @@ const itemPolicy = policy({
 
 // The manifest is your whole app: data, policies, and the file-based routes
 // under `app/`. `pylon dev` serves the SSR frontend and the API from one
-// port. Guest sessions (via `<EnsureGuest>` on the page) mean every visitor
-// implicitly becomes their own user — no login wall. Add fields to `Item`, or
-// a second `entity()`, and the typed client + REST/realtime API follow.
+// port. Add fields to `Item`, or a second `entity()`, and the typed client +
+// REST/realtime API follow.
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",

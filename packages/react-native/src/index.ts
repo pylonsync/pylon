@@ -13,10 +13,8 @@
 //   - `AsyncStoragePersistence` / `OfflineStore` — optional manual cache
 //     for apps that want a separate offline layer
 //
-// Why no parallel hook implementations? The previous RN hooks were a
-// stripped-down copy that lost `useSession`, `useShard`, `useInfiniteQuery`,
-// `usePaginatedQuery`, `where` / `orderBy` / `include`. Re-exporting from
-// React keeps the two surfaces in lockstep.
+// Why no parallel hook implementations? Re-exporting from React keeps the
+// two surfaces in lockstep.
 // ---------------------------------------------------------------------------
 
 import {

@@ -1,11 +1,11 @@
-// Who owns this waitlist? A waitlist is single-tenant — one business, one
+// Who owns this site? A booking site is single-tenant — one business, one
 // owner — so ownership is just "the email the owner signs in with", configured
-// once via the PYLON_OWNER_EMAIL env var. The owner-only `waitlistStats`
+// once via the PYLON_OWNER_EMAIL env var. The owner-only `bookingsForOwner`
 // function reads that env (via `ctx.env`) and compares it here.
 //
 // Fail closed: if PYLON_OWNER_EMAIL is unset, NOBODY is the owner and the
 // dashboard stays locked. That's deliberate — an unset owner on a public site
-// must not mean "everyone can read the signups". Set it in .env (see
+// must not mean "everyone can read the bookings". Set it in .env (see
 // .env.example) before signing in.
 
 export function normalizeOwner(raw: string | null | undefined): string | null {

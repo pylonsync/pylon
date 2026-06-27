@@ -8,7 +8,7 @@ import { mutation, v } from "@pylonsync/functions";
  */
 export default mutation({
   // Scheduler-driven, but declare guest so a guest-session caller is never
-  // rejected by the post-v0.3.256 auth: "user" default.
+  // rejected by the auth: "user" default.
   auth: "guest",
   args: {
     lotId: v.string(),

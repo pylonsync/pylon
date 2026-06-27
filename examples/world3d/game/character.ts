@@ -282,7 +282,7 @@ export function buildCharacter(color: string): Character {
     // the body mid-stride). The rig's bones carry a ~49× scale, so
     // both the rifle's scale AND its local offset are countered by the
     // measured bone world scale — uncountered offsets put the gun 7 m
-    // away, which cost us a full debugging round.
+    // away.
     torsoBone = model.getObjectByName("Torso") ?? model.getObjectByName("Spine") ?? null;
     // Seed the post-mixer snapshot with the REST pose so the first
     // frame's restore doesn't zero an un-animated bone.

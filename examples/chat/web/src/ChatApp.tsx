@@ -47,11 +47,10 @@ import { Checkbox } from "@pylonsync/example-ui/checkbox";
 import { Badge } from "@pylonsync/example-ui/badge";
 import { cn } from "@pylonsync/example-ui/utils";
 
-// Engine + client configuration moved to `PylonProvider` in main.tsx
-// so the same component works under any host. Auth-related fetches
-// below still need a base URL — derive it the same way main.tsx
-// does so dev (Vite proxies `/api/*` to Pylon) and prod (Pylon serves
-// the SPA from its own origin) both work without env config.
+// Engine + client configuration lives in `PylonProvider` (main.tsx).
+// Auth-related fetches below still need a base URL — derive it the same
+// way main.tsx does so dev (Vite proxies `/api/*` to Pylon) and prod
+// (Pylon serves the SPA from its own origin) both work without env config.
 const BASE_URL = (() => {
   if (typeof window === "undefined") return "http://localhost:4321";
   const env = (import.meta as unknown as { env?: { VITE_PYLON_URL?: string } })
@@ -270,11 +269,7 @@ function ColorAvatar({
         : size === "lg"
           ? "size-14 text-lg"
           : "size-8 text-xs";
-  // Subtle top-light gradient gives the flat brand color a touch
-  // of dimension — reads as "applied finish" instead of "tag
-  // sticker". 14% white at the top fades to 8% black at the
-  // bottom over the same hue, then a ring + inner highlight pin
-  // it visually to the surface.
+  // Top-light gradient over the flat brand color adds a touch of depth.
   const baseColor = color || "#8b5cf6";
   const gradient = `linear-gradient(180deg, rgba(255,255,255,.14) 0%, transparent 45%, rgba(0,0,0,.10) 100%), ${baseColor}`;
   return (
@@ -320,11 +315,8 @@ export function ChatApp() {
   const [profileUserId, setProfileUserId] = useState<string | null>(null);
   const [channelDetailsId, setChannelDetailsId] = useState<string | null>(null);
 
-  // Mobile navigation: on small screens we can only show one panel at
-  // a time. `mobileView` tracks which. Desktop (≥ md) ignores this
-  // state — both the sidebar and the channel always render side by
-  // side via the responsive grid. Switching channels / opening
-  // threads on mobile auto-advances the view.
+  // Mobile shows one panel at a time; `mobileView` tracks which. Desktop
+  // (≥ md) ignores it and renders panels side-by-side via the grid.
   const [mobileView, setMobileView] = useState<"sidebar" | "channel" | "thread">(
     "sidebar",
   );
@@ -425,9 +417,8 @@ export function ChatApp() {
     openChannelDetails: (id: string) => setChannelDetailsId(id),
   };
 
-  // Auto-advance the mobile view when the user picks a channel or
-  // opens a thread. Desktop layout ignores `mobileView` (everything
-  // is visible side-by-side), so these no-op on `md+`.
+  // Auto-advance the mobile view on channel pick / thread open. No-op on
+  // desktop, where everything is visible side-by-side.
   const selectChannel = (id: string | null) => {
     setActiveChannelId(id);
     if (id) setMobileView("channel");
@@ -440,15 +431,9 @@ export function ChatApp() {
 
   return (
     <UIContext.Provider value={ui}>
-      {/* Mobile-first responsive shell:
-          - On < md: a single column (`grid-cols-1`). The visible
-            panel is controlled by `mobileView` via the `hidden`/`flex`
-            toggles below.
-          - On ≥ md: the original two-column layout. A third column
-            opens when a thread is active (data-[thread=true] →
-            md:grid-cols-[260px_1fr_380px]).
-          Both rows / cols use `min-h-0` so the inner overflow-y-auto
-          regions size correctly under flex/grid. */}
+      {/* Responsive shell: one column on < md (mobileView toggles the
+          visible panel), two columns on ≥ md, three when a thread is open.
+          min-h-0 lets the inner overflow-y-auto regions size correctly. */}
       <div
         className="grid h-screen h-dvh grid-cols-1 overflow-hidden bg-background text-foreground md:grid-cols-[260px_1fr] md:data-[thread=true]:grid-cols-[260px_1fr_380px]"
         data-thread={!!threadMessageId}
@@ -553,11 +538,8 @@ const UIContext = React.createContext<{
 });
 
 /**
- * Mobile-only stub header rendered above the empty-state when no
- * channel is selected on a small screen. Surfaces the hamburger
- * button so the user can still reach the sidebar without first
- * picking a channel. Hidden on `md+` (the sidebar is always
- * visible there).
+ * Mobile-only header above the empty-state so the user can reach the
+ * sidebar (hamburger) without first picking a channel. Hidden on `md+`.
  */
 function MobileChannelHeaderShell({
   title,
@@ -828,11 +810,8 @@ function Sidebar({
 
   return (
     <>
-      {/* Sidebar surface — gradient from the lighter card color
-          at the top (where the user card sits) down to the
-          muted background at the bottom keeps the panel from
-          reading as a flat slab and visually anchors the
-          channel list against the main panel. */}
+      {/* Sidebar surface — top-to-bottom gradient so the panel doesn't
+          read as a flat slab. */}
       <aside className="flex min-h-0 flex-col border-r border-border bg-gradient-to-b from-card/60 via-card/30 to-muted/30">
         <div
           role="button"
@@ -848,8 +827,7 @@ function Sidebar({
         >
           <div className="relative">
             <ColorAvatar name={currentUser.displayName} color={currentUser.avatarColor} />
-            {/* Online-state dot with a faint outer pulse so it
-                reads as "live" rather than "decoration." */}
+            {/* Online dot with a faint pulse. */}
             <span className="absolute -right-0.5 -bottom-0.5 flex size-2.5">
               <span className="absolute inset-0 animate-ping rounded-full bg-emerald-500 opacity-50" />
               <span className="relative size-2.5 rounded-full bg-emerald-500 ring-2 ring-card" />
@@ -992,11 +970,7 @@ function SidebarSection({
   label: React.ReactNode;
   action?: React.ReactNode;
 }) {
-  // Slightly more breathing room above the label (pt-1.5),
-  // softer weight (medium instead of semibold), and a hover-
-  // gated action button so the [+] doesn't pop visually unless
-  // the user is in this section. The eye sees a rhythm:
-  // section label → channels → next label.
+  // Section label with a hover-gated action button (the [+] shows on hover).
   return (
     <div className="group/section mb-0.5 flex items-center justify-between px-2.5 pt-1.5 pb-1 text-[10.5px] font-medium uppercase tracking-[.06em] text-muted-foreground/80">
       <span>{label}</span>
@@ -1041,8 +1015,7 @@ function ChannelRow({
         unread > 0 && !active && "font-semibold text-foreground",
       )}
     >
-      {/* Active row gets a 2px accent rail on the left — a
-          quieter cue than flooding the whole pill with color. */}
+      {/* Active row gets an accent rail on the left. */}
       {active && (
         <span
           aria-hidden="true"
@@ -1403,14 +1376,8 @@ function ChannelView({
 
   return (
     <main className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
-      {/* Channel header: cleaner two-column layout with a thin
-          vertical separator between the channel name and the
-          topic input. The topic gets more horizontal room
-          because it's the part that benefits most from space
-          (the placeholder + collaborative-text demo). The
-          hamburger button at the start of the row only shows
-          below `md` — desktop has the sidebar permanently open
-          so it's redundant there. */}
+      {/* Channel header: channel name + topic input, separated by a
+          hairline. The hamburger button only shows below `md`. */}
       <header className="flex shrink-0 items-center gap-2 border-b border-border px-3 py-2 md:gap-3 md:px-5 md:py-2.5">
         <Button
           variant="ghost"
@@ -1466,24 +1433,14 @@ function ChannelView({
 }
 
 /**
- * Inline-editable channel topic, backed by a Loro text CRDT.
- * Two browser tabs typing in the same channel header converge
- * character-by-character — concurrent edits to disjoint regions
- * both land instead of one stomping the other (which is what the
- * legacy LWW path would have done).
- *
- * Plays the role of the visible "this is real" demo for Pylon's
- * CRDT integration. The plumbing (server LoroStore, binary WS
- * broadcast, useLoroDoc hook, POST /api/crdt push endpoint) all
- * lights up the moment this component mounts and a user types.
+ * Inline-editable channel topic, backed by a Loro text CRDT. Two browser
+ * tabs typing in the same header converge character-by-character —
+ * concurrent edits to disjoint regions both land. Exercises the CRDT
+ * plumbing (server LoroStore, binary WS broadcast, useCollabText hook).
  */
 function CollabTopic({ channelId }: { channelId: string }) {
   const [value, setValue] = useCollabText("Channel", channelId, "topic");
-  // Tightened placeholder copy so it fits in the available
-  // horizontal space without truncation, plus a subtle hover
-  // background to telegraph "this is editable" — the topic
-  // looked like static text before. Padding x to keep the
-  // hover-bg from hugging the next-door separator pixel-tight.
+  // Hover background telegraphs that the topic is editable.
   return (
     <input
       value={value}
@@ -1548,9 +1505,7 @@ function ChannelPresenceCount({
 
   return (
     <div className="relative" ref={wrapRef}>
-      {/* Presence pill — slightly more vertical room and a
-          subtle emerald glow on the live dot, so the "this is
-          presence, not metadata" cue lands at a glance. */}
+      {/* Presence pill with a live emerald dot. */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -1694,12 +1649,7 @@ function MessageList({
     const thisDate = new Date(m.createdAt);
     const needsDivider = !prev || !prevDate || !sameDay(prevDate, thisDate);
     if (needsDivider) {
-      // Hairline divider with floating date text. The label
-      // sits on a transparent ground so the line beneath it
-      // shows through the kerning — reads as "marker" rather
-      // than "pill button." Tracking is tightened from
-      // `tracking-wider` to `tracking-[.04em]` because heavy
-      // tracking on a UI label fights the message text below.
+      // Day divider: hairline rule with a floating date label.
       rows.push(
         <div
           key={`day-${m.id}`}
@@ -1795,11 +1745,8 @@ function MessageRow({
   const ui = React.useContext(UIContext);
   const openAuthor = () => ui.openProfile(message.authorId);
 
-  // Message row: tighter horizontal padding pairs with the wider
-  // header below, hover bg uses /50 so the row pops a bit more
-  // on mouseover (was /30, almost invisible). Spacing between
-  // groups (`mt-3`) is up from `mt-2` so consecutive senders
-  // feel like distinct messages, not a wall of text.
+  // Message row with hover background; non-compact rows add top spacing
+  // so consecutive senders read as distinct messages.
   return (
     <div
       className={cn(
@@ -2135,10 +2082,8 @@ function ThreadComposer({
     { channelId: string; body: string; parentMessageId: string },
     { messageId: string }
   >("sendMessage", {
-    // First-class optimistic: ghost row painted into the local store
-    // immediately, framework threads `_optimisticId` through to the
-    // server function, canonical insert merges in-place via the WS
-    // broadcast — no flash, no manual cleanup.
+    // Optimistic: ghost row painted locally, then the canonical insert
+    // merges in-place via the WS broadcast — no flash.
     optimistic: (args, ctx) => ({
       entity: "Message",
       data: {
@@ -2260,11 +2205,7 @@ function ComposerInner({
   onSubmit: () => void;
   ariaLabel: string;
 }) {
-  // Single-ring focus state — was previously a thick 2px accent
-  // ring + border change that read as a heavy "selected"
-  // affordance. Softer 1px border that lifts to the foreground
-  // color, paired with a faint accent glow only on actual focus,
-  // reads cleaner.
+  // Single-ring focus: a soft border that lifts on focus plus a faint glow.
   return (
     <div className="flex items-end gap-2 rounded-xl border border-border bg-card px-3.5 py-2.5 transition-all focus-within:border-foreground/30 focus-within:shadow-[0_0_0_3px_color-mix(in_srgb,var(--color-ring)_12%,transparent)]">
       <Textarea
@@ -2281,9 +2222,7 @@ function ComposerInner({
           }
         }}
       />
-      {/* Send button fades in only when the input has content —
-          empty-state composer reads as a writing surface, not a
-          form-with-action. */}
+      {/* Send button fades in only when the input has content. */}
       <Button
         type="submit"
         size="icon"
@@ -2314,10 +2253,8 @@ function Composer({
     { channelId: string; body: string },
     { messageId: string }
   >("sendMessage", {
-    // Ghost the message into the local store before the server
-    // confirms — the WS broadcast carries the same row id and
-    // overwrites in-place, so the user sees their message instantly
-    // and there's no flash when the canonical row arrives.
+    // Ghost the message locally; the WS broadcast carries the same row id
+    // and merges in-place, so there's no flash when the canonical row lands.
     optimistic: (args, ctx) => ({
       entity: "Message",
       data: {
@@ -2349,8 +2286,7 @@ function Composer({
     if (!text) return;
     setBody("");
     setPresence({ displayName: currentUser.displayName, typing: false });
-    // The optimistic ghost dance lives in the sync engine now — see
-    // db.useMutation's `optimistic` option. The Composer just sends.
+    // Optimistic insert is handled by db.useMutation's `optimistic` option.
     try {
       await send.mutate({ channelId, body: text });
     } catch (e) {

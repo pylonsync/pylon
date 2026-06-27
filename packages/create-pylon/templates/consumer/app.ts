@@ -43,9 +43,8 @@ const Like = entity(
   },
 );
 
-// Posts + likes are public-read so the feed and its counts render for
-// everyone; writes are gated to the owner. An entity with no policy is denied
-// to clients by default, so these allow-lists are what make the feed work.
+// An entity with no policy is denied to clients by default, so these
+// allow-lists are what make the feed work.
 // `allowInsert` is `auth.userId != null`, not `== data.authorId`: the owner
 // field is stamped by field.owner() *after* the policy check, so it's null at
 // insert-time. The stamp still guarantees the new row is owned by the caller,

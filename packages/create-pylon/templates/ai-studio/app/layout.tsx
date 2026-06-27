@@ -2,10 +2,10 @@ import React from "react";
 import { Link, type PageAuth } from "@pylonsync/react";
 import { siteConfig } from "@/lib/site.config";
 
-// App shell: a slim top bar over a full-height chat. `auth.user_id` is resolved
+// App shell: a slim top bar over the studio. `auth.user_id` is resolved
 // server-side from the session cookie before any HTML is sent, so the bar shows
-// the account / "Sign in" with no flash. The chat page fills the rest of the
-// viewport (h-[calc(100vh-3.5rem)] in chat-client.tsx — keep the header at h-14).
+// the account / "Sign in" with no flash. The header is h-14; the studio page
+// fills the rest of the viewport (min-h-[calc(100vh-3.5rem)]).
 interface LayoutProps {
   children: React.ReactNode;
   url: string;
@@ -13,8 +13,6 @@ interface LayoutProps {
 }
 
 export default function RootLayout({ children, url, auth }: LayoutProps) {
-  // Resolved server-side from the session cookie. The app requires sign-in, so
-  // this is set on every in-app page; the header reflects it with no flash.
   const signedIn = Boolean(auth?.user_id);
   const { brand, colors } = siteConfig;
 

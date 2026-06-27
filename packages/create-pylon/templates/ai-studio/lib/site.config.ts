@@ -28,8 +28,8 @@ export type StudioConfig = BaseConfig & {
     headline: string;
     subcopy: string;
     inputPlaceholder: string;
-    // The generation kinds shown as a selector. `wired` flags which actually
-    // call a provider (image + audio); video is a labeled extension point.
+    // The generation kinds shown as a selector. `wired` flags which call a
+    // provider (all three do via Replicate when REPLICATE_API_TOKEN is set).
     kinds: { id: GenerationKind; label: string; wired: boolean }[];
     // Starter prompts; clicking one fills the box.
     examples: string[];

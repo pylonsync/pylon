@@ -30,11 +30,9 @@ export default mutation({
 
     const now = new Date().toISOString();
     if (existing.length > 0) {
-      // Remove.
       await ctx.db.delete("IssueLabel", existing[0].id as string);
       return { action: "removed" };
     } else {
-      // Add.
       await ctx.db.insert("IssueLabel", {
         orgId: ctx.auth.tenantId,
         issueId: args.issueId,

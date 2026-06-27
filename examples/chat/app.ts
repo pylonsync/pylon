@@ -117,10 +117,9 @@ const ReadMarker = entity(
 
 // Ownership-aware policies. Reads are open to any authenticated user;
 // mutations require the caller to own the row (data.<owner> == auth.userId).
-// The raw /api/entities PATCH/DELETE endpoints consult these directly, so
-// it's no longer possible to edit or delete someone else's message by
-// poking the raw URL. Server functions still provide extra validation but
-// are no longer the sole line of defense.
+// The raw /api/entities PATCH/DELETE endpoints consult these directly, so a
+// member can't edit or delete someone else's row via the raw URL. Server
+// functions layer on extra validation.
 
 // User reads need to span the whole org so message author lookups
 // (db.useQueryOne<User>("User", message.authorId)) can render display

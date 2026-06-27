@@ -837,13 +837,7 @@ export function entitiesToManifest(
         // backing slot so both APIs serialize identically — apps
         // using the procedural `field` exports get the same
         // ManifestField shape as fluent apps.
-        const extra = fb._def as FieldDefinition & {
-          default?:
-            | { kind: "value"; value: unknown }
-            | { kind: "now" }
-            | { kind: "owner" };
-          enumValues?: readonly string[];
-        };
+        const extra = fb._def;
         if (extra.default) {
           f.default =
             extra.default.kind === "now"

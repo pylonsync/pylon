@@ -3,7 +3,7 @@
 /**
  * Pylon Todo — the canonical hello-world.
  *
- * One file, ~300 lines. Demonstrates:
+ * Demonstrates:
  *   - Email/password sign-up + login (`/api/auth/password/*`)
  *   - Live `db.useQuery<Todo>` scoped to the current user
  *   - Optimistic CRUD via `db.useEntity("Todo")` — toggling a checkbox

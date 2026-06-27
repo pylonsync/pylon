@@ -1,9 +1,7 @@
-// THE single source of truth for everything business-specific. Rebrand the
-// whole site — and reconfigure the booking engine — by editing this ONE file.
-// The landing page, layout, AND the createBooking server function all read from
-// here, so services, prices, weekly hours, and lead time stay in lockstep. The
-// create-pylon scaffolder and Mast target this file: a whole appointment site
-// is themed + configured by producing one typed object.
+// THE single source of truth for everything business-specific. The landing
+// page, layout, AND the createBooking server function all read from here, so
+// services, prices, weekly hours, and lead time stay in lockstep — rebrand and
+// reconfigure the whole site by editing this ONE file.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
 //

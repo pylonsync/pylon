@@ -176,9 +176,8 @@ function normalizeToCell(scene: THREE.Object3D): THREE.Object3D {
   return holder;
 }
 
-// Road paint is a lit (matte) material, not MeshBasic — basic is unlit and
-// ignores the day/night cycle, so the markings stayed at full brightness and
-// glowed against the dark night while everything else went dark.
+// Road paint is a lit (matte) material, not MeshBasic: basic is unlit, so
+// markings would ignore the day/night cycle and glow against the dark night.
 const laneMat = new THREE.MeshStandardMaterial({ color: 0xc7a83e, roughness: 1, metalness: 0 });
 const dashGeo = new THREE.PlaneGeometry(TILE * 0.04, TILE * 0.34).rotateX(-Math.PI / 2);
 

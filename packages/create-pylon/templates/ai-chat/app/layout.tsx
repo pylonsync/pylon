@@ -13,8 +13,6 @@ interface LayoutProps {
 }
 
 export default function RootLayout({ children, url, auth }: LayoutProps) {
-  // Resolved server-side from the session cookie. The app requires sign-in, so
-  // this is set on every in-app page; the header reflects it with no flash.
   const signedIn = Boolean(auth?.user_id);
   const { brand, colors } = siteConfig;
 

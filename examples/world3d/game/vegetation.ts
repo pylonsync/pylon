@@ -93,8 +93,7 @@ function palmSpine(t: number, out: THREE.Vector3): THREE.Vector3 {
 
 /**
  * Curved palm trunk: ONE continuous tapered tube — rings sampled along
- * the spine and stitched into a single indexed geometry. (The previous
- * stacked-cylinder version had visible breaks at every joint.)
+ * the spine and stitched into a single indexed geometry.
  */
 function buildTrunkGeometry(): THREE.BufferGeometry {
   const rings = 10;

@@ -171,11 +171,10 @@ export class City {
     const h = rect.height;
     this.composer = new EffectComposer(this.renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    // NB: no SSAO. It re-rendered the whole scene's depth + normals every
-    // frame — two extra full-scene passes (~2x the triangle throughput) — and
-    // tanked the framerate on a ~13M-triangle scene. The directional sun
-    // shadows + bloom + grade carry the depth read; the AO wasn't worth ~half
-    // the GPU budget.
+    // No SSAO: it would re-render the whole scene's depth + normals every
+    // frame (~2x the triangle throughput on this ~13M-triangle scene), and the
+    // directional sun shadows + bloom + grade already carry the depth read —
+    // not worth ~half the GPU budget.
     const bloom = new UnrealBloomPass(new THREE.Vector2(w, h), 0.26, 0.7, 0.85);
     this.composer.addPass(bloom);
     this.grade = new ShaderPass(COLOR_GRADE);
