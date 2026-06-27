@@ -868,11 +868,8 @@ async function _doBuild(appDirRel: string): Promise<BuildOutput> {
   return _doBuildInner(fs, path, cwd, appDirRel);
 }
 
-// Monotonic per-process counter for the Tailwind temp filename. `pylon dev`
-// warms the SSR bundle in one runner process while incoming requests can drive
-// their own rebuild in another, so two `buildTailwind` calls may run against the
-// same outdir at once. Combined with the pid it gives every compile a unique
-// temp path, so concurrent builds never rename each other's file away.
+// Per-process counter for the Tailwind temp filename — with the pid it gives
+// every concurrent compile a unique temp path (see buildTailwind below).
 let _styleBuildSeq = 0;
 
 /**
