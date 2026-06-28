@@ -2277,36 +2277,50 @@ fn build_ssr_response_headers(
         out.push(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
     }
     {
-        // True if a Cache-Control would let a SHARED cache (Cloudflare) store +
-        // replay the response. Such directives are only safe when the request is
-        // itself shareable (cookie-anonymous GET, no query) — otherwise the body
-        // may carry this request's auth.
-        fn allows_shared_cache(cc: &str) -> bool {
-            let l = cc.to_ascii_lowercase();
-            l.contains("public") || l.contains("s-maxage")
+        // Does a Cache-Control EXPLICITLY forbid shared storage (`private` /
+        // `no-store`)? Directive-aware (split on `,`, take the name before `=`),
+        // case-insensitive. NOTE: the test is "explicitly non-shared", NOT
+        // "contains public/s-maxage" — a bare `max-age=300` (no `private`) is
+        // ALSO storable by a shared cache, so anything not explicitly private
+        // must be treated as shareable and downgraded when the response isn't.
+        fn is_non_shared_cc(cc: &str) -> bool {
+            cc.split(',').any(|d| {
+                let name = d
+                    .trim()
+                    .split('=')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase();
+                name == "private" || name == "no-store"
+            })
         }
+        // A response may be stored by a SHARED cache only when the request is
+        // itself shareable (cookie-anonymous GET, no query) AND the response sets
+        // no cookie. Otherwise the body may carry this request's auth (hydration
+        // tail) and must never be shared.
+        let may_share = request_shareable && !saw_set_cookie;
         let cc: String = if let Some(pcc) = page_cache_control {
-            // Respect a page's own Cache-Control — EXCEPT never honor a shared-
-            // cache directive for a non-shareable request (a logged-in page that
-            // did `setHeader("cache-control", "public, …")` must not leak its
-            // hydration-tail auth to a shared cache). Fail closed to no-store.
-            if !request_shareable && allows_shared_cache(&pcc) {
+            // Respect a page's own Cache-Control — EXCEPT when the response isn't
+            // shareable and the page didn't explicitly forbid shared storage. A
+            // page that did `setHeader("cache-control", "public"/"max-age=300")`
+            // on a logged-in or cookie-setting render must not leak its tail auth
+            // to a shared cache. Fail closed to no-store.
+            if !may_share && !is_non_shared_cc(&pcc) {
                 "private, no-store".to_string()
             } else {
                 pcc
             }
         } else if saw_set_cookie {
-            // A cookie-setting (personalized) response → no-store: a shared cache
-            // must never store + replay it to another user.
+            // A cookie-setting (personalized) response → no-store.
             "no-store".to_string()
         } else if let Some(secs) = cacheable_secs {
-            if request_shareable {
-                // Proven anonymous-safe + opted in + shareable request →
-                // shared-cacheable (stale-while-revalidate avoids a herd).
+            if may_share {
+                // Proven anonymous-safe + opted in + shareable → shared-cacheable
+                // (stale-while-revalidate avoids a thundering herd).
                 format!("public, s-maxage={secs}, stale-while-revalidate={secs}")
             } else {
-                // Proof present but the request isn't shareable (logged-in /
-                // query / non-GET / dev) — its hydration tail carries real auth.
+                // Proof present but not shareable — tail carries real auth.
                 "private, no-store".to_string()
             }
         } else {
@@ -3726,6 +3740,22 @@ mod tests {
             "private, max-age=0".to_string(),
         );
         assert_eq!(cc(&priv_page, false).as_deref(), Some("private, max-age=0"));
+
+        // Bare `max-age` (no `private`) is ALSO shared-storable per HTTP → it
+        // must be downgraded for an unshareable request, not just `public`.
+        let mut bare = std::collections::HashMap::new();
+        bare.insert("cache-control".to_string(), "max-age=300".to_string());
+        assert_eq!(cc(&bare, false).as_deref(), Some("private, no-store"));
+
+        // A Set-Cookie (personalized) response can't be made shared-cacheable by
+        // a page-set `public`, even on an otherwise-shareable request.
+        let mut pub_cookie = std::collections::HashMap::new();
+        pub_cookie.insert(
+            "cache-control".to_string(),
+            "public, max-age=300".to_string(),
+        );
+        pub_cookie.insert("set-cookie".to_string(), "sid=abc; HttpOnly".to_string());
+        assert_eq!(cc(&pub_cookie, true).as_deref(), Some("private, no-store"));
 
         // Any forged `x-pylon-*` from page headers is stripped, never emitted.
         let mut forged = std::collections::HashMap::new();
