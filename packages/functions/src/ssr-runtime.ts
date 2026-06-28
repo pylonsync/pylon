@@ -1608,6 +1608,59 @@ export function computeCacheVerdict(args: {
 }
 
 /**
+ * PPR Phase 0 — the AUTH-BUCKET verdict: may this render be stored as a SHARED
+ * cache entry keyed only on session-cookie PRESENCE (one signed-in shell + one
+ * signed-out shell, both IDENTITY-FREE)? Pure, exported, leak-class tested.
+ *
+ * Like `computeCacheVerdict` EXCEPT `sessionTouched` is ALLOWED (reading
+ * `props.session.exists` to render a binary signed-in/out nav is the whole
+ * point — that bit is what the bucket keys on, and it's identical across all
+ * users in the same bucket). Everything else still vetoes:
+ *
+ *  - `authTouched` — reading real `props.auth` (user_id/tenant_id/roles) makes
+ *    the output identity-SPECIFIC, not bucket-uniform. This is the load-bearing
+ *    gate: ANY identity-dependent output requires reading auth, so vetoing on
+ *    `authTouched` proves a bucketable body depends on nothing but the binary
+ *    session bit.
+ *  - `dynamicTouched` — reading request headers/cookies makes it request-specific.
+ *  - `strictPolicies` — in strict mode serverData reads are auth-FILTERED, so the
+ *    body/ssrData would vary by identity even without the page reading auth. In
+ *    the default (non-strict) mode serverData reads bypass the policy gate and
+ *    return identity-independent rows, so the cached body is safe to share within
+ *    the bucket. Strict mode therefore must NOT bucket.
+ *  - cookieCount / forceDynamic / wantsStream / non-200 — same reasons as the
+ *    anon verdict (a Set-Cookie, a streaming head, or an error/redirect can't be
+ *    safely shared).
+ *
+ * Requires the explicit `bucketOptIn` (`export const cache = "auth-bucketed"`)
+ * AND a TTL via `export const revalidate = N` — fail-closed: no opt-in or no TTL
+ * → no bucket.
+ */
+export function computeBucketVerdict(args: {
+  bucketOptIn: boolean;
+  revalidateSecs: number | null;
+  forceDynamic: boolean;
+  authTouched: boolean;
+  dynamicTouched: boolean;
+  cookieCount: number;
+  strictPolicies: boolean;
+  wantsStream: boolean;
+  status: number;
+}): boolean {
+  return (
+    args.bucketOptIn &&
+    args.revalidateSecs != null &&
+    !args.forceDynamic &&
+    !args.authTouched &&
+    !args.dynamicTouched &&
+    args.cookieCount === 0 &&
+    !args.strictPolicies &&
+    !args.wantsStream &&
+    args.status === 200
+  );
+}
+
+/**
  * #278: diff the response head committed at `response_start` against the final
  * state after EOF, to catch a late response.* mutation from a suspended subtree
  * that the already-sent head couldn't carry. Returns the dropped pieces, or
@@ -2105,12 +2158,35 @@ export async function handleRenderRoute(
     // `!Loading`) is the gate: a `streaming = true` page has `Loading` null but
     // `wantsStream` true, and must still be excluded. Fail-closed. (See
     // computeCacheVerdict — pure + unit-tested for the leak class.)
-    const cacheable = computeCacheVerdict({
+    // PPR Phase 0: a page opts into auth-bucketed SHARED caching with
+    // `export const cache = "auth-bucketed"`. A bucketed render and the plain
+    // anon cache are mutually exclusive — `cacheable` excludes the opt-in so a
+    // bucket page never also emits the anon proof.
+    const bucketOptIn = (mod as any).cache === "auth-bucketed";
+    const cacheable =
+      !bucketOptIn &&
+      computeCacheVerdict({
+        revalidateSecs,
+        forceDynamic,
+        authTouched,
+        dynamicTouched,
+        sessionTouched,
+        cookieCount: responseState.cookies.length,
+        strictPolicies,
+        wantsStream,
+        status: responseState.status,
+      });
+    // The bucket verdict permits `sessionTouched` (reading the binary signed-in
+    // bit) but still vetoes any real-auth read. When true, this render is stored
+    // as a shared, identity-free, session-presence-keyed entry — so its
+    // hydration tail MUST be anonymized (bucketAuth below) and it advertises the
+    // TRUSTED internal `x-pylon-bucket` proof for the host to key + store it.
+    const bucketable = computeBucketVerdict({
+      bucketOptIn,
       revalidateSecs,
       forceDynamic,
       authTouched,
       dynamicTouched,
-      sessionTouched,
       cookieCount: responseState.cookies.length,
       strictPolicies,
       wantsStream,
@@ -2144,10 +2220,15 @@ export async function handleRenderRoute(
       headers: finalizeHeaders(
         responseState,
         undefined,
-        // The #277 proof rides the TRUSTED `internal` channel (never stripped),
-        // so userland (page setHeader / route-handler headers via `extra`) can't
-        // forge it.
-        cacheable ? { "x-pylon-cacheable": String(revalidateSecs) } : undefined,
+        // The #277 anon proof and the Phase 0 bucket proof both ride the TRUSTED
+        // `internal` channel (never stripped), so userland (page setHeader /
+        // route-handler headers via `extra`) can't forge either. Mutually
+        // exclusive (bucketOptIn splits the two verdicts).
+        bucketable
+          ? { "x-pylon-bucket": String(revalidateSecs) }
+          : cacheable
+            ? { "x-pylon-cacheable": String(revalidateSecs) }
+            : undefined,
       ),
     });
 
@@ -2295,6 +2376,11 @@ export async function handleRenderRoute(
           ? /(^|\/)error$/.test(msg.component)
             ? "error"
             : "not-found"
+          : undefined,
+        // A bucketed render is stored shared → its tail must carry ONLY the
+        // binary signed-in bit, never this request's real identity.
+        bucketAuth: bucketable
+          ? { signedIn: msg.session_present === true }
           : undefined,
       });
       sendChunk(tail);

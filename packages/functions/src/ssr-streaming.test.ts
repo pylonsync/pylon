@@ -18,6 +18,7 @@ import React, { Suspense, use } from "react";
 import { renderToReadableStream } from "react-dom/server.browser";
 import {
   buildHydrationTail,
+  computeBucketVerdict,
   computeCacheVerdict,
   computeRevalidateSecs,
   computeWantsStream,
@@ -151,6 +152,73 @@ describe("computeCacheVerdict (the #277 leak-class gate)", () => {
                   checked++;
                 }
     expect(checked).toBe(640); // 2^4 (bools) × 2 (cookies) × 5 (status) × 4 (revs)
+  });
+});
+
+describe("computeBucketVerdict (PPR Phase 0 — session-presence shared cache)", () => {
+  const base = {
+    bucketOptIn: true,
+    revalidateSecs: 60 as number | null,
+    forceDynamic: false,
+    authTouched: false,
+    dynamicTouched: false,
+    cookieCount: 0,
+    strictPolicies: false,
+    wantsStream: false,
+    status: 200,
+  };
+
+  test("a clean opted-in bucketed 200 is bucketable", () => {
+    expect(computeBucketVerdict(base)).toBe(true);
+  });
+
+  test("sessionTouched is NOT a veto here (the whole point of a bucket)", () => {
+    // computeBucketVerdict has no sessionTouched field — reading session.exists
+    // is allowed. This test documents the contract by construction: the same
+    // base (which a bucket render reaches with sessionTouched=true) buckets.
+    expect(computeBucketVerdict(base)).toBe(true);
+  });
+
+  test("no opt-in → never buckets, even when otherwise clean", () => {
+    expect(computeBucketVerdict({ ...base, bucketOptIn: false })).toBe(false);
+  });
+
+  test("every identity/safety veto flips it to non-bucketable (fail-closed)", () => {
+    expect(computeBucketVerdict({ ...base, revalidateSecs: null })).toBe(false); // no TTL
+    expect(computeBucketVerdict({ ...base, forceDynamic: true })).toBe(false);
+    expect(computeBucketVerdict({ ...base, authTouched: true })).toBe(false); // read real auth
+    expect(computeBucketVerdict({ ...base, dynamicTouched: true })).toBe(false); // headers/cookies
+    expect(computeBucketVerdict({ ...base, cookieCount: 1 })).toBe(false); // set a cookie
+    expect(computeBucketVerdict({ ...base, strictPolicies: true })).toBe(false); // auth-filtered reads
+    expect(computeBucketVerdict({ ...base, wantsStream: true })).toBe(false); // streaming head
+    expect(computeBucketVerdict({ ...base, status: 404 })).toBe(false);
+    expect(computeBucketVerdict({ ...base, status: 307 })).toBe(false);
+  });
+
+  test("LOAD-BEARING: authTouched ALWAYS vetoes regardless of opt-in", () => {
+    // The proof that a bucketable body is identity-free: any output that depends
+    // on identity must read props.auth, which sets authTouched. So authTouched
+    // ⟹ !bucketable over the full cross-product.
+    const bools = [false, true];
+    for (const bucketOptIn of bools)
+      for (const dynamicTouched of bools)
+        for (const strictPolicies of bools)
+          for (const wantsStream of bools)
+            for (const cookieCount of [0, 1])
+              for (const status of [200, 404]) {
+                const v = computeBucketVerdict({
+                  bucketOptIn,
+                  revalidateSecs: 60,
+                  forceDynamic: false,
+                  authTouched: true,
+                  dynamicTouched,
+                  cookieCount,
+                  strictPolicies,
+                  wantsStream,
+                  status,
+                });
+                expect(v).toBe(false);
+              }
   });
 });
 
