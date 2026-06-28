@@ -695,26 +695,56 @@ pub fn try_handle(
             // restart (the dev boot id changes but the cache key doesn't) —
             // a confusing "my change didn't show up" footgun. Dev always
             // renders live.
-            let cacheable_eligible = !is_dev_mode()
+            // Bucket-eligible (PPR Phase 0): GET, no query, not dev — but a
+            // session cookie IS allowed. Anon-eligible is the cookie-anonymous
+            // subset of that. A bucket entry is keyed on session PRESENCE
+            // (`ssr_cache_bucket_vary`) and is identity-free, so serving it to a
+            // session-carrying request is safe; an anon entry stays restricted to
+            // cookie-anonymous requests (defense-in-depth).
+            let bucket_eligible = !is_dev_mode()
                 && matches!(request.method(), Method::Get)
                 && url
                     .split_once('?')
                     .map(|(_, q)| q.is_empty())
-                    .unwrap_or(true)
-                && !session_cookie_present(cfg, &request);
-            if cacheable_eligible {
+                    .unwrap_or(true);
+            let cacheable_eligible = bucket_eligible && !session_cookie_present(cfg, &request);
+            if bucket_eligible {
                 let (path_only, _) = url.split_once('?').unwrap_or((url.as_str(), ""));
-                let cache_vary = ssr_cache_vary(request_host(&request).as_deref());
+                let host = request_host(&request);
+                // Anon entry (`export const revalidate`) — cookie-anonymous only.
+                if cacheable_eligible {
+                    let cache_vary = ssr_cache_vary(host.as_deref());
+                    if let Some(entry) =
+                        crate::ssr_cache::get(&matched.route.path, path_only, &cache_vary)
+                    {
+                        if entry.fresh {
+                            tracing::debug!(url = %url, "SSR cache hit (disk, anon)");
+                            return serve_cached_ssr(entry, cors_origin, request);
+                        }
+                    }
+                }
+                // Bucket entry (`export const cache = "auth-bucketed"`) — keyed on
+                // session presence; ANY GET (signed-in or not) hits its bucket.
+                let session_present = session_cookie_present(cfg, &request);
+                let bucket_vary = ssr_cache_bucket_vary(host.as_deref(), session_present);
                 if let Some(entry) =
-                    crate::ssr_cache::get(&matched.route.path, path_only, &cache_vary)
+                    crate::ssr_cache::get(&matched.route.path, path_only, &bucket_vary)
                 {
                     if entry.fresh {
-                        tracing::debug!(url = %url, "SSR cache hit (disk)");
-                        return serve_cached_ssr(entry, cors_origin, request);
+                        tracing::debug!(url = %url, session = session_present, "SSR cache hit (disk, bucket)");
+                        return serve_cached_bucket_ssr(entry, cors_origin, request);
                     }
                 }
             }
-            return serve_via_ssr_rpc(cfg, matched, request, cors_origin, None, cacheable_eligible);
+            return serve_via_ssr_rpc(
+                cfg,
+                matched,
+                request,
+                cors_origin,
+                None,
+                cacheable_eligible,
+                bucket_eligible,
+            );
         }
         // Raw GET routes: a `route.ts` exporting `GET` (kind:"route") matched
         // on this path. No page lives here (Next forbids page.tsx + route.ts in
@@ -741,7 +771,16 @@ pub fn try_handle(
                     route: nf.clone(),
                     params: std::collections::HashMap::new(),
                 };
-                return serve_via_ssr_rpc(cfg, matched, request, cors_origin, Some(404), false);
+                // A 404 boundary dispatch is never cacheable/bucketable.
+                return serve_via_ssr_rpc(
+                    cfg,
+                    matched,
+                    request,
+                    cors_origin,
+                    Some(404),
+                    false,
+                    false,
+                );
             }
         }
     }
@@ -1341,6 +1380,10 @@ fn serve_via_ssr_rpc(
     // anonymous requests serve from disk. False for boundaries + authed/query
     // requests, which are never cached.
     cacheable_eligible: bool,
+    // PPR Phase 0: when true (GET, no query, not dev — session cookie allowed)
+    // this render's body is teed + stored under its session-presence BUCKET key
+    // if it emits the `x-pylon-bucket` proof. Superset of `cacheable_eligible`.
+    bucket_eligible: bool,
 ) -> Result<(), Request> {
     let fn_ops = match cfg.fn_ops.as_ref() {
         Some(f) => f.clone(),
@@ -1407,6 +1450,10 @@ fn serve_via_ssr_rpc(
     // bucketing) — whether a session cookie is present, NOT who. Copied into the
     // render so a page can render a binary auth nav without reading real `auth`.
     let session_present = session_cookie_present(cfg, &request);
+    // Bucket cache key — host + session presence. A render emitting the
+    // `x-pylon-bucket` proof is stored here; the read path keys the same way.
+    let bucket_vary =
+        ssr_cache_bucket_vary(headers_map.get("host").map(String::as_str), session_present);
 
     // Cold-start robustness: the Rust HTTP listener accepts connections the
     // moment it binds, but the Bun runner that executes this render boots
@@ -1433,6 +1480,8 @@ fn serve_via_ssr_rpc(
             &path_only,
             cacheable_eligible,
             &cache_vary,
+            bucket_eligible,
+            &bucket_vary,
             cors_origin,
             request,
         ) {
@@ -1479,19 +1528,21 @@ fn serve_via_ssr_rpc(
     let layouts = matched.route.layouts.clone();
     let route_path_owned = matched.route.path.clone();
     let path_only_owned = path_only.clone();
-    // #277 Stage 2 write-tee buffer. Allocated only for cacheable-eligible
-    // requests; the chunk callback mirrors every body byte here (push BEFORE
-    // the channel send, so the buffer is complete once respond() drains the
-    // stream to EOF). None for non-eligible renders → zero extra allocation.
-    let tee_buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> = if cacheable_eligible {
+    // #277 Stage 2 / Phase 0 write-tee buffer. Allocated for bucket-eligible
+    // requests (the superset of cacheable-eligible); the chunk callback mirrors
+    // every body byte here (push BEFORE the channel send, so the buffer is
+    // complete once respond() drains the stream to EOF). None for non-eligible
+    // renders → zero extra allocation.
+    let tee_buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> = if bucket_eligible {
         Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
     } else {
         None
     };
     let tee_for_chunk = tee_buf.clone();
-    // Gate the tee on the response actually advertising the Stage-1 proof. The
-    // header arrives in `response_start` BEFORE the first body byte (same render
-    // thread, sequential), so a non-cacheable render never buffers its body.
+    // Gate the tee on the response actually advertising a cache proof (the anon
+    // `x-pylon-cacheable` or the Phase 0 `x-pylon-bucket`). The header arrives in
+    // `response_start` BEFORE the first body byte (same render thread,
+    // sequential), so a non-cacheable render never buffers its body.
     let should_tee = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let should_tee_rs = should_tee.clone();
     let should_tee_chunk = should_tee.clone();
@@ -1501,10 +1552,10 @@ fn serve_via_ssr_rpc(
         .spawn(move || {
             let on_response_start: pylon_functions::runner::ResponseStartCallback = Box::new(
                 move |status: u16, headers: std::collections::HashMap<String, String>| {
-                    if headers
-                        .keys()
-                        .any(|k| k.eq_ignore_ascii_case("x-pylon-cacheable"))
-                    {
+                    if headers.keys().any(|k| {
+                        k.eq_ignore_ascii_case("x-pylon-cacheable")
+                            || k.eq_ignore_ascii_case("x-pylon-bucket")
+                    }) {
                         should_tee_rs.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     // Capacity-1, fires at most once — never blocks.
@@ -1603,6 +1654,8 @@ fn serve_via_ssr_rpc(
                 &path_only,
                 cacheable_eligible,
                 &cache_vary,
+                bucket_eligible,
+                &bucket_vary,
                 cors_origin,
                 request,
             ) {
@@ -1615,9 +1668,20 @@ fn serve_via_ssr_rpc(
         }
     };
 
+    // A bucket render is shareable WITHIN its session bucket only when the CDN is
+    // configured to key on session-cookie presence (`PYLON_SSR_BUCKET_CDN`).
+    // Without that, a bucket response stays browser-`private`/no-store (origin ISR
+    // still serves it fast) so a cookie-blind shared cache can't mis-serve a
+    // signed-in shell to a signed-out visitor or vice versa.
+    let bucket_shareable = bucket_eligible && bucket_cdn_sharing_enabled();
     let response = Response::new(
         tiny_http::StatusCode(status),
-        build_ssr_response_headers(&page_headers, cors_origin, cacheable_eligible),
+        build_ssr_response_headers(
+            &page_headers,
+            cors_origin,
+            cacheable_eligible,
+            bucket_shareable,
+        ),
         streaming_body,
         None, // content-length unknown → tiny_http uses chunked transfer
         None,
@@ -1626,16 +1690,18 @@ fn serve_via_ssr_rpc(
     // chunked-transfer frames; returns at EOF (render thread done).
     let _ = request.respond(response);
 
-    // #277 Stage 2 write-tee. The body has fully streamed to the client; now
-    // persist it for subsequent anonymous requests IF this render earned it
-    // (Stage-1 `x-pylon-cacheable` proof + clean 200 + no Set-Cookie + no
-    // mid-render error). Off the hot path; best-effort. When not eligible the
-    // handle is simply dropped (the thread detaches, as before).
+    // #277 Stage 2 / Phase 0 write-tee. The body has fully streamed to the
+    // client; now persist it for subsequent requests IF this render earned it (a
+    // cache proof + clean 200 + no Set-Cookie + no mid-render error). The anon
+    // proof (`x-pylon-cacheable`) stores under `cache_vary`; the bucket proof
+    // (`x-pylon-bucket`) stores under the session-keyed `bucket_vary`. Off the
+    // hot path; best-effort. When not eligible the handle is simply dropped.
     if let Some(buf) = tee_buf {
         maybe_cache_render(
             &matched.route.path,
             &path_only,
             &cache_vary,
+            &bucket_vary,
             status,
             &page_headers,
             buf,
@@ -1731,6 +1797,37 @@ fn ssr_cache_vary(request_host: Option<&str>) -> Vec<(String, String)> {
     vec![("host".to_string(), ssr_cache_host_bucket(request_host))]
 }
 
+/// PPR Phase 0 cache-key `vary` for an auth-BUCKET render: the host dimension
+/// PLUS a `("sess", "1"|"0")` pair for session-cookie PRESENCE. A signed-in and
+/// a signed-out request therefore key to DISTINCT entries (different shells),
+/// while two different signed-in users key to the SAME entry — which is correct
+/// precisely because a bucketable render is identity-free (it never read real
+/// `auth`). Distinct from `ssr_cache_vary` so anon and bucket entries for the
+/// same route never collide.
+fn ssr_cache_bucket_vary(
+    request_host: Option<&str>,
+    session_present: bool,
+) -> Vec<(String, String)> {
+    vec![
+        ("host".to_string(), ssr_cache_host_bucket(request_host)),
+        (
+            "sess".to_string(),
+            if session_present { "1" } else { "0" }.to_string(),
+        ),
+    ]
+}
+
+/// PPR Phase 0: is the CDN configured to key its cache on session-cookie
+/// PRESENCE (a Cloudflare cache-key rule / Worker)? Only then may a bucket
+/// response advertise `public, s-maxage` — otherwise a cookie-blind shared cache
+/// would mis-serve a signed-in shell to a signed-out visitor (and vice versa).
+/// Default OFF (safe): buckets stay browser-`private`/no-store and the win is the
+/// origin ISR render-skip. Operators flip `PYLON_SSR_BUCKET_CDN=1` after the CDN
+/// rule is in place.
+fn bucket_cdn_sharing_enabled() -> bool {
+    std::env::var("PYLON_SSR_BUCKET_CDN").ok().as_deref() == Some("1")
+}
+
 /// The request `Host` header value, if present.
 fn request_host(request: &Request) -> Option<String> {
     request.headers().iter().find_map(|h| {
@@ -1751,9 +1848,31 @@ fn ssr_cache_verdict(
     status: u16,
     page_headers: &std::collections::HashMap<String, String>,
 ) -> Option<u64> {
+    ssr_proof_verdict(status, page_headers, "x-pylon-cacheable")
+}
+
+/// PPR Phase 0: the host-edge BUCKET verdict — `Some(revalidate secs)` only when
+/// the render emitted the bucket proof (`x-pylon-bucket: N`, N>0) AND the
+/// response is a clean 200 with no Set-Cookie. Same fail-closed shape as
+/// `ssr_cache_verdict`, different proof header. Pure.
+fn ssr_bucket_verdict(
+    status: u16,
+    page_headers: &std::collections::HashMap<String, String>,
+) -> Option<u64> {
+    ssr_proof_verdict(status, page_headers, "x-pylon-bucket")
+}
+
+/// Shared fail-closed gate behind `ssr_cache_verdict` / `ssr_bucket_verdict`:
+/// the named internal proof header parses to N>0, status is 200, and the render
+/// set no cookie. A Set-Cookie can never ride a shared/bucket entry.
+fn ssr_proof_verdict(
+    status: u16,
+    page_headers: &std::collections::HashMap<String, String>,
+    proof_header: &str,
+) -> Option<u64> {
     let secs = page_headers
         .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("x-pylon-cacheable"))
+        .find(|(k, _)| k.eq_ignore_ascii_case(proof_header))
         .and_then(|(_, v)| v.trim().parse::<u64>().ok())
         .filter(|s| *s > 0)?;
     if status != 200 {
@@ -1774,18 +1893,23 @@ fn ssr_cache_verdict(
 fn maybe_cache_render(
     route_path: &str,
     pathname: &str,
-    vary: &[(String, String)],
+    anon_vary: &[(String, String)],
+    bucket_vary: &[(String, String)],
     status: u16,
     page_headers: &std::collections::HashMap<String, String>,
     buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     render_handle: std::thread::JoinHandle<()>,
     err_rx: std::sync::mpsc::Receiver<(String, String)>,
 ) {
-    // The host-edge shareability verdict (proof present + clean 200 + no
-    // Set-Cookie). None → don't cache (fail-closed).
-    let revalidate_secs = match ssr_cache_verdict(status, page_headers) {
-        Some(s) => s,
-        None => return,
+    // Which proof did the render earn? The bucket proof keys under `bucket_vary`
+    // (session-presence); the anon proof under `anon_vary`. Mutually exclusive
+    // (the TS verdict splits on the opt-in). None → don't cache (fail-closed).
+    let (revalidate_secs, vary) = if let Some(s) = ssr_bucket_verdict(status, page_headers) {
+        (s, bucket_vary)
+    } else if let Some(s) = ssr_cache_verdict(status, page_headers) {
+        (s, anon_vary)
+    } else {
+        return;
     };
     // Wait for the render thread, then confirm it didn't error AFTER
     // response_start — a partial/aborted body must never be cached. respond()
@@ -1842,7 +1966,34 @@ fn serve_cached_ssr(
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
     // Reached only for cookie-anonymous, eligible requests (the cache READ gate),
     // and the stored body is the anonymous render → safe to advertise `public`.
-    for h in build_ssr_response_headers(&page_headers, cors_origin, true) {
+    for h in build_ssr_response_headers(&page_headers, cors_origin, true, false) {
+        resp = resp.with_header(h);
+    }
+    let _ = request.respond(resp);
+    Ok(())
+}
+
+/// PPR Phase 0: serve a fresh BUCKET cache entry off disk, skipping the Bun
+/// render. The stored body is identity-free (only the binary signed-in bit), and
+/// the read gate already matched this request's session bucket. Re-derives
+/// headers from the stored `x-pylon-bucket` proof: browser-`private`/no-store by
+/// default, or `public, s-maxage` when the CDN keys on session presence
+/// (`bucket_shareable`). Not anon-shareable (the request may carry a session
+/// cookie), so `request_shareable=false`.
+fn serve_cached_bucket_ssr(
+    entry: crate::ssr_cache::CacheEntry,
+    cors_origin: &str,
+    request: Request,
+) -> Result<(), Request> {
+    let page_headers: std::collections::HashMap<String, String> =
+        entry.headers.into_iter().collect();
+    let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
+    for h in build_ssr_response_headers(
+        &page_headers,
+        cors_origin,
+        false,
+        bucket_cdn_sharing_enabled(),
+    ) {
         resp = resp.with_header(h);
     }
     let _ = request.respond(resp);
@@ -1863,10 +2014,22 @@ fn try_serve_stale_on_error(
     pathname: &str,
     cacheable_eligible: bool,
     vary: &[(String, String)],
+    bucket_eligible: bool,
+    bucket_vary: &[(String, String)],
     cors_origin: &str,
     request: Request,
 ) -> Result<(), Request> {
-    match stale_on_error_candidate(route_path, pathname, cacheable_eligible, vary) {
+    // Prefer an anon entry; fall back to this request's session bucket. Both are
+    // identity-free, so either is safe to serve as a stale fallback.
+    let candidate = stale_on_error_candidate(route_path, pathname, cacheable_eligible, vary)
+        .or_else(|| {
+            if bucket_eligible {
+                crate::ssr_cache::get(route_path, pathname, bucket_vary)
+            } else {
+                None
+            }
+        });
+    match candidate {
         Some(entry) => {
             tracing::warn!(
                 route = %route_path,
@@ -1910,8 +2073,16 @@ fn serve_cached_ssr_stale(
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
         entry.headers.into_iter().collect();
+    // A bucket entry (session-presence keyed) must NOT be served `public` to a
+    // cookie-blind shared cache unless the CDN keys on session presence — else it
+    // would mis-serve a signed-in shell to a signed-out visitor. The origin ISR
+    // serves each request from this entry anyway (the worker is down, but disk is
+    // up), so `private, no-store` loses nothing here.
+    let is_bucket = page_headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("x-pylon-bucket"));
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
-    for h in build_ssr_response_headers(&page_headers, cors_origin, true) {
+    for h in build_ssr_response_headers(&page_headers, cors_origin, true, false) {
         // Drop the stored Cache-Control; we re-apply a short one below.
         if h.field
             .as_str()
@@ -1922,10 +2093,12 @@ fn serve_cached_ssr_stale(
         }
         resp = resp.with_header(h);
     }
-    if let Ok(h) = Header::from_bytes(
-        "Cache-Control",
-        "public, max-age=10, stale-while-revalidate=30",
-    ) {
+    let stale_cc = if is_bucket && !bucket_cdn_sharing_enabled() {
+        "private, no-store"
+    } else {
+        "public, max-age=10, stale-while-revalidate=30"
+    };
+    if let Ok(h) = Header::from_bytes("Cache-Control", stale_cc) {
         resp = resp.with_header(h);
     }
     if let Ok(h) = Header::from_bytes("X-Pylon-Cache", "stale-on-error") {
@@ -2122,8 +2295,9 @@ fn serve_via_form_rpc(
 
     let response = Response::new(
         tiny_http::StatusCode(status),
-        // Form-handler (POST) path — never a shareable GET, so never `public`.
-        build_ssr_response_headers(&page_headers, cors_origin, false),
+        // Form-handler (POST) path — never a shareable GET, so never `public`
+        // (anon or bucket).
+        build_ssr_response_headers(&page_headers, cors_origin, false, false),
         streaming_body,
         None,
         None,
@@ -2202,6 +2376,14 @@ fn build_ssr_response_headers(
     // real `auth` in the hydration tail, so emitting `public` for it would let a
     // shared cache replay one user's identity to another. Both must hold.
     request_shareable: bool,
+    // PPR Phase 0: whether THIS request may receive a shared-WITHIN-BUCKET
+    // (`public, s-maxage`) response for a `x-pylon-bucket` render — true only when
+    // the request is bucket-eligible AND the CDN keys on session-cookie presence
+    // (`PYLON_SSR_BUCKET_CDN`). When false, a bucket render stays browser-`private`
+    // so a cookie-blind shared cache can't mis-serve a signed-in shell to a
+    // signed-out visitor. A bucket body is identity-free (see `computeBucketVerdict`)
+    // so this is about cache-KEYING, not body safety.
+    bucket_shareable: bool,
 ) -> Vec<Header> {
     let mut out: Vec<Header> = Vec::new();
     let mut saw_content_type = false;
@@ -2215,6 +2397,9 @@ fn build_ssr_response_headers(
     // itself anonymous-safe + opted into caching. Captured + STRIPPED below so
     // it never reaches the client or CDN.
     let mut cacheable_secs: Option<u64> = None;
+    // PPR Phase 0: the bucket proof — `Some(secs)` means the render proved itself
+    // identity-free (only the binary session bit). Captured + STRIPPED below.
+    let mut bucket_secs: Option<u64> = None;
 
     // A header VALUE carrying CR/LF/NUL could smuggle extra headers (HTTP
     // response splitting). Drop it rather than trust the header library.
@@ -2253,12 +2438,14 @@ fn build_ssr_response_headers(
             continue;
         }
         if lname.starts_with("x-pylon-") {
-            // Reserved internal namespace. Capture the #277 cache proof, then
-            // STRIP every `x-pylon-*` — none may reach the client/CDN, and a
-            // value forged by userland (page setHeader, or a route handler's
-            // returned headers) must never be honored.
+            // Reserved internal namespace. Capture the #277 cache proof + the
+            // Phase 0 bucket proof, then STRIP every `x-pylon-*` — none may reach
+            // the client/CDN, and a value forged by userland (page setHeader, or a
+            // route handler's returned headers) must never be honored.
             if lname == "x-pylon-cacheable" {
                 cacheable_secs = value.trim().parse::<u64>().ok();
+            } else if lname == "x-pylon-bucket" {
+                bucket_secs = value.trim().parse::<u64>().ok();
             }
             continue;
         }
@@ -2294,16 +2481,31 @@ fn build_ssr_response_headers(
             })
         }
         // A response may be stored by a SHARED cache only when the request is
-        // itself shareable (cookie-anonymous GET, no query) AND it sets no cookie
-        // — otherwise the body may carry this request's auth (hydration tail).
-        let may_share = request_shareable && !saw_set_cookie;
-        // Natural Cache-Control from the page / #277 proof / defaults.
+        // itself shareable AND it sets no cookie — otherwise the body may carry
+        // this request's auth (hydration tail). Two shareability lanes:
+        //   - anon: cookie-anonymous GET (`request_shareable`).
+        //   - bucket: bucket-eligible request with a `x-pylon-bucket` render AND a
+        //     CDN that keys on session presence (`bucket_shareable`). The body is
+        //     identity-free, so the CDN keying — not body content — is the gate.
+        let may_share =
+            !saw_set_cookie && (request_shareable || (bucket_shareable && bucket_secs.is_some()));
+        // Natural Cache-Control from the page / proofs / defaults.
         let mut cc: String = if let Some(pcc) = page_cache_control {
             pcc
         } else if saw_set_cookie {
             "no-store".to_string()
         } else if let Some(secs) = cacheable_secs {
             format!("public, s-maxage={secs}, stale-while-revalidate={secs}")
+        } else if let Some(secs) = bucket_secs {
+            // Identity-free bucket body. Public (shared-within-bucket) ONLY when
+            // the CDN keys on session presence; otherwise browser-`private` so a
+            // cookie-blind shared cache can't mis-serve across buckets. The origin
+            // ISR still serves it fast either way.
+            if bucket_shareable {
+                format!("public, s-maxage={secs}, stale-while-revalidate={secs}")
+            } else {
+                "private, no-store".to_string()
+            }
         } else {
             "no-cache".to_string()
         };
@@ -2311,9 +2513,9 @@ fn build_ssr_response_headers(
         // response must NEVER be storable by a shared cache. If the chosen CC
         // doesn't already forbid shared storage, force `private, no-store`. This
         // catches every branch — page-set `public`/bare `max-age`, the bare
-        // `no-cache` default, and a `public` #277 proof on a logged-in request —
-        // while respecting a page's own `private`/`no-store` (e.g.
-        // `private, max-age=60` for the user's own browser).
+        // `no-cache` default, a `public` #277 proof on a logged-in request, and a
+        // `public` bucket proof when the CDN isn't bucket-keyed — while respecting
+        // a page's own `private`/`no-store` (e.g. `private, max-age=60`).
         if !may_share && !is_non_shared_cc(&cc) {
             cc = "private, no-store".to_string();
         }
@@ -3568,6 +3770,7 @@ mod tests {
             &page,
             "https://app.example",
             true,
+            false,
         ));
         assert!(pairs.iter().any(|(k, v)| k == "x-custom" && v == "hi"));
         assert!(pairs.iter().any(|(k, _)| k == "content-type"));
@@ -3584,7 +3787,7 @@ mod tests {
             "content-type".to_string(),
             "application/rss+xml".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
         let cts: Vec<&(String, String)> =
             pairs.iter().filter(|(k, _)| k == "content-type").collect();
         assert_eq!(cts.len(), 1, "exactly one content-type (no default added)");
@@ -3598,7 +3801,7 @@ mod tests {
             "set-cookie".to_string(),
             "a=1; Path=/; HttpOnly\nb=2; Path=/; HttpOnly".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
         let cookies: Vec<&String> = pairs
             .iter()
             .filter(|(k, _)| k == "set-cookie")
@@ -3612,7 +3815,7 @@ mod tests {
     #[test]
     fn ssr_cookie_response_is_no_store_else_no_cache() {
         let cc = |page: &std::collections::HashMap<String, String>| {
-            header_pairs(&build_ssr_response_headers(page, "*", true))
+            header_pairs(&build_ssr_response_headers(page, "*", true, false))
                 .into_iter()
                 .find(|(k, _)| k == "cache-control")
                 .map(|(_, v)| v)
@@ -3638,7 +3841,7 @@ mod tests {
     #[test]
     fn ssr_cacheable_proof_yields_public_smaxage_and_is_stripped() {
         let headers = |page: &std::collections::HashMap<String, String>| {
-            header_pairs(&build_ssr_response_headers(page, "*", true))
+            header_pairs(&build_ssr_response_headers(page, "*", true, false))
         };
         let cc = |page: &std::collections::HashMap<String, String>| {
             headers(page)
@@ -3683,7 +3886,7 @@ mod tests {
         // proof its response must NEVER be advertised `public` — else a shared
         // cache (Cloudflare) could replay one user's identity to another.
         let cc = |page: &std::collections::HashMap<String, String>, shareable: bool| {
-            header_pairs(&build_ssr_response_headers(page, "*", shareable))
+            header_pairs(&build_ssr_response_headers(page, "*", shareable, false))
                 .into_iter()
                 .find(|(k, _)| k == "cache-control")
                 .map(|(_, v)| v)
@@ -3702,6 +3905,137 @@ mod tests {
     }
 
     #[test]
+    fn ssr_bucket_proof_is_private_by_default_public_only_with_cdn_bucketing() {
+        // PPR Phase 0: a `x-pylon-bucket` render carries an identity-free body, so
+        // it's safe to SHARE within its session bucket — but only if the CDN keys
+        // on session presence (`bucket_shareable`). Default (bucket_shareable
+        // false) → browser-`private`/no-store so a cookie-blind shared cache can't
+        // mis-serve across buckets. And the internal proof never leaks.
+        let cc = |page: &std::collections::HashMap<String, String>,
+                  req_shareable: bool,
+                  bucket_shareable: bool| {
+            header_pairs(&build_ssr_response_headers(
+                page,
+                "*",
+                req_shareable,
+                bucket_shareable,
+            ))
+            .into_iter()
+            .find(|(k, _)| k == "cache-control")
+            .map(|(_, v)| v)
+        };
+        let mut bucket = std::collections::HashMap::new();
+        bucket.insert("x-pylon-bucket".to_string(), "60".to_string());
+
+        // Default (no CDN bucketing): private, no-store — even for a signed-out
+        // (request_shareable=true) request, because a cookie-blind CDN would
+        // otherwise serve this sess-keyed shell to the wrong bucket.
+        assert_eq!(
+            cc(&bucket, true, false).as_deref(),
+            Some("private, no-store")
+        );
+        // Signed-in (request_shareable=false) request, no CDN bucketing → same.
+        assert_eq!(
+            cc(&bucket, false, false).as_deref(),
+            Some("private, no-store")
+        );
+        // CDN bucketing ON → public, shared-within-bucket (the CDN keys on the
+        // cookie-presence so it can't cross buckets). Survives the may_share
+        // invariant even for a session-carrying (request_shareable=false) request.
+        assert_eq!(
+            cc(&bucket, false, true).as_deref(),
+            Some("public, s-maxage=60, stale-while-revalidate=60")
+        );
+
+        // The internal proof header NEVER reaches the client/CDN.
+        assert!(
+            !header_pairs(&build_ssr_response_headers(&bucket, "*", false, true))
+                .iter()
+                .any(|(k, _)| k == "x-pylon-bucket"),
+            "the internal bucket proof must be stripped"
+        );
+
+        // Set-Cookie is an ABSOLUTE veto — a bucket render that set a cookie is
+        // never shared, even with CDN bucketing on.
+        let mut bucket_cookie = std::collections::HashMap::new();
+        bucket_cookie.insert("x-pylon-bucket".to_string(), "60".to_string());
+        bucket_cookie.insert("set-cookie".to_string(), "sid=abc".to_string());
+        assert_eq!(cc(&bucket_cookie, false, true).as_deref(), Some("no-store"));
+    }
+
+    #[test]
+    fn ssr_bucket_verdict_only_stores_proven_identity_free_clean_200() {
+        let mk = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::HashMap<String, String>>()
+        };
+        // Proof + clean 200 + no Set-Cookie → Some(secs).
+        assert_eq!(
+            ssr_bucket_verdict(200, &mk(&[("x-pylon-bucket", "60")])),
+            Some(60)
+        );
+        // The anon proof does NOT satisfy the bucket verdict (distinct header).
+        assert_eq!(
+            ssr_bucket_verdict(200, &mk(&[("x-pylon-cacheable", "60")])),
+            None
+        );
+        // Set-Cookie veto.
+        assert_eq!(
+            ssr_bucket_verdict(200, &mk(&[("x-pylon-bucket", "60"), ("set-cookie", "s=x")])),
+            None
+        );
+        // Non-200 veto.
+        assert_eq!(
+            ssr_bucket_verdict(404, &mk(&[("x-pylon-bucket", "60")])),
+            None
+        );
+        // No proof / zero / garbage → fail-closed None.
+        assert_eq!(ssr_bucket_verdict(200, &mk(&[])), None);
+        assert_eq!(
+            ssr_bucket_verdict(200, &mk(&[("x-pylon-bucket", "0")])),
+            None
+        );
+        assert_eq!(
+            ssr_bucket_verdict(200, &mk(&[("x-pylon-bucket", "nope")])),
+            None
+        );
+    }
+
+    #[test]
+    fn bucket_vary_separates_session_presence_and_never_collides_with_anon() {
+        // The session dimension actually changes the cache key, so a signed-in and
+        // a signed-out request land on DIFFERENT bucket entries (different shells)
+        // — and a bucket entry can never collide with an anon entry for the same
+        // route (distinct vary shape).
+        let key = |vary: &[(String, String)]| crate::ssr_cache::cache_key("/p", "/p", vary);
+        let anon = ssr_cache_vary(Some("a.example.com"));
+        let b_in = ssr_cache_bucket_vary(Some("a.example.com"), true);
+        let b_out = ssr_cache_bucket_vary(Some("a.example.com"), false);
+        assert_ne!(
+            key(&b_in),
+            key(&b_out),
+            "sess=1 and sess=0 are distinct entries"
+        );
+        assert_ne!(
+            key(&anon),
+            key(&b_in),
+            "anon and bucket entries never collide"
+        );
+        assert_ne!(
+            key(&anon),
+            key(&b_out),
+            "anon and bucket entries never collide"
+        );
+        // Same inputs → same key (deterministic, so read/write/stale agree).
+        assert_eq!(
+            key(&ssr_cache_bucket_vary(Some("a.example.com"), true)),
+            key(&b_in)
+        );
+    }
+
+    #[test]
     fn ssr_page_set_public_cache_control_is_downgraded_for_unshareable_request() {
         // P0 follow-up (codex 2026-06-28): a page that sets its OWN Cache-Control
         // must NOT be able to advertise shared caching (`public`/`s-maxage`) for a
@@ -3710,7 +4044,7 @@ mod tests {
         // fix, a page-set `cache-control` set `saw_cache_control` and skipped the
         // shareability gate entirely.
         let cc = |page: &std::collections::HashMap<String, String>, shareable: bool| {
-            header_pairs(&build_ssr_response_headers(page, "*", shareable))
+            header_pairs(&build_ssr_response_headers(page, "*", shareable, false))
                 .into_iter()
                 .find(|(k, _)| k == "cache-control")
                 .map(|(_, v)| v)
@@ -3750,7 +4084,7 @@ mod tests {
         // Any forged `x-pylon-*` from page headers is stripped, never emitted.
         let mut forged = std::collections::HashMap::new();
         forged.insert("x-pylon-foo".to_string(), "1".to_string());
-        let pairs = header_pairs(&build_ssr_response_headers(&forged, "*", true));
+        let pairs = header_pairs(&build_ssr_response_headers(&forged, "*", true, false));
         assert!(!pairs.iter().any(|(k, _)| k.starts_with("x-pylon-")));
     }
 
@@ -3766,7 +4100,7 @@ mod tests {
             if let Some(v) = page_cc {
                 page.insert("cache-control".to_string(), v.to_string());
             }
-            header_pairs(&build_ssr_response_headers(&page, "*", false))
+            header_pairs(&build_ssr_response_headers(&page, "*", false, false))
                 .into_iter()
                 .find(|(k, _)| k == "cache-control")
                 .map(|(_, v)| v)
@@ -3991,6 +4325,7 @@ mod tests {
             &std::collections::HashMap::new(),
             "*",
             true,
+            false,
         ));
         let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("x-frame-options").as_deref(), Some("SAMEORIGIN")); // clickjacking
@@ -4001,7 +4336,7 @@ mod tests {
         // duplicate header emitted.
         let mut page = std::collections::HashMap::new();
         page.insert("x-frame-options".to_string(), "ALLOWALL".to_string());
-        let p2 = header_pairs(&build_ssr_response_headers(&page, "*", true));
+        let p2 = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
         let xfo: Vec<&String> = p2
             .iter()
             .filter(|(n, _)| n == "x-frame-options")
@@ -4020,7 +4355,7 @@ mod tests {
             "x-evil".to_string(),
             "ok\r\nset-cookie: stolen=1".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
         assert!(
             pairs.iter().all(|(_, v)| !v.contains("stolen")),
             "CRLF-injected value must not appear in any header"
@@ -4039,7 +4374,7 @@ mod tests {
         let mut page = std::collections::HashMap::new();
         page.insert("x-evil\r\nset-cookie".to_string(), "stolen=1".to_string());
         page.insert("x:colon".to_string(), "v".to_string());
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
         assert!(pairs
             .iter()
             .all(|(k, _)| !k.contains('\r') && !k.contains('\n') && !k.contains(':')));
