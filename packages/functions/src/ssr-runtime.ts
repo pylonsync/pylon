@@ -331,6 +331,16 @@ export function makeReadTrackingProxy(
 }
 
 /**
+ * Deep clone via JSON round-trip — drops functions / proxies / symbols, keeping
+ * only JSON-serializable data. Used to SNAPSHOT the bucket-tail props before any
+ * page code can mutate them, so a page can't smuggle identity through a nested
+ * field of params/searchParams into a shared cache entry.
+ */
+function jsonClone<T>(v: T): T {
+  return v == null ? v : (JSON.parse(JSON.stringify(v)) as T);
+}
+
+/**
  * Revocable form of {@link makeReadTrackingProxy}. The render path wraps each
  * per-request input (auth / headers / cookies / session) in one of these and
  * REVOKES it once the render is done — so a page that stashed the props object
@@ -2050,6 +2060,23 @@ export async function handleRenderRoute(
       serverData,
     };
 
+    // PPR Phase 0: an immutable, pre-render SNAPSHOT of the only props a bucketed
+    // (SHARED) tail may serialize — url/params/searchParams, all path-derived and
+    // in the cache key. Deep-cloned NOW, before any page/generateMetadata code
+    // runs, because `props.params`/`searchParams` ARE the live `msg` objects: a
+    // page could mutate a nested field to smuggle identity (e.g.
+    // `props.searchParams.leak = props.auth`) WITHOUT tripping read-tracking, and
+    // a shallow allowlist would copy that mutation by reference into the shared
+    // tail. Captured only for opted-in pages (zero cost otherwise).
+    const bucketOptIn = (mod as any).cache === "auth-bucketed";
+    const bucketTailBase = bucketOptIn
+      ? {
+          url: msg.url,
+          params: jsonClone(msg.params),
+          searchParams: jsonClone(msg.search_params),
+        }
+      : null;
+
     // SEO metadata: static `export const metadata` or dynamic
     // `export async function generateMetadata(props)`. Awaited before the
     // first byte, so keep it to cheap derivations (params → title); heavy
@@ -2206,11 +2233,11 @@ export async function handleRenderRoute(
     // `!Loading`) is the gate: a `streaming = true` page has `Loading` null but
     // `wantsStream` true, and must still be excluded. Fail-closed. (See
     // computeCacheVerdict — pure + unit-tested for the leak class.)
-    // PPR Phase 0: a page opts into auth-bucketed SHARED caching with
-    // `export const cache = "auth-bucketed"`. A bucketed render and the plain
-    // anon cache are mutually exclusive — `cacheable` excludes the opt-in so a
-    // bucket page never also emits the anon proof.
-    const bucketOptIn = (mod as any).cache === "auth-bucketed";
+    // PPR Phase 0: `bucketOptIn` (`export const cache = "auth-bucketed"`) was
+    // resolved at props-construction time (it gates the immutable bucketTailBase
+    // snapshot). A bucketed render and the plain anon cache are mutually exclusive
+    // — `cacheable` excludes the opt-in so a bucket page never also emits the anon
+    // proof.
     const cacheable =
       !bucketOptIn &&
       computeCacheVerdict({
@@ -2245,7 +2272,11 @@ export async function handleRenderRoute(
     // it can't become a vehicle that leaks a prior request's identity to a later
     // render (the proxies are revoked in `finally`). headers/cookies are stripped
     // inside buildHydrationTail; auth uses the raw value (so anon auth stays
-    // falsy/undefined rather than the proxy's empty `{}`).
+    // falsy/undefined rather than the proxy's empty `{}`). For a BUCKETED render,
+    // url/params/searchParams come from the pre-render `bucketTailBase` snapshot —
+    // NOT the live (page-mutable) props — so a page can't smuggle identity through
+    // a nested field into the shared tail. buildHydrationTail's bucket allowlist
+    // then serializes only these fields + the collapsed { signedIn } bit.
     const tailProps = props
       ? {
           ...props,
@@ -2253,6 +2284,7 @@ export async function handleRenderRoute(
           headers: msg.headers,
           cookies: msg.cookies,
           session: { exists: msg.session_present === true },
+          ...(bucketable && bucketTailBase ? bucketTailBase : {}),
         }
       : props;
     // #278: on a STREAMING render the head commits NOW, before suspended
