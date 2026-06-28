@@ -300,16 +300,14 @@ no-store. Each non-vacuous (assert it fails without the split).
 
 ## 12. Open questions
 
-- **O1 (HARD GATE — Phase 1 starts here).** Verify against the actually-resolved React
-  (lock currently → react-dom **19.2.7**, ranges are `^19.0.0`) with a minimal real
-  fixture: (a) does `react-dom/static` export `prerender` and `react-dom/server` export
-  `resume` (Web) — NOT the `resumeToReadableStream` the first draft named? (b) what are
-  resume's real semantics (restart-from-root, skip-completed)? (c) is
-  `React.unstable_postpone` present, or must holes be made via never-resolving-promise
-  suspension + prerender abort? Do NOT design further mechanism details until this
-  probe runs; codex flagged the draft named non-existent exports and leaned on an
-  unstable API. If the pinned React lacks the needed surface, either raise the peer-dep
-  floor or redesign around stable `prerender`/`resume` only.
+- **O1 — RESOLVED ✅ (probed react-dom 19.2.7, 2026-06-28).** `prerender` is exported
+  from `react-dom/static` (+ `.browser`/`.edge`); `resume` is exported from
+  `react-dom/server.browser` and `.edge` — the exact Web-streams entry points Pylon
+  uses for `renderToReadableStream`. So PPR is buildable on the pinned React. Caveat:
+  `React.unstable_postpone` is **undefined** on stable 19.2.7, so holes MUST be created
+  via the suspend-during-prerender mechanism (§3), never `unstable_postpone`. The first
+  draft's `resumeToReadableStream` name was wrong (it's `resume`). Re-probe if the React
+  floor changes.
 - **O2**: do we auto-wrap a known auth-nav slot in `<Suspense>`, or require the dev to?
   (Auto is seamless but magic; explicit is predictable.)
 - **O3**: resume cost per request vs. just rendering live for cheap shells — measure
