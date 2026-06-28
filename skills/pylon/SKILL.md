@@ -20,7 +20,7 @@ This skill is a starting point, not the ceiling. When the user asks something th
 - **Pylon Cloud:** <https://www.pylonsync.com> — managed Pylon. Same binary, same APIs, no infra to run.
 - **This skill file (latest):** <https://www.pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
-**Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`, `db.useAggregate({sum: ...})`) is probably hallucinated.
+**Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`) is probably hallucinated. (`db.useAggregate`, `db.useReactiveQuery`, `db.useSearch`, `useRoom`, `useShard` ARE real — see the realtime hooks below.)
 
 ## When to use this skill
 
@@ -165,23 +165,32 @@ Policies are boolean string expressions. They guard direct `/api/entities/*` acc
 
 **Bindings available in expressions:**
 - `auth.userId` — `string | null`
-- `auth.email` — `string | null`
-- `auth.roles` — `string[]`
-- `data.*` — the proposed row on insert/update
-- `existing.*` — the current row on update/delete
+- `auth.isAdmin` — `boolean` (true for the `admin` role / admin token / Studio cookie)
+- `auth.tenantId` — `string | null` (the selected org, for multi-tenant apps)
+- `data.*` — the row: incoming payload on insert; the **current stored row** on read/update/delete
+- `existing.*` — synonym for the current row (same as `data.*` on read/update/delete); use whichever reads clearer
+- `now` — current UTC time as an ISO-8601 string, for time windows
+
+Roles are checked with the **`auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` functions** — there is **no `auth.roles` array and no `auth.email`** binding in policy expressions. (The SSR page `auth` prop and the session DO expose roles/email; the policy evaluator does not.)
 
 **Actions:**
 - `allowRead` — applied to query results; unmatched rows are filtered out silently.
 - `allowInsert` / `allowUpdate` / `allowDelete` — reject the op with `POLICY_DENIED` if false.
 - **Omitted actions default to deny.**
 
-**Operators:**
+**Operators — the COMPLETE set (the policy language is deliberately tiny):**
 ```
-==  !=  <  <=  >  >=  &&  ||  !  +  -  *  /  %
-in            // membership: "admin" in auth.roles
-ends_with     // string suffix: data.email ends_with "@example.com"
-starts_with   // string prefix
+==  !=                              // equality
+<   <=   >   >=                     // ordering (numbers; timestamps if both are ISO-8601; else lexicographic)
+&&  ||  !                           // boolean logic
+true  false  null                  // literals
+42   -3   4.5                       // numeric literals (int / float / negative)
+"string"  'string'                 // string literals (either quote)
+auth.hasRole("admin")              // role check
+auth.hasAnyRole("admin", "owner")  // any-of role check
+exists(Entity where field == <expr> [and field == <expr>]*)   // correlated subquery
 ```
+Ordering is **deny-safe**: comparing null, booleans, or a number against a non-numeric string is always false (so an unresolvable `data.publishAt <= now` denies). Still **no `in`, no `ends_with`/`starts_with`, no arithmetic (`+ - * /`).** Membership ("is the user in this org?") is `exists(...)`, not `in`. String prefix/suffix matching still belongs in a function.
 
 **Typical patterns:**
 
@@ -196,20 +205,42 @@ policy({
   allowDelete: "auth.userId == existing.authorId",
 });
 
-// Member-of-org
+// Member-of-org — membership lives in a join entity, checked with exists()
 policy({
   name: "doc_members",
   entity: "Document",
-  allowRead: "auth.userId in existing.memberIds",
-  allowInsert: "auth.userId in data.memberIds",
-  allowUpdate: "auth.userId in existing.memberIds",
+  allowRead: "exists(OrgMember where orgId == existing.orgId and userId == auth.userId)",
+  allowInsert: "exists(OrgMember where orgId == data.orgId and userId == auth.userId)",
+  allowUpdate: "exists(OrgMember where orgId == existing.orgId and userId == auth.userId)",
 });
 
 // Admin-only
 policy({
   name: "audit_admin",
   entity: "AuditLog",
-  allowRead: "'admin' in auth.roles",
+  allowRead: "auth.isAdmin",          // or: auth.hasRole("admin")
+});
+
+// Multi-tenant row scoping
+policy({
+  name: "ticket_tenant",
+  entity: "Ticket",
+  allowRead: "auth.tenantId == existing.orgId",
+  allowInsert: "auth.tenantId == data.orgId",
+});
+
+// Time window: published posts are public; scheduled ones stay hidden until their time
+policy({
+  name: "post_published",
+  entity: "Post",
+  allowRead: "data.publishAt <= now || auth.userId == data.authorId",
+});
+
+// Threshold: only show rows at or above a priority
+policy({
+  name: "ticket_priority",
+  entity: "Ticket",
+  allowRead: "data.priority >= 3",
 });
 ```
 
@@ -312,9 +343,12 @@ Actions are **not transactional** — use mutations for atomic multi-row writes.
 ### `ctx` surface (inside handlers)
 
 ```ts
-ctx.auth.userId       // string | null
-ctx.auth.email        // string | null
-ctx.auth.roles        // string[]
+ctx.auth.userId       // string | null  (string when auth: "user")
+ctx.auth.isAdmin      // boolean
+ctx.auth.tenantId     // string | null  (selected org)
+ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER you verify a webhook/HMAC
+// NOTE: there is NO ctx.auth.email and NO ctx.auth.roles on the handler ctx.
+// Need the email? -> const u = await ctx.db.get("User", ctx.auth.userId)
 
 ctx.db.insert(entity, data)            // => id
 ctx.db.get(entity, id)                 // => row | null
@@ -322,9 +356,19 @@ ctx.db.query(entity, filter?)          // => row[]
 ctx.db.update(entity, id, patch)       // => void
 ctx.db.delete(entity, id)              // => void
 
-ctx.error("CODE", "message")           // throw typed error
-ctx.schedule(delayMs, fnName, args)    // enqueue delayed call
+ctx.error("CODE", "message")           // throw typed error (mutation/action ctx only — NOT query ctx)
+ctx.scheduler.runAfter(delayMs, "fnName", args)   // enqueue delayed call
+ctx.scheduler.runAt(isoTimestamp, "fnName", args) // enqueue at a wall-clock time
+ctx.requireMember(orgId, { role })     // assert org membership/role — throws, fails closed
+ctx.db.link(entity, id, relation, targetId) / ctx.db.unlink(entity, id, relation)
 ```
+
+**Functions bypass policies** — a `mutation`/`action` that reads or writes another tenant's
+rows without re-checking membership is an IDOR. Use `ctx.requireMember(orgId, { role })` (it
+looks up the membership row and throws `UNAUTHENTICATED`/`FORBIDDEN`) rather than trusting
+`args` or a client-supplied id.
+
+`ctx.error` exists on **mutation/action** ctx but **not on query ctx** — a `query` handler that needs to signal "forbidden" should return a discriminated result (`{ authorized: false }`) rather than throw, or a plain throw will reach the client as a stripped generic `HANDLER_ERROR`.
 
 ### Typed errors
 
@@ -365,6 +409,38 @@ async function onSend(roomId: string, body: string) {
   return id;
 }
 ```
+
+### Realtime hooks beyond `db.useQuery`
+
+`db.useQuery` is the workhorse, but the React SDK ships a full realtime surface. Pick the right primitive:
+
+| You want | Hook | Notes |
+|---|---|---|
+| Live list of one entity, filtered | `db.useQuery("E", { filter })` | Cached in the local replica; filters offline/sort locally for free. **The cross-tab-reliable primitive.** |
+| One row by id, live | `db.useQueryOne("E", id)` (alias `db.useOne`) | |
+| Live pagination | `db.useInfiniteQuery` / `db.useQueryPaginated` | each page is its own subscription |
+| Server-side join / computed / aggregate value, live | `db.useReactiveQuery("fnName", args)` | Convex-style: a `query()` handler that auto-re-runs when its dep set changes. **See the footgun below.** |
+| Live count / sum / avg / groupBy | `db.useAggregate(...)` | |
+| Live full-text + faceted search | `db.useSearch("E", { query, filters, facets, sort, pageSize })` | re-runs on every keystroke AND every matching write; needs the `search` plugin + `search:` on the entity |
+| Optimistic write with a "ghost" row | `db.useMutation("fnName")` / `db.useEntity` | inserts locally instantly; server broadcast reconciles in place |
+| Presence / cursors / typing / broadcast | `useRoom(sync, roomId, { initialPresence })` | ephemeral — `peers`, `setPresence(data)`, `broadcast(topic, data)`. NOT persisted. |
+| Authoritative multiplayer sim (game/MMO tick loop) | `useShard(shardId, { subscriberId, token })` | `{ snapshot, tick, send, connected }`. The server-side sim (`SimState` tick loop) is defined in Rust (`crates/realtime`); `useShard`/`connectShard` are the TS client. |
+| Connection/sync state for a status indicator | `useSyncStatus()` / `useSession()` | |
+
+**Cross-tab realtime footgun (important).** For state that must update across *all* a user's tabs (a live counter, availability, "N slots left"), use **`db.useQuery` over a PII-free projection/aggregate entity** — NOT `db.useReactiveQuery`. Reactive server queries behave as leader-tab-only in practice (a follower tab's reactive subscription may never deliver its initial result), whereas entity sync (`db.useQuery`) reaches every tab. The pattern: keep your sensitive table `allowRead: "false"` (deny-all), and have the mutation also maintain a small public-read projection entity (e.g. `WaitlistStat { count }`, `BookedSlot { serviceId, startsAt }`) with `allowRead: "true"` + client writes denied. Subscribe the UI to the projection.
+
+```tsx
+// Live counter that updates in every tab — db.useQuery over a public projection
+const { data: stat } = db.useQuery("WaitlistStat");   // allowRead:"true", count maintained server-side
+const count = stat[0]?.count ?? 0;
+
+// Presence (cursors / typing) — ephemeral, not stored
+const room = useRoom(db.sync, `doc:${docId}`, { initialPresence: { cursor: 0 } });
+room.peers.map((p) => <Cursor key={p.user_id} x={p.data.cursor} />);
+room.setPresence({ cursor: caretPos });
+```
+
+Use `db.useReactiveQuery` for **server-side joins / computed values rendered in one (leader) view** (a feed that joins Post→User, a dashboard rollup) — it's the right tool there. Just don't lean on it for cross-tab fan-out of a shared scalar.
 
 ### Session / auth bootstrap (guest fallback pattern)
 
@@ -532,11 +608,16 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 |---|---|
 | A new table | New `entity(...)` in `app.ts` + matching `policy(...)` + `buildManifest({ entities: [...], policies: [...] })` |
 | A list in the UI | `db.useQuery("Entity", { filter })` — make sure `filter` keys are indexed |
-| A form submission / write | A `mutation()` in `functions/X.ts` + `await callFn("X", args)` in the component |
+| A live counter / availability across tabs | `db.useQuery` over a public-read projection entity the mutation maintains — NOT `useReactiveQuery` |
+| A server-side join / computed value, live | `db.useReactiveQuery("fnName", args)` (leader-view; see footgun) |
+| Live full-text search | `db.useSearch("Entity", { query, facets })` + `search` plugin |
+| Presence / cursors / typing | `useRoom(db.sync, roomId)` — ephemeral, not persisted |
+| Multiplayer game / tick sim | `useShard(shardId, { subscriberId })` |
+| A form submission / write | A `mutation()` in `functions/X.ts` + `await callFn("X", args)` in the component (or `db.useMutation` for optimistic UI) |
 | Auth-gated functions | `auth: "user"` is the default on every `query` / `mutation` / `action`. Anon callers get `401 AUTH_REQUIRED` before the handler runs. `auth: "public"` to opt out (webhooks, healthchecks). CRITICAL on actions — policies don't gate them. |
 | Access rules | `policy({ allowRead: "...", allowInsert: "..." })` — not middleware, not function guards |
 | Email / external API | `action()` (not `mutation()`) |
-| A scheduled job | `ctx.schedule(delayMs, "fnName", args)` inside a mutation |
+| A scheduled job | `ctx.scheduler.runAfter(delayMs, "fnName", args)` (or `runAt(iso, ...)`) inside a mutation/action |
 | Deploy | `pylon deploy --target fly` then `fly deploy . --config fly.toml` |
 
 ## Before you finish a task

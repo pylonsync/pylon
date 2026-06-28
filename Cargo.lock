@@ -2481,6 +2481,7 @@ dependencies = [
 name = "pylon-policy"
 version = "0.3.296"
 dependencies = [
+ "chrono",
  "pylon-auth",
  "pylon-kernel",
  "serde_json",

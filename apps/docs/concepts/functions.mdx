@@ -47,8 +47,11 @@ The filename becomes the RPC name — `createMessage` is callable at `POST /api/
 
 ```ts
 ctx.auth.userId   // string (when auth: "user" | "admin") OR string | null (when auth: "public" | "guest")
-ctx.auth.email    // string | null
-ctx.auth.roles    // string[]
+ctx.auth.isAdmin  // boolean
+ctx.auth.tenantId // string | null  (selected org)
+ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER verifying a webhook/HMAC
+// No ctx.auth.email / ctx.auth.roles on the handler ctx — fetch the user row for email:
+//   const u = await ctx.db.get("User", ctx.auth.userId)
 
 ctx.db.insert(entity, data)
 ctx.db.get(entity, id)

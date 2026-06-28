@@ -31,7 +31,7 @@ Roles are typically stored on a per-user, per-tenant join table:
 }
 ```
 
-When the user calls `/api/auth/select-org`, the runtime hydrates `auth.roles` with the matching `OrgMember.role` so policies see them on every request.
+When the user calls `/api/auth/select-org`, the runtime loads the matching `OrgMember.role` into the session so policy `auth.hasRole(...)` / `auth.hasAnyRole(...)` checks see them on every request. (There's no `auth.roles` *array* binding in the policy DSL — roles are only reachable through those two functions.)
 
 ## Special roles
 
@@ -69,7 +69,7 @@ Policies live in `pylon.manifest.json` under `policies`:
 | `auth.hasAnyRole('a','b')` | fn → bool | Match any of the roles |
 | `data.<field>` | varies | Row column value |
 
-Supported operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parentheses.
+Supported operators: `==`, `!=`, `<`, `<=`, `>`, `>=`, `&&`, `||`, `!`, parentheses, plus numeric literals and the `now` binding. Ordering compares numbers numerically and ISO-8601 strings chronologically (deny-safe otherwise). **No arithmetic and no `in`/`ends_with`/`starts_with`.** Role checks use the `auth.hasRole(...)` / `auth.hasAnyRole(...)` functions; cross-entity membership uses `exists(Entity where field == <expr> [and ...])`. String matching belongs in a function.
 
 ## Common patterns
 
@@ -164,16 +164,28 @@ export default mutation({
 
 ## Reading roles in functions
 
-Inside a `mutation` / `query` / `action`, `ctx.auth` mirrors `AuthContext`:
+Inside a `mutation` / `query` / `action`, `ctx.auth` exposes:
 
 ```typescript
 ctx.auth.userId        // string | null
-ctx.auth.isAdmin       // bool
-ctx.auth.isGuest       // bool
+ctx.auth.isAdmin       // boolean
 ctx.auth.tenantId      // string | null
-ctx.auth.roles         // string[]
-ctx.auth.hasRole('x')  // bool
+ctx.auth.elevate({ admin: true, reason: "..." })  // promote after verifying a webhook/HMAC
 ```
+
+The handler `ctx.auth` carries **no `roles` array, no `hasRole`, and no `email`** —
+those are policy-expression / session concerns. For the admin case, `ctx.auth.isAdmin`
+is enough. To gate a function on org membership or a role, use the first-class
+`ctx.requireMember` helper — it looks up the membership row and fails closed:
+
+```typescript
+// throws UNAUTHENTICATED / FORBIDDEN if the caller isn't an owner of this org
+const member = await ctx.requireMember(args.orgId, { role: "owner" });
+```
+
+This matters because functions bypass policies — a mutation/action with a forgotten
+membership check is an IDOR. Roles themselves "aren't first-class data" (see below) —
+they're strings on your membership table, which is exactly what `requireMember` reads.
 
 ## Granting roles
 
@@ -200,7 +212,7 @@ export default mutation({
 
 ## Why no permission grid?
 
-Pylon ships role-based access control, not attribute-based or capability-based. You **could** build a permission table and check it in policies (`data.id in auth.permittedTodoIds`), but for 90% of apps "owner can write, member can read, admin bypasses" is enough — and policies stay readable.
+Pylon ships role-based access control, not attribute-based or capability-based. You **could** build a permission table and check it in policies with `exists(Permission where todoId == existing.id and userId == auth.userId)`, but for 90% of apps "owner can write, member can read, admin bypasses" is enough — and policies stay readable.
 
 If you outgrow it, the policy expression language is intentionally narrow so you can move complex logic into a function without losing security guarantees.
 

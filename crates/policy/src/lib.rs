@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -401,12 +402,13 @@ impl PolicyEngine {
                 continue;
             }
             any_rule_for_action = true;
-            // Skip per-row predicates at scan-time. If the rule
-            // references `data.`, it's filterable — the caller will
-            // run the full check per row. Otherwise evaluate now and
-            // surface the result, so `allow: "false"` and missing-
-            // auth gates (`auth.userId != null`) still 403 early.
-            if expr.contains("data.") {
+            // Skip per-row predicates at scan-time. If the rule references a
+            // row field (`data.` or its `existing.` alias), it's filterable —
+            // the caller runs the full check per row. Otherwise evaluate now
+            // and surface the result, so `allow: "false"` and missing-auth
+            // gates (`auth.userId != null`) still 403 early. (A row-less `now`
+            // gate has neither prefix and is correctly evaluated here.)
+            if expr.contains("data.") || expr.contains("existing.") {
                 continue;
             }
             match self.eval_cached(expr, auth, None, None) {
@@ -653,6 +655,7 @@ fn evaluate_ast(
         data,
         input,
         resolver,
+        now: pylon_kernel::util::now_iso(),
     };
     match env.eval(ast) {
         EvalResult::True => PolicyResult::Allowed,
@@ -693,11 +696,17 @@ enum Token {
     Not, // !
     Eq,  // ==
     Neq, // !=
+    Lt,  // <
+    Lte, // <=
+    Gt,  // >
+    Gte, // >=
     LParen,
     RParen,
     Comma,
     Ident(String),
     Str(String),
+    /// Numeric literal lexeme (parsed to f64 when built into the AST).
+    Num(String),
 }
 
 fn tokenize(src: &str) -> Result<Vec<Token>, String> {
@@ -754,6 +763,46 @@ fn tokenize(src: &str) -> Result<Vec<Token>, String> {
                     out.push(Token::Not);
                     i += 1;
                 }
+            }
+            b'<' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    out.push(Token::Lte);
+                    i += 2;
+                } else {
+                    out.push(Token::Lt);
+                    i += 1;
+                }
+            }
+            b'>' => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+                    out.push(Token::Gte);
+                    i += 2;
+                } else {
+                    out.push(Token::Gt);
+                    i += 1;
+                }
+            }
+            // Numeric literal: `[-]?digits[.digits]?`. A leading `-` is only
+            // a number when a digit follows (there is no subtraction operator,
+            // so a bare `-` stays an error). The lexeme is parsed to f64 at the
+            // AST stage; storing it as a string keeps `Token` Eq-able.
+            c if c.is_ascii_digit()
+                || (c == b'-' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit()) =>
+            {
+                let start = i;
+                if c == b'-' {
+                    i += 1;
+                }
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
+                if i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit() {
+                    i += 1;
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
+                        i += 1;
+                    }
+                }
+                out.push(Token::Num(src[start..i].to_string()));
             }
             b'"' | b'\'' => {
                 // Parse the literal as chars (not bytes) so multi-byte UTF-8
@@ -832,6 +881,14 @@ enum Ast {
     Or(Box<Ast>, Box<Ast>),
     Eq(Box<Ast>, Box<Ast>),
     Neq(Box<Ast>, Box<Ast>),
+    /// Ordering comparisons (`<`, `<=`, `>`, `>=`). Numeric when either side
+    /// resolves to a number; chronological when both are RFC-3339 timestamps;
+    /// lexicographic for other string pairs; false (deny-safe) for anything
+    /// not orderable (null, mixed, booleans).
+    Lt(Box<Ast>, Box<Ast>),
+    Lte(Box<Ast>, Box<Ast>),
+    Gt(Box<Ast>, Box<Ast>),
+    Gte(Box<Ast>, Box<Ast>),
     /// `auth.hasRole("x")`
     HasRole(String),
     /// `auth.hasAnyRole("a", "b", ...)`
@@ -850,6 +907,8 @@ enum Ast {
     Path(Vec<String>),
     /// A string literal.
     Str(String),
+    /// A numeric literal.
+    Num(f64),
     /// `null` literal.
     Null,
     /// Degenerate: bare `auth.isAdmin` etc. resolves to a boolean.
@@ -951,6 +1010,26 @@ impl<'a> Parser<'a> {
                 let rhs = self.parse_atom()?;
                 Ok(Ast::Neq(Box::new(lhs), Box::new(rhs)))
             }
+            Some(Token::Lt) => {
+                self.bump();
+                let rhs = self.parse_atom()?;
+                Ok(Ast::Lt(Box::new(lhs), Box::new(rhs)))
+            }
+            Some(Token::Lte) => {
+                self.bump();
+                let rhs = self.parse_atom()?;
+                Ok(Ast::Lte(Box::new(lhs), Box::new(rhs)))
+            }
+            Some(Token::Gt) => {
+                self.bump();
+                let rhs = self.parse_atom()?;
+                Ok(Ast::Gt(Box::new(lhs), Box::new(rhs)))
+            }
+            Some(Token::Gte) => {
+                self.bump();
+                let rhs = self.parse_atom()?;
+                Ok(Ast::Gte(Box::new(lhs), Box::new(rhs)))
+            }
             _ => Ok(lhs),
         }
     }
@@ -983,6 +1062,13 @@ impl<'a> Parser<'a> {
             Some(Token::Str(s)) => {
                 self.bump();
                 Ok(Ast::Str(s))
+            }
+            Some(Token::Num(s)) => {
+                self.bump();
+                let n = s
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid numeric literal {s:?}"))?;
+                Ok(Ast::Num(n))
             }
             Some(Token::LParen) => {
                 self.bump();
@@ -1195,6 +1281,13 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Ok(Ast::Str(s))
             }
+            Some(Token::Num(s)) => {
+                self.bump();
+                let n = s
+                    .parse::<f64>()
+                    .map_err(|_| format!("invalid numeric literal {s:?}"))?;
+                Ok(Ast::Num(n))
+            }
             Some(Token::Ident(name)) => {
                 self.bump();
                 Ok(Ast::Path(split_path(&name)))
@@ -1213,15 +1306,21 @@ fn ast_contains_exists(ast: &Ast) -> bool {
     match ast {
         Ast::Exists { .. } => true,
         Ast::Not(inner) => ast_contains_exists(inner),
-        Ast::And(l, r) | Ast::Or(l, r) | Ast::Eq(l, r) | Ast::Neq(l, r) => {
-            ast_contains_exists(l) || ast_contains_exists(r)
-        }
+        Ast::And(l, r)
+        | Ast::Or(l, r)
+        | Ast::Eq(l, r)
+        | Ast::Neq(l, r)
+        | Ast::Lt(l, r)
+        | Ast::Lte(l, r)
+        | Ast::Gt(l, r)
+        | Ast::Gte(l, r) => ast_contains_exists(l) || ast_contains_exists(r),
         Ast::True
         | Ast::False
         | Ast::HasRole(_)
         | Ast::HasAnyRole(_)
         | Ast::Path(_)
         | Ast::Str(_)
+        | Ast::Num(_)
         | Ast::Null
         | Ast::Bool(_) => false,
     }
@@ -1240,6 +1339,10 @@ struct EvalEnv<'a> {
     /// don't supply one (most unit tests, scan-mode pre-checks);
     /// `Ast::Exists` then evaluates to Denied with a clear reason.
     resolver: Option<&'a dyn PolicyDataResolver>,
+    /// Current UTC time (ISO-8601), bound to the `now` identifier so policies
+    /// can express time windows (`data.publishAt <= now`). Computed once per
+    /// evaluation so every `now` in one expression sees the same instant.
+    now: String,
 }
 
 #[derive(Debug)]
@@ -1251,6 +1354,7 @@ enum EvalResult {
 #[derive(Debug, Clone)]
 enum Value {
     Str(String),
+    Num(f64),
     Bool(bool),
     Null,
 }
@@ -1295,6 +1399,27 @@ impl<'a> EvalEnv<'a> {
                     EvalResult::True
                 }
             }
+            Ast::Lt(l, r) | Ast::Lte(l, r) | Ast::Gt(l, r) | Ast::Gte(l, r) => {
+                let lv = self.value_of(l);
+                let rv = self.value_of(r);
+                // Not-orderable operands (null, mixed types, booleans) yield
+                // `None` → the comparison is false. This is deny-safe: an
+                // unresolvable `data.publishAt <= now` denies rather than
+                // allows.
+                let ord = compare_values(&lv, &rv);
+                let pass = match ast {
+                    Ast::Lt(..) => ord == Some(Ordering::Less),
+                    Ast::Lte(..) => matches!(ord, Some(Ordering::Less | Ordering::Equal)),
+                    Ast::Gt(..) => ord == Some(Ordering::Greater),
+                    Ast::Gte(..) => matches!(ord, Some(Ordering::Greater | Ordering::Equal)),
+                    _ => unreachable!(),
+                };
+                if pass {
+                    EvalResult::True
+                } else {
+                    EvalResult::False(format!("comparison {lv:?} vs {rv:?} did not hold"))
+                }
+            }
             Ast::HasRole(role) => {
                 if self.auth.has_role(role) {
                     EvalResult::True
@@ -1329,6 +1454,9 @@ impl<'a> EvalEnv<'a> {
                     let v = self.value_of(rhs_ast);
                     let json = match v {
                         Value::Str(s) => serde_json::Value::String(s),
+                        Value::Num(n) => serde_json::Number::from_f64(n)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null),
                         Value::Bool(b) => serde_json::Value::Bool(b),
                         Value::Null => serde_json::Value::Null,
                     };
@@ -1340,12 +1468,20 @@ impl<'a> EvalEnv<'a> {
                     EvalResult::False(format!("exists({entity} ...) matched no rows"))
                 }
             }
-            Ast::Path(_) | Ast::Str(_) | Ast::Null | Ast::Bool(_) => {
+            Ast::Path(_) | Ast::Str(_) | Ast::Num(_) | Ast::Null | Ast::Bool(_) => {
                 // Bare value as boolean expression.
                 match self.value_of(ast) {
                     Value::Bool(true) => EvalResult::True,
                     Value::Bool(false) => EvalResult::False("Expression evaluated to false".into()),
                     Value::Null => EvalResult::False("Expression evaluated to null".into()),
+                    Value::Num(n) => {
+                        // Nonzero is truthy (matches JS-ish intuition).
+                        if n == 0.0 {
+                            EvalResult::False("Zero".into())
+                        } else {
+                            EvalResult::True
+                        }
+                    }
                     Value::Str(s) => {
                         // Non-empty string is truthy (matches JS-ish intuition).
                         if s.is_empty() {
@@ -1363,6 +1499,7 @@ impl<'a> EvalEnv<'a> {
         match ast {
             Ast::Null => Value::Null,
             Ast::Str(s) => Value::Str(s.clone()),
+            Ast::Num(n) => Value::Num(*n),
             Ast::Bool(b) => Value::Bool(*b),
             Ast::Path(parts) => self.resolve_path(parts),
             // Nested boolean ops evaluate to Bool.
@@ -1380,7 +1517,16 @@ impl<'a> EvalEnv<'a> {
         match parts[0].as_str() {
             "auth" => self.resolve_auth(&parts[1..]),
             "data" => self.resolve_json(self.data, &parts[1..]),
+            // On read/update/delete the route handler passes the CURRENT row
+            // as `data` (the call sites bind it from `existing_row`/`pre_row`),
+            // so `existing.*` is an alias for the same row — the more intuitive
+            // name when gating against stored values. On insert there is no
+            // prior row, so it aliases the incoming payload.
+            "existing" => self.resolve_json(self.data, &parts[1..]),
             "input" => self.resolve_json(self.input, &parts[1..]),
+            // `now` is the current UTC time as an ISO-8601 string, for time
+            // windows. Only valid as a bare identifier (no sub-path).
+            "now" if parts.len() == 1 => Value::Str(self.now.clone()),
             other => {
                 // Unknown top-level — treat as null so policies fail closed
                 // rather than authorizing based on unresolved identifiers.
@@ -1427,7 +1573,10 @@ impl<'a> EvalEnv<'a> {
             serde_json::Value::String(s) => Value::Str(s.clone()),
             serde_json::Value::Bool(b) => Value::Bool(*b),
             serde_json::Value::Null => Value::Null,
-            serde_json::Value::Number(n) => Value::Str(n.to_string()),
+            serde_json::Value::Number(n) => match n.as_f64() {
+                Some(f) => Value::Num(f),
+                None => Value::Null,
+            },
             _ => Value::Null,
         }
     }
@@ -1436,10 +1585,51 @@ impl<'a> EvalEnv<'a> {
 fn values_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
         (Value::Null, Value::Null) => true,
-        (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Bool(x), Value::Bool(y)) => x == y,
-        // Mixed types are never equal (no coercion).
+        // Numeric whenever EITHER side is a real number — so a numeric field
+        // compares true to a quoted-number literal (`data.count == "3"`, the
+        // pre-literals workaround) AND to a bare literal (`data.count == 3`).
+        // String-vs-string stays exact (so `"0123" != "00123"`).
+        (Value::Num(_), _) | (_, Value::Num(_)) => match (num_coerce(a), num_coerce(b)) {
+            (Some(x), Some(y)) => x == y,
+            _ => false,
+        },
+        (Value::Str(x), Value::Str(y)) => x == y,
+        // Mixed types (e.g. str vs bool, anything vs null) are never equal.
         _ => false,
+    }
+}
+
+/// Coerce a value to f64 for numeric comparison: a real number, or a string
+/// that parses cleanly as one. Bool/Null/non-numeric strings → `None`.
+fn num_coerce(v: &Value) -> Option<f64> {
+    match v {
+        Value::Num(n) => Some(*n),
+        Value::Str(s) => s.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// Total, deny-safe ordering for `<`/`<=`/`>`/`>=`. Returns `None` when the
+/// operands aren't meaningfully orderable (null, booleans, a number vs a
+/// non-numeric string) — callers treat `None` as "comparison false", i.e.
+/// deny. Numbers compare numerically (incl. numeric strings when the other
+/// side is a number); two strings compare chronologically when both are valid
+/// RFC-3339 timestamps, else lexicographically.
+fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
+    match (a, b) {
+        (Value::Num(_), _) | (_, Value::Num(_)) => num_coerce(a)?.partial_cmp(&num_coerce(b)?),
+        (Value::Str(x), Value::Str(y)) => Some(
+            match (
+                chrono::DateTime::parse_from_rfc3339(x),
+                chrono::DateTime::parse_from_rfc3339(y),
+            ) {
+                (Ok(dx), Ok(dy)) => dx.cmp(&dy),
+                _ => x.as_str().cmp(y.as_str()),
+            },
+        ),
+        // Null, bool, or mixed → not orderable.
+        _ => None,
     }
 }
 
@@ -2430,5 +2620,200 @@ mod tests {
             ),
             _ => panic!("expected Denied, got {r:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Numeric literals + ordering comparisons (<, <=, >, >=)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn numeric_literal_equality() {
+        let auth = AuthContext::anonymous();
+        let data = serde_json::json!({ "count": 3 });
+        assert!(evaluate_allow("data.count == 3", &auth, Some(&data), None).is_allowed());
+        assert!(!evaluate_allow("data.count == 4", &auth, Some(&data), None).is_allowed());
+    }
+
+    #[test]
+    fn numeric_ordering_int_and_float() {
+        let auth = AuthContext::anonymous();
+        let hi = serde_json::json!({ "priority": 5, "score": 4.9 });
+        let lo = serde_json::json!({ "priority": 2, "score": 4.1 });
+        assert!(evaluate_allow("data.priority >= 3", &auth, Some(&hi), None).is_allowed());
+        assert!(!evaluate_allow("data.priority >= 3", &auth, Some(&lo), None).is_allowed());
+        assert!(evaluate_allow("data.priority < 3", &auth, Some(&lo), None).is_allowed());
+        assert!(evaluate_allow("data.score > 4.5", &auth, Some(&hi), None).is_allowed());
+        assert!(!evaluate_allow("data.score > 4.5", &auth, Some(&lo), None).is_allowed());
+    }
+
+    #[test]
+    fn negative_numeric_literal() {
+        let auth = AuthContext::anonymous();
+        let neg = serde_json::json!({ "balance": -5 });
+        let pos = serde_json::json!({ "balance": 10 });
+        assert!(evaluate_allow("data.balance < 0", &auth, Some(&neg), None).is_allowed());
+        assert!(!evaluate_allow("data.balance < 0", &auth, Some(&pos), None).is_allowed());
+    }
+
+    #[test]
+    fn numeric_field_vs_quoted_number_is_backward_compatible() {
+        // Before numeric literals existed, the only way to compare a number
+        // field was against a quoted string. That must still work.
+        let auth = AuthContext::anonymous();
+        let data = serde_json::json!({ "count": 3 });
+        assert!(evaluate_allow("data.count == \"3\"", &auth, Some(&data), None).is_allowed());
+    }
+
+    #[test]
+    fn string_equality_stays_exact_not_numeric() {
+        // Two strings must compare exactly — NOT be coerced to numbers — so
+        // zero-padded ids/zips don't collide.
+        let auth = AuthContext::anonymous();
+        let data = serde_json::json!({ "zip": "0123" });
+        assert!(!evaluate_allow("data.zip == \"00123\"", &auth, Some(&data), None).is_allowed());
+        let exact = serde_json::json!({ "zip": "00123" });
+        assert!(evaluate_allow("data.zip == \"00123\"", &auth, Some(&exact), None).is_allowed());
+    }
+
+    #[test]
+    fn comparison_is_deny_safe_on_unorderable_operands() {
+        let auth = AuthContext::anonymous();
+        // Missing field → null → comparison false (deny).
+        let empty = serde_json::json!({});
+        assert!(!evaluate_allow("data.missing < 3", &auth, Some(&empty), None).is_allowed());
+        // Boolean vs number → not orderable → deny.
+        let flag = serde_json::json!({ "flag": true });
+        assert!(!evaluate_allow("data.flag < 3", &auth, Some(&flag), None).is_allowed());
+        // Number vs non-numeric string → deny.
+        let name = serde_json::json!({ "name": "bob" });
+        assert!(!evaluate_allow("data.name >= 3", &auth, Some(&name), None).is_allowed());
+    }
+
+    #[test]
+    fn string_ordering_is_chronological_for_timestamps() {
+        let auth = AuthContext::anonymous();
+        let row = serde_json::json!({
+            "start": "2020-01-01T00:00:00Z",
+            "end": "2020-12-31T23:59:59Z",
+        });
+        assert!(evaluate_allow("data.start < data.end", &auth, Some(&row), None).is_allowed());
+        assert!(!evaluate_allow("data.end < data.start", &auth, Some(&row), None).is_allowed());
+    }
+
+    #[test]
+    fn fabricated_operators_still_rejected() {
+        // `in`, `+`, `ends_with` were never real — they must still fail to
+        // parse (→ Denied), not silently behave.
+        let auth = AuthContext::anonymous();
+        let data = serde_json::json!({ "a": "x", "b": "x", "email": "a@x.com" });
+        assert!(!evaluate_allow("data.a in data.b", &auth, Some(&data), None).is_allowed());
+        assert!(
+            !evaluate_allow("data.email ends_with \"@x.com\"", &auth, Some(&data), None)
+                .is_allowed()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // `now` binding — time windows
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn now_enables_publish_window() {
+        let auth = AuthContext::anonymous();
+        // Past publish time → readable; future → not yet.
+        let published = serde_json::json!({ "publishAt": "2000-01-01T00:00:00.000Z" });
+        let scheduled = serde_json::json!({ "publishAt": "2999-01-01T00:00:00.000Z" });
+        assert!(
+            evaluate_allow("data.publishAt <= now", &auth, Some(&published), None).is_allowed()
+        );
+        assert!(
+            !evaluate_allow("data.publishAt <= now", &auth, Some(&scheduled), None).is_allowed()
+        );
+    }
+
+    #[test]
+    fn now_enables_expiry_window() {
+        let auth = AuthContext::anonymous();
+        let live = serde_json::json!({ "expiresAt": "2999-01-01T00:00:00.000Z" });
+        let expired = serde_json::json!({ "expiresAt": "2000-01-01T00:00:00.000Z" });
+        assert!(evaluate_allow("data.expiresAt > now", &auth, Some(&live), None).is_allowed());
+        assert!(!evaluate_allow("data.expiresAt > now", &auth, Some(&expired), None).is_allowed());
+    }
+
+    // -----------------------------------------------------------------------
+    // `existing` binding — alias of the current row (fixes shipped templates)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn scan_defers_existing_and_now_read_policies_to_per_row() {
+        // A read policy that references the row via `existing.*` (or a row-
+        // dependent `now` comparison) must be treated as per-row filterable at
+        // scan time — NOT evaluated with no row and hard-denying the whole
+        // entity. Regression for the `existing` alias + comparison feature.
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![
+                // Single owner clause: with NO row (data=None) this evaluates
+                // FALSE (existing.ownerId → null), so without treating
+                // `existing.` as per-row the scan would hard-deny the whole
+                // entity. That's the regression this guards.
+                ManifestPolicy {
+                    name: "owner_read".into(),
+                    entity: Some("Doc".into()),
+                    allow_read: Some("existing.ownerId == auth.userId".into()),
+                    ..Default::default()
+                },
+                ManifestPolicy {
+                    name: "window".into(),
+                    entity: Some("Post".into()),
+                    allow_read: Some("data.publishAt <= now".into()),
+                    ..Default::default()
+                },
+            ],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+            crons: vec![],
+            fonts: vec![],
+        };
+        let eng = PolicyEngine::from_manifest(&manifest);
+        // Authenticated user: with NO row, `existing.ownerId == auth.userId`
+        // would be `null == "u1"` → false → blanket deny without the fix.
+        let u1 = AuthContext::authenticated("u1".into());
+        // Both defer to per-row filtering → scan is Allowed, not a blanket 403.
+        assert!(eng.check_entity_scan("Doc", &u1).is_allowed());
+        assert!(eng.check_entity_scan("Post", &u1).is_allowed());
+    }
+
+    #[test]
+    fn existing_aliases_current_row() {
+        // The b2b/consumer templates gate update/delete with
+        // `existing.ownerId == auth.userId`. The router passes the current row
+        // as `data`, so `existing` must resolve to it (was null → deny-all).
+        let alice = AuthContext::authenticated("alice".into());
+        let row = serde_json::json!({ "ownerId": "alice", "userId": "alice" });
+        assert!(
+            evaluate_allow("existing.ownerId == auth.userId", &alice, Some(&row), None)
+                .is_allowed()
+        );
+        assert!(
+            evaluate_allow("auth.userId == existing.userId", &alice, Some(&row), None).is_allowed()
+        );
+
+        let bob_row = serde_json::json!({ "ownerId": "bob" });
+        assert!(!evaluate_allow(
+            "existing.ownerId == auth.userId",
+            &alice,
+            Some(&bob_row),
+            None
+        )
+        .is_allowed());
     }
 }

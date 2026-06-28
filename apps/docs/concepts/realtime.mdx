@@ -1,0 +1,100 @@
+---
+title: Realtime
+description: "The realtime primitives Pylon ships — and which one to reach for."
+---
+
+Pylon is realtime end to end: one WebSocket from the same binary that serves your
+app powers live data, presence, and multiplayer. There isn't one "realtime API" —
+there are a few, each tuned for a different shape of live state. This page is the
+map; each primitive has its own deep-dive.
+
+## Pick the right primitive
+
+| You want | Reach for | Persisted? | Deep dive |
+|---|---|---|---|
+| A live list/row of one entity, filtered | [`db.useQuery`](/concepts/live-queries) | ✅ synced replica | [Live queries](/concepts/live-queries) |
+| A server-side join / aggregate / computed value, live | [`db.useReactiveQuery`](/concepts/reactive-queries) | ✅ (re-derived) | [Reactive queries](/concepts/reactive-queries) |
+| Live full-text + faceted search | [`db.useSearch`](/concepts/search) | ✅ | [Search](/concepts/search) |
+| An instant write that reconciles with the server | [`db.useMutation`](/concepts/optimistic-updates) | ✅ | [Optimistic updates](/concepts/optimistic-updates) |
+| Presence — cursors, typing, "who's here", broadcast | `useRoom` | ❌ ephemeral | [React client](/clients/react#presence--rooms) |
+| Authoritative multiplayer sim (game / MMO tick loop) | `useShard` | ❌ in-memory sim | [React client](/clients/react#multiplayer-shards) |
+| A connection / sync status indicator | `useSyncStatus` | — | [React client](/clients/react) |
+
+## Two layers: synced data vs. ephemeral signals
+
+The first four rows above are **synced data** — they flow through the entity store,
+respect [policies](/concepts/policies), and land in the local replica so they survive
+reload and work offline.
+
+The last rows — `useRoom` (presence/broadcast) and `useShard` (simulation) — are
+**ephemeral signals**. A cursor position or a game tick has no business in your
+database; it's broadcast to the room's current members and forgotten. Don't model
+presence as an entity, and don't try to drive a 60fps game loop through `db.useQuery`.
+
+## Best practice: cross-tab live state goes through `db.useQuery`
+
+The most common realtime feature is a shared scalar that must update everywhere at
+once — a live counter, remaining capacity, "12 people viewing". The reliable way to
+build it is a **public, PII-free projection entity** subscribed with `db.useQuery`,
+*not* a reactive query.
+
+Reactive server queries (`db.useReactiveQuery`) behave as leader-tab-only in
+practice: a follower tab's reactive subscription may never deliver its initial
+result. Entity sync (`db.useQuery`) reaches every tab. So:
+
+1. Keep the sensitive table deny-all: `allowRead: "false"`.
+2. Have the mutation also maintain a tiny projection entity with `allowRead: "true"`
+   and client writes denied.
+3. Subscribe the UI to the projection with `db.useQuery`.
+
+```ts
+// app.ts — the sensitive table stays private; the counter is public
+const Signup = entity("Signup", { email: field.string(), createdAt: field.datetime() });
+const WaitlistStat = entity("WaitlistStat", { count: field.int() });
+
+policy({ name: "signup_private", entity: "Signup", allowInsert: "true", allowRead: "false" });
+policy({ name: "stat_public",   entity: "WaitlistStat", allowRead: "true" }); // writes server-only
+```
+
+```ts
+// functions/joinWaitlist.ts — one mutation keeps both in sync (transactional)
+export default mutation({
+  args: { email: v.string() },
+  auth: "public",
+  async handler(ctx, args) {
+    await ctx.db.insert("Signup", { email: args.email, createdAt: new Date().toISOString() });
+    const stat = (await ctx.db.query("WaitlistStat"))[0];
+    if (stat) await ctx.db.update("WaitlistStat", stat.id, { count: stat.count + 1 });
+    else await ctx.db.insert("WaitlistStat", { count: 1 });
+  },
+});
+```
+
+```tsx
+// Any number of tabs see the count tick up live
+const { data: stat } = db.useQuery("WaitlistStat");
+return <span>{stat[0]?.count ?? 0} signed up</span>;
+```
+
+Use `db.useReactiveQuery` where it shines — a server-side join or rollup rendered in a
+single (leader) view, like a feed that joins `Post → User`. Just don't lean on it for
+cross-tab fan-out of a shared value.
+
+## How it works
+
+Under the hood every subscription rides one WebSocket per client. The server keeps an
+index of active subscriptions keyed by entity + indexed filter fields, so a write
+fans out in O(matching subs), not O(all subs). On multi-machine deployments a cluster
+bus forwards change events between nodes — a mutation on machine A updates subscribers
+on machine B. See [horizontal scaling](/operations/scaling) for the architecture.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Live queries" icon="radio" href="/concepts/live-queries">
+    The `db.useQuery` workhorse and how fan-out scales.
+  </Card>
+  <Card title="React client" icon="react" href="/clients/react">
+    Every realtime hook the client exposes, including presence and shards.
+  </Card>
+</CardGroup>

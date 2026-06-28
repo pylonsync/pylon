@@ -17,4 +17,5 @@ path = "src/lib.rs"
 pylon-kernel = { path = "../core", version = "0.3.296" }
 pylon-auth = { path = "../auth", version = "0.3.296" }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 
