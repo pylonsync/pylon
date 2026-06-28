@@ -306,3 +306,126 @@ describe("hydration tail ordering (#278: data blob before entry script)", () => 
     expect(tail).toContain('"body":"hi"');
   });
 });
+
+// ---------------------------------------------------------------------------
+// PPR Phase 0 — bucketed hydration tail must be IDENTITY-FREE
+// ---------------------------------------------------------------------------
+
+// Pull the __PYLON_DATA__ payload back out of a tail. JSON.parse natively
+// decodes the unicode escapes (< etc.) buildHydrationTail applies.
+function parsePylonData(tail: string): any {
+  const m = tail.match(
+    /<script id="__PYLON_DATA__" type="application\/json">([\s\S]*?)<\/script>/,
+  );
+  if (!m) throw new Error("no __PYLON_DATA__ blob in tail");
+  return JSON.parse(m[1]);
+}
+
+describe("bucketed hydration tail (PPR Phase 0 leak class)", () => {
+  // Two DIFFERENT signed-in identities. A non-bucketed tail serializes each
+  // verbatim; a bucketed tail MUST collapse both to `{ signedIn: true }`.
+  const alice = {
+    user_id: "user_alice",
+    tenant_id: "tenant_1",
+    roles: ["admin"],
+    email: "alice@x.com",
+  };
+  const bob = {
+    user_id: "user_bob",
+    tenant_id: "tenant_2",
+    roles: ["member"],
+    email: "bob@y.com",
+  };
+  const baseArgs = (auth: any) => ({
+    component: "app/page",
+    layouts: [],
+    props: {
+      url: "/",
+      params: {},
+      searchParams: {},
+      auth,
+      session: { exists: true },
+    },
+    ssrData: {},
+    manifestRoute: { file: "index.js", imports: [], css: [] },
+    publicPrefix: "/_pylon/build/",
+    manifestErr: null,
+  });
+
+  test("non-bucketed tail keeps real auth (unchanged legacy behavior)", () => {
+    const tail = buildHydrationTail(baseArgs(alice));
+    expect(parsePylonData(tail).props.auth).toEqual(alice);
+  });
+
+  test("bucketed signed-in tail carries ONLY { signedIn: true }", () => {
+    const tail = buildHydrationTail({
+      ...baseArgs(alice),
+      bucketAuth: { signedIn: true },
+    });
+    const data = parsePylonData(tail);
+    expect(data.props.auth).toEqual({ signedIn: true });
+    expect(data.props.session).toEqual({ exists: true });
+    // No identity escapes — not in props, not anywhere in the rendered tail.
+    expect(tail).not.toContain("user_alice");
+    expect(tail).not.toContain("tenant_1");
+    expect(tail).not.toContain("alice@x.com");
+    expect(tail).not.toContain("admin");
+  });
+
+  test("bucketed signed-out tail carries ONLY { signedIn: false }", () => {
+    const tail = buildHydrationTail({
+      ...baseArgs(null),
+      props: {
+        url: "/",
+        params: {},
+        searchParams: {},
+        auth: null,
+        session: { exists: false },
+      },
+      bucketAuth: { signedIn: false },
+    });
+    const data = parsePylonData(tail);
+    expect(data.props.auth).toEqual({ signedIn: false });
+    expect(data.props.session).toEqual({ exists: false });
+  });
+
+  test("LEAK INVARIANT: two identities → byte-identical bucketed tail", () => {
+    // The load-bearing property. If these two tails differed by a single byte,
+    // a shared cache entry would replay alice's identity to bob (or vice-versa).
+    const aTail = buildHydrationTail({
+      ...baseArgs(alice),
+      bucketAuth: { signedIn: true },
+    });
+    const bTail = buildHydrationTail({
+      ...baseArgs(bob),
+      bucketAuth: { signedIn: true },
+    });
+    expect(aTail).toBe(bTail);
+  });
+
+  test("anonymization survives even if a page leaves auth in ssrData-adjacent props", () => {
+    // Defense in depth: a nested prop that happens to mirror auth is NOT
+    // collapsed (only the top-level `auth`/`session` are keyed), so the bucket
+    // verdict (increment 3) must still veto any render that surfaces identity
+    // elsewhere. This documents the boundary: buildHydrationTail anonymizes the
+    // KEYED fields; it is not a general identity scrubber.
+    const tail = buildHydrationTail({
+      ...baseArgs(alice),
+      props: {
+        url: "/",
+        params: {},
+        searchParams: {},
+        auth: alice,
+        session: { exists: true },
+        // A page that copied auth into a custom prop — the verdict gate, not the
+        // tail, is what keeps this render out of the bucket.
+        leaked: { uid: alice.user_id },
+      },
+      bucketAuth: { signedIn: true },
+    });
+    const data = parsePylonData(tail);
+    expect(data.props.auth).toEqual({ signedIn: true });
+    // The custom prop is untouched — proving anonymization is scoped, not magic.
+    expect(data.props.leaked).toEqual({ uid: "user_alice" });
+  });
+});

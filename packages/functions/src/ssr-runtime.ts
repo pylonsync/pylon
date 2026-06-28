@@ -1208,6 +1208,15 @@ export function buildHydrationTail(args: {
   manifestErr: string | null;
   kind?: "error" | "not-found";
   errorForClient?: { message: string; digest?: string };
+  // PPR Phase 0 (auth-bucketed caching): when set, this render is being stored
+  // as a SHARED cache entry keyed only on session-cookie PRESENCE, so its
+  // hydration tail must carry an IDENTITY-FREE auth — the binary `{ signedIn }`
+  // bit the bucket is keyed on, and NOTHING ELSE (no user_id / tenant_id /
+  // roles / email). Two different signed-in users hitting the same bucketed
+  // page MUST produce a byte-identical tail, or the shared cache replays one
+  // user's identity to another (the #277 leak class, at the body level). The
+  // raw `auth` is replaced AFTER the live-handle strip below.
+  bucketAuth?: { signedIn: boolean };
 }): string {
   // Strip live, non-serializable handles (serverData / response / reset) + the
   // request headers/cookies (SECURITY: never expose the session cookie to
@@ -1223,6 +1232,12 @@ export function buildHydrationTail(args: {
     ...restProps
   } = args.props ?? {};
   const serializableProps: any = { ...restProps, headers: {}, cookies: {} };
+  if (args.bucketAuth) {
+    // Bucketed render: collapse auth to the keyed bit. `session` is already the
+    // identity-free `{ exists }`, but pin it to the same bit for consistency.
+    serializableProps.auth = { signedIn: args.bucketAuth.signedIn };
+    serializableProps.session = { exists: args.bucketAuth.signedIn };
+  }
   if (args.errorForClient) serializableProps.error = args.errorForClient;
   const hydrationPayload: any = {
     component: args.component,
