@@ -96,6 +96,7 @@ describe("computeCacheVerdict (the #277 leak-class gate)", () => {
     revalidateSecs: 60 as number | null,
     forceDynamic: false,
     authTouched: false,
+    dynamicTouched: false,
     cookieCount: 0,
     strictPolicies: false,
     wantsStream: false,
@@ -110,6 +111,7 @@ describe("computeCacheVerdict (the #277 leak-class gate)", () => {
     expect(computeCacheVerdict({ ...base, revalidateSecs: null })).toBe(false); // no opt-in
     expect(computeCacheVerdict({ ...base, forceDynamic: true })).toBe(false);
     expect(computeCacheVerdict({ ...base, authTouched: true })).toBe(false); // read auth
+    expect(computeCacheVerdict({ ...base, dynamicTouched: true })).toBe(false); // read headers/cookies
     expect(computeCacheVerdict({ ...base, cookieCount: 1 })).toBe(false); // set a cookie
     expect(computeCacheVerdict({ ...base, strictPolicies: true })).toBe(false);
     expect(computeCacheVerdict({ ...base, wantsStream: true })).toBe(false); // STREAMING
@@ -133,6 +135,7 @@ describe("computeCacheVerdict (the #277 leak-class gate)", () => {
                     revalidateSecs,
                     forceDynamic,
                     authTouched,
+                    dynamicTouched: false,
                     cookieCount,
                     strictPolicies,
                     wantsStream,

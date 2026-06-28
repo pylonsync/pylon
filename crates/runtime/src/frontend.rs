@@ -1612,7 +1612,7 @@ fn serve_via_ssr_rpc(
 
     let response = Response::new(
         tiny_http::StatusCode(status),
-        build_ssr_response_headers(&page_headers, cors_origin),
+        build_ssr_response_headers(&page_headers, cors_origin, cacheable_eligible),
         streaming_body,
         None, // content-length unknown → tiny_http uses chunked transfer
         None,
@@ -1835,7 +1835,9 @@ fn serve_cached_ssr(
     let page_headers: std::collections::HashMap<String, String> =
         entry.headers.into_iter().collect();
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
-    for h in build_ssr_response_headers(&page_headers, cors_origin) {
+    // Reached only for cookie-anonymous, eligible requests (the cache READ gate),
+    // and the stored body is the anonymous render → safe to advertise `public`.
+    for h in build_ssr_response_headers(&page_headers, cors_origin, true) {
         resp = resp.with_header(h);
     }
     let _ = request.respond(resp);
@@ -1904,7 +1906,7 @@ fn serve_cached_ssr_stale(
     let page_headers: std::collections::HashMap<String, String> =
         entry.headers.into_iter().collect();
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
-    for h in build_ssr_response_headers(&page_headers, cors_origin) {
+    for h in build_ssr_response_headers(&page_headers, cors_origin, true) {
         // Drop the stored Cache-Control; we re-apply a short one below.
         if h.field
             .as_str()
@@ -2115,7 +2117,8 @@ fn serve_via_form_rpc(
 
     let response = Response::new(
         tiny_http::StatusCode(status),
-        build_ssr_response_headers(&page_headers, cors_origin),
+        // Form-handler (POST) path — never a shareable GET, so never `public`.
+        build_ssr_response_headers(&page_headers, cors_origin, false),
         streaming_body,
         None,
         None,
@@ -2187,6 +2190,13 @@ fn form_text_response(
 fn build_ssr_response_headers(
     page_headers: &std::collections::HashMap<String, String>,
     cors_origin: &str,
+    // Whether THIS request may receive a shared-cacheable (`public`) response —
+    // i.e. it is itself eligible (GET, no query, NO session cookie, not dev).
+    // The #277 render proof says "this render is anonymous-safe"; it does NOT say
+    // "this request is anonymous". A logged-in request still carries the user's
+    // real `auth` in the hydration tail, so emitting `public` for it would let a
+    // shared cache replay one user's identity to another. Both must hold.
+    request_shareable: bool,
 ) -> Vec<Header> {
     let mut out: Vec<Header> = Vec::new();
     let mut saw_content_type = false;
@@ -2269,7 +2279,16 @@ fn build_ssr_response_headers(
         let cc: String = if saw_set_cookie {
             "no-store".to_string()
         } else if let Some(secs) = cacheable_secs {
-            format!("public, s-maxage={secs}, stale-while-revalidate={secs}")
+            if request_shareable {
+                format!("public, s-maxage={secs}, stale-while-revalidate={secs}")
+            } else {
+                // The render proved itself anonymous-cacheable (#277), but THIS
+                // request is not shareable (logged-in / query string / non-GET /
+                // dev). Its hydration tail carries this request's real `auth`, so
+                // advertising it to a shared cache would replay one user's
+                // identity to another — fail closed to a non-shared response.
+                "private, no-store".to_string()
+            }
         } else {
             "no-cache".to_string()
         };
@@ -3520,7 +3539,11 @@ mod tests {
     fn ssr_headers_inject_defaults_and_preserve_page_headers() {
         let mut page = std::collections::HashMap::new();
         page.insert("x-custom".to_string(), "hi".to_string());
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "https://app.example"));
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "https://app.example",
+            true,
+        ));
         assert!(pairs.iter().any(|(k, v)| k == "x-custom" && v == "hi"));
         assert!(pairs.iter().any(|(k, _)| k == "content-type"));
         assert!(pairs.iter().any(|(k, _)| k == "cache-control"));
@@ -3536,7 +3559,7 @@ mod tests {
             "content-type".to_string(),
             "application/rss+xml".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
         let cts: Vec<&(String, String)> =
             pairs.iter().filter(|(k, _)| k == "content-type").collect();
         assert_eq!(cts.len(), 1, "exactly one content-type (no default added)");
@@ -3550,7 +3573,7 @@ mod tests {
             "set-cookie".to_string(),
             "a=1; Path=/; HttpOnly\nb=2; Path=/; HttpOnly".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
         let cookies: Vec<&String> = pairs
             .iter()
             .filter(|(k, _)| k == "set-cookie")
@@ -3564,7 +3587,7 @@ mod tests {
     #[test]
     fn ssr_cookie_response_is_no_store_else_no_cache() {
         let cc = |page: &std::collections::HashMap<String, String>| {
-            header_pairs(&build_ssr_response_headers(page, "*"))
+            header_pairs(&build_ssr_response_headers(page, "*", true))
                 .into_iter()
                 .find(|(k, _)| k == "cache-control")
                 .map(|(_, v)| v)
@@ -3590,7 +3613,7 @@ mod tests {
     #[test]
     fn ssr_cacheable_proof_yields_public_smaxage_and_is_stripped() {
         let headers = |page: &std::collections::HashMap<String, String>| {
-            header_pairs(&build_ssr_response_headers(page, "*"))
+            header_pairs(&build_ssr_response_headers(page, "*", true))
         };
         let cc = |page: &std::collections::HashMap<String, String>| {
             headers(page)
@@ -3625,6 +3648,32 @@ mod tests {
         // No proof ⇒ fail closed (no-cache), never accidentally public.
         let no_proof = std::collections::HashMap::new();
         assert_eq!(cc(&no_proof).as_deref(), Some("no-cache"));
+    }
+
+    #[test]
+    fn ssr_cacheable_proof_not_public_for_unshareable_request() {
+        // P0 (codex 2026-06-28): the #277 proof means "this RENDER is anonymous-
+        // safe", NOT "this REQUEST is anonymous". A logged-in request still
+        // carries the user's real `auth` in the hydration tail, so even with the
+        // proof its response must NEVER be advertised `public` — else a shared
+        // cache (Cloudflare) could replay one user's identity to another.
+        let cc = |page: &std::collections::HashMap<String, String>, shareable: bool| {
+            header_pairs(&build_ssr_response_headers(page, "*", shareable))
+                .into_iter()
+                .find(|(k, _)| k == "cache-control")
+                .map(|(_, v)| v)
+        };
+        let mut proven = std::collections::HashMap::new();
+        proven.insert("x-pylon-cacheable".to_string(), "60".to_string());
+        // Shareable (cookie-anonymous, GET, no query) request → public.
+        assert_eq!(
+            cc(&proven, true).as_deref(),
+            Some("public, s-maxage=60, stale-while-revalidate=60")
+        );
+        // NOT shareable (logged-in / query / non-GET) → never public; the proof
+        // is downgraded to a private, non-stored response. Without the fix this
+        // would still be `public, s-maxage=60` and leak the tail's auth.
+        assert_eq!(cc(&proven, false).as_deref(), Some("private, no-store"));
     }
 
     #[test]
@@ -3820,6 +3869,7 @@ mod tests {
         let pairs = header_pairs(&build_ssr_response_headers(
             &std::collections::HashMap::new(),
             "*",
+            true,
         ));
         let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("x-frame-options").as_deref(), Some("SAMEORIGIN")); // clickjacking
@@ -3830,7 +3880,7 @@ mod tests {
         // duplicate header emitted.
         let mut page = std::collections::HashMap::new();
         page.insert("x-frame-options".to_string(), "ALLOWALL".to_string());
-        let p2 = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let p2 = header_pairs(&build_ssr_response_headers(&page, "*", true));
         let xfo: Vec<&String> = p2
             .iter()
             .filter(|(n, _)| n == "x-frame-options")
@@ -3849,7 +3899,7 @@ mod tests {
             "x-evil".to_string(),
             "ok\r\nset-cookie: stolen=1".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
         assert!(
             pairs.iter().all(|(_, v)| !v.contains("stolen")),
             "CRLF-injected value must not appear in any header"
@@ -3868,7 +3918,7 @@ mod tests {
         let mut page = std::collections::HashMap::new();
         page.insert("x-evil\r\nset-cookie".to_string(), "stolen=1".to_string());
         page.insert("x:colon".to_string(), "v".to_string());
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*"));
+        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true));
         assert!(pairs
             .iter()
             .all(|(k, _)| !k.contains('\r') && !k.contains('\n') && !k.contains(':')));

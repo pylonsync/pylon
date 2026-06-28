@@ -14,6 +14,8 @@ import {
   isSafeRedirect,
   asRouteControl,
   PylonRouteControl,
+  finalizeHeaders,
+  makeResponseController,
 } from "./ssr-runtime";
 
 describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () => {
@@ -52,6 +54,64 @@ describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () =
 
   test("no public origin + untrusted host → empty (relative, never poisoned)", () => {
     expect(resolveOrigin({ host: "evil.com" })).toBe("");
+  });
+
+  test("forwarded proto is clamped to http|https even on a trusted host", () => {
+    // A valid forwarded proto on a trusted host is honored…
+    expect(
+      resolveOrigin({ host: "www.notbehind.com", publicUrl, forwardedProto: "http" }),
+    ).toBe("http://www.notbehind.com");
+    // …but an attacker-supplied junk proto must NOT inject into the absolute URL
+    // (it would land in og:image/canonical). Clamp to the off-loopback default.
+    expect(
+      resolveOrigin({
+        host: "www.notbehind.com",
+        publicUrl,
+        forwardedProto: "javascript:alert(1)",
+      }),
+    ).toBe("https://www.notbehind.com");
+    expect(
+      resolveOrigin({ host: "www.notbehind.com", publicUrl, forwardedProto: "https://evil" }),
+    ).toBe("https://www.notbehind.com");
+  });
+});
+
+describe("reserved x-pylon-* header namespace (cache-proof forgery fence)", () => {
+  test("response.setHeader() rejects the reserved x-pylon-* namespace", () => {
+    const state = {
+      status: 200,
+      headers: {} as Record<string, string>,
+      cookies: [] as string[],
+    };
+    const res = makeResponseController(state);
+    // Forging the #277 cache proof from userland must throw, not silently set it.
+    expect(() => res.setHeader("x-pylon-cacheable", "300")).toThrow(/reserved/i);
+    expect(() => res.setHeader("X-Pylon-Anything", "1")).toThrow(/reserved/i);
+    // An ordinary header still works.
+    res.setHeader("x-custom", "ok");
+    expect(state.headers["x-custom"]).toBe("ok");
+  });
+
+  test("finalizeHeaders strips page-set x-pylon-* but keeps the runtime's extra", () => {
+    // Even if a forged proof reaches state.headers by some other path, it is
+    // stripped before merge; only the runtime's trusted `extra` survives.
+    const state = {
+      status: 200,
+      headers: { "x-pylon-cacheable": "999", "x-keep": "yes" },
+      cookies: [],
+    };
+    const out = finalizeHeaders(state, { "x-pylon-cacheable": "60" });
+    expect(out["x-pylon-cacheable"]).toBe("60"); // the trusted runtime value
+    expect(out["x-keep"]).toBe("yes");
+
+    // With no runtime proof, a page-set proof does NOT survive at all.
+    const state2 = {
+      status: 200,
+      headers: { "x-pylon-cacheable": "999" },
+      cookies: [],
+    };
+    const out2 = finalizeHeaders(state2);
+    expect(out2["x-pylon-cacheable"]).toBeUndefined();
   });
 });
 

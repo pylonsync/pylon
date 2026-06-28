@@ -253,6 +253,16 @@ export function makeResponseController(
       if (!TOKEN_RE.test(name)) {
         throw new Error(`pylon ssr: invalid header name ${JSON.stringify(name)}`);
       }
+      // `x-pylon-*` is a reserved internal namespace — the host trusts headers
+      // like the #277 `x-pylon-cacheable` cache proof as runtime-emitted. Letting
+      // userland set one would forge the cache verdict (e.g. mark a personalized
+      // render shareable). Reject it loudly.
+      if (name.toLowerCase().startsWith("x-pylon-")) {
+        throw new Error(
+          `pylon ssr: "x-pylon-*" is a reserved internal header namespace and ` +
+            `cannot be set via response.setHeader() (got ${JSON.stringify(name)})`,
+        );
+      }
       assertNoControlChars(value, "header value");
       state.headers[name.toLowerCase()] = value;
     },
@@ -303,7 +313,17 @@ export function finalizeHeaders(
   state: ResponseState,
   extra?: Record<string, string>,
 ): Record<string, string> {
-  const h: Record<string, string> = { ...state.headers, ...(extra ?? {}) };
+  // Defense-in-depth for the reserved `x-pylon-*` namespace: strip any from the
+  // page-set headers before merging the runtime's trusted `extra` (which is the
+  // ONLY legitimate source of e.g. the #277 `x-pylon-cacheable` proof). setHeader
+  // already rejects these, but a direct write to state.headers must not slip one
+  // through and forge the host-side cache verdict.
+  const pageHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(state.headers)) {
+    if (k.toLowerCase().startsWith("x-pylon-")) continue;
+    pageHeaders[k] = v;
+  }
+  const h: Record<string, string> = { ...pageHeaders, ...(extra ?? {}) };
   if (!h["content-type"]) h["content-type"] = "text/html; charset=utf-8";
   if (state.cookies.length > 0) {
     // Preserve a set-cookie value set via setHeader() (rare) and join it
@@ -813,7 +833,11 @@ export function resolveOrigin(opts: {
     if (isLoopback || allow.has(host)) {
       // Only honor a forwarded proto for a TRUSTED host — else an attacker
       // could downgrade the cached URL to http://. Default https off-loopback.
-      const proto = opts.forwardedProto || (isLoopback ? "http" : "https");
+      // CLAMP to a known scheme: an attacker-supplied X-Forwarded-Proto must
+      // never inject arbitrary text into the absolute origin (it feeds og:image
+      // / canonical and is cache-keyed only by host, not proto).
+      const fp = opts.forwardedProto;
+      const proto = fp === "http" || fp === "https" ? fp : isLoopback ? "http" : "https";
       return `${proto}://${host}`;
     }
   }
@@ -1486,6 +1510,13 @@ export function computeCacheVerdict(args: {
   revalidateSecs: number | null;
   forceDynamic: boolean;
   authTouched: boolean;
+  // True when the render read any OTHER per-request input that is not part of
+  // the cache key — request `headers` (incl. non-bucketed ones) or `cookies`
+  // (incl. via generateMetadata). Such a read makes the output request-specific,
+  // so it must veto shared caching exactly like `authTouched`. (Keyed inputs —
+  // pathname, and Host via the host bucket — are handled by the cache key and do
+  // not set this.)
+  dynamicTouched: boolean;
   cookieCount: number;
   strictPolicies: boolean;
   wantsStream: boolean;
@@ -1495,6 +1526,7 @@ export function computeCacheVerdict(args: {
     args.revalidateSecs != null &&
     !args.forceDynamic &&
     !args.authTouched &&
+    !args.dynamicTouched &&
     args.cookieCount === 0 &&
     !args.strictPolicies &&
     !args.wantsStream &&
@@ -1804,12 +1836,27 @@ export async function handleRenderRoute(
       },
     });
 
+    // Same proof for the OTHER per-request inputs that aren't in the cache key:
+    // reading `headers` (any header, incl. via generateMetadata) or `cookies`
+    // makes the output request-specific, so it must veto shared caching just like
+    // auth. Only USER code (page/layout/generateMetadata) reads props.headers/
+    // cookies — the framework's own metadata path reads `msg.headers` directly, so
+    // it never trips these. Restored to the raw objects before serialization.
+    let dynamicTouched = false;
+    const touchProxy = (obj: Record<string, unknown> | undefined) =>
+      new Proxy((obj ?? {}) as Record<string, unknown>, {
+        get(target, prop, receiver) {
+          dynamicTouched = true;
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+
     props = {
       url: msg.url,
       params: msg.params,
       searchParams: msg.search_params,
-      headers: msg.headers,
-      cookies: msg.cookies,
+      headers: touchProxy(msg.headers as Record<string, unknown> | undefined),
+      cookies: touchProxy(msg.cookies as Record<string, unknown> | undefined),
       auth: authProxy,
       // Response controller — a page/layout calls response.setStatus /
       // setHeader / setCookie / redirect / notFound to shape the reply.
@@ -1978,14 +2025,19 @@ export async function handleRenderRoute(
       revalidateSecs,
       forceDynamic,
       authTouched,
+      dynamicTouched,
       cookieCount: responseState.cookies.length,
       strictPolicies,
       wantsStream,
       status: responseState.status,
     });
-    // Restore the raw auth before any serialization below (the Proxy was only
-    // for the render-time auth-touch probe).
-    if (props) props.auth = msg.auth;
+    // Restore the raw auth/headers/cookies before any serialization below (the
+    // Proxies were only for the render-time touch probe).
+    if (props) {
+      props.auth = msg.auth;
+      props.headers = msg.headers;
+      props.cookies = msg.cookies;
+    }
     // #278: on a STREAMING render the head commits NOW, before suspended
     // subtrees run. Snapshot what's committed so we can detect (after EOF) a
     // late response.setStatus/setCookie/setHeader from a suspended subtree that
