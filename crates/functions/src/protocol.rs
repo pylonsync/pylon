@@ -107,6 +107,13 @@ pub struct RenderRouteMessage {
     pub headers: std::collections::HashMap<String, String>,
     pub cookies: std::collections::HashMap<String, String>,
     pub auth: AuthInfo,
+    /// Whether the request carried a session cookie (by name), exposed to the
+    /// page as the identity-FREE `props.session.exists` so it can render a binary
+    /// auth-aware nav without reading real `auth` (which would taint caching).
+    /// Presence, not validity — a present-but-invalid cookie reads `true` and the
+    /// client resolves the real (anonymous) session. Default false (back-compat).
+    #[serde(default)]
+    pub session_present: bool,
     /// Initial HTTP status the Bun-side response controller starts at.
     /// `None` (default 200) for normal page renders; `Some(404)` when the
     /// host dispatches a `not-found.tsx` render for an unmatched URL so the
@@ -129,6 +136,7 @@ impl RenderRouteMessage {
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: AuthInfo,
+        session_present: bool,
         initial_status: Option<u16>,
     ) -> Self {
         Self {
@@ -143,6 +151,7 @@ impl RenderRouteMessage {
             headers,
             cookies,
             auth,
+            session_present,
             initial_status,
         }
     }

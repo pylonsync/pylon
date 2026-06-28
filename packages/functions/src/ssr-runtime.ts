@@ -76,6 +76,12 @@ export interface RenderRouteMessage {
     roles: string[];
   };
   /**
+   * Whether the request carried a session cookie (presence, not identity) —
+   * surfaced as the identity-free `props.session.exists` (Phase 0 auth
+   * bucketing). Default false / absent for back-compat.
+   */
+  session_present?: boolean;
+  /**
    * Initial HTTP status the response controller starts at (default 200).
    * The host sets this to 404 when dispatching a `not-found.tsx` render
    * for an unmatched URL, so the boundary streams at 404 without the
@@ -1563,6 +1569,11 @@ export function computeCacheVerdict(args: {
   // pathname, and Host via the host bucket — are handled by the cache key and do
   // not set this.)
   dynamicTouched: boolean;
+  // True when the render read `props.session.exists` (Phase 0). For the PLAIN
+  // anonymous cache this is a veto — the output varies by signed-in bucket, and
+  // the anon cache holds one entry for all. (The auth-BUCKET verdict, which keys
+  // the cache on the bucket, permits it; this gate does not.)
+  sessionTouched: boolean;
   cookieCount: number;
   strictPolicies: boolean;
   wantsStream: boolean;
@@ -1573,6 +1584,7 @@ export function computeCacheVerdict(args: {
     !args.forceDynamic &&
     !args.authTouched &&
     !args.dynamicTouched &&
+    !args.sessionTouched &&
     args.cookieCount === 0 &&
     !args.strictPolicies &&
     !args.wantsStream &&
@@ -1893,6 +1905,20 @@ export async function handleRenderRoute(
         dynamicTouched = true;
       });
 
+    // Phase 0 (auth bucketing): `props.session.exists` — the identity-FREE
+    // presence bit, so a page can render a binary auth nav WITHOUT reading real
+    // `auth`. Reading it sets `sessionTouched` (separate from authTouched): it
+    // vetoes the plain anonymous cache (the output now varies by signed-in
+    // bucket) but WILL be permitted by the future bucket verdict (which keys the
+    // cache on the bucket). Until that lands, reading it just opts out of caching.
+    let sessionTouched = false;
+    const sessionProxy = makeReadTrackingProxy(
+      { exists: msg.session_present === true },
+      () => {
+        sessionTouched = true;
+      },
+    );
+
     props = {
       url: msg.url,
       params: msg.params,
@@ -1900,6 +1926,7 @@ export async function handleRenderRoute(
       headers: touchProxy(msg.headers as Record<string, unknown> | undefined),
       cookies: touchProxy(msg.cookies as Record<string, unknown> | undefined),
       auth: authProxy,
+      session: sessionProxy,
       // Response controller — a page/layout calls response.setStatus /
       // setHeader / setCookie / redirect / notFound to shape the reply.
       response,
@@ -2068,6 +2095,7 @@ export async function handleRenderRoute(
       forceDynamic,
       authTouched,
       dynamicTouched,
+      sessionTouched,
       cookieCount: responseState.cookies.length,
       strictPolicies,
       wantsStream,
@@ -2079,6 +2107,7 @@ export async function handleRenderRoute(
       props.auth = msg.auth;
       props.headers = msg.headers;
       props.cookies = msg.cookies;
+      props.session = { exists: msg.session_present === true };
     }
     // #278: on a STREAMING render the head commits NOW, before suspended
     // subtrees run. Snapshot what's committed so we can detect (after EOF) a

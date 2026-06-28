@@ -97,6 +97,7 @@ describe("computeCacheVerdict (the #277 leak-class gate)", () => {
     forceDynamic: false,
     authTouched: false,
     dynamicTouched: false,
+    sessionTouched: false,
     cookieCount: 0,
     strictPolicies: false,
     wantsStream: false,
@@ -112,6 +113,7 @@ describe("computeCacheVerdict (the #277 leak-class gate)", () => {
     expect(computeCacheVerdict({ ...base, forceDynamic: true })).toBe(false);
     expect(computeCacheVerdict({ ...base, authTouched: true })).toBe(false); // read auth
     expect(computeCacheVerdict({ ...base, dynamicTouched: true })).toBe(false); // read headers/cookies
+    expect(computeCacheVerdict({ ...base, sessionTouched: true })).toBe(false); // read session.exists (anon cache)
     expect(computeCacheVerdict({ ...base, cookieCount: 1 })).toBe(false); // set a cookie
     expect(computeCacheVerdict({ ...base, strictPolicies: true })).toBe(false);
     expect(computeCacheVerdict({ ...base, wantsStream: true })).toBe(false); // STREAMING
@@ -136,6 +138,7 @@ describe("computeCacheVerdict (the #277 leak-class gate)", () => {
                     forceDynamic,
                     authTouched,
                     dynamicTouched: false,
+                    sessionTouched: false,
                     cookieCount,
                     strictPolicies,
                     wantsStream,

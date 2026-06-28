@@ -638,6 +638,7 @@ impl FnRunner {
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: crate::protocol::AuthInfo,
+        session_present: bool,
         initial_status: Option<u16>,
         store: &dyn DataStore,
         on_response_start: Option<ResponseStartCallback>,
@@ -653,6 +654,7 @@ impl FnRunner {
             headers,
             cookies,
             auth,
+            session_present,
             initial_status,
             store,
             on_response_start,
@@ -673,6 +675,7 @@ impl FnRunner {
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: crate::protocol::AuthInfo,
+        session_present: bool,
         initial_status: Option<u16>,
         store: &dyn DataStore,
         mut on_response_start: Option<ResponseStartCallback>,
@@ -710,6 +713,7 @@ impl FnRunner {
             headers,
             cookies,
             auth,
+            session_present,
             initial_status,
         );
         self.send(&msg)?;

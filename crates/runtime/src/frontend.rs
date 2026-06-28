@@ -1403,6 +1403,10 @@ fn serve_via_ssr_rpc(
     // pylon dev / pylon start). Without them, fall back to anonymous
     // AuthInfo — matches Phase 1 behavior.
     let auth = resolve_request_auth(cfg, &cookies_map);
+    // Identity-FREE session presence for `props.session.exists` (Phase 0 auth
+    // bucketing) — whether a session cookie is present, NOT who. Copied into the
+    // render so a page can render a binary auth nav without reading real `auth`.
+    let session_present = session_cookie_present(cfg, &request);
 
     // Cold-start robustness: the Rust HTTP listener accepts connections the
     // moment it binds, but the Bun runner that executes this render boots
@@ -1536,6 +1540,7 @@ fn serve_via_ssr_rpc(
                 headers_map,
                 cookies_map,
                 auth,
+                session_present,
                 initial_status,
                 Some(on_response_start),
                 on_chunk,
