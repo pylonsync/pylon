@@ -2526,13 +2526,21 @@ fn build_ssr_response_headers(
         }
         // A response may be stored by a SHARED cache only when the request is
         // itself shareable AND it sets no cookie — otherwise the body may carry
-        // this request's auth (hydration tail). Two shareability lanes:
-        //   - anon: cookie-anonymous GET (`request_shareable`).
-        //   - bucket: bucket-eligible request with a `x-pylon-bucket` render AND a
-        //     CDN that keys on session presence (`bucket_shareable`). The body is
-        //     identity-free, so the CDN keying — not body content — is the gate.
-        let may_share =
-            !saw_set_cookie && (request_shareable || (bucket_shareable && bucket_secs.is_some()));
+        // this request's auth (hydration tail), or a cookie-blind cache could
+        // mis-serve a session bucket. Two MUTUALLY-EXCLUSIVE lanes:
+        //   - bucket render (`x-pylon-bucket` present): shareability is governed
+        //     ONLY by `bucket_shareable` (the CDN keys on session presence). The
+        //     anon `request_shareable` must NOT grant sharing here — a signed-out
+        //     bucket request is request_shareable=true, but its sess=0 shell would
+        //     be mis-served to signed-in visitors by a cookie-blind cache. This
+        //     also downgrades a bucket page that set its OWN `public` Cache-Control.
+        //   - otherwise (anon / default): cookie-anonymous GET (`request_shareable`).
+        let may_share = !saw_set_cookie
+            && if bucket_secs.is_some() {
+                bucket_shareable
+            } else {
+                request_shareable
+            };
         // Natural Cache-Control from the page / proofs / defaults.
         let mut cc: String = if let Some(pcc) = page_cache_control {
             pcc
@@ -4037,6 +4045,29 @@ mod tests {
         bucket_cookie.insert("x-pylon-bucket".to_string(), "60".to_string());
         bucket_cookie.insert("set-cookie".to_string(), "sid=abc".to_string());
         assert_eq!(cc(&bucket_cookie, false, true).as_deref(), Some("no-store"));
+
+        // P0 follow-up (codex round-2 #5): a bucket page that sets its OWN public
+        // Cache-Control must NOT escape the bucket policy. For a signed-OUT
+        // request (request_shareable=true) with CDN bucketing OFF, the page-set
+        // `public` would otherwise survive and let a cookie-blind CDN serve the
+        // sess=0 shell to a signed-in visitor. A bucket render's shareability is
+        // governed ONLY by bucket_shareable.
+        let mut bucket_pub = std::collections::HashMap::new();
+        bucket_pub.insert("x-pylon-bucket".to_string(), "60".to_string());
+        bucket_pub.insert(
+            "cache-control".to_string(),
+            "public, max-age=300".to_string(),
+        );
+        assert_eq!(
+            cc(&bucket_pub, true, false).as_deref(),
+            Some("private, no-store")
+        );
+        // With CDN bucketing ON, the page-set value is honored (the CDN keys on
+        // session presence so it can't cross buckets).
+        assert_eq!(
+            cc(&bucket_pub, true, true).as_deref(),
+            Some("public, max-age=300")
+        );
     }
 
     #[test]

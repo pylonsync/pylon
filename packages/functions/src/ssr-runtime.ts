@@ -1249,12 +1249,27 @@ export function buildHydrationTail(args: {
     error: _err,
     ...restProps
   } = args.props ?? {};
-  const serializableProps: any = { ...restProps, headers: {}, cookies: {} };
+  let serializableProps: any;
   if (args.bucketAuth) {
-    // Bucketed render: collapse auth to the keyed bit. `session` is already the
-    // identity-free `{ exists }`, but pin it to the same bit for consistency.
-    serializableProps.auth = { signedIn: args.bucketAuth.signedIn };
-    serializableProps.session = { exists: args.bucketAuth.signedIn };
+    // Bucketed render → SHARED entry. Serialize a strict ALLOWLIST of the
+    // framework props that are provably bucket-uniform — never a spread of the
+    // page's props object. A page can alias identity onto a custom key
+    // (`props.leak = props.auth`) without tripping read-tracking; spreading
+    // `restProps` would then serialize that identity into the shared tail. The
+    // allowlisted fields are all path/route-derived (in the cache key) or the
+    // collapsed binary auth bit. (params/searchParams are keyed by pathname; a
+    // bucket request has no query, so searchParams is empty.)
+    serializableProps = {
+      url: restProps.url,
+      params: restProps.params,
+      searchParams: restProps.searchParams,
+      auth: { signedIn: args.bucketAuth.signedIn },
+      session: { exists: args.bucketAuth.signedIn },
+      headers: {},
+      cookies: {},
+    };
+  } else {
+    serializableProps = { ...restProps, headers: {}, cookies: {} };
   }
   if (args.errorForClient) serializableProps.error = args.errorForClient;
   const hydrationPayload: any = {

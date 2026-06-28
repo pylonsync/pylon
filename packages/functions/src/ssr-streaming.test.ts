@@ -471,29 +471,47 @@ describe("bucketed hydration tail (PPR Phase 0 leak class)", () => {
     expect(aTail).toBe(bTail);
   });
 
-  test("anonymization survives even if a page leaves auth in ssrData-adjacent props", () => {
-    // Defense in depth: a nested prop that happens to mirror auth is NOT
-    // collapsed (only the top-level `auth`/`session` are keyed), so the bucket
-    // verdict (increment 3) must still veto any render that surfaces identity
-    // elsewhere. This documents the boundary: buildHydrationTail anonymizes the
-    // KEYED fields; it is not a general identity scrubber.
+  test("bucketed tail DROPS page-added props (alias-identity fence, codex #4)", () => {
+    // A page can alias identity onto a custom key without tripping read-tracking
+    // (`props.leak = props.auth` — props is a plain object, no proxy trap). A
+    // bucketed (SHARED) tail must therefore serialize a strict ALLOWLIST of
+    // framework props, never a spread — else `leak` would carry one user's
+    // identity into every signed-in visitor's cached page.
     const tail = buildHydrationTail({
       ...baseArgs(alice),
       props: {
         url: "/",
-        params: {},
+        params: { id: "x" },
         searchParams: {},
         auth: alice,
         session: { exists: true },
-        // A page that copied auth into a custom prop — the verdict gate, not the
-        // tail, is what keeps this render out of the bucket.
-        leaked: { uid: alice.user_id },
+        // Page-aliased identity + a copied cookie bag.
+        leak: { uid: alice.user_id },
+        sneaky: alice.email,
       },
       bucketAuth: { signedIn: true },
     });
     const data = parsePylonData(tail);
     expect(data.props.auth).toEqual({ signedIn: true });
-    // The custom prop is untouched — proving anonymization is scoped, not magic.
-    expect(data.props.leaked).toEqual({ uid: "user_alice" });
+    // Allowlisted framework fields survive…
+    expect(data.props.url).toBe("/");
+    expect(data.props.params).toEqual({ id: "x" });
+    // …but the page-added keys are GONE, and no identity is anywhere in the tail.
+    expect(data.props.leak).toBeUndefined();
+    expect(data.props.sneaky).toBeUndefined();
+    expect(tail).not.toContain("user_alice");
+    expect(tail).not.toContain("alice@x.com");
+  });
+
+  test("NON-bucket tail still preserves page-added props (no behavior change)", () => {
+    // The allowlist applies ONLY to bucketed renders. A normal (non-shared)
+    // render keeps serializing all props so hydration matches the server tree.
+    const tail = buildHydrationTail({
+      ...baseArgs(alice),
+      props: { url: "/", params: {}, searchParams: {}, auth: alice, custom: 42 },
+    });
+    const data = parsePylonData(tail);
+    expect(data.props.custom).toBe(42);
+    expect(data.props.auth).toEqual(alice);
   });
 });
