@@ -724,8 +724,10 @@ pub fn try_handle(
                     }
                 }
                 // Bucket entry (`export const cache = "auth-bucketed"`) — keyed on
-                // session presence; ANY GET (signed-in or not) hits its bucket.
-                let session_present = session_cookie_present(cfg, &request);
+                // RESOLVED session (signed-in vs not); ANY GET hits its bucket. An
+                // expired/invalid cookie resolves to not-signed-in → sess=0, the
+                // same bit the render path stores under.
+                let session_present = session_authenticated(cfg, &request);
                 let bucket_vary = ssr_cache_bucket_vary(host.as_deref(), session_present);
                 if let Some(entry) =
                     crate::ssr_cache::get(&matched.route.path, path_only, &bucket_vary)
@@ -1447,9 +1449,10 @@ fn serve_via_ssr_rpc(
     // AuthInfo — matches Phase 1 behavior.
     let auth = resolve_request_auth(cfg, &cookies_map);
     // Identity-FREE session presence for `props.session.exists` (Phase 0 auth
-    // bucketing) — whether a session cookie is present, NOT who. Copied into the
-    // render so a page can render a binary auth nav without reading real `auth`.
-    let session_present = session_cookie_present(cfg, &request);
+    // bucketing) — whether the request RESOLVED to a signed-in user, NOT who.
+    // Derived from the already-resolved `auth` (free), so an expired/invalid
+    // cookie is sess=0 — matching `session_authenticated` on the read path.
+    let session_present = auth.user_id.is_some();
     // Bucket cache key — host + session presence. A render emitting the
     // `x-pylon-bucket` proof is stored here; the read path keys the same way.
     let bucket_vary =
@@ -1700,6 +1703,7 @@ fn serve_via_ssr_rpc(
         maybe_cache_render(
             &matched.route.path,
             &path_only,
+            cacheable_eligible,
             &cache_vary,
             &bucket_vary,
             status,
@@ -1887,12 +1891,54 @@ fn ssr_proof_verdict(
     Some(secs)
 }
 
+/// Which cache lane a finished render writes to.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum CacheWriteLane {
+    /// Shared anonymous entry (`x-pylon-cacheable`), keyed path+host.
+    Anon,
+    /// Session-presence bucket (`x-pylon-bucket`), keyed path+host+sess.
+    Bucket,
+}
+
+/// Pure write decision: given the request's anon-eligibility and the finished
+/// render's status+headers, which lane (if any) may store it, and for how long?
+///
+/// SECURITY (P0, codex 2026-06-28): the bucket proof writes regardless of
+/// `cacheable_eligible` (its body is identity-free + the bucket key separates
+/// signed-in/out). The ANON proof writes ONLY when `cacheable_eligible` — a
+/// signed-in request can legitimately emit `x-pylon-cacheable` (it never read
+/// auth/session), but its NON-bucket hydration tail carries the user's REAL
+/// identity, so storing it under the shared anon key would replay that identity
+/// to anonymous visitors. Fail-closed: no proof / wrong eligibility → None.
+fn cache_write_plan(
+    cacheable_eligible: bool,
+    status: u16,
+    page_headers: &std::collections::HashMap<String, String>,
+) -> Option<(u64, CacheWriteLane)> {
+    if let Some(s) = ssr_bucket_verdict(status, page_headers) {
+        return Some((s, CacheWriteLane::Bucket));
+    }
+    if cacheable_eligible {
+        if let Some(s) = ssr_cache_verdict(status, page_headers) {
+            return Some((s, CacheWriteLane::Anon));
+        }
+    }
+    None
+}
+
 /// #277 Stage 2: persist a finished render to the on-disk ISR cache, but only
 /// when it provably earned it. Fail-closed at every gate — a render that read
 /// auth, set a cookie, returned non-200, or errored mid-body is never stored.
 fn maybe_cache_render(
     route_path: &str,
     pathname: &str,
+    // True when THIS request is cookie-anonymous (the anon read gate). The anon
+    // proof may only be STORED for such a request — a signed-in request can emit
+    // `x-pylon-cacheable` (it never read auth/session), but its NON-bucket
+    // hydration tail carries the user's REAL identity, so storing it under the
+    // shared anon key would replay that identity to anonymous visitors. The
+    // bucket proof has no such restriction (its tail is anonymized).
+    cacheable_eligible: bool,
     anon_vary: &[(String, String)],
     bucket_vary: &[(String, String)],
     status: u16,
@@ -1901,15 +1947,13 @@ fn maybe_cache_render(
     render_handle: std::thread::JoinHandle<()>,
     err_rx: std::sync::mpsc::Receiver<(String, String)>,
 ) {
-    // Which proof did the render earn? The bucket proof keys under `bucket_vary`
-    // (session-presence); the anon proof under `anon_vary`. Mutually exclusive
-    // (the TS verdict splits on the opt-in). None → don't cache (fail-closed).
-    let (revalidate_secs, vary) = if let Some(s) = ssr_bucket_verdict(status, page_headers) {
-        (s, bucket_vary)
-    } else if let Some(s) = ssr_cache_verdict(status, page_headers) {
-        (s, anon_vary)
-    } else {
-        return;
+    // Which proof did the render earn, and under which key? Pure decision (see
+    // `cache_write_plan`) — fail-closed, and unit-tested for the P0 where a
+    // signed-in request's anon proof must NOT write the shared anon entry.
+    let (revalidate_secs, vary) = match cache_write_plan(cacheable_eligible, status, page_headers) {
+        Some((s, CacheWriteLane::Bucket)) => (s, bucket_vary),
+        Some((s, CacheWriteLane::Anon)) => (s, anon_vary),
+        None => return,
     };
     // Wait for the render thread, then confirm it didn't error AFTER
     // response_start — a partial/aborted body must never be cached. respond()
@@ -3059,6 +3103,38 @@ fn session_cookie_present(cfg: &FrontendConfig, request: &Request) -> bool {
     false
 }
 
+/// PPR Phase 0: does the request's session cookie RESOLVE to a real signed-in
+/// user — not merely "a cookie string is present"? This is what keys the auth
+/// bucket + feeds `props.session.exists`, so an expired/invalid cookie maps to
+/// the signed-OUT bucket (sess=0) instead of a misleading signed-in shell. The
+/// render path derives the same bit from its already-resolved `auth`
+/// (`auth.user_id.is_some()`); this helper is for the cache-READ fast path, where
+/// no auth has been resolved yet. Cheap short-circuit: a request with no session
+/// cookie pays NO store lookup (only cookie-bearing requests resolve).
+fn session_authenticated(cfg: &FrontendConfig, request: &Request) -> bool {
+    if !session_cookie_present(cfg, request) {
+        return false;
+    }
+    let (Some(store), Some(cookie_cfg)) = (cfg.session_store.as_ref(), cfg.cookie_config.as_ref())
+    else {
+        return false;
+    };
+    let mut token: Option<String> = None;
+    for h in request.headers() {
+        if !h.field.as_str().as_str().eq_ignore_ascii_case("cookie") {
+            continue;
+        }
+        for pair in h.value.as_str().split(';') {
+            if let Some((k, v)) = pair.trim().split_once('=') {
+                if k == cookie_cfg.name && !v.is_empty() {
+                    token = Some(v.to_string());
+                }
+            }
+        }
+    }
+    store.resolve(token.as_deref()).user_id.is_some()
+}
+
 /// Pure: does a `Cookie:` header value contain a non-empty cookie named
 /// `name`? Extracted for unit testing the cache-eligibility gate.
 fn cookie_header_has_named(header_value: &str, name: &str) -> bool {
@@ -4001,6 +4077,47 @@ mod tests {
             ssr_bucket_verdict(200, &mk(&[("x-pylon-bucket", "nope")])),
             None
         );
+    }
+
+    #[test]
+    fn cache_write_plan_never_stores_a_signed_in_anon_proof_under_the_shared_key() {
+        // P0 (codex 2026-06-28): the write-tee now fires for bucket-eligible
+        // requests (session allowed). A signed-in request to an ANON-opted page
+        // (`export const revalidate`) that didn't read auth emits
+        // `x-pylon-cacheable`, but its NON-bucket hydration tail carries the
+        // user's real identity. It must NOT be written under the shared anon key.
+        let mk = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect::<std::collections::HashMap<String, String>>()
+        };
+        let anon = mk(&[("x-pylon-cacheable", "60")]);
+        let bucket = mk(&[("x-pylon-bucket", "60")]);
+
+        // Anon proof: stored ONLY for a cookie-anonymous (cacheable_eligible) req.
+        assert_eq!(
+            cache_write_plan(true, 200, &anon),
+            Some((60, CacheWriteLane::Anon))
+        );
+        // THE LEAK GATE: signed-in (cacheable_eligible=false) + anon proof → no
+        // write. Without the fix this stored a signed-in user's identity under the
+        // shared anon key, replaying it to anonymous visitors.
+        assert_eq!(cache_write_plan(false, 200, &anon), None);
+
+        // Bucket proof: stored regardless of cookie-anonymity (body is identity-
+        // free; the bucket key separates signed-in/out).
+        assert_eq!(
+            cache_write_plan(false, 200, &bucket),
+            Some((60, CacheWriteLane::Bucket))
+        );
+        assert_eq!(
+            cache_write_plan(true, 200, &bucket),
+            Some((60, CacheWriteLane::Bucket))
+        );
+
+        // No proof → never stored.
+        assert_eq!(cache_write_plan(true, 200, &mk(&[])), None);
     }
 
     #[test]

@@ -327,7 +327,25 @@ export function makeReadTrackingProxy(
   obj: Record<string, unknown> | undefined,
   onTouch: () => void,
 ): Record<string, unknown> {
-  return new Proxy((obj ?? {}) as Record<string, unknown>, {
+  return makeRevocableReadTrackingProxy(obj, onTouch).proxy;
+}
+
+/**
+ * Revocable form of {@link makeReadTrackingProxy}. The render path wraps each
+ * per-request input (auth / headers / cookies / session) in one of these and
+ * REVOKES it once the render is done — so a page that stashed the props object
+ * (or `props.auth`) in module-level state and read it on a LATER render gets a
+ * hard throw instead of silently reading a prior request's identity WITHOUT
+ * tripping this render's read-tracking. Revocation is per-render (each render
+ * revokes only its own proxies), so it is sound even when the Bun runner
+ * multiplexes concurrent renders. Fail-closed: the stale read throws, the render
+ * fails, and nothing is cached.
+ */
+export function makeRevocableReadTrackingProxy(
+  obj: Record<string, unknown> | undefined,
+  onTouch: () => void,
+): { proxy: Record<string, unknown>; revoke: () => void } {
+  return Proxy.revocable((obj ?? {}) as Record<string, unknown>, {
     get(t, p, r) {
       onTouch();
       return Reflect.get(t, p, r);
@@ -1871,6 +1889,11 @@ export async function handleRenderRoute(
   let React: any = null;
   let renderToReadableStream: any = null;
   let props: any = null;
+  // Revoke fns for this render's per-request proxies (auth/headers/cookies/
+  // session). Declared OUT here so the `finally` revokes them on EVERY exit path
+  // (success, redirect/notFound/error boundary, throw) — neutralizing any
+  // module-stashed reference to a prior request's identity.
+  const proxyRevokers: Array<() => void> = [];
   // Accumulates the resolved results of every `serverData.*` read the page
   // made during render, keyed identically to the client shim. Serialized
   // into `__PYLON_DATA__.ssrData` so hydration replays the same values
@@ -1949,14 +1972,24 @@ export async function handleRenderRoute(
 
     // #277 cache-safety proof. A render is shareable (CDN/disk cacheable) ONLY
     // if its output is independent of per-request inputs — so wrap each in a
-    // read-tracking Proxy (makeReadTrackingProxy) that flips a flag the moment a
-    // page/layout/generateMetadata observes it (get / `in` / Object.keys / probe).
-    // The raw objects are restored before serialization.
+    // read-tracking Proxy that flips a flag the moment a page/layout/
+    // generateMetadata observes it (get / `in` / Object.keys / probe). The
+    // proxies are REVOKED in the `finally` (never restored to raw onto `props`),
+    // so the live props object never aliases a prior request's identity. The tail
+    // serializes from the raw `msg` values via `tailProps` below.
+    const track = (
+      obj: Record<string, unknown> | undefined,
+      onTouch: () => void,
+    ) => {
+      const { proxy, revoke } = makeRevocableReadTrackingProxy(obj, onTouch);
+      proxyRevokers.push(revoke);
+      return proxy;
+    };
 
     // Reading auth at all (even for an anon request) opts the render OUT of
     // caching, because the output could differ by identity.
     let authTouched = false;
-    const authProxy = makeReadTrackingProxy(
+    const authProxy = track(
       msg.auth as Record<string, unknown> | undefined,
       () => {
         authTouched = true;
@@ -1969,7 +2002,7 @@ export async function handleRenderRoute(
     // cookies — the framework's metadata path reads `msg.headers` directly.
     let dynamicTouched = false;
     const touchProxy = (obj: Record<string, unknown> | undefined) =>
-      makeReadTrackingProxy(obj, () => {
+      track(obj, () => {
         dynamicTouched = true;
       });
 
@@ -1977,10 +2010,10 @@ export async function handleRenderRoute(
     // presence bit, so a page can render a binary auth nav WITHOUT reading real
     // `auth`. Reading it sets `sessionTouched` (separate from authTouched): it
     // vetoes the plain anonymous cache (the output now varies by signed-in
-    // bucket) but WILL be permitted by the future bucket verdict (which keys the
-    // cache on the bucket). Until that lands, reading it just opts out of caching.
+    // bucket) but is PERMITTED by the bucket verdict (which keys the cache on the
+    // bucket).
     let sessionTouched = false;
-    const sessionProxy = makeReadTrackingProxy(
+    const sessionProxy = track(
       { exists: msg.session_present === true },
       () => {
         sessionTouched = true;
@@ -2192,14 +2225,21 @@ export async function handleRenderRoute(
       wantsStream,
       status: responseState.status,
     });
-    // Restore the raw auth/headers/cookies before any serialization below (the
-    // Proxies were only for the render-time touch probe).
-    if (props) {
-      props.auth = msg.auth;
-      props.headers = msg.headers;
-      props.cookies = msg.cookies;
-      props.session = { exists: msg.session_present === true };
-    }
+    // Serialization view of props built from the RAW `msg` values — the live
+    // `props` (with its read-tracking proxies) is NEVER mutated back to raw, so
+    // it can't become a vehicle that leaks a prior request's identity to a later
+    // render (the proxies are revoked in `finally`). headers/cookies are stripped
+    // inside buildHydrationTail; auth uses the raw value (so anon auth stays
+    // falsy/undefined rather than the proxy's empty `{}`).
+    const tailProps = props
+      ? {
+          ...props,
+          auth: msg.auth,
+          headers: msg.headers,
+          cookies: msg.cookies,
+          session: { exists: msg.session_present === true },
+        }
+      : props;
     // #278: on a STREAMING render the head commits NOW, before suspended
     // subtrees run. Snapshot what's committed so we can detect (after EOF) a
     // late response.setStatus/setCookie/setHeader from a suspended subtree that
@@ -2367,7 +2407,7 @@ export async function handleRenderRoute(
       const tail = buildHydrationTail({
         component: msg.component,
         layouts: msg.layouts ?? [],
-        props,
+        props: tailProps,
         ssrData: ssrValueCache,
         manifestRoute: preloadManifestRoute,
         publicPrefix: preloadPublicPrefix,
@@ -2474,5 +2514,17 @@ export async function handleRenderRoute(
       message:
         devMode && err?.stack ? String(err.stack) : err?.message ?? String(err),
     });
+  } finally {
+    // Revoke this render's per-request proxies. Any reference a page stashed in
+    // module-level state (props or props.auth/headers/cookies/session) now throws
+    // on access from a LATER render — fail-closed, so a prior request's identity
+    // can never silently enter a cached body without tripping read-tracking.
+    for (const revoke of proxyRevokers) {
+      try {
+        revoke();
+      } catch {
+        // best-effort
+      }
+    }
   }
 }

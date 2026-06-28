@@ -17,6 +17,7 @@ import {
   finalizeHeaders,
   makeResponseController,
   makeReadTrackingProxy,
+  makeRevocableReadTrackingProxy,
 } from "./ssr-runtime";
 
 describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () => {
@@ -147,6 +148,24 @@ describe("reserved x-pylon-* header namespace (cache-proof forgery fence)", () =
       t = true;
     });
     expect(t).toBe(false);
+  });
+
+  test("revocable proxy throws after revoke (stale module-stashed props fence)", () => {
+    // P0 (codex 2026-06-28): a page that stashes `props` (or `props.auth`) in
+    // module-level state and reads it on a LATER render must not silently read a
+    // prior request's identity without tripping THIS render's read-tracking. The
+    // render path revokes each per-request proxy when the render ends, so any
+    // retained reference throws on access — fail-closed.
+    const { proxy, revoke } = makeRevocableReadTrackingProxy(
+      { user_id: "alice" },
+      () => {},
+    );
+    expect((proxy as any).user_id).toBe("alice"); // live during the render
+    revoke();
+    // A stashed reference, read on a later render:
+    expect(() => (proxy as any).user_id).toThrow();
+    expect(() => "user_id" in proxy).toThrow();
+    expect(() => Object.keys(proxy)).toThrow();
   });
 });
 
