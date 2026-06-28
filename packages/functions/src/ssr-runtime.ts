@@ -334,9 +334,11 @@ export function makeReadTrackingProxy(
  * Deep clone via JSON round-trip — drops functions / proxies / symbols, keeping
  * only JSON-serializable data. Used to SNAPSHOT the bucket-tail props before any
  * page code can mutate them, so a page can't smuggle identity through a nested
- * field of params/searchParams into a shared cache entry.
+ * field of params/searchParams into a shared cache entry. The deep copy is fully
+ * independent of the source: a later mutation of the original object can't reach
+ * the snapshot.
  */
-function jsonClone<T>(v: T): T {
+export function jsonClone<T>(v: T): T {
   return v == null ? v : (JSON.parse(JSON.stringify(v)) as T);
 }
 

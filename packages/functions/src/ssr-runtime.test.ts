@@ -18,6 +18,7 @@ import {
   makeResponseController,
   makeReadTrackingProxy,
   makeRevocableReadTrackingProxy,
+  jsonClone,
 } from "./ssr-runtime";
 
 describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () => {
@@ -166,6 +167,24 @@ describe("reserved x-pylon-* header namespace (cache-proof forgery fence)", () =
     expect(() => (proxy as any).user_id).toThrow();
     expect(() => "user_id" in proxy).toThrow();
     expect(() => Object.keys(proxy)).toThrow();
+  });
+
+  test("jsonClone snapshot is independent of later source mutation (bucket params fence)", () => {
+    // The bucket-tail snapshot (bucketTailBase) is jsonClone'd at render START.
+    // The defense rests on the clone being decoupled from the live params object:
+    // a page mutating a NESTED field afterwards (props.searchParams.leak =
+    // props.auth) can't reach the already-captured snapshot.
+    const source: any = { id: "a", nested: { keep: 1 } };
+    const snap = jsonClone(source);
+    // Simulate the page smuggling identity in after the snapshot was taken.
+    source.leak = { user_id: "alice" };
+    source.nested.keep = 999;
+    expect(snap).toEqual({ id: "a", nested: { keep: 1 } });
+    expect((snap as any).leak).toBeUndefined();
+    // And it strips non-JSON values (a proxy aliased in would serialize as its
+    // target via JSON, but a function/symbol is dropped entirely).
+    const stripped = jsonClone({ ok: "v", fn: () => 1, sym: Symbol("x") } as any);
+    expect(stripped).toEqual({ ok: "v" });
   });
 });
 
