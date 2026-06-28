@@ -115,3 +115,35 @@ signed-in user. So this ships as one reviewed unit, not piecemeal.
 4. codex adversarial review (the leak class) BEFORE enabling on any app.
 5. CDN cache-key rule (Cloudflare) + browser-verify on notbehind.
 6. Docs/skill: the `session.exists` pattern + when to use bucketing vs PPR.
+
+## Implementation status (2026-06-28)
+Steps 1–4 SHIPPED (unreleased, default-OFF). Resolved open questions:
+- **O-INVALID resolved the OTHER way**: `session.exists` reflects RESOLVED auth
+  (`auth.user_id.is_some()`), not raw cookie presence — an expired/invalid cookie
+  maps to the signed-OUT bucket. The read path resolves only for cookie-bearing
+  requests (`session_authenticated`), so the cost is a local store lookup only
+  when a cookie is present. This is what makes read-key and write-key agree.
+- **O-CDN**: Pylon-ISR bucketing ships first (origin render-skip). A bucket
+  response is browser-`private`/`no-store` by default; it advertises
+  `public, s-maxage` ONLY when `PYLON_SSR_BUCKET_CDN=1` tells the host the CDN
+  keys its cache on session-cookie presence (a Cloudflare cache-key rule). Flag
+  default OFF → no shared cache can mis-serve across buckets before the rule is in.
+
+### Security review (codex, 3 rounds — each found real holes, all fixed)
+- Signed-in request must not write the SHARED anon lane (`cache_write_plan` gates
+  the anon proof on `cacheable_eligible`; the bucket lane is identity-free).
+- The hydration tail of a bucketed render serializes a strict ALLOWLIST
+  (url/params/searchParams + `{ signedIn }`), from an immutable pre-render
+  snapshot (`bucketTailBase`) — a page can't smuggle identity via a top-level or
+  nested prop mutation. Per-request proxies are revocable + revoked after render.
+- A bucket render's shareability is governed only by `bucket_shareable`, so a
+  page-set `public` Cache-Control can't escape the bucket policy.
+
+### Purity contract (the residual, documented)
+An `auth-bucketed` page MUST be a pure function of its props. It MUST NOT stash
+request-derived data (auth/cookies/headers, or values computed from them) in
+module/global scope and render it on a later request. This is the same constraint
+every SSR framework draws (Next.js: "don't put request data in module scope");
+it is undefendable by the framework — and a page that renders another request's
+data already has an app-level IDOR independent of caching. The framework catches
+every *prop-mediated* vector; module-global stashing is the author's contract.
