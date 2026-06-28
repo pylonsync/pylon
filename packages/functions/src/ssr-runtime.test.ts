@@ -16,6 +16,7 @@ import {
   PylonRouteControl,
   finalizeHeaders,
   makeResponseController,
+  makeReadTrackingProxy,
 } from "./ssr-runtime";
 
 describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () => {
@@ -56,13 +57,14 @@ describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () =
     expect(resolveOrigin({ host: "evil.com" })).toBe("");
   });
 
-  test("forwarded proto is clamped to http|https even on a trusted host", () => {
-    // A valid forwarded proto on a trusted host is honored…
+  test("off-loopback never honors X-Forwarded-Proto (no downgrade poisoning)", () => {
+    // Even on a TRUSTED host, a client-supplied proto must not change the
+    // absolute origin — it feeds og:image/canonical and is cache-keyed only by
+    // host, so honoring `http` would downgrade the cached URL for everyone.
+    // Off-loopback is ALWAYS https.
     expect(
       resolveOrigin({ host: "www.notbehind.com", publicUrl, forwardedProto: "http" }),
-    ).toBe("http://www.notbehind.com");
-    // …but an attacker-supplied junk proto must NOT inject into the absolute URL
-    // (it would land in og:image/canonical). Clamp to the off-loopback default.
+    ).toBe("https://www.notbehind.com");
     expect(
       resolveOrigin({
         host: "www.notbehind.com",
@@ -70,9 +72,13 @@ describe("resolveOrigin — Host-header allowlist (cache-poisoning fence)", () =
         forwardedProto: "javascript:alert(1)",
       }),
     ).toBe("https://www.notbehind.com");
-    expect(
-      resolveOrigin({ host: "www.notbehind.com", publicUrl, forwardedProto: "https://evil" }),
-    ).toBe("https://www.notbehind.com");
+    // Loopback (dev) may be http; an explicit https there is honored.
+    expect(resolveOrigin({ host: "localhost:4321", forwardedProto: "http" })).toBe(
+      "http://localhost:4321",
+    );
+    expect(resolveOrigin({ host: "localhost:4321", forwardedProto: "https" })).toBe(
+      "https://localhost:4321",
+    );
   });
 });
 
@@ -92,26 +98,55 @@ describe("reserved x-pylon-* header namespace (cache-proof forgery fence)", () =
     expect(state.headers["x-custom"]).toBe("ok");
   });
 
-  test("finalizeHeaders strips page-set x-pylon-* but keeps the runtime's extra", () => {
-    // Even if a forged proof reaches state.headers by some other path, it is
-    // stripped before merge; only the runtime's trusted `extra` survives.
+  test("finalizeHeaders: x-pylon-* survives ONLY from the trusted internal channel", () => {
+    // The #277 proof must come from the 3rd `internal` arg. A page-set header
+    // (state.headers) OR a route-handler header (the 2nd `extra` arg, which
+    // ssr-form-runtime fills from user-returned headers) is stripped — so
+    // userland can't forge the host-side cache verdict through ANY path.
     const state = {
       status: 200,
-      headers: { "x-pylon-cacheable": "999", "x-keep": "yes" },
-      cookies: [],
+      headers: { "x-pylon-cacheable": "999", "x-keep": "yes" } as Record<string, string>,
+      cookies: [] as string[],
     };
-    const out = finalizeHeaders(state, { "x-pylon-cacheable": "60" });
-    expect(out["x-pylon-cacheable"]).toBe("60"); // the trusted runtime value
+    const out = finalizeHeaders(
+      state,
+      { "x-pylon-cacheable": "888", "x-extra": "e" }, // untrusted extra → stripped
+      { "x-pylon-cacheable": "60" }, // trusted internal → kept
+    );
+    expect(out["x-pylon-cacheable"]).toBe("60"); // only the trusted value
     expect(out["x-keep"]).toBe("yes");
+    expect(out["x-extra"]).toBe("e"); // a non-reserved extra header still merges
 
-    // With no runtime proof, a page-set proof does NOT survive at all.
-    const state2 = {
-      status: 200,
-      headers: { "x-pylon-cacheable": "999" },
-      cookies: [],
-    };
-    const out2 = finalizeHeaders(state2);
+    // No internal proof → NO x-pylon-* survives, from page headers OR extra.
+    const out2 = finalizeHeaders(
+      { status: 200, headers: { "x-pylon-cacheable": "999" }, cookies: [] as string[] },
+      { "x-pylon-cacheable": "777" },
+    );
     expect(out2["x-pylon-cacheable"]).toBeUndefined();
+  });
+
+  test("makeReadTrackingProxy trips on get / in / Object.keys / descriptor / spread", () => {
+    const probes: Array<(o: any) => unknown> = [
+      (o) => o.host,
+      (o) => "host" in o,
+      (o) => Object.keys(o),
+      (o) => Object.getOwnPropertyDescriptor(o, "host"),
+      (o) => ({ ...o }),
+    ];
+    for (const probe of probes) {
+      let touched = false;
+      const p = makeReadTrackingProxy({ host: "x" }, () => {
+        touched = true;
+      });
+      probe(p);
+      expect(touched).toBe(true); // a bare `get` trap would miss in/keys
+    }
+    // No observation → never touched.
+    let t = false;
+    makeReadTrackingProxy({ host: "x" }, () => {
+      t = true;
+    });
+    expect(t).toBe(false);
   });
 });
 

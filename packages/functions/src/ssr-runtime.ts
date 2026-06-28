@@ -309,21 +309,63 @@ export function makeResponseController(
  * into one `Set-Cookie` header each (newline is forbidden inside a
  * cookie, so it can't be turned into header injection).
  */
+/**
+ * Wrap a per-request object so ANY observation — property `get`, `in` (`has`),
+ * `Object.keys`/spread/`for…in` (`ownKeys`), or a descriptor probe — calls
+ * `onTouch`. Used to mark a render request-specific (vetoing shared caching) the
+ * instant it reads auth/headers/cookies. A bare `get` trap misses `in` and
+ * `Object.keys`, which would observe the data without tripping the veto.
+ * Exported for direct unit testing of that property.
+ */
+export function makeReadTrackingProxy(
+  obj: Record<string, unknown> | undefined,
+  onTouch: () => void,
+): Record<string, unknown> {
+  return new Proxy((obj ?? {}) as Record<string, unknown>, {
+    get(t, p, r) {
+      onTouch();
+      return Reflect.get(t, p, r);
+    },
+    has(t, p) {
+      onTouch();
+      return Reflect.has(t, p);
+    },
+    ownKeys(t) {
+      onTouch();
+      return Reflect.ownKeys(t);
+    },
+    getOwnPropertyDescriptor(t, p) {
+      onTouch();
+      return Reflect.getOwnPropertyDescriptor(t, p);
+    },
+  });
+}
+
 export function finalizeHeaders(
   state: ResponseState,
+  // UNTRUSTED user headers (page-set `state.headers` and, at the form/data-route
+  // call sites, a route handler's returned headers). `x-pylon-*` is stripped.
   extra?: Record<string, string>,
+  // TRUSTED runtime headers (e.g. the #277 `x-pylon-cacheable` proof). The ONLY
+  // legitimate source of `x-pylon-*`; merged last and never stripped.
+  internal?: Record<string, string>,
 ): Record<string, string> {
-  // Defense-in-depth for the reserved `x-pylon-*` namespace: strip any from the
-  // page-set headers before merging the runtime's trusted `extra` (which is the
-  // ONLY legitimate source of e.g. the #277 `x-pylon-cacheable` proof). setHeader
-  // already rejects these, but a direct write to state.headers must not slip one
-  // through and forge the host-side cache verdict.
-  const pageHeaders: Record<string, string> = {};
-  for (const [k, v] of Object.entries(state.headers)) {
-    if (k.toLowerCase().startsWith("x-pylon-")) continue;
-    pageHeaders[k] = v;
-  }
-  const h: Record<string, string> = { ...pageHeaders, ...(extra ?? {}) };
+  // The host TRUSTS `x-pylon-*` headers (cache verdict, etc.). They must come
+  // ONLY from `internal` — strip them from BOTH page-set headers AND `extra` so
+  // userland can't forge the verdict through any path (setHeader is also
+  // rejected at the source, this is defense-in-depth + covers route-handler
+  // headers that flow through `extra`).
+  const h: Record<string, string> = {};
+  const mergeStripped = (src?: Record<string, string>) => {
+    if (!src) return;
+    for (const [k, v] of Object.entries(src)) {
+      if (k.toLowerCase().startsWith("x-pylon-")) continue;
+      h[k] = v; // later sources override earlier (page < extra)
+    }
+  };
+  mergeStripped(state.headers);
+  mergeStripped(extra);
+  if (internal) Object.assign(h, internal); // trusted, never stripped
   if (!h["content-type"]) h["content-type"] = "text/html; charset=utf-8";
   if (state.cookies.length > 0) {
     // Preserve a set-cookie value set via setHeader() (rare) and join it
@@ -831,13 +873,17 @@ export function resolveOrigin(opts: {
     for (const x of (opts.trustedHostsCsv || "").split(",")) add(x);
     const isLoopback = LOOPBACK_HOST.test(host);
     if (isLoopback || allow.has(host)) {
-      // Only honor a forwarded proto for a TRUSTED host — else an attacker
-      // could downgrade the cached URL to http://. Default https off-loopback.
-      // CLAMP to a known scheme: an attacker-supplied X-Forwarded-Proto must
-      // never inject arbitrary text into the absolute origin (it feeds og:image
-      // / canonical and is cache-keyed only by host, not proto).
-      const fp = opts.forwardedProto;
-      const proto = fp === "http" || fp === "https" ? fp : isLoopback ? "http" : "https";
+      // Off-loopback (prod) we ALWAYS use https and never honor the request's
+      // X-Forwarded-Proto. The SSR cache is keyed only by host (not proto), so
+      // honoring a client-supplied `http` would poison the cached canonical/OG
+      // URL with a downgraded scheme for every subsequent visitor. Loopback
+      // (dev) may be plain http. (A genuinely non-https prod origin should set
+      // PYLON_PUBLIC_URL explicitly, which takes precedence above.)
+      const proto = isLoopback
+        ? opts.forwardedProto === "https"
+          ? "https"
+          : "http"
+        : "https";
       return `${proto}://${host}`;
     }
   }
@@ -1822,33 +1868,29 @@ export async function handleRenderRoute(
     );
 
     // #277 cache-safety proof. A render is shareable (CDN/disk cacheable) ONLY
-    // if its output is auth-INDEPENDENT — so wrap props.auth in a Proxy that
-    // flips `authTouched` the moment a page/layout reads it. Reading auth at
-    // all (even for an anonymous request) opts the render OUT of caching,
-    // because the output could differ by identity. The raw auth is restored
-    // before serialization (so the hydration blob carries real values, and so
-    // JSON.stringify doesn't trip the Proxy itself).
+    // if its output is independent of per-request inputs — so wrap each in a
+    // read-tracking Proxy (makeReadTrackingProxy) that flips a flag the moment a
+    // page/layout/generateMetadata observes it (get / `in` / Object.keys / probe).
+    // The raw objects are restored before serialization.
+
+    // Reading auth at all (even for an anon request) opts the render OUT of
+    // caching, because the output could differ by identity.
     let authTouched = false;
-    const authProxy = new Proxy(msg.auth as Record<string, unknown>, {
-      get(target, prop, receiver) {
+    const authProxy = makeReadTrackingProxy(
+      msg.auth as Record<string, unknown> | undefined,
+      () => {
         authTouched = true;
-        return Reflect.get(target, prop, receiver);
       },
-    });
+    );
 
     // Same proof for the OTHER per-request inputs that aren't in the cache key:
     // reading `headers` (any header, incl. via generateMetadata) or `cookies`
-    // makes the output request-specific, so it must veto shared caching just like
-    // auth. Only USER code (page/layout/generateMetadata) reads props.headers/
-    // cookies — the framework's own metadata path reads `msg.headers` directly, so
-    // it never trips these. Restored to the raw objects before serialization.
+    // makes the output request-specific. Only USER code reads props.headers/
+    // cookies — the framework's metadata path reads `msg.headers` directly.
     let dynamicTouched = false;
     const touchProxy = (obj: Record<string, unknown> | undefined) =>
-      new Proxy((obj ?? {}) as Record<string, unknown>, {
-        get(target, prop, receiver) {
-          dynamicTouched = true;
-          return Reflect.get(target, prop, receiver);
-        },
+      makeReadTrackingProxy(obj, () => {
+        dynamicTouched = true;
       });
 
     props = {
@@ -2057,7 +2099,11 @@ export async function handleRenderRoute(
       status: responseState.status,
       headers: finalizeHeaders(
         responseState,
-        cacheable ? { "x-pylon-cacheable": String(revalidateSecs) } : {},
+        undefined,
+        // The #277 proof rides the TRUSTED `internal` channel (never stripped),
+        // so userland (page setHeader / route-handler headers via `extra`) can't
+        // forge it.
+        cacheable ? { "x-pylon-cacheable": String(revalidateSecs) } : undefined,
       ),
     });
 

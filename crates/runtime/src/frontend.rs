@@ -2200,7 +2200,11 @@ fn build_ssr_response_headers(
 ) -> Vec<Header> {
     let mut out: Vec<Header> = Vec::new();
     let mut saw_content_type = false;
-    let mut saw_cache_control = false;
+    // A page-set Cache-Control is captured (not emitted in the loop) so the final
+    // value can be decided with `request_shareable` in mind — a page must not be
+    // able to advertise shared caching (`public`/`s-maxage`) for a non-shareable
+    // (e.g. logged-in) request whose body carries that request's auth.
+    let mut page_cache_control: Option<String> = None;
     let mut saw_set_cookie = false;
     // #277: the render's internal cache proof — `Some(secs)` means it proved
     // itself anonymous-safe + opted into caching. Captured + STRIPPED below so
@@ -2243,21 +2247,27 @@ fn build_ssr_response_headers(
             }
             continue;
         }
-        if lname == "x-pylon-cacheable" {
-            // Internal #277 proof — capture the revalidate seconds and STRIP it
-            // (it must never leak to the client or the CDN).
-            cacheable_secs = value.trim().parse::<u64>().ok();
+        if lname.starts_with("x-pylon-") {
+            // Reserved internal namespace. Capture the #277 cache proof, then
+            // STRIP every `x-pylon-*` — none may reach the client/CDN, and a
+            // value forged by userland (page setHeader, or a route handler's
+            // returned headers) must never be honored.
+            if lname == "x-pylon-cacheable" {
+                cacheable_secs = value.trim().parse::<u64>().ok();
+            }
             continue;
         }
         if !header_value_is_safe(value) || !header_name_is_safe(name) {
             continue;
         }
+        if lname == "cache-control" {
+            // Defer to the post-loop decision (see `page_cache_control`).
+            page_cache_control = Some(value.clone());
+            continue;
+        }
         if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             if lname == "content-type" {
                 saw_content_type = true;
-            }
-            if lname == "cache-control" {
-                saw_cache_control = true;
             }
             out.push(h);
         }
@@ -2266,30 +2276,41 @@ fn build_ssr_response_headers(
     if !saw_content_type {
         out.push(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
     }
-    if !saw_cache_control {
-        // A cookie-setting SSR response is personalized — a shared cache (e.g.
-        // Cloudflare) must NEVER store it and replay it to another user, so it
-        // gets `no-store`, an ABSOLUTE veto that overrides any cache opt-in
-        // (#277). Otherwise, if the render proved itself anonymous-safe + opted
-        // into caching (#277), let a shared cache store + serve it
-        // (`public, s-maxage`, with `stale-while-revalidate` so an origin
-        // restart doesn't cause a thundering herd). With no proof we fail
-        // closed to `no-cache` (don't serve stale without revalidation;
-        // caching is strictly opt-in + earned).
-        let cc: String = if saw_set_cookie {
+    {
+        // True if a Cache-Control would let a SHARED cache (Cloudflare) store +
+        // replay the response. Such directives are only safe when the request is
+        // itself shareable (cookie-anonymous GET, no query) — otherwise the body
+        // may carry this request's auth.
+        fn allows_shared_cache(cc: &str) -> bool {
+            let l = cc.to_ascii_lowercase();
+            l.contains("public") || l.contains("s-maxage")
+        }
+        let cc: String = if let Some(pcc) = page_cache_control {
+            // Respect a page's own Cache-Control — EXCEPT never honor a shared-
+            // cache directive for a non-shareable request (a logged-in page that
+            // did `setHeader("cache-control", "public, …")` must not leak its
+            // hydration-tail auth to a shared cache). Fail closed to no-store.
+            if !request_shareable && allows_shared_cache(&pcc) {
+                "private, no-store".to_string()
+            } else {
+                pcc
+            }
+        } else if saw_set_cookie {
+            // A cookie-setting (personalized) response → no-store: a shared cache
+            // must never store + replay it to another user.
             "no-store".to_string()
         } else if let Some(secs) = cacheable_secs {
             if request_shareable {
+                // Proven anonymous-safe + opted in + shareable request →
+                // shared-cacheable (stale-while-revalidate avoids a herd).
                 format!("public, s-maxage={secs}, stale-while-revalidate={secs}")
             } else {
-                // The render proved itself anonymous-cacheable (#277), but THIS
-                // request is not shareable (logged-in / query string / non-GET /
-                // dev). Its hydration tail carries this request's real `auth`, so
-                // advertising it to a shared cache would replay one user's
-                // identity to another — fail closed to a non-shared response.
+                // Proof present but the request isn't shareable (logged-in /
+                // query / non-GET / dev) — its hydration tail carries real auth.
                 "private, no-store".to_string()
             }
         } else {
+            // No proof → fail closed to no-cache (opt-in + earned).
             "no-cache".to_string()
         };
         out.push(Header::from_bytes("Cache-Control", cc.as_bytes()).unwrap());
@@ -3674,6 +3695,43 @@ mod tests {
         // is downgraded to a private, non-stored response. Without the fix this
         // would still be `public, s-maxage=60` and leak the tail's auth.
         assert_eq!(cc(&proven, false).as_deref(), Some("private, no-store"));
+    }
+
+    #[test]
+    fn ssr_page_set_public_cache_control_is_downgraded_for_unshareable_request() {
+        // P0 follow-up (codex 2026-06-28): a page that sets its OWN Cache-Control
+        // must NOT be able to advertise shared caching (`public`/`s-maxage`) for a
+        // non-shareable (logged-in) request — its hydration tail carries that
+        // user's auth. Respected when shareable, downgraded when not. Without the
+        // fix, a page-set `cache-control` set `saw_cache_control` and skipped the
+        // shareability gate entirely.
+        let cc = |page: &std::collections::HashMap<String, String>, shareable: bool| {
+            header_pairs(&build_ssr_response_headers(page, "*", shareable))
+                .into_iter()
+                .find(|(k, _)| k == "cache-control")
+                .map(|(_, v)| v)
+        };
+        let mut pub_page = std::collections::HashMap::new();
+        pub_page.insert(
+            "cache-control".to_string(),
+            "public, max-age=300".to_string(),
+        );
+        assert_eq!(cc(&pub_page, true).as_deref(), Some("public, max-age=300"));
+        assert_eq!(cc(&pub_page, false).as_deref(), Some("private, no-store"));
+
+        // A page's NON-shared directive is respected even for an unshareable req.
+        let mut priv_page = std::collections::HashMap::new();
+        priv_page.insert(
+            "cache-control".to_string(),
+            "private, max-age=0".to_string(),
+        );
+        assert_eq!(cc(&priv_page, false).as_deref(), Some("private, max-age=0"));
+
+        // Any forged `x-pylon-*` from page headers is stripped, never emitted.
+        let mut forged = std::collections::HashMap::new();
+        forged.insert("x-pylon-foo".to_string(), "1".to_string());
+        let pairs = header_pairs(&build_ssr_response_headers(&forged, "*", true));
+        assert!(!pairs.iter().any(|(k, _)| k.starts_with("x-pylon-")));
     }
 
     #[test]
