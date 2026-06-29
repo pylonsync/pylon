@@ -516,9 +516,18 @@ export default async function sitemap(): Promise<Sitemap> {
 - `import { useRouter, useSearchParams, usePathname, useParams, redirect, notFound } from "@pylonsync/react"` — for `"use client"` components.
 - The `response` prop shapes the HTTP reply from a server component: `response.setStatus(404)`, `response.redirect("/login")`, `response.notFound()`, `response.setHeader(...)`, `response.setCookie(...)`.
 
-### Gotcha
+### Caching (SSR output cache)
 
-Reading `props.auth` in a page opts that render OUT of anonymous output caching (the render could differ by identity). For public, cacheable pages, resolve signed-in state client-side instead of reading `auth` server-side.
+Pages are **dynamic by default**. Two opt-ins make a render shareable (a hit skips the Bun render entirely):
+
+- **Anonymous cache** — `export const revalidate = 60` (seconds). Stored + reused for ALL anonymous visitors. Cached ONLY if the render never read per-request identity — reading `props.auth` / `props.headers` / `props.cookies`, setting a cookie, a non-200, or streaming opts it out. Use for fully public pages.
+- **Auth-bucketed cache** — `export const cache = "auth-bucketed"` + `export const revalidate = 60`. Caches TWO identity-free shells keyed on whether the request is signed in. Read `props.session.exists` (a binary signed-in bit, **never** identity) to render a signed-in vs signed-out shell and still get a per-bucket hit. Reading real `props.auth` still opts out (output would be identity-specific).
+  - **Purity contract:** an `auth-bucketed` page MUST be a pure function of its props. NEVER stash request data (auth/cookies/headers, or values derived from them) in module/global scope and render it on a later request — that leaks across users (same rule as Next: no request data in module scope).
+  - CDN: bucket responses are browser-`private` by default (the origin still skips the render). A shared-CDN hit requires the operator to set `PYLON_SSR_BUCKET_CDN=1` after adding a CDN cache-key rule on session-cookie presence.
+
+To show signed-in nav on a cacheable page, read `props.session.exists` (bucketed) — do NOT read `props.auth` server-side (that makes the render dynamic). Resolve full identity client-side after hydration.
+
+**"Why isn't my page caching?"** → run `pylon diagnostics` or open the dev HUD; it reports the exact verdict + reason per route (see "Running the app").
 
 ## Running the app
 
@@ -530,6 +539,17 @@ pylon dev
 That's it — no second terminal for the UI. `pylon dev` watches `app.ts` + `functions/` + `app/`, recompiles Tailwind, and live-reloads the browser. (A backend-only app runs the same `pylon dev`.) The first run creates `.pylon/dev.db` (SQLite) and auto-migrates. Set `DATABASE_URL=postgres://...` to target Postgres instead — the adapter is chosen at startup, and all schema/policy/function/SSR code is identical either way.
 
 In production, use `pylon start app.ts` instead of `pylon dev`. Same server, no file watcher, blocks on the server thread so a fatal error exits the process and lets the supervisor (systemd / Docker / Fly init) restart cleanly.
+
+### Debugging — the dev HUD + `pylon diagnostics` (read this when iterating)
+
+`pylon dev` surfaces the framework's hidden decisions so you don't guess. Same data, three ways:
+
+- **Dev HUD** — a floating overlay (bottom-left, in the browser) showing each page's cache verdict + WHY, render mode + timing, sync connection + offline-outbox depth, and client error count.
+- **`pylon diagnostics`** (machine-readable, for agents) — prints recent SSR renders: verdict (`cacheable` / `bucketed` / `dynamic`), the reason, and render time per route. `--json` for raw; `--port` if not 4321.
+- **`GET /_pylon/dev/diagnostics`** — the JSON ring the CLI + HUD read.
+- **`pylon dev` stdout** — one `[pylon:dev] SSR <route> → <verdict> · <ms> — <reason>` line per render.
+
+When a page won't cache, returns no data, or is slow, check these FIRST — the verdict reason names the exact cause (e.g. "read props.auth", "not opted in", "the render set a cookie"). Dev-only; absent in prod.
 
 ## Deployment
 
