@@ -2485,6 +2485,27 @@ export async function handleRenderRoute(
       wantsStream,
       status: responseState.status,
     });
+    // Dev diagnostics (the agent + HUD signal): the cache verdict + the single
+    // actionable reason, computed ONCE here and reused for the dev HUD blob, the
+    // `x-pylon-dev` header (→ the host's diagnostics ring + `pylon diagnostics`),
+    // and the structured dev log. Null in prod.
+    const renderMode = wantsStream ? "ssr-streaming" : "ssr-buffered";
+    const devVerdict = isDevMode()
+      ? describeCacheVerdict({
+          bucketOptIn,
+          cacheable,
+          bucketable,
+          revalidateSecs,
+          authTouched,
+          dynamicTouched,
+          sessionTouched,
+          cookieCount: responseState.cookies.length,
+          strictPolicies,
+          wantsStream,
+          forceDynamic,
+          status: responseState.status,
+        })
+      : null;
     // Serialization view of props built from the RAW `msg` values — the live
     // `props` (with its read-tracking proxies) is NEVER mutated back to raw, so
     // it can't become a vehicle that leaks a prior request's identity to a later
@@ -2522,19 +2543,32 @@ export async function handleRenderRoute(
       type: "response_start",
       call_id: msg.call_id,
       status: responseState.status,
-      headers: finalizeHeaders(
-        responseState,
-        undefined,
+      headers: finalizeHeaders(responseState, undefined, {
         // The #277 anon proof and the Phase 0 bucket proof both ride the TRUSTED
-        // `internal` channel (never stripped), so userland (page setHeader /
-        // route-handler headers via `extra`) can't forge either. Mutually
-        // exclusive (bucketOptIn splits the two verdicts).
-        bucketable
+        // `internal` channel (never stripped here, always stripped by the host
+        // before the client), so userland (page setHeader / route-handler headers
+        // via `extra`) can't forge either. Mutually exclusive (bucketOptIn splits
+        // the two verdicts).
+        ...(bucketable
           ? { "x-pylon-bucket": String(revalidateSecs) }
           : cacheable
             ? { "x-pylon-cacheable": String(revalidateSecs) }
-            : undefined,
-      ),
+            : {}),
+        // Dev-only: the host parses this into its diagnostics ring (served at
+        // /_pylon/dev/diagnostics + `pylon diagnostics`). Single-line JSON, no
+        // newlines. Stripped before the client like every x-pylon-* header.
+        ...(devVerdict
+          ? {
+              "x-pylon-dev": JSON.stringify({
+                verdict: devVerdict.verdict,
+                secs: devVerdict.secs,
+                reason: devVerdict.reason,
+                mode: renderMode,
+                component: msg.component,
+              }),
+            }
+          : {}),
+      }),
     });
 
     // Pre-load the manifest BEFORE the React stream starts emitting
@@ -2692,32 +2726,25 @@ export async function handleRenderRoute(
     }
 
     // Dev HUD (dev only): append the cache-verdict + render-timing blob + the
-    // floating overlay. After the page tail so its marker/probe are in place
-    // before the deferred client entry boots the sync engine.
-    if (isDevMode()) {
-      const verdict = describeCacheVerdict({
-        bucketOptIn,
-        cacheable,
-        bucketable,
-        revalidateSecs,
-        authTouched,
-        dynamicTouched,
-        sessionTouched,
-        cookieCount: responseState.cookies.length,
-        strictPolicies,
-        wantsStream,
-        forceDynamic,
-        status: responseState.status,
-      });
+    // floating overlay, and emit ONE structured log line. After the page tail so
+    // the HUD marker/probe are in place before the deferred client entry boots the
+    // sync engine. `devVerdict` was computed once above (reused here + in the
+    // x-pylon-dev header). The log rides the runtime's inherited stderr, so an
+    // agent running `pylon dev` sees the verdict without any extra call.
+    if (devVerdict) {
+      const renderMs = Math.round((performance.now() - renderStart) * 10) / 10;
       sendChunk(
         buildDevHudChunk({
           route: msg.url,
           component: msg.component,
-          renderMode: wantsStream ? "ssr-streaming" : "ssr-buffered",
-          renderMs: Math.round((performance.now() - renderStart) * 10) / 10,
-          cache: verdict,
+          renderMode,
+          renderMs,
+          cache: devVerdict,
         }),
       );
+      // The structured dev-log line is emitted host-side (Rust tracing) from the
+      // x-pylon-dev header, so it rides the same log stream as every other
+      // [pylon] line — no duplicate console.error here.
     }
 
     send({ type: "render_done", call_id: msg.call_id });

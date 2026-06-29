@@ -17,6 +17,7 @@ pub mod codegen_client;
 pub mod deploy;
 pub mod deploy_cloud;
 pub mod dev;
+pub mod diagnostics;
 pub mod doctor;
 pub mod env;
 pub mod explain;

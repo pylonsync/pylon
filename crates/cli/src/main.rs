@@ -95,6 +95,7 @@ fn run() -> ExitCode {
             }
         }
         Some("dev") => commands::dev::run(&args, json_mode),
+        Some("diagnostics") => commands::diagnostics::run(&args, json_mode),
         Some("doctor") => commands::doctor::run(&args, json_mode),
         Some("env") => commands::env::run(&args, json_mode),
         Some("explain") => commands::explain::run(&args, json_mode),
@@ -171,7 +172,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 34] = [
+const TOP_LEVEL_COMMANDS: [&str; 35] = [
     "backup",
     "build",
     "cache",
@@ -181,6 +182,7 @@ const TOP_LEVEL_COMMANDS: [&str; 34] = [
     "deploy",
     "deployments",
     "dev",
+    "diagnostics",
     "doctor",
     "domains",
     "env",
@@ -374,6 +376,7 @@ fn print_usage() {
     println!("  plugins search <query>    Search plugins by name/tag");
     println!("  plugins info <name>       Show detailed plugin info");
     println!();
+    println!("  diagnostics               Read the dev server's SSR cache/render diagnostics");
     println!("  doctor                    Check development environment");
     println!("  env                       Show environment variable reference");
     println!("  explain <code>            Explain an error code");

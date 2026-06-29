@@ -9,6 +9,7 @@ pub mod config;
 pub mod connections;
 pub mod cron;
 pub mod datastore;
+pub mod dev_diagnostics;
 pub mod encryption;
 pub mod frontend;
 pub mod image_optim;

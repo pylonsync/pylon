@@ -665,6 +665,27 @@ pub fn try_handle(
         return Err(request);
     }
 
+    // Agent diagnostics (#hud-for-agents): the machine-readable side of the dev
+    // HUD. Returns the recent-SSR-render ring (verdict + reason + timing per
+    // route) as JSON so a coding agent — or `pylon diagnostics` — can read why a
+    // page is/isn't caching without a browser. Dev-only (404 in prod).
+    if path_only == "/_pylon/dev/diagnostics" {
+        if is_dev_mode() {
+            let body = crate::dev_diagnostics::snapshot_json();
+            let mut resp = Response::from_data(body.into_bytes());
+            if let Ok(h) = Header::from_bytes("Content-Type", "application/json") {
+                resp = resp.with_header(h);
+            }
+            if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes())
+            {
+                resp = resp.with_header(h);
+            }
+            let _ = request.respond(resp);
+            return Ok(());
+        }
+        return Err(request);
+    }
+
     // SSR branch sits ABOVE dev_proxy so file-based pages take
     // precedence over Vite's catch-all (Vite would serve the SPA
     // shell, masking the SSR'd output). Falls through to proxy/disk
@@ -1549,6 +1570,9 @@ fn serve_via_ssr_rpc(
     let should_tee = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let should_tee_rs = should_tee.clone();
     let should_tee_chunk = should_tee.clone();
+    // Dev diagnostics: wall-clock around the render, so the ring + `pylon
+    // diagnostics` report end-to-end render time. Dev-only (cheap Instant).
+    let render_t0 = std::time::Instant::now();
     let render_thread = std::thread::Builder::new()
         .name("pylon-ssr-render".into())
         .stack_size(512 * 1024)
@@ -1692,6 +1716,27 @@ fn serve_via_ssr_rpc(
     // request.respond drains StreamingBody chunk-by-chunk as HTTP
     // chunked-transfer frames; returns at EOF (render thread done).
     let _ = request.respond(response);
+
+    // Dev diagnostics: record this render's verdict (from the dev-only
+    // `x-pylon-dev` header the runtime emitted) + the Rust-measured render time
+    // into the ring served at /_pylon/dev/diagnostics, and log one structured
+    // line. The header is stripped from the client response by
+    // build_ssr_response_headers; we read the raw `page_headers` here.
+    if is_dev_mode() {
+        let dev_header = page_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("x-pylon-dev"))
+            .map(|(_, v)| v.as_str());
+        let render_ms = render_t0.elapsed().as_secs_f64() * 1000.0;
+        if let Some(summary) = crate::dev_diagnostics::record_from_header(
+            dev_header,
+            &path_only,
+            status,
+            (render_ms * 10.0).round() / 10.0,
+        ) {
+            tracing::info!("[pylon:dev] SSR {} → {}", path_only, summary);
+        }
+    }
 
     // #277 Stage 2 / Phase 0 write-tee. The body has fully streamed to the
     // client; now persist it for subsequent requests IF this render earned it (a
