@@ -1362,11 +1362,14 @@ function pylonDevHud() {
   };
 
   // A row; pass `key` to make it click-to-expand the matching drawer section.
-  const rowEl = (label: string, key?: string) => {
+  // Each row hover-explains itself via a native `title` (the terse labels are
+  // cryptic otherwise). `key` makes the row click-to-expand its drawer.
+  const rowEl = (label: string, tip: string, key?: string) => {
     const r = make(
       "div",
       "display:flex;align-items:flex-start;gap:8px;margin:3px 0" + (key ? ";cursor:pointer" : ""),
     );
+    r.title = key ? tip + " (click to expand)" : tip;
     r.appendChild(make("span", "color:#8b949e;flex:0 0 60px", key ? label + " ▸" : label));
     const v = make("span", "color:#e6edf3;word-break:break-word;flex:1");
     r.appendChild(v);
@@ -1385,18 +1388,39 @@ function pylonDevHud() {
     cache.verdict === "dynamic"
       ? "dynamic"
       : cache.verdict + (cache.secs ? " · " + cache.secs + "s" : "");
-  rowEl("route").textContent = info.route || "—";
-  rowEl("page").textContent = info.component || "—";
-  const cacheV = rowEl("cache", "cache");
+  rowEl("route", "The request path being server-rendered.").textContent = info.route || "—";
+  rowEl("page", "The page component (app/…/page.tsx) that matched this route.").textContent =
+    info.component || "—";
+  const cacheV = rowEl(
+    "cache",
+    "SSR output-cache verdict — dynamic = re-rendered every request; cacheable = shared anonymous cache; bucketed = cached per signed-in/out shell. Shows the single reason it's dynamic.",
+    "cache",
+  );
   cacheV.textContent = cacheLabel + (cache.reason ? "  ·  " + cache.reason : "");
   cacheV.style.color = cache.verdict === "dynamic" ? C.warn : C.ok;
-  rowEl("render").textContent =
+  rowEl(
+    "render",
+    "How the page rendered (buffered vs streaming) and the server render time, end to end.",
+  ).textContent =
     (info.renderMode || "ssr") + (info.renderMs != null ? " · " + info.renderMs + "ms" : "");
-  const syncV = rowEl("sync");
-  const apiV = rowEl("api", "api");
-  const errV = rowEl("errors", "errors");
+  const syncV = rowEl(
+    "sync",
+    "Local-first sync engine — connection status · queued offline writes (outbox) · rows in the local replica.",
+  );
+  const apiV = rowEl(
+    "api",
+    "Recent /api/* calls this page made: status + timing. 403s show the policy reason.",
+    "api",
+  );
+  const errV = rowEl(
+    "errors",
+    "Uncaught client errors + unhandled promise rejections captured on this page.",
+    "errors",
+  );
   panel.appendChild(drawer);
 
+  pill.title =
+    "Pylon dev HUD — cache verdict, render timing, sync + /api activity, errors. Click to expand.";
   pill.appendChild(dot(cache.verdict === "dynamic" ? C.warn : C.ok));
   pill.appendChild(make("span", "font-weight:600;color:#e6edf3", "pylon"));
   const pillSyncDot = dot(C.dim);
