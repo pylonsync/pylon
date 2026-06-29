@@ -22,6 +22,7 @@ import {
   computeCacheVerdict,
   computeRevalidateSecs,
   computeWantsStream,
+  describeCacheVerdict,
   diffCommittedResponse,
   isDevMode,
 } from "./ssr-runtime";
@@ -219,6 +220,61 @@ describe("computeBucketVerdict (PPR Phase 0 — session-presence shared cache)",
                 });
                 expect(v).toBe(false);
               }
+  });
+});
+
+describe("describeCacheVerdict (dev HUD — why isn't my page cached?)", () => {
+  const base = {
+    bucketOptIn: false,
+    cacheable: false,
+    bucketable: false,
+    revalidateSecs: null as number | null,
+    authTouched: false,
+    dynamicTouched: false,
+    sessionTouched: false,
+    cookieCount: 0,
+    strictPolicies: false,
+    wantsStream: false,
+    forceDynamic: false,
+    status: 200,
+  };
+
+  test("cacheable / bucketed verdicts carry the TTL", () => {
+    expect(describeCacheVerdict({ ...base, cacheable: true, revalidateSecs: 60 })).toEqual({
+      verdict: "cacheable",
+      secs: 60,
+      reason: "anonymous shared cache",
+    });
+    const b = describeCacheVerdict({
+      ...base,
+      bucketOptIn: true,
+      bucketable: true,
+      revalidateSecs: 30,
+    });
+    expect(b.verdict).toBe("bucketed");
+    expect(b.secs).toBe(30);
+  });
+
+  test("dynamic verdict reports the SINGLE actionable reason", () => {
+    const why = (over: any) =>
+      describeCacheVerdict({ ...base, ...over }).reason;
+    // Not opted in at all.
+    expect(why({})).toContain("not opted in");
+    // Opted in (revalidate set) but each veto wins in priority order.
+    const opted = { revalidateSecs: 60 };
+    expect(why({ ...opted, status: 404 })).toContain("status 404");
+    expect(why({ ...opted, forceDynamic: true })).toContain("force-dynamic");
+    expect(why({ ...opted, wantsStream: true })).toContain("streaming");
+    expect(why({ ...opted, cookieCount: 1 })).toContain("set a cookie");
+    expect(why({ ...opted, strictPolicies: true })).toContain("STRICT");
+    expect(why({ ...opted, authTouched: true })).toContain("props.auth");
+    expect(why({ ...opted, dynamicTouched: true })).toContain("headers/cookies");
+    // Reading session on a non-bucket page → the actionable hint to opt into buckets.
+    expect(why({ ...opted, sessionTouched: true })).toContain("auth-bucketed");
+    // …but on a bucket-opted page that didn't bucket for another reason, no hint.
+    expect(why({ bucketOptIn: true, revalidateSecs: 60, sessionTouched: true })).not.toContain(
+      "auth-bucketed",
+    );
   });
 });
 

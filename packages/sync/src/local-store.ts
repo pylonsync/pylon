@@ -60,6 +60,14 @@ export class LocalStore {
     return names;
   }
 
+  /** Total rows held across all entity tables — the local replica size.
+   *  Read by the dev HUD's sync row. */
+  size(): number {
+    let n = 0;
+    for (const table of this.tables.values()) n += table.size;
+    return n;
+  }
+
   /**
    * Remove a row whose absence was confirmed by the server-truth
    * reconciler. Records a tombstone at `tombstoneSeq` so a stale

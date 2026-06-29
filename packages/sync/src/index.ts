@@ -488,6 +488,15 @@ export class SyncEngine {
   }
 
   /**
+   * Count of optimistic writes still queued locally (not yet acked by the
+   * server) — i.e. the offline outbox depth. 0 when fully synced. Read by the
+   * dev HUD's sync row; also handy for a "saving…" indicator.
+   */
+  pendingCount(): number {
+    return this.mutations.pending().length;
+  }
+
+  /**
    * Mutate connection status + notify subscribers. Idempotent — same-
    * status calls are a no-op so the WS onopen → connected transition
    * doesn't spam re-renders during a stable connection.
@@ -532,6 +541,22 @@ export class SyncEngine {
     // promote/demote) only matter when multiTab is enabled.
     if (this.config.multiTab === false) {
       this.isMultiTabLeader = true;
+    }
+    // Dev HUD hook: in dev (the server injects `__PYLON_DEV__` into the page),
+    // publish a tiny read-only status probe the floating dev overlay polls for
+    // the sync row (connection + offline-outbox depth). Gated on the dev marker
+    // so it's never present in production. Defensive — never let it break init.
+    try {
+      const g = globalThis as Record<string, unknown>;
+      if (typeof window !== "undefined" && g.__PYLON_DEV__) {
+        g.__pylonDevSync = {
+          status: () => this.connectionStatus(),
+          pending: () => this.pendingCount(),
+          rows: () => this.store.size(),
+        };
+      }
+    } catch {
+      // ignore — the HUD just won't show a sync row
     }
   }
 

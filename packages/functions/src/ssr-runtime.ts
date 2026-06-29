@@ -1159,6 +1159,155 @@ const DEV_LIVE_RELOAD_SNIPPET =
   "}catch(_){}})();</script>";
 
 /**
+ * The dev HUD (a floating bottom-left overlay, dev-only): surfaces the
+ * framework decisions a dev otherwise can't see — the cache verdict + WHY a page
+ * isn't cached, render mode + timing, sync connection + offline-outbox depth, and
+ * client error count. Written as a plain function and embedded via `.toString()`
+ * (Bun strips the TS annotations), so it ships as self-contained browser JS that
+ * closes over nothing. Browser globals go through `g` so it typechecks without a
+ * DOM lib. Mirrors Next's dev indicator, tuned to Pylon's hidden state.
+ */
+function pylonDevHud() {
+  const g: any = globalThis;
+  const d: any = g.document;
+  if (!d || g.__pylonHudMounted) return;
+  g.__pylonHudMounted = true;
+
+  let info: any = {};
+  try {
+    const el = d.getElementById("__PYLON_DEV__");
+    if (el) info = JSON.parse(el.textContent || "{}");
+  } catch (_e) {}
+  // Marker the sync engine checks before publishing its dev status probe.
+  g.__PYLON_DEV__ = info;
+
+  const errs: string[] = [];
+  const onErr = (m: any) => {
+    errs.push(String(m));
+    if (errs.length > 50) errs.shift();
+  };
+  if (g.addEventListener) {
+    g.addEventListener("error", (e: any) => onErr((e && (e.message || e.error)) || e));
+    g.addEventListener("unhandledrejection", (e: any) => onErr((e && e.reason) || e));
+  }
+
+  const C = { ok: "#3fb950", warn: "#d29922", bad: "#f85149", dim: "#6e7681" };
+  const make = (tag: string, css: string, text?: string) => {
+    const n = d.createElement(tag);
+    n.style.cssText = css;
+    if (text != null) n.textContent = text;
+    return n;
+  };
+  const dot = (color: string) =>
+    make("span", "display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:" + color);
+
+  const box = make(
+    "div",
+    "position:fixed;left:12px;bottom:12px;z-index:2147483646;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace",
+  );
+  const panel = make(
+    "div",
+    "background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:9px 11px;margin-bottom:6px;min-width:240px;max-width:360px;box-shadow:0 8px 28px rgba(0,0,0,.45)",
+  );
+  const pill = make(
+    "button",
+    "display:flex;align-items:center;gap:6px;background:#161b22;border:1px solid #30363d;border-radius:999px;padding:5px 11px;color:#e6edf3;cursor:pointer;font:inherit;box-shadow:0 2px 10px rgba(0,0,0,.35)",
+  );
+
+  const rowEl = (label: string) => {
+    const r = make("div", "display:flex;align-items:flex-start;gap:8px;margin:3px 0");
+    r.appendChild(make("span", "color:#8b949e;flex:0 0 60px", label));
+    const v = make("span", "color:#e6edf3;word-break:break-word;flex:1");
+    r.appendChild(v);
+    panel.appendChild(r);
+    return v;
+  };
+
+  const cache = info.cache || {};
+  const cacheLabel =
+    cache.verdict === "dynamic"
+      ? "dynamic"
+      : cache.verdict + (cache.secs ? " · " + cache.secs + "s" : "");
+  rowEl("route").textContent = info.route || "—";
+  rowEl("page").textContent = info.component || "—";
+  const cacheV = rowEl("cache");
+  cacheV.textContent = cacheLabel + (cache.reason ? "  ·  " + cache.reason : "");
+  cacheV.style.color = cache.verdict === "dynamic" ? C.warn : C.ok;
+  rowEl("render").textContent =
+    (info.renderMode || "ssr") + (info.renderMs != null ? " · " + info.renderMs + "ms" : "");
+  const syncV = rowEl("sync");
+  const errV = rowEl("errors");
+
+  pill.appendChild(dot(cache.verdict === "dynamic" ? C.warn : C.ok));
+  pill.appendChild(make("span", "font-weight:600;color:#e6edf3", "pylon"));
+  const pillSyncDot = dot(C.dim);
+  pill.appendChild(pillSyncDot);
+
+  let open = false;
+  try {
+    open = g.localStorage && g.localStorage.getItem("pylon.hud.open") === "1";
+  } catch (_e) {}
+  panel.style.display = open ? "block" : "none";
+  pill.onclick = () => {
+    open = !open;
+    panel.style.display = open ? "block" : "none";
+    try {
+      g.localStorage && g.localStorage.setItem("pylon.hud.open", open ? "1" : "0");
+    } catch (_e) {}
+  };
+
+  const refresh = () => {
+    const s = g.__pylonDevSync;
+    if (s) {
+      let st = "?";
+      let pend = 0;
+      let rows = 0;
+      try {
+        st = s.status();
+        pend = s.pending();
+        rows = s.rows();
+      } catch (_e) {}
+      syncV.textContent = st + " · " + pend + " pending · " + rows + " rows";
+      const col = st === "connected" ? C.ok : st === "offline" ? C.bad : C.warn;
+      syncV.style.color = col;
+      pillSyncDot.style.background = col;
+    } else {
+      const online = g.navigator ? g.navigator.onLine : true;
+      syncV.textContent = "no sync engine · " + (online ? "online" : "offline");
+      syncV.style.color = C.dim;
+      pillSyncDot.style.background = online ? C.dim : C.bad;
+    }
+    errV.textContent = errs.length === 0 ? "0" : errs.length + " · " + errs[errs.length - 1];
+    errV.style.color = errs.length ? C.bad : C.dim;
+  };
+
+  box.appendChild(panel);
+  box.appendChild(pill);
+  const mount = () => (d.body || d.documentElement).appendChild(box);
+  if (d.body) mount();
+  else if (g.addEventListener) g.addEventListener("DOMContentLoaded", mount);
+  refresh();
+  if (g.setInterval) g.setInterval(refresh, 1000);
+}
+
+/**
+ * Dev-only tail chunk: the `__PYLON_DEV__` info blob (cache verdict, render
+ * mode/timing, route) + the HUD bootstrap. Embedded after the page tail so the
+ * marker + probe are in place before the deferred client entry boots the sync
+ * engine. `<` is escaped so the JSON can't break out of the script.
+ */
+export function buildDevHudChunk(devInfo: Record<string, unknown>): string {
+  const json = JSON.stringify(devInfo)
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  return (
+    `<script id="__PYLON_DEV__" type="application/json">${json}</script>` +
+    `<script>(${pylonDevHud.toString()})();</script>`
+  );
+}
+
+/**
  * Build the <head> blob for a boundary render: the union of every route's
  * stylesheet links from the client build manifest. Boundary modules aren't
  * bundled as their own client entry, but they render inside the same
@@ -1706,6 +1855,69 @@ export function computeBucketVerdict(args: {
 }
 
 /**
+ * Dev HUD: explain the cache verdict for a finished render in human terms — the
+ * verdict, its TTL, and (when dynamic) the SINGLE reason it isn't cached. Pure so
+ * it's unit-tested and matches `computeCacheVerdict`/`computeBucketVerdict`
+ * exactly. The "why isn't my page caching?" answer the framework otherwise throws
+ * away.
+ */
+export function describeCacheVerdict(v: {
+  bucketOptIn: boolean;
+  cacheable: boolean;
+  bucketable: boolean;
+  revalidateSecs: number | null;
+  authTouched: boolean;
+  dynamicTouched: boolean;
+  sessionTouched: boolean;
+  cookieCount: number;
+  strictPolicies: boolean;
+  wantsStream: boolean;
+  forceDynamic: boolean;
+  status: number;
+}): { verdict: "bucketed" | "cacheable" | "dynamic"; secs: number | null; reason: string } {
+  if (v.bucketable) {
+    return {
+      verdict: "bucketed",
+      secs: v.revalidateSecs,
+      reason: "shared cache, keyed on session presence",
+    };
+  }
+  if (v.cacheable) {
+    return {
+      verdict: "cacheable",
+      secs: v.revalidateSecs,
+      reason: "anonymous shared cache",
+    };
+  }
+  // Dynamic — surface the single most useful reason (mirrors the verdict order).
+  let reason: string;
+  if (!v.bucketOptIn && v.revalidateSecs == null) {
+    reason = "not opted in — add `export const revalidate = N` (or `cache = \"auth-bucketed\"`)";
+  } else if (v.status !== 200) {
+    reason = `status ${v.status} (only 200 is cacheable)`;
+  } else if (v.forceDynamic) {
+    reason = "dynamic = \"force-dynamic\"";
+  } else if (v.wantsStream) {
+    reason = "streaming render (loading.tsx / streaming = true)";
+  } else if (v.cookieCount > 0) {
+    reason = "the render set a cookie";
+  } else if (v.strictPolicies) {
+    reason = "PYLON_STRICT_FN_POLICIES (serverData reads are auth-filtered)";
+  } else if (v.authTouched) {
+    reason = "read props.auth (identity-specific)";
+  } else if (v.dynamicTouched) {
+    reason = "read request headers/cookies";
+  } else if (v.sessionTouched) {
+    reason = v.bucketOptIn
+      ? "read props.session"
+      : "read props.session — add `export const cache = \"auth-bucketed\"` to bucket-cache it";
+  } else {
+    reason = "not cacheable";
+  }
+  return { verdict: "dynamic", secs: null, reason };
+}
+
+/**
  * #278: diff the response head committed at `response_start` against the final
  * state after EOF, to catch a late response.* mutation from a suspended subtree
  * that the already-sent head couldn't carry. Returns the dropped pieces, or
@@ -1901,6 +2113,10 @@ export async function handleRenderRoute(
       ? "robots"
       : null;
   if (dataKind) return handleDataRoute(msg, dataKind, send);
+
+  // Dev HUD: wall-clock for the whole render, surfaced in the dev overlay's
+  // render row. `performance.now()` is monotonic; harmless in prod (unused).
+  const renderStart = isDevMode() ? performance.now() : 0;
 
   // Declared OUTSIDE the try so the catch can read page-set status/
   // cookies when turning a redirect()/notFound() throw into a response.
@@ -2473,6 +2689,35 @@ export async function handleRenderRoute(
           : undefined,
       });
       sendChunk(tail);
+    }
+
+    // Dev HUD (dev only): append the cache-verdict + render-timing blob + the
+    // floating overlay. After the page tail so its marker/probe are in place
+    // before the deferred client entry boots the sync engine.
+    if (isDevMode()) {
+      const verdict = describeCacheVerdict({
+        bucketOptIn,
+        cacheable,
+        bucketable,
+        revalidateSecs,
+        authTouched,
+        dynamicTouched,
+        sessionTouched,
+        cookieCount: responseState.cookies.length,
+        strictPolicies,
+        wantsStream,
+        forceDynamic,
+        status: responseState.status,
+      });
+      sendChunk(
+        buildDevHudChunk({
+          route: msg.url,
+          component: msg.component,
+          renderMode: wantsStream ? "ssr-streaming" : "ssr-buffered",
+          renderMs: Math.round((performance.now() - renderStart) * 10) / 10,
+          cache: verdict,
+        }),
+      );
     }
 
     send({ type: "render_done", call_id: msg.call_id });
