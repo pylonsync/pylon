@@ -1159,13 +1159,14 @@ const DEV_LIVE_RELOAD_SNIPPET =
   "}catch(_){}})();</script>";
 
 /**
- * The dev HUD (a floating bottom-left overlay, dev-only): surfaces the
- * framework decisions a dev otherwise can't see — the cache verdict + WHY a page
- * isn't cached, render mode + timing, sync connection + offline-outbox depth, and
- * client error count. Written as a plain function and embedded via `.toString()`
- * (Bun strips the TS annotations), so it ships as self-contained browser JS that
- * closes over nothing. Browser globals go through `g` so it typechecks without a
- * DOM lib. Mirrors Next's dev indicator, tuned to Pylon's hidden state.
+ * The dev HUD (a floating bottom-left overlay, dev-only): surfaces the framework
+ * decisions a dev otherwise can't see — the cache verdict + WHY a page isn't
+ * cached, render mode + timing, sync connection + offline-outbox depth, /api
+ * activity + policy denials, and client errors. The cache / api / errors rows
+ * expand a detail drawer (click). Written as a plain function and embedded via
+ * `.toString()` (Bun strips the TS annotations), so it ships as self-contained
+ * browser JS that closes over nothing. Browser globals go through `g` so it
+ * typechecks without a DOM lib. Mirrors Next's dev indicator, tuned to Pylon.
  */
 function pylonDevHud() {
   const g: any = globalThis;
@@ -1181,6 +1182,7 @@ function pylonDevHud() {
   // Marker the sync engine checks before publishing its dev status probe.
   g.__PYLON_DEV__ = info;
 
+  // Client errors.
   const errs: string[] = [];
   const onErr = (m: any) => {
     errs.push(String(m));
@@ -1191,7 +1193,68 @@ function pylonDevHud() {
     g.addEventListener("unhandledrejection", (e: any) => onErr((e && e.reason) || e));
   }
 
-  const C = { ok: "#3fb950", warn: "#d29922", bad: "#f85149", dim: "#6e7681" };
+  // /api activity: wrap fetch ONCE to observe Pylon API calls (method, path,
+  // status, ms, and a policy/error reason on non-2xx). Transparent — returns the
+  // ORIGINAL promise untouched; the body is read from a clone only on errors.
+  const api: any[] = [];
+  if (g.fetch && !g.__pylonFetchWrapped) {
+    g.__pylonFetchWrapped = true;
+    const orig = g.fetch.bind(g);
+    g.fetch = function (input: any, init: any) {
+      let url = "";
+      try {
+        url = typeof input === "string" ? input : (input && input.url) || "";
+      } catch (_e) {}
+      const method = String(
+        (init && init.method) || (input && input.method) || "GET",
+      ).toUpperCase();
+      const t0 = g.performance && g.performance.now ? g.performance.now() : Date.now();
+      const p = orig(input, init);
+      if (url.indexOf("/api/") !== -1 && p && p.then) {
+        const path = url.replace(/^https?:\/\/[^/]+/, "").split("?")[0];
+        const done = (status: number, reason: string) => {
+          const t1 = g.performance && g.performance.now ? g.performance.now() : Date.now();
+          api.push({
+            method,
+            path,
+            status,
+            ms: Math.round((t1 - t0) * 10) / 10,
+            reason,
+            denied: status === 403,
+          });
+          if (api.length > 40) api.shift();
+        };
+        p.then(
+          (res: any) => {
+            if (!res.ok && res.clone) {
+              res
+                .clone()
+                .json()
+                .then((b: any) =>
+                  done(
+                    res.status,
+                    (b && b.error && (b.error.message || b.error.code)) || (b && b.message) || "",
+                  ),
+                )
+                .catch(() => done(res.status, ""));
+            } else {
+              done(res.status, "");
+            }
+          },
+          () => done(0, "network error"),
+        );
+      }
+      return p;
+    };
+  }
+
+  const C = {
+    ok: "#3fb950",
+    warn: "#d29922",
+    bad: "#f85149",
+    dim: "#6e7681",
+    txt: "#e6edf3",
+  };
   const make = (tag: string, css: string, text?: string) => {
     const n = d.createElement(tag);
     n.style.cssText = css;
@@ -1199,7 +1262,11 @@ function pylonDevHud() {
     return n;
   };
   const dot = (color: string) =>
-    make("span", "display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:" + color);
+    make(
+      "span",
+      "display:inline-block;width:7px;height:7px;border-radius:50%;flex:0 0 auto;background:" +
+        color,
+    );
 
   const box = make(
     "div",
@@ -1207,18 +1274,108 @@ function pylonDevHud() {
   );
   const panel = make(
     "div",
-    "background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:9px 11px;margin-bottom:6px;min-width:240px;max-width:360px;box-shadow:0 8px 28px rgba(0,0,0,.45)",
+    "background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:9px 11px;margin-bottom:6px;min-width:260px;max-width:380px;box-shadow:0 8px 28px rgba(0,0,0,.45)",
   );
   const pill = make(
     "button",
     "display:flex;align-items:center;gap:6px;background:#161b22;border:1px solid #30363d;border-radius:999px;padding:5px 11px;color:#e6edf3;cursor:pointer;font:inherit;box-shadow:0 2px 10px rgba(0,0,0,.35)",
   );
 
-  const rowEl = (label: string) => {
-    const r = make("div", "display:flex;align-items:flex-start;gap:8px;margin:3px 0");
-    r.appendChild(make("span", "color:#8b949e;flex:0 0 60px", label));
+  // The expandable detail area below the rows.
+  let activeDrawer: string | null = null;
+  const drawer = make(
+    "div",
+    "display:none;margin-top:7px;padding-top:7px;border-top:1px solid #21262d;max-height:200px;overflow:auto",
+  );
+  const drawerLine = (label: string, value: string, color?: string) => {
+    const r = make("div", "display:flex;gap:8px;margin:2px 0");
+    r.appendChild(make("span", "color:#8b949e;flex:0 0 110px", label));
+    r.appendChild(make("span", "color:" + (color || C.txt) + ";flex:1;word-break:break-word", value));
+    drawer.appendChild(r);
+  };
+  const renderDrawer = () => {
+    if (!activeDrawer) {
+      drawer.style.display = "none";
+      return;
+    }
+    drawer.style.display = "block";
+    drawer.textContent = "";
+    if (activeDrawer === "cache") {
+      const f = (info.cache && info.cache.flags) || {};
+      const optIn = f.bucketOptIn
+        ? "auth-bucketed"
+        : f.revalidateSecs != null
+          ? "revalidate=" + f.revalidateSecs + "s"
+          : "none";
+      drawerLine("opt-in", optIn, optIn === "none" ? C.warn : C.ok);
+      drawerLine("props.auth", f.authTouched ? "read ✗" : "untouched ✓", f.authTouched ? C.bad : C.ok);
+      drawerLine(
+        "headers/cookies",
+        f.dynamicTouched ? "read ✗" : "untouched ✓",
+        f.dynamicTouched ? C.bad : C.ok,
+      );
+      drawerLine("props.session", f.sessionTouched ? "read (bucket bit)" : "untouched", C.dim);
+      drawerLine("set-cookie", String(f.cookieCount || 0), f.cookieCount ? C.bad : C.ok);
+      drawerLine("strict policies", f.strictPolicies ? "on ✗" : "off ✓", f.strictPolicies ? C.bad : C.ok);
+      drawerLine("streaming", f.wantsStream ? "yes" : "no", C.dim);
+      drawerLine("status", String(f.status != null ? f.status : "—"), f.status === 200 ? C.ok : C.warn);
+    } else if (activeDrawer === "api") {
+      if (!api.length) {
+        drawerLine("", "no /api calls yet", C.dim);
+      } else {
+        for (let i = api.length - 1; i >= 0; i--) {
+          const a = api[i];
+          const col =
+            a.status === 0 || a.status >= 500 || a.denied
+              ? C.bad
+              : a.status >= 400
+                ? C.warn
+                : C.ok;
+          drawer.appendChild(
+            make(
+              "div",
+              "margin:2px 0;color:" + col + ";word-break:break-word",
+              a.method +
+                " " +
+                a.path +
+                "  " +
+                (a.status || "ERR") +
+                " · " +
+                a.ms +
+                "ms" +
+                (a.reason ? "  — " + a.reason : ""),
+            ),
+          );
+        }
+      }
+    } else if (activeDrawer === "errors") {
+      if (!errs.length) {
+        drawerLine("", "no errors", C.dim);
+      } else {
+        for (let i = errs.length - 1; i >= 0; i--) {
+          drawer.appendChild(
+            make("div", "margin:2px 0;color:" + C.bad + ";word-break:break-word", errs[i]),
+          );
+        }
+      }
+    }
+  };
+
+  // A row; pass `key` to make it click-to-expand the matching drawer section.
+  const rowEl = (label: string, key?: string) => {
+    const r = make(
+      "div",
+      "display:flex;align-items:flex-start;gap:8px;margin:3px 0" + (key ? ";cursor:pointer" : ""),
+    );
+    r.appendChild(make("span", "color:#8b949e;flex:0 0 60px", key ? label + " ▸" : label));
     const v = make("span", "color:#e6edf3;word-break:break-word;flex:1");
     r.appendChild(v);
+    if (key) {
+      r.onclick = () => {
+        activeDrawer = activeDrawer === key ? null : key;
+        renderDrawer();
+      };
+    }
     panel.appendChild(r);
     return v;
   };
@@ -1230,13 +1387,15 @@ function pylonDevHud() {
       : cache.verdict + (cache.secs ? " · " + cache.secs + "s" : "");
   rowEl("route").textContent = info.route || "—";
   rowEl("page").textContent = info.component || "—";
-  const cacheV = rowEl("cache");
+  const cacheV = rowEl("cache", "cache");
   cacheV.textContent = cacheLabel + (cache.reason ? "  ·  " + cache.reason : "");
   cacheV.style.color = cache.verdict === "dynamic" ? C.warn : C.ok;
   rowEl("render").textContent =
     (info.renderMode || "ssr") + (info.renderMs != null ? " · " + info.renderMs + "ms" : "");
   const syncV = rowEl("sync");
-  const errV = rowEl("errors");
+  const apiV = rowEl("api", "api");
+  const errV = rowEl("errors", "errors");
+  panel.appendChild(drawer);
 
   pill.appendChild(dot(cache.verdict === "dynamic" ? C.warn : C.ok));
   pill.appendChild(make("span", "font-weight:600;color:#e6edf3", "pylon"));
@@ -1277,8 +1436,14 @@ function pylonDevHud() {
       syncV.style.color = C.dim;
       pillSyncDot.style.background = online ? C.dim : C.bad;
     }
-    errV.textContent = errs.length === 0 ? "0" : errs.length + " · " + errs[errs.length - 1];
+    const failed = api.filter((a) => a.denied || a.status === 0 || a.status >= 400).length;
+    apiV.textContent =
+      api.length === 0 ? "—" : api.length + " calls" + (failed ? " · " + failed + " failed" : "");
+    apiV.style.color = failed ? C.bad : api.length ? C.ok : C.dim;
+    errV.textContent = String(errs.length);
     errV.style.color = errs.length ? C.bad : C.dim;
+    // Keep the live sections (api / errors) fresh while open.
+    if (activeDrawer === "api" || activeDrawer === "errors") renderDrawer();
   };
 
   box.appendChild(panel);
@@ -2739,7 +2904,22 @@ export async function handleRenderRoute(
           component: msg.component,
           renderMode,
           renderMs,
-          cache: devVerdict,
+          // verdict + reason + the raw gate flags, so the HUD's cache drawer can
+          // show the full per-gate breakdown (which check vetoed caching).
+          cache: {
+            ...devVerdict,
+            flags: {
+              bucketOptIn,
+              revalidateSecs,
+              authTouched,
+              dynamicTouched,
+              sessionTouched,
+              cookieCount: responseState.cookies.length,
+              strictPolicies,
+              wantsStream,
+              status: responseState.status,
+            },
+          },
         }),
       );
       // The structured dev-log line is emitted host-side (Rust tracing) from the
