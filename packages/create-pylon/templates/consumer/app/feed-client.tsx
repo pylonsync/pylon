@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState } from "react";
-import { db } from "@pylonsync/react";
+import React, { useEffect, useState } from "react";
+import { db, callFn } from "@pylonsync/react";
 import { EnsureGuest, useAuth } from "@pylonsync/client";
 import { Button } from "@/components/ui/button";
 
@@ -32,6 +32,11 @@ export function Feed() {
 function FeedInner() {
   const { userId } = useAuth();
   const [text, setText] = useState("");
+  // Seed a few demo posts on first visit so the feed isn't empty. No-op once
+  // any post exists; safe to call every mount.
+  useEffect(() => {
+    void callFn("seedPosts", {});
+  }, []);
   const { data: posts, loading } = db.useQuery<Post>("Post");
   // Public-read, so this is every like in the system — we count + match them
   // client-side. db.useQuery is live, so counts update the instant anyone likes.

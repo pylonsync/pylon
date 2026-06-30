@@ -195,6 +195,11 @@ const StockMovement = entity(
     indexes: [
       { name: "by_material", fields: ["materialId", "createdAt"], unique: false },
     ],
+    // Append-only inventory ledger — grows unbounded for an active shop and is
+    // only ever read server-side (analytics via db.useAggregate), never from a
+    // client replica. Keep it out of the client sync set so it never bulk-
+    // replicates into a browser.
+    sync: false,
   },
 );
 
