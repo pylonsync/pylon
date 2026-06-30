@@ -249,6 +249,7 @@ async function handle(
         body: { error: { code: "RESYNC_REQUIRED" } },
       };
     }
+    server.pullUrls.push(url);
     const since = Number(new URL(url, "http://test").searchParams.get("since") ?? "0");
     // Cluster-divergence sim: a delta pull lands on an instance that
     // can't serve our cursor → 410. A snapshot (since=0) still succeeds.
@@ -257,6 +258,24 @@ async function handle(
         status: 410,
         body: { error: { code: "RESYNC_REQUIRED" } },
       };
+    }
+    // Snapshot pagination sim (since=0). A primed from-0 pull returns an
+    // already-URL-encoded `snapshot_after` continuation (page 1); the resume
+    // request (page 2) carries it back and gets the final page. The regression
+    // guard lives in the TEST, which inspects the captured page-2 URL: the client
+    // must echo the cursor VERBATIM, not re-encode it (double-encoding broke the
+    // server's single url_decode and restarted the snapshot forever).
+    if (since === 0) {
+      const hasResume = url.includes("snapshot_after=");
+      if (!hasResume) {
+        const token = server.consumeSnapshotAfter();
+        if (token) {
+          const resp = await server.pull(token, since);
+          return { status: 200, body: { ...resp, snapshot_after: token } };
+        }
+      }
+      // Resume page (or no pagination primed): fall through to a normal,
+      // terminating snapshot (no snapshot_after → client exits the loop).
     }
     const resp = await server.pull(token, since);
     // One-shot has_more on a delta pull → drives the tail-pull recursion.

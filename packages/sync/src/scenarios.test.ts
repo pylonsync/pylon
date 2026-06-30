@@ -941,4 +941,34 @@ describe("sync scenarios", () => {
     // follower broadcast and nothing re-pushed.
     expect(env.server.receivedPushKeys).toContain("Note/n1");
   });
+
+  // Pins: the snapshot_after continuation cursor must be appended to the pull
+  // URL VERBATIM. The server returns it already URL-encoded; the client used to
+  // run it back through URLSearchParams, double-encoding it. The server's single
+  // url_decode then left it encoded, serde_json::from_str failed, the resume was
+  // ignored, and the snapshot restarted from row 0 on EVERY page — an infinite
+  // re-snapshot loop (and egress storm) for any synced table past one page
+  // (SNAPSHOT_BATCH_LIMIT rows). Reproduced live on the 10k-product store demo.
+  test("snapshot pagination echoes the cursor verbatim (no double-encode loop)", async () => {
+    env = createTestEnv();
+    // The real server's cursor: url_encode(JSON) — full of %-escapes.
+    const cursor = "%7B%22a%22%3A%22r1%22%2C%22e%22%3A%22Recording%22%2C%22s%22%3A1%7D";
+    env.server.primeSnapshotAfter(cursor);
+
+    await env.start();
+
+    const snapshotPulls = env.server.pullUrls.filter((u) => u.includes("since=0"));
+    // Page 1 (no cursor) + page 2 (resume) — BOUNDED. A regressed engine would
+    // loop forever on page 1; the mock terminates the resume so this stays a
+    // fast assertion instead of a hang.
+    expect(snapshotPulls.length).toBeGreaterThanOrEqual(2);
+    expect(snapshotPulls.length).toBeLessThan(6);
+
+    const resume = snapshotPulls.find((u) => u.includes("snapshot_after="));
+    expect(resume).toBeDefined();
+    const sent = resume!.split("snapshot_after=")[1]!.split("&")[0];
+    // VERBATIM. Double-encoding would have produced `%2522`/`%257B`.
+    expect(sent).toBe(cursor);
+    expect(sent).not.toContain("%2522");
+  });
 });

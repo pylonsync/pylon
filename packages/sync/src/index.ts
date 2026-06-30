@@ -1543,14 +1543,21 @@ export class SyncEngine {
       let firstPass = true;
       while (firstPass || snapshotAfter) {
         firstPass = false;
-        const params = new URLSearchParams();
-        params.set("since", String(this.cursor.last_seq));
+        // `snapshot_after` is an OPAQUE cursor the server already URL-encoded
+        // (it `url_encode`s the JSON payload). It MUST be appended raw — running
+        // it back through URLSearchParams would double-encode it, the server's
+        // single `url_decode` would leave it still-encoded, `serde_json::from_str`
+        // would fail, and the server would treat the page as "no resume" and
+        // restart the snapshot from row 0 — an infinite re-snapshot loop for any
+        // table larger than one page (SNAPSHOT_BATCH_LIMIT rows). `since` is a
+        // plain integer, so it's safe to inline.
+        let query = `since=${this.cursor.last_seq}`;
         if (snapshotAfter) {
-          params.set("snapshot_after", snapshotAfter);
+          query += `&snapshot_after=${snapshotAfter}`;
         }
         const resp = await this.request<
           PullResponse & { snapshot_after?: string | null }
-        >("GET", `/api/sync/pull?${params.toString()}`);
+        >("GET", `/api/sync/pull?${query}`);
         await this.enqueueApply(resp.changes, resp.cursor, { isPull: true });
         // `snapshot_after` is only set when the server is mid-snapshot.
         // Continue paginating in the same loop iteration so we don't

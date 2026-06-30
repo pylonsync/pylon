@@ -243,6 +243,25 @@ export class TestServer {
     return v;
   }
 
+  /** Every `/api/sync/pull` URL the engine requested, in order. Lets a test
+   *  assert how the engine encodes query params (e.g. that `snapshot_after` is
+   *  not double-URL-encoded — the bug that caused an infinite re-snapshot loop). */
+  pullUrls: string[] = [];
+
+  /** One-shot: make the next from-0 snapshot pull return this `snapshot_after`
+   *  token (a continuation cursor), so a test can drive the engine's snapshot
+   *  pagination + assert the resume request echoes the token verbatim. The token
+   *  is what the real server returns: already URL-encoded JSON. */
+  private nextSnapshotAfter: string | null = null;
+  primeSnapshotAfter(token: string): void {
+    this.nextSnapshotAfter = token;
+  }
+  consumeSnapshotAfter(): string | null {
+    const v = this.nextSnapshotAfter;
+    this.nextSnapshotAfter = null;
+    return v;
+  }
+
   // ---- Entity data --------------------------------------------------------
 
   /** Bulk-seed rows for an entity AND emit insert events into the
