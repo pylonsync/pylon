@@ -5588,6 +5588,7 @@ pub(crate) fn cron_lease_entity() -> pylon_kernel::ManifestEntity {
         relations: vec![],
         search: None,
         crdt: false,
+        sync: true,
     }
 }
 
@@ -7428,6 +7429,7 @@ mod sqlite_transact_tx_safety_tests {
                 relations: vec![],
                 search: None,
                 crdt: false,
+                sync: true,
             }],
             ..Default::default()
         }

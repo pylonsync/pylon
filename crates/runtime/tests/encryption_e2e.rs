@@ -59,6 +59,7 @@ fn manifest_with_encrypted_ssn() -> AppManifest {
             relations: vec![],
             search: None,
             crdt: false,
+            sync: true,
         }],
         routes: vec![],
         queries: vec![],

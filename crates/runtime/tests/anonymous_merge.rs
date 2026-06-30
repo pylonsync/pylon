@@ -39,6 +39,7 @@ fn entity(name: &str, fields: Vec<ManifestField>) -> ManifestEntity {
         relations: vec![],
         search: None,
         crdt: true,
+        sync: true,
     }
 }
 

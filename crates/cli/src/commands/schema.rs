@@ -1303,6 +1303,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![ManifestRoute {
                 path: "/".into(),
@@ -1338,6 +1339,7 @@ mod tests {
             relations: vec![],
             search: None,
             crdt: true,
+            sync: true,
         });
         let changes = compute_diff(&old, &new);
         assert!(changes

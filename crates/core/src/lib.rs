@@ -479,9 +479,22 @@ pub struct ManifestEntity {
     /// and indexes don't change between modes.
     #[serde(default = "default_crdt_enabled")]
     pub crdt: bool,
+    /// Client replication. Default `true` — the entity is bulk-snapshotted +
+    /// delta-streamed into every client's local replica. Set `false` for large,
+    /// server-queried catalogs (a 10k-row product table) that the client reaches
+    /// via search + by-id fetch instead of holding the whole table locally:
+    /// `sync: false` excludes the entity from the snapshot AND the change-log
+    /// delta, so it never floods the replica. Direct reads (`/api/entities/X`,
+    /// `/api/search/X`) and policies are unchanged.
+    #[serde(default = "default_sync_enabled")]
+    pub sync: bool,
 }
 
 fn default_crdt_enabled() -> bool {
+    true
+}
+
+fn default_sync_enabled() -> bool {
     true
 }
 
@@ -494,6 +507,7 @@ impl Default for ManifestEntity {
             relations: Vec::new(),
             search: None,
             crdt: true,
+            sync: true,
         }
     }
 }

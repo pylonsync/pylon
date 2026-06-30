@@ -692,6 +692,7 @@ mod tests {
                     relations: vec![],
                     search: None,
                     crdt: true,
+                    sync: true,
                 },
                 ManifestEntity {
                     name: "Post".into(),
@@ -725,6 +726,7 @@ mod tests {
                     relations: vec![],
                     search: None,
                     crdt: true,
+                    sync: true,
                 },
             ],
             routes: vec![],

@@ -237,6 +237,7 @@ mod tests {
             relations: vec![],
             search: None,
             crdt: true,
+            sync: true,
         });
         m
     }

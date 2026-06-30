@@ -55,6 +55,7 @@ fn test_manifest() -> AppManifest {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             },
             secret_entity(),
         ],
@@ -109,6 +110,7 @@ fn secret_entity() -> ManifestEntity {
         relations: vec![],
         search: None,
         crdt: false,
+        sync: true,
     }
 }
 
@@ -494,6 +496,124 @@ fn deny_all_entity_excluded_from_snapshot() {
 }
 
 // ---------------------------------------------------------------------------
+// A `sync: false` entity is excluded from BOTH the snapshot and the change-log
+// delta — even with a PUBLIC read policy. This is the knob that lets a large,
+// server-queried catalog (the store's 10k-row Product table) stay out of every
+// client replica while remaining directly readable via /api/entities + search.
+// Distinct from `deny_all_entity_excluded_from_snapshot`: there a deny-all
+// policy drives the exclusion; here the rows are fully readable and only the
+// `sync` flag keeps them out of bulk replication. Without the flag the public
+// catalog would flood the snapshot AND re-flood via the delta tail forever.
+// ---------------------------------------------------------------------------
+#[test]
+fn sync_false_entity_excluded_from_snapshot_and_delta() {
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "Catalog".into(),
+        fields: vec![ManifestField {
+            name: "title".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: false,
+        // The entity under test: public to read, but never bulk-replicated.
+        sync: false,
+    });
+    manifest.policies.push(ManifestPolicy {
+        name: "catalog_public".into(),
+        entity: Some("Catalog".into()),
+        allow: "true".into(),
+        ..Default::default()
+    });
+
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    // Seed a synced Note and several Catalog rows through the HTTP write path.
+    insert_note(port, &token, "synced-note");
+    for i in 0..5 {
+        let (s, b) = http(
+            port,
+            "POST",
+            "/api/entities/Catalog",
+            Some(&token),
+            Some(&format!(r#"{{"title":"c{i}"}}"#)),
+        );
+        assert!(s == 200 || s == 201, "catalog insert: status={s} {b}");
+    }
+
+    // The catalog isn't hidden — direct reads still work (policy allows). It's
+    // only excluded from bulk replication, not from the API surface.
+    let (ls, lb) = http(port, "GET", "/api/entities/Catalog", Some(&token), None);
+    assert_eq!(
+        ls, 200,
+        "sync:false catalog must stay directly readable: {lb}"
+    );
+    assert!(
+        lb.contains("c0") && lb.contains("c4"),
+        "direct catalog read must return the rows: {lb}"
+    );
+
+    // 1. SNAPSHOT (since=0): synced Note present, Catalog entirely absent, converges.
+    let (status, resp) = pull(port, &token, 0);
+    assert_eq!(status, 200, "snapshot pull: {resp}");
+    let changes = resp["changes"].as_array().unwrap();
+    assert!(
+        changes.iter().any(|c| c["entity"] == "Note"),
+        "synced Note must be in the snapshot: {resp}"
+    );
+    assert!(
+        changes.iter().all(|c| c["entity"] != "Catalog"),
+        "sync:false Catalog must be absent from the snapshot — not one of 5 rows leaks: {resp}"
+    );
+    assert_eq!(
+        resp["has_more"].as_bool().unwrap_or(false),
+        false,
+        "snapshot must converge (Catalog never paginated): {resp}"
+    );
+    let cursor = resp["cursor"]["last_seq"].as_u64().unwrap();
+    assert!(cursor > 0, "cursor must advance off 0: {resp}");
+
+    // 2. DELTA (since=cursor): a post-snapshot Catalog write must NOT stream
+    // (else the tail re-floods what the snapshot deliberately skipped); a
+    // post-snapshot Note write MUST stream.
+    let (cs, cb) = http(
+        port,
+        "POST",
+        "/api/entities/Catalog",
+        Some(&token),
+        Some(r#"{"title":"post-snapshot-catalog"}"#),
+    );
+    assert!(cs == 200 || cs == 201, "post-snapshot catalog insert: {cb}");
+    let new_note = insert_note(port, &token, "post-snapshot-note");
+
+    let (ds, dresp) = pull(port, &token, cursor);
+    assert_eq!(ds, 200, "delta pull: {dresp}");
+    let dchanges = dresp["changes"].as_array().unwrap();
+    assert!(
+        dchanges
+            .iter()
+            .any(|c| c["row_id"].as_str() == Some(new_note.as_str())),
+        "post-snapshot Note delta must stream: {dresp}"
+    );
+    assert!(
+        dchanges.iter().all(|c| c["entity"] != "Catalog"),
+        "sync:false Catalog delta must NOT stream (would re-flood the replica): {dresp}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Security: /api/sync/push must NOT let a non-admin write framework-internal
 // `_`-prefixed entities. The policy gate allows them (no app policy ⇒ allowed
 // for underscore entities), trusting the route edge to gate — the entity REST
@@ -527,6 +647,7 @@ fn push_rejects_underscore_entities_for_non_admin() {
         relations: vec![],
         search: None,
         crdt: false,
+        sync: true,
     });
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     let port = start_server(rt);
@@ -609,6 +730,7 @@ fn push_update_cannot_flip_readonly_field_for_non_admin() {
         relations: vec![],
         search: None,
         crdt: true,
+        sync: true,
     });
     manifest.policies.push(ManifestPolicy {
         name: "owned_public".into(),
@@ -720,6 +842,7 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
         relations: vec![],
         search: None,
         crdt: true,
+        sync: true,
     });
     // Data-dependent per-row policy: not statically deniable, so the entity is
     // scanned and filtered row-by-row — the path that scanned unboundedly.

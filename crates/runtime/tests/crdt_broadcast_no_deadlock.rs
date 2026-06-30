@@ -54,6 +54,7 @@ fn crdt_manifest() -> AppManifest {
             relations: vec![],
             search: None,
             crdt: true,
+            sync: true,
         }],
         ..Default::default()
     }

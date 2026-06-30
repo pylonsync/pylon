@@ -1218,6 +1218,7 @@ mod change_log_wiring_tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],

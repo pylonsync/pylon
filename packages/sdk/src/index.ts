@@ -360,6 +360,15 @@ export interface EntityDefinition {
   indexes?: IndexDefinition[];
   relations?: RelationDefinition[];
   search?: SearchConfig;
+  /**
+   * Client replication. Default `true` — the entity is bulk-snapshotted +
+   * delta-streamed into every client's local replica. Set `false` for a large,
+   * server-queried catalog (e.g. a 10k-row product table) the client reaches via
+   * `db.useSearch` + by-id fetch instead of holding the whole table locally:
+   * `sync: false` keeps it out of the replica entirely. Direct reads
+   * (`/api/entities/X`, `/api/search/X`) and policies are unchanged.
+   */
+  sync?: boolean;
 }
 
 export function entity(
@@ -369,6 +378,7 @@ export function entity(
     indexes?: IndexDefinition[];
     relations?: RelationDefinition[];
     search?: SearchConfig;
+    sync?: boolean;
   },
 ): EntityDefinition {
   return {
@@ -377,6 +387,7 @@ export function entity(
     indexes: options?.indexes,
     relations: options?.relations,
     search: options?.search,
+    sync: options?.sync,
   };
 }
 
@@ -606,6 +617,9 @@ export interface ManifestEntity {
     facets?: string[];
     sortable?: string[];
   };
+  /** Client replication; omitted when true (the default). `false` keeps the
+   *  entity out of the client replica (snapshot + delta) — server-queried only. */
+  sync?: boolean;
 }
 
 export interface ManifestRoute {
@@ -884,6 +898,10 @@ export function entitiesToManifest(
           sortable: s.sortable ?? [],
         };
       }
+    }
+    // Emit only when opted OUT — the runtime defaults sync to true.
+    if (e.sync === false) {
+      result.sync = false;
     }
     return result;
   });

@@ -64,6 +64,11 @@ const Product = entity(
       facets: ["brand", "category", "color"],
       sortable: ["price", "rating", "createdAt"],
     },
+    // The catalog is 10k rows — far too large to replicate into every browser.
+    // It's reached via server-side faceted search (db.useSearch) + by-id fetch
+    // for the detail page, so keep it OUT of the client sync replica. Only the
+    // small per-user entities (cart/addresses/orders) sync.
+    sync: false,
   },
 );
 

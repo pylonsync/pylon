@@ -171,6 +171,11 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         if entity.name.starts_with('_') {
             continue;
         }
+        // `sync: false` entities (large server-queried catalogs) are never bulk-
+        // replicated into the client — reached via search + by-id fetch instead.
+        if !entity.sync {
+            continue;
+        }
         if !started {
             if Some(&entity.name) == resume_entity.as_ref() {
                 started = true;
@@ -344,15 +349,25 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
 fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
     match ctx.change_log.pull(&SyncCursor { last_seq: since }, 100) {
         Ok(mut resp) => {
+            let manifest = ctx.store.manifest();
+            // Non-synced entities (`sync: false`) are never in the client replica
+            // (snapshot skips them), so don't stream their deltas either —
+            // otherwise the change-log tail would re-flood them post-snapshot.
+            let non_synced: std::collections::HashSet<&str> = manifest
+                .entities
+                .iter()
+                .filter(|e| !e.sync)
+                .map(|e| e.name.as_str())
+                .collect();
             resp.changes = resp
                 .changes
                 .into_iter()
+                .filter(|ev| !non_synced.contains(ev.entity.as_str()))
                 .filter_map(|ev| project_change_for_caller(ctx, ev))
                 .collect();
             // Wire-level projection on every kept event (data +
             // prev_data) so server-only fields don't leak via the
             // visibility-flip path either.
-            let manifest = ctx.store.manifest();
             let auth_user = &manifest.auth.user;
             for ev in resp.changes.iter_mut() {
                 if let Some(data) = ev.data.take() {

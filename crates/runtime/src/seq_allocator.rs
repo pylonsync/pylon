@@ -292,6 +292,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],

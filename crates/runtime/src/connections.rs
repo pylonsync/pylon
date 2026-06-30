@@ -808,6 +808,7 @@ pub fn connection_entity() -> pylon_kernel::ManifestEntity {
         relations: vec![],
         search: None,
         crdt: false,
+        sync: true,
     }
 }
 

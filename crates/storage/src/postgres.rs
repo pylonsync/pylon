@@ -2186,6 +2186,7 @@ mod tests {
                     relations: vec![],
                     search: None,
                     crdt: true,
+                    sync: true,
                 },
                 ManifestEntity {
                     name: "Todo".into(),
@@ -2204,6 +2205,7 @@ mod tests {
                     relations: vec![],
                     search: None,
                     crdt: true,
+                    sync: true,
                 },
             ],
             queries: vec![],

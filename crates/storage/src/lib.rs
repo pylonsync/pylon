@@ -875,6 +875,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -980,6 +981,7 @@ mod tests {
             relations: vec![],
             search: None,
             crdt: true,
+            sync: true,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -1276,6 +1278,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -1342,6 +1345,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -1450,6 +1454,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -1543,6 +1548,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -1600,6 +1606,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -1678,6 +1685,7 @@ mod tests {
             relations: vec![],
             search: None,
             crdt: true,
+            sync: true,
         }
     }
 

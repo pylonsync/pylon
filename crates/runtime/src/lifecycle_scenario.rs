@@ -209,6 +209,7 @@ fn entity(name: &str, fields: &[&str]) -> ManifestEntity {
         // CRDT is irrelevant to change-log persistence; keep it off so
         // inserts are plain SQL and the test stays focused.
         crdt: false,
+        sync: true,
     }
 }
 

@@ -72,6 +72,7 @@ fn fresh_runtime(url: &str) -> Runtime {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -269,6 +270,7 @@ fn typed_columns_roundtrip_correctly() {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -455,6 +457,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -488,6 +491,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -547,6 +551,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -575,6 +580,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -650,6 +656,7 @@ fn timestamptz_binds_iso_string_correctly() {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -812,6 +819,7 @@ fn crdt_runtime(url: &str) -> Runtime {
             // crdt: true opts the entity into the LoroDoc projection
             // path. Default field shape is LWW, which we exercise here.
             crdt: true,
+            sync: true,
             search: None,
         }],
         ..empty_manifest()
@@ -983,6 +991,7 @@ fn fts_runtime(url: &str) -> Runtime {
             indexes: vec![],
             relations: vec![],
             crdt: false,
+            sync: true,
             search: Some(ManifestSearchConfig {
                 text: vec!["name".into(), "description".into()],
                 facets: vec!["brand".into()],

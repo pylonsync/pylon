@@ -45,6 +45,7 @@ fn manifest() -> AppManifest {
             relations: vec![],
             search: None,
             crdt: false,
+            sync: true,
         }],
         routes: vec![],
         queries: vec![],

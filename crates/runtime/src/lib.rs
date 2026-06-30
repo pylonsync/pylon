@@ -4211,6 +4211,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: true,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -4957,6 +4958,7 @@ mod tests {
                 relations: vec![],
                 search: None,
                 crdt: false,
+                sync: true,
             }],
             routes: vec![],
             queries: vec![],
@@ -5058,6 +5060,7 @@ mod tests {
                 relations,
                 search: None,
                 crdt: false,
+                sync: true,
             }
         };
         let manifest = AppManifest {

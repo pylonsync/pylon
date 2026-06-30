@@ -149,7 +149,8 @@
           "rating",
           "createdAt"
         ]
-      }
+      },
+      "sync": false
     },
     {
       "name": "CartItem",

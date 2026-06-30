@@ -128,6 +128,7 @@ fn test_manifest() -> AppManifest {
             relations: vec![],
             search: None,
             crdt: true,
+            sync: true,
         }],
         routes: vec![],
         queries: vec![],

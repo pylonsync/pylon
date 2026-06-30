@@ -2,12 +2,13 @@
 /**
  * Product detail — single-product page reached via #/p/<id>.
  *
- * `db.useQueryOne` keeps the page in lockstep with the catalog: if a
- * background mutation changes the price or stock, the detail page
- * reflects it without a refresh.
+ * The 10k-product catalog is NOT client-replicated (Product is `sync: false`),
+ * so the detail page fetches the one product it needs by id from the server with
+ * `fetchById` — instead of reading a fully-synced replica. Search + this by-id
+ * fetch are all the client needs from the catalog.
  */
-import { useState } from "react";
-import { db } from "@pylonsync/react";
+import { useEffect, useState } from "react";
+import { fetchById } from "@pylonsync/react";
 import { ArrowLeft, Check, Star } from "lucide-react";
 import { Button } from "@pylonsync/example-ui/button";
 import { Card, CardContent } from "@pylonsync/example-ui/card";
@@ -23,8 +24,30 @@ export function ProductDetail({
   id: string;
   onAddToCart: (p: Product) => void;
 }) {
-  const { data: product, loading, error } = db.useQueryOne<Product>("Product", id);
+  const [product, setProduct] = useState<Product | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<Error | null>(null);
   const [added, setAdded] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    fetchById("Product", id)
+      .then((row) => {
+        if (!alive) return;
+        setProduct((row as Product | null) ?? null);
+        setLoading(false);
+      })
+      .catch((e) => {
+        if (!alive) return;
+        setError(e instanceof Error ? e : new Error(String(e)));
+        setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [id]);
 
   const handleAdd = () => {
     if (!product) return;
