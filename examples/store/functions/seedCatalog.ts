@@ -40,6 +40,53 @@ function seeded(i: number, n: number) {
   return Math.abs((i * 2654435761) % n);
 }
 
+// --- Derived facet/display fields ---------------------------------------
+// Faceted search filters on equality, not ranges, so price + rating are
+// bucketed into string tiers that show as sidebar facets.
+function priceBucket(price: number): string {
+  if (price < 25) return "Under $25";
+  if (price < 50) return "$25 – $50";
+  if (price < 100) return "$50 – $100";
+  if (price < 200) return "$100 – $200";
+  return "$200 & up";
+}
+
+function ratingTier(rating: number): string {
+  if (rating >= 4.5) return "4.5★ & up";
+  if (rating >= 4) return "4 – 4.5★";
+  if (rating >= 3.5) return "3.5 – 4★";
+  return "Under 3.5★";
+}
+
+// Sizes only apply to apparel; accessories/home are one-size. Stored as a
+// comma-joined string (no array field type) — the client splits it.
+function sizesFor(category: string): string {
+  switch (category) {
+    case "Shoes":
+      return "7,8,9,10,11,12";
+    case "Pants":
+      return "28,30,32,34,36";
+    case "Shirts":
+    case "Jackets":
+      return "XS,S,M,L,XL";
+    case "Hats":
+      return "S/M,L/XL";
+    default:
+      return "";
+  }
+}
+
+// A few merchandising tags on *some* items (comma-joined). Deterministic so
+// re-seeds are stable; most items get none, some get one or two.
+function tagsFor(i: number): string {
+  const t: string[] = [];
+  if (i % 4 === 0) t.push("Sale");
+  if (i % 6 === 0) t.push("New");
+  if (i % 11 === 0) t.push("Eco");
+  if (i % 9 === 0) t.push("Limited");
+  return t.join(",");
+}
+
 export default mutation({
   auth: "guest",
   args: {
@@ -50,23 +97,45 @@ export default mutation({
 
     const existing = await ctx.db.query("Product", {});
     if (existing.length >= target) {
-      // Migration for catalogs seeded before slug/featured/salesCount existed:
-      // backfill any row missing a slug so the /p/<slug> SSR route + the
-      // Featured/Best-selling facets work. Idempotent — skips done rows.
+      // Migration for catalogs seeded before the slug/facet/display fields
+      // existed. Idempotent: a row already carrying a priceBucket is done.
+      // Backfills slug too (older rows) without changing an existing one.
       let backfilled = 0;
+      let i = 0;
       for (const p of existing) {
-        const row = p as { id: string; name?: string; slug?: string };
-        if (row.slug) continue;
+        const row = p as {
+          id: string;
+          name?: string;
+          slug?: string;
+          price?: number;
+          rating?: number;
+          category?: string;
+          priceBucket?: string;
+        };
+        if (row.priceBucket) {
+          i++;
+          continue;
+        }
         const name = String(row.name ?? "product");
-        const sfx =
-          row.id.replace(/[^a-z0-9]/gi, "").slice(-6) ||
-          backfilled.toString(16);
-        await ctx.db.update("Product", row.id, {
-          slug: `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${sfx}`,
-          featured: seeded(backfilled + 29, 12) === 0,
-          salesCount: seeded(backfilled + 37, 5000),
-        });
+        const price = Number(row.price ?? 0);
+        const rating = Number(row.rating ?? 0);
+        const category = String(row.category ?? "");
+        const patch: Record<string, unknown> = {
+          priceBucket: priceBucket(price),
+          ratingTier: ratingTier(rating),
+          sizes: sizesFor(category),
+          tags: tagsFor(i),
+        };
+        if (!row.slug) {
+          const sfx =
+            row.id.replace(/[^a-z0-9]/gi, "").slice(-6) || i.toString(16);
+          patch.slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${sfx}`;
+          patch.featured = seeded(i + 29, 12) === 0;
+          patch.salesCount = seeded(i + 37, 5000);
+        }
+        await ctx.db.update("Product", row.id, patch);
         backfilled++;
+        i++;
       }
       return { inserted: 0, existing: existing.length, backfilled };
     }
@@ -85,7 +154,7 @@ export default mutation({
       const name = `${brand} ${adj} ${noun}`;
       const description = `The ${brand} ${name.toLowerCase()} — a ${color} ${category.toLowerCase().slice(0, -1)} designed for everyday wear. ${adj[0].toUpperCase()}${adj.slice(1)} ${noun} construction with a soft feel and long-lasting finish.`;
 
-      // Human-readable slug + a deterministic 4-hex suffix so repeated names
+      // Human-readable slug + a deterministic hex suffix so repeated names
       // across the 10k catalog still map to unique, shareable /p/<slug> URLs.
       const suffix = (seeded(i + 31, 0xffff) | 0x1000).toString(16);
       const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${suffix}`;
@@ -93,8 +162,8 @@ export default mutation({
       // Deterministic price + rating from the index so re-seeding
       // produces the same catalog. Prices cluster in the $20-$240
       // range; ratings skew high with natural variance.
-      const price = 20 + ((i * 17) % 220) + (i % 100) / 100;
-      const rating = 3.2 + ((i * 7) % 180) / 100;
+      const price = Math.round((20 + ((i * 17) % 220) + (i % 100) / 100) * 100) / 100;
+      const rating = Math.round((3.2 + ((i * 7) % 180) / 100) * 10) / 10;
       const stock = seeded(i + 23, 50);
       // ~8% featured; sales skew so a handful are clear best-sellers.
       const featured = seeded(i + 29, 12) === 0;
@@ -107,11 +176,15 @@ export default mutation({
         brand,
         category,
         color,
-        price: Math.round(price * 100) / 100,
-        rating: Math.round(rating * 10) / 10,
+        price,
+        rating,
         stock,
         featured,
         salesCount,
+        priceBucket: priceBucket(price),
+        ratingTier: ratingTier(rating),
+        sizes: sizesFor(category),
+        tags: tagsFor(i),
         createdAt: now,
       });
       inserted++;

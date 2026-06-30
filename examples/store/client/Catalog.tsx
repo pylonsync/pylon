@@ -39,10 +39,20 @@ const FACET_LABELS: Record<string, string> = {
   brand: "Brand",
   category: "Category",
   color: "Color",
+  priceBucket: "Price",
+  ratingTier: "Rating",
 };
 
 // Facet keys that map 1:1 to a URL query param + a db.useSearch filter.
-const FACET_ORDER = ["category", "brand", "color"];
+// Price + Rating sit high so they're visible without scrolling past the long
+// category/brand/color lists.
+const FACET_ORDER = ["category", "priceBucket", "ratingTier", "brand", "color"];
+
+// Bucket facets render in a fixed logical order (low→high), not by count.
+const BUCKET_ORDER: Record<string, string[]> = {
+  priceBucket: ["Under $25", "$25 – $50", "$50 – $100", "$100 – $200", "$200 & up"],
+  ratingTier: ["4.5★ & up", "4 – 4.5★", "3.5 – 4★", "Under 3.5★"],
+};
 
 const PAGE_SIZE = 24;
 
@@ -102,7 +112,7 @@ export function Catalog() {
   const search = db.useSearch<Product>("Product", {
     query: urlQuery,
     filters,
-    facets: ["brand", "category", "color"],
+    facets: ["brand", "category", "color", "priceBucket", "ratingTier"],
     sort: SORTS[sortIdx].value,
     page,
     pageSize: PAGE_SIZE,
@@ -261,7 +271,12 @@ function FacetGroups({
       {FACET_ORDER.map((facet) => {
         const counts = facetCounts[facet];
         if (!counts) return null;
-        const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+        const fixedOrder = BUCKET_ORDER[facet];
+        const entries: [string, number][] = fixedOrder
+          ? fixedOrder
+              .filter((v) => counts[v] != null)
+              .map((v) => [v, counts[v]])
+          : Object.entries(counts).sort((a, b) => b[1] - a[1]);
         return (
           <div key={facet} className="flex flex-col gap-1.5">
             <h4 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
@@ -318,10 +333,26 @@ function ProductCard({
     <Card className="group overflow-hidden p-0 transition hover:-translate-y-0.5 hover:shadow-md">
       <Link href={productPath(product.slug)} className="block">
         <div
-          className="flex aspect-square items-center justify-center text-2xl font-semibold text-white/90"
+          className="relative flex aspect-square items-center justify-center text-2xl font-semibold text-white/90"
           style={{ background: gradient(product.name, product.brand) }}
         >
           {initials(product.name)}
+          {product.tags ? (
+            <div className="absolute left-2 top-2 flex flex-wrap gap-1">
+              {product.tags
+                .split(",")
+                .filter(Boolean)
+                .map((t) => (
+                  <Badge
+                    key={t}
+                    variant="secondary"
+                    className="bg-white/90 text-[10px] text-foreground shadow-sm"
+                  >
+                    {t}
+                  </Badge>
+                ))}
+            </div>
+          ) : null}
         </div>
         <div className="flex flex-col gap-1 p-3 pb-0">
           <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">

@@ -119,6 +119,30 @@
           "default": 0
         },
         {
+          "name": "priceBucket",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "ratingTier",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "sizes",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "tags",
+          "type": "string",
+          "optional": true,
+          "unique": false
+        },
+        {
           "name": "imageUrl",
           "type": "string",
           "optional": true,
@@ -170,7 +194,9 @@
           "brand",
           "category",
           "color",
-          "featured"
+          "featured",
+          "priceBucket",
+          "ratingTier"
         ],
         "sortable": [
           "price",

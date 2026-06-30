@@ -88,13 +88,21 @@ function Detail({
 
           <Card className="flex flex-col">
             <CardContent className="flex flex-col gap-4 p-6">
-              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 {product.brand}
                 {product.featured ? (
                   <Badge variant="secondary" className="text-[10px]">
                     Featured
                   </Badge>
                 ) : null}
+                {(product.tags ?? "")
+                  .split(",")
+                  .filter(Boolean)
+                  .map((t) => (
+                    <Badge key={t} variant="outline" className="text-[10px]">
+                      {t}
+                    </Badge>
+                  ))}
               </div>
               <h1 className="text-2xl font-semibold leading-tight">
                 {product.name}
@@ -123,8 +131,29 @@ function Detail({
               <dl className="grid grid-cols-3 gap-3 text-sm">
                 <Attr label="Category" value={product.category} />
                 <Attr label="Color" value={product.color} />
-                <Attr label="SKU" value={product.slug.slice(-8)} />
+                <Attr label="SKU" value={(product.slug ?? product.id).slice(-8)} />
               </dl>
+
+              {product.sizes ? (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    Size
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {product.sizes
+                      .split(",")
+                      .filter(Boolean)
+                      .map((s) => (
+                        <span
+                          key={s}
+                          className="rounded-md border px-3 py-1.5 text-sm text-foreground"
+                        >
+                          {s}
+                        </span>
+                      ))}
+                  </div>
+                </div>
+              ) : null}
 
               <AddToCart product={product} />
             </CardContent>

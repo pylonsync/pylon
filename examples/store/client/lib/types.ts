@@ -11,6 +11,11 @@ export type Product = {
   stock: number;
   featured: boolean;
   salesCount: number;
+  priceBucket?: string;
+  ratingTier?: string;
+  // Comma-joined; split on the client. `sizes` empty for non-apparel.
+  sizes?: string;
+  tags?: string;
   imageUrl?: string;
   createdAt: string;
 };

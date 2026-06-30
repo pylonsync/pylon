@@ -61,6 +61,17 @@ const Product = entity(
     // real values.
     featured: field.bool().default(false),
     salesCount: field.int().default(0),
+    // Faceted search filters on equality, not numeric ranges — so price and
+    // rating are bucketed into string tiers (e.g. "$50–$100", "4 – 4.5★") that
+    // show as sidebar facets with live counts. Optional for migration-safety;
+    // seed/backfill fills them.
+    priceBucket: field.string().optional(),
+    ratingTier: field.string().optional(),
+    // Comma-joined (no array field type). `sizes` = apparel size run (empty for
+    // accessories); `tags` = merchandising badges on some items ("New","Sale").
+    // Display-only — the client splits them.
+    sizes: field.string().optional(),
+    tags: field.string().optional(),
     imageUrl: field.string().optional(),
     createdAt: field.datetime(),
   },
@@ -73,7 +84,14 @@ const Product = entity(
     ],
     search: {
       text: ["name", "description"],
-      facets: ["brand", "category", "color", "featured"],
+      facets: [
+        "brand",
+        "category",
+        "color",
+        "featured",
+        "priceBucket",
+        "ratingTier",
+      ],
       sortable: ["price", "rating", "createdAt", "salesCount"],
     },
     // The catalog is 10k rows — far too large to replicate into every browser.
