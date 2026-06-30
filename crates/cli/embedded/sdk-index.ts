@@ -43,6 +43,16 @@ export type CrdtAnnotation =
   | "movable-list"
   | "tree";
 
+/**
+ * Insert-time default marker stored on a field definition. Apps never
+ * construct these directly — they come from `.default(v)` / `.defaultNow()`
+ * / `.owner()` on a field builder. The runtime + codegen read them.
+ */
+export type DefaultMarker =
+  | { kind: "value"; value: unknown }
+  | { kind: "now" }
+  | { kind: "owner" };
+
 export interface FieldDefinition {
   type: FieldType;
   optional: boolean;
@@ -119,6 +129,16 @@ export interface FieldDefinition {
    * pipeline upgrades them to ciphertext.
    */
   encrypted?: boolean;
+  /**
+   * Insert-time default. Set via `.default(value)` / `.defaultNow()` /
+   * `.owner()` on the field builder; recorded for the runtime + codegen.
+   */
+  default?: DefaultMarker;
+  /**
+   * Allowed values for `field.enum([...])` — recorded so codegen emits a
+   * precise literal-union type instead of a wide `string`.
+   */
+  enumValues?: readonly string[];
 }
 
 interface FieldBuilder {
@@ -194,6 +214,16 @@ interface FieldBuilder {
    * stays unspoofable.
    */
   owner(): FieldBuilder;
+  /**
+   * Set a static insert-time default, recorded for the runtime +
+   * codegen. Example: `enabled: field.bool().default(true)`.
+   */
+  default(value: unknown): FieldBuilder;
+  /**
+   * Default a datetime field to insert-time `now()`. Example:
+   * `createdAt: field.datetime().defaultNow()`.
+   */
+  defaultNow(): FieldBuilder;
 }
 
 function createFieldBuilder(type: FieldType): FieldBuilder {
@@ -224,11 +254,13 @@ function buildField(def: FieldDefinition): FieldBuilder {
     owner() {
       // Dynamic default filled by the auth-aware pipeline; also lock
       // the field on update so ownership can't be reassigned via PATCH.
-      return buildField({
-        ...def,
-        readonly: true,
-        default: { kind: "owner" },
-      } as FieldDefinition);
+      return buildField({ ...def, readonly: true, default: { kind: "owner" } });
+    },
+    default(value: unknown) {
+      return buildField({ ...def, default: { kind: "value", value } });
+    },
+    defaultNow() {
+      return buildField({ ...def, default: { kind: "now" } });
     },
   };
 }
@@ -250,6 +282,18 @@ export const field = {
   datetime: () => createFieldBuilder("datetime"),
   richtext: () => createFieldBuilder("richtext"),
   id: (target: string) => createFieldBuilder(`id(${target})`),
+  /**
+   * `field.enum(["pending", "paid", "failed"])` — stored as a string with
+   * allowed-values metadata so codegen emits a precise literal union
+   * (`"pending" | "paid" | "failed"`) instead of a wide `string`.
+   */
+  enum: (values: readonly string[]) =>
+    buildField({
+      type: "string",
+      optional: false,
+      unique: false,
+      enumValues: values,
+    }),
 };
 
 // ---------------------------------------------------------------------------
@@ -316,6 +360,15 @@ export interface EntityDefinition {
   indexes?: IndexDefinition[];
   relations?: RelationDefinition[];
   search?: SearchConfig;
+  /**
+   * Client replication. Default `true` — the entity is bulk-snapshotted +
+   * delta-streamed into every client's local replica. Set `false` for a large,
+   * server-queried catalog (e.g. a 10k-row product table) the client reaches via
+   * `db.useSearch` + by-id fetch instead of holding the whole table locally:
+   * `sync: false` keeps it out of the replica entirely. Direct reads
+   * (`/api/entities/X`, `/api/search/X`) and policies are unchanged.
+   */
+  sync?: boolean;
 }
 
 export function entity(
@@ -325,6 +378,7 @@ export function entity(
     indexes?: IndexDefinition[];
     relations?: RelationDefinition[];
     search?: SearchConfig;
+    sync?: boolean;
   },
 ): EntityDefinition {
   return {
@@ -333,6 +387,7 @@ export function entity(
     indexes: options?.indexes,
     relations: options?.relations,
     search: options?.search,
+    sync: options?.sync,
   };
 }
 
@@ -374,7 +429,7 @@ export interface RouteDefinition {
    * POST/PUT/PATCH/DELETE) — matched on its `path` for non-GET requests only,
    * never rendered as a page.
    */
-  kind?: "page" | "not-found" | "error" | "route";
+  kind?: "page" | "not-found" | "error" | "route" | "sitemap" | "robots";
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
@@ -562,6 +617,9 @@ export interface ManifestEntity {
     facets?: string[];
     sortable?: string[];
   };
+  /** Client replication; omitted when true (the default). `false` keeps the
+   *  entity out of the client replica (snapshot + delta) — server-queried only. */
+  sync?: boolean;
 }
 
 export interface ManifestRoute {
@@ -572,7 +630,7 @@ export interface ManifestRoute {
   component?: string;
   layouts?: string[];
   /** "not-found" / "error" boundaries, or "route" form handlers; omitted for normal pages. */
-  kind?: "page" | "not-found" | "error" | "route";
+  kind?: "page" | "not-found" | "error" | "route" | "sitemap" | "robots";
 }
 
 export interface ManifestInputField {
@@ -606,6 +664,54 @@ export interface ManifestPolicy {
 
 export const MANIFEST_VERSION = 1;
 
+/** A recurring job: run a function on a cron schedule. Declared in the
+ *  manifest via `cron(schedule, functionName)`; the runtime fires the named
+ *  function with anonymous auth every time the schedule matches. Server-side
+ *  `ctx.db.*` is trusted, so a maintenance handler reads/writes its entities
+ *  directly without elevating. */
+export interface ManifestCron {
+  /** Standard 5-field cron expression, e.g. `"0 * * * *"` (every hour). */
+  schedule: string;
+  /** Name of the function (query/mutation/action) to run. Should be an
+   *  `internal: true` function so it isn't also reachable over HTTP. */
+  function: string;
+  /** Optional human description, surfaced by `pylon status` / tooling. */
+  description?: string;
+}
+
+/** A self-hosted web font. Declared via `font({...})`; at build the runtime
+ *  fetches the family from Google Fonts, self-hosts the woff2 same-origin,
+ *  generates `@font-face` + a size-adjusted fallback face (zero layout shift),
+ *  and auto-injects the preload + faces into every SSR page's `<head>`. The app
+ *  references the font through the CSS `variable`. */
+export interface ManifestFont {
+  /** Google Fonts family name, e.g. "Geist" or "Inter". */
+  family: string;
+  /** CSS custom property the app uses to apply the font, e.g. "--font-geist".
+   *  Set `font-family: var(--font-geist)` (it resolves to the family + the
+   *  size-adjusted fallback + your `fallback` stack). */
+  variable: string;
+  /** Weights to load — specific (`["400","500","700"]`) or a CSS2 range
+   *  (`["300..700"]`). Defaults to `["400"]`. */
+  weights?: string[];
+  /** Styles to load. Defaults to `["normal"]`. */
+  styles?: ("normal" | "italic")[];
+  /** Unicode subsets, e.g. `["latin"]`. Defaults to `["latin"]`. */
+  subsets?: string[];
+  /** CSS `font-display`. Defaults to `"swap"`. */
+  display?: "auto" | "block" | "swap" | "fallback" | "optional";
+  /** Emit `<link rel="preload">` for the font files so the browser fetches
+   *  them early. Defaults to `true`. */
+  preload?: boolean;
+  /** Fallback stack appended after the family + the adjusted fallback face,
+   *  e.g. `["system-ui", "sans-serif"]`. Defaults to `["sans-serif"]`. */
+  fallback?: string[];
+  /** Generate a size-adjusted fallback `@font-face` (matching x-height +
+   *  metrics) so there's no layout shift when the web font swaps in. Defaults
+   *  to `true`. Serialized snake_case to match the kernel manifest wire shape. */
+  adjust_font_fallback?: boolean;
+}
+
 export interface AppManifest {
   manifest_version: number;
   name: string;
@@ -621,6 +727,95 @@ export interface AppManifest {
   /** Declared OAuth integrations. Auto-creates the `_Connection`
    *  entity at runtime boot. */
   connections?: ManifestConnection[];
+  /** Recurring jobs — run a function on a cron schedule. */
+  crons?: ManifestCron[];
+  /** Self-hosted web fonts. Fetched + self-hosted at build; preload +
+   *  `@font-face` auto-injected into the SSR `<head>`. */
+  fonts?: ManifestFont[];
+}
+
+/**
+ * Declare a recurring job. Runs the named function every time the cron
+ * `schedule` matches (the runtime checks once a minute).
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   crons: [
+ *     cron("0 * * * *", "hourlyRollup"),     // every hour, on the hour
+ *     cron("15 3 * * *", "nightlyCleanup"),   // daily at 03:15
+ *   ],
+ * });
+ * ```
+ *
+ * `functionName` is a function in `functions/` — make it `internal: true`
+ * so it isn't also exposed over HTTP. It runs with anonymous auth, and a
+ * function's own `ctx.db.*` calls are server-side (not policy-gated), so a
+ * maintenance handler writes directly. Only call
+ * `ctx.auth.elevate({ admin: true, reason: "..." })` if it chains an
+ * `internal: true` function via `ctx.scheduler`, or you run with
+ * `PYLON_STRICT_FN_POLICIES=1`. The `reason` is mandatory (audited).
+ *
+ * Multiple replicas: each Pylon process runs its own scheduler. On a SHARED
+ * datastore (Postgres — the cloud default), the runtime takes a per-minute
+ * lease so each cron fires exactly ONCE per tick across all replicas. On
+ * per-replica SQLite there's no shared lease, so each replica fires — keep
+ * handlers idempotent there (most maintenance work naturally is). A
+ * single-machine app always fires exactly once.
+ */
+export function cron(
+  schedule: string,
+  functionName: string,
+  opts?: { description?: string }
+): ManifestCron {
+  return {
+    schedule,
+    function: functionName,
+    ...(opts?.description ? { description: opts.description } : {}),
+  };
+}
+
+/**
+ * Declare a self-hosted web font (Google Fonts). At build, Pylon fetches the
+ * family, self-hosts the woff2 same-origin, generates `@font-face` + a
+ * size-adjusted fallback face, and auto-injects the preload + faces into every
+ * SSR page's `<head>` — no render-blocking third-party request, no layout shift.
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   fonts: [
+ *     font({ family: "Geist", variable: "--font-sans", weights: ["300..700"], subsets: ["latin"] }),
+ *     font({ family: "Geist Mono", variable: "--font-mono", weights: ["400..600"] }),
+ *   ],
+ * });
+ * ```
+ *
+ * Then use it in CSS: `font-family: var(--font-sans);` (resolves to the family,
+ * the zero-CLS fallback, then your `fallback` stack).
+ */
+export function font(opts: {
+  family: string;
+  variable: string;
+  weights?: string[];
+  styles?: ("normal" | "italic")[];
+  subsets?: string[];
+  display?: "auto" | "block" | "swap" | "fallback" | "optional";
+  preload?: boolean;
+  fallback?: string[];
+  adjustFontFallback?: boolean;
+}): ManifestFont {
+  return {
+    family: opts.family,
+    variable: opts.variable,
+    weights: opts.weights ?? ["400"],
+    styles: opts.styles ?? ["normal"],
+    subsets: opts.subsets ?? ["latin"],
+    display: opts.display ?? "swap",
+    preload: opts.preload ?? true,
+    ...(opts.fallback ? { fallback: opts.fallback } : {}),
+    adjust_font_fallback: opts.adjustFontFallback ?? true,
+  };
 }
 
 export function entitiesToManifest(
@@ -656,13 +851,7 @@ export function entitiesToManifest(
         // backing slot so both APIs serialize identically — apps
         // using the procedural `field` exports get the same
         // ManifestField shape as fluent apps.
-        const extra = fb._def as FieldDefinition & {
-          default?:
-            | { kind: "value"; value: unknown }
-            | { kind: "now" }
-            | { kind: "owner" };
-          enumValues?: readonly string[];
-        };
+        const extra = fb._def;
         if (extra.default) {
           f.default =
             extra.default.kind === "now"
@@ -709,6 +898,10 @@ export function entitiesToManifest(
           sortable: s.sortable ?? [],
         };
       }
+    }
+    // Emit only when opted OUT — the runtime defaults sync to true.
+    if (e.sync === false) {
+      result.sync = false;
     }
     return result;
   });
@@ -933,7 +1126,33 @@ export async function discoverAppRoutes(opts?: {
     kind: "route" as const,
   }));
 
-  return [...pageRoutes, ...boundaryRoutes, ...routeRoutes];
+  // Root-level data conventions (Next-style): `app/sitemap.{ts,tsx,js,jsx}` →
+  // `/sitemap.xml`, `app/robots.{...}` → `/robots.txt`. Each exports a default
+  // (optionally async) function returning sitemap entries / a robots object;
+  // the SSR runtime detects these by component basename, calls the export, and
+  // serializes the return to XML / plain text (no React render). Root-level
+  // only for now (no route-group nesting / `generateSitemaps` id sharding).
+  const dataRoutes: RouteDefinition[] = [];
+  const sitemapMod = findModule(appDir, "sitemap");
+  if (sitemapMod) {
+    dataRoutes.push({
+      path: "/sitemap.xml",
+      mode: "ssr",
+      component: sitemapMod,
+      kind: "sitemap",
+    });
+  }
+  const robotsMod = findModule(appDir, "robots");
+  if (robotsMod) {
+    dataRoutes.push({
+      path: "/robots.txt",
+      mode: "ssr",
+      component: robotsMod,
+      kind: "robots",
+    });
+  }
+
+  return [...pageRoutes, ...boundaryRoutes, ...routeRoutes, ...dataRoutes];
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
@@ -1282,6 +1501,8 @@ export function buildManifest(options: {
   auth?: ManifestAuthConfig;
   llm?: ManifestLlmConfig;
   connections?: ManifestConnection[];
+  crons?: ManifestCron[];
+  fonts?: ManifestFont[];
 }): AppManifest {
   // Pull policies attached via the fluent `e.entity().policies(...)`
   // chain onto the top-level policies list. Without this, fluent
@@ -1325,6 +1546,12 @@ export function buildManifest(options: {
       : {}),
     ...(options.connections && options.connections.length > 0
       ? { connections: options.connections }
+      : {}),
+    ...(options.crons && options.crons.length > 0
+      ? { crons: options.crons }
+      : {}),
+    ...(options.fonts && options.fonts.length > 0
+      ? { fonts: options.fonts }
       : {}),
   };
 }
@@ -1480,124 +1707,10 @@ export const audit: Behavior = {
   },
 };
 
-/**
- * Internal sentinel — apps don't construct these directly. The
- * `field.X` builders gain `default(val)` / `defaultNow()` chainables
- * below; this is just the shape stored on the field definition for
- * the runtime to read.
- */
-type DefaultMarker =
-  | { kind: "value"; value: unknown }
-  | { kind: "now" }
-  | { kind: "owner" };
-
-/**
- * Augment FieldBuilder with the new `default()` / `defaultNow()`
- * chainables. Runtime support for actually filling these values on
- * insert lands as part of v0.4.1; until then the markers are
- * recorded in the manifest for tooling + the codegen layer.
- */
-declare module "./index" {
-  // (Empty — the `default*` methods are added at runtime via the
-  // patched buildField below. Apps see them via the FieldBuilder
-  // surface declared above.)
-}
-
-// Field builder with chainable `.default()` / `.defaultNow()`. All
-// other chainables (`optional`, `unique`, `crdt`, `serverOnly`,
-// `readonly`) are reimplemented here to return another
-// `buildFieldWithDefaults` — without this, calling `.optional()`
-// after `.default()` would drop the default markers off the chain
-// (codex Wave-3 review: the previous `{ ...base, default, defaultNow }`
-// pattern delegated optional/unique to the original buildField which
-// returned a builder lacking `.default()`). Recursion through the
-// same constructor keeps the surface stable regardless of chain
-// order.
-function buildFieldWithDefaults(
-  def: FieldDefinition & {
-    default?: DefaultMarker;
-    enumValues?: readonly string[];
-  },
-): FieldBuilder & {
-  default(value: unknown): ReturnType<typeof buildFieldWithDefaults>;
-  defaultNow(): ReturnType<typeof buildFieldWithDefaults>;
-  owner(): ReturnType<typeof buildFieldWithDefaults>;
-} {
-  return {
-    _def: def,
-    optional() {
-      return buildFieldWithDefaults({ ...def, optional: true });
-    },
-    unique() {
-      return buildFieldWithDefaults({ ...def, unique: true });
-    },
-    crdt(annotation) {
-      return buildFieldWithDefaults({ ...def, crdt: annotation });
-    },
-    serverOnly() {
-      return buildFieldWithDefaults({ ...def, serverOnly: true });
-    },
-    readonly() {
-      return buildFieldWithDefaults({ ...def, readonly: true });
-    },
-    encrypted() {
-      return buildFieldWithDefaults({ ...def, encrypted: true });
-    },
-    default(value: unknown) {
-      return buildFieldWithDefaults({
-        ...def,
-        default: { kind: "value", value },
-      });
-    },
-    defaultNow() {
-      return buildFieldWithDefaults({ ...def, default: { kind: "now" } });
-    },
-    owner() {
-      // Server-stamped owner: a dynamic default the auth-aware
-      // pipeline fills + enforces, plus `readonly` so the owner can't
-      // be reassigned via a later PATCH. See FieldBuilder.owner().
-      return buildFieldWithDefaults({
-        ...def,
-        readonly: true,
-        default: { kind: "owner" },
-      });
-    },
-  };
-}
-// Re-export `field` with the patched builder so callers picking up
-// the new SDK get the chainables transparently. The old `field`
-// surface still works — `.default()` / `.defaultNow()` are additive.
-// We intentionally re-export from the same name so existing imports
-// (`import { field } from "@pylonsync/sdk"`) keep working AND gain
-// the new methods without a code change.
-Object.assign(field, {
-  string: () => buildFieldWithDefaults({ type: "string", optional: false, unique: false }),
-  int: () => buildFieldWithDefaults({ type: "int", optional: false, unique: false }),
-  float: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
-  number: () => buildFieldWithDefaults({ type: "float", optional: false, unique: false }),
-  bool: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
-  boolean: () => buildFieldWithDefaults({ type: "bool", optional: false, unique: false }),
-  datetime: () => buildFieldWithDefaults({ type: "datetime", optional: false, unique: false }),
-  richtext: () => buildFieldWithDefaults({ type: "richtext", optional: false, unique: false }),
-  id: (target: string) => buildFieldWithDefaults({ type: `id(${target})` as FieldType, optional: false, unique: false }),
-  /**
-   * `field.enum(["pending", "paid", "failed"])` — stored as a string
-   * with allowed-values metadata. Runtime enforcement (CHECK
-   * constraint or insert-time validation) lands in a follow-up
-   * patch; for now the values flow through to codegen so the
-   * generated client gets a precise `"pending" | "paid" | "failed"`
-   * literal-union type instead of a wide `string`.
-   */
-  enum(values: readonly string[]) {
-    const def: FieldDefinition & { enumValues?: readonly string[] } = {
-      type: "string",
-      optional: false,
-      unique: false,
-      enumValues: values,
-    };
-    return buildFieldWithDefaults(def);
-  },
-});
+// `field` builders (`default` / `defaultNow` / `owner` / `enum`) are all
+// implemented directly on `buildField` above and typed on the FieldBuilder
+// interface, so `field.datetime().defaultNow()` and `field.enum([...])`
+// are real, statically-typed chainables — no runtime augmentation needed.
 
 /** Variadic index helper — `e.idx("customer", "createdAt")` reads
  *  better than the options-object form for the common case. */
