@@ -277,6 +277,34 @@ export class IndexedDBPersistence {
     });
   }
 
+  /** Record which identity (resolved `userId`, or `null` when logged out)
+   *  the persisted replica belongs to. Read back on the next cold start to
+   *  detect an account switch across a page reload — the one case the live
+   *  `observeToken` path can't see (a fresh engine has no prior token to
+   *  compare against). Stored in the cursor store so it rides the same DB. */
+  async saveIdentity(userId: string | null): Promise<boolean> {
+    if (!this.db) return false;
+    const tx = this.db.transaction(CURSOR_STORE, "readwrite");
+    tx.objectStore(CURSOR_STORE).put({ key: "identity", userId });
+    return this.commit(tx, "saveIdentity");
+  }
+
+  /** Load the persisted replica identity. Returns `undefined` when no tag
+   *  was ever written (a pre-tag replica — the caller must not treat that
+   *  as a mismatch), or `string | null` for a recorded identity. */
+  async loadIdentity(): Promise<string | null | undefined> {
+    if (!this.db) return undefined;
+    const tx = this.db.transaction(CURSOR_STORE, "readonly");
+    const store = tx.objectStore(CURSOR_STORE);
+    const request = store.get("identity");
+    return new Promise((resolve) => {
+      request.onsuccess = () => {
+        resolve(request.result ? (request.result.userId ?? null) : undefined);
+      };
+      request.onerror = () => resolve(undefined);
+    });
+  }
+
   /** Clear stored rows + cursor. Deliberately does NOT touch the
    *  durable mutation queue: `resetReplica` calls this on a 410 RESYNC
    *  (same user, needs a fresh snapshot) where pending offline writes

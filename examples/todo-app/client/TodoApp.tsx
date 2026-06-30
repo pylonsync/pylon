@@ -17,6 +17,7 @@ import {
   init,
   configureClient,
   db,
+  setSessionToken,
   storageKey,
 } from "@pylonsync/react";
 import {
@@ -94,16 +95,22 @@ function readAuth(): AuthState {
   return { token, userId };
 }
 
-function saveAuth(token: string, userId: string) {
-  localStorage.setItem(storageKey("token"), token);
+async function saveAuth(token: string, userId: string) {
   localStorage.setItem(storageKey("userId"), userId);
   configureClient({ baseUrl: BASE_URL, appName: "todo-app" });
+  // setSessionToken writes the token AND resets the local replica for the new
+  // identity (then re-pulls). Without it, signing in as a different user keeps
+  // the previous user's todos in the replica until the next poll happens to
+  // notice the token flip — the "data from the last account is still here" gap.
+  await setSessionToken(token);
   window.dispatchEvent(new Event("pylon-auth-changed"));
 }
 
-function clearAuth() {
-  localStorage.removeItem(storageKey("token"));
+async function clearAuth() {
   localStorage.removeItem(storageKey("userId"));
+  // Drop the token AND wipe the signed-in user's replica so a subsequent
+  // guest/login session never starts on top of stale rows.
+  await setSessionToken(null);
   window.dispatchEvent(new Event("pylon-auth-changed"));
 }
 
@@ -160,7 +167,7 @@ function Login() {
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error?.message ?? "auth failed");
-      saveAuth(json.token, json.user_id);
+      await saveAuth(json.token, json.user_id);
     } catch (err) {
       setError((err as Error).message);
     } finally {

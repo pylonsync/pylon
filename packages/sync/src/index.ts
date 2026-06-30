@@ -281,6 +281,17 @@ export class SyncEngine {
   private _hadCachedReplica = false;
 
   /**
+   * Which identity (resolved `userId`, or `null` when logged out) the
+   * currently-hydrated replica belongs to. Loaded from disk on cold start
+   * and re-tagged after every (re)sync. `undefined` means "unknown" — a
+   * pre-tag replica or a fresh engine; the guard must NOT treat that as a
+   * mismatch. Used to wipe the replica when a different user signs in on
+   * the same browser across a page reload — the leak `observeToken` can't
+   * see, because a fresh engine has no prior token to compare against.
+   */
+  private _replicaIdentity: string | null | undefined = undefined;
+
+  /**
    * Sticky flag: a persisted row/cursor write degraded (IDB quota /
    * abort), so the on-disk replica is known to be behind the in-memory
    * cursor. Once set, `enqueueApply` STOPS advancing the persisted
@@ -632,6 +643,10 @@ export class SyncEngine {
         // whose pull-from-cursor misses an offline server-side delete
         // depends on that reconcile pass to catch the ghost row.
         this._hadCachedReplica = hadCache;
+        // Which identity the hydrated rows belong to. Compared against the
+        // resolved session in `guardReplicaIdentity` before the first pull
+        // so a reload-time account switch drops the prior user's rows.
+        this._replicaIdentity = await this.persistence.loadIdentity();
         let hydrated = false;
         for (const [entity, rows] of Object.entries(cached)) {
           for (const row of rows) {
@@ -772,6 +787,15 @@ export class SyncEngine {
       await this.refreshResolvedSession();
     }
 
+    // Identity-tag guard. If the hydrated replica belongs to a DIFFERENT
+    // user than the one we just resolved — a shared browser / account
+    // switch across a page reload — wipe it before the pull below layers
+    // the new identity's deltas on top of the old user's rows. The live
+    // `observeToken` reset can't catch this: a fresh engine's
+    // `lastSeenToken` starts undefined, so its first observation reports
+    // no change and it would otherwise adopt the prior user's replica.
+    await this.guardReplicaIdentity();
+
     // Drain hydrated offline writes now that we ARE the leader. The
     // startup hydrate (in the persist block above) ran pre-election,
     // when a push() would have taken the follower branch and broadcast
@@ -801,6 +825,10 @@ export class SyncEngine {
     if (this.persistence && !this.persistDegraded) {
       void this.persistence.saveCursor(this.cursor);
     }
+
+    // Tag the freshly-synced replica with the identity that owns it, so the
+    // next cold start can detect an account switch (see guardReplicaIdentity).
+    this.persistReplicaIdentity();
 
     // First-load reconciliation pass — closes the "phantom row" gap when
     // the local IndexedDB has rows the server doesn't (deletes made by
@@ -1342,6 +1370,50 @@ export class SyncEngine {
   }
 
   /**
+   * Wipe the hydrated replica when it belongs to a different identity than
+   * the currently-resolved session — the shared-browser / account-switch
+   * leak that surfaces only across a page reload (a live token flip is
+   * already caught by `observeToken` in pull()). No-op when nothing was
+   * hydrated, when the persisted identity is unknown (a pre-tag replica —
+   * we tag it on this run instead of wiping, so the protection kicks in
+   * from the next reload), or when it already matches.
+   */
+  private async guardReplicaIdentity(): Promise<void> {
+    if (!this._hadCachedReplica) return;
+    const prev = this._replicaIdentity;
+    if (prev === undefined) return;
+    const now = this.session.resolved().userId;
+    if (prev === now) return;
+    // Identity flipped across the reload. Drop the prior identity's rows.
+    // Keep pending offline writes ONLY for guest→user (the anonymous-merge
+    // login: the server reassigns the guest's rows to the new user, and the
+    // queued writes should re-push under the user). For any other flip
+    // (user A → user B, user → guest) discard them so one identity's
+    // unsynced writes never push under another.
+    const isGuestToUser =
+      typeof prev === "string" &&
+      prev.startsWith("guest_") &&
+      typeof now === "string" &&
+      !now.startsWith("guest_");
+    await this.resetReplica({ wipeMutations: !isGuestToUser });
+    this.persistReplicaIdentity();
+  }
+
+  /**
+   * Record the identity that owns the current replica (in memory + on disk)
+   * so a later cold start can detect an account switch. Fire-and-forget —
+   * the tag is a hint; a missed write just degrades to "tag unknown" which
+   * the guard treats conservatively (no wipe, re-tag next run).
+   */
+  private persistReplicaIdentity(): void {
+    const id = this.session.resolved().userId;
+    this._replicaIdentity = id;
+    if (this.persistence && !this.persistDegraded) {
+      void this.persistence.saveIdentity(id);
+    }
+  }
+
+  /**
    * Drop the local replica and pull fresh. `wipeMutations` decides the
    * fate of the durable offline write queue:
    * - `false` (default, 410 RESYNC, SAME user): KEEP pending writes —
@@ -1388,6 +1460,13 @@ export class SyncEngine {
       try {
         await this.persistence.clear();
         await this.persistence.saveCursor(this.cursor);
+        // clear() wiped the cursor store (identity tag included). The
+        // replica is about to be re-pulled for the CURRENT identity, so
+        // re-tag it to match — otherwise the on-disk tag reads "unknown"
+        // until the next cold-start pull re-records it.
+        const id = this.session.resolved().userId;
+        this._replicaIdentity = id;
+        await this.persistence.saveIdentity(id);
       } catch {
         /* best-effort */
       }
@@ -1865,8 +1944,11 @@ export class SyncEngine {
         const cursorBeforeFetch = this.cursor.last_seq;
         const sessionBeforeFetch = this.session.signature();
         let serverRows: Row[];
+        let fetchTruncated: boolean;
         try {
-          serverRows = await this.fetchEntityRows(entity);
+          const fetched = await this.fetchEntityRows(entity);
+          serverRows = fetched.rows;
+          fetchTruncated = fetched.truncated;
         } catch (err) {
           // Network errors are expected (offline, transient 5xx). Skip
           // this entity; the next reconcile trigger will retry.
@@ -1923,19 +2005,28 @@ export class SyncEngine {
           // the session-changed envelope drive the next reconcile.
           return;
         }
-        await this.applyEntityReconcile(entity, serverRows, tombstoneSeq);
+        await this.applyEntityReconcile(
+          entity,
+          serverRows,
+          tombstoneSeq,
+          fetchTruncated,
+        );
       }),
     );
   }
 
   /** Fetch every row for an entity. Uses cursor pagination so big tables
    *  don't blow past server-side limits; loops until `has_more` is false
-   *  or a safety cap is hit. */
-  private async fetchEntityRows(entity: string): Promise<Row[]> {
+   *  or a safety cap is hit. Returns `truncated: true` when the cap was hit
+   *  with rows STILL on the server — the fetched set is then INCOMPLETE and
+   *  the caller must not infer deletions from it (see applyEntityReconcile). */
+  private async fetchEntityRows(
+    entity: string,
+  ): Promise<{ rows: Row[]; truncated: boolean }> {
     const out: Row[] = [];
     let cursor: string | null = null;
-    // 200 pages × 100 per page = 20k rows. Anything larger should not be
-    // mirrored client-side anyway — see useInfiniteQuery for huge tables.
+    // 200 pages × 100 per page = 20k rows. A `sync:true` entity larger than
+    // this should switch to `sync: false` + search/by-id — see useInfiniteQuery.
     for (let page = 0; page < 200; page++) {
       const qs: string = cursor
         ? `?limit=100&after=${encodeURIComponent(cursor)}`
@@ -1946,16 +2037,22 @@ export class SyncEngine {
         has_more: boolean;
       } = await this.request("GET", `/api/entities/${entity}/cursor${qs}`);
       for (const row of resp.data) out.push(row);
-      if (!resp.has_more || !resp.next_cursor) break;
+      if (!resp.has_more || !resp.next_cursor) {
+        return { rows: out, truncated: false };
+      }
       cursor = resp.next_cursor;
     }
-    return out;
+    // Exhausted the page cap while the server still had more rows: the set
+    // is incomplete. Surface it so reconcile upserts-only instead of
+    // deleting every row past the cap.
+    return { rows: out, truncated: true };
   }
 
   private async applyEntityReconcile(
     entity: string,
     serverRows: Row[],
     tombstoneSeq: number,
+    truncated: boolean,
   ): Promise<void> {
     // Invariant: rows with in-flight or failed mutations are
     // off-limits to reconcile. Neither the upsert branch nor the
@@ -1981,12 +2078,28 @@ export class SyncEngine {
     // stale. The reconcile primitive tombstones at `tombstoneSeq` so
     // future legitimate re-creations (with strictly greater seqs)
     // still flow through.
+    //
+    // BUT only when the server set is COMPLETE. A truncated fetch (entity
+    // larger than the 20k reconcile page cap) returns just the first pages —
+    // a row absent from it may simply live on an un-fetched page, not be
+    // deleted. Inferring deletion here would silently tombstone every row
+    // past the cap (the rows flap: full resync re-adds them, next reconcile
+    // deletes them again). Upsert only; never remove from an incomplete set.
     const removalIds: string[] = [];
-    for (const local of this.store.list(entity)) {
-      const id = (local as { id?: unknown }).id;
-      if (typeof id !== "string") continue;
-      if (pendingKeys.has(`${entity}/${id}`)) continue;
-      if (!serverIds.has(id)) removalIds.push(id);
+    if (truncated) {
+      console.warn(
+        `[reconcile] "${entity}" exceeds the ${20_000}-row client-replication ` +
+          `cap; skipping stale-row cleanup to avoid deleting un-fetched rows. ` +
+          `Mark large server-queried entities \`sync: false\` and read them via ` +
+          `search + by-id instead of replicating the whole table.`,
+      );
+    } else {
+      for (const local of this.store.list(entity)) {
+        const id = (local as { id?: unknown }).id;
+        if (typeof id !== "string") continue;
+        if (pendingKeys.has(`${entity}/${id}`)) continue;
+        if (!serverIds.has(id)) removalIds.push(id);
+      }
     }
     if (upserts.length === 0 && removalIds.length === 0) return;
     // Route through the apply queue so a reconcile batch can't

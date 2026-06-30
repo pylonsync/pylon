@@ -265,6 +265,51 @@ describe("SyncEngine.reconcile", () => {
     expect(engine.store.list("Recording").length).toBe(0);
   });
 
+  test("truncated fetch (entity past the 20k cap) upserts but never deletes", async () => {
+    // The server has more rows than the 200-page (20k) reconcile cap.
+    // fetchEntityRows stops at the cap with `has_more` STILL true, so its
+    // result is INCOMPLETE. Pre-fix, reconcile treated every local row
+    // absent from that partial set as deleted → it silently tombstoned
+    // every row past the cap (then flapped: a full resync re-added them and
+    // the next reconcile deleted them again). The fix: a truncated fetch
+    // upserts only, never removes.
+    let pages = 0;
+    restore = installFetch(async (url) => {
+      if (url.includes("/api/entities/Event/cursor")) {
+        pages += 1;
+        // Always claim more remains → the engine exhausts its page cap.
+        return {
+          status: 200,
+          body: {
+            data: [{ id: `srv_${pages}`, title: `page ${pages}` }],
+            next_cursor: `cursor_${pages}`,
+            has_more: true,
+          },
+        };
+      }
+      return { status: 404, body: {} };
+    });
+
+    const engine = makeEngine();
+    // Local rows that live PAST the cap — the truncated fetch never reaches
+    // them. They must survive reconcile.
+    seedStore(engine, "Event", [
+      { id: "beyond_1", title: "row past the cap" },
+      { id: "beyond_2", title: "row past the cap" },
+    ]);
+    expect(engine.store.list("Event").length).toBe(2);
+
+    await engine.reconcile(["Event"]);
+
+    // The fetch hit the 200-page safety cap — proof the set was truncated.
+    expect(pages).toBe(200);
+    // The un-fetched local rows are NOT deleted (the bug would drop them).
+    expect(engine.store.get("Event", "beyond_1")).not.toBeNull();
+    expect(engine.store.get("Event", "beyond_2")).not.toBeNull();
+    // Rows the fetch DID return are still upserted — reconcile keeps working.
+    expect(engine.store.get("Event", "srv_1")).not.toBeNull();
+  });
+
   test("a successful fetch resets the 403 streak (#343)", async () => {
     let status = 403;
     restore = installFetch(async () =>
@@ -395,6 +440,86 @@ describe("SyncEngine.reconcile session guard", () => {
       expect(engine.store.get("Recording", "r1")).not.toBeNull();
     } finally {
       restore?.();
+    }
+  });
+});
+
+describe("SyncEngine replica identity guard", () => {
+  // A different user signing in on the same browser across a page RELOAD
+  // must not inherit the previous user's rows. The live `observeToken`
+  // reset can't catch this — a fresh engine has no prior token to compare
+  // against — so the engine tags the persisted replica with its owner and
+  // wipes on a cold-start mismatch. (Privacy leak + "my data vanished"
+  // class found in the ai-chat / ai-studio templates.)
+  function resolveAs(engine: SyncEngine, userId: string | null): void {
+    engine.session.observeSession({
+      userId,
+      tenantId: null,
+      isAdmin: false,
+      roles: [],
+    });
+  }
+
+  test("wipes the replica when a DIFFERENT user is resolved on reload", async () => {
+    const engine = makeEngine();
+    seedStore(engine, "Note", [{ id: "n1", title: "A's private note" }]);
+    (engine as unknown as { _hadCachedReplica: boolean })._hadCachedReplica = true;
+    (engine as unknown as { _replicaIdentity: string })._replicaIdentity = "user_A";
+    resolveAs(engine, "user_B");
+
+    await (engine as unknown as { guardReplicaIdentity(): Promise<void> }).guardReplicaIdentity();
+
+    expect(engine.store.list("Note").length).toBe(0);
+  });
+
+  test("keeps the replica when the SAME user is resolved", async () => {
+    const engine = makeEngine();
+    seedStore(engine, "Note", [{ id: "n1", title: "mine" }]);
+    (engine as unknown as { _hadCachedReplica: boolean })._hadCachedReplica = true;
+    (engine as unknown as { _replicaIdentity: string })._replicaIdentity = "user_A";
+    resolveAs(engine, "user_A");
+
+    await (engine as unknown as { guardReplicaIdentity(): Promise<void> }).guardReplicaIdentity();
+
+    expect(engine.store.list("Note").length).toBe(1);
+  });
+
+  test("keeps an UNTAGGED (pre-fix) replica — conservative, no mass re-download", async () => {
+    const engine = makeEngine();
+    seedStore(engine, "Note", [{ id: "n1", title: "legacy" }]);
+    (engine as unknown as { _hadCachedReplica: boolean })._hadCachedReplica = true;
+    // undefined = a replica written before this fix shipped; can't prove a
+    // mismatch, so don't wipe (the tag gets written this run for next time).
+    (engine as unknown as { _replicaIdentity: undefined })._replicaIdentity = undefined;
+    resolveAs(engine, "user_B");
+
+    await (engine as unknown as { guardReplicaIdentity(): Promise<void> }).guardReplicaIdentity();
+
+    expect(engine.store.list("Note").length).toBe(1);
+  });
+
+  test("guest→user preserves pending writes (merge); user→user discards them", async () => {
+    const cases: ReadonlyArray<readonly [string, string, boolean]> = [
+      ["guest_123", "user_B", false], // anonymous-merge login: keep writes
+      ["user_A", "user_B", true], // account switch: drop A's writes
+    ];
+    for (const [prev, now, expectWipeMutations] of cases) {
+      const engine = makeEngine();
+      seedStore(engine, "Note", [{ id: "n1" }]);
+      (engine as unknown as { _hadCachedReplica: boolean })._hadCachedReplica = true;
+      (engine as unknown as { _replicaIdentity: string })._replicaIdentity = prev;
+      resolveAs(engine, now);
+
+      let captured: { wipeMutations?: boolean } | undefined;
+      const orig = engine.resetReplica.bind(engine);
+      engine.resetReplica = ((opts: { wipeMutations?: boolean } = {}) => {
+        captured = opts;
+        return orig(opts);
+      }) as typeof engine.resetReplica;
+
+      await (engine as unknown as { guardReplicaIdentity(): Promise<void> }).guardReplicaIdentity();
+
+      expect(captured?.wipeMutations).toBe(expectWipeMutations);
     }
   });
 });
