@@ -50,7 +50,25 @@ export default mutation({
 
     const existing = await ctx.db.query("Product", {});
     if (existing.length >= target) {
-      return { inserted: 0, existing: existing.length };
+      // Migration for catalogs seeded before slug/featured/salesCount existed:
+      // backfill any row missing a slug so the /p/<slug> SSR route + the
+      // Featured/Best-selling facets work. Idempotent — skips done rows.
+      let backfilled = 0;
+      for (const p of existing) {
+        const row = p as { id: string; name?: string; slug?: string };
+        if (row.slug) continue;
+        const name = String(row.name ?? "product");
+        const sfx =
+          row.id.replace(/[^a-z0-9]/gi, "").slice(-6) ||
+          backfilled.toString(16);
+        await ctx.db.update("Product", row.id, {
+          slug: `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${sfx}`,
+          featured: seeded(backfilled + 29, 12) === 0,
+          salesCount: seeded(backfilled + 37, 5000),
+        });
+        backfilled++;
+      }
+      return { inserted: 0, existing: existing.length, backfilled };
     }
 
     const start = existing.length;
