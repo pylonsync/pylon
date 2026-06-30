@@ -24,6 +24,8 @@ import {
 import {
   callFn,
   configureClient,
+  getReactStorage,
+  storageKey,
   streamFn,
   uploadFile,
   uploadFileMultipart,
@@ -73,6 +75,40 @@ export function init(config?: Partial<SyncEngineConfig> & { baseUrl?: string }) 
     baseUrl: resolvedBaseUrl,
     appName: config?.appName,
   });
+}
+
+/**
+ * Switch the active session token and re-sync the local replica to the new
+ * identity. Call this on EVERY auth transition — login, signup, AND logout
+ * (pass `null`).
+ *
+ * It writes the token where both the request helpers and the sync engine read
+ * it, then wipes the local replica — dropping the previous identity's pending
+ * offline writes so they can't replay as the new user — and re-snapshots under
+ * the new identity.
+ *
+ * Why this exists: changing the stored token alone is NOT enough. The engine is
+ * already running with the previous identity's replica + cursor; without an
+ * explicit reset it keeps serving that (or, after a re-init, an empty replica on
+ * a stale cursor) — so the rows the new user should see never load and freshly
+ * written rows appear to "vanish" on the next render/refresh. This is the
+ * supported, can't-get-it-wrong way to flip identity; hand-rolling token writes
+ * without it is the #1 cause of "my data disappears after login" in Pylon apps.
+ */
+export async function setSessionToken(token: string | null): Promise<void> {
+  const key = storageKey("token");
+  const store = getReactStorage();
+  if (token) store.set(key, token);
+  else store.remove(key);
+  // resetReplica wipes rows + cursor (wipeMutations drops the outgoing
+  // identity's queued writes) so the previous identity's data is gone
+  // immediately. The re-snapshot pull runs in the BACKGROUND (not awaited) — for
+  // a large replica it can take a moment, and blocking login on a full snapshot
+  // is bad UX; live `useQuery`/`useSearch` hooks show loading and populate as the
+  // snapshot lands. Awaiting resetReplica (fast) is enough for callers.
+  const engine = getSync();
+  await engine.resetReplica({ wipeMutations: true });
+  void engine.pull();
 }
 
 /** Module-internal accessor for the global sync engine. Exported so

@@ -11,7 +11,7 @@
  * so display name + email come straight from the live sync replica.
  */
 import { useCallback, useEffect, useState } from "react";
-import { configureClient, db, storageKey } from "@pylonsync/react";
+import { configureClient, db, setSessionToken, storageKey } from "@pylonsync/react";
 import type { AuthUser } from "./types";
 
 // Same-origin under native SSR; fall back to localhost for standalone dev.
@@ -79,6 +79,8 @@ export async function ensureGuestSession(): Promise<StoredAuth> {
     const next = { token: body.token, userId: body.user_id, isGuest: true };
     writeStored(next);
     configureClient({ baseUrl: BASE_URL, appName: "store" });
+    // Re-snapshot the replica under the (new) guest identity.
+    await setSessionToken(next.token);
     return next;
   } catch {
     return existing;
@@ -101,6 +103,9 @@ export async function register(input: {
   const next = { token: body.token, userId: body.user_id, isGuest: false };
   writeStored(next);
   configureClient({ baseUrl: BASE_URL, appName: "store" });
+  // Identity flipped guest→user: wipe the guest replica + re-snapshot as the
+  // signed-in user, so their cart/addresses/orders load and writes persist.
+  await setSessionToken(next.token);
   return next;
 }
 
@@ -115,6 +120,8 @@ export async function login(input: {
   const next = { token: body.token, userId: body.user_id, isGuest: false };
   writeStored(next);
   configureClient({ baseUrl: BASE_URL, appName: "store" });
+  // Identity flipped to the signed-in user: re-snapshot under the new identity.
+  await setSessionToken(next.token);
   return next;
 }
 

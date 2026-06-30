@@ -118,7 +118,7 @@ export { useSyncStatus } from "./useSyncStatus";
 export type { SyncConnectionStatus } from "./useSyncStatus";
 
 // One-liner API
-export { db, init, getSync } from "./db";
+export { db, init, getSync, setSessionToken } from "./db";
 
 // Typed client (consumes generated AppSchema)
 export { createTypedDb } from "./typed";
