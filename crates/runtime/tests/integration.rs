@@ -639,11 +639,23 @@ fn health_and_metrics() {
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(resp["status"], "ok");
 
-    // Make a few requests so the metrics counter is non-zero.
-    http_request("GET", &format!("{base}/health"), None);
-    http_request("GET", &format!("{base}/metrics"), None);
+    // Make a few COUNTED requests so the metrics counter is non-zero.
+    // /health and /metrics use early fast-paths that bypass the request
+    // counter, so hit a normal API endpoint to actually bump `requests.total`.
+    http_request("GET", &format!("{base}/api/entities/Todo"), None);
+    http_request("GET", &format!("{base}/api/entities/Todo"), None);
 
-    let (status, body) = http_request("GET", &format!("{base}/metrics"), None);
+    // /metrics is gated whenever an operator token is configured — and
+    // `start_test_server` sets PYLON_ADMIN_TOKEN, so dev-mode's open path is
+    // OFF here (the secure model: configuring a token locks metrics down even
+    // in dev). Fetch with the admin bearer, the way a Prometheus scraper or
+    // the Studio dashboard would.
+    let (status, body) = http_request_with_auth(
+        "GET",
+        &format!("{base}/metrics"),
+        None,
+        Some(TEST_ADMIN_TOKEN),
+    );
     assert_eq!(status, 200, "metrics: {body}");
     let resp: serde_json::Value = serde_json::from_str(&body).unwrap();
     // The metrics snapshot must record at least the requests we just made.
