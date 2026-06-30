@@ -43,9 +43,11 @@ const Product = entity(
   "Product",
   {
     // Human-readable, unique URL key for the SSR detail route (/p/<slug>).
-    // Generated at seed as `name-slug-<4hex>` so the 10k catalog's repeated
-    // names still produce distinct, shareable, SEO-able URLs.
-    slug: field.string(),
+    // Generated at seed as `name-slug-<hex>` so the 10k catalog's repeated
+    // names still produce distinct, shareable, SEO-able URLs. Optional so the
+    // column can be added to an already-populated table (a NOT-NULL unique
+    // column can't be back-added to 10k rows); the seed/backfill fills it.
+    slug: field.string().optional(),
     name: field.string(),
     description: field.richtext(),
     brand: field.string(),
@@ -55,8 +57,10 @@ const Product = entity(
     rating: field.float(),
     stock: field.int(),
     // Merchandising flags powering the "Featured" facet + "Best selling" sort.
-    featured: field.bool(),
-    salesCount: field.int(),
+    // Defaulted so they auto-add to an existing table; the seed/backfill fills
+    // real values.
+    featured: field.bool().default(false),
+    salesCount: field.int().default(0),
     imageUrl: field.string().optional(),
     createdAt: field.datetime(),
   },

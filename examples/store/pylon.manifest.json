@@ -53,7 +53,7 @@
         {
           "name": "slug",
           "type": "string",
-          "optional": false,
+          "optional": true,
           "unique": false
         },
         {
@@ -108,13 +108,15 @@
           "name": "featured",
           "type": "bool",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "default": false
         },
         {
           "name": "salesCount",
           "type": "int",
           "optional": false,
-          "unique": false
+          "unique": false,
+          "default": 0
         },
         {
           "name": "imageUrl",
