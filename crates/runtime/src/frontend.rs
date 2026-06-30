@@ -2655,14 +2655,99 @@ fn build_ssr_response_headers(
 
 /// A minimal, structured SSR error response (used when the render can't
 /// even start, or fails before emitting `response_start`).
-fn ssr_error_response(status: u16, cors_origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
-    let body = format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{status}</title></head><body><h1>{status}</h1><p>The server could not render this page.</p></body></html>"
+/// Friendly, framework-default error page. Styled (light/dark aware), no app
+/// code required — this is the "provided default" so an html request never
+/// sees raw JSON. Apps can still override per-route with `error.tsx` /
+/// `not-found.tsx` (and `rate-limit.tsx`, served on 429). `heading`/`message`
+/// are HTML-escaped by the caller's literals (static, no user input here).
+pub(crate) fn builtin_error_page_html(status: u16, heading: &str, message: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
+<title>{status} — {heading}</title>\
+<style>\
+:root{{color-scheme:light dark}}\
+*{{box-sizing:border-box}}\
+body{{margin:0;min-height:100vh;display:grid;place-items:center;\
+font:16px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;\
+background:#fafafa;color:#18181b}}\
+@media(prefers-color-scheme:dark){{body{{background:#0b0d12;color:#e6e8eb}}}}\
+.card{{max-width:30rem;padding:0 24px;text-align:center}}\
+.code{{font-size:13px;font-weight:600;letter-spacing:.08em;text-transform:uppercase;\
+color:#a1a1aa}}\
+h1{{font-size:24px;font-weight:600;margin:8px 0 8px}}\
+p{{margin:0;color:#71717a}}\
+@media(prefers-color-scheme:dark){{p{{color:#9aa3ad}}}}\
+a{{display:inline-block;margin-top:24px;color:inherit;text-decoration:none;\
+border:1px solid currentColor;border-radius:8px;padding:8px 18px;font-size:14px;font-weight:500;opacity:.85}}\
+a:hover{{opacity:1}}\
+</style></head><body><div class=\"card\">\
+<div class=\"code\">{status}</div>\
+<h1>{heading}</h1>\
+<p>{message}</p>\
+<a href=\"/\">Back home</a>\
+</div></body></html>",
     )
-    .into_bytes();
+}
+
+fn ssr_error_response(status: u16, cors_origin: &str) -> Response<std::io::Cursor<Vec<u8>>> {
+    let (heading, message) = match status {
+        404 => (
+            "Page not found",
+            "The page you're looking for doesn't exist or has moved.",
+        ),
+        429 => (
+            "Too many requests",
+            "You've hit the rate limit. Please slow down and try again shortly.",
+        ),
+        _ => (
+            "Something went wrong",
+            "The server ran into an error rendering this page. Please try again.",
+        ),
+    };
+    let body = builtin_error_page_html(status, heading, message).into_bytes();
     let mut resp = Response::from_data(body)
         .with_status_code(status)
         .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    resp
+}
+
+/// Whether the client prefers an HTML response (a browser navigation) over
+/// JSON (an API/fetch call). Used to decide if an early short-circuit (rate
+/// limit, etc.) should render the friendly HTML error page instead of the API
+/// JSON envelope. Defaults to false (JSON) when no Accept header is present.
+pub(crate) fn request_prefers_html(request: &tiny_http::Request) -> bool {
+    request.headers().iter().any(|h| {
+        let field = h.field.as_str();
+        (field == "Accept" || field == "accept") && {
+            let v = h.value.as_str();
+            v.contains("text/html") || v.contains("application/xhtml")
+        }
+    })
+}
+
+/// Framework-default 429 page for browser navigations that get rate-limited,
+/// so they see a styled page instead of raw `{"error":...}` JSON. `retry_after`
+/// (seconds) is surfaced in the message and the standard `Retry-After` header.
+pub fn rate_limited_html_response(
+    retry_after: u64,
+    cors_origin: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let message = format!(
+        "You've made too many requests. Please wait {retry_after} second{} and try again.",
+        if retry_after == 1 { "" } else { "s" }
+    );
+    let body = builtin_error_page_html(429, "Too many requests", &message).into_bytes();
+    let mut resp = Response::from_data(body)
+        .with_status_code(429u16)
+        .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+        .with_header(
+            Header::from_bytes("Retry-After", retry_after.to_string().as_bytes()).unwrap(),
+        );
     if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
         resp = resp.with_header(h);
     }
@@ -3866,6 +3951,26 @@ mod tests {
         // Mentions the error.tsx remedy + the dev-only nature.
         assert!(html.contains("error.tsx"));
         assert!(html.contains("PYLON_DEV_MODE"));
+    }
+
+    #[test]
+    fn builtin_error_page_is_html_not_json() {
+        // A rate-limited browser navigation must get a styled HTML page, never
+        // the raw API JSON envelope. Regression for "{"error":{"code":
+        // "RATE_LIMITED"...}}" showing as a full page on store.pyln.dev.
+        let html = builtin_error_page_html(
+            429,
+            "Too many requests",
+            "You've made too many requests. Please wait 8 seconds and try again.",
+        );
+        assert!(html.starts_with("<!DOCTYPE html>"));
+        assert!(html.contains("429"));
+        assert!(html.contains("Too many requests"));
+        assert!(html.contains("Please wait 8 seconds"));
+        // It's a real page (has a back-home link), not a JSON blob.
+        assert!(html.contains("Back home"));
+        assert!(!html.contains("\"error\""));
+        assert!(!html.contains("RATE_LIMITED"));
     }
 
     #[test]

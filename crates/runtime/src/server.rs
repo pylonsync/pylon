@@ -3319,6 +3319,18 @@ fn start_server(
         let is_preflight = matches!(method, Method::Options);
         if !is_preflight {
             if let Err(retry_after) = rate_limiter.check(&peer_ip) {
+                // Browser navigation (Accept: text/html) → friendly HTML page,
+                // not the raw API JSON envelope. API/fetch callers still get
+                // JSON. The HTML is the framework default; an app can ship
+                // app/rate-limit.tsx to override the styling.
+                if crate::frontend::request_prefers_html(&request) {
+                    let response = with_security_headers(
+                        crate::frontend::rate_limited_html_response(retry_after, &cors_origin),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request(method.as_str(), 429);
+                    return;
+                }
                 let err_body = json_error(
                     "RATE_LIMITED",
                     &format!("Too many requests. Retry after {retry_after} seconds."),
