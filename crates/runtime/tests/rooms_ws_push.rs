@@ -309,6 +309,87 @@ fn subscribe_and_push_on_join() {
     let _ = client_b.close(None);
 }
 
+/// Cross-tenant isolation: a presence/join event for room1 must reach
+/// room1's subscribers ONLY — never a client subscribed to a different
+/// room. Regression for the `broadcast_presence` firehose, where
+/// `notify_presence` fanned every room event to EVERY connected client
+/// across all tenants (a cross-tenant data leak). With the firehose gated
+/// behind PYLON_WS_UNSCOPED_PRESENCE (off here), room events flow only
+/// through the room-scoped push.
+#[test]
+fn presence_does_not_leak_across_rooms() {
+    let (port, _rt) = start_server();
+    let base = format!("http://127.0.0.1:{port}");
+    let room1 = "channel:tenant-a";
+    let room2 = "channel:tenant-b";
+
+    // Seed both rooms so they exist.
+    for room in [room1, room2] {
+        let (status, body) = http_request_with_auth(
+            "POST",
+            &format!("{base}/api/rooms/join"),
+            Some(&format!(r#"{{"room":"{room}","user_id":"seed"}}"#)),
+            Some(TEST_ADMIN_TOKEN),
+        );
+        assert_eq!(status, 200, "seed join {room}: {body}");
+    }
+
+    // A subscribes to room1, B subscribes to room2 (a different "tenant").
+    let mut client_a = connect_ws_admin(port);
+    let mut client_b = connect_ws_admin(port);
+    client_a
+        .send(Message::Text(
+            serde_json::json!({"type":"room-subscribe","room":room1}).to_string(),
+        ))
+        .unwrap();
+    client_b
+        .send(Message::Text(
+            serde_json::json!({"type":"room-subscribe","room":room2}).to_string(),
+        ))
+        .unwrap();
+    for c in [&mut client_a, &mut client_b] {
+        let _ = wait_for_frame(c, Duration::from_secs(2), |v| {
+            v.get("type").and_then(|t| t.as_str()) == Some("room-snapshot")
+        });
+    }
+
+    // Alice joins room1. The room-scoped push must reach A and ONLY A.
+    let (status, body) = http_request_with_auth(
+        "POST",
+        &format!("{base}/api/rooms/join"),
+        Some(&format!(
+            r#"{{"room":"{room1}","user_id":"alice","data":{{"color":"red"}}}}"#
+        )),
+        Some(TEST_ADMIN_TOKEN),
+    );
+    assert_eq!(status, 200, "alice join: {body}");
+
+    // Positive control: room1's subscriber sees the join.
+    let push_a = wait_for_frame(&mut client_a, Duration::from_secs(3), |v| {
+        v.get("type").and_then(|t| t.as_str()) == Some("room-update")
+            && v.get("action").and_then(|a| a.as_str()) == Some("join")
+            && v.get("room").and_then(|r| r.as_str()) == Some(room1)
+    });
+    assert!(
+        push_a.is_some(),
+        "room1 subscriber must receive the join push"
+    );
+
+    // The leak check: room2's subscriber must receive NOTHING mentioning
+    // room1 — not the scoped push (wrong room) and not the firehose copy
+    // (the bug). Any frame whose `room` is room1 reaching B is the leak.
+    let leaked = wait_for_frame(&mut client_b, Duration::from_secs(2), |v| {
+        v.get("room").and_then(|r| r.as_str()) == Some(room1)
+    });
+    assert!(
+        leaked.is_none(),
+        "room1 event must NOT leak to a room2 subscriber: {leaked:?}"
+    );
+
+    let _ = client_a.close(None);
+    let _ = client_b.close(None);
+}
+
 /// Scenario 2: a non-admin user subscribes to a room they didn't join.
 /// Server replies with `{"type":"error","code":"NOT_IN_ROOM"}` and
 /// records no subscription, so they never see future pushes.

@@ -1195,19 +1195,27 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
     }
 
     fn notify_presence(&self, json: &str) {
-        // Legacy WS firehose: keep broadcasting to every connected
-        // client so SDK clients on the old wire (pre-room-subscribe)
-        // still see presence/join/leave events. New clients ignore
-        // the legacy shape and rely on the room-scoped `room-update`
-        // push below.
-        self.ws.broadcast_presence(json);
-        self.sse.broadcast_message(json);
-        // New room-scoped push: parse the RoomEvent shape and push a
-        // `room-update` envelope only to clients subscribed to the
-        // affected room. O(subscribers per room), NOT O(all WS
-        // clients). Replaces the 5s polling loop the SDK ran against
-        // `/api/rooms/<room>`.
-        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(json) {
+        let payload = serde_json::from_str::<serde_json::Value>(json).ok();
+        let has_room = payload
+            .as_ref()
+            .and_then(|p| p.get("room"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|r| !r.is_empty());
+        // Secure by default. A room-scoped frame is delivered ONLY to that
+        // room's subscribers via the `room-update` push below — never the
+        // global firehose, which fanned every payload (data + sender + topic)
+        // to every connected client across all tenants. The legacy firehose
+        // now fires only for ROOMLESS frames and only when the operator opted
+        // into PYLON_WS_UNSCOPED_PRESENCE (single-tenant apps). Mirrors the
+        // inbound WS path's `presence_target` routing.
+        if !has_room && unscoped_presence_enabled() {
+            self.ws.broadcast_presence(json);
+            self.sse.broadcast_message(json);
+        }
+        // Room-scoped push: parse the RoomEvent shape and push a `room-update`
+        // envelope only to clients subscribed to the affected room.
+        // O(subscribers per room), NOT O(all WS clients).
+        if let Some(payload) = payload {
             translate_and_push_room_event(&self.ws, &payload);
             // Presence relays are cross-machine too — a typing indicator
             // on machine A should reach clients on machine B. Skip the relay
@@ -1457,17 +1465,25 @@ pub fn install_cluster_bus_subscriber(
             let _ = (&manifest_handler, &auth_user_handler);
             return;
         }
-        // Presence: opaque JSON, broadcast as-is. The originating
-        // machine already shaped it as the WS wire format expects.
+        // Presence relayed from a peer machine. Same secure-by-default
+        // routing as the local `notify_presence` path: a room-scoped frame
+        // reaches ONLY that room's subscribers (via the scoped push below);
+        // the global firehose fires only for ROOMLESS frames and only under
+        // the PYLON_WS_UNSCOPED_PRESENCE opt-in. Pre-fix, every peer presence
+        // frame fanned to every client on this machine across all tenants.
         if envelope.kind == "presence" {
-            if let Ok(json) = serde_json::to_string(&envelope.payload) {
-                ws_handler.broadcast_presence(&json);
-                sse_handler.broadcast_message(&json);
+            let has_room = envelope
+                .payload
+                .get("room")
+                .and_then(|v| v.as_str())
+                .is_some_and(|r| !r.is_empty());
+            if !has_room && unscoped_presence_enabled() {
+                if let Ok(json) = serde_json::to_string(&envelope.payload) {
+                    ws_handler.broadcast_presence(&json);
+                    sse_handler.broadcast_message(&json);
+                }
             }
-            // Also fan to room subscribers on this machine — without
-            // this, a room-update originating on peer A would only
-            // reach peer B's legacy WS firehose listeners, not the
-            // new room-scoped subscribers.
+            // Fan to this machine's room subscribers (the scoped path).
             translate_and_push_room_event(&ws_handler, &envelope.payload);
             return;
         }
@@ -1578,6 +1594,16 @@ fn to_json_array<T: serde::Serialize>(val: T) -> serde_json::Value {
 /// Used by `WsSseNotifier::notify_presence` AND the cluster-bus
 /// subscriber path so a presence event originating on machine A
 /// reaches room subscribers on machine B with identical wire shape.
+/// Whether the operator opted back into the legacy un-scoped presence
+/// firehose (single-tenant apps). Mirrors the inbound WS path's read of
+/// `PYLON_WS_UNSCOPED_PRESENCE` so the server-side relay and the inbound
+/// relay make the same secure-by-default decision.
+pub(crate) fn unscoped_presence_enabled() -> bool {
+    std::env::var("PYLON_WS_UNSCOPED_PRESENCE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 pub(crate) fn translate_and_push_room_event(
     ws: &Arc<crate::ws::WsHub>,
     payload: &serde_json::Value,
