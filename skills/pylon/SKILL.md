@@ -20,7 +20,7 @@ This skill is a starting point, not the ceiling. When the user asks something th
 - **Pylon Cloud:** <https://www.pylonsync.com> — managed Pylon. Same binary, same APIs, no infra to run.
 - **This skill file (latest):** <https://www.pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
-**Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`) is probably hallucinated. (`db.useAggregate`, `db.useReactiveQuery`, `db.useSearch`, `useRoom`, `useShard` ARE real — see the realtime hooks below.)
+**Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`v.money()`, `v.enum()`, `v.timestamp()`) is probably hallucinated. (`db.useAggregate`, `db.useReactiveQuery`, `db.useSearch`, `useRoom`, `useShard` ARE real — see the realtime hooks below.)
 
 ## When to use this skill
 
@@ -358,7 +358,7 @@ ctx.db.delete(entity, id)              // => void
 
 ctx.error("CODE", "message")           // throw typed error (mutation/action ctx only — NOT query ctx)
 ctx.scheduler.runAfter(delayMs, "fnName", args)   // enqueue delayed call
-ctx.scheduler.runAt(isoTimestamp, "fnName", args) // enqueue at a wall-clock time
+ctx.scheduler.runAt(unixMs, "fnName", args)       // enqueue at a wall-clock time (Unix ms, e.g. new Date(iso).getTime())
 ctx.requireMember(orgId, { role })     // assert org membership/role — throws, fails closed
 ctx.db.link(entity, id, relation, targetId) / ctx.db.unlink(entity, id, relation)
 ```
@@ -387,7 +387,7 @@ In a **full-stack SSR app you do NOT call `init`/`configureClient`** — the run
 import { db } from "@pylonsync/react";
 
 function MessageList({ roomId }: { roomId: string }) {
-  const { data: messages, loading } = db.useQuery("Message", { roomId });
+  const { data: messages, loading } = db.useQuery("Message", { where: { roomId } });
   if (loading) return null;
   return (
     <ul>
@@ -416,14 +416,14 @@ async function onSend(roomId: string, body: string) {
 
 | You want | Hook | Notes |
 |---|---|---|
-| Live list of one entity, filtered | `db.useQuery("E", { filter })` | Cached in the local replica; filters offline/sort locally for free. **The cross-tab-reliable primitive.** |
-| One row by id, live | `db.useQueryOne("E", id)` (alias `db.useOne`) | |
-| Live pagination | `db.useInfiniteQuery` / `db.useQueryPaginated` | each page is its own subscription |
+| Live list of one entity, filtered | `db.useQuery("E", { where: {...} })` | Cached in the local replica; filters offline/sort locally for free. **The cross-tab-reliable primitive.** |
+| One row by id, live | `db.useQueryOne("E", id)` | |
+| Live pagination | `db.useInfiniteQuery("E", { pageSize })` | each page is its own subscription |
 | Server-side join / computed / aggregate value, live | `db.useReactiveQuery("fnName", args)` | Convex-style: a `query()` handler that auto-re-runs when its dep set changes. **See the footgun below.** |
 | Live count / sum / avg / groupBy | `db.useAggregate(...)` | |
 | Live full-text + faceted search | `db.useSearch("E", { query, filters, facets, sort, pageSize })` | re-runs on every keystroke AND every matching write; needs the `search` plugin + `search:` on the entity |
 | Optimistic write with a "ghost" row | `db.useMutation("fnName")` / `db.useEntity` | inserts locally instantly; server broadcast reconciles in place |
-| Presence / cursors / typing / broadcast | `useRoom(sync, roomId, { initialPresence })` | ephemeral — `peers`, `setPresence(data)`, `broadcast(topic, data)`. NOT persisted. |
+| Presence / cursors / typing / broadcast | `useRoom(roomId, userId, { initialPresence })` | ephemeral — `peers`, `setPresence(data)`, `broadcast(topic, data)`. NOT persisted. |
 | Authoritative multiplayer sim (game/MMO tick loop) | `useShard(shardId, { subscriberId, token })` | `{ snapshot, tick, send, connected }`. The server-side sim (`SimState` tick loop) is defined in Rust (`crates/realtime`); `useShard`/`connectShard` are the TS client. |
 | Connection/sync state for a status indicator | `useSyncStatus()` / `useSession()` | |
 
@@ -435,7 +435,7 @@ const { data: stat } = db.useQuery("WaitlistStat");   // allowRead:"true", count
 const count = stat[0]?.count ?? 0;
 
 // Presence (cursors / typing) — ephemeral, not stored
-const room = useRoom(db.sync, `doc:${docId}`, { initialPresence: { cursor: 0 } });
+const room = useRoom(`doc:${docId}`, userId, { initialPresence: { cursor: 0 } });
 room.peers.map((p) => <Cursor key={p.user_id} x={p.data.cursor} />);
 room.setPresence({ cursor: caretPos });
 ```
@@ -612,14 +612,14 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
   | richtext | `field.richtext()` | `v.richtext()` or `v.string()` |
   | FK id | `field.id("X")` | `v.id("X")` |
 
-  What still **doesn't exist**: `relation(...)`, `v.money()`, `v.enum()`, `v.timestamp()`. When in doubt, source is at <https://github.com/pylonsync/pylon/tree/main/packages>.
+  What still **doesn't exist**: `v.money()`, `v.enum()`, `v.timestamp()`. When in doubt, source is at <https://github.com/pylonsync/pylon/tree/main/packages>.
 - **Every function file must `export default`** the `mutation()/query()/action()` result. Named exports are ignored.
 - **`functions/*.ts` file names are the RPC names.** `functions/create-issue.ts` would be called as `create-issue` — prefer camelCase to match JS identifier conventions.
 - **Generated files** (`pylon.manifest.json`, `pylon.client.ts`) are rebuilt on every `pylon dev` invocation. Never edit by hand.
 - **Workspace deps** in examples use `workspace:*` — if you scaffold outside the Pylon monorepo, replace with the published version.
 - **Dev mode is generous by default** (CORS `*`, rate limits raised). Production requires explicit `PYLON_CORS_ORIGIN` — `*` is rejected.
 - **Policies filter silently on read** but throw `POLICY_DENIED` on write. If a list query returns fewer rows than expected, check read policies.
-- **Live queries need indexes** on filter columns. A `useQuery("Message", { roomId })` with no index on `roomId` will still work but scale O(N) per change.
+- **Live queries need indexes** on filter columns. A `db.useQuery("Message", { where: { roomId } })` with no index on `roomId` will still work but scale O(N) per change.
 - **Always call `ctx.error(code, msg)`** instead of throwing plain `Error` — plain errors become generic `HANDLER_ERROR` on the client with the real message stripped.
 
 ## Quick decision guide
@@ -627,17 +627,17 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 | User wants | You write |
 |---|---|
 | A new table | New `entity(...)` in `app.ts` + matching `policy(...)` + `buildManifest({ entities: [...], policies: [...] })` |
-| A list in the UI | `db.useQuery("Entity", { filter })` — make sure `filter` keys are indexed |
+| A list in the UI | `db.useQuery("Entity", { where: {...} })` — make sure the `where` keys are indexed |
 | A live counter / availability across tabs | `db.useQuery` over a public-read projection entity the mutation maintains — NOT `useReactiveQuery` |
 | A server-side join / computed value, live | `db.useReactiveQuery("fnName", args)` (leader-view; see footgun) |
 | Live full-text search | `db.useSearch("Entity", { query, facets })` + `search` plugin |
-| Presence / cursors / typing | `useRoom(db.sync, roomId)` — ephemeral, not persisted |
+| Presence / cursors / typing | `useRoom(roomId, userId)` — ephemeral, not persisted |
 | Multiplayer game / tick sim | `useShard(shardId, { subscriberId })` |
 | A form submission / write | A `mutation()` in `functions/X.ts` + `await callFn("X", args)` in the component (or `db.useMutation` for optimistic UI) |
 | Auth-gated functions | `auth: "user"` is the default on every `query` / `mutation` / `action`. Anon callers get `401 AUTH_REQUIRED` before the handler runs. `auth: "public"` to opt out (webhooks, healthchecks). CRITICAL on actions — policies don't gate them. |
 | Access rules | `policy({ allowRead: "...", allowInsert: "..." })` — not middleware, not function guards |
 | Email / external API | `action()` (not `mutation()`) |
-| A scheduled job | `ctx.scheduler.runAfter(delayMs, "fnName", args)` (or `runAt(iso, ...)`) inside a mutation/action |
+| A scheduled job | `ctx.scheduler.runAfter(delayMs, "fnName", args)` (or `runAt(unixMs, ...)` — Unix ms, not an ISO string) inside a mutation/action |
 | Deploy | `pylon deploy --target fly` then `fly deploy . --config fly.toml` |
 
 ## Before you finish a task

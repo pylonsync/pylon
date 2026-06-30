@@ -179,7 +179,7 @@ Pylon doesn't have a separate relation primitive — use `field.id("Other")` and
 const msgs = await ctx.db.query("Message", { roomId: args.roomId });
 
 // Or in a React client:
-const { data: messages } = db.useQuery("Message", { roomId });
+const { data: messages } = db.useQuery("Message", { where: { roomId } });
 ```
 
 ## Schema changes

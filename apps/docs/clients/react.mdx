@@ -179,8 +179,8 @@ function ConnectionIndicator() {
 ```tsx
 import { useRoom } from "@pylonsync/react";
 
-function Editor({ docId }: { docId: string }) {
-  const room = useRoom(db.sync, `doc:${docId}`);
+function Editor({ docId, userId }: { docId: string; userId: string }) {
+  const room = useRoom(`doc:${docId}`, userId);
   return (
     <>
       {room.peers.map((p) => (

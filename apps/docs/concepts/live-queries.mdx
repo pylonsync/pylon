@@ -9,7 +9,7 @@ A **live query** is a server query whose result streams updates to the client. I
 import { db } from "@pylonsync/react";
 
 function Inbox() {
-  const { data: messages, loading } = db.useQuery("Message", { roomId });
+  const { data: messages, loading } = db.useQuery("Message", { where: { roomId } });
   if (loading) return null;
   return messages.map((m) => <Row key={m.id} msg={m} />);
 }
@@ -30,8 +30,8 @@ When anyone inserts, updates, or deletes a `Message` row matching `{ roomId }`, 
 Filters map to indexed columns. Equality is always fast; inequality and range scans require an index on the queried columns.
 
 ```tsx
-db.useQuery("Issue", { teamId, state: "open" });
-db.useQuery("Message", { roomId });
+db.useQuery("Issue", { where: { teamId, state: "open" } });
+db.useQuery("Message", { where: { roomId } });
 db.useQuery("User");              // full table (careful, scales O(N))
 ```
 
@@ -40,10 +40,10 @@ db.useQuery("User");              // full table (careful, scales O(N))
 With codegen, `db` is fully typed to your schema:
 
 ```tsx
-const { data } = db.useQuery("Message", { roomId });
+const { data } = db.useQuery("Message", { where: { roomId } });
 // data: Message[]
 
-const { data: issue } = db.useOne("Issue", issueId);
+const { data: issue } = db.useQueryOne("Issue", issueId);
 // issue: Issue | null
 ```
 
@@ -54,9 +54,7 @@ Type errors catch mismatched filter keys or wrong entity names at compile time.
 Live pagination works; each page is its own subscription:
 
 ```tsx
-const { data, hasMore, loadMore } = db.useQueryPaginated("Message", {
-  filter: { roomId },
-  orderBy: ["sentAt", "desc"],
+const { data, hasMore, loadMore } = db.useInfiniteQuery("Message", {
   pageSize: 50,
 });
 ```
