@@ -48,7 +48,7 @@ export function OrderDetail({ id }: { id: string }) {
         variant="ghost"
         size="sm"
         className="self-start"
-        onClick={() => navigate("#/account")}
+        onClick={() => navigate("/account")}
       >
         <ArrowLeft className="size-4" />
         Back to orders

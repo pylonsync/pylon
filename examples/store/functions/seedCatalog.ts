@@ -67,14 +67,23 @@ export default mutation({
       const name = `${brand} ${adj} ${noun}`;
       const description = `The ${brand} ${name.toLowerCase()} — a ${color} ${category.toLowerCase().slice(0, -1)} designed for everyday wear. ${adj[0].toUpperCase()}${adj.slice(1)} ${noun} construction with a soft feel and long-lasting finish.`;
 
+      // Human-readable slug + a deterministic 4-hex suffix so repeated names
+      // across the 10k catalog still map to unique, shareable /p/<slug> URLs.
+      const suffix = (seeded(i + 31, 0xffff) | 0x1000).toString(16);
+      const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-${suffix}`;
+
       // Deterministic price + rating from the index so re-seeding
       // produces the same catalog. Prices cluster in the $20-$240
       // range; ratings skew high with natural variance.
       const price = 20 + ((i * 17) % 220) + (i % 100) / 100;
       const rating = 3.2 + ((i * 7) % 180) / 100;
       const stock = seeded(i + 23, 50);
+      // ~8% featured; sales skew so a handful are clear best-sellers.
+      const featured = seeded(i + 29, 12) === 0;
+      const salesCount = seeded(i + 37, 5000);
 
       await ctx.db.insert("Product", {
+        slug,
         name,
         description,
         brand,
@@ -83,6 +92,8 @@ export default mutation({
         price: Math.round(price * 100) / 100,
         rating: Math.round(rating * 10) / 10,
         stock,
+        featured,
+        salesCount,
         createdAt: now,
       });
       inserted++;

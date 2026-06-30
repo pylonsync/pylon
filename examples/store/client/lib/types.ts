@@ -1,5 +1,6 @@
 export type Product = {
   id: string;
+  slug: string;
   name: string;
   description: string;
   brand: string;
@@ -8,6 +9,8 @@ export type Product = {
   price: number;
   rating: number;
   stock: number;
+  featured: boolean;
+  salesCount: number;
   imageUrl?: string;
   createdAt: string;
 };

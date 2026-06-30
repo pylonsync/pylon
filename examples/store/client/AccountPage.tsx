@@ -49,7 +49,7 @@ export function AccountPage() {
           <Card className="p-6 text-center text-sm text-muted-foreground">
             You haven&rsquo;t placed any orders yet.
             <div className="mt-3">
-              <Button size="sm" onClick={() => navigate("#/")}>
+              <Button size="sm" onClick={() => navigate("/")}>
                 Browse the catalog
               </Button>
             </div>
@@ -78,7 +78,7 @@ function OrderRow({ order }: { order: Order }) {
   return (
     <Card
       className="cursor-pointer transition hover:border-primary/30"
-      onClick={() => navigate(`#/orders/${encodeURIComponent(order.id)}`)}
+      onClick={() => navigate(`/orders/${encodeURIComponent(order.id)}`)}
     >
       <CardContent className="flex items-center gap-4 p-4">
         <div className="flex flex-1 flex-col gap-1">

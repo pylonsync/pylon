@@ -1,9 +1,11 @@
 import React from "react";
+import { StoreChrome } from "../client/StoreChrome";
 
-// Root layout for the native-SSR Store example. Pylon's SSR head adapter
-// injects the compiled Tailwind <link> (from app/globals.css) into <head>
-// automatically. The interactive sync-engine UI mounts as a client island
-// (see app/page.tsx), so this layout stays a thin server-rendered shell.
+// Root layout for the native-SSR Store. Each route under app/ is a real
+// server-rendered page (catalog, /p/<slug>, /account, /checkout,
+// /orders/<id>) — no hash router. The shared chrome (header, cart drawer,
+// auth dialog, sync boot) mounts once here as a client island so it persists
+// across client-side route transitions while each page's content SSRs.
 export default function RootLayout({
   children,
 }: {
@@ -18,6 +20,7 @@ export default function RootLayout({
         <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased">
+        <StoreChrome />
         {children}
       </body>
     </html>

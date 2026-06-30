@@ -52,11 +52,11 @@ export function UserMenu({ user }: { user: NonNullable<AuthUser> }) {
           )}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onClick={() => navigate("#/account")}>
+        <DropdownMenuItem onClick={() => navigate("/account")}>
           <UserIcon className="size-4" />
           Account
         </DropdownMenuItem>
-        <DropdownMenuItem onClick={() => navigate("#/account")}>
+        <DropdownMenuItem onClick={() => navigate("/account")}>
           <Package className="size-4" />
           Orders
         </DropdownMenuItem>
@@ -65,7 +65,7 @@ export function UserMenu({ user }: { user: NonNullable<AuthUser> }) {
           className="text-destructive focus:text-destructive"
           onClick={async () => {
             await logout();
-            navigate("#/");
+            navigate("/");
           }}
         >
           <LogOut className="size-4" />

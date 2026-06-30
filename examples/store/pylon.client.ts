@@ -15,6 +15,7 @@ export interface User {
 
 export interface Product {
   id: string;
+  slug: string;
   name: string;
   description: string;
   brand: string;
@@ -23,6 +24,8 @@ export interface Product {
   price: number;
   rating: number;
   stock: number;
+  featured: boolean;
+  salesCount: number;
   imageUrl?: string;
   createdAt: string;
 }

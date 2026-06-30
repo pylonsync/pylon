@@ -65,7 +65,7 @@ export function CheckoutPage({
     if (!selectedId) return;
     try {
       const result = await placeOrder.mutate({ addressId: selectedId });
-      navigate(`#/orders/${encodeURIComponent(result.orderId)}`);
+      navigate(`/orders/${encodeURIComponent(result.orderId)}`);
     } catch {
       /* shown via placeOrder.error below */
     }
@@ -80,7 +80,7 @@ export function CheckoutPage({
           variant="ghost"
           size="sm"
           className="self-start"
-          onClick={() => navigate("#/")}
+          onClick={() => navigate("/")}
         >
           <ArrowLeft className="size-4" />
           Back to catalog

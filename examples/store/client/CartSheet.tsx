@@ -70,7 +70,7 @@ export function CartSheet({
                   <button
                     className="text-left text-sm font-medium hover:underline"
                     onClick={() => {
-                      navigate(`#/p/${encodeURIComponent(it.productId)}`);
+                      navigate(`/p/${encodeURIComponent(it.productId)}`);
                       onClose();
                     }}
                   >
@@ -134,7 +134,7 @@ export function CartSheet({
               <span>${cart.total.toFixed(2)}</span>
             </div>
             <SheetClose asChild>
-              <Button onClick={() => navigate("#/checkout")} className="w-full">
+              <Button onClick={() => navigate("/checkout")} className="w-full">
                 Checkout
               </Button>
             </SheetClose>

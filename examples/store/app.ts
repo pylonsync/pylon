@@ -42,6 +42,10 @@ const User = entity(
 const Product = entity(
   "Product",
   {
+    // Human-readable, unique URL key for the SSR detail route (/p/<slug>).
+    // Generated at seed as `name-slug-<4hex>` so the 10k catalog's repeated
+    // names still produce distinct, shareable, SEO-able URLs.
+    slug: field.string(),
     name: field.string(),
     description: field.richtext(),
     brand: field.string(),
@@ -50,19 +54,23 @@ const Product = entity(
     price: field.float(),
     rating: field.float(),
     stock: field.int(),
+    // Merchandising flags powering the "Featured" facet + "Best selling" sort.
+    featured: field.bool(),
+    salesCount: field.int(),
     imageUrl: field.string().optional(),
     createdAt: field.datetime(),
   },
   {
     indexes: [
+      { name: "by_slug", fields: ["slug"], unique: true },
       { name: "by_category", fields: ["category"], unique: false },
       { name: "by_brand", fields: ["brand"], unique: false },
       { name: "by_price", fields: ["price"], unique: false },
     ],
     search: {
       text: ["name", "description"],
-      facets: ["brand", "category", "color"],
-      sortable: ["price", "rating", "createdAt"],
+      facets: ["brand", "category", "color", "featured"],
+      sortable: ["price", "rating", "createdAt", "salesCount"],
     },
     // The catalog is 10k rows — far too large to replicate into every browser.
     // It's reached via server-side faceted search (db.useSearch) + by-id fetch

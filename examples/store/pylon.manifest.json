@@ -51,6 +51,12 @@
       "name": "Product",
       "fields": [
         {
+          "name": "slug",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
           "name": "name",
           "type": "string",
           "optional": false,
@@ -99,6 +105,18 @@
           "unique": false
         },
         {
+          "name": "featured",
+          "type": "bool",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "salesCount",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
           "name": "imageUrl",
           "type": "string",
           "optional": true,
@@ -112,6 +130,13 @@
         }
       ],
       "indexes": [
+        {
+          "name": "by_slug",
+          "fields": [
+            "slug"
+          ],
+          "unique": true
+        },
         {
           "name": "by_category",
           "fields": [
@@ -142,12 +167,14 @@
         "facets": [
           "brand",
           "category",
-          "color"
+          "color",
+          "featured"
         ],
         "sortable": [
           "price",
           "rating",
-          "createdAt"
+          "createdAt",
+          "salesCount"
         ]
       },
       "sync": false
@@ -420,6 +447,38 @@
       "path": "/",
       "mode": "ssr",
       "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/account",
+      "mode": "ssr",
+      "component": "app/account/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/checkout",
+      "mode": "ssr",
+      "component": "app/checkout/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/orders/:id",
+      "mode": "ssr",
+      "component": "app/orders/[id]/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/p/:slug",
+      "mode": "ssr",
+      "component": "app/p/[slug]/page",
       "layouts": [
         "app/layout"
       ]
