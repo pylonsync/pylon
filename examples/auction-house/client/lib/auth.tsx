@@ -5,7 +5,7 @@
  * sign in / out.
  */
 import { useCallback, useEffect, useState } from "react";
-import { configureClient, db, storageKey } from "@pylonsync/react";
+import { configureClient, db, setSessionToken, storageKey } from "@pylonsync/react";
 import type { AuthUser } from "./types";
 
 // Same-origin under native SSR: the Pylon binary serves this app and its API
@@ -74,6 +74,7 @@ export async function ensureGuestSession(): Promise<StoredAuth> {
     const next = { token: body.token, userId: body.user_id, isGuest: true };
     writeStored(next);
     configureClient({ baseUrl: BASE_URL, appName: "auction-house" });
+    await setSessionToken(next.token);
     return next;
   } catch {
     return existing;
@@ -96,6 +97,8 @@ export async function register(input: {
   const next = { token: body.token, userId: body.user_id, isGuest: false };
   writeStored(next);
   configureClient({ baseUrl: BASE_URL, appName: "auction-house" });
+  // Identity flip guest→user: reset + re-snapshot under the new identity.
+  await setSessionToken(next.token);
   return next;
 }
 
@@ -110,6 +113,8 @@ export async function login(input: {
   const next = { token: body.token, userId: body.user_id, isGuest: false };
   writeStored(next);
   configureClient({ baseUrl: BASE_URL, appName: "auction-house" });
+  // Identity flip guest→user: reset + re-snapshot under the new identity.
+  await setSessionToken(next.token);
   return next;
 }
 

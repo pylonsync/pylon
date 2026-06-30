@@ -3,7 +3,7 @@
 // Shared client-side glue for Pylon Market: types, display helpers, and the
 // email/password auth bootstrap. Same-origin under native SSR, so no baseUrl —
 // init() resolves window.location.origin.
-import { init, configureClient, callFn, storageKey } from "@pylonsync/react";
+import { init, configureClient, callFn, setSessionToken, storageKey } from "@pylonsync/react";
 
 export const APP_NAME = "market";
 
@@ -183,19 +183,28 @@ export async function ensureReadSession(): Promise<void> {
     const res = await fetch("/api/auth/guest", { method: "POST" });
     if (res.ok) {
       const body = (await res.json()) as { token?: string };
-      if (body.token) localStorage.setItem(TOKEN(), body.token);
-      configureClient({ appName: APP_NAME });
+      if (body.token) {
+        localStorage.setItem(TOKEN(), body.token);
+        configureClient({ appName: APP_NAME });
+        // Re-snapshot the replica under the (new) guest identity. Also resets
+        // the user→guest flip on sign-out.
+        await setSessionToken(body.token);
+      }
     }
   } catch {
     // Server not reachable yet — the engine retries on connect.
   }
 }
 
-function applySession(token: string, userId: string, name: string): void {
+async function applySession(token: string, userId: string, name: string): Promise<void> {
   localStorage.setItem(TOKEN(), token);
   localStorage.setItem(USER_ID(), userId);
   localStorage.setItem(DISPLAY_NAME, name);
   configureClient({ appName: APP_NAME });
+  // Identity flipped (guest→user): wipe the replica + re-snapshot under the new
+  // identity so the user's own rows load and writes persist. Without this the
+  // engine keeps the guest replica and freshly-written rows vanish on refresh.
+  await setSessionToken(token);
   // Notify in-tab + cross-tab listeners (MarketProvider) to re-read identity.
   window.dispatchEvent(new Event("pylon-auth-changed"));
 }
@@ -213,7 +222,7 @@ export async function signIn(email: string, password: string): Promise<void> {
   const { token, user_id } = json as AuthResponse;
   // Login doesn't return displayName; default to the email handle and let
   // MarketProvider's live User query upgrade it.
-  applySession(token, user_id, email.split("@")[0] ?? "you");
+  await applySession(token, user_id, email.split("@")[0] ?? "you");
 }
 
 export async function signUp(
@@ -233,7 +242,7 @@ export async function signUp(
   const json = await res.json();
   if (!res.ok) throw new Error(json.error?.message ?? "Sign-up failed");
   const { token, user_id } = json as AuthResponse;
-  applySession(token, user_id, name || email.split("@")[0] || "you");
+  await applySession(token, user_id, name || email.split("@")[0] || "you");
 }
 
 export async function signOut(): Promise<void> {
