@@ -351,6 +351,47 @@ fn build_sso_redirect_uri(ctx: &RouterContext, org_id: &str) -> Option<String> {
     Some(format!("{trimmed}/api/auth/orgs/{org_id}/sso/callback"))
 }
 
+/// Base URL for user-facing auth EMAIL links (password reset, magic-link,
+/// email-change confirm, org invite). Prefers the request's own `Origin` WHEN
+/// it's a trusted origin, then falls back to `PYLON_PUBLIC_URL`.
+///
+/// Why prefer the request Origin: a reset/invite requested from the app's
+/// Default custom domain (e.g. `https://www.notbehind.com`) should link back to
+/// THAT domain — even when `PYLON_PUBLIC_URL` is stale against it (on Pylon
+/// Cloud the secret lagged the Default domain for ~2 weeks). The browser sends
+/// `Origin` on these POSTs and proxies pass it through unchanged, so it names
+/// the domain the user is actually on.
+///
+/// Why the trusted-origin gate is mandatory: these links carry a valid,
+/// redeemable token. Building the base from an UNVALIDATED Origin/Host would let
+/// an attacker submit a reset for a victim with a spoofed origin and have the
+/// token-bearing link point at their own domain (phishing / account takeover).
+/// `validate_trusted_redirect` restricts the derived base to the operator's
+/// explicit allowlist (+ loopback for dev); anything else falls back to the
+/// env var. SSO/SAML callbacks intentionally do NOT use this — those must match
+/// the fixed redirect_uri registered with the IdP.
+fn auth_link_base(ctx: &RouterContext) -> String {
+    pick_auth_base(
+        ctx.request_origin(),
+        ctx.trusted_origins,
+        &std::env::var("PYLON_PUBLIC_URL").unwrap_or_default(),
+    )
+}
+
+/// Pure core of [`auth_link_base`] — extracted so the trust decision is
+/// unit-testable without constructing a `RouterContext`. Returns the request
+/// `origin` only when it passes `validate_trusted_redirect` (operator allowlist
+/// + loopback); otherwise the operator's `env_url`. Trailing slashes trimmed.
+fn pick_auth_base(origin: Option<&str>, trusted: &[String], env_url: &str) -> String {
+    if let Some(origin) = origin {
+        let o = origin.trim_end_matches('/');
+        if pylon_auth::validate_trusted_redirect(o, trusted).is_ok() {
+            return o.to_string();
+        }
+    }
+    env_url.trim_end_matches('/').to_string()
+}
+
 fn sso_error_redirect(
     ctx: &RouterContext,
     error_url: &str,
@@ -715,6 +756,49 @@ fn form_decode(s: &str) -> String {
 /// where samael / IdP responses can carry i18n cert subjects.
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     s.chars().take(max_chars).collect()
+}
+
+#[cfg(test)]
+mod auth_link_base_tests {
+    use super::pick_auth_base;
+
+    #[test]
+    fn prefers_a_trusted_request_origin_over_the_env_url() {
+        let trusted = vec!["https://www.notbehind.com".to_string()];
+        // Reset requested from the Default custom domain → link back to it, even
+        // though PYLON_PUBLIC_URL still points at the stale system domain.
+        assert_eq!(
+            pick_auth_base(
+                Some("https://www.notbehind.com"),
+                &trusted,
+                "https://notbehind.pyln.dev",
+            ),
+            "https://www.notbehind.com",
+        );
+    }
+
+    #[test]
+    fn falls_back_to_env_url_for_untrusted_or_missing_origin() {
+        let trusted = vec!["https://www.notbehind.com".to_string()];
+        // SECURITY: an attacker-controlled Origin must NOT be used — the link
+        // carries a redeemable token, so it falls back to the operator's URL.
+        assert_eq!(
+            pick_auth_base(Some("https://evil.example"), &trusted, "https://safe.app"),
+            "https://safe.app",
+        );
+        // Non-browser caller (no Origin) → env URL.
+        assert_eq!(pick_auth_base(None, &trusted, "https://safe.app"), "https://safe.app");
+    }
+
+    #[test]
+    fn trims_trailing_slashes_on_both_paths() {
+        let trusted = vec!["https://www.notbehind.com".to_string()];
+        assert_eq!(
+            pick_auth_base(Some("https://www.notbehind.com/"), &trusted, "x"),
+            "https://www.notbehind.com",
+        );
+        assert_eq!(pick_auth_base(None, &trusted, "https://safe.app/"), "https://safe.app");
+    }
 }
 
 #[cfg(test)]
@@ -4178,7 +4262,7 @@ pub(crate) fn handle(
                 };
                 let accept_url = format!(
                     "{}/api/auth/invites/{}/accept",
-                    std::env::var("PYLON_PUBLIC_URL").unwrap_or_else(|_| String::new()),
+                    auth_link_base(ctx),
                     invited.token
                 );
                 let mut vars = std::collections::HashMap::new();
@@ -5899,7 +5983,7 @@ pub(crate) fn handle(
             None,
         );
         if registered {
-            let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
+            let public_url = auth_link_base(ctx);
             let reset_url = format!("{public_url}/reset-password?token={}", minted.plaintext);
             let mut vars = std::collections::HashMap::new();
             vars.insert("url", reset_url.as_str());
@@ -6064,7 +6148,7 @@ pub(crate) fn handle(
             None,
             None,
         );
-        let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
+        let public_url = auth_link_base(ctx);
         let verify_url = format!(
             "{public_url}/api/auth/magic-link/verify?token={}",
             minted.plaintext
@@ -6225,7 +6309,7 @@ pub(crate) fn handle(
             Some(user_id.clone()),
             Some(new_email.clone()),
         );
-        let public_url = std::env::var("PYLON_PUBLIC_URL").unwrap_or_default();
+        let public_url = auth_link_base(ctx);
         let confirm_url = format!(
             "{public_url}/email-change/confirm?token={}",
             minted.plaintext
