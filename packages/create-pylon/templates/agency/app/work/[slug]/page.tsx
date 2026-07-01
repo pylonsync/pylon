@@ -53,6 +53,11 @@ export const generateMetadata: GenerateMetadata = async ({
   };
 };
 
+// Public case study, no auth read → an ISR candidate. `revalidate` serves it
+// from cache with stale-while-revalidate and makes <Link>'s prefetch reusable,
+// so a click off the work grid hits cache instead of a live render.
+export const revalidate = 300;
+
 const WRAP_NARROW = "mx-auto w-full max-w-3xl px-6";
 
 function CaseStudy({

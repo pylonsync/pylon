@@ -31,6 +31,14 @@ async function resolveListing(
   );
 }
 
+// The listing page is anonymous + public (the watch button + offer panel are
+// client islands with their own auth), so its SSR output is shared across
+// visitors — an ISR candidate. `revalidate` serves it from cache, emits
+// stale-while-revalidate, and makes <Link>'s prefetch reusable so a click hits
+// cache instead of a live render. Short TTL because a listing's sold status is
+// time-sensitive; the realtime offer panel keeps the live bits fresh regardless.
+export const revalidate = 60;
+
 // Data-driven SEO: the title + description come from the listing itself,
 // fetched on the server. `generateMetadata` is handed the same PageProps as
 // the page (params + serverData), so it reads the row directly.
