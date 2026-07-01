@@ -14,6 +14,17 @@ import { useCallback, useEffect, useState } from "react";
 import { configureClient, db, setSessionToken, storageKey } from "@pylonsync/react";
 import type { AuthUser } from "./types";
 
+const APP_NAME = "store";
+
+// Configure the client at MODULE LOAD — before any component renders — so the
+// very first readStored()/useAuth() call resolves storage keys under the "store"
+// appName (`pylon:store:token`). configureClient() defaults appName to "default"
+// (keys `pylon_token`), and StoreChrome only sets it later inside a bootstrap
+// effect; that left the initial render reading the wrong keys, so a valid saved
+// session rendered as logged-out until an auth/storage event forced a re-read.
+// Running it at import fixes the read on the first paint after a reload.
+configureClient({ appName: APP_NAME });
+
 // Same-origin under native SSR; fall back to localhost for standalone dev.
 const BASE_URL =
   typeof window !== "undefined"
