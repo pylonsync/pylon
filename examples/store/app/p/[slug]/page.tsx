@@ -1,7 +1,7 @@
-import React, { Suspense, use } from "react";
+import React, { Suspense } from "react";
 import {
   Link,
-  useRouteSeed,
+  useRouteData,
   type GenerateMetadata,
   type Metadata,
   type PageProps,
@@ -58,14 +58,9 @@ export const generateMetadata: GenerateMetadata = async ({
 };
 
 export default function Page({ params, serverData }: PageProps<{ slug: string }>) {
-  // The catalog card hands us the whole product via <Link seed={product}>, so a
-  // click paints the full detail INSTANTLY from data we already have while the
-  // SSR fetch confirms it (fresh stock, canonical description). On a hard load /
-  // direct URL there's no seed — serverData is already resolved server-side, so
-  // the fallback never shows and the page ships fully rendered. useRouteSeed()
-  // returns null once the real data lands, so ProductView(seed) is only ever the
-  // brief optimistic first paint.
-  const seed = useRouteSeed<Product>();
+  // Keyed by slug so each product navigation mounts a fresh <Detail> in the
+  // right mode (optimistic vs hard-load); a same-product optimistic→real swap
+  // then updates that one instance in place — no remount flash.
   return (
     <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 md:px-6">
       <Link
@@ -76,10 +71,8 @@ export default function Page({ params, serverData }: PageProps<{ slug: string }>
         Back to catalog
       </Link>
 
-      <Suspense
-        fallback={seed ? <ProductView product={seed} /> : <DetailSkeleton />}
-      >
-        <Detail serverData={serverData} slug={params.slug} />
+      <Suspense fallback={<DetailSkeleton />}>
+        <Detail key={params.slug} serverData={serverData} slug={params.slug} />
       </Suspense>
     </main>
   );
@@ -92,7 +85,14 @@ function Detail({
   serverData: ServerData;
   slug: string;
 }) {
-  const product = use(resolveProduct(serverData, slug));
+  // useRouteData paints the <Link seed> instantly as content, then upgrades to
+  // the authoritative row IN PLACE (no Suspense fallback → no flash). On a hard
+  // load / direct URL there's no seed, so it suspends and the server streams the
+  // real product (the <Suspense> above catches it). See its docs in @pylonsync/react.
+  const product = useRouteData<Product>(
+    () => resolveProduct(serverData, slug),
+    [serverData, slug],
+  );
   if (!product) {
     return (
       <Card className="p-8 text-center text-sm text-muted-foreground">

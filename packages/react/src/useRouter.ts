@@ -12,7 +12,7 @@
 // `searchParams` PROPS the runtime already hands every page (see PageProps);
 // the hooks exist for deep children that need to react to client navigation
 // without prop-drilling.
-import { useMemo, useSyncExternalStore } from "react";
+import { use, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 // `Window.__pylon` is globally augmented in ./Link (same package, ambient).
 
@@ -148,6 +148,63 @@ export function useRouteSeed<T = unknown>(): T | null {
     seedClientSnapshot,
     seedServerSnapshot,
   ) as T | null;
+}
+
+/**
+ * Load a page's primary data with an optimistic first paint from `<Link seed>`.
+ * This is the flash-free way to consume a seed — prefer it over reading
+ * `useRouteSeed()` into a Suspense fallback (a fallback→content transition
+ * remounts, which flickers).
+ *
+ * - Hard load / SSR (no seed): suspends on `loader()`, so the server renders +
+ *   streams the real content and the client hydrates from the pre-fulfilled
+ *   serverData cache. Wrap the calling component in `<Suspense>`.
+ * - Optimistic client nav (a `<Link seed>` was clicked): returns the seed
+ *   immediately as real content — NO Suspense fallback — then swaps to the
+ *   resolved `loader()` value IN PLACE (same component instance), so there is no
+ *   remount between the seed and the authoritative row. No flash.
+ *
+ * `deps` drive the background reload — pass the values `loader` closes over
+ * (e.g. `[serverData, slug]`). Key the component by its dynamic route param if
+ * it serves both seeded and hard-loaded requests, so each navigation mounts a
+ * fresh instance in the right mode.
+ *
+ * ```tsx
+ * function Detail({ serverData, slug }: { serverData: ServerData; slug: string }) {
+ *   const product = useRouteData(() => loadProduct(serverData, slug), [serverData, slug]);
+ *   return product ? <ProductView product={product} /> : <NotFound />;
+ * }
+ * ```
+ */
+export function useRouteData<T>(
+  loader: () => Promise<T> | T,
+  deps: readonly unknown[],
+): T | null {
+  const seed = useRouteSeed<T>();
+  // Fix the mode at first render so the hook calls below stay stable even if the
+  // seed changes on a later same-instance nav (rules of hooks). `use()` may be
+  // called conditionally, but useState/useEffect may not — hence the ref.
+  const optimistic = useRef(seed != null).current;
+  const [data, setData] = useState<T | null>(optimistic ? seed : null);
+  useEffect(() => {
+    if (!optimistic) return;
+    let live = true;
+    Promise.resolve(loader()).then((v) => {
+      if (live && v != null) setData(v as T);
+    });
+    return () => {
+      live = false;
+    };
+    // loader is intentionally excluded; `deps` are the reload trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+  if (!optimistic) {
+    // SSR + hard load + non-seeded nav: suspend so the server streams the real
+    // content and the client hydrates it synchronously from the pre-fulfilled
+    // serverData cache (matches the server HTML — no mismatch).
+    return use(Promise.resolve(loader())) as T;
+  }
+  return data ?? seed;
 }
 
 /**

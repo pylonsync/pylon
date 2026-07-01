@@ -42,6 +42,7 @@ export {
   usePathname,
   useParams,
   useRouteSeed,
+  useRouteData,
   redirect,
   notFound,
   NotFoundError,

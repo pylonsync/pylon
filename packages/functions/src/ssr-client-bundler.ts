@@ -677,8 +677,11 @@ async function navigate(href, opts) {
   document.title = doc.title || document.title;
   syncHeadMeta(doc);
   setNavParams(data);
-  // Real data is in — drop the seed so useRouteSeed() stops returning it.
-  currentSeed = null;
+  // Keep currentSeed set for the rest of this nav: useRouteData renders the seed
+  // as CONTENT (not a Suspense fallback) and upgrades it to real data in place,
+  // so the seed must stay readable across the optimistic→real render. It's reset
+  // at the START of the next navigation. (Clearing it here would degrade the
+  // page to its skeleton for a frame during the swap — a visible flash.)
   currentPageProps = withClientProps(data);
   // Reuse myEpoch (do NOT bump) so the optimistic tree and the real tree share
   // a boundary identity: React resolves the Suspense fallback into the real
