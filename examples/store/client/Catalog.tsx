@@ -331,7 +331,7 @@ function ProductCard({
 }) {
   return (
     <Card className="group overflow-hidden p-0 transition hover:-translate-y-0.5 hover:shadow-md">
-      <Link href={productPath(product.slug)} className="block">
+      <Link href={productPath(product.slug)} seed={product} className="block">
         <div
           className="relative flex aspect-square items-center justify-center text-2xl font-semibold text-white/90"
           style={{ background: gradient(product.name, product.brand) }}

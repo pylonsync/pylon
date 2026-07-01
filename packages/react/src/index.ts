@@ -41,6 +41,7 @@ export {
   useSearchParams,
   usePathname,
   useParams,
+  useRouteSeed,
   redirect,
   notFound,
   NotFoundError,

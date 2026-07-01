@@ -114,6 +114,42 @@ export function useParams<
   ) as T;
 }
 
+// The seed for the active navigation, stashed on `window.__pylon.seed` by the
+// runtime when a <Link seed> is clicked. A stable reference for the whole nav
+// (set once at nav start), which useSyncExternalStore requires. Null otherwise.
+function seedClientSnapshot(): unknown {
+  return (typeof window !== "undefined" && window.__pylon?.seed) || null;
+}
+function seedServerSnapshot(): unknown {
+  return null;
+}
+
+/**
+ * The seed passed to the `<Link seed>` that started the current navigation, for
+ * an instant optimistic first paint. Returns the seed while the destination's
+ * data is still loading, then `null` once the real server render lands (and on
+ * hard loads / seedless navs). Use it as the page's Suspense fallback so
+ * above-the-fold content shows immediately instead of a skeleton:
+ *
+ * ```tsx
+ * export default function Page({ params, serverData }: PageProps<{ slug: string }>) {
+ *   const seed = useRouteSeed<Product>();
+ *   return (
+ *     <Suspense fallback={seed ? <ProductView product={seed} pending /> : <Skeleton />}>
+ *       <ProductDetail serverData={serverData} slug={params.slug} />
+ *     </Suspense>
+ *   );
+ * }
+ * ```
+ */
+export function useRouteSeed<T = unknown>(): T | null {
+  return useSyncExternalStore(
+    subscribe,
+    seedClientSnapshot,
+    seedServerSnapshot,
+  ) as T | null;
+}
+
 /**
  * Client-side redirect — replaces the current history entry with `href`.
  * Drop-in for Next's `redirect` when called from a client component

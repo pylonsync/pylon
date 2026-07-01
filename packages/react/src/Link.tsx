@@ -32,12 +32,19 @@ declare global {
       prefetch: (href: string) => Promise<void>;
       navigate: (
         href: string,
-        opts?: { push?: boolean; replace?: boolean },
+        opts?: { push?: boolean; replace?: boolean; seed?: unknown },
       ) => Promise<void>;
       /** Current route's dynamic params (read by useParams). A getter on the
        *  runtime side, so it always reflects the latest navigation. */
       readonly params?: Record<string, string>;
+      /** Seed the active navigation was started with (read by useRouteSeed).
+       *  A getter on the runtime side; null outside an optimistic nav. */
+      readonly seed?: unknown;
     };
+    /** WeakMap of <Link seed> anchor element → its seed value. Populated by
+     *  <Link> and read by the runtime's global click handler so it can pass the
+     *  seed to navigate() for an optimistic first paint. */
+    __pylonLinkSeeds?: WeakMap<Element, unknown>;
   }
 }
 
@@ -51,16 +58,46 @@ export interface LinkProps
    * is unlikely to follow — pagination tail, etc.).
    */
   prefetch?: boolean;
+  /**
+   * Data you already have for the destination (e.g. the list item you clicked).
+   * When set, Pylon paints the destination page's Suspense fallback with this
+   * data the instant the link is clicked — before the SSR fetch resolves — so
+   * above-the-fold content appears immediately instead of a skeleton or a delay.
+   * Read it on the destination page with `useRouteSeed<T>()`.
+   *
+   * Degrades gracefully: no seed, or a route Pylon can't resolve on the client,
+   * simply falls back to normal navigation. Best for detail routes whose page
+   * keeps its `serverData` reads inside a `<Suspense>` (so the seeded fallback
+   * has somewhere to show).
+   */
+  seed?: unknown;
   children?: React.ReactNode;
 }
 
 export function Link({
   href,
   prefetch = true,
+  seed,
   children,
   ...rest
 }: LinkProps) {
   const ref = useRef<HTMLAnchorElement>(null);
+
+  // Register the seed keyed by this anchor element so the runtime's global
+  // click handler can find it and hand it to navigate(). A WeakMap keeps it
+  // GC-safe (no leak when the link unmounts) and off the DOM node itself.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const el = ref.current;
+    if (!el || seed === undefined) return;
+    const reg =
+      window.__pylonLinkSeeds ||
+      (window.__pylonLinkSeeds = new WeakMap<Element, unknown>());
+    reg.set(el, seed);
+    return () => {
+      reg.delete(el);
+    };
+  }, [seed]);
 
   useEffect(() => {
     if (!prefetch || !ref.current) return;

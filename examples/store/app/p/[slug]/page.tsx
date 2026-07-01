@@ -1,6 +1,7 @@
 import React, { Suspense, use } from "react";
 import {
   Link,
+  useRouteSeed,
   type GenerateMetadata,
   type Metadata,
   type PageProps,
@@ -30,6 +31,20 @@ async function resolveProduct(
   );
 }
 
+// Product pages are anonymous + public (the cart button hydrates as its own
+// client island with its own auth), so the SSR output is identical for every
+// visitor — a textbook ISR candidate. Opting in with `revalidate` makes Pylon
+//   • serve the render from the on-disk ISR + in-memory LRU cache (no per-hit
+//     DB lookup or React render),
+//   • emit `Cache-Control: public, max-age=…, stale-while-revalidate=…` so the
+//     browser HTTP cache + CloudFlare hold it, and
+//   • make <Link>'s viewport/hover prefetch reusable — by the time you click a
+//     card the HTML is already cached, so navigation is instant with no backend
+//     round-trip flash.
+// Without this the route is `dynamic`: re-rendered every request with no
+// Cache-Control, so even prefetched HTML can't be reused.
+export const revalidate = 300; // 5 min; stale-while-revalidate refreshes in bg
+
 export const generateMetadata: GenerateMetadata = async ({
   params,
   serverData,
@@ -43,10 +58,30 @@ export const generateMetadata: GenerateMetadata = async ({
 };
 
 export default function Page({ params, serverData }: PageProps<{ slug: string }>) {
+  // The catalog card hands us the whole product via <Link seed={product}>, so a
+  // click paints the full detail INSTANTLY from data we already have while the
+  // SSR fetch confirms it (fresh stock, canonical description). On a hard load /
+  // direct URL there's no seed — serverData is already resolved server-side, so
+  // the fallback never shows and the page ships fully rendered. useRouteSeed()
+  // returns null once the real data lands, so ProductView(seed) is only ever the
+  // brief optimistic first paint.
+  const seed = useRouteSeed<Product>();
   return (
-    <Suspense fallback={<DetailSkeleton />}>
-      <Detail serverData={serverData} slug={params.slug} />
-    </Suspense>
+    <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 md:px-6">
+      <Link
+        href="/"
+        className="inline-flex items-center gap-1 self-start text-sm text-muted-foreground transition-colors hover:text-foreground"
+      >
+        <ArrowLeft className="size-4" />
+        Back to catalog
+      </Link>
+
+      <Suspense
+        fallback={seed ? <ProductView product={seed} /> : <DetailSkeleton />}
+      >
+        <Detail serverData={serverData} slug={params.slug} />
+      </Suspense>
+    </main>
   );
 }
 
@@ -58,109 +93,102 @@ function Detail({
   slug: string;
 }) {
   const product = use(resolveProduct(serverData, slug));
+  if (!product) {
+    return (
+      <Card className="p-8 text-center text-sm text-muted-foreground">
+        Product not found.{" "}
+        <Link href="/" className="underline">
+          Browse the catalog
+        </Link>
+        .
+      </Card>
+    );
+  }
+  return <ProductView product={product} />;
+}
 
+// The product panel. Rendered both as the optimistic seed paint (from the
+// clicked card) and, once the SSR fetch lands, from the authoritative row —
+// same markup either way, so the swap is seamless.
+function ProductView({ product }: { product: Product }) {
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 md:px-6">
-      <Link
-        href="/"
-        className="inline-flex items-center gap-1 self-start text-sm text-muted-foreground transition-colors hover:text-foreground"
+    <div className="grid gap-8 md:grid-cols-[1.1fr_1fr]">
+      <div
+        className="flex aspect-square items-center justify-center rounded-xl text-6xl font-bold text-white/90"
+        style={{ background: gradient(product.name, product.brand) }}
       >
-        <ArrowLeft className="size-4" />
-        Back to catalog
-      </Link>
+        {initials(product.name)}
+      </div>
 
-      {!product ? (
-        <Card className="p-8 text-center text-sm text-muted-foreground">
-          Product not found.{" "}
-          <Link href="/" className="underline">
-            Browse the catalog
-          </Link>
-          .
-        </Card>
-      ) : (
-        <div className="grid gap-8 md:grid-cols-[1.1fr_1fr]">
-          <div
-            className="flex aspect-square items-center justify-center rounded-xl text-6xl font-bold text-white/90"
-            style={{ background: gradient(product.name, product.brand) }}
-          >
-            {initials(product.name)}
+      <Card className="flex flex-col">
+        <CardContent className="flex flex-col gap-4 p-6">
+          <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            {product.brand}
+            {product.featured ? (
+              <Badge variant="secondary" className="text-[10px]">
+                Featured
+              </Badge>
+            ) : null}
+            {(product.tags ?? "")
+              .split(",")
+              .filter(Boolean)
+              .map((t) => (
+                <Badge key={t} variant="outline" className="text-[10px]">
+                  {t}
+                </Badge>
+              ))}
           </div>
+          <h1 className="text-2xl font-semibold leading-tight">
+            {product.name}
+          </h1>
+          <div className="flex items-center gap-3 text-sm">
+            <span className="flex items-center gap-1 text-muted-foreground">
+              <Star className="size-4 fill-current text-amber-400" />
+              {product.rating.toFixed(1)}
+            </span>
+            <Separator orientation="vertical" className="h-4" />
+            <Badge variant={product.stock > 0 ? "secondary" : "destructive"}>
+              {product.stock > 0 ? `${product.stock} in stock` : "Out of stock"}
+            </Badge>
+          </div>
+          <div className="text-3xl font-bold">${product.price.toFixed(2)}</div>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            {product.description}
+          </p>
 
-          <Card className="flex flex-col">
-            <CardContent className="flex flex-col gap-4 p-6">
-              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                {product.brand}
-                {product.featured ? (
-                  <Badge variant="secondary" className="text-[10px]">
-                    Featured
-                  </Badge>
-                ) : null}
-                {(product.tags ?? "")
+          <Separator />
+
+          <dl className="grid grid-cols-3 gap-3 text-sm">
+            <Attr label="Category" value={product.category} />
+            <Attr label="Color" value={product.color} />
+            <Attr label="SKU" value={(product.slug ?? product.id).slice(-8)} />
+          </dl>
+
+          {product.sizes ? (
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Size
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {product.sizes
                   .split(",")
                   .filter(Boolean)
-                  .map((t) => (
-                    <Badge key={t} variant="outline" className="text-[10px]">
-                      {t}
-                    </Badge>
+                  .map((s) => (
+                    <span
+                      key={s}
+                      className="rounded-md border px-3 py-1.5 text-sm text-foreground"
+                    >
+                      {s}
+                    </span>
                   ))}
               </div>
-              <h1 className="text-2xl font-semibold leading-tight">
-                {product.name}
-              </h1>
-              <div className="flex items-center gap-3 text-sm">
-                <span className="flex items-center gap-1 text-muted-foreground">
-                  <Star className="size-4 fill-current text-amber-400" />
-                  {product.rating.toFixed(1)}
-                </span>
-                <Separator orientation="vertical" className="h-4" />
-                <Badge variant={product.stock > 0 ? "secondary" : "destructive"}>
-                  {product.stock > 0
-                    ? `${product.stock} in stock`
-                    : "Out of stock"}
-                </Badge>
-              </div>
-              <div className="text-3xl font-bold">
-                ${product.price.toFixed(2)}
-              </div>
-              <p className="text-sm leading-relaxed text-muted-foreground">
-                {product.description}
-              </p>
+            </div>
+          ) : null}
 
-              <Separator />
-
-              <dl className="grid grid-cols-3 gap-3 text-sm">
-                <Attr label="Category" value={product.category} />
-                <Attr label="Color" value={product.color} />
-                <Attr label="SKU" value={(product.slug ?? product.id).slice(-8)} />
-              </dl>
-
-              {product.sizes ? (
-                <div className="flex flex-col gap-1.5">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    Size
-                  </span>
-                  <div className="flex flex-wrap gap-2">
-                    {product.sizes
-                      .split(",")
-                      .filter(Boolean)
-                      .map((s) => (
-                        <span
-                          key={s}
-                          className="rounded-md border px-3 py-1.5 text-sm text-foreground"
-                        >
-                          {s}
-                        </span>
-                      ))}
-                  </div>
-                </div>
-              ) : null}
-
-              <AddToCart product={product} />
-            </CardContent>
-          </Card>
-        </div>
-      )}
-    </main>
+          <AddToCart product={product} />
+        </CardContent>
+      </Card>
+    </div>
   );
 }
 
@@ -175,19 +203,20 @@ function Attr({ label, value }: { label: string; value: string }) {
   );
 }
 
+// Shown only on a hard load whose data isn't ready and there's no seed (the
+// common navigation case paints ProductView from the card seed instead). Renders
+// just the grid — Page owns the <main> + back link.
 function DetailSkeleton() {
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-6 px-4 py-6 md:px-6">
-      <div className="grid gap-8 md:grid-cols-[1.1fr_1fr]">
-        <div className="aspect-square animate-pulse rounded-xl bg-muted" />
-        <div className="space-y-3 p-6">
-          <div className="h-3 w-1/4 animate-pulse rounded bg-muted" />
-          <div className="h-6 w-3/4 animate-pulse rounded bg-muted" />
-          <div className="h-4 w-1/3 animate-pulse rounded bg-muted" />
-          <div className="h-9 w-1/3 animate-pulse rounded bg-muted" />
-          <div className="h-20 animate-pulse rounded bg-muted" />
-        </div>
+    <div className="grid gap-8 md:grid-cols-[1.1fr_1fr]">
+      <div className="aspect-square animate-pulse rounded-xl bg-muted" />
+      <div className="space-y-3 p-6">
+        <div className="h-3 w-1/4 animate-pulse rounded bg-muted" />
+        <div className="h-6 w-3/4 animate-pulse rounded bg-muted" />
+        <div className="h-4 w-1/3 animate-pulse rounded bg-muted" />
+        <div className="h-9 w-1/3 animate-pulse rounded bg-muted" />
+        <div className="h-20 animate-pulse rounded bg-muted" />
       </div>
-    </main>
+    </div>
   );
 }
