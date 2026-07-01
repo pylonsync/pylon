@@ -304,8 +304,140 @@ fn content_type_for(path: &Path) -> &'static str {
         Some("pdf") => "application/pdf",
         Some("mp4") => "video/mp4",
         Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
         _ => "application/octet-stream",
     }
+}
+
+/// RFC 7233 single-range parse result for a body of `total` bytes.
+#[derive(Debug, PartialEq, Eq)]
+enum RangeSpec {
+    /// No usable `Range` header → serve the whole body (200).
+    Full,
+    /// A satisfiable single range, as inclusive byte offsets.
+    Partial(u64, u64),
+    /// A syntactically valid but unsatisfiable range → 416.
+    Unsatisfiable,
+}
+
+/// Parse a `Range` header value against a body of `total` bytes. Handles the
+/// three single-range forms — `bytes=start-end`, `bytes=start-` (open-ended),
+/// and `bytes=-suffix` (last N bytes). A multi-range request
+/// (`bytes=0-1,5-6`) or anything unparseable falls back to `Full` (we don't
+/// emit `multipart/byteranges`), so serving degrades to a plain 200.
+fn parse_byte_range(header: &str, total: u64) -> RangeSpec {
+    let spec = match header.trim().strip_prefix("bytes=") {
+        Some(s) => s.trim(),
+        None => return RangeSpec::Full,
+    };
+    // Multi-range → fall back to a full response.
+    if spec.contains(',') {
+        return RangeSpec::Full;
+    }
+    let (start_s, end_s) = match spec.split_once('-') {
+        Some(p) => (p.0.trim(), p.1.trim()),
+        None => return RangeSpec::Full,
+    };
+
+    if start_s.is_empty() {
+        // Suffix range: the last N bytes (`bytes=-N`).
+        let suffix: u64 = match end_s.parse() {
+            Ok(n) => n,
+            Err(_) => return RangeSpec::Full,
+        };
+        if suffix == 0 || total == 0 {
+            return RangeSpec::Unsatisfiable;
+        }
+        return RangeSpec::Partial(total.saturating_sub(suffix), total - 1);
+    }
+
+    let start: u64 = match start_s.parse() {
+        Ok(n) => n,
+        Err(_) => return RangeSpec::Full,
+    };
+    if start >= total {
+        return RangeSpec::Unsatisfiable;
+    }
+    let end: u64 = if end_s.is_empty() {
+        total - 1
+    } else {
+        match end_s.parse::<u64>() {
+            Ok(n) => n.min(total - 1),
+            Err(_) => return RangeSpec::Full,
+        }
+    };
+    if end < start {
+        return RangeSpec::Unsatisfiable;
+    }
+    RangeSpec::Partial(start, end)
+}
+
+/// Serve `bytes` for a GET, honoring a single HTTP `Range` request (RFC 7233):
+/// `206 Partial Content` + `Content-Range` for a satisfiable range, `416` for
+/// an unsatisfiable one, else a full `200`. ALWAYS advertises
+/// `Accept-Ranges: bytes` — iOS Safari refuses to play a `<video>` whose source
+/// answers a range request with `200` instead of `206`, so without this every
+/// video served from `public/` shows a black box with a slashed-out play button
+/// on iPhone/iPad (desktop tolerates `200`, which masks it).
+fn respond_static_file(
+    request: Request,
+    bytes: Vec<u8>,
+    content_type: &'static str,
+    cache: &str,
+    cors_origin: &str,
+) {
+    let total = bytes.len() as u64;
+    let range = request.headers().iter().find_map(|h| {
+        let field = h.field.as_str();
+        if field == "Range" || field == "range" {
+            Some(h.value.as_str().to_string())
+        } else {
+            None
+        }
+    });
+
+    let ct = Header::from_bytes("Content-Type", content_type).unwrap();
+    let cors =
+        Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap();
+    let cache_h = Header::from_bytes("Cache-Control", cache).unwrap();
+    let accept_ranges = Header::from_bytes("Accept-Ranges", "bytes").unwrap();
+
+    let spec = range
+        .as_deref()
+        .map(|r| parse_byte_range(r, total))
+        .unwrap_or(RangeSpec::Full);
+
+    let response = match spec {
+        RangeSpec::Partial(start, end) => {
+            let slice = bytes[start as usize..=end as usize].to_vec();
+            let content_range =
+                Header::from_bytes("Content-Range", format!("bytes {start}-{end}/{total}"))
+                    .unwrap();
+            Response::from_data(slice)
+                .with_status_code(206)
+                .with_header(ct)
+                .with_header(cors)
+                .with_header(cache_h)
+                .with_header(accept_ranges)
+                .with_header(content_range)
+        }
+        RangeSpec::Unsatisfiable => {
+            let content_range =
+                Header::from_bytes("Content-Range", format!("bytes */{total}")).unwrap();
+            Response::from_data(Vec::new())
+                .with_status_code(416)
+                .with_header(cors)
+                .with_header(accept_ranges)
+                .with_header(content_range)
+        }
+        RangeSpec::Full => Response::from_data(bytes)
+            .with_status_code(200)
+            .with_header(ct)
+            .with_header(cors)
+            .with_header(cache_h)
+            .with_header(accept_ranges),
+    };
+    let _ = request.respond(response);
 }
 
 /// Minimal percent-decoder for a query-string value. `encodeURIComponent`
@@ -840,18 +972,9 @@ pub fn try_handle(
                 } else {
                     "public, max-age=3600"
                 };
-                let response = Response::from_data(bytes)
-                    .with_status_code(200)
-                    .with_header(Header::from_bytes("Content-Type", ct).unwrap())
-                    .with_header(
-                        Header::from_bytes(
-                            "Access-Control-Allow-Origin",
-                            cors_origin.as_bytes().to_vec(),
-                        )
-                        .unwrap(),
-                    )
-                    .with_header(Header::from_bytes("Cache-Control", cache).unwrap());
-                let _ = request.respond(response);
+                // Range-aware: emits 206 for a `Range` request (iOS Safari
+                // <video> needs it) + `Accept-Ranges: bytes` on every response.
+                respond_static_file(request, bytes, ct, cache, cors_origin);
                 return Ok(());
             }
         }
@@ -1052,26 +1175,11 @@ fn serve_from_disk(
             Err(_) => return Err(request),
         };
         let ct = content_type_for(&file_path);
-        let response = Response::from_data(bytes)
-            .with_status_code(200)
-            .with_header(Header::from_bytes("Content-Type", ct).unwrap())
-            .with_header(
-                Header::from_bytes(
-                    "Access-Control-Allow-Origin",
-                    cors_origin.as_bytes().to_vec(),
-                )
-                .unwrap(),
-            )
-            .with_header(
-                // Hashed assets (Vite emits ?v= and chunk-hash filenames)
-                // can be cached aggressively, but the SPA shell itself
-                // must always re-validate so a deploy bump is picked up
-                // on the next page load. Use a conservative one-hour
-                // public cache as the default — operators who want
-                // longer can put a CDN in front.
-                Header::from_bytes("Cache-Control", "public, max-age=3600").unwrap(),
-            );
-        let _ = request.respond(response);
+        // Range-aware (206 + Accept-Ranges) — same as public/. Hashed assets
+        // (Vite emits ?v= and chunk-hash filenames) can be cached aggressively,
+        // but keep a conservative one-hour public cache as the default so a
+        // deploy bump is picked up on the next load; operators can front a CDN.
+        respond_static_file(request, bytes, ct, "public, max-age=3600", cors_origin);
         return Ok(());
     }
 
@@ -3401,6 +3509,41 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn parse_byte_range_forms() {
+        // Closed range within bounds.
+        assert_eq!(parse_byte_range("bytes=0-1023", 4096), RangeSpec::Partial(0, 1023));
+        // Open-ended range → to the last byte.
+        assert_eq!(parse_byte_range("bytes=1000-", 4096), RangeSpec::Partial(1000, 4095));
+        // Suffix range → the last N bytes.
+        assert_eq!(parse_byte_range("bytes=-500", 4096), RangeSpec::Partial(3596, 4095));
+        // End past EOF is clamped to the last byte (iOS probes `bytes=0-1` then
+        // often `bytes=0-<huge>`).
+        assert_eq!(parse_byte_range("bytes=0-99999", 4096), RangeSpec::Partial(0, 4095));
+        // Suffix larger than the file → the whole file.
+        assert_eq!(parse_byte_range("bytes=-99999", 4096), RangeSpec::Partial(0, 4095));
+        // Whitespace tolerated.
+        assert_eq!(parse_byte_range("bytes= 0-10 ", 4096), RangeSpec::Partial(0, 10));
+    }
+
+    #[test]
+    fn parse_byte_range_unsatisfiable_and_fallback() {
+        // start at/after EOF → 416.
+        assert_eq!(parse_byte_range("bytes=4096-5000", 4096), RangeSpec::Unsatisfiable);
+        assert_eq!(parse_byte_range("bytes=4096-", 4096), RangeSpec::Unsatisfiable);
+        // Zero-length suffix → 416.
+        assert_eq!(parse_byte_range("bytes=-0", 4096), RangeSpec::Unsatisfiable);
+        // Range against an empty body → 416.
+        assert_eq!(parse_byte_range("bytes=0-10", 0), RangeSpec::Unsatisfiable);
+        // Inverted range → 416.
+        assert_eq!(parse_byte_range("bytes=500-100", 4096), RangeSpec::Unsatisfiable);
+        // Multi-range, wrong unit, or garbage → serve the whole body (200).
+        assert_eq!(parse_byte_range("bytes=0-1,5-6", 4096), RangeSpec::Full);
+        assert_eq!(parse_byte_range("items=0-1", 4096), RangeSpec::Full);
+        assert_eq!(parse_byte_range("bytes=abc-def", 4096), RangeSpec::Full);
+        assert_eq!(parse_byte_range("", 4096), RangeSpec::Full);
+    }
 
     /// Regression: the dev live-reload SSE must deliver its HTTP head + the
     /// `hello` event IMMEDIATELY — not after tiny_http's 1KB write buffer
