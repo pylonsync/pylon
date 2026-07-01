@@ -2729,18 +2729,40 @@ pub(crate) fn request_prefers_html(request: &tiny_http::Request) -> bool {
     })
 }
 
-/// Framework-default 429 page for browser navigations that get rate-limited,
-/// so they see a styled page instead of raw `{"error":...}` JSON. `retry_after`
-/// (seconds) is surfaced in the message and the standard `Retry-After` header.
+/// The app's own 429 page, if it shipped `app/rate-limit.tsx`. The client
+/// bundler pre-renders it to `<client-build>/rate-limit.html` (compiled CSS
+/// inlined, self-contained) — the rate limiter short-circuits before SSR, so a
+/// per-request render would defeat the point; this is read once + cached and
+/// served straight off memory. `None` when the app didn't ship one → the
+/// caller falls back to the built-in default. Not cached until the first
+/// successful read, so a 429 that races boot (bundle not warm yet) retries.
+pub fn app_rate_limit_html() -> Option<String> {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(s) = CACHE.get() {
+        return Some(s.clone());
+    }
+    let outdir = cached_bundle_outdir().lock().ok()?.clone()?;
+    let html = std::fs::read_to_string(outdir.join("rate-limit.html")).ok()?;
+    let _ = CACHE.set(html.clone());
+    Some(html)
+}
+
+/// 429 page for browser navigations that get rate-limited, so they see a page
+/// instead of raw `{"error":...}` JSON. Prefers the app's pre-rendered
+/// `app/rate-limit.tsx`; otherwise the styled framework default. `retry_after`
+/// rides the standard `Retry-After` header either way.
 pub fn rate_limited_html_response(
     retry_after: u64,
     cors_origin: &str,
 ) -> Response<std::io::Cursor<Vec<u8>>> {
-    let message = format!(
-        "You've made too many requests. Please wait {retry_after} second{} and try again.",
-        if retry_after == 1 { "" } else { "s" }
-    );
-    let body = builtin_error_page_html(429, "Too many requests", &message).into_bytes();
+    let body = app_rate_limit_html().unwrap_or_else(|| {
+        let message = format!(
+            "You've made too many requests. Please wait {retry_after} second{} and try again.",
+            if retry_after == 1 { "" } else { "s" }
+        );
+        builtin_error_page_html(429, "Too many requests", &message)
+    });
+    let body = body.into_bytes();
     let mut resp = Response::from_data(body)
         .with_status_code(429u16)
         .with_header(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap())

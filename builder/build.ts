@@ -14,6 +14,8 @@
 //   PYLON_BUILD_SOURCE_URL          signed GET → source.tar.gz
 //   PYLON_ARTIFACT_PUT_URL          signed PUT ← bundle.tar.gz  (ct: application/gzip)
 //   PYLON_ARTIFACT_COMPLETE_PUT_URL signed PUT ← .complete JSON {sha256,size}
+//   PYLON_ARTIFACT_LOG_PUT_URL      signed PUT ← build.log (optional; the
+//                                    control plane surfaces it in the dashboard)
 //   PYLON_BUILD_ID                  for logs
 
 import { existsSync } from "node:fs";
@@ -22,6 +24,54 @@ import { readFile, readdir, rm } from "node:fs/promises";
 const SRC = "/build/src";
 const SOURCE_TAR = "/build/source.tar.gz";
 const BUNDLE = "/build/bundle.tar.gz";
+
+// --- Build-log capture ---------------------------------------------------
+// The machine self-destructs, so its stdout (Fly logs) is gone by the time
+// the control plane notices completion. Tee everything — console.* AND every
+// subprocess's stdout/stderr — into a buffer and PUT it to a signed url so the
+// dashboard can show the full build log (success OR failure). Still mirrored to
+// the real stdout so live Fly logs work during the build.
+const logChunks: string[] = [];
+const origLog = console.log.bind(console);
+const origErr = console.error.bind(console);
+console.log = (...a: unknown[]) => {
+	logChunks.push(a.map(String).join(" ") + "\n");
+	origLog(...a);
+};
+console.error = (...a: unknown[]) => {
+	logChunks.push(a.map(String).join(" ") + "\n");
+	origErr(...a);
+};
+
+async function drainToLog(
+	stream: ReadableStream<Uint8Array> | null | undefined,
+): Promise<void> {
+	if (!stream) return;
+	const dec = new TextDecoder();
+	for await (const chunk of stream) {
+		logChunks.push(dec.decode(chunk));
+		process.stdout.write(chunk);
+	}
+}
+
+let logFlushed = false;
+async function flushLog(): Promise<void> {
+	if (logFlushed) return;
+	logFlushed = true;
+	const url = process.env.PYLON_ARTIFACT_LOG_PUT_URL;
+	if (!url) return;
+	try {
+		await fetch(url, {
+			method: "PUT",
+			headers: { "content-type": "text/plain; charset=utf-8" },
+			// Cap at ~256KB so a runaway build (huge npm output) can't blow the
+			// object / the dashboard render; keep the TAIL (where errors are).
+			body: logChunks.join("").slice(-262_144),
+		});
+	} catch {
+		/* best-effort — logs are a nicety, never fail the build over them */
+	}
+}
 
 function need(name: string): string {
 	const v = process.env[name];
@@ -36,10 +86,11 @@ async function sh(cmd: string[], cwd?: string): Promise<void> {
 	console.log(`[builder] $ ${cmd.join(" ")}`);
 	const proc = Bun.spawn(cmd, {
 		cwd,
-		stdout: "inherit",
-		stderr: "inherit",
+		stdout: "pipe",
+		stderr: "pipe",
 		env: process.env as Record<string, string>,
 	});
+	await Promise.all([drainToLog(proc.stdout), drainToLog(proc.stderr)]);
 	const code = await proc.exited;
 	if (code !== 0) {
 		throw new Error(`command failed (exit ${code}): ${cmd.join(" ")}`);
@@ -53,10 +104,11 @@ async function trySh(cmd: string[], cwd?: string): Promise<boolean> {
 	console.log(`[builder] $ ${cmd.join(" ")}`);
 	const proc = Bun.spawn(cmd, {
 		cwd,
-		stdout: "inherit",
-		stderr: "inherit",
+		stdout: "pipe",
+		stderr: "pipe",
 		env: process.env as Record<string, string>,
 	});
+	await Promise.all([drainToLog(proc.stdout), drainToLog(proc.stderr)]);
 	return (await proc.exited) === 0;
 }
 
@@ -347,6 +399,11 @@ async function main() {
 		// assets out to the public bucket and point machines at the CDN.
 		clientAssets: clientAssetsPublished,
 	});
+	console.log(`[builder] build ${buildId} done`);
+	// Flush the build log to Tigris BEFORE the COMPLETE marker so it's already
+	// there the instant the control plane sees completion and reads it.
+	await flushLog();
+
 	const completeResp = await fetch(completeUrl, {
 		method: "PUT",
 		headers: { "content-type": "application/json" },
@@ -355,11 +412,12 @@ async function main() {
 	if (!completeResp.ok) {
 		throw new Error(`write complete marker: HTTP ${completeResp.status}`);
 	}
-
-	console.log(`[builder] build ${buildId} done`);
 }
 
-main().catch((err) => {
+main().catch(async (err) => {
 	console.error(`[builder] FAILED: ${err?.message ?? err}`);
+	// Persist the log on failure too — a failed build's log is the whole point.
+	// The control plane surfaces it when the deploy is marked failed.
+	await flushLog();
 	process.exit(1);
 });

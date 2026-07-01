@@ -1220,9 +1220,11 @@ async function _doBuildInner(
     // Tailwind v4 compile. Optional — only fires if the project has
     // `app/globals.css`. Adds the stylesheet to every route's css
     // array so SSR head injection emits `<link rel="stylesheet">`.
+    let stylesRel: string | null = null;
     try {
       const styles = await buildTailwind(fs, path, cwd, outdir, appDirRel);
       if (styles) {
+        stylesRel = styles;
         for (const r of Object.values(manifest.routes)) {
           r.css = [styles];
         }
@@ -1250,6 +1252,46 @@ async function _doBuildInner(
     } catch (fErr: any) {
       // eslint-disable-next-line no-console
       console.warn(`[pylon ssr] font build failed: ${fErr?.message ?? fErr}`);
+    }
+
+    // App-overridable rate-limit page. The rate limiter short-circuits in the
+    // Rust layer BEFORE SSR, so it can't render a route per (shed) request —
+    // instead pre-render `app/rate-limit.tsx` ONCE here to a self-contained
+    // static HTML (compiled CSS inlined, so it needs no asset fetch) that the
+    // runtime serves on 429 for browser navigations. FULLY GATED: any failure
+    // just skips the override and the framework's built-in default 429 page is
+    // used — a broken/absent rate-limit.tsx never affects the build.
+    try {
+      const rlPath = path.join(cwd, appDirRel, "rate-limit.tsx");
+      if (fs.existsSync(rlPath)) {
+        const ReactMod: any = await import("react");
+        const React = ReactMod.default ?? ReactMod;
+        const { renderToStaticMarkup }: any = await import("react-dom/server");
+        const mod: any = await import(rlPath);
+        const Comp = mod.default;
+        if (typeof Comp === "function") {
+          const inner = renderToStaticMarkup(React.createElement(Comp));
+          const css = stylesRel
+            ? fs.readFileSync(path.join(outdir, stylesRel), "utf8")
+            : "";
+          const html =
+            `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">` +
+            `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+            `<title>Too many requests</title>` +
+            (css ? `<style>${css}</style>` : "") +
+            `</head><body>${inner}</body></html>`;
+          fs.writeFileSync(path.join(outdir, "rate-limit.html"), html, "utf8");
+          // eslint-disable-next-line no-console
+          console.log(
+            "[pylon ssr] pre-rendered app/rate-limit.tsx → rate-limit.html",
+          );
+        }
+      }
+    } catch (rlErr: any) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[pylon ssr] rate-limit.tsx pre-render skipped: ${rlErr?.message ?? rlErr}`,
+      );
     }
 
   const manifestPath = path.join(outdir, "manifest.json");
