@@ -397,8 +397,11 @@ fn respond_static_file(
     });
 
     let ct = Header::from_bytes("Content-Type", content_type).unwrap();
-    let cors =
-        Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes().to_vec()).unwrap();
+    let cors = Header::from_bytes(
+        "Access-Control-Allow-Origin",
+        cors_origin.as_bytes().to_vec(),
+    )
+    .unwrap();
     let cache_h = Header::from_bytes("Cache-Control", cache).unwrap();
     let accept_ranges = Header::from_bytes("Accept-Ranges", "bytes").unwrap();
 
@@ -3513,31 +3516,58 @@ mod tests {
     #[test]
     fn parse_byte_range_forms() {
         // Closed range within bounds.
-        assert_eq!(parse_byte_range("bytes=0-1023", 4096), RangeSpec::Partial(0, 1023));
+        assert_eq!(
+            parse_byte_range("bytes=0-1023", 4096),
+            RangeSpec::Partial(0, 1023)
+        );
         // Open-ended range → to the last byte.
-        assert_eq!(parse_byte_range("bytes=1000-", 4096), RangeSpec::Partial(1000, 4095));
+        assert_eq!(
+            parse_byte_range("bytes=1000-", 4096),
+            RangeSpec::Partial(1000, 4095)
+        );
         // Suffix range → the last N bytes.
-        assert_eq!(parse_byte_range("bytes=-500", 4096), RangeSpec::Partial(3596, 4095));
+        assert_eq!(
+            parse_byte_range("bytes=-500", 4096),
+            RangeSpec::Partial(3596, 4095)
+        );
         // End past EOF is clamped to the last byte (iOS probes `bytes=0-1` then
         // often `bytes=0-<huge>`).
-        assert_eq!(parse_byte_range("bytes=0-99999", 4096), RangeSpec::Partial(0, 4095));
+        assert_eq!(
+            parse_byte_range("bytes=0-99999", 4096),
+            RangeSpec::Partial(0, 4095)
+        );
         // Suffix larger than the file → the whole file.
-        assert_eq!(parse_byte_range("bytes=-99999", 4096), RangeSpec::Partial(0, 4095));
+        assert_eq!(
+            parse_byte_range("bytes=-99999", 4096),
+            RangeSpec::Partial(0, 4095)
+        );
         // Whitespace tolerated.
-        assert_eq!(parse_byte_range("bytes= 0-10 ", 4096), RangeSpec::Partial(0, 10));
+        assert_eq!(
+            parse_byte_range("bytes= 0-10 ", 4096),
+            RangeSpec::Partial(0, 10)
+        );
     }
 
     #[test]
     fn parse_byte_range_unsatisfiable_and_fallback() {
         // start at/after EOF → 416.
-        assert_eq!(parse_byte_range("bytes=4096-5000", 4096), RangeSpec::Unsatisfiable);
-        assert_eq!(parse_byte_range("bytes=4096-", 4096), RangeSpec::Unsatisfiable);
+        assert_eq!(
+            parse_byte_range("bytes=4096-5000", 4096),
+            RangeSpec::Unsatisfiable
+        );
+        assert_eq!(
+            parse_byte_range("bytes=4096-", 4096),
+            RangeSpec::Unsatisfiable
+        );
         // Zero-length suffix → 416.
         assert_eq!(parse_byte_range("bytes=-0", 4096), RangeSpec::Unsatisfiable);
         // Range against an empty body → 416.
         assert_eq!(parse_byte_range("bytes=0-10", 0), RangeSpec::Unsatisfiable);
         // Inverted range → 416.
-        assert_eq!(parse_byte_range("bytes=500-100", 4096), RangeSpec::Unsatisfiable);
+        assert_eq!(
+            parse_byte_range("bytes=500-100", 4096),
+            RangeSpec::Unsatisfiable
+        );
         // Multi-range, wrong unit, or garbage → serve the whole body (200).
         assert_eq!(parse_byte_range("bytes=0-1,5-6", 4096), RangeSpec::Full);
         assert_eq!(parse_byte_range("items=0-1", 4096), RangeSpec::Full);

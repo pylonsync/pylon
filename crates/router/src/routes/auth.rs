@@ -787,7 +787,10 @@ mod auth_link_base_tests {
             "https://safe.app",
         );
         // Non-browser caller (no Origin) → env URL.
-        assert_eq!(pick_auth_base(None, &trusted, "https://safe.app"), "https://safe.app");
+        assert_eq!(
+            pick_auth_base(None, &trusted, "https://safe.app"),
+            "https://safe.app"
+        );
     }
 
     #[test]
@@ -797,7 +800,10 @@ mod auth_link_base_tests {
             pick_auth_base(Some("https://www.notbehind.com/"), &trusted, "x"),
             "https://www.notbehind.com",
         );
-        assert_eq!(pick_auth_base(None, &trusted, "https://safe.app/"), "https://safe.app");
+        assert_eq!(
+            pick_auth_base(None, &trusted, "https://safe.app/"),
+            "https://safe.app"
+        );
     }
 }
 
