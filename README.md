@@ -78,9 +78,6 @@ curl -fsSL https://www.pylonsync.com/install.sh | bash
 Other install paths:
 
 ```sh
-# Homebrew (macOS + Linux)
-brew install pylonsync/tap/pylon
-
 # Cargo (compiles from source)
 cargo install pylon-cli
 
