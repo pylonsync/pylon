@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { db } from "@pylonsync/react";
 import {
   passwordLogin,
@@ -29,6 +29,26 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // OAuth buttons render only for providers the server actually has
+  // configured (GET /api/auth/providers) — an unconfigured provider's
+  // login URL is a JSON error dead-end, not a login page. `null` while
+  // loading so nothing flashes in.
+  const [providers, setProviders] = useState<string[] | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/auth/providers")
+      .then((r) => (r.ok ? r.json() : []))
+      .then((list: Array<{ provider: string }>) => {
+        if (alive) setProviders(list.map((p) => p.provider));
+      })
+      .catch(() => {
+        if (alive) setProviders([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -114,22 +134,38 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
         </button>
       </form>
 
-      <div className="flex items-center gap-3 text-[11px] uppercase tracking-wide text-zinc-400">
-        <span className="h-px flex-1 bg-zinc-200" />
-        or continue with
-        <span className="h-px flex-1 bg-zinc-200" />
-      </div>
+      {/* Social sign-in — only for providers the server reports as
+          configured. Enable Google with PYLON_OAUTH_GOOGLE_CLIENT_ID /
+          _CLIENT_SECRET / _REDIRECT (GitHub: PYLON_OAUTH_GITHUB_*) and the
+          button appears with zero code changes. */}
+      {providers && providers.length > 0 ? (
+        <>
+          <div className="flex items-center gap-3 text-[11px] uppercase tracking-wide text-zinc-400">
+            <span className="h-px flex-1 bg-zinc-200" />
+            or continue with
+            <span className="h-px flex-1 bg-zinc-200" />
+          </div>
 
-      {/* Social sign-in. The Google provider must be configured (set
-          PYLON_OAUTH_GOOGLE_CLIENT_ID / _CLIENT_SECRET / _REDIRECT) — until then
-          this button returns a helpful "configure the provider" error. */}
-      <a
-        href="/api/auth/login/google?callback=/dashboard&redirect=1"
-        className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-300 bg-white text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-50"
-      >
-        <GoogleIcon />
-        Google
-      </a>
+          {providers.includes("google") ? (
+            <a
+              href="/api/auth/login/google?callback=/dashboard&redirect=1"
+              className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-300 bg-white text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-50"
+            >
+              <GoogleIcon />
+              Google
+            </a>
+          ) : null}
+          {providers.includes("github") ? (
+            <a
+              href="/api/auth/login/github?callback=/dashboard&redirect=1"
+              className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-zinc-300 bg-white text-sm font-medium text-zinc-900 transition-colors hover:bg-zinc-50"
+            >
+              <GitHubIcon />
+              GitHub
+            </a>
+          ) : null}
+        </>
+      ) : null}
     </div>
   );
 }
@@ -190,6 +226,14 @@ function LockIcon() {
     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <rect x="5" y="11" width="14" height="10" rx="2" />
       <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+    </svg>
+  );
+}
+
+function GitHubIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <path d="M12 1C5.92 1 1 5.92 1 12c0 4.87 3.15 9 7.52 10.45.55.1.75-.24.75-.53 0-.26-.01-.96-.01-1.88-3.06.66-3.71-1.48-3.71-1.48-.5-1.27-1.22-1.61-1.22-1.61-1-.68.08-.67.08-.67 1.1.08 1.68 1.13 1.68 1.13.98 1.68 2.57 1.19 3.2.91.1-.71.38-1.19.69-1.47-2.44-.28-5.01-1.22-5.01-5.44 0-1.2.43-2.18 1.13-2.95-.11-.28-.49-1.4.11-2.91 0 0 .92-.3 3.03 1.13a10.5 10.5 0 0 1 5.52 0c2.1-1.43 3.03-1.13 3.03-1.13.6 1.51.22 2.63.11 2.91.7.77 1.13 1.75 1.13 2.95 0 4.23-2.58 5.16-5.03 5.43.39.34.74 1 .74 2.02 0 1.47-.01 2.65-.01 3.01 0 .29.2.64.76.53A11.01 11.01 0 0 0 23 12c0-6.08-4.92-11-11-11z" />
     </svg>
   );
 }
