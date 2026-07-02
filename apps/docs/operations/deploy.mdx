@@ -75,7 +75,7 @@ Your reverse proxy needs to forward all relevant ports. For deployments with a s
 
 ## Shape 1: single VPS (SSH + systemd)
 
-Simplest and cheapest. One binary, one systemd unit, one reverse proxy.
+Simplest and cheapest. One binary, one systemd unit, one reverse proxy. `pylon deploy --target systemd` generates this unit (plus step-by-step install commands) for your app; the shape looks like:
 
 ```ini
 # /etc/systemd/system/pylon.service
@@ -85,7 +85,11 @@ After=network-online.target
 
 [Service]
 EnvironmentFile=/etc/pylon/env
-ExecStart=/usr/local/bin/pylon serve
+# App source (app.ts, functions/, app/, node_modules) lives here.
+# TypeScript functions + SSR need bun on the host:
+#   curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash
+WorkingDirectory=/opt/my-app
+ExecStart=/usr/local/bin/pylon start app.ts
 Restart=on-failure
 RestartSec=5s
 User=pylon
@@ -213,15 +217,18 @@ For multi-region, on Pylon Cloud, set the workspace region during signup. Self-h
 
 ## What about Docker?
 
+The runtime image bundles the pylon binary plus Bun (which runs your TypeScript functions and SSR). It expects your app source mounted (or baked) at `/app` and keeps data on the `/data` volume:
+
 ```bash
 docker run -d \
   --name pylon \
   -p 4321:4321 -p 4322:4322 -p 4323:4323 -p 4324:4324 \
+  -v $(pwd):/app \
   -v /var/lib/pylon:/data \
   --env-file /etc/pylon/env \
   ghcr.io/pylonsync/pylon:latest
 ```
 
-Same env vars apply. Mount the data volume so it survives container restarts. The image is ~30 MB (statically linked, alpine-based).
+Same env vars apply. Mount the data volume so it survives container restarts.
 
-For docker-compose with a Postgres sidecar, see `deploy/docker-compose.yml`.
+For a self-contained image (no runtime mount) or a docker-compose setup with a Postgres sidecar, run `pylon deploy --target docker` or `pylon deploy --target compose` in your project — both generate a Dockerfile that copies your app onto the runtime image and serves it with `pylon start`.
