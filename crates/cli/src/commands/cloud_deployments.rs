@@ -57,9 +57,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         Some("rollback") => {
             run_rollback(&creds, &project_id, positional.get(1).copied(), json_mode)
         }
+        Some("logs") => run_logs(&creds, &project_id, positional.get(1).copied(), json_mode),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
-            eprintln!("Usage: pylon deployments [list | rollback <id>]");
+            eprintln!("Usage: pylon deployments [list | logs [<id>] | rollback <id>]");
             ExitCode::Usage
         }
     }
@@ -174,6 +175,117 @@ fn run_rollback(
         if let Some(d) = &r.deployment_id {
             println!("  New deployment: {d}");
         }
+    }
+    ExitCode::Ok
+}
+
+/// `pylon deployments logs [<id>]` — print a deployment's captured build log.
+/// With no id, targets the most recent deployment (the common "my last deploy
+/// failed, why?" case). The build log is tee'd to Tigris by the builder and
+/// read back onto the Deployment row, so this is one server call.
+fn run_logs(
+    creds: &Credentials,
+    project_id: &str,
+    deployment_id: Option<&str>,
+    json_mode: bool,
+) -> ExitCode {
+    // Resolve the target: the given id, else the newest deployment.
+    let id: String = match deployment_id {
+        Some(id) => id.to_string(),
+        None => {
+            #[derive(serde::Serialize)]
+            struct ListArgs<'a> {
+                #[serde(rename = "projectId")]
+                project_id: &'a str,
+                limit: u32,
+            }
+            let deploys: Vec<Deployment> = match post_json(
+                creds,
+                "/api/fn/listDeployments",
+                &ListArgs {
+                    project_id,
+                    limit: 1,
+                },
+            ) {
+                Ok(d) => d,
+                Err(e) => {
+                    output::print_error(&e);
+                    return ExitCode::Error;
+                }
+            };
+            match deploys.first() {
+                Some(d) => d.id.clone(),
+                None => {
+                    println!("No deployments yet.");
+                    return ExitCode::Ok;
+                }
+            }
+        }
+    };
+
+    #[derive(serde::Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+        #[serde(rename = "deploymentId")]
+        deployment_id: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct LogOut {
+        id: String,
+        sha: Option<String>,
+        status: Option<String>,
+        error: Option<String>,
+        #[serde(rename = "buildLog")]
+        build_log: Option<String>,
+    }
+    let out: LogOut = match post_json(
+        creds,
+        "/api/fn/getDeploymentBuildLog",
+        &Args {
+            project_id,
+            deployment_id: &id,
+        },
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            output::print_error(&e);
+            return ExitCode::Error;
+        }
+    };
+
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "id": out.id, "sha": out.sha, "status": out.status,
+                "error": out.error, "buildLog": out.build_log,
+            }))
+            .unwrap_or_default()
+        );
+        return ExitCode::Ok;
+    }
+
+    let sha = out
+        .sha
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(8)
+        .collect::<String>();
+    println!(
+        "Deployment {} ({})  status: {}",
+        out.id,
+        sha,
+        out.status.as_deref().unwrap_or("?")
+    );
+    if let Some(err) = out.error.as_deref().filter(|e| !e.is_empty()) {
+        println!("Error: {err}");
+    }
+    println!("{}", "─".repeat(60));
+    match out.build_log.as_deref().filter(|l| !l.is_empty()) {
+        Some(log) => println!("{log}"),
+        None => println!("(no build log captured for this deployment)"),
     }
     ExitCode::Ok
 }
