@@ -353,7 +353,7 @@ fn print_usage() {
     println!("  domains  [list|add|verify|rm] Manage custom domains");
     println!("  db       [list|backup|restore] Database snapshots");
     println!("  data     [entities|list|get] Browse entity rows from the shell");
-    println!("  deployments [list|rollback]   List + roll back deploys");
+    println!("  deployments [list|logs|rollback] List, tail build logs, roll back");
     println!("  members  [list|invite]    Org members");
     println!("  fn <name> [k=v ...]       Call any Pylon Cloud function by name");
     println!("  status                    One-glance project health");

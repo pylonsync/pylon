@@ -83,8 +83,8 @@ fn run_list(json_mode: bool) -> ExitCode {
     if projects.is_empty() {
         println!("No projects yet.");
         println!(
-            "  Create one at: {}/dashboard/orgs",
-            creds.cloud_url.trim_end_matches('/')
+            "  Create one at: {}/dashboard",
+            crate::cloud_client::dashboard_url()
         );
         return ExitCode::Ok;
     }

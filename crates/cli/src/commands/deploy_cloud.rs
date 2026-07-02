@@ -7,9 +7,11 @@
 //!
 //! Flow:
 //! 1. Require credentials. Bail with a `pylon login` hint if missing.
-//! 2. Resolve target project — `--project <slug>` flag, then
-//!    `PYLON_PROJECT` env, then prompt interactively (TTY only) by
-//!    listing the user's projects via the cloud API.
+//! 2. Resolve target project via the shared resolver
+//!    (`project_context::resolve_project_slug`): `--project` flag →
+//!    `PYLON_PROJECT` env → `.pylon/project` context file (written by
+//!    `pylon projects use`) → global default → interactive picker
+//!    (TTY only).
 //! 3. Build a gzipped tar of the project source. Skips `.git`,
 //!    `node_modules`, `.pylon`, `target`, common artifact dirs, and
 //!    anything in `.gitignore`. Hard 50MB cap — projects bigger than
@@ -18,11 +20,11 @@
 //!    `multipart/form-data; boundary=...` carrying `projectSlug` +
 //!    the tarball bytes. (See pylon-cloud function for the exact
 //!    accepted shape.)
-//! 5. Print the deployment URL + tail the deploy log if `--follow`
-//!    was passed (defaults to true on TTY, false in CI / --json).
+//! 5. Print the deployment id + URL. The upload QUEUES the deploy;
+//!    `pylon deployments logs` follows the build server-side.
 
 use std::fs::File;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::write::GzEncoder;
@@ -31,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use pylon_kernel::ExitCode;
 
-use crate::cloud_client::{cloud_url, post_json, require_credentials, Credentials};
+use crate::cloud_client::{post_json, require_credentials};
 use crate::output;
 
 /// Maximum size of the source tarball. Pylon Cloud's GitHub-push path
@@ -80,8 +82,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    // 2. Resolve the project slug.
-    let project_slug = match resolve_project(args, &creds, json_mode) {
+    // 2. Resolve the project slug — same resolver as every other
+    //    cloud-aware command, so `pylon projects use <slug>` sticks
+    //    for deploys too.
+    let project_slug = match crate::project_context::resolve_project_slug(args, &creds, json_mode) {
         Ok(slug) => slug,
         Err(e) => {
             output::print_error(&e);
@@ -95,6 +99,19 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let workspace = detect_workspace(&cwd);
+
+    // Fail fast when there's nothing deployable here: a single-app pack
+    // with no app.ts at its root is exactly the tarball the server
+    // rejects with MISSING_APP_TS — catch it before the upload with an
+    // error that says where to cd.
+    if workspace.is_none() && !cwd.join("app.ts").is_file() {
+        output::print_error(
+            "No app.ts in this directory — nothing to deploy from here. \
+             Run `pylon deploy` from your app's root (the directory with \
+             app.ts, e.g. apps/api in a monorepo).",
+        );
+        return ExitCode::Usage;
+    }
     if let Some(ws) = &workspace {
         if !json_mode {
             println!(
@@ -174,9 +191,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         if let Some(url) = &resp.url {
             println!("  URL:        {url}");
         }
+        println!("  Build log:  pylon deployments logs");
         println!(
-            "  Watch:      {}/dashboard → project → Deployments",
-            cloud_url().trim_end_matches('/'),
+            "  Dashboard:  {}/dashboard → project → Deployments",
+            crate::cloud_client::dashboard_url(),
         );
     }
     ExitCode::Ok
@@ -205,81 +223,6 @@ struct UploadResponse {
     #[serde(rename = "deploymentId")]
     deployment_id: String,
     url: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ProjectSummary {
-    slug: String,
-    name: String,
-    #[serde(rename = "orgSlug")]
-    org_slug: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// Project resolution
-// ---------------------------------------------------------------------------
-
-fn resolve_project(
-    args: &[String],
-    creds: &Credentials,
-    json_mode: bool,
-) -> Result<String, String> {
-    // 1. --project <slug>
-    if let Some(slug) = args
-        .windows(2)
-        .find(|w| w[0] == "--project")
-        .map(|w| w[1].clone())
-    {
-        return Ok(slug);
-    }
-    // 2. --project=<slug>
-    if let Some(slug) = args
-        .iter()
-        .find(|a| a.starts_with("--project="))
-        .map(|a| a.trim_start_matches("--project=").to_string())
-    {
-        return Ok(slug);
-    }
-    // 3. $PYLON_PROJECT
-    if let Ok(slug) = std::env::var("PYLON_PROJECT") {
-        if !slug.is_empty() {
-            return Ok(slug);
-        }
-    }
-    // 4. Interactive picker — TTY only. CI / --json get an error
-    //    pointing at the flag.
-    if json_mode || !std::io::stdin().is_terminal() {
-        return Err("No project specified. Pass --project <slug> or set PYLON_PROJECT.".into());
-    }
-    let projects: Vec<ProjectSummary> = post_json(creds, "/api/fn/listMyProjectsForCli", &())
-        .map_err(|e| format!("Couldn't list your projects: {e}"))?;
-    if projects.is_empty() {
-        return Err(format!(
-            "You don't have any projects yet. Create one at {}/dashboard/orgs",
-            creds.cloud_url.trim_end_matches('/'),
-        ));
-    }
-    println!();
-    println!("Pick a project:");
-    for (i, p) in projects.iter().enumerate() {
-        let org = p.org_slug.as_deref().unwrap_or("?");
-        println!("  {:>2}. {}/{} ({})", i + 1, org, p.slug, p.name);
-    }
-    print!("Number: ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| e.to_string())?;
-    let idx: usize = line
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| "Not a number.".to_string())?;
-    if idx == 0 || idx > projects.len() {
-        return Err("Out of range.".into());
-    }
-    Ok(projects[idx - 1].slug.clone())
 }
 
 // ---------------------------------------------------------------------------

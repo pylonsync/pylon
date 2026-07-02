@@ -88,7 +88,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // never reach this — they'll get a paste prompt that hangs.
     let token_url = format!(
         "{}/dashboard/account/cli-tokens",
-        cloud.trim_end_matches('/')
+        crate::cloud_client::dashboard_url()
     );
 
     if !json_mode {

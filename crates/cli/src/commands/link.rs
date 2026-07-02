@@ -254,9 +254,12 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
         println!();
         println!("Next push to {git_branch} will auto-deploy.");
+        // The project settings URL needs the org slug, which this
+        // endpoint doesn't return — link the dashboard root instead of
+        // a guessed path that 404s.
         println!(
-            "  View: {}/dashboard/projects/{}/settings/git",
-            creds.cloud_url.trim_end_matches('/'),
+            "  View: {}/dashboard → {} → Settings → Git",
+            crate::cloud_client::dashboard_url(),
             project.slug
         );
     }

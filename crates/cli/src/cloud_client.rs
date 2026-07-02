@@ -43,6 +43,23 @@ pub fn cloud_url() -> String {
     std::env::var("PYLON_CLOUD_URL").unwrap_or_else(|_| DEFAULT_CLOUD_URL.to_string())
 }
 
+/// Where the human-facing dashboard lives. The hosted API origin is
+/// api.pylonsync.com but the dashboard is served from www.pylonsync.com —
+/// links the CLI prints for a browser must use the www host. Self-hosted /
+/// staging installs (PYLON_CLOUD_URL set) serve both from one origin, so
+/// the API origin is the right fallback there.
+pub fn dashboard_url() -> String {
+    dashboard_url_for(&cloud_url())
+}
+
+fn dashboard_url_for(api: &str) -> String {
+    if api.trim_end_matches('/') == DEFAULT_CLOUD_URL {
+        "https://www.pylonsync.com".to_string()
+    } else {
+        api.trim_end_matches('/').to_string()
+    }
+}
+
 /// Path to the credentials file. Honors XDG_CONFIG_HOME; falls back
 /// to `~/.config/pylon/credentials.json`.
 pub fn credentials_path() -> io::Result<PathBuf> {
@@ -296,5 +313,36 @@ pub fn validate_token(cloud_url: &str, token: &str) -> Result<String, String> {
             Err(format!("Cloud returned {code}: {body}"))
         }
         Err(e) => Err(format!("Cloud request failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_url_maps_hosted_api_origin_to_www() {
+        // Regression: login/deploy/projects used to print browser links on
+        // the api. host, where /dashboard pages 404.
+        assert_eq!(
+            dashboard_url_for("https://api.pylonsync.com"),
+            "https://www.pylonsync.com"
+        );
+        assert_eq!(
+            dashboard_url_for("https://api.pylonsync.com/"),
+            "https://www.pylonsync.com"
+        );
+    }
+
+    #[test]
+    fn dashboard_url_keeps_self_hosted_origin() {
+        assert_eq!(
+            dashboard_url_for("https://pylon.internal.example.com"),
+            "https://pylon.internal.example.com"
+        );
+        assert_eq!(
+            dashboard_url_for("http://localhost:8080/"),
+            "http://localhost:8080"
+        );
     }
 }

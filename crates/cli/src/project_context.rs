@@ -92,8 +92,8 @@ pub fn resolve_project_slug(
             .map_err(|e| format!("Couldn't list your projects: {e}"))?;
     if projects.is_empty() {
         return Err(format!(
-            "You don't have any projects yet. Create one at {}/dashboard/orgs.",
-            creds.cloud_url.trim_end_matches('/'),
+            "You don't have any projects yet. Create one at {}/dashboard, then re-run this command.",
+            crate::cloud_client::dashboard_url(),
         ));
     }
     println!();
