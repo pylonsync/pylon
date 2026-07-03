@@ -22,6 +22,8 @@ pylon-storage = { path = "../storage", version = "0.3.312", features = ["postgre
 pylon-runtime = { path = "../runtime", version = "0.3.312" }
 pylon-staticgen = { path = "../staticgen", version = "0.3.312" }
 pylon-migrate = { path = "../migrate", version = "0.3.312" }
+pylon-policy = { path = "../policy", version = "0.3.312" }
+pylon-auth = { path = "../auth", version = "0.3.312" }
 rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

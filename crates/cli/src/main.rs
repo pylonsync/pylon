@@ -103,6 +103,7 @@ fn run() -> ExitCode {
         Some("init") => commands::init::run(&args, json_mode),
         Some("link") => commands::link::run(&args, json_mode),
         Some("lint") => commands::lint::run(&args, json_mode),
+        Some("policy") => commands::policy_test::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
         Some("db") => commands::cloud_db::run(&args, json_mode),
         Some("deployments") => commands::cloud_deployments::run(&args, json_mode),
@@ -172,7 +173,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 35] = [
+const TOP_LEVEL_COMMANDS: [&str; 36] = [
     "backup",
     "build",
     "cache",
@@ -191,6 +192,7 @@ const TOP_LEVEL_COMMANDS: [&str; 35] = [
     "init",
     "link",
     "lint",
+    "policy",
     "login",
     "logout",
     "logs",
@@ -379,7 +381,10 @@ fn print_usage() {
     println!("  diagnostics               Read the dev server's SSR cache/render diagnostics");
     println!("  doctor                    Check development environment");
     println!("  env                       Show environment variable reference");
-    println!("  explain <code>            Explain an error code");
+    println!(
+        "  explain <code>            Explain an error code
+  policy test <expr>        Dry-run a policy expression (--auth k=v --row json)"
+    );
     println!("  version                   Show version");
     println!();
     println!("Options:");

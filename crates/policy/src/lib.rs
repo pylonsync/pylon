@@ -626,6 +626,22 @@ fn evaluate_allow(
     evaluate_allow_inner(expr, auth, data, input, None)
 }
 
+/// Evaluate a single policy expression against an explicit context —
+/// the dry-run entry point behind `pylon policy test`. Same tokenizer,
+/// parser, and evaluator as production enforcement, so an expression
+/// that passes here behaves identically inside a deployed policy (the
+/// one exception: the `existing(...)` resolver isn't wired, matching
+/// how data-independent checks run). Parse errors surface as Denied
+/// with the parser's reason, exactly as enforcement treats them.
+pub fn evaluate_expression(
+    expr: &str,
+    auth: &AuthContext,
+    data: Option<&serde_json::Value>,
+    input: Option<&serde_json::Value>,
+) -> PolicyResult {
+    evaluate_allow_inner(expr, auth, data, input, None)
+}
+
 /// Tokenize + parse + at-end check an expression into an `Ast`. `Err` is a
 /// ready-to-surface "Policy parse error" / "Trailing tokens" reason. Split
 /// out from evaluation so the parsed AST can be cached once (see
