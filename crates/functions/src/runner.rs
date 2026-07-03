@@ -494,9 +494,16 @@ impl FnRunner {
         match guard.as_mut() {
             None => false,
             Some(child) => match child.try_wait() {
-                Ok(Some(_status)) => false, // exited
-                Ok(None) => true,           // still running
-                Err(_) => false,            // can't tell — assume dead
+                Ok(Some(status)) => {
+                    // Say HOW it died (exit code vs signal): stderr is
+                    // inherited, so a clean exit(0) prints nothing, and the
+                    // supervisor's respawn otherwise hides that the child is
+                    // exiting at all.
+                    tracing::warn!("[functions] runner child exited: {status:?}");
+                    false
+                }
+                Ok(None) => true, // still running
+                Err(_) => false,  // can't tell — assume dead
             },
         }
     }

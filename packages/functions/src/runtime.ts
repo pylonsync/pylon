@@ -1057,11 +1057,15 @@ async function main() {
   send({ type: "ready", functions });
 
   // Belt-and-suspenders against orphaning: if the host dies in a way that
-  // somehow leaves our stdin open, we'll have been reparented to init
-  // (ppid === 1). Notice and exit. Unref'd so it never keeps us alive on its
-  // own.
+  // somehow leaves our stdin open, we'll have been REPARENTED — our ppid
+  // changes (to init or the nearest subreaper). Compare against the ppid we
+  // were born with rather than testing `ppid === 1`: in a container the
+  // host pylon usually IS PID 1, so every healthy runner is born with
+  // ppid 1 and the equality check kills the whole pool in a 2s respawn
+  // loop. Unref'd so the watch never keeps us alive on its own.
+  const initialPpid = process.ppid;
   const orphanWatch = setInterval(() => {
-    if (process.ppid === 1) process.exit(0);
+    if (process.ppid !== initialPpid) process.exit(0);
   }, 2000);
   if (typeof orphanWatch.unref === "function") orphanWatch.unref();
 
