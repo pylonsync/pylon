@@ -1,0 +1,108 @@
+{
+  "manifest_version": 1,
+  "name": "pad",
+  "version": "0.1.0",
+  "entities": [
+    {
+      "name": "Doc",
+      "fields": [
+        {
+          "name": "title",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "content",
+          "type": "string",
+          "optional": false,
+          "unique": false,
+          "crdt": "text"
+        },
+        {
+          "name": "createdBy",
+          "type": "string",
+          "optional": false,
+          "unique": false,
+          "readonly": true
+        },
+        {
+          "name": "createdAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_created",
+          "fields": [
+            "createdAt"
+          ],
+          "unique": false
+        }
+      ]
+    }
+  ],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "app/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
+      "path": "/d/:id",
+      "mode": "ssr",
+      "component": "app/d/[id]/page",
+      "layouts": [
+        "app/layout"
+      ]
+    }
+  ],
+  "queries": [],
+  "actions": [],
+  "policies": [
+    {
+      "name": "doc_collab",
+      "allowRead": "true",
+      "allowInsert": "auth.userId != null",
+      "allowUpdate": "auth.userId != null",
+      "allowDelete": "auth.userId == data.createdBy",
+      "entity": "Doc"
+    }
+  ],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "trusted_origins": []
+  }
+}

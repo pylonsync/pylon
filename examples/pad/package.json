@@ -1,0 +1,30 @@
+{
+  "name": "pad-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pylon dev",
+    "check": "tsc --noEmit",
+    "deploy": "pylon deploy"
+  },
+  "dependencies": {
+    "@pylonsync/functions": "workspace:*",
+    "@pylonsync/loro": "workspace:*",
+    "@pylonsync/react": "workspace:*",
+    "@pylonsync/sdk": "workspace:*",
+    "@pylonsync/sync": "workspace:*",
+    "loro-crdt": "^1.7.1",
+    "lucide-react": "^0.475.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.0",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.3"
+  }
+}

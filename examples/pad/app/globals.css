@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+/* Tailwind v4 scans these for class names. Paths are relative to this
+   file: the SSR app dir and the client components. */
+@source "./";
+@source "../client";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+html {
+  font-family: var(--font-sans);
+}
