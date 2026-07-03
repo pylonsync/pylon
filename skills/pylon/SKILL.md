@@ -669,6 +669,8 @@ claude mcp add pylon -- pylon mcp --url http://localhost:4321
 
 which exposes `pylon_schema` (entities/policies/routes/functions), `pylon_list` / `pylon_get` (entity reads — row policies apply, no extra authority), `pylon_call` (functions), `pylon_policy_test`, and `pylon_verify`.
 
+Per-route CSS strategy: `export const inlineCss = true` on a page inlines the compiled stylesheet into that route's SSR `<head>` (kills the render-blocking round trip — right for cold-traffic landing pages); `false` forces the cached `<link>` (right for logged-in pages, where the immutable sheet is fetched once and free forever). Unset defers to `PYLON_SSR_INLINE_CSS`. Sheets over 32KB always link.
+
 Dev-mode failures are disclosed where you'll see them: unhandled function errors return `Internal handler error (dev): <message> [at <file:line>]` in the HTTP response (prod stays masked), and a failed Tailwind compile paints a red banner on every page instead of silently serving unstyled.
 
 ## Before you finish a task

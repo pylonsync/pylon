@@ -1569,9 +1569,11 @@ export function buildDevHudChunk(devInfo: Record<string, unknown>): string {
  */
 /**
  * One `<head>` tag per route stylesheet: a `<link rel="stylesheet">` by
- * default, or the file's contents inlined in a `<style>` when
- * PYLON_SSR_INLINE_CSS is enabled and the compiled sheet is small
- * enough (PYLON_SSR_INLINE_CSS_MAX bytes, default 32768). Inlining
+ * default, or the file's contents inlined in a `<style>` when inlining
+ * is enabled — per route via `export const inlineCss = true|false`
+ * (wins), else globally via PYLON_SSR_INLINE_CSS — and the compiled
+ * sheet is small enough (PYLON_SSR_INLINE_CSS_MAX bytes, default
+ * 32768). Inlining
  * removes the render-blocking stylesheet round trip on cold
  * connections — at 14KB of compiled Tailwind that's the whole sheet.
  *
@@ -1582,9 +1584,18 @@ export function buildDevHudChunk(devInfo: Record<string, unknown>): string {
  * sheet containing "</style" (would break out of the tag).
  */
 const inlineCssCache = new Map<string, string | null>();
-export async function cssHeadTag(css: string, prefix: string): Promise<string> {
+export async function cssHeadTag(
+  css: string,
+  prefix: string,
+  routeOverride?: boolean,
+): Promise<string> {
   const link = `<link rel="stylesheet" href="${prefix}${css}">`;
-  const enabled = /^(1|true)$/i.test(process.env.PYLON_SSR_INLINE_CSS ?? "");
+  // Per-route `export const inlineCss = true|false` beats the env
+  // default — the tradeoff is inherently per-route (cold landing pages
+  // win from inlining; cached logged-in pages win from the link).
+  const enabled =
+    routeOverride ??
+    /^(1|true)$/i.test(process.env.PYLON_SSR_INLINE_CSS ?? "");
   if (!enabled) return link;
   let cached = inlineCssCache.get(css);
   if (cached === undefined) {
@@ -2903,8 +2914,10 @@ export async function handleRenderRoute(
     if (preloadManifestRoute) {
       headBlob += await buildFontHeadBlob();
       const co = /^https?:\/\//i.test(preloadPublicPrefix) ? " crossorigin" : "";
+      const inlineOverride =
+        typeof mod?.inlineCss === "boolean" ? mod.inlineCss : undefined;
       for (const css of preloadManifestRoute.css) {
-        headBlob += await cssHeadTag(css, preloadPublicPrefix);
+        headBlob += await cssHeadTag(css, preloadPublicPrefix, inlineOverride);
       }
       for (const chunk of preloadManifestRoute.imports) {
         headBlob += `<link rel="modulepreload"${co} href="${preloadPublicPrefix}${chunk}">`;
