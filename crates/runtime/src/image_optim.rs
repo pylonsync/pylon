@@ -17,8 +17,9 @@
 //!   - Quality must be in the `qualities` set (default 50/75/90).
 //!   - Format must be in the `formats` set (default webp/jpeg).
 //!   - Source bytes capped at `maxBytes` (default 25MB).
-//!   - Decoded pixel count capped at `maxPixels` (default 100M).
-//!     Prevents image-bomb DoS (tiny file, huge dimensions).
+//!   - Decoded pixel count capped at `maxPixels` (default 40M) —
+//!     bounds decode memory. Prevents image-bomb DoS (tiny file,
+//!     huge dimensions).
 //!   - SVG inputs hard-rejected. We never accept or emit SVG —
 //!     it can carry script.
 //!
@@ -57,7 +58,7 @@ enum OutFormat {
 /// | `PYLON_IMAGE_QUALITIES` | `50,75,90` | Quality values allowed. |
 /// | `PYLON_IMAGE_FORMATS` | `webp,jpeg` | Output formats allowed. |
 /// | `PYLON_IMAGE_MAX_BYTES` | `26214400` (25MB) | Source byte cap. |
-/// | `PYLON_IMAGE_MAX_PIXELS` | `100000000` (100M) | Decoded pixel cap. Prevents image bombs. |
+/// | `PYLON_IMAGE_MAX_PIXELS` | `40000000` (40M) | Decoded pixel cap (bounds decode memory). Prevents image bombs. |
 /// | `PYLON_IMAGE_FETCH_TIMEOUT_MS` | `15000` | Remote-source fetch timeout. |
 #[derive(Debug, Clone)]
 struct ImageConfig {
@@ -177,10 +178,17 @@ impl ImageConfig {
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(25 * 1024 * 1024);
+        // Decoded-pixel cap. This bounds peak DECODE memory (pixels x 4 bytes
+        // RGBA + a resize clone), NOT the source byte count (max_bytes) — a
+        // highly-compressible source under max_bytes can still declare a huge
+        // canvas. 40M px (~any 24MP camera photo) caps a decode at ~160MB;
+        // 100M would allow ~400MB (≈1GB peak with clones), and N concurrent
+        // requests then OOM a small machine. Operators serving genuinely huge
+        // images raise PYLON_IMAGE_MAX_PIXELS explicitly.
         let max_pixels = std::env::var("PYLON_IMAGE_MAX_PIXELS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(100_000_000);
+            .unwrap_or(40_000_000);
         let fetch_timeout_ms = std::env::var("PYLON_IMAGE_FETCH_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -746,7 +754,11 @@ fn cache_path(cache_dir: &Path, src: &str, width: u32, quality: u8, fmt: OutForm
     h.update(src.as_bytes());
     h.update(width.to_le_bytes());
     h.update([quality]);
-    h.update([fmt.extension().as_bytes()[0]]);
+    // Full extension, not just its first byte — hashing one byte would collide
+    // any two output formats sharing a first letter (a future `jp2`/`jpg` or
+    // `webp`/`webm`) onto the same cache file, serving format A's bytes under
+    // format B's Content-Type.
+    h.update(fmt.extension().as_bytes());
     let hash = h.finalize();
     let hex: String = hash.iter().take(16).map(|b| format!("{b:02x}")).collect();
     cache_dir.join(format!("{hex}.{}", fmt.extension()))
@@ -904,5 +916,39 @@ mod tests {
         );
         // Empty Location is unfollowable.
         assert_eq!(resolve_redirect("https://a.com/x", ""), None);
+    }
+}
+
+#[cfg(test)]
+mod cache_key_tests {
+    use super::*;
+
+    #[test]
+    fn cache_path_distinguishes_output_formats() {
+        let dir = Path::new("/tmp/pylon-img-test");
+        let webp = cache_path(dir, "a.png", 640, 75, OutFormat::Webp);
+        let jpg = cache_path(dir, "a.png", 640, 75, OutFormat::Jpeg);
+        let png = cache_path(dir, "a.png", 640, 75, OutFormat::Png);
+        // Distinct output formats MUST map to distinct cache files — both the
+        // hashed stem (full extension is hashed) and the `.ext` suffix differ,
+        // so format A's bytes can't be served under format B's Content-Type.
+        assert_ne!(webp, jpg);
+        assert_ne!(webp, png);
+        assert_ne!(jpg, png);
+        assert_ne!(webp.file_stem(), jpg.file_stem());
+    }
+
+    #[test]
+    fn cache_path_is_stable_for_same_inputs() {
+        let dir = Path::new("/tmp/pylon-img-test");
+        assert_eq!(
+            cache_path(dir, "a.png", 640, 75, OutFormat::Webp),
+            cache_path(dir, "a.png", 640, 75, OutFormat::Webp),
+        );
+        // Any input change reshapes the key.
+        assert_ne!(
+            cache_path(dir, "a.png", 640, 75, OutFormat::Webp),
+            cache_path(dir, "a.png", 641, 75, OutFormat::Webp),
+        );
     }
 }

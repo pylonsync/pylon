@@ -15,6 +15,7 @@ import {
   asRouteControl,
   PylonRouteControl,
   finalizeHeaders,
+  escapeScriptJson,
   makeResponseController,
   makeReadTrackingProxy,
   makeRevocableReadTrackingProxy,
@@ -748,5 +749,70 @@ describe("isSafeRedirect — open-redirect guard for response.redirect()", () =>
     expect(isSafeRedirect("/ok", {})).toBe(true);
     expect(isSafeRedirect("http://localhost/x", {})).toBe(true);
     expect(isSafeRedirect("https://app.example.com/x", {})).toBe(false);
+  });
+});
+
+describe("script-escaping + secure cookies", () => {
+  test("escapeScriptJson neutralizes a </script> breakout", () => {
+    const out = escapeScriptJson(JSON.stringify("</script><script>alert(1)</script>"));
+    expect(out).not.toContain("<");
+    expect(out).toContain("\\u003c");
+  });
+
+  test("buildHydrationTail fallback warn script escapes manifestErr", () => {
+    const tail = buildHydrationTail({
+      component: "app/x/page",
+      layouts: [],
+      props: {},
+      ssrData: {},
+      manifestRoute: null,
+      publicPrefix: "/_pylon/build/",
+      manifestErr: 'no entry for "</script><script>evil</script>"',
+    });
+    const warn = tail.slice(tail.indexOf("console.warn"));
+    // The executable fallback must escape the error — no raw injected tag.
+    expect(warn).not.toContain("<script>evil");
+    expect(warn).toContain("\\u003c");
+  });
+
+  test("serializeCookie: Secure defaults + SameSite=None forces Secure", () => {
+    const mk = () => {
+      const s = { status: 200, headers: {}, cookies: [] as string[] };
+      return { s, r: makeResponseController(s) };
+    };
+    const prev = process.env.PYLON_DEV_MODE;
+    try {
+      // Prod (dev off): Secure defaults ON.
+      delete process.env.PYLON_DEV_MODE;
+      {
+        const { s, r } = mk();
+        r.setCookie("a", "1");
+        expect(s.cookies[0]).toContain("; Secure");
+        expect(s.cookies[0]).toContain("; HttpOnly");
+      }
+      // Explicit secure:false (non-None) wins even in prod.
+      {
+        const { s, r } = mk();
+        r.setCookie("a", "1", { secure: false });
+        expect(s.cookies[0]).not.toContain("; Secure");
+      }
+      // Dev: Secure defaults OFF so http://localhost keeps the cookie.
+      process.env.PYLON_DEV_MODE = "1";
+      {
+        const { s, r } = mk();
+        r.setCookie("a", "1");
+        expect(s.cookies[0]).not.toContain("; Secure");
+      }
+      // SameSite=None forces Secure even in dev (browsers drop it otherwise).
+      {
+        const { s, r } = mk();
+        r.setCookie("a", "1", { sameSite: "none" });
+        expect(s.cookies[0]).toContain("; Secure");
+        expect(s.cookies[0]).toContain("SameSite=None");
+      }
+    } finally {
+      if (prev === undefined) delete process.env.PYLON_DEV_MODE;
+      else process.env.PYLON_DEV_MODE = prev;
+    }
   });
 });

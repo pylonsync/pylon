@@ -146,6 +146,7 @@ export interface SsrCookieOptions {
   expires?: Date | string;
   /** Defaults to true (secure default). Pass false for a client-readable cookie. */
   httpOnly?: boolean;
+  /** Defaults to true in prod / false in dev. Forced true when sameSite="none". */
   secure?: boolean;
   /** Defaults to "lax". */
   sameSite?: "strict" | "lax" | "none";
@@ -194,8 +195,13 @@ function serializeCookie(
     c += `; Domain=${opts.domain}`;
   }
   if (opts.httpOnly !== false) c += `; HttpOnly`;
-  if (opts.secure) c += `; Secure`;
   const ss = opts.sameSite ?? "lax";
+  // `Secure` defaults ON in prod (mirrors the framework session cookie), OFF in
+  // dev so an http://localhost cookie isn't dropped. `SameSite=None` REQUIRES
+  // `Secure` — browsers silently drop a None cookie without it — so force it
+  // there regardless of the caller / dev mode.
+  const secure = ss === "none" ? true : (opts.secure ?? !isDevMode());
+  if (secure) c += `; Secure`;
   c += `; SameSite=${ss[0].toUpperCase()}${ss.slice(1)}`;
   return c;
 }
@@ -1517,11 +1523,22 @@ function pylonDevHud() {
  * marker + probe are in place before the deferred client entry boots the sync
  * engine. `<` is escaped so the JSON can't break out of the script.
  */
-export function buildDevHudChunk(devInfo: Record<string, unknown>): string {
-  const json = JSON.stringify(devInfo)
+/**
+ * Escape a JSON string so it can't break out of a `<script>` element: `<`
+ * closes a `</script>` (or `<!--`, `<script`); U+2028/U+2029 are JS statement
+ * terminators (valid in JSON, not in a JS string literal). Applied to every
+ * server-serialized blob embedded in a script tag \u2014 the `application/json`
+ * data blobs AND the executable fallback warning.
+ */
+export function escapeScriptJson(json: string): string {
+  return json
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
+}
+
+export function buildDevHudChunk(devInfo: Record<string, unknown>): string {
+  const json = escapeScriptJson(JSON.stringify(devInfo));
   return (
     `<script id="__PYLON_DEV__" type="application/json">${json}</script>` +
     `<script>(${pylonDevHud.toString()})();</script>`
@@ -1661,13 +1678,7 @@ export function buildHydrationTail(args: {
     ssrData: args.ssrData,
   };
   if (args.kind) hydrationPayload.kind = args.kind;
-  // Escape `<` (closes a </script> breakout) + U+2028/U+2029 (JSON-valid but
-  // JS statement terminators). Regex form keeps the separators visible in
-  // source rather than as invisible literals.
-  const json = JSON.stringify(hydrationPayload)
-    .replace(/</g, "\\u003c")
-    .replace(/\u2028/g, "\\u2028")
-    .replace(/\u2029/g, "\\u2029");
+  const json = escapeScriptJson(JSON.stringify(hydrationPayload));
   let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
   if (args.manifestRoute) {
     // A cross-origin CDN module (`public_prefix` is an absolute http(s) URL) is
@@ -1677,7 +1688,10 @@ export function buildHydrationTail(args: {
     const co = /^https?:\/\//i.test(args.publicPrefix) ? " crossorigin" : "";
     tail += `<script type="module"${co} src="${args.publicPrefix}${args.manifestRoute.file}"></script>`;
   } else {
-    tail += `<script>console.warn(${JSON.stringify(`[pylon ssr] hydration disabled: ${args.manifestErr}`)})</script>`;
+    // Executable script → the serialized message MUST be script-escaped
+    // (`manifestErr` is server-derived today, but this is the one script sink
+    // that would otherwise skip the `<`-escape every other blob applies).
+    tail += `<script>console.warn(${escapeScriptJson(JSON.stringify(`[pylon ssr] hydration disabled: ${args.manifestErr}`))})</script>`;
   }
   if (isDevMode()) tail += DEV_LIVE_RELOAD_SNIPPET;
   return tail;

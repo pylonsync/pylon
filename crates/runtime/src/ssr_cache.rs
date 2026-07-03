@@ -54,13 +54,28 @@ fn cache_dir() -> PathBuf {
     cache_base().join(build_namespace())
 }
 
-/// SHA-256 hex of (route_path, pathname, sorted allowlisted params). The build
-/// namespace lives in the dir, not the key.
+/// Canonicalize a pathname to the SAME form the route matcher keys on — collapse
+/// empty/duplicate segments and any trailing slash (`.split('/').filter(!empty)`
+/// then rejoin). Equivalent spellings (`/blog`, `//blog`, `/blog/`, `///blog//`)
+/// then share ONE cache entry instead of minting a distinct key each — which an
+/// attacker could spray to amplify live renders and evict the hot working set.
+/// Not case-folded or percent-decoded (the router is case- and encoding-exact),
+/// so `/Blog` and `/blog%2Fx` stay distinct, matching what actually renders.
+pub fn normalize_pathname(pathname: &str) -> String {
+    let segs: Vec<&str> = pathname.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
+        return "/".to_string();
+    }
+    format!("/{}", segs.join("/"))
+}
+
+/// SHA-256 hex of (route_path, normalized pathname, sorted allowlisted params).
+/// The build namespace lives in the dir, not the key.
 pub fn cache_key(route_path: &str, pathname: &str, vary: &[(String, String)]) -> String {
     let mut h = Sha256::new();
     h.update(route_path.as_bytes());
     h.update([0]);
-    h.update(pathname.as_bytes());
+    h.update(normalize_pathname(pathname).as_bytes());
     let mut sorted: Vec<&(String, String)> = vary.iter().collect();
     sorted.sort();
     for (k, v) in sorted {
@@ -371,12 +386,32 @@ fn sweep_disk_cache(dir: &Path, max_entries: usize, max_bytes: u64) {
         Ok(rd) => rd,
         Err(_) => return,
     };
+    // Orphaned `<key>.tmp.<nanos>` files are reclaimed if older than this — a
+    // writer that crashed between File::create and rename leaks one, and it's
+    // outside the `.html`/`.meta` byte accounting below so the size caps never
+    // see it (a slow disk leak across crashes). The age floor keeps a
+    // concurrent in-flight write (its tmp is seconds old) safe.
+    const TMP_ORPHAN_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(300);
     let mut entries: Vec<Entry> = Vec::new();
     let mut total_bytes: u64 = 0;
     for ent in rd.flatten() {
         let path = ent.path();
-        // One record per completed `.html`; `.meta` is counted with its pair,
-        // and in-flight `.tmp.*` files (and anything else) are ignored.
+        // Reclaim stale in-flight tmp files (named `<key>.tmp.<nanos>`, so the
+        // final extension is the nanos, not "tmp" — match on the name).
+        if ent.file_name().to_string_lossy().contains(".tmp.") {
+            let stale = ent
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mt| SystemTime::now().duration_since(mt).ok())
+                .map(|age| age >= TMP_ORPHAN_MAX_AGE)
+                .unwrap_or(false);
+            if stale {
+                let _ = std::fs::remove_file(&path);
+            }
+            continue;
+        }
+        // One record per completed `.html`; `.meta` is counted with its pair.
         if path.extension().and_then(|e| e.to_str()) != Some("html") {
             continue;
         }
@@ -687,5 +722,45 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn cache_key_collapses_equivalent_pathname_spellings() {
+        // The route matcher keys on `.split('/').filter(!empty)`, so these all
+        // hit the same route — they MUST share one cache key (else an attacker
+        // sprays spellings to amplify renders + churn the working set).
+        let k = |p: &str| cache_key("/blog", p, &[]);
+        assert_eq!(k("/blog"), k("/blog/"));
+        assert_eq!(k("/blog"), k("//blog"));
+        assert_eq!(k("/blog"), k("///blog//"));
+        assert_eq!(normalize_pathname("///blog//"), "/blog");
+        assert_eq!(normalize_pathname("/"), "/");
+        // NOT over-normalized: distinct routes stay distinct.
+        assert_ne!(k("/blog"), k("/blog/x"));
+        assert_ne!(k("/blog"), cache_key("/blog", "/Blog", &[])); // case-exact
+    }
+
+    #[test]
+    fn disk_sweep_reclaims_stale_tmp_orphans() {
+        use std::time::Duration;
+        let dir = unique_tmp("tmp_orphans");
+        // A crashed writer's orphan (old) + an in-flight tmp (fresh).
+        let stale = dir.join("keyA.tmp.111");
+        let fresh = dir.join("keyB.tmp.222");
+        std::fs::write(&stale, b"partial").unwrap();
+        std::fs::write(&fresh, b"partial").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(600))
+            .unwrap();
+
+        sweep_disk_cache(&dir, 4096, 0);
+
+        assert!(!stale.exists(), "a >5min-old orphan tmp must be reclaimed");
+        assert!(fresh.exists(), "a fresh in-flight tmp must be left alone");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

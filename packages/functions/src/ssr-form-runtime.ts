@@ -19,6 +19,7 @@ import {
   PylonRouteControl,
   finalizeHeaders,
   importModule,
+  isDevMode,
   type ResponseState,
 } from "./ssr-runtime";
 import { buildDbWriter } from "./runtime";
@@ -81,8 +82,9 @@ function makeFormFields(raw: Record<string, string | string[]>): FormFields {
 // the list drives the 405 `Allow` header advertising which a route.ts exports.
 const HANDLER_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 const b64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
-const isDev = () =>
-  process.env.PYLON_DEV_MODE === "1" || process.env.PYLON_DEV_MODE === "true";
+// Share ONE dev-mode parse with ssr-runtime (case-insensitive "1"/"true") so
+// the form path and the render path never disagree on whether to leak stacks.
+const isDev = isDevMode;
 
 export async function handleForm(
   msg: HandleFormMessage,

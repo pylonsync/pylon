@@ -274,11 +274,18 @@ impl FrontendConfig {
 /// hits would also be a security smell (response-type confusion).
 fn is_spa_eligible(url: &str) -> bool {
     let path = url.split('?').next().unwrap_or(url);
+    // Framework routes are anchored to an exact match OR a trailing-slash
+    // subpath (like /health below) — a bare `starts_with("/studio")` also
+    // swallowed legitimate SSR routes such as /studios, /eventsfeed,
+    // /metrics-report and 404'd them.
     !(path.starts_with("/api/")
         || path == "/api"
-        || path.starts_with("/studio")
-        || path.starts_with("/events")
-        || path.starts_with("/metrics")
+        || path == "/studio"
+        || path.starts_with("/studio/")
+        || path == "/events"
+        || path.starts_with("/events/")
+        || path == "/metrics"
+        || path.starts_with("/metrics/")
         || path == "/health"
         || path.starts_with("/health/")
         || path.starts_with("/admin/")
@@ -4996,5 +5003,29 @@ mod tests {
             ),
             "SSR auth must NOT grant is_admin to a non-admin User"
         );
+    }
+
+    #[test]
+    fn is_spa_eligible_anchors_framework_prefixes() {
+        // Framework routes + their subpaths are NOT SPA-eligible…
+        for p in [
+            "/studio",
+            "/studio/x",
+            "/events",
+            "/metrics",
+            "/health",
+            "/api",
+            "/api/x",
+        ] {
+            assert!(
+                !is_spa_eligible(p),
+                "{p} must route to the framework, not SPA"
+            );
+        }
+        // …but sibling-prefixed SSR routes ARE (the bare starts_with bug 404'd
+        // these).
+        for p in ["/studios", "/eventsfeed", "/metrics-report", "/apiary", "/"] {
+            assert!(is_spa_eligible(p), "{p} must be SPA-eligible");
+        }
     }
 }

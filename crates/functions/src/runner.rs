@@ -5,7 +5,7 @@
 //! and transaction management.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -1667,21 +1667,86 @@ fn kill_and_msg(child: &mut Child, msg: String) -> String {
 /// (a late frame after the call unregistered) is dropped. On child exit the
 /// table is cleared so every in-flight call's recv returns `Disconnected`
 /// (→ `RUNNER_EXITED`) instead of hanging until its deadline.
+/// Max bytes buffered for ONE NDJSON frame. A frame with no terminating
+/// newline (a malformed / hostile / pathologically-large return value) would
+/// otherwise grow the read buffer without bound and OOM the host — which kills
+/// EVERY runner, not just the offending call. Beyond this the frame is dropped
+/// and the reader re-syncs on the next newline; the waiting call then times out
+/// gracefully instead. 64 MiB is far above any legitimate single frame (render
+/// chunks stream in small pieces; the largest normal frame is an action's JSON
+/// return).
+const MAX_FRAME_BYTES: u64 = 64 * 1024 * 1024;
+
+enum Frame {
+    /// A complete NDJSON line (bytes include the trailing '\n' except at EOF).
+    Data(Vec<u8>),
+    /// A frame exceeding `MAX_FRAME_BYTES` with no newline — dropped + drained.
+    Oversized,
+    /// Child stdout reached EOF.
+    Eof,
+}
+
+/// Read one newline-terminated frame from `r`, bounded to `max` bytes. An
+/// oversized frame is dropped and its tail drained so the NEXT call re-syncs on
+/// a clean line boundary.
+fn read_frame<R: BufRead>(r: &mut R, max: u64) -> std::io::Result<Frame> {
+    let mut buf = Vec::new();
+    let n = (&mut *r).take(max).read_until(b'\n', &mut buf)?;
+    if n == 0 {
+        return Ok(Frame::Eof);
+    }
+    if buf.last() == Some(&b'\n') {
+        return Ok(Frame::Data(buf));
+    }
+    // No terminating newline within what we read.
+    if buf.len() as u64 >= max {
+        // Cap hit → oversized/hostile frame. Discard its remaining bytes
+        // (without buffering them) so the reader picks up the next frame.
+        drain_to_newline(r)?;
+        return Ok(Frame::Oversized);
+    }
+    // A partial final line the child wrote before exiting — hand it up as-is.
+    Ok(Frame::Data(buf))
+}
+
+/// Discard bytes up to and including the next '\n' (or EOF) WITHOUT buffering
+/// them. Returns Ok(true) if a newline was consumed, Ok(false) on EOF.
+fn drain_to_newline<R: BufRead>(r: &mut R) -> std::io::Result<bool> {
+    loop {
+        let available = r.fill_buf()?;
+        if available.is_empty() {
+            return Ok(false); // EOF
+        }
+        if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            r.consume(pos + 1);
+            return Ok(true);
+        }
+        let consumed = available.len();
+        r.consume(consumed);
+    }
+}
+
 fn reader_loop(
     mut stdout: BufReader<std::process::ChildStdout>,
     routes: Arc<RouteTable>,
     ready_tx: Sender<TsMessage>,
     last_msg_at: Arc<AtomicU64>,
 ) {
-    let mut line = String::new();
     loop {
-        line.clear();
-        match stdout.read_line(&mut line) {
-            Ok(0) => break,  // EOF — child exited
-            Err(_) => break, // pipe error — child gone
-            Ok(_) => {}
-        }
-        match serde_json::from_str::<TsMessage>(line.trim()) {
+        let buf = match read_frame(&mut stdout, MAX_FRAME_BYTES) {
+            Ok(Frame::Eof) => break, // EOF — child exited
+            Err(_) => break,         // pipe error — child gone
+            Ok(Frame::Data(buf)) => buf,
+            Ok(Frame::Oversized) => {
+                tracing::warn!(
+                    "[functions] dropping oversized NDJSON frame (>= {MAX_FRAME_BYTES} bytes, no newline) — the waiting call will time out"
+                );
+                continue;
+            }
+        };
+        // `from_slice` tolerates the trailing newline (whitespace). Bytes, not a
+        // String, so a non-UTF-8 frame is a parse error we skip — not a panic.
+        match serde_json::from_slice::<TsMessage>(&buf) {
             Ok(msg) => {
                 // Liveness: a message just arrived, so the runtime is
                 // responsive. Feeds the health probe (busy-but-flowing = OK).
@@ -1691,7 +1756,7 @@ fn reader_loop(
             Err(e) => {
                 tracing::warn!(
                     "[functions] Skipping unparseable line from Bun runtime: {e} (line={:?})",
-                    line.trim()
+                    String::from_utf8_lossy(&buf).trim()
                 );
             }
         }
@@ -2632,6 +2697,42 @@ mod tests {
             result.unwrap()["hits"],
             serde_json::json!([{"id": "1", "owner": "u1"}])
         );
+    }
+
+    // ---- NDJSON frame bound (memory-DoS fence) ----
+
+    #[test]
+    fn read_frame_drops_oversized_and_resyncs() {
+        use std::io::Cursor;
+        // A 100-byte frame with NO newline, then a normal frame. With a 10-byte
+        // cap the first is dropped (Oversized) and the reader re-syncs on the
+        // second — one hostile/huge frame can't grow the buffer without bound
+        // or corrupt the frames after it.
+        let mut input = vec![b'x'; 100];
+        input.push(b'\n');
+        input.extend_from_slice(b"{\"a\":1}\n");
+        let mut r = Cursor::new(input);
+
+        assert!(matches!(read_frame(&mut r, 10).unwrap(), Frame::Oversized));
+        match read_frame(&mut r, 10).unwrap() {
+            Frame::Data(buf) => assert_eq!(buf, b"{\"a\":1}\n"),
+            _ => panic!("expected the next frame to parse cleanly after a drop"),
+        }
+        assert!(matches!(read_frame(&mut r, 10).unwrap(), Frame::Eof));
+    }
+
+    #[test]
+    fn read_frame_passes_normal_frames() {
+        use std::io::Cursor;
+        let mut r = Cursor::new(b"{\"x\":1}\n".to_vec());
+        match read_frame(&mut r, MAX_FRAME_BYTES).unwrap() {
+            Frame::Data(buf) => assert_eq!(buf, b"{\"x\":1}\n"),
+            _ => panic!("a within-bound frame must be returned as Data"),
+        }
+        assert!(matches!(
+            read_frame(&mut r, MAX_FRAME_BYTES).unwrap(),
+            Frame::Eof
+        ));
     }
 
     #[test]
