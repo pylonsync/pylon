@@ -264,8 +264,18 @@ export class RoomSubscriptions {
       case "presence": {
         if (!member) break;
         // Swap the matching member's data while preserving join order.
+        // The server ships the NEW presence in the envelope's data slot
+        // (`member` carries only the user_id) — merging `member` alone
+        // is a no-op that drops every live presence update: remote
+        // cursors/typing indicators freeze at whatever the join carried.
+        const presence =
+          _data && typeof _data === "object"
+            ? (_data as Record<string, unknown>)
+            : undefined;
         entry.members = entry.members.map((m) =>
-          m.user_id === member.user_id ? { ...m, ...member } : m,
+          m.user_id === member.user_id
+            ? { ...m, ...member, ...(presence ? { data: presence } : {}) }
+            : m,
         );
         break;
       }

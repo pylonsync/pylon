@@ -181,6 +181,26 @@ describe("RoomSubscriptions: snapshot / update / error", () => {
     expect(h.rooms.members("channel:foo")).toHaveLength(1);
   });
 
+  test("applyUpdate presence applies the envelope's data slot", () => {
+    // The server ships new presence in the DATA slot; `member` carries
+    // only user_id. Pre-fix the handler merged `member` alone — a no-op
+    // that froze remote presence (live cursors, typing indicators) at
+    // whatever the join carried.
+    const h = makeHarness();
+    h.rooms.register("channel:foo", () => {});
+    h.rooms.applySnapshot("channel:foo", [
+      { user_id: "u1", joined_at: "t1", data: { caret: 1 } },
+    ]);
+    h.rooms.applyUpdate(
+      "channel:foo",
+      "presence",
+      { user_id: "u1", joined_at: "t1" },
+      { caret: 42, name: "Ada" },
+    );
+    const members = h.rooms.members("channel:foo")!;
+    expect(members[0].data).toEqual({ caret: 42, name: "Ada" });
+  });
+
   test("applyUpdate leave removes the matching user", () => {
     const h = makeHarness();
     h.rooms.register("channel:foo", () => {});
