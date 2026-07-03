@@ -95,6 +95,11 @@ impl ChangeNotifier for NoopNotifier {
 // by internal compaction so the bandwidth is fine; switching to deltas
 // is a non-breaking optimization (just flip the type byte and the
 // payload encoding) once we have per-client version-vector tracking.
+//
+// THIS FILE IS THE CANONICAL DEFINITION of the frame layout. Clients
+// parse it independently — change them together:
+//   packages/sync/src/index.ts        crdtFrameKey() + dispatchBinaryFrame()
+//   packages/swift/…/SyncEngine.swift the Swift binary-frame parser
 // ---------------------------------------------------------------------------
 
 /// Frame type for a full CRDT snapshot.

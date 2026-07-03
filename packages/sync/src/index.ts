@@ -3547,6 +3547,10 @@ export const LAST_CRDT_FRAMES_MAX = 64;
  *   [type: u8] [entity_len: u16 BE] [entity utf8]
  *   [row_id_len: u16 BE] [row_id utf8] [payload]
  *
+ * The layout is defined canonically in crates/router/src/lib.rs
+ * (CRDT_FRAME_SNAPSHOT / encode_crdt_frame) — if it changes there,
+ * this parser and the Swift one change with it.
+ *
  * The engine still treats the PAYLOAD as opaque — this reads only the
  * routing header so the follower-catch-up cache can be keyed per row.
  */

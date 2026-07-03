@@ -100,6 +100,11 @@ pub use loro;
 
 /// Root container name. Every Pylon-managed Loro doc has exactly one
 /// top-level [`LoroMap`] under this id; entity field names live inside it.
+///
+/// CANONICAL — clients hold a mirror of this constant and resolve every
+/// field container through the row map (a container anywhere else is
+/// invisible to the projector). Change together:
+///   packages/loro/src/index.ts   ROOT_MAP + resolveLoroText/getLoroMap
 pub const ROOT_MAP: &str = "row";
 
 /// Open or create the root map for a Pylon-shaped doc.

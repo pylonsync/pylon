@@ -140,3 +140,36 @@ public final class PylonLoroDoc: @unchecked Sendable {
         unsubscribeCrdt = nil
     }
 }
+
+// MARK: - Row-map field accessors (the server's doc-shape contract)
+
+public extension PylonLoroDoc {
+    /// The server's projection contract (canonical: crates/crdt in the
+    /// pylon repo): each entity row's doc holds ONE root `LoroMap` named
+    /// "row"; its keys are the entity's field names, and a `crdt: "text"`
+    /// field is a `LoroText` CHILD of that map. The server seeds those
+    /// containers at insert and projects them back to SQL columns after
+    /// every merge — a container anywhere else in the doc (e.g. a
+    /// top-level `doc.getText("content")`) is INVISIBLE to it: your
+    /// writes would 200 and never appear in the row. Always go through
+    /// these accessors.
+    static let rootMapId = "row"
+
+    /// The root "row" map holding the entity's fields.
+    var row: LoroMap { doc.getMap(id: Self.rootMapId) }
+
+    /// The `LoroText` for a `crdt: "text"` field, resolved through the
+    /// row map. Read path only — returns nil until the server's seeded
+    /// snapshot has been imported (creating a fresh container here would
+    /// lose the concurrent-merge identity race against the server's,
+    /// exactly the divergence this accessor exists to prevent).
+    func text(_ field: String) -> LoroText? {
+        row.get(key: field)?.asLoroText()
+    }
+
+    /// Current string value of a `crdt: "text"` field ("" until the
+    /// server snapshot lands).
+    func string(_ field: String) -> String {
+        text(field)?.toString() ?? ""
+    }
+}

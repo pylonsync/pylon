@@ -1,4 +1,5 @@
 import XCTest
+import Loro
 @testable import PylonSync
 
 final class LoroBridgeTests: XCTestCase {
@@ -50,5 +51,43 @@ final class LoroBridgeTests: XCTestCase {
         XCTAssertEqual(decoded?.entity, entity)
         XCTAssertEqual(decoded?.rowId, rowId)
         XCTAssertEqual(decoded?.payload.count, 1024)
+    }
+}
+
+// MARK: - Row-map contract (mirror of packages/loro contract.test.ts)
+
+extension LoroBridgeTests {
+    /// Pin the server doc-shape contract: fields live inside the root
+    /// "row" LoroMap. A server-seeded snapshot must be readable through
+    /// the row-map accessors, and a top-level text container (the
+    /// pre-contract client bug) must stay invisible to them.
+    func testRowMapAccessorsReadServerShapedDoc() throws {
+        // Shape a doc exactly like the server does at insert.
+        let server = LoroDoc()
+        let row = server.getMap(id: "row")
+        let content = try row.insertContainer(key: "content", child: LoroText())
+        try content.insert(pos: 0, s: "hello from the server")
+        try row.insert(key: "title", v: "Welcome")
+        let snapshot = try server.export(mode: ExportMode.snapshot)
+
+        let handle = PylonLoroDoc(entity: "Doc", rowId: "r1")
+        _ = try handle.doc.import(bytes: snapshot)
+
+        XCTAssertEqual(handle.string("content"), "hello from the server")
+        XCTAssertNotNil(handle.text("content"))
+        // A field that isn't a text container resolves to nil, not a crash.
+        XCTAssertNil(handle.text("title"))
+        // Nothing was ever seeded at the TOP level — the old bug's shape.
+        XCTAssertEqual(handle.doc.getText(id: "content").toString(), "")
+    }
+
+    /// Before any server snapshot arrives the accessors return the
+    /// empty state — they must NOT create containers (creating one would
+    /// lose the merge-identity race against the server's seeded one).
+    func testAccessorsAreReadOnlyBeforeSnapshot() {
+        let handle = PylonLoroDoc(entity: "Doc", rowId: "r2")
+        XCTAssertNil(handle.text("content"))
+        XCTAssertEqual(handle.string("content"), "")
+        XCTAssertNil(handle.row.get(key: "content"))
     }
 }
