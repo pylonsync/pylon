@@ -31,6 +31,12 @@ type Listener = () => void;
 interface DocEntry {
   doc: LoroDoc;
   listeners: Set<Listener>;
+  /** Bumped on every applied frame, local touch, and eviction. Hooks
+   *  use this as their useSyncExternalStore snapshot: the doc instance
+   *  is intentionally stable across renders, and a stable snapshot
+   *  makes React bail out of re-rendering — so notifications must be
+   *  accompanied by a value that actually changes. */
+  version: number;
 }
 
 export class LoroRegistry {
@@ -82,6 +88,7 @@ export class LoroRegistry {
       );
       return false;
     }
+    entry.version += 1;
     for (const listener of entry.listeners) {
       try {
         listener();
@@ -92,6 +99,29 @@ export class LoroRegistry {
     return true;
   }
 
+  /** Monotonic per-row change counter — the render snapshot for hooks.
+   *  Zero for rows the registry hasn't seen. */
+  version(entity: string, rowId: string): number {
+    return this.docs.get(this.key(entity, rowId))?.version ?? 0;
+  }
+
+  /** Record a LOCAL mutation on a row's doc (the hooks call this right
+   *  after `doc.commit()`): bumps the version and notifies subscribers
+   *  so every component reading the row re-renders NOW, optimistically
+   *  — not when the server's post-merge broadcast echoes back. */
+  touch(entity: string, rowId: string): void {
+    const entry = this.docs.get(this.key(entity, rowId));
+    if (!entry) return;
+    entry.version += 1;
+    for (const listener of entry.listeners) {
+      try {
+        listener();
+      } catch (err) {
+        console.warn("[loro] listener threw:", err);
+      }
+    }
+  }
+
   /** Drop the cached doc for a row. Tests + the eventual eviction
    *  policy. Subscribers receive a final notify before the entry
    *  is removed so they can detect the drop and re-create their
@@ -100,6 +130,7 @@ export class LoroRegistry {
     const key = this.key(entity, rowId);
     const entry = this.docs.get(key);
     if (!entry) return;
+    entry.version += 1;
     for (const listener of entry.listeners) {
       try {
         listener();
@@ -119,7 +150,7 @@ export class LoroRegistry {
     const key = this.key(entity, rowId);
     let entry = this.docs.get(key);
     if (!entry) {
-      entry = { doc: new LoroDoc(), listeners: new Set() };
+      entry = { doc: new LoroDoc(), listeners: new Set(), version: 0 };
       this.docs.set(key, entry);
     }
     return entry;

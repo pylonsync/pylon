@@ -4,7 +4,7 @@
 // ---------------------------------------------------------------------------
 
 import { test, expect } from "bun:test";
-import { LoroDoc } from "loro-crdt";
+import { LoroDoc, LoroText } from "loro-crdt";
 import { LoroRegistry } from "./registry";
 import { CRDT_FRAME_SNAPSHOT, encodeCrdtFrame } from "./wire";
 
@@ -149,4 +149,17 @@ test("two registries hydrated from snapshots converge after exchange", () => {
   const bText = b.doc("Note", "n1").getText("body").toString();
   expect(aText).toBe(bText);
   expect(aText.length).toBeGreaterThan(0);
+});
+
+test("touch bumps the version and notifies — optimistic local renders", () => {
+  const reg = new LoroRegistry();
+  const doc = reg.doc("Doc", "r1");
+  let notified = 0;
+  reg.subscribe("Doc", "r1", () => notified++);
+  const before = reg.version("Doc", "r1");
+  doc.getMap("row").setContainer("content", new LoroText()).insert(0, "x");
+  doc.commit();
+  reg.touch("Doc", "r1");
+  expect(reg.version("Doc", "r1")).toBe(before + 1);
+  expect(notified).toBe(1);
 });

@@ -121,14 +121,19 @@ export function useLoroDoc(entity: string, id: string): LoroDoc {
     };
   }, [entity, id]);
 
-  // useSyncExternalStore drives re-renders. The snapshot is the doc
-  // itself (referentially stable across calls — same instance from
-  // the registry), so React's bail-out keeps re-renders bounded to
-  // when the registry's listener actually fires.
+  // useSyncExternalStore drives re-renders. The SNAPSHOT is the row's
+  // monotonic version counter, not the doc: the doc instance is
+  // intentionally stable across renders, and React bails out of
+  // re-rendering when the snapshot is Object.is-equal — a stable doc
+  // snapshot would swallow every notification. The version bumps on
+  // each applied frame AND on each local `touch()` after a commit, so
+  // consumers re-render optimistically on their own edits instead of
+  // waiting for the server's post-merge echo.
   const subscribe = (notify: () => void) =>
     globalRegistry.subscribe(entity, id, notify);
-  const getSnapshot = () => globalRegistry.doc(entity, id);
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const getVersion = () => globalRegistry.version(entity, id);
+  useSyncExternalStore(subscribe, getVersion, getVersion);
+  return globalRegistry.doc(entity, id);
 }
 
 /**
@@ -243,6 +248,8 @@ export function useCollabText(
       text.insert(0, next);
     }
     doc.commit();
+    // Optimistic render: notify every consumer of this row NOW.
+    globalRegistry.touch(entity, id);
 
     const update = doc.export({ mode: "update", from: beforeVv });
     if (update.length === 0) {
@@ -345,6 +352,9 @@ export function useCollabTextarea<
     if (insert.length > 0) text.insert(index, insert);
     doc.commit();
     domValue.current = next;
+    // Optimistic render: the preview (and any other consumer of this
+    // row) updates on the local commit, not on the server echo.
+    globalRegistry.touch(entity, id);
     const update = doc.export({ mode: "update", from: beforeVv });
     if (update.length > 0) void pushCrdtUpdate(entity, id, update);
   };
