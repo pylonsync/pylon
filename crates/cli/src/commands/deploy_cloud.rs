@@ -172,6 +172,19 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         Ok(r) => r,
         Err(e) => {
             output::print_error(&format!("Cloud deploy failed: {e}"));
+            if e.contains("PAYLOAD_TOO_LARGE") || e.contains("413") {
+                eprintln!(
+                    "  The upload ({:.1} MB source, ~{:.1} MB on the wire as base64 JSON) \
+                     exceeds the server's request cap.",
+                    tarball.len() as f64 / 1_048_576.0,
+                    (tarball.len() as f64 * 4.0 / 3.0) / 1_048_576.0,
+                );
+                eprintln!(
+                    "  On Pylon Cloud: deploy via the connected git repo instead \
+                     (Settings → Git), or trim large static assets out of the upload."
+                );
+                eprintln!("  Self-hosting the control plane: raise PYLON_HTTP_BODY_MAX_BYTES.");
+            }
             return ExitCode::Error;
         }
     };
@@ -576,6 +589,16 @@ fn walk_into_tar<W: Write>(
                 // .env.local, .env.production, etc — never upload.
                 continue;
             }
+            // pylon.manifest.json ships EVEN when gitignored (it near-
+            // universally is — it's generated output). The cloud build
+            // reads manifest-derived features (fonts, SSR route metadata)
+            // from it; without it a bundle builds fine and silently loses
+            // them. The builder can also re-derive it, but the local copy
+            // matches what the developer just ran, so prefer shipping it.
+            if name == "pylon.manifest.json" {
+                tar.append_path_with_name(&path, path.strip_prefix(root).unwrap_or(&path))?;
+                continue;
+            }
             if matches_gitignore(&path, root, gitignore) {
                 continue;
             }
@@ -760,5 +783,43 @@ mod workspace_deploy_tests {
             "root workspaces narrowed to packed members"
         );
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tar_entry_names(tarball: &[u8]) -> Vec<String> {
+        let gz = flate2::read::GzDecoder::new(tarball);
+        let mut archive = tar::Archive::new(gz);
+        archive
+            .entries()
+            .unwrap()
+            .map(|e| e.unwrap().path().unwrap().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn tarball_ships_manifest_even_when_gitignored() {
+        let dir = std::env::temp_dir().join(format!("pylon-tar-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("app.ts"), "export {};").unwrap();
+        std::fs::write(dir.join("pylon.manifest.json"), "{}").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        // Both gitignored — but the manifest is required build input.
+        std::fs::write(dir.join(".gitignore"), "pylon.manifest.json\nnotes.txt\n").unwrap();
+
+        let tarball = build_tarball(&dir).unwrap();
+        let names = tar_entry_names(&tarball);
+        assert!(
+            names.iter().any(|n| n == "pylon.manifest.json"),
+            "gitignored manifest must still ship: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "notes.txt"),
+            "other gitignored files must stay excluded: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

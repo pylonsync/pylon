@@ -4632,13 +4632,26 @@ fn start_server(
         //   2. The actual read uses `.take(MAX_BODY_SIZE + 1)` so a lying
         //      or chunked stream is capped at MAX + 1 bytes; if we read that
         //      many, we reject.
-        const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+        //
+        // Default 10 MB; PYLON_HTTP_BODY_MAX_BYTES raises it for
+        // deployments that legitimately take large request bodies (the
+        // canonical case: a control plane accepting CLI source uploads,
+        // where the tarball rides base64-inside-JSON at ~1.37x its size).
+        // It stays a hard bound either way — just a configurable one.
+        static BODY_MAX: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let max_body_size: usize = *BODY_MAX.get_or_init(|| {
+            std::env::var("PYLON_HTTP_BODY_MAX_BYTES")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|v| *v >= 1024)
+                .unwrap_or(10 * 1024 * 1024)
+        });
 
         if let Some(declared) = request.body_length() {
-            if declared > MAX_BODY_SIZE {
+            if declared > max_body_size {
                 let err_body = json_error(
                     "PAYLOAD_TOO_LARGE",
-                    &format!("Content-Length {declared} exceeds max of {MAX_BODY_SIZE}"),
+                    &format!("Content-Length {declared} exceeds max of {max_body_size}"),
                 );
                 let response = with_security_headers(
                     Response::from_string(&err_body)
@@ -4663,7 +4676,7 @@ fn start_server(
             Method::Get | Method::Head | Method::Options | Method::Delete
         ) {
             use std::io::Read;
-            let mut limited = request.as_reader().take((MAX_BODY_SIZE as u64) + 1);
+            let mut limited = request.as_reader().take((max_body_size as u64) + 1);
             let _ = limited.read_to_string(&mut body);
         }
         // Stamp bytes_in for the shipper's per-request rollup. The
@@ -4671,12 +4684,12 @@ fn start_server(
         // so this is the single right place to capture its size.
         crate::metrics::set_current_request_bytes(body.len());
 
-        if body.len() > MAX_BODY_SIZE {
+        if body.len() > max_body_size {
             let err_body = json_error(
                 "PAYLOAD_TOO_LARGE",
                 &format!(
                     "Request body exceeds maximum size of {} bytes",
-                    MAX_BODY_SIZE,
+                    max_body_size,
                 ),
             );
             let response = with_security_headers(

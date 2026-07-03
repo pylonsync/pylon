@@ -34,6 +34,18 @@ const ENV_VARS: &[EnvVarDef] = &[
         sensitive: false,
     },
     EnvVarDef {
+        name: "PYLON_HTTP_BODY_MAX_BYTES",
+        description: "Max HTTP request body size in bytes. Raise on control planes accepting CLI source uploads (base64 JSON is ~1.37x the tarball).",
+        default: Some("10485760"),
+        sensitive: false,
+    },
+    EnvVarDef {
+        name: "PYLON_IMAGE_FORMATS",
+        description: "Image optimizer output formats (comma-separated). AVIF negotiates only on explicit Accept.",
+        default: Some("avif,webp,jpeg"),
+        sensitive: false,
+    },
+    EnvVarDef {
         name: "PYLON_RATE_LIMIT_WINDOW",
         description: "Rate limit window in seconds (applies to both anon and authed limits)",
         default: Some("60"),

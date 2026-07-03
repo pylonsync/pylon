@@ -1462,6 +1462,20 @@ async function _doBuildInner(
       );
     }
 
+    // Manifest-driven features (fonts, route metadata) read
+    // pylon.manifest.json from cwd. It's generated output — commonly
+    // gitignored — so when it's absent the bundle still builds but
+    // silently loses those features. Say so, loudly, instead.
+    if (!fs.existsSync(path.join(cwd, "pylon.manifest.json"))) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[pylon ssr] pylon.manifest.json not found — building the client " +
+          "bundle WITHOUT manifest-derived features (declared fonts will " +
+          "be missing). Run `pylon codegen` first, or deploy through a " +
+          "path that derives the manifest.",
+      );
+    }
+
     // Tailwind v4 compile. Optional — only fires if the project has
     // `app/globals.css`. Adds the stylesheet to every route's css
     // array so SSR head injection emits `<link rel="stylesheet">`.

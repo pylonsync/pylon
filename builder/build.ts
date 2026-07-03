@@ -291,6 +291,34 @@ async function main() {
 	//     the partial build, report `clientAssets:false`, and the runtime falls
 	//     back to its own lazy per-machine build (today's behavior). A broken or
 	//     unconfigured pre-build never ships a broken app.
+	// 3b-bis. Ensure the app manifest exists BEFORE anything reads it.
+	// pylon.manifest.json is generated output and near-universally
+	// gitignored, so it's usually absent from the shipped source. The
+	// client pre-build below reads manifest-derived features from it —
+	// fonts especially — and readManifestFonts() degrades to [] when the
+	// file is missing, which shipped a customer site with its web fonts
+	// silently gone. Derive it here with the same codegen the runtime
+	// uses; if THAT fails, fail the build loudly rather than build a
+	// degraded bundle.
+	if (!existsSync(`${appDir}/pylon.manifest.json`)) {
+		console.log("[builder] pylon.manifest.json absent — deriving via pylon codegen");
+		try {
+			await sh(["pylon", "codegen"], appDir);
+		} catch (err) {
+			throw new Error(
+				`app manifest could not be derived (pylon codegen failed): ${err}. ` +
+					"The client bundle would silently lose manifest-driven features " +
+					"(fonts, SSR route metadata), so the build stops here instead.",
+			);
+		}
+		if (!existsSync(`${appDir}/pylon.manifest.json`)) {
+			throw new Error(
+				"pylon codegen completed but wrote no pylon.manifest.json — " +
+					"cannot build the client bundle without a manifest.",
+			);
+		}
+	}
+
 	let clientAssetsPublished = false;
 	const publicPrefix = process.env.PYLON_PUBLIC_PREFIX ?? "";
 	const assetsPutUrl = process.env.PYLON_ASSETS_PUT_URL ?? "";

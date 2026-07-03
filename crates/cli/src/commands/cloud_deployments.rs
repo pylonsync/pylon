@@ -189,24 +189,58 @@ fn run_logs(
     deployment_id: Option<&str>,
     json_mode: bool,
 ) -> ExitCode {
-    // Resolve the target: the given id, else the newest deployment.
+    // Resolve the target: the given id OR git sha (people paste the sha
+    // from `deployments list` — passing it straight through used to 400
+    // on the server's id validation), else the newest deployment.
+    #[derive(serde::Serialize)]
+    struct ListArgs<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+        limit: u32,
+    }
+    let list = |limit: u32| -> Result<Vec<Deployment>, String> {
+        post_json(
+            creds,
+            "/api/fn/listDeployments",
+            &ListArgs { project_id, limit },
+        )
+    };
     let id: String = match deployment_id {
-        Some(id) => id.to_string(),
-        None => {
-            #[derive(serde::Serialize)]
-            struct ListArgs<'a> {
-                #[serde(rename = "projectId")]
-                project_id: &'a str,
-                limit: u32,
+        Some(arg) => {
+            // Entity ids are 40 lowercase hex chars. Anything else — a
+            // short or full git sha, a sha prefix — resolves via the
+            // deployment list.
+            let looks_like_id = arg.len() == 40
+                && arg
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase());
+            if looks_like_id {
+                arg.to_string()
+            } else {
+                let deploys = match list(50) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        output::print_error(&e);
+                        return ExitCode::Error;
+                    }
+                };
+                match deploys
+                    .iter()
+                    .find(|d| d.sha.starts_with(arg) || d.id.starts_with(arg))
+                {
+                    Some(d) => d.id.clone(),
+                    None => {
+                        output::print_error(&format!(
+                            "no deployment matches \"{arg}\" (checked sha + id prefixes of the last 50)"
+                        ));
+                        eprintln!("  See: pylon deployments list");
+                        return ExitCode::Error;
+                    }
+                }
             }
-            let deploys: Vec<Deployment> = match post_json(
-                creds,
-                "/api/fn/listDeployments",
-                &ListArgs {
-                    project_id,
-                    limit: 1,
-                },
-            ) {
+        }
+        None => {
+            let deploys = match list(1) {
                 Ok(d) => d,
                 Err(e) => {
                     output::print_error(&e);
