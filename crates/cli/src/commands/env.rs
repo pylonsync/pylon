@@ -46,6 +46,18 @@ const ENV_VARS: &[EnvVarDef] = &[
         sensitive: false,
     },
     EnvVarDef {
+        name: "PYLON_SSR_INLINE_CSS",
+        description: "Inline the compiled stylesheet into SSR <head> instead of a render-blocking <link> (set 1/true). Sheets over PYLON_SSR_INLINE_CSS_MAX bytes keep the link.",
+        default: None,
+        sensitive: false,
+    },
+    EnvVarDef {
+        name: "PYLON_SSR_INLINE_CSS_MAX",
+        description: "Max stylesheet size in bytes to inline when PYLON_SSR_INLINE_CSS is on",
+        default: Some("32768"),
+        sensitive: false,
+    },
+    EnvVarDef {
         name: "PYLON_RATE_LIMIT_WINDOW",
         description: "Rate limit window in seconds (applies to both anon and authed limits)",
         default: Some("60"),

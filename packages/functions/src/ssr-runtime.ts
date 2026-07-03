@@ -1567,6 +1567,55 @@ export function buildDevHudChunk(devInfo: Record<string, unknown>): string {
  * would look broken. Returns "" if the manifest can't be loaded — the
  * boundary still renders (unstyled); CSS must never block the error path.
  */
+/**
+ * One `<head>` tag per route stylesheet: a `<link rel="stylesheet">` by
+ * default, or the file's contents inlined in a `<style>` when
+ * PYLON_SSR_INLINE_CSS is enabled and the compiled sheet is small
+ * enough (PYLON_SSR_INLINE_CSS_MAX bytes, default 32768). Inlining
+ * removes the render-blocking stylesheet round trip on cold
+ * connections — at 14KB of compiled Tailwind that's the whole sheet.
+ *
+ * Read from the local client-build outdir (present even in CDN mode —
+ * the CDN prefix changes where BROWSERS fetch, not where the build
+ * lives). Contents are cached per content-hashed filename. Falls back
+ * to the link on any miss: unreadable file, over threshold, or a
+ * sheet containing "</style" (would break out of the tag).
+ */
+const inlineCssCache = new Map<string, string | null>();
+export async function cssHeadTag(css: string, prefix: string): Promise<string> {
+  const link = `<link rel="stylesheet" href="${prefix}${css}">`;
+  const enabled = /^(1|true)$/i.test(process.env.PYLON_SSR_INLINE_CSS ?? "");
+  if (!enabled) return link;
+  let cached = inlineCssCache.get(css);
+  if (cached === undefined) {
+    cached = null;
+    try {
+      const { getManifest } = await import("./ssr-client-bundler");
+      const manifest: any = await getManifest();
+      const fs = await import("fs");
+      const path = await import("path");
+      const max = Number(process.env.PYLON_SSR_INLINE_CSS_MAX ?? "") || 32768;
+      const file = path.join(
+        process.cwd(),
+        manifest.outdir || ".pylon/client-build",
+        css,
+      );
+      const stat = fs.statSync(file);
+      if (stat.size <= max) {
+        const text = fs.readFileSync(file, "utf8");
+        if (!/<\/style/i.test(text)) cached = text;
+      }
+    } catch {
+      cached = null;
+    }
+    if (inlineCssCache.size > 64) inlineCssCache.clear();
+    inlineCssCache.set(css, cached);
+  }
+  return cached === null
+    ? link
+    : `<style data-pylon-css="${css}">${cached}</style>`;
+}
+
 async function collectBoundaryHeadBlob(): Promise<string> {
   try {
     const { getManifest } = await import("./ssr-client-bundler");
@@ -1580,7 +1629,7 @@ async function collectBoundaryHeadBlob(): Promise<string> {
       for (const css of (route.css || []) as string[]) {
         if (seen.has(css)) continue;
         seen.add(css);
-        blob += `<link rel="stylesheet" href="${prefix}${css}">`;
+        blob += await cssHeadTag(css, prefix);
       }
     }
     return blob;
@@ -1805,7 +1854,7 @@ async function renderBoundaryToClient(
     headBlob += await buildFontHeadBlob();
     const co = /^https?:\/\//i.test(publicPrefix) ? " crossorigin" : "";
     for (const css of manifestRoute.css) {
-      headBlob += `<link rel="stylesheet" href="${publicPrefix}${css}">`;
+      headBlob += await cssHeadTag(css, publicPrefix);
     }
     for (const chunk of manifestRoute.imports) {
       headBlob += `<link rel="modulepreload"${co} href="${publicPrefix}${chunk}">`;
@@ -2855,7 +2904,7 @@ export async function handleRenderRoute(
       headBlob += await buildFontHeadBlob();
       const co = /^https?:\/\//i.test(preloadPublicPrefix) ? " crossorigin" : "";
       for (const css of preloadManifestRoute.css) {
-        headBlob += `<link rel="stylesheet" href="${preloadPublicPrefix}${css}">`;
+        headBlob += await cssHeadTag(css, preloadPublicPrefix);
       }
       for (const chunk of preloadManifestRoute.imports) {
         headBlob += `<link rel="modulepreload"${co} href="${preloadPublicPrefix}${chunk}">`;
