@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/create-pylon",
-  "version": "0.3.311",
+  "version": "0.3.312",
   "description": "Scaffold a new Pylon app — realtime backend + web/mobile/expo frontends in one command. Run via `npm create @pylonsync/pylon@latest`.",
   "publishConfig": {
     "access": "public"
