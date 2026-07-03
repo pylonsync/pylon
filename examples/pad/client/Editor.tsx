@@ -95,8 +95,14 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
 
   const title = (doc as { title?: string } | null)?.title ?? "";
 
-  const cursors: PeerCursor[] = peers.map(
-    (p: { user_id: string; data: Record<string, unknown> }) => {
+  // Room membership is keyed by the AUTH user (the server derives it
+  // from the token), so your own presence — echoed back, or another
+  // window of the same guest — shows up in `peers`. Drawing it would
+  // paint a laggy ghost of your own caret chasing the real one, so
+  // filter self out; only genuinely-other visitors get cursors.
+  const cursors: PeerCursor[] = peers
+    .filter((p: { user_id: string }) => p.user_id !== userId)
+    .map((p: { user_id: string; data: Record<string, unknown> }) => {
       const data = p.data as {
         name?: string;
         color?: string;
@@ -108,8 +114,7 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
         color: data.color ?? fallback.color,
         caret: typeof data.caret === "number" ? data.caret : null,
       };
-    },
-  );
+    });
 
   return (
     <div className="flex h-screen flex-col">
