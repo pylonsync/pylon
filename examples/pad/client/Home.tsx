@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useRef, useState } from "react";
-import { db, callFn } from "@pylonsync/react";
+import { db, callFn, Link, useRouter } from "@pylonsync/react";
 import { FileText, Plus, Users } from "lucide-react";
 
 interface DocRow {
@@ -12,6 +12,7 @@ interface DocRow {
 }
 
 export function Home({ userId }: { userId: string }) {
+  const router = useRouter();
   const { data: docs, loading } = db.useQuery("Doc", {
     orderBy: { createdAt: "desc" },
     limit: 100,
@@ -42,7 +43,9 @@ export function Home({ userId }: { userId: string }) {
         createdAt: now,
         updatedAt: now,
       });
-      window.location.assign(`/d/${id}`);
+      // Client-side navigation: the sync engine, guest session, and
+      // WebSocket stay warm — no full-page reload between list and editor.
+      router.push(`/d/${id}`);
     } catch {
       setCreating(false);
     }
@@ -78,7 +81,7 @@ export function Home({ userId }: { userId: string }) {
           <p className="text-sm text-zinc-400">Loading…</p>
         ) : null}
         {rows.map((d) => (
-          <a
+          <Link
             key={d.id}
             href={`/d/${d.id}`}
             className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 transition-colors hover:border-zinc-300 hover:bg-zinc-50"
@@ -90,7 +93,7 @@ export function Home({ userId }: { userId: string }) {
             <span className="ml-auto shrink-0 text-xs text-zinc-400">
               {new Date(d.updatedAt).toLocaleDateString()}
             </span>
-          </a>
+          </Link>
         ))}
       </div>
 

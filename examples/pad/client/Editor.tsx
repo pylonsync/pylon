@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { db, useRoom } from "@pylonsync/react";
+import { db, useRoom, Link } from "@pylonsync/react";
 import { useCollabTextarea } from "@pylonsync/loro";
 import { ArrowLeft, Check, Link2 } from "lucide-react";
 import { identityFor, tabIdentity } from "./bootstrap";
@@ -89,9 +89,9 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
     return (
       <div className="mx-auto max-w-2xl px-6 py-16">
         <p className="text-sm text-zinc-500">Document not found.</p>
-        <a href="/" className="mt-2 inline-block text-sm underline">
+        <Link href="/" className="mt-2 inline-block text-sm underline">
           Back to documents
-        </a>
+        </Link>
       </div>
     );
   }
@@ -122,13 +122,13 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
   return (
     <div className="flex h-dvh flex-col">
       <header className="flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200 bg-white px-3 sm:gap-3 sm:px-4">
-        <a
+        <Link
           href="/"
           className="rounded p-1.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
           aria-label="Back to documents"
         >
           <ArrowLeft size={16} />
-        </a>
+        </Link>
         <input
           defaultValue={title}
           key={title || docId}
