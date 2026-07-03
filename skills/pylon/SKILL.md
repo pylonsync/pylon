@@ -640,11 +640,44 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 | A scheduled job | `ctx.scheduler.runAfter(delayMs, "fnName", args)` (or `runAt(unixMs, ...)` — Unix ms, not an ISO string) inside a mutation/action |
 | Deploy | `pylon deploy --target fly` then `fly deploy . --config fly.toml` |
 
+### Agent tooling — verify, policy dry-runs, MCP (pylon ≥ 0.3.313)
+
+Three commands exist specifically so you can check your own work:
+
+```bash
+# Prove the app actually serves: boots it on a free port (or targets a
+# running one with --url), checks /health, GETs every static route, and
+# fetches every referenced JS/CSS asset (catches "renders but ships no
+# hydration/styles"). Exit 0 only when nothing failed. --json for machine output.
+pylon verify
+pylon verify --url https://myapp.pyln.dev
+
+# Deploy and only report success when THIS build is live and passes the
+# same checks (waits for the flip; fails on failed/canceled builds):
+pylon deploy --verify
+
+# Dry-run a policy expression with the PRODUCTION evaluator before you
+# ship it — allow/deny + the exact comparison that failed. Exit 0=allow, 1=deny.
+pylon policy test 'auth.userId == data.ownerId' --auth userId=u1 --row '{"ownerId":"u2"}'
+```
+
+And a running app can be attached directly to your tool loop over MCP:
+
+```bash
+claude mcp add pylon -- pylon mcp --url http://localhost:4321
+```
+
+which exposes `pylon_schema` (entities/policies/routes/functions), `pylon_list` / `pylon_get` (entity reads — row policies apply, no extra authority), `pylon_call` (functions), `pylon_policy_test`, and `pylon_verify`.
+
+Dev-mode failures are disclosed where you'll see them: unhandled function errors return `Internal handler error (dev): <message> [at <file:line>]` in the HTTP response (prod stays masked), and a failed Tailwind compile paints a red banner on every page instead of silently serving unstyled.
+
 ## Before you finish a task
 
 - Run `bun run app.ts` in the project root — if it errors, the manifest won't build and `pylon dev` will fail silently on function load.
+- Run `pylon verify` — it boots the app and fails on any route/asset that doesn't serve. This is the cheap end-to-end check; don't skip it.
 - If you added a function, verify it's discoverable by opening the project and checking that `pylon dev` logs list your new function name in the `Loaded N functions` output.
 - If you changed an entity, schema auto-migration runs — but destructive changes (dropping a required column) will refuse to apply without bumping `manifest.version`.
+- If you wrote or changed a policy, dry-run it: `pylon policy test '<expr>' --auth ... --row ...` for both the allow case AND the deny case.
 
 ## Beyond the React quickstart — what's available
 
