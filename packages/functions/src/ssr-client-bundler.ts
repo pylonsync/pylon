@@ -1330,6 +1330,52 @@ async function _doBuildInner(
       }
     }
 
+    // loro-crdt's web build locates its WASM sibling at RUNTIME via
+    // `new URL("loro_wasm_bg.wasm", import.meta.url)` — the file never
+    // appears in the static import graph, so Bun doesn't emit it and every
+    // CRDT-using page 404s on /_pylon/build/loro_wasm_bg.wasm during
+    // hydration. When any built output references the wasm by name, copy
+    // the binary next to the entries AND into chunks/ so the runtime URL
+    // resolves from either an entry or a split chunk.
+    try {
+      const referencesLoroWasm = result.outputs.some((o) => {
+        if (!o.path.endsWith(".js")) return false;
+        try {
+          return fs.readFileSync(o.path, "utf8").includes("loro_wasm_bg.wasm");
+        } catch {
+          return false;
+        }
+      });
+      if (referencesLoroWasm) {
+        const loroPkg = (Bun as any).resolveSync(
+          "loro-crdt/package.json",
+          cwd,
+        ) as string;
+        // The wasm must come from the SAME build variant whose JS glue got
+        // bundled — the wasm-bindgen import namespaces differ between
+        // variants (mixing them fails instantiation with `Import #0 "wbg"`).
+        // `target: "browser"` resolves the package's "browser" condition, so
+        // prefer browser/; web/ is the fallback for older package layouts.
+        const loroDir = path.dirname(loroPkg);
+        const wasmSrc = ["browser", "web"]
+          .map((v) => path.join(loroDir, v, "loro_wasm_bg.wasm"))
+          .find((p) => fs.existsSync(p));
+        if (wasmSrc) {
+          fs.copyFileSync(wasmSrc, path.join(outdir, "loro_wasm_bg.wasm"));
+          const chunksDir = path.join(outdir, "chunks");
+          if (fs.existsSync(chunksDir)) {
+            fs.copyFileSync(
+              wasmSrc,
+              path.join(chunksDir, "loro_wasm_bg.wasm"),
+            );
+          }
+        }
+      }
+    } catch {
+      // Best-effort: failing to copy just reproduces the 404 this guards
+      // against; the build itself is fine.
+    }
+
     // Scan a built JS file for static `import` literals pointing
     // at `./chunks/<file>.js` and return them resolved to outdir-
     // relative paths. Bun's minified output uses simple double
