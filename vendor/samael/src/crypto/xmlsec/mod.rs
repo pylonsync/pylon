@@ -892,7 +892,7 @@ fn node_attribute_names(node: &libxml::tree::Node) -> Vec<AttributeName> {
 
 fn attribute_name_from_ptr(attr_ptr: *mut libxml::bindings::xmlAttr) -> AttributeName {
     unsafe {
-        let local_name = CStr::from_ptr((*attr_ptr).name as *const i8)
+        let local_name = CStr::from_ptr((*attr_ptr).name as *const std::os::raw::c_char)
             .to_string_lossy()
             .into_owned();
         let namespace = if (*attr_ptr).ns.is_null() {
@@ -903,7 +903,7 @@ fn attribute_name_from_ptr(attr_ptr: *mut libxml::bindings::xmlAttr) -> Attribut
                 None
             } else {
                 Some(
-                    CStr::from_ptr(href as *const i8)
+                    CStr::from_ptr(href as *const std::os::raw::c_char)
                         .to_string_lossy()
                         .into_owned(),
                 )
@@ -958,7 +958,7 @@ fn get_attribute_value(
             return Some(String::new());
         }
 
-        let value = CStr::from_ptr(value_ptr as *const i8)
+        let value = CStr::from_ptr(value_ptr as *const std::os::raw::c_char)
             .to_string_lossy()
             .into_owned();
         libc::free(value_ptr as *mut libc::c_void);
