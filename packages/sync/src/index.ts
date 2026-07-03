@@ -418,6 +418,19 @@ export class SyncEngine {
   private binaryHandlers: Set<(bytes: Uint8Array) => void> = new Set();
 
   /**
+   * Latest server CRDT SNAPSHOT frame per `entity|rowId`, kept so a
+   * follower tab that registers interest in an ALREADY-subscribed row
+   * gets state immediately. The server sends its catch-up snapshot only
+   * when a fresh `crdt-subscribe` goes over the WS — when the leader
+   * (or another follower) already holds the subscription, no wire
+   * traffic happens and, pre-cache, the new tab's LoroDoc stayed empty
+   * until the next live edit. Server broadcasts are always FULL merged
+   * snapshots (CRDT_FRAME_SNAPSHOT), so one frame per row is complete
+   * state. Bounded FIFO — see LAST_CRDT_FRAMES_MAX.
+   */
+  private lastCrdtFrames: Map<string, Uint8Array> = new Map();
+
+  /**
    * Server-side ephemeral subscriptions (CRDT row subs, reactive query
    * subs, future kinds). Owns the WS replay bookkeeping — each kind
    * registers the message that re-creates its server-side state, and
@@ -534,6 +547,14 @@ export class SyncEngine {
     this.subscriptions = new SubscriptionCoordinator(this.serverSubs, {
       isLeader: () => this.isMultiTabLeader,
       broadcastToTabs: (payload) => this.broadcastToTabs(payload),
+      // Follower registered interest in a row whose WS subscription is
+      // already alive — no server catch-up will come, so replay the
+      // cached snapshot over the tab channel. Loro imports are
+      // idempotent, so tabs that already have the state are unaffected.
+      replayCrdtFrame: (entity, rowId) => {
+        const cached = this.lastCrdtFrames.get(`${entity}|${rowId}`);
+        if (cached) this.broadcastToTabs({ type: "binary", bytes: cached });
+      },
     });
     this.rooms = new RoomSubscriptions((msg) => {
       // Leader: send over the WS. Followers don't open a transport;
@@ -751,16 +772,38 @@ export class SyncEngine {
 
     if (!this.isMultiTabLeader) {
       // Follower path: rely on the leader's broadcasts for session +
-      // applied changes. Nothing else to do here — the broker is
-      // wired to forward inbound messages into the engine. The
-      // sessionPromise we kicked off above resolves into the void;
-      // the leader's broadcast will deliver the authoritative view.
-      // Swallow any pending error so it doesn't surface as an
-      // unhandled rejection.
+      // applied changes. The broker is wired to forward inbound
+      // messages into the engine. The sessionPromise we kicked off
+      // above resolves into the void; the leader's broadcast will
+      // deliver the authoritative view. Swallow any pending error so
+      // it doesn't surface as an unhandled rejection.
       void sessionPromise.then(
         () => {},
         () => {},
       );
+      // Replay every subscription made BEFORE the election settled.
+      // Those calls took the follower branch and broadcast to a
+      // not-yet-constructed orchestrator — a silent no-op — so the
+      // leader never learned this tab wants anything. The leader-side
+      // mirror of this is seedServerSubsFromLocalInterest below; the
+      // follower side was missing, which left a second tab opening a
+      // CRDT doc the leader already held rendering EMPTY forever (no
+      // crdt-subscribe ever reached the leader, so neither the server
+      // catch-up nor the cached-snapshot replay fired). Rooms,
+      // observed entities, and hydrated offline mutations strand the
+      // same way — replay the full bundle, mirroring what
+      // request-sub-replay does after a leader flip.
+      this.subscriptions.replayForwardedSubs();
+      for (const roomId of this.rooms.roomIds()) {
+        this.broadcastToTabs({ type: "room-sub-register", room: roomId });
+      }
+      for (const entity of this.observedEntities) {
+        this.broadcastToTabs({ type: "entity-observe", entity });
+      }
+      const pendingOps = this.mutations.pending();
+      if (pendingOps.length > 0) {
+        this.broadcastToTabs({ type: "mutations", ops: pendingOps });
+      }
       return;
     }
 
@@ -1168,6 +1211,28 @@ export class SyncEngine {
     if (this.transport) {
       this.transport.stop();
       this.transport = null;
+    }
+    // Re-forward everything this tab wanted while it still believed it
+    // was the leader. Before the election settles every tab defaults to
+    // leader, so components that mounted in that window registered
+    // their subscriptions against OUR transport — which we just
+    // stopped. Without the re-forward the real leader never learns
+    // about them: a second tab opening a CRDT doc the leader already
+    // holds rendered EMPTY forever (no crdt-subscribe reached the
+    // leader, so neither the server catch-up nor the leader's cached-
+    // snapshot replay ever fired). Same stranding applied to rooms
+    // (presence), observed entities, and pending mutations — mirror
+    // the request-sub-replay bundle.
+    this.subscriptions.replayForwardedSubs();
+    for (const roomId of this.rooms.roomIds()) {
+      this.broadcastToTabs({ type: "room-sub-register", room: roomId });
+    }
+    for (const entity of this.observedEntities) {
+      this.broadcastToTabs({ type: "entity-observe", entity });
+    }
+    const pending = this.mutations.pending();
+    if (pending.length > 0) {
+      this.broadcastToTabs({ type: "mutations", ops: pending });
     }
   }
 
@@ -2316,6 +2381,7 @@ export class SyncEngine {
       }
       this.store.notify();
     }
+    this.evictCrdtFrame(entity, rowId);
     for (const listener of this.rowEvictionListeners) {
       listener(entity, rowId);
     }
@@ -3317,6 +3383,19 @@ export class SyncEngine {
    *  follower tab forwarded a CRDT sub, mirror over the multi-tab
    *  channel so followers see Loro updates too. */
   private dispatchBinaryFrame(bytes: Uint8Array): void {
+    // Remember the latest snapshot per row for follower catch-up (see
+    // lastCrdtFrames). Header-only peek; the payload stays opaque.
+    const key = crdtFrameKey(bytes);
+    if (key !== null) {
+      if (!this.lastCrdtFrames.has(key) &&
+          this.lastCrdtFrames.size >= LAST_CRDT_FRAMES_MAX) {
+        const oldest = this.lastCrdtFrames.keys().next().value;
+        if (oldest !== undefined) this.lastCrdtFrames.delete(oldest);
+      }
+      // Re-insert to refresh FIFO position.
+      this.lastCrdtFrames.delete(key);
+      this.lastCrdtFrames.set(key, bytes);
+    }
     for (const handler of this.binaryHandlers) {
       try {
         handler(bytes);
@@ -3338,6 +3417,12 @@ export class SyncEngine {
     if (this.subscriptions.hasCrdtForwarders()) {
       this.broadcastToTabs({ type: "binary", bytes });
     }
+  }
+
+  /** Drop the cached snapshot for a revoked row so it can't be
+   *  replayed to a late-joining tab after policy said no. */
+  private evictCrdtFrame(entity: string, rowId: string): void {
+    this.lastCrdtFrames.delete(`${entity}|${rowId}`);
   }
 
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -3448,6 +3533,39 @@ export async function getServerData(
  * varies by mutation path on the server). Recursive on objects only;
  * arrays and primitives use their natural shape.
  */
+/** Cap on cached per-row CRDT snapshots (see lastCrdtFrames). 64 rows of
+ *  collaborative state is far beyond what one browser session edits at
+ *  once; FIFO eviction keeps a long-lived leader tab bounded. */
+export const LAST_CRDT_FRAMES_MAX = 64;
+
+/**
+ * Header-only peek at a binary CRDT frame: returns `"entity|rowId"` for
+ * a SNAPSHOT frame, null for anything else (updates, foreign binary,
+ * truncated bytes). Mirrors the layout of
+ * `crates/router::encode_crdt_frame` / `@pylonsync/loro`'s wire.ts:
+ *
+ *   [type: u8] [entity_len: u16 BE] [entity utf8]
+ *   [row_id_len: u16 BE] [row_id utf8] [payload]
+ *
+ * The engine still treats the PAYLOAD as opaque — this reads only the
+ * routing header so the follower-catch-up cache can be keyed per row.
+ */
+export function crdtFrameKey(bytes: Uint8Array): string | null {
+  const SNAPSHOT_TYPE = 0x10;
+  if (bytes.length < 5 || bytes[0] !== SNAPSHOT_TYPE) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const entityLen = view.getUint16(1, false);
+  const entityEnd = 3 + entityLen;
+  if (entityEnd + 2 > bytes.length) return null;
+  const rowIdLen = view.getUint16(entityEnd, false);
+  const rowIdEnd = entityEnd + 2 + rowIdLen;
+  if (rowIdEnd > bytes.length) return null;
+  const decoder = new TextDecoder();
+  const entity = decoder.decode(bytes.subarray(3, entityEnd));
+  const rowId = decoder.decode(bytes.subarray(entityEnd + 2, rowIdEnd));
+  return `${entity}|${rowId}`;
+}
+
 function rowsDiffer(a: Row, b: Row): boolean {
   return stableStringify(a) !== stableStringify(b);
 }

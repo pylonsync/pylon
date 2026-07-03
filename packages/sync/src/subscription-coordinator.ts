@@ -53,6 +53,13 @@ const OWN_TAB = "__self__";
 export interface SubscriptionCoordinatorContext {
   isLeader(): boolean;
   broadcastToTabs(payload: unknown): void;
+  /** Leader-side replay of the cached CRDT snapshot for a row (see
+   *  SyncEngine.lastCrdtFrames). Called when a follower registers
+   *  interest in a row whose WS subscription is ALREADY alive — the
+   *  server only ships its catch-up snapshot on a fresh
+   *  `crdt-subscribe`, so without the replay the new tab's doc stays
+   *  empty until the next live edit. */
+  replayCrdtFrame?(entity: string, rowId: string): void;
 }
 
 interface ReactiveSpec {
@@ -282,6 +289,12 @@ export class SubscriptionCoordinator {
           entity,
           rowId,
         });
+      } else {
+        // Subscription already alive → the server won't send a fresh
+        // catch-up snapshot. Replay the leader's cached one so the
+        // follower converges immediately instead of staying empty
+        // until the next live edit.
+        this.ctx.replayCrdtFrame?.(entity, rowId);
       }
       return;
     }
