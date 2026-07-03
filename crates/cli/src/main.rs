@@ -103,6 +103,7 @@ fn run() -> ExitCode {
         Some("init") => commands::init::run(&args, json_mode),
         Some("link") => commands::link::run(&args, json_mode),
         Some("lint") => commands::lint::run(&args, json_mode),
+        Some("mcp") => commands::mcp::run(&args, json_mode),
         Some("policy") => commands::policy_test::run(&args, json_mode),
         Some("verify") => commands::verify::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
@@ -174,7 +175,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 37] = [
+const TOP_LEVEL_COMMANDS: [&str; 38] = [
     "backup",
     "build",
     "cache",
@@ -193,6 +194,7 @@ const TOP_LEVEL_COMMANDS: [&str; 37] = [
     "init",
     "link",
     "lint",
+    "mcp",
     "policy",
     "verify",
     "login",
@@ -385,6 +387,7 @@ fn print_usage() {
     println!("  env                       Show environment variable reference");
     println!(
         "  explain <code>            Explain an error code
+  mcp [--url <base>]        Serve this app to agents over MCP (stdio)
   policy test <expr>        Dry-run a policy expression (--auth k=v --row json)
   verify [--url <base>]     Boot (or target) the app and verify routes + assets serve"
     );

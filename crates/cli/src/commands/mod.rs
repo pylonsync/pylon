@@ -25,6 +25,7 @@ pub mod init;
 pub mod link;
 pub mod lint;
 pub mod login;
+pub mod mcp;
 pub mod migrate;
 pub mod plugins;
 pub mod policy_test;
