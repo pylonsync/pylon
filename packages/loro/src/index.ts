@@ -20,6 +20,10 @@
 import { useSyncExternalStore, useEffect, useRef } from "react";
 import type { FormEvent, RefObject } from "react";
 import type { LoroDoc, LoroText, LoroMap } from "loro-crdt";
+import {
+  LoroText as LoroTextCtor,
+  LoroMap as LoroMapCtor,
+} from "loro-crdt";
 import { db, getBaseUrl, getReactStorage, storageKey } from "@pylonsync/react";
 import { pylonFetch, type SyncEngine } from "@pylonsync/sync";
 import { globalRegistry, LoroRegistry } from "./registry";
@@ -128,19 +132,68 @@ export function useLoroDoc(entity: string, id: string): LoroDoc {
 }
 
 /**
- * Convenience: get a `LoroText` container at the given top-level key,
- * creating it if absent. Wraps `doc.getText(key)` so callers don't
- * have to import loro-crdt directly for the common case.
+ * The server's projection contract (crates/crdt): each entity row's doc
+ * holds ONE root `LoroMap` named "row"; its keys are the entity's field
+ * names, and a `crdt: "text"` field is a `LoroText` CHILD of that map.
+ * The server seeds those containers at insert and projects them back to
+ * SQL columns after every merge — a text container anywhere else in the
+ * doc is invisible to it. Every field accessor here must resolve through
+ * this map or client edits silently diverge from the server's view.
  */
-export function getLoroText(doc: LoroDoc, key: string): LoroText {
-  return doc.getText(key);
+const ROOT_MAP = "row";
+
+function containerOfKind<C>(value: unknown, kind: string): C | null {
+  if (
+    value &&
+    typeof value === "object" &&
+    typeof (value as { kind?: unknown }).kind === "function" &&
+    (value as { kind: () => string }).kind() === kind
+  ) {
+    return value as C;
+  }
+  return null;
 }
 
 /**
- * Convenience: get a `LoroMap` container at the given top-level key.
+ * Read-only resolve of the field's `LoroText` under the `"row"` root
+ * map. Returns null when the container doesn't exist yet — crucially it
+ * NEVER creates one: a read-path create races the server's catch-up
+ * snapshot, and when the server's seeded container wins the map-key LWW
+ * the eagerly-created one is orphaned — every edit made through a
+ * captured handle then mutates a container nothing projects or renders.
+ */
+export function resolveLoroText(doc: LoroDoc, key: string): LoroText | null {
+  return containerOfKind<LoroText>(doc.getMap(ROOT_MAP).get(key), "Text");
+}
+
+/**
+ * Get the `LoroText` for an entity FIELD, resolving through the server's
+ * `"row"` root map. The server seeds the container at insert, so the
+ * common case finds it (carrying the row's initial value); creation only
+ * happens on the WRITE path for rows that predate CRDT mode. Callers
+ * must re-resolve per operation rather than capture the handle — after a
+ * catch-up snapshot merges, the live container can be a different
+ * instance than the one an earlier render saw. Identified by `kind()`
+ * rather than instanceof so a duplicated loro-crdt module in the bundle
+ * can't break the check.
+ */
+export function getLoroText(doc: LoroDoc, key: string): LoroText {
+  const existing = resolveLoroText(doc, key);
+  if (existing) return existing;
+  return doc
+    .getMap(ROOT_MAP)
+    .setContainer(key, new LoroTextCtor()) as LoroText;
+}
+
+/**
+ * Get the `LoroMap` for an entity FIELD (a map child of the `"row"`
+ * root). For the root map itself use `doc.getMap("row")` directly.
  */
 export function getLoroMap(doc: LoroDoc, key: string): LoroMap {
-  return doc.getMap(key);
+  const row = doc.getMap(ROOT_MAP);
+  const existing = containerOfKind<LoroMap>(row.get(key), "Map");
+  if (existing) return existing;
+  return row.setContainer(key, new LoroMapCtor()) as LoroMap;
 }
 
 /**
@@ -172,9 +225,11 @@ export function useCollabText(
   field: string,
 ): [string, (next: string) => void] {
   const doc = useLoroDoc(entity, id);
-  const text = doc.getText(field);
-  const value = text.toString();
+  // Re-resolved every render/operation, never captured: the live
+  // container can change identity when the catch-up snapshot merges.
+  const value = resolveLoroText(doc, field)?.toString() ?? "";
   const setValue = (next: string): void => {
+    const text = getLoroText(doc, field);
     // Capture the version vector BEFORE the mutation so we can ship
     // exactly the new ops to the server (incremental delta, not the
     // whole snapshot). Loro's `export({mode: "update", from: vv})`
@@ -243,8 +298,10 @@ export function useCollabTextarea<
   onInput: (e: FormEvent<T>) => void;
 } {
   const doc = useLoroDoc(entity, id);
-  const text = doc.getText(field);
-  const value = text.toString(); // re-renders on every applied frame
+  // Re-resolved every render, never captured: the live container can
+  // change identity when the catch-up snapshot merges (see
+  // resolveLoroText), and a stale handle would edit an orphan.
+  const value = resolveLoroText(doc, field)?.toString() ?? ""; // re-renders on every applied frame
   const ref = useRef<T | null>(null);
   // The value we last reconciled into the DOM element. Lets us tell our own
   // edits (element already correct — skip) from remote frames (patch the DOM).
@@ -279,7 +336,10 @@ export function useCollabTextarea<
     const prev = domValue.current;
     if (next === prev) return;
     const { index, deleteCount, insert } = spliceDiff(prev, next);
-    // Capture the version vector BEFORE mutating so we ship exactly the new ops.
+    // Resolve the container per keystroke (see resolveLoroText) and
+    // capture the version vector BEFORE mutating so we ship exactly the
+    // new ops.
+    const text = getLoroText(doc, field);
     const beforeVv = doc.oplogVersion();
     if (deleteCount > 0) text.delete(index, deleteCount);
     if (insert.length > 0) text.insert(index, insert);
