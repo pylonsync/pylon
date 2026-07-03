@@ -56,6 +56,9 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
   const [, setScrollTick] = useState(0);
 
   const [copied, setCopied] = useState(false);
+  // Phones get one pane at a time (the split needs md+ width); this
+  // picks which. Desktop always shows both — the toggle is md:hidden.
+  const [mobileView, setMobileView] = useState<"write" | "preview">("write");
   useEffect(() => {
     if (!copied) return;
     const t = setTimeout(() => setCopied(false), 1500);
@@ -117,8 +120,8 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
     });
 
   return (
-    <div className="flex h-screen flex-col">
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-zinc-200 bg-white px-4">
+    <div className="flex h-dvh flex-col">
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-zinc-200 bg-white px-3 sm:gap-3 sm:px-4">
         <a
           href="/"
           className="rounded p-1.5 text-zinc-400 transition-colors hover:bg-zinc-100 hover:text-zinc-700"
@@ -134,17 +137,17 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
             const next = e.target.value.trim();
             if (next && next !== title) void renameDoc(next);
           }}
-          className="w-64 rounded border border-transparent bg-transparent px-2 py-1 text-sm font-semibold outline-none transition-colors focus:border-zinc-300 focus:bg-white"
+          className="w-0 min-w-0 flex-1 rounded border border-transparent bg-transparent px-2 py-1 text-sm font-semibold outline-none transition-colors focus:border-zinc-300 focus:bg-white sm:w-64 sm:flex-none"
         />
 
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
           <div className="flex items-center -space-x-1.5">
             <Avatar name={me.name} color={me.color} me />
             {cursors.map((c, i) => (
               <Avatar key={`${c.name}-${i}`} name={c.name} color={c.color} />
             ))}
           </div>
-          <span className="text-xs text-zinc-400">
+          <span className="hidden text-xs text-zinc-400 md:inline">
             {cursors.length === 0
               ? "just you — open this URL in a second window"
               : `${cursors.length + 1} editing`}
@@ -160,7 +163,11 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
       </header>
 
       <main className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-2">
-        <div className="relative h-full min-h-0 border-r border-zinc-200">
+        <div
+          className={`relative h-full min-h-0 border-r border-zinc-200 ${
+            mobileView === "write" ? "" : "hidden"
+          } md:block`}
+        >
           <textarea
             ref={ref}
             defaultValue={value}
@@ -174,7 +181,7 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
             onScroll={() => setScrollTick((t) => t + 1)}
             spellCheck={false}
             placeholder="Write markdown…"
-            className="h-full w-full resize-none bg-white p-6 font-mono text-[13.5px] leading-relaxed outline-none"
+            className="h-full w-full resize-none bg-white p-4 font-mono text-base leading-relaxed outline-none md:p-6 md:text-[13.5px]"
           />
           <CursorOverlay
             textareaRef={ref as React.RefObject<HTMLTextAreaElement | null>}
@@ -182,10 +189,33 @@ export function Editor({ docId, userId }: { docId: string; userId: string }) {
             cursors={cursors}
           />
         </div>
-        <div className="hidden h-full overflow-y-auto bg-zinc-50 p-6 md:block">
+        <div
+          className={`h-full overflow-y-auto bg-zinc-50 p-4 md:p-6 ${
+            mobileView === "preview" ? "" : "hidden"
+          } md:block`}
+        >
           <Markdown source={value} />
         </div>
       </main>
+
+      {/* Mobile-only pane switcher, floating clear of the keyboard. */}
+      <div className="pointer-events-none fixed inset-x-0 bottom-4 flex justify-center md:hidden">
+        <div className="pointer-events-auto flex overflow-hidden rounded-full border border-zinc-300 bg-white shadow-lg">
+          {(["write", "preview"] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setMobileView(v)}
+              className={`px-4 py-2 text-xs font-medium capitalize transition-colors ${
+                mobileView === v
+                  ? "bg-zinc-900 text-white"
+                  : "text-zinc-600 hover:bg-zinc-50"
+              }`}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
