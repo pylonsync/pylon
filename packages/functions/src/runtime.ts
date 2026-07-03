@@ -32,6 +32,7 @@ import type {
   AuthInfo,
 } from "./types";
 import { makeRequireMember } from "./member";
+import { isDevMode } from "./ssr-runtime";
 import { validateArgs } from "./validators";
 import { readdirSync } from "fs";
 import { join, basename } from "path";
@@ -989,19 +990,41 @@ async function handleCall(msg: CallMessage): Promise<void> {
     } else {
       // No explicit code — assume it's an unexpected Error/thrown value.
       // Log the real error to stderr (server operator visible) and return
-      // a safe placeholder to the client.
+      // a safe placeholder to the client. In DEV the real message (and
+      // top stack frame) rides along: the developer debugging a 500 IS
+      // the operator, and hiding the reason from the HTTP response just
+      // sends them (or their agent) digging through server logs for
+      // something we already know. Production responses stay masked.
       console.error(
         `[functions] unhandled error in ${msg.fn_name} (${msg.call_id}):`,
         err,
       );
+      const devDetail =
+        isDevMode() && typeof err?.message === "string" && err.message.length > 0
+          ? ` (dev): ${err.message}${firstStackFrame(err)}`
+          : "";
       send({
         type: "error",
         call_id: msg.call_id,
         code: "HANDLER_ERROR",
-        message: "Internal handler error",
+        message: `Internal handler error${devDetail}`,
       });
     }
   }
+}
+
+/**
+ * The first user-code stack frame of an error, for dev-mode error
+ * detail — one frame locates the throw without shipping a whole trace.
+ */
+function firstStackFrame(err: unknown): string {
+  const stack = (err as { stack?: string })?.stack;
+  if (typeof stack !== "string") return "";
+  const frame = stack
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.startsWith("at "));
+  return frame ? ` [${frame}]` : "";
 }
 
 // ---------------------------------------------------------------------------

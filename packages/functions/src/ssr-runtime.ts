@@ -1220,6 +1220,20 @@ function pylonDevHud() {
   // Marker the sync engine checks before publishing its dev status probe.
   g.__PYLON_DEV__ = info;
 
+  // Build failure banner: when the build degraded the page (e.g. the
+  // Tailwind compile failed and the page is serving unstyled), paint an
+  // unmissable fixed banner. This is the loud path for failures that
+  // would otherwise masquerade as app bugs.
+  if (info.buildWarning) {
+    const b = d.createElement("div");
+    b.textContent = "⚠ " + String(info.buildWarning);
+    b.style.cssText =
+      "position:fixed;top:0;left:0;right:0;z-index:2147483647;" +
+      "background:#dc2626;color:#fff;padding:8px 14px;" +
+      "font:13px/1.4 ui-monospace,monospace;white-space:pre-wrap;";
+    d.body.appendChild(b);
+  }
+
   // Client errors.
   const errs: string[] = [];
   const onErr = (m: any) => {
@@ -2972,8 +2986,18 @@ export async function handleRenderRoute(
     // agent running `pylon dev` sees the verdict without any extra call.
     if (devVerdict) {
       const renderMs = Math.round((performance.now() - renderStart) * 10) / 10;
+      // Build-level failures that degraded this page (currently: the
+      // Tailwind compile). Dev-only and unmissable — the HUD paints a
+      // banner, because an unstyled page never says "go read the log".
+      let buildWarning: string | undefined;
+      try {
+        const { getManifest } = await import("./ssr-client-bundler");
+        const m: any = await getManifest();
+        if (m?.css_error) buildWarning = `Tailwind compile failed — serving without styles: ${m.css_error}`;
+      } catch {}
       sendChunk(
         buildDevHudChunk({
+          buildWarning,
           route: msg.url,
           component: msg.component,
           renderMode,

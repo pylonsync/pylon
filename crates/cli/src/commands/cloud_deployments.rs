@@ -250,6 +250,13 @@ fn run_logs(
         Ok(o) => o,
         Err(e) => {
             output::print_error(&e);
+            // The most common way to land here is asking for the log while
+            // the build is still running (it attaches at the terminal
+            // transition). Say so — a bare server error reads as a bug.
+            eprintln!(
+                "  If the deployment is still building, the log attaches when it \
+                 finishes — check status with: pylon deployments list"
+            );
             return ExitCode::Error;
         }
     };

@@ -935,6 +935,11 @@ export interface PylonBundleManifest {
    *  independent); rendered into every SSR `<head>` against `public_prefix`.
    *  Absent when the app declares no `font({...})`. */
   fonts?: ManifestFonts;
+  /** Set when the Tailwind compile failed for this build: the pages are
+   *  serving WITHOUT styles. Dev surfaces it as an on-page banner (see
+   *  pylonDevHud) — a silent unstyled page reads as a CSS bug, not a
+   *  build failure, and costs real debugging time. */
+  css_error?: string;
 }
 
 /** Result of an in-process build — same shape the protocol returns. */
@@ -1470,10 +1475,20 @@ async function _doBuildInner(
         }
       }
     } catch (twErr: any) {
-      // Tailwind failure shouldn't kill the SSR build — log a loud
-      // warning + ship the bundle without styles so devs can iterate.
+      // Tailwind failure shouldn't kill the SSR build — ship the bundle
+      // without styles so devs can iterate. But NOT silently: the error
+      // rides the bundle manifest so dev renders banner it on-page.
+      // (The log line alone proved invisible in practice — an unstyled
+      // page doesn't say "go read the bundler log".)
+      // Tailwind's CLI output arrives ANSI-colored; strip the escapes —
+      // this string renders in a browser banner, not a terminal.
+      const cssMsg = String(twErr?.message ?? twErr).replace(
+        /\u001b\[[0-9;]*m/g,
+        "",
+      );
+      manifest.css_error = cssMsg;
       // eslint-disable-next-line no-console
-      console.warn(`[pylon ssr] tailwind compile failed: ${twErr?.message ?? twErr}`);
+      console.warn(`[pylon ssr] tailwind compile failed: ${cssMsg}`);
     }
 
     // Self-hosted fonts (next/font parity). Reads `fonts` from the app's
