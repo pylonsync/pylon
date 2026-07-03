@@ -385,6 +385,10 @@ export function finalizeHeaders(
   // TRUSTED runtime headers (e.g. the #277 `x-pylon-cacheable` proof). The ONLY
   // legitimate source of `x-pylon-*`; merged last and never stripped.
   internal?: Record<string, string>,
+  // The status this header map ships with, when it isn't `state.status` (a raw
+  // `route.ts` GET handler returns its own status). Used for the open-redirect
+  // guard below. Defaults to `state.status`.
+  effectiveStatus?: number,
 ): Record<string, string> {
   // The host TRUSTS `x-pylon-*` headers (cache verdict, etc.). They must come
   // ONLY from `internal` — strip them from BOTH page-set headers AND `extra` so
@@ -402,6 +406,34 @@ export function finalizeHeaders(
   mergeStripped(state.headers);
   mergeStripped(extra);
   if (internal) Object.assign(h, internal); // trusted, never stripped
+  // SECURITY: open-redirect guard. A 3xx response's `Location` must be same-site
+  // or a trusted host — the SAME rule `response.redirect()` enforces — no matter
+  // how it was set: `response.setHeader("location", …)`, a `route.ts` handler's
+  // returned `headers`, or a `location` in `extra`. Those paths skip
+  // `redirect()`'s check, so without this a request-derived value becomes an
+  // off-site redirect. Fail loud (throws → 500/error boundary) rather than
+  // silently emitting the redirect. The `redirect()`/route-control paths pass an
+  // already-validated URL, so re-checking them here is a safe no-op.
+  const status = effectiveStatus ?? state.status;
+  if (status >= 300 && status < 400) {
+    const locKey = Object.keys(h).find((k) => k.toLowerCase() === "location");
+    if (locKey != null) {
+      const env = (globalThis as any).process?.env ?? {};
+      if (
+        !isSafeRedirect(h[locKey], {
+          publicUrl: env.PYLON_PUBLIC_URL,
+          canonicalHost: env.PYLON_CANONICAL_HOST,
+          trustedHostsCsv: env.PYLON_TRUSTED_HOSTS,
+        })
+      ) {
+        throw new Error(
+          `pylon ssr: refused an untrusted redirect target ${JSON.stringify(h[locKey])} ` +
+            `in a ${status} response — use a same-site path (e.g. "/dashboard") or add the ` +
+            `host to PYLON_TRUSTED_HOSTS. (Refusing to emit an open redirect.)`,
+        );
+      }
+    }
+  }
   if (!h["content-type"]) h["content-type"] = "text/html; charset=utf-8";
   if (state.cookies.length > 0) {
     // Preserve a set-cookie value set via setHeader() (rare) and join it
@@ -2397,8 +2429,12 @@ export async function handleRenderRoute(
     // cached so `use()` doesn't re-suspend forever; resolved values land in
     // `ssrValueCache` for hydration replay.
     const { buildDbReader } = await import("./runtime");
+    // `ssrRead: true` — serverData results are serialized into the
+    // client-visible `__PYLON_DATA__` blob, so the host applies the same
+    // per-row policy filter + `server_only`/`passwordHash` projection the
+    // entity/sync read API does. `serverData.unsafe.*` stays server-trust.
     const serverData = makeServerData(
-      buildDbReader(msg.call_id),
+      buildDbReader(msg.call_id, true),
       ssrValueCache,
     );
 

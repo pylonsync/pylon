@@ -945,7 +945,7 @@ pub fn start_with_plugins(
     port: u16,
     plugins: Option<Arc<PluginRegistry>>,
 ) -> Result<(), String> {
-    start_server(runtime, port, plugins, None)
+    start_server(runtime, port, plugins, None, None)
 }
 
 /// Start the dev server with plugins and a shard registry for real-time
@@ -956,7 +956,150 @@ pub fn start_with_shards(
     plugins: Option<Arc<PluginRegistry>>,
     shard_registry: Arc<dyn pylon_realtime::DynShardRegistry>,
 ) -> Result<(), String> {
-    start_server(runtime, port, plugins, Some(shard_registry))
+    start_server(runtime, port, plugins, Some(shard_registry), None)
+}
+
+/// Test-only entrypoint: start the server with a caller-supplied `FnOps`
+/// wired into the frontend dispatcher (SSR pages + `route.ts` form handlers),
+/// skipping the Bun runner spawn. Lets integration tests drive the real HTTP
+/// request loop — routing, the CSRF gate, and form dispatch — against a stub
+/// runtime instead of a live Bun process. Blocks until shutdown.
+#[doc(hidden)]
+pub fn start_server_for_test_with_fn_ops(
+    runtime: Arc<Runtime>,
+    port: u16,
+    fn_ops: Arc<dyn pylon_router::FnOps>,
+) -> Result<(), String> {
+    start_server(runtime, port, None, None, Some(fn_ops))
+}
+
+/// Lift `is_admin` on a resolved auth context via the two admin-designation
+/// paths, persisting an env-allowlisted promotion to the User row when an
+/// `adminField` is configured. Shared by the main HTTP request handler AND
+/// `crate::frontend::resolve_request_auth` (the SSR/frontend path) so both
+/// resolve `is_admin` identically for a given cookie + admin config.
+///
+/// Two independent paths feed `is_admin`; either one is enough to lift it:
+///
+/// 1. `auth.user.admin_field` (manifest config) — load the User row, check the
+///    configured boolean/string/role-array field, lift `is_admin` when truthy.
+///    Apps with a `User.isAdmin` column (or `"admin"` role) configure this so
+///    platform admins sign in with their regular account and Studio respects
+///    the role.
+///
+/// 2. `PYLON_ADMIN_EMAILS` env var — comma-separated allowlist of verified
+///    emails. A matched user gets `is_admin` lifted AND (when `admin_field` is
+///    configured) the User row's flag flipped to true so the promotion
+///    survives env-var removal. Operator-friendly: every Pylon app gets
+///    "designate admins by email" without writing app code.
+///
+/// SECURITY: API-key contexts are excluded from admin promotion. A leaked /
+/// scoped `pk.*` token for an admin-allowlisted user must NOT escalate to
+/// `is_admin` — the API-key issuer minted that token with a specific scope,
+/// not "act as this user across every privileged route" (2026-05-09 codex
+/// audit). No-op for anonymous, API-key, or already-admin contexts.
+pub(crate) fn lift_admin(runtime: &Runtime, auth_ctx: &mut pylon_auth::AuthContext) {
+    if auth_ctx.is_admin || auth_ctx.is_api_key_auth() {
+        return;
+    }
+    let Some(uid) = auth_ctx.user_id.clone() else {
+        return;
+    };
+    let user_entity = runtime.manifest().auth.user.entity.clone();
+    let admin_field = runtime
+        .manifest()
+        .auth
+        .user
+        .admin_field
+        .clone()
+        .filter(|f| !f.is_empty());
+    let row = runtime.get_by_id(&user_entity, &uid).ok().flatten();
+
+    // Path 1: admin_field on the User row.
+    if let (Some(field), Some(row)) = (&admin_field, &row) {
+        let truthy = match row.get(field.as_str()) {
+            Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
+            Some(v) if v.is_string() => {
+                let s = v.as_str().unwrap_or("").to_ascii_lowercase();
+                s == "true" || s == "1" || s == "admin"
+            }
+            Some(v) if v.is_number() => v.as_i64().map(|n| n != 0).unwrap_or(false),
+            Some(v) if v.is_array() => v
+                .as_array()
+                .map(|items| items.iter().any(|x| x.as_str() == Some("admin")))
+                .unwrap_or(false),
+            _ => false,
+        };
+        if truthy {
+            auth_ctx.is_admin = true;
+        }
+    }
+
+    // Path 2: PYLON_ADMIN_EMAILS allowlist. Only fires when the User row
+    // carries a verified email — we never promote on an unverified claim.
+    // Match is case-insensitive and tolerates whitespace around entries.
+    if auth_ctx.is_admin {
+        return;
+    }
+    let allow: Vec<String> = std::env::var("PYLON_ADMIN_EMAILS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if allow.is_empty() {
+        return;
+    }
+    let Some(row) = &row else {
+        return;
+    };
+    let email = row
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty());
+    let verified = row
+        .get("emailVerified")
+        .or_else(|| row.get("email_verified"))
+        .map(|v| match v {
+            serde_json::Value::Bool(b) => *b,
+            // Treat any non-empty timestamp / "true" / "1" string as verified
+            // (consistent with how the rest of the framework reads "verified"
+            // timestamps).
+            serde_json::Value::String(s) => !s.is_empty() && !s.eq_ignore_ascii_case("false"),
+            serde_json::Value::Number(n) => n.as_i64().map(|n| n != 0).unwrap_or(false),
+            serde_json::Value::Null => false,
+            _ => false,
+        })
+        .unwrap_or(false);
+    if !verified {
+        return;
+    }
+    let Some(email) = email else {
+        return;
+    };
+    if !allow.iter().any(|a| a == &email) {
+        return;
+    }
+    auth_ctx.is_admin = true;
+    // Persist when an admin_field is configured. Best-effort — a write failure
+    // shouldn't fail the request, we already lifted in-memory. The spec says
+    // "removing an email from the env doesn't demote", and the persisted flag
+    // is what makes that true.
+    if let Some(field) = &admin_field {
+        let already_truthy = row
+            .get(field.as_str())
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already_truthy {
+            let payload = serde_json::json!({ field: true });
+            let _ = runtime.update(&user_entity, &uid, &payload);
+            tracing::info!(
+                target: "pylon::auth",
+                "[admin-emails] promoted {email} via PYLON_ADMIN_EMAILS"
+            );
+        }
+    }
 }
 
 /// Build the boot-time change log: seq provider + persistent on-disk
@@ -1274,6 +1417,9 @@ fn start_server(
     port: u16,
     plugins: Option<Arc<PluginRegistry>>,
     shard_registry: Option<Arc<dyn pylon_realtime::DynShardRegistry>>,
+    // Test-only: when set, this `FnOps` backs the frontend dispatcher (SSR +
+    // form handlers) and the Bun runner pool spawn is skipped. `None` in prod.
+    fn_ops_override: Option<Arc<dyn pylon_router::FnOps>>,
 ) -> Result<(), String> {
     // Run the tracing-exporter hook BEFORE anything else emits spans. The
     // operator registers it via `pylon_observability::set_tracing_hook`
@@ -1700,20 +1846,28 @@ fn start_server(
     // via EmailAdapter::for_auth() so a shared platform auth key never
     // backs app code's ctx.email.
     let fn_email_adapter = Arc::new(crate::datastore::EmailAdapter::from_env());
-    let fn_ops_maybe = crate::datastore::try_spawn_functions(
-        Arc::clone(&runtime),
-        Arc::clone(&job_queue),
-        Arc::clone(&fn_rate_limiter),
-        Arc::clone(&change_log),
-        fn_notifier,
-        Arc::clone(&fn_email_adapter),
-        Arc::clone(&plugin_reg),
-        // Wire the caller-aware policy gate. Off-by-default
-        // (gated by PYLON_STRICT_FN_POLICIES=1 inside the runner);
-        // passing the engine here so the gate is reachable when
-        // operators flip the env.
-        Arc::clone(&policy_engine),
-    );
+    // A test override (see `start_server_for_test_with_fn_ops`) supplies the
+    // frontend dispatcher's FnOps directly, so skip spawning the Bun runner
+    // pool — the integration test drives the real request loop (routing, CSRF
+    // gate, form dispatch) without a live Bun process.
+    let fn_ops_maybe = if fn_ops_override.is_some() {
+        None
+    } else {
+        crate::datastore::try_spawn_functions(
+            Arc::clone(&runtime),
+            Arc::clone(&job_queue),
+            Arc::clone(&fn_rate_limiter),
+            Arc::clone(&change_log),
+            fn_notifier,
+            Arc::clone(&fn_email_adapter),
+            Arc::clone(&plugin_reg),
+            // Wire the caller-aware policy gate. Off-by-default
+            // (gated by PYLON_STRICT_FN_POLICIES=1 inside the runner);
+            // passing the engine here so the gate is reachable when
+            // operators flip the env.
+            Arc::clone(&policy_engine),
+        )
+    };
 
     // Reactive registry needs FnOps to invoke handlers for initial
     // run + re-run. Wire it now that fn_ops is built, then spawn the
@@ -2126,14 +2280,18 @@ fn start_server(
             .filter(|r| r.mode == "ssr")
             .cloned()
             .collect();
-        let fn_ops_arc: Option<Arc<dyn pylon_router::FnOps>> = fn_ops_maybe
-            .as_ref()
-            .map(|f| Arc::clone(f) as Arc<dyn pylon_router::FnOps>);
+        let fn_ops_arc: Option<Arc<dyn pylon_router::FnOps>> =
+            fn_ops_override.clone().or_else(|| {
+                fn_ops_maybe
+                    .as_ref()
+                    .map(|f| Arc::clone(f) as Arc<dyn pylon_router::FnOps>)
+            });
         Arc::new(
             crate::frontend::FrontendConfig::from_env(&app_dir)
                 .with_ssr(Arc::new(ssr_routes), fn_ops_arc)
                 .with_session(Arc::clone(&session_store), Arc::clone(&cookie_config))
-                .with_orgs(Arc::clone(&orgs)),
+                .with_orgs(Arc::clone(&orgs))
+                .with_runtime(Arc::clone(&runtime)),
         )
     };
     if frontend_config.is_active() {
@@ -3376,38 +3534,14 @@ fn start_server(
             }
         } // end: if !is_preflight
 
-        // --- SPA serving (unified full-stack) ---
-        //
-        // After rate-limiting, before auth + CSRF: if the project ships
-        // a built frontend (web/dist/) or PYLON_FRONTEND_DEV_PROXY is set,
-        // route non-API GET/HEAD requests through it. The handler is
-        // self-contained — it consumes `request` on success or hands it
-        // back (`Err(request)`) when the URL is API-bound so existing
-        // routing continues unchanged.
-        //
-        // CSRF + auth are intentionally below this point: SPA assets are
-        // public-by-design (anyone hitting the URL can fetch them — the
-        // SPA's own code is what proves identity once the bundle runs)
-        // and only-GET, so the CSRF check wouldn't fire on them anyway.
-        if frontend_config.is_active() {
-            let method_str_for_metric = method.as_str().to_string();
-            match crate::frontend::try_handle(&frontend_config, request, &cors_origin) {
-                Ok(()) => {
-                    // Status is logged inside the module; we record a
-                    // 200 here as a conservative aggregate (precise per-
-                    // asset status codes flow through `tracing::info!`
-                    // in dev). The frontend module never panics — a
-                    // 502 from the proxy still flows through Ok(()).
-                    metrics.record_request(&method_str_for_metric, 200);
-                    return;
-                }
-                Err(returned) => {
-                    request = returned;
-                }
-            }
-        }
-
         // --- CSRF check on state-changing requests ---
+        //
+        // Runs after rate-limiting and ABOVE `try_handle`: `route.ts`
+        // form/method handlers (#276) are dispatched inside `try_handle` for
+        // non-GET methods and WRITE to the DB, so the Origin/Referer gate MUST
+        // clear before they run — otherwise a cross-site POST to a form route
+        // bypasses CSRF entirely. GET/HEAD SPA assets are unaffected (safe
+        // methods skip the check below). Auth is still resolved further down.
         //
         // Browsers forbid cross-origin POST/PATCH/PUT/DELETE unless CORS
         // allows it, but an attacker controlling another origin can still
@@ -3460,6 +3594,32 @@ fn start_server(
                     let _ = request.respond(response);
                     mt.record_request(method_str, err.status);
                     return;
+                }
+            }
+        }
+
+        // --- SPA / form-route serving (unified full-stack) ---
+        //
+        // The handler is self-contained — it consumes `request` on success or
+        // hands it back (`Err(request)`) when the URL is API-bound so existing
+        // routing continues unchanged. SPA assets are public-by-design (anyone
+        // hitting the URL can fetch them — the SPA's own code proves identity
+        // once the bundle runs); state-changing form routes already cleared the
+        // CSRF gate above.
+        if frontend_config.is_active() {
+            let method_str_for_metric = method.as_str().to_string();
+            match crate::frontend::try_handle(&frontend_config, request, &cors_origin) {
+                Ok(()) => {
+                    // Status is logged inside the module; we record a
+                    // 200 here as a conservative aggregate (precise per-
+                    // asset status codes flow through `tracing::info!`
+                    // in dev). The frontend module never panics — a
+                    // 502 from the proxy still flows through Ok(()).
+                    metrics.record_request(&method_str_for_metric, 200);
+                    return;
+                }
+                Err(returned) => {
+                    request = returned;
                 }
             }
         }
@@ -3634,142 +3794,11 @@ fn start_server(
                 }
             }
         }
-        // Per-user admin resolution. Two independent paths feed into
-        // is_admin; either one is enough to lift it.
-        //
-        // 1. `auth.user.admin_field` (manifest config) — load the
-        //    User row, check the configured boolean/string/role-array
-        //    field, lift is_admin when truthy. Apps with a
-        //    User.isAdmin column (or "admin" role) configure this so
-        //    platform admins sign in with their regular account and
-        //    Studio respects the role.
-        //
-        // 2. `PYLON_ADMIN_EMAILS` env var — comma-separated allowlist
-        //    of verified emails. On every successful auth resolution,
-        //    a matched user gets is_admin lifted AND (when
-        //    admin_field is configured) the User row's flag is
-        //    flipped to true so the promotion survives env-var
-        //    removal. Operator-friendly: every Pylon app gets
-        //    "designate admins by email" without writing app code.
-        //
-        // PYLON_ADMIN_TOKEN remains as the operator-token escape
-        // hatch for cron/migration scripts.
-        //
-        // SECURITY: API-key contexts are excluded from admin
-        // promotion. A leaked / scoped `pk.*` token for an admin-
-        // allowlisted user must NOT escalate to is_admin — the
-        // API-key issuer minted that token with a specific scope,
-        // not "act as this user across every privileged route".
-        // Caught in the 2026-05-09 codex security audit. Apps that
-        // genuinely want API keys with admin power should explicitly
-        // mint them via the admin-token path.
-        if !auth_ctx.is_admin && !auth_ctx.is_api_key_auth() {
-            if let Some(uid) = auth_ctx.user_id.clone() {
-                let user_entity = runtime.manifest().auth.user.entity.clone();
-                let admin_field = runtime
-                    .manifest()
-                    .auth
-                    .user
-                    .admin_field
-                    .clone()
-                    .filter(|f| !f.is_empty());
-                use pylon_http::DataStore as _;
-                let row = runtime.get_by_id(&user_entity, &uid).ok().flatten();
-
-                // Path 1: admin_field on the User row.
-                if let (Some(ref field), Some(ref row)) = (&admin_field, &row) {
-                    let truthy = match row.get(field.as_str()) {
-                        Some(v) if v.is_boolean() => v.as_bool().unwrap_or(false),
-                        Some(v) if v.is_string() => {
-                            let s = v.as_str().unwrap_or("").to_ascii_lowercase();
-                            s == "true" || s == "1" || s == "admin"
-                        }
-                        Some(v) if v.is_number() => v.as_i64().map(|n| n != 0).unwrap_or(false),
-                        Some(v) if v.is_array() => v
-                            .as_array()
-                            .map(|items| items.iter().any(|x| x.as_str() == Some("admin")))
-                            .unwrap_or(false),
-                        _ => false,
-                    };
-                    if truthy {
-                        auth_ctx.is_admin = true;
-                    }
-                }
-
-                // Path 2: PYLON_ADMIN_EMAILS allowlist. Only fires when
-                // the User row carries a verified email — we never
-                // promote on an unverified claim. Match is case-
-                // insensitive and tolerates whitespace around entries.
-                if !auth_ctx.is_admin {
-                    let allow: Vec<String> = std::env::var("PYLON_ADMIN_EMAILS")
-                        .unwrap_or_default()
-                        .split(',')
-                        .map(|s| s.trim().to_ascii_lowercase())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !allow.is_empty() {
-                        if let Some(ref row) = row {
-                            let email = row
-                                .get("email")
-                                .and_then(|v| v.as_str())
-                                .map(|s| s.trim().to_ascii_lowercase())
-                                .filter(|s| !s.is_empty());
-                            let verified = row
-                                .get("emailVerified")
-                                .or_else(|| row.get("email_verified"))
-                                .map(|v| match v {
-                                    serde_json::Value::Bool(b) => *b,
-                                    // Treat any non-empty timestamp / "true" /
-                                    // "1" string as verified (consistent with
-                                    // how the rest of the framework reads
-                                    // "verified" timestamps).
-                                    serde_json::Value::String(s) => {
-                                        !s.is_empty() && !s.eq_ignore_ascii_case("false")
-                                    }
-                                    serde_json::Value::Number(n) => {
-                                        n.as_i64().map(|n| n != 0).unwrap_or(false)
-                                    }
-                                    serde_json::Value::Null => false,
-                                    _ => false,
-                                })
-                                .unwrap_or(false);
-                            if verified {
-                                if let Some(email) = email {
-                                    if allow.iter().any(|a| a == &email) {
-                                        auth_ctx.is_admin = true;
-                                        // Persist when an admin_field is
-                                        // configured. Best-effort — a write
-                                        // failure shouldn't fail the request,
-                                        // we already lifted in-memory. The
-                                        // spec says "removing an email from
-                                        // the env doesn't demote", and the
-                                        // persisted flag is what makes that
-                                        // true.
-                                        if let Some(field) = &admin_field {
-                                            let already_truthy = row
-                                                .get(field.as_str())
-                                                .and_then(|v| v.as_bool())
-                                                .unwrap_or(false);
-                                            if !already_truthy {
-                                                let payload = serde_json::json!({
-                                                    field: true,
-                                                });
-                                                let _ =
-                                                    runtime.update(&user_entity, &uid, &payload);
-                                                tracing::info!(
-                                                    target: "pylon::auth",
-                                                    "[admin-emails] promoted {email} via PYLON_ADMIN_EMAILS"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Per-user admin resolution. Shared with the SSR/frontend auth resolver
+        // (`crate::frontend::resolve_request_auth`) via `lift_admin` so both
+        // paths resolve `is_admin` identically — see the helper's doc for the
+        // two designation paths + the API-key exclusion.
+        lift_admin(&runtime, &mut auth_ctx);
 
         // Multi-tenant role resolution. Surface the caller's role in their
         // active org as `auth_ctx.roles` (see the helper's doc comment for why

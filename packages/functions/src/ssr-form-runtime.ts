@@ -172,11 +172,15 @@ export async function handleForm(
       for (const [k, v] of Object.entries(raw.headers ?? {})) {
         extra[k.toLowerCase()] = String(v);
       }
+      const rawStatus = raw.status ?? responseState.status;
       send({
         type: "response_start",
         call_id: msg.call_id,
-        status: raw.status ?? responseState.status,
-        headers: finalizeHeaders(responseState, extra),
+        status: rawStatus,
+        // Pass rawStatus so the open-redirect guard sees the handler's own
+        // status (a raw GET's redirect status lives on `raw.status`, not
+        // `responseState.status`).
+        headers: finalizeHeaders(responseState, extra, undefined, rawStatus),
       });
       if (raw.body != null) {
         const bodyStr =

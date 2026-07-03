@@ -391,11 +391,24 @@ function rpc(callId: string, msg: Record<string, unknown>): Promise<unknown> {
 // `serverData` read handle that reuses this module's `send` + `pendingRpcs`
 // + reader loop. The render call_id ("r_<n>") correlates DB replies back
 // through the shared pendingRpcs map.
-export function buildDbReader(callId: string): DbReader {
-  return { ...buildReaderOps(callId, false), unsafe: buildReaderOps(callId, true) };
+export function buildDbReader(callId: string, ssrRead = false): DbReader {
+  return {
+    ...buildReaderOps(callId, false, ssrRead),
+    unsafe: buildReaderOps(callId, true, ssrRead),
+  };
 }
 
-function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsafe"> {
+function buildReaderOps(
+  callId: string,
+  unsafeOp: boolean,
+  // `ssrRead`: true when the reader backs SSR `serverData.*` (results are
+  // serialized into the client-visible `__PYLON_DATA__` blob). The Rust side
+  // then applies the same per-row policy filter + `server_only`/`passwordHash`
+  // projection the entity/sync read API does — UNLESS `unsafe_op` is also set
+  // (`serverData.unsafe.*` stays server-trust). Server-function `ctx.db.*`
+  // leaves it false and reads raw.
+  ssrRead = false,
+): Omit<DbReader, "unsafe"> {
   // All DB ops use rpcDb so Promise.all over ctx.db reads can run in
   // parallel without colliding on the outer call_id key.
   //
@@ -412,6 +425,7 @@ function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsa
         entity,
         id,
         unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
       })) as any;
     },
     async list(entity) {
@@ -420,6 +434,7 @@ function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsa
         op: "list",
         entity,
         unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
       })) as any;
     },
     async lookup(entity, field, value) {
@@ -430,6 +445,7 @@ function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsa
         field,
         value,
         unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
       })) as any;
     },
     async query(entity, filter) {
@@ -439,6 +455,7 @@ function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsa
         entity,
         data: filter,
         unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
       })) as any;
     },
     async queryGraph(query) {
@@ -448,6 +465,7 @@ function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsa
         entity: "",
         data: query,
         unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
       })) as any;
     },
     async paginate(entity, opts) {
@@ -461,6 +479,7 @@ function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsa
         after: opts.cursor ?? undefined,
         limit: numItems,
         unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
       })) as any;
     },
     async search(entity, query) {
@@ -470,6 +489,7 @@ function buildReaderOps(callId: string, unsafeOp: boolean): Omit<DbReader, "unsa
         entity,
         data: query,
         unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
       })) as any;
     },
   };

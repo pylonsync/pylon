@@ -4357,6 +4357,24 @@ pub fn find_functions_runtime() -> Option<String> {
 /// caches an `Arc<dyn PolicyGate>` so cloning stays O(1).
 struct PolicyGateAdapter {
     engine: Arc<pylon_policy::PolicyEngine>,
+    /// The app manifest — used by [`filter_client_read`] to strip
+    /// `server_only`/`passwordHash` fields via `project_row_for_wire`.
+    manifest: Arc<pylon_kernel::AppManifest>,
+}
+
+/// Build an [`AuthContext`] from the runner's [`AuthInfo`]. SSR/function reads
+/// never carry API-key scopes, so those stay `None`.
+fn policy_auth_ctx(auth: &pylon_functions::protocol::AuthInfo) -> pylon_auth::AuthContext {
+    pylon_auth::AuthContext {
+        user_id: auth.user_id.clone(),
+        is_admin: auth.is_admin,
+        is_guest: false,
+        roles: auth.roles.clone(),
+        tenant_id: auth.tenant_id.clone(),
+        api_key_id: None,
+        api_key_scopes: None,
+        is_trusted_device: false,
+    }
 }
 
 impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
@@ -4367,16 +4385,7 @@ impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
         auth: &pylon_functions::protocol::AuthInfo,
         data: Option<&serde_json::Value>,
     ) -> Result<(), (String, String)> {
-        let auth_ctx = pylon_auth::AuthContext {
-            user_id: auth.user_id.clone(),
-            is_admin: auth.is_admin,
-            is_guest: false,
-            roles: auth.roles.clone(),
-            tenant_id: auth.tenant_id.clone(),
-            api_key_id: None,
-            api_key_scopes: None,
-            is_trusted_device: false,
-        };
+        let auth_ctx = policy_auth_ctx(auth);
         let result = match op {
             pylon_functions::runner::PolicyOp::Read => {
                 self.engine.check_entity_read(entity, &auth_ctx, data)
@@ -4408,6 +4417,78 @@ impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
                 ),
             )),
         }
+    }
+
+    fn filter_client_read(
+        &self,
+        entity: &str,
+        auth: &pylon_functions::protocol::AuthInfo,
+        rows: Vec<serde_json::Value>,
+    ) -> Vec<serde_json::Value> {
+        let auth_ctx = policy_auth_ctx(auth);
+        let auth_user = &self.manifest.auth.user;
+        rows.into_iter()
+            // Per-row read fence — identical to the entity/sync list path's
+            // `row_visible`. `check_entity_read` with the row present evaluates
+            // row-dependent policies (`existing.ownerId == auth.userId`, tenant
+            // scoping) and correctly handles admin (full-operator admin passes;
+            // admin-with-active-tenant is scoped per row).
+            .filter(|row| {
+                matches!(
+                    self.engine.check_entity_read(entity, &auth_ctx, Some(row)),
+                    pylon_policy::PolicyResult::Allowed
+                )
+            })
+            // Wire projection — strip `server_only` + the User row's
+            // `passwordHash`/`_*`. Same helper every sync wire path runs.
+            .map(|row| pylon_router::project_row_for_wire(&self.manifest, auth_user, entity, row))
+            .collect()
+    }
+
+    fn filter_client_search(
+        &self,
+        entity: &str,
+        auth: &pylon_functions::protocol::AuthInfo,
+        mut result: serde_json::Value,
+    ) -> Result<serde_json::Value, (String, String)> {
+        let auth_ctx = policy_auth_ctx(auth);
+        // Aggregate safety — identical to the entity search route: a
+        // row-DEPENDENT read policy is rejected because faceted counts /
+        // `total` aggregate over EVERY match and would leak "how many rows
+        // exist" even after per-hit filtering. Probe with `None` (no row) to
+        // detect row-dependence.
+        if !matches!(
+            self.engine.check_entity_read(entity, &auth_ctx, None),
+            pylon_policy::PolicyResult::Allowed
+        ) {
+            return Err((
+                "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY".to_string(),
+                format!(
+                    "serverData.search on \"{entity}\" has a row-dependent read policy; faceted \
+                     search would leak aggregate counts for rows you can't read. Make the read \
+                     policy row-independent, disable search in the manifest, or use \
+                     serverData.unsafe.search from a trusted server context."
+                ),
+            ));
+        }
+        // Belt-and-suspenders per-hit filter + wire projection.
+        let auth_user = &self.manifest.auth.user;
+        if let Some(hits) = result.get_mut("hits").and_then(|v| v.as_array_mut()) {
+            let projected: Vec<serde_json::Value> = std::mem::take(hits)
+                .into_iter()
+                .filter(|hit| {
+                    matches!(
+                        self.engine.check_entity_read(entity, &auth_ctx, Some(hit)),
+                        pylon_policy::PolicyResult::Allowed
+                    )
+                })
+                .map(|hit| {
+                    pylon_router::project_row_for_wire(&self.manifest, auth_user, entity, hit)
+                })
+                .collect();
+            *hits = projected;
+        }
+        Ok(result)
     }
 }
 
@@ -4567,6 +4648,7 @@ pub fn try_spawn_functions(
     // the shared PolicyEngine.
     let policy_gate: Arc<dyn pylon_functions::runner::PolicyGate> = Arc::new(PolicyGateAdapter {
         engine: Arc::clone(&policy_engine),
+        manifest: runtime.manifest_arc(),
     });
     // LlmClient loaded once at boot from env + manifest. When
     // unconfigured the ctx.llm.complete hook returns LLM_NOT_CONFIGURED
@@ -7631,5 +7713,125 @@ mod sqlite_transact_tx_safety_tests {
         // test gets its own in-memory DB, but be tidy).
         let conn = rt.lock_conn_pub().expect("lock conn");
         let _ = conn.execute("ROLLBACK", []);
+    }
+}
+
+#[cfg(test)]
+mod ssr_client_read_fence_tests {
+    //! The client-read fence (`PolicyGateAdapter::filter_client_read`) that SSR
+    //! `serverData.*` reads run through. It must match the entity/sync read
+    //! path: drop rows the caller can't read per the entity's read policy, and
+    //! strip `server_only` fields — before the rows are serialized into the
+    //! browser-visible `__PYLON_DATA__` hydration blob.
+    use super::*;
+    use pylon_functions::protocol::AuthInfo;
+    use pylon_functions::runner::PolicyGate;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, ManifestPolicy};
+    use pylon_policy::PolicyEngine;
+
+    fn field(name: &str, server_only: bool) -> ManifestField {
+        ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }
+    }
+
+    /// `Note { id, owner, secret(serverOnly) }` with a row-dependent read
+    /// policy: you can only read your own notes.
+    fn note_manifest() -> AppManifest {
+        AppManifest {
+            manifest_version: pylon_kernel::MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![ManifestEntity {
+                name: "Note".into(),
+                fields: vec![field("owner", false), field("secret", true)],
+                ..Default::default()
+            }],
+            policies: vec![ManifestPolicy {
+                name: "note_owner_read".into(),
+                entity: Some("Note".into()),
+                allow_read: Some("existing.owner == auth.userId".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn adapter(manifest: &AppManifest) -> PolicyGateAdapter {
+        PolicyGateAdapter {
+            engine: Arc::new(PolicyEngine::from_manifest(manifest)),
+            manifest: Arc::new(manifest.clone()),
+        }
+    }
+
+    fn user(uid: &str) -> AuthInfo {
+        AuthInfo {
+            user_id: Some(uid.into()),
+            is_admin: false,
+            tenant_id: None,
+            roles: vec![],
+        }
+    }
+
+    fn rows() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"id": "1", "owner": "u1", "secret": "s1"}),
+            serde_json::json!({"id": "2", "owner": "u2", "secret": "s2"}),
+        ]
+    }
+
+    #[test]
+    fn filters_foreign_rows_and_strips_server_only() {
+        let m = note_manifest();
+        let gate = adapter(&m);
+        let out = gate.filter_client_read("Note", &user("u1"), rows());
+        // Only u1's note survives (per-row read policy), and the serverOnly
+        // `secret` field is stripped before it can cross to the client.
+        assert_eq!(out, vec![serde_json::json!({"id": "1", "owner": "u1"})]);
+    }
+
+    #[test]
+    fn different_user_sees_only_their_own_row() {
+        let m = note_manifest();
+        let gate = adapter(&m);
+        let out = gate.filter_client_read("Note", &user("u2"), rows());
+        assert_eq!(out, vec![serde_json::json!({"id": "2", "owner": "u2"})]);
+    }
+
+    #[test]
+    fn no_policy_entity_is_default_denied() {
+        // An entity with NO registered read policy is default-denied on the
+        // client-visible read path — same posture as the client db.useQuery.
+        // (Server-trust reads use serverData.unsafe.* / ctx.db.)
+        let mut m = note_manifest();
+        m.policies.clear();
+        let gate = adapter(&m);
+        let out = gate.filter_client_read("Note", &user("u1"), rows());
+        assert!(
+            out.is_empty(),
+            "no-policy entity must default-deny SSR reads"
+        );
+    }
+
+    #[test]
+    fn search_rejects_row_dependent_policy() {
+        // Faceted search over a row-dependent policy would leak aggregate
+        // counts — rejected, matching the entity search route.
+        let m = note_manifest();
+        let gate = adapter(&m);
+        let result = serde_json::json!({"hits": [], "total": 0});
+        let err = gate
+            .filter_client_search("Note", &user("u1"), result)
+            .expect_err("row-dependent search must be rejected");
+        assert_eq!(err.0, "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY");
     }
 }

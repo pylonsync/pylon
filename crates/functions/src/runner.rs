@@ -195,6 +195,42 @@ pub trait PolicyGate: Send + Sync {
         auth: &crate::protocol::AuthInfo,
         data: Option<&serde_json::Value>,
     ) -> Result<(), (String, String)>;
+
+    /// Post-process the rows returned by a CLIENT-VISIBLE read (SSR
+    /// `serverData.*`, whose results are serialized into the browser-visible
+    /// `__PYLON_DATA__` hydration blob) so they get the SAME treatment as the
+    /// entity/sync read API: drop rows the caller can't read per the entity's
+    /// read policy (per-ROW fence — `check_op` is only a coarse op-level gate),
+    /// and strip `server_only` / `passwordHash` fields before they cross to the
+    /// client. Server-function `ctx.db.*` reads never call this (server-trust);
+    /// neither does `serverData.unsafe.*`.
+    ///
+    /// Default impl returns rows unchanged — stub gates and non-runtime
+    /// backends don't filter. The runtime adapter implements the real fence.
+    fn filter_client_read(
+        &self,
+        _entity: &str,
+        _auth: &crate::protocol::AuthInfo,
+        rows: Vec<serde_json::Value>,
+    ) -> Vec<serde_json::Value> {
+        rows
+    }
+
+    /// Fence a CLIENT-VISIBLE faceted-search result (SSR `serverData.search`),
+    /// mirroring the entity search route: reject a row-DEPENDENT read policy
+    /// (faceted aggregates would leak counts for rows the caller can't read),
+    /// then per-hit filter + project. `result` is the `{ hits, facetCounts,
+    /// total, tookMs }` envelope. Returns `Err((code, message))` to deny.
+    ///
+    /// Default impl returns the result unchanged — stub gates don't filter.
+    fn filter_client_search(
+        &self,
+        _entity: &str,
+        _auth: &crate::protocol::AuthInfo,
+        result: serde_json::Value,
+    ) -> Result<serde_json::Value, (String, String)> {
+        Ok(result)
+    }
 }
 
 /// Coarse action classification for the policy gate. Mirrors
@@ -1801,7 +1837,7 @@ fn execute_db_op(
             }
         }
     }
-    match msg.op {
+    let outcome = match msg.op {
         DbOp::Get => {
             let id = msg.id.as_deref().unwrap_or("");
             crate::deps::record_read(&msg.entity, Some(id));
@@ -1948,6 +1984,90 @@ fn execute_db_op(
                 Err(e) => (Err(e), None),
             }
         }
+    };
+    // SSR `serverData.*` reads are client-visible (serialized into
+    // `__PYLON_DATA__`), so they get the entity/sync read treatment: per-row
+    // policy filtering + `server_only`/`passwordHash` projection. `ctx.db.*`
+    // (server-trust) and `serverData.unsafe.*` skip this.
+    project_ssr_read(msg, policy_gate, auth, outcome)
+}
+
+/// Apply the client-visible read fence (per-row policy filter + wire field
+/// projection) to a read op's result when it came from SSR `serverData.*`
+/// (safe, not `unsafe`). Non-read ops, `ctx.db` reads, unsafe reads, and error
+/// results pass through untouched.
+fn project_ssr_read(
+    msg: &DbOpMessage,
+    policy_gate: Option<&dyn PolicyGate>,
+    auth: &AuthInfo,
+    outcome: (
+        Result<serde_json::Value, pylon_http::DataError>,
+        Option<usize>,
+    ),
+) -> (
+    Result<serde_json::Value, pylon_http::DataError>,
+    Option<usize>,
+) {
+    if !msg.ssr_read || msg.unsafe_op {
+        return outcome;
+    }
+    let Some(gate) = policy_gate else {
+        return outcome;
+    };
+    let (Ok(value), _count) = outcome else {
+        return outcome;
+    };
+    let entity = msg.entity.as_str();
+    // Reshape each read op's result into a row list, run the client-read fence,
+    // then reshape back to the op's response envelope.
+    match msg.op {
+        // Array-returning reads: filter + project the whole list.
+        DbOp::List | DbOp::Query => {
+            let rows = match value {
+                serde_json::Value::Array(rows) => rows,
+                other => return (Ok(other), None),
+            };
+            let filtered = gate.filter_client_read(entity, auth, rows);
+            let count = filtered.len();
+            (Ok(serde_json::Value::Array(filtered)), Some(count))
+        }
+        // Single-row reads: `null` when the row is filtered out.
+        DbOp::Get | DbOp::Lookup => {
+            if value.is_null() {
+                return (Ok(value), Some(0));
+            }
+            let filtered = gate.filter_client_read(entity, auth, vec![value]);
+            match filtered.into_iter().next() {
+                Some(row) => (Ok(row), Some(1)),
+                None => (Ok(serde_json::Value::Null), Some(0)),
+            }
+        }
+        // Paginate envelope: `{ page: [...], nextCursor, isDone }` — fence the
+        // page array, leave the cursor/isDone as-is.
+        DbOp::Paginate => {
+            let mut obj = match value {
+                serde_json::Value::Object(obj) => obj,
+                other => return (Ok(other), None),
+            };
+            if let Some(serde_json::Value::Array(rows)) = obj.remove("page") {
+                let filtered = gate.filter_client_read(entity, auth, rows);
+                let count = filtered.len();
+                obj.insert("page".to_string(), serde_json::Value::Array(filtered));
+                (Ok(serde_json::Value::Object(obj)), Some(count))
+            } else {
+                (Ok(serde_json::Value::Object(obj)), None)
+            }
+        }
+        // Faceted search envelope: `{ hits, facetCounts, total }` — fence via
+        // the dedicated search path (aggregate-safety gate + per-hit filter).
+        DbOp::Search => match gate.filter_client_search(entity, auth, value) {
+            Ok(filtered) => (Ok(filtered), None),
+            Err((code, message)) => (Err(pylon_http::DataError { code, message }), None),
+        },
+        // QueryGraph returns a nested include tree (not a flat row list); its
+        // include-level read policy is enforced inside the query engine, so it
+        // isn't reshaped here. Every write op also passes through unchanged.
+        _ => (Ok(value), None),
     }
 }
 
@@ -2294,6 +2414,7 @@ mod tests {
             after: None,
             limit: None,
             unsafe_op,
+            ssr_read: false,
         }
     }
 
@@ -2356,6 +2477,161 @@ mod tests {
         assert_eq!(err.code, "POLICY_DENIED");
         assert!(err.message.contains("stubbed deny"));
         assert!(count.is_none());
+    }
+
+    // ---- SSR client-read fence (project_ssr_read wiring) ----
+
+    /// Gate that stands in for the runtime adapter's client-read fence: keep
+    /// only rows owned by the caller, and strip the `secret` field.
+    struct FilterGate;
+    impl PolicyGate for FilterGate {
+        fn check_op(
+            &self,
+            _: PolicyOp,
+            _: &str,
+            _: &AuthInfo,
+            _: Option<&serde_json::Value>,
+        ) -> Result<(), (String, String)> {
+            Ok(())
+        }
+        fn filter_client_read(
+            &self,
+            _entity: &str,
+            auth: &AuthInfo,
+            rows: Vec<serde_json::Value>,
+        ) -> Vec<serde_json::Value> {
+            rows.into_iter()
+                .filter(|r| r.get("owner").and_then(|v| v.as_str()) == auth.user_id.as_deref())
+                .map(|mut r| {
+                    if let Some(o) = r.as_object_mut() {
+                        o.remove("secret");
+                    }
+                    r
+                })
+                .collect()
+        }
+        fn filter_client_search(
+            &self,
+            entity: &str,
+            auth: &AuthInfo,
+            mut result: serde_json::Value,
+        ) -> Result<serde_json::Value, (String, String)> {
+            if let Some(hits) = result.get_mut("hits").and_then(|v| v.as_array_mut()) {
+                *hits = self.filter_client_read(entity, auth, std::mem::take(hits));
+            }
+            Ok(result)
+        }
+    }
+
+    fn ssr_msg(op: DbOp, unsafe_op: bool, ssr_read: bool) -> DbOpMessage {
+        let mut m = db_msg(op, "Doc", unsafe_op);
+        m.ssr_read = ssr_read;
+        m
+    }
+
+    fn two_rows() -> serde_json::Value {
+        serde_json::json!([
+            {"id": "1", "owner": "u1", "secret": "s1"},
+            {"id": "2", "owner": "u2", "secret": "s2"},
+        ])
+    }
+
+    #[test]
+    fn ssr_read_list_is_filtered_and_projected() {
+        // SSR serverData.list → per-row fence: only the caller's row survives,
+        // and the `secret` field is stripped before it can reach the client.
+        let (result, count) = project_ssr_read(
+            &ssr_msg(DbOp::List, false, true),
+            Some(&FilterGate),
+            &user_auth(),
+            (Ok(two_rows()), Some(2)),
+        );
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!([{"id": "1", "owner": "u1"}])
+        );
+        assert_eq!(count, Some(1));
+    }
+
+    #[test]
+    fn ctx_db_read_is_not_fenced() {
+        // ssr_read=false (server-function ctx.db) → server-trust, raw rows.
+        let (result, _) = project_ssr_read(
+            &ssr_msg(DbOp::List, false, false),
+            Some(&FilterGate),
+            &user_auth(),
+            (Ok(two_rows()), Some(2)),
+        );
+        assert_eq!(result.unwrap(), two_rows());
+    }
+
+    #[test]
+    fn ssr_unsafe_read_is_not_fenced() {
+        // serverData.unsafe.* → explicit server-trust escape hatch, raw rows.
+        let (result, _) = project_ssr_read(
+            &ssr_msg(DbOp::List, true, true),
+            Some(&FilterGate),
+            &user_auth(),
+            (Ok(two_rows()), Some(2)),
+        );
+        assert_eq!(result.unwrap(), two_rows());
+    }
+
+    #[test]
+    fn ssr_get_of_forbidden_row_becomes_null() {
+        // A single-row SSR read of a row the caller can't see → null.
+        let (result, count) = project_ssr_read(
+            &ssr_msg(DbOp::Get, false, true),
+            Some(&FilterGate),
+            &user_auth(),
+            (
+                Ok(serde_json::json!({"id": "2", "owner": "u2", "secret": "s2"})),
+                Some(1),
+            ),
+        );
+        assert_eq!(result.unwrap(), serde_json::Value::Null);
+        assert_eq!(count, Some(0));
+    }
+
+    #[test]
+    fn ssr_get_strips_fields_on_visible_row() {
+        let (result, count) = project_ssr_read(
+            &ssr_msg(DbOp::Get, false, true),
+            Some(&FilterGate),
+            &user_auth(),
+            (
+                Ok(serde_json::json!({"id": "1", "owner": "u1", "secret": "s1"})),
+                Some(1),
+            ),
+        );
+        assert_eq!(
+            result.unwrap(),
+            serde_json::json!({"id": "1", "owner": "u1"})
+        );
+        assert_eq!(count, Some(1));
+    }
+
+    #[test]
+    fn ssr_search_hits_are_fenced() {
+        let (result, _) = project_ssr_read(
+            &ssr_msg(DbOp::Search, false, true),
+            Some(&FilterGate),
+            &user_auth(),
+            (
+                Ok(serde_json::json!({
+                    "hits": [
+                        {"id": "1", "owner": "u1", "secret": "s1"},
+                        {"id": "2", "owner": "u2", "secret": "s2"},
+                    ],
+                    "total": 2,
+                })),
+                None,
+            ),
+        );
+        assert_eq!(
+            result.unwrap()["hits"],
+            serde_json::json!([{"id": "1", "owner": "u1"}])
+        );
     }
 
     #[test]

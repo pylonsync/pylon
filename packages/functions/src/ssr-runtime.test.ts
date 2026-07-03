@@ -127,6 +127,54 @@ describe("reserved x-pylon-* header namespace (cache-proof forgery fence)", () =
     expect(out2["x-pylon-cacheable"]).toBeUndefined();
   });
 
+  test("finalizeHeaders: 3xx open-redirect guard on setHeader('location') / returned headers", () => {
+    const st = (status: number, location: string) => ({
+      status,
+      headers: { location } as Record<string, string>,
+      cookies: [] as string[],
+    });
+
+    // An off-site absolute Location on a 3xx (set via setHeader or a route
+    // handler's returned headers) is refused — the same rule redirect() applies.
+    expect(() => finalizeHeaders(st(302, "https://evil.example/steal"))).toThrow(
+      /open redirect/i,
+    );
+    // Protocol-relative `//host` is the classic bypass — also refused.
+    expect(() => finalizeHeaders(st(307, "//evil.example"))).toThrow(/open redirect/i);
+    // A backslash variant that browsers normalize cross-origin — refused.
+    expect(() => finalizeHeaders(st(303, "/\\evil.example"))).toThrow(/open redirect/i);
+
+    // A same-site relative path is fine and passes through unchanged.
+    expect(finalizeHeaders(st(302, "/dashboard"))["location"]).toBe("/dashboard");
+
+    // Case-insensitive header name is still caught (host lowercases, but guard
+    // must not depend on that).
+    expect(() =>
+      finalizeHeaders({
+        status: 302,
+        headers: { Location: "https://evil.example" } as Record<string, string>,
+        cookies: [],
+      }),
+    ).toThrow(/open redirect/i);
+
+    // NON-3xx status → `location` is just a header, not a redirect: no guard.
+    expect(
+      finalizeHeaders(st(200, "https://evil.example"))["location"],
+    ).toBe("https://evil.example");
+
+    // A raw `route.ts` GET returns its OWN status via the `effectiveStatus`
+    // arg — an off-site Location there is still refused even though
+    // `state.status` is 200.
+    expect(() =>
+      finalizeHeaders(
+        { status: 200, headers: {}, cookies: [] },
+        { location: "https://evil.example" },
+        undefined,
+        302,
+      ),
+    ).toThrow(/open redirect/i);
+  });
+
   test("makeReadTrackingProxy trips on get / in / Object.keys / descriptor / spread", () => {
     const probes: Array<(o: any) => unknown> = [
       (o) => o.host,

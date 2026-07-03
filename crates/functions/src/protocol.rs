@@ -475,6 +475,17 @@ pub struct DbOpMessage {
     /// `false` so the wire format stays compact.
     #[serde(default, skip_serializing_if = "is_false_local")]
     pub unsafe_op: bool,
+    /// When `true`, this read was emitted by SSR `serverData.*` (whose results
+    /// are serialized into the client-visible `__PYLON_DATA__` hydration blob),
+    /// NOT server-function `ctx.db.*`. Client-visible reads get the same
+    /// treatment as the entity/sync API: per-row read-policy filtering + the
+    /// `server_only`/`passwordHash` wire projection. `serverData.unsafe.*`
+    /// carries `unsafe_op` too and stays server-trust (raw, unfiltered).
+    ///
+    /// Default `false` — server-function `ctx.db` reads and old TS runtimes
+    /// keep the server-trust shape. Skipped on serialize when `false`.
+    #[serde(default, skip_serializing_if = "is_false_local")]
+    pub ssr_read: bool,
 }
 
 // Used via `skip_serializing_if = "is_false_local"` — serde

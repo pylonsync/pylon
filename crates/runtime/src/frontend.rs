@@ -122,6 +122,11 @@ pub struct FrontendConfig {
     /// `auth.roles` the main request handler resolves. None → SSR `roles`
     /// stays whatever the session carries (empty for plain sessions).
     pub orgs: Option<std::sync::Arc<pylon_auth::org::OrgStore>>,
+    /// Runtime handle — lets the SSR auth resolver run the SAME per-user
+    /// admin-lift (`auth.user.adminField` + `PYLON_ADMIN_EMAILS`) the main
+    /// HTTP handler applies, so SSR pages see the same `auth.is_admin`. None →
+    /// SSR `is_admin` reflects only what the session carries (never admin).
+    pub runtime: Option<std::sync::Arc<crate::Runtime>>,
 }
 
 impl std::fmt::Debug for FrontendConfig {
@@ -186,6 +191,7 @@ impl FrontendConfig {
             session_store: None,
             cookie_config: None,
             orgs: None,
+            runtime: None,
         }
     }
 
@@ -221,6 +227,14 @@ impl FrontendConfig {
     /// caller's active-org role (mirrors the main HTTP request handler).
     pub fn with_orgs(mut self, orgs: std::sync::Arc<pylon_auth::org::OrgStore>) -> Self {
         self.orgs = Some(orgs);
+        self
+    }
+
+    /// Attach the runtime so SSR auth resolution runs the same per-user
+    /// admin-lift (`crate::server::lift_admin`) the main HTTP handler applies —
+    /// keeping SSR `auth.is_admin` in parity with the API/sync paths.
+    pub fn with_runtime(mut self, runtime: std::sync::Arc<crate::Runtime>) -> Self {
+        self.runtime = Some(runtime);
         self
     }
 
@@ -714,10 +728,10 @@ pub fn try_handle(
 ) -> Result<(), Request> {
     // route.ts form/method handlers (#276): a non-GET request that matches a
     // discovered `kind:"route"` path is dispatched to its POST/PUT/PATCH/DELETE
-    // handler. CSRF is already enforced upstream — the CsrfPlugin gates every
-    // non-safe method on Origin/Referer before any handler runs — so a
-    // cross-site form forgery never reaches here. Everything else non-GET falls
-    // through to the API router (the early return below).
+    // handler. CSRF is enforced by the caller (`server.rs`) BEFORE `try_handle`
+    // runs — the Origin/Referer gate clears first, so a cross-site form forgery
+    // never reaches this dispatch. Everything else non-GET falls through to the
+    // API router (the early return below).
     if !matches!(request.method(), Method::Get | Method::Head)
         && !cfg.ssr_routes.is_empty()
         && cfg.fn_ops.is_some()
@@ -3435,10 +3449,20 @@ fn resolve_request_auth(
     };
     let token = cookies.get(&cookie_cfg.name);
     let mut ctx = store.resolve(token.map(|s| s.as_str()));
-    // Mirror the main HTTP request handler: fill `roles` from the caller's
-    // active-org membership so SSR pages gate on `auth.roles` the same way API
-    // routes do (e.g. an owner sees the invite UI). Without this, SSR `roles`
-    // is always empty — `SessionStore::resolve` only copies user_id + tenant.
+    // Mirror the main HTTP request handler EXACTLY, in the same order:
+    //
+    //   1. Per-user admin-lift (`auth.user.adminField` + `PYLON_ADMIN_EMAILS`).
+    //      Without this, `SessionStore::resolve` returns `is_admin:false` for
+    //      every user and SSR pages render as non-admin even for real admins —
+    //      diverging from the API/sync paths (which DO lift it).
+    //   2. Active-org role enrichment (`auth.roles`).
+    //
+    // Order matters: `enrich_active_org_role` early-returns when `is_admin`, so
+    // the admin-lift must run first (an admin who is also an org owner then
+    // carries `is_admin:true, roles:[]` — identical to the API path).
+    if let Some(rt) = cfg.runtime.as_ref() {
+        crate::server::lift_admin(rt, &mut ctx);
+    }
     if let Some(orgs) = cfg.orgs.as_ref() {
         pylon_auth::org::enrich_active_org_role(orgs, &mut ctx);
     }
@@ -4874,6 +4898,103 @@ mod tests {
         assert!(
             !pairs.iter().any(|(_, v)| v == "stolen=1" || v == "v"),
             "values of unsafe-named headers must not leak"
+        );
+    }
+
+    // --- SSR auth parity: `is_admin` must be resolved the same as the API path ---
+
+    fn user_field(name: &str, ty: &str) -> pylon_kernel::ManifestField {
+        pylon_kernel::ManifestField {
+            name: name.into(),
+            field_type: ty.into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }
+    }
+
+    /// In-memory runtime with a `User` entity whose `isAdmin` bool field is the
+    /// configured `adminField` (Path 1 of the admin-lift).
+    fn admin_field_runtime() -> std::sync::Arc<crate::Runtime> {
+        let mut manifest = pylon_kernel::AppManifest {
+            manifest_version: 1,
+            name: "ssr-admin-parity".into(),
+            version: "0.1.0".into(),
+            ..Default::default()
+        };
+        manifest.entities = vec![pylon_kernel::ManifestEntity {
+            name: "User".into(),
+            fields: vec![
+                user_field("isAdmin", "bool"),
+                user_field("email", "string"),
+                user_field("emailVerified", "bool"),
+            ],
+            indexes: vec![],
+            relations: vec![],
+            search: None,
+            crdt: false,
+            sync: false,
+        }];
+        manifest.auth.user.entity = "User".into();
+        manifest.auth.user.admin_field = Some("isAdmin".into());
+        std::sync::Arc::new(crate::Runtime::in_memory(manifest).unwrap())
+    }
+
+    /// Insert `user`, mint a session for it, and resolve SSR auth exactly as an
+    /// SSR render would — returning the resolved `is_admin`.
+    fn ssr_is_admin_for(runtime: std::sync::Arc<crate::Runtime>, user: serde_json::Value) -> bool {
+        let uid = runtime.insert("User", &user).unwrap();
+        let store = std::sync::Arc::new(pylon_auth::SessionStore::new());
+        let session = store.create(uid);
+        let cookie = std::sync::Arc::new(pylon_auth::CookieConfig {
+            name: "sid".into(),
+            domain: None,
+            secure: false,
+            same_site: pylon_auth::SameSite::Lax,
+            max_age_secs: 3600,
+            path: "/".into(),
+        });
+        let cfg = FrontendConfig::from_env(std::path::Path::new("."))
+            .with_session(store, cookie)
+            .with_runtime(runtime);
+        let mut cookies = std::collections::HashMap::new();
+        cookies.insert("sid".to_string(), session.token.clone());
+        resolve_request_auth(&cfg, &cookies).is_admin
+    }
+
+    #[test]
+    fn ssr_auth_lifts_is_admin_via_admin_field() {
+        // Regression: `resolve_request_auth` never applied the admin-lift, so
+        // SSR `is_admin` was ALWAYS false — diverging from the API/sync paths.
+        // A User row whose configured `adminField` is truthy must now resolve
+        // as admin on the SSR path too.
+        let rt = admin_field_runtime();
+        assert!(
+            ssr_is_admin_for(
+                rt,
+                serde_json::json!({"isAdmin": true, "email": "a@x.test", "emailVerified": true}),
+            ),
+            "SSR auth must lift is_admin for a User whose adminField is truthy"
+        );
+    }
+
+    #[test]
+    fn ssr_auth_non_admin_stays_non_admin() {
+        // Control: a plain User (adminField false, email unverified) must NOT
+        // be lifted — the parity fix must not over-grant. Robust against a
+        // polluted PYLON_ADMIN_EMAILS because the email is unverified.
+        let rt = admin_field_runtime();
+        assert!(
+            !ssr_is_admin_for(
+                rt,
+                serde_json::json!({"isAdmin": false, "email": "b@x.test", "emailVerified": false}),
+            ),
+            "SSR auth must NOT grant is_admin to a non-admin User"
         );
     }
 }
