@@ -14,6 +14,10 @@
       "types": "./dist/runtime.d.ts",
       "default": "./src/runtime.ts"
     },
+    "./server-only": {
+      "types": "./dist/server-only.d.ts",
+      "default": "./src/server-only.ts"
+    },
     "./client-bundler": {
       "types": "./dist/ssr-client-bundler.d.ts",
       "default": "./src/ssr-client-bundler.ts"

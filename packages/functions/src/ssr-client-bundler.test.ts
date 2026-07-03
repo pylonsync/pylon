@@ -24,6 +24,7 @@ import * as os from "node:os";
 import {
   buildClientBundle,
   buildTailwind,
+  assertNotServerOnly,
   type PylonBundleManifest,
 } from "./ssr-client-bundler";
 import { nearestBoundaryComponent } from "./ssr-client-boundary";
@@ -429,4 +430,61 @@ describe("Tailwind compile is concurrency-safe", () => {
     );
     expect(stranded).toEqual([]);
   }, 20_000);
+});
+
+describe("server-only guard (secrets can't leak into the client bundle)", () => {
+  test("assertNotServerOnly throws for server-only specifiers, passes others", () => {
+    expect(() =>
+      assertNotServerOnly("@pylonsync/functions/server-only", "app/page.tsx"),
+    ).toThrow(/server-only/i);
+    expect(() => assertNotServerOnly("server-only", "app/x/layout.tsx")).toThrow(
+      /server-only/i,
+    );
+    // The importer is named so the author can find the offending module.
+    expect(() => assertNotServerOnly("server-only", "app/secrets.ts")).toThrow(
+      /app\/secrets\.ts/,
+    );
+    // Ordinary imports pass untouched.
+    expect(() => assertNotServerOnly("react", "app/page.tsx")).not.toThrow();
+    expect(() => assertNotServerOnly("@/lib/utils", "app/page.tsx")).not.toThrow();
+  });
+
+  test("a real client build importing a server-only module FAILS via the guard", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pylon-server-only-"));
+    const entry = path.join(dir, "entry.ts");
+    fs.writeFileSync(entry, `import "server-only";\nexport const x = 1;\n`);
+    // Same plugin the bundler installs. `guardFired` proves the guard's
+    // onResolve ran for the marker (Bun runs plugin resolution BEFORE default
+    // resolution) — distinguishing a real guard rejection from an unrelated
+    // "module not found". Bun surfaces the plugin throw as a failed build.
+    let guardFired = false;
+    let failed = false;
+    try {
+      const result = await Bun.build({
+        entrypoints: [entry],
+        outdir: path.join(dir, "out"),
+        target: "browser",
+        plugins: [
+          {
+            name: "pylon-server-only",
+            setup(build: any) {
+              build.onResolve(
+                { filter: /^(@pylonsync\/functions\/server-only|server-only)$/ },
+                (args: any) => {
+                  guardFired = true;
+                  assertNotServerOnly(args.path, args.importer);
+                },
+              );
+            },
+          },
+        ],
+      } as any);
+      failed = !result.success;
+    } catch {
+      failed = true;
+    }
+    expect(guardFired).toBe(true);
+    expect(failed).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });

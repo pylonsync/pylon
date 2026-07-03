@@ -101,9 +101,45 @@ declare const Bun: {
         };
     publicPath?: string;
     root?: string;
+    plugins?: Array<{
+      name: string;
+      setup(build: {
+        onResolve(
+          opts: { filter: RegExp; namespace?: string },
+          callback: (args: { path: string; importer: string }) => void,
+        ): void;
+      }): void;
+    }>;
   }): Promise<BunBuildOutput>;
   file(path: string): { exists(): Promise<boolean> };
 };
+
+/**
+ * Specifiers marking a module as SERVER-ONLY: `@pylonsync/functions/server-only`
+ * (in-ecosystem) or the bare `server-only` (Next.js compat). A module that
+ * imports one must never reach the browser.
+ */
+const SERVER_ONLY_RE = /^(@pylonsync\/functions\/server-only|server-only)$/;
+
+/**
+ * Fail the CLIENT bundle when a `server-only` module is resolved — meaning it
+ * was pulled into a page/layout's client graph. Page/layout modules (and their
+ * transitive imports) are bundled for hydration, so a literal secret or server
+ * config in that graph would ship to the browser (the `process.env.*` `define`
+ * only neutralizes env reads). Authors mark such modules with
+ * `import "@pylonsync/functions/server-only"`; this turns an accidental client
+ * import into a loud build failure that names the offending importer.
+ */
+export function assertNotServerOnly(specifier: string, importer: string): void {
+  if (SERVER_ONLY_RE.test(specifier)) {
+    throw new Error(
+      `pylon: "${specifier}" is server-only but was imported into the client bundle by ` +
+        `${importer || "a page/layout module"}. Page/layout modules (and everything they import) ship to ` +
+        `the browser — move server-only code (secrets, server config, node-only APIs) into a server function ` +
+        `(functions/) or a route.ts handler and pass only the rendered values as props.`,
+    );
+  }
+}
 
 /**
  * Synchronously walk the route dir (`<appDirRel>` under cwd, e.g.
@@ -1240,6 +1276,19 @@ async function _doBuildInner(
         chunk: "chunks/[name]-[hash].js",
         asset: "assets/[name]-[hash][ext]",
       },
+      // Refuse to bundle a server-only module into a client-reachable page —
+      // secrets / server config in a page's import graph would otherwise ship
+      // to the browser.
+      plugins: [
+        {
+          name: "pylon-server-only",
+          setup(build) {
+            build.onResolve({ filter: SERVER_ONLY_RE }, (args) => {
+              assertNotServerOnly(args.path, args.importer);
+            });
+          },
+        },
+      ],
     });
 
     if (!result.success) {
