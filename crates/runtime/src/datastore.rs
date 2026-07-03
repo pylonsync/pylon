@@ -5949,6 +5949,14 @@ fn default_wedge_probe_secs(call_timeout_secs: u64, strikes: u32) -> u64 {
     per_strike.max(FLOOR_SECS)
 }
 
+/// Silence (seconds) a runner must accumulate before strike `prior_strikes+1`
+/// lands. `health_probe` measures silence-since-last-message, not
+/// silence-since-last-probe, so the demanded window has to grow with each
+/// strike for "N strikes" to mean N full probe-windows of silence.
+fn wedge_strike_window_secs(probe_secs: u64, prior_strikes: u32) -> u64 {
+    probe_secs.saturating_mul(prior_strikes as u64 + 1)
+}
+
 fn spawn_runner_supervisor(
     ops: Arc<FnOpsImpl>,
     runner: Arc<FnRunner>,
@@ -6024,11 +6032,18 @@ fn spawn_runner_supervisor(
                 let probe_secs = explicit_probe_secs
                     .unwrap_or(0)
                     .max(default_wedge_probe_secs(effective_timeout, wedge_strikes));
-                let probe = Duration::from_secs(probe_secs);
-                // Alive — but is it WEDGED? Probe the io_lock. A free lock means
-                // the runtime is processing; a held-for->probe lock means a call
-                // is stuck.
-                if runner.health_probe(probe).is_ok() {
+                // Alive — but is it WEDGED? Probe the io_lock. `health_probe`
+                // measures ACCUMULATED silence since the last runtime message,
+                // so each successive strike must demand a proportionally
+                // longer window — strike n fires only after n probe-windows of
+                // total silence. A flat window would let strikes 2..N fire on
+                // consecutive 2s loop ticks, killing at ~probe+4s and
+                // pre-empting a call still inside its own deadline (the
+                // guarantee the probe sizing exists to provide is
+                // probe_secs * strikes total before a kill).
+                let window =
+                    Duration::from_secs(wedge_strike_window_secs(probe_secs, strikes));
+                if runner.health_probe(window).is_ok() {
                     strikes = 0;
                     backoff = Duration::from_secs(1);
                     continue;
@@ -6148,6 +6163,26 @@ mod wedge_probe_tests {
         // merely-busy (sub-second) runtime isn't respawned needlessly.
         assert!(default_wedge_probe_secs(1, 3) >= 8);
         assert!(default_wedge_probe_secs(0, 8) >= 8);
+    }
+
+    #[test]
+    fn strike_windows_scale_so_the_kill_needs_full_probe_times_strikes() {
+        // health_probe measures ACCUMULATED silence, so with a flat window
+        // strikes 2..N land on consecutive 2s supervisor ticks and the kill
+        // fires at ~probe+4s — inside a legitimate call's own 30s budget
+        // (observed as a cold container's SSR bundle warm being force-killed
+        // in a respawn loop). The final strike must demand the full
+        // probe*strikes of silence.
+        let strikes = 3u32;
+        let probe = default_wedge_probe_secs(30, strikes);
+        let kill_at = super::wedge_strike_window_secs(probe, strikes - 1);
+        assert_eq!(kill_at, probe * strikes as u64);
+        assert!(
+            kill_at > 30,
+            "kill threshold must clear the 30s call timeout"
+        );
+        // First strike still fires after a single probe window.
+        assert_eq!(super::wedge_strike_window_secs(probe, 0), probe);
     }
 }
 
