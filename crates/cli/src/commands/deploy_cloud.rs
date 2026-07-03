@@ -197,7 +197,115 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             crate::cloud_client::dashboard_url(),
         );
     }
+
+    // `--verify`: don't stop at "queued" — wait for THIS deployment to
+    // flip live (the old build keeps serving during the bake, so
+    // verifying immediately would pass against stale code), then walk
+    // the live URL with the same checks as `pylon verify --url`.
+    if args.iter().any(|a| a == "--verify") {
+        let Some(url) = resp.url.as_deref() else {
+            output::print_error("--verify: the cloud response carried no URL to verify");
+            return ExitCode::Error;
+        };
+        match wait_for_flip(&creds, &project_slug, &resp.deployment_id, json_mode) {
+            Ok(()) => {}
+            Err(e) => {
+                output::print_error(&e);
+                return ExitCode::Error;
+            }
+        }
+        let route_paths: Vec<String> = match crate::manifest::load_manifest("pylon.manifest.json") {
+            Ok(m) => m.routes.iter().map(|r| r.path.clone()).collect(),
+            // No local manifest (rare — deploy just validated one, but
+            // tolerate): verify the root route only.
+            Err(_) => vec!["/".to_string()],
+        };
+        let report = crate::commands::verify::verify_target(url, &route_paths);
+        crate::commands::verify::print_report(&report, json_mode);
+        if report.failed() {
+            return ExitCode::Error;
+        }
+    }
     ExitCode::Ok
+}
+
+/// Poll the deployments list until `deployment_id` reaches a terminal
+/// status. "live" returns Ok; failed/error/canceled return Err. The
+/// build path (workspace tarballs especially) legitimately takes many
+/// minutes, so the ceiling is generous; progress prints every poll so
+/// an agent tailing this knows it isn't hung.
+fn wait_for_flip(
+    creds: &crate::cloud_client::Credentials,
+    project_slug: &str,
+    deployment_id: &str,
+    json_mode: bool,
+) -> Result<(), String> {
+    #[derive(Serialize)]
+    struct SlugArgs<'a> {
+        slug: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct ProjectIdResponse {
+        id: String,
+    }
+    #[derive(Serialize)]
+    struct ListArgs<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+        limit: u32,
+    }
+    #[derive(Deserialize)]
+    struct DeploymentRow {
+        id: String,
+        status: String,
+    }
+
+    let project: ProjectIdResponse = post_json(
+        creds,
+        "/api/fn/getProjectForCli",
+        &SlugArgs { slug: project_slug },
+    )
+    .map_err(|e| format!("--verify: could not resolve project id: {e}"))?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
+    let mut last_status = String::new();
+    loop {
+        let rows: Vec<DeploymentRow> = post_json(
+            creds,
+            "/api/fn/listDeployments",
+            &ListArgs {
+                project_id: &project.id,
+                limit: 20,
+            },
+        )
+        .map_err(|e| format!("--verify: could not poll deployments: {e}"))?;
+        let status = rows
+            .iter()
+            .find(|d| d.id == deployment_id)
+            .map(|d| d.status.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        if status != last_status {
+            if !json_mode {
+                println!("  build status: {status}");
+            }
+            last_status = status.clone();
+        }
+        match status.as_str() {
+            "live" => return Ok(()),
+            "failed" | "error" | "canceled" => {
+                return Err(format!(
+                    "deployment {deployment_id} ended {status} — see: pylon deployments logs"
+                ));
+            }
+            _ => {}
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!(
+                "--verify: deployment {deployment_id} still {status} after 15m — check: pylon deployments logs"
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
 }
 
 // ---------------------------------------------------------------------------

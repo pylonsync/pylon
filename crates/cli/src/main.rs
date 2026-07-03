@@ -104,6 +104,7 @@ fn run() -> ExitCode {
         Some("link") => commands::link::run(&args, json_mode),
         Some("lint") => commands::lint::run(&args, json_mode),
         Some("policy") => commands::policy_test::run(&args, json_mode),
+        Some("verify") => commands::verify::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
         Some("db") => commands::cloud_db::run(&args, json_mode),
         Some("deployments") => commands::cloud_deployments::run(&args, json_mode),
@@ -173,7 +174,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 36] = [
+const TOP_LEVEL_COMMANDS: [&str; 37] = [
     "backup",
     "build",
     "cache",
@@ -193,6 +194,7 @@ const TOP_LEVEL_COMMANDS: [&str; 36] = [
     "link",
     "lint",
     "policy",
+    "verify",
     "login",
     "logout",
     "logs",
@@ -383,7 +385,8 @@ fn print_usage() {
     println!("  env                       Show environment variable reference");
     println!(
         "  explain <code>            Explain an error code
-  policy test <expr>        Dry-run a policy expression (--auth k=v --row json)"
+  policy test <expr>        Dry-run a policy expression (--auth k=v --row json)
+  verify [--url <base>]     Boot (or target) the app and verify routes + assets serve"
     );
     println!("  version                   Show version");
     println!();
