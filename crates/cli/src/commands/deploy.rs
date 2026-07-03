@@ -63,8 +63,12 @@ FROM ghcr.io/pylonsync/pylon:{version}
 
 WORKDIR /app
 # Dependencies first so Docker caches the install layer across code changes.
+# The base image pre-seeds /app/node_modules/@pylonsync/* symlinks into
+# /pylon for the bare mount-an-app.ts flow; for a baked app they must go —
+# they'd shadow the npm packages bun installs, and page imports would
+# resolve into /pylon where the app's deps (react, ...) don't exist.
 COPY --chown=pylon:pylon package.json bun.lock* package-lock.json* ./
-RUN bun install
+RUN find node_modules -maxdepth 2 -type l -delete 2>/dev/null; bun install
 COPY --chown=pylon:pylon . .
 
 # The base image defaults to PYLON_DEV_MODE=true so the container boots
@@ -654,6 +658,10 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         )));
         assert!(df.contains("bun install"));
+        // The base image pre-seeds /app/node_modules/@pylonsync/* symlinks
+        // into /pylon; left in place they shadow the npm packages and page
+        // imports fail with "Cannot find package 'react'".
+        assert!(df.contains("find node_modules -maxdepth 2 -type l -delete"));
         assert!(df.contains(GENERATED_MARKER));
         // Regression: the old generator cargo-built the user's TS app
         // (impossible) and ran `pylon dev --once`, which validates and
