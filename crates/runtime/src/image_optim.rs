@@ -33,12 +33,15 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 use tiny_http::{Header, Request, Response};
 
-/// Allowed output formats. We deliberately exclude AVIF — see the
-/// Cargo.toml comment for the dep cost trade-off. SVG is excluded
-/// at the format level: never accepted as output, never accepted as
-/// input either (parseable image-bomb / script vector).
+/// Allowed output formats. AVIF encodes are 5-20x slower than WebP,
+/// but the on-disk transform cache means each variant encodes once
+/// ever — the ~35-45% wire savings on photographic content dominate.
+/// SVG is excluded at the format level: never accepted as output,
+/// never accepted as input either (parseable image-bomb / script
+/// vector).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutFormat {
+    Avif,
     Webp,
     Jpeg,
     Png,
@@ -56,7 +59,7 @@ enum OutFormat {
 /// | `PYLON_IMAGE_DEVICE_SIZES` | `640,750,828,1080,1200,1920,2048,3840` | Widths allowed for full-bleed images. Used for `srcset`. |
 /// | `PYLON_IMAGE_IMAGE_SIZES` | `16,32,48,64,96,128,256,384` | Widths allowed for thumbnails / icons. Unioned with device sizes. |
 /// | `PYLON_IMAGE_QUALITIES` | `50,75,90` | Quality values allowed. |
-/// | `PYLON_IMAGE_FORMATS` | `webp,jpeg` | Output formats allowed. |
+/// | `PYLON_IMAGE_FORMATS` | `avif,webp,jpeg` | Output formats allowed. |
 /// | `PYLON_IMAGE_MAX_BYTES` | `26214400` (25MB) | Source byte cap. |
 /// | `PYLON_IMAGE_MAX_PIXELS` | `40000000` (40M) | Decoded pixel cap (bounds decode memory). Prevents image bombs. |
 /// | `PYLON_IMAGE_FETCH_TIMEOUT_MS` | `15000` | Remote-source fetch timeout. |
@@ -170,7 +173,7 @@ impl ImageConfig {
         });
         let allowed_formats = parse_csv(
             "PYLON_IMAGE_FORMATS",
-            vec![OutFormat::Webp, OutFormat::Jpeg],
+            vec![OutFormat::Avif, OutFormat::Webp, OutFormat::Jpeg],
             OutFormat::from_str,
         );
 
@@ -217,6 +220,7 @@ fn config() -> &'static ImageConfig {
 impl OutFormat {
     fn extension(self) -> &'static str {
         match self {
+            OutFormat::Avif => "avif",
             OutFormat::Webp => "webp",
             OutFormat::Jpeg => "jpg",
             OutFormat::Png => "png",
@@ -224,6 +228,7 @@ impl OutFormat {
     }
     fn mime(self) -> &'static str {
         match self {
+            OutFormat::Avif => "image/avif",
             OutFormat::Webp => "image/webp",
             OutFormat::Jpeg => "image/jpeg",
             OutFormat::Png => "image/png",
@@ -231,6 +236,7 @@ impl OutFormat {
     }
     fn from_str(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
+            "avif" => Some(OutFormat::Avif),
             "webp" => Some(OutFormat::Webp),
             "jpeg" | "jpg" => Some(OutFormat::Jpeg),
             "png" => Some(OutFormat::Png),
@@ -684,6 +690,23 @@ fn process(
                 .map_err(|e| format!("png encode failed: {e}"))?;
             Ok(out)
         }
+        OutFormat::Avif => {
+            // ravif (rav1e) — quality maps 1..=100 like the others;
+            // speed 8 keeps cold encodes in the hundreds of ms and the
+            // transform cache makes every later hit free. RGBA input;
+            // AVIF carries alpha natively.
+            let rgba = resized.to_rgba8();
+            let (w, h) = (resized.width() as usize, resized.height() as usize);
+            let pixels: &[ravif::RGBA8] = bytemuck_cast_rgba(rgba.as_raw());
+            let img = ravif::Img::new(pixels, w, h);
+            let res = ravif::Encoder::new()
+                .with_quality(quality as f32)
+                .with_alpha_quality(quality as f32)
+                .with_speed(8)
+                .encode_rgba(img)
+                .map_err(|e| format!("avif encode failed: {e}"))?;
+            Ok(res.avif_file)
+        }
         OutFormat::Webp => {
             // libwebp lossy encoder — quality 0..=100 (we clamp at
             // the parse step). RGBA8 input; libwebp handles alpha.
@@ -694,6 +717,16 @@ fn process(
             Ok(mem.to_vec())
         }
     }
+}
+
+/// Reinterpret packed RGBA bytes as ravif's RGBA8 pixel slice. Length
+/// is a multiple of 4 by construction (the buffer comes from
+/// `to_rgba8()`); the types are layout-identical (4 consecutive u8s).
+fn bytemuck_cast_rgba(bytes: &[u8]) -> &[ravif::RGBA8] {
+    // SAFETY: RGBA8 is #[repr(C)] { r,g,b,a: u8 } — same size (4),
+    // align (1), and meaning as the packed byte quadruplets in an
+    // image::RgbaImage raw buffer.
+    unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const ravif::RGBA8, bytes.len() / 4) }
 }
 
 /// Flatten an image with alpha onto a white background, returning
@@ -730,6 +763,12 @@ fn default_format(headers: &[Header], cfg: &ImageConfig) -> OutFormat {
         .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case("accept"))
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_default();
+    // Prefer AVIF when the browser EXPLICITLY accepts it (never on an
+    // empty Accept — unknown clients get the universally-supported
+    // WebP), then WebP.
+    if accept.contains("image/avif") && cfg.allowed_formats.contains(&OutFormat::Avif) {
+        return OutFormat::Avif;
+    }
     // Prefer WebP when the browser accepts it AND it's allowed.
     if (accept.contains("image/webp") || accept.is_empty())
         && cfg.allowed_formats.contains(&OutFormat::Webp)
@@ -823,6 +862,15 @@ pub fn serve(request: Request, cache_root: &Path, frontend_dir: Option<&Path>, c
         .with_header(
             Header::from_bytes("Cache-Control", "public, max-age=31536000, immutable").unwrap(),
         )
+        // The output format is negotiated from Accept when the URL
+        // doesn't pin one — any shared cache MUST key on it or Safari
+        // gets the AVIF a Chrome visitor warmed. CDNs that support
+        // CDN-Cache-Control (Cloudflare et al.) get an explicit edge
+        // TTL so transforms are edge-cacheable without a manual rule.
+        .with_header(Header::from_bytes("Vary", "Accept").unwrap())
+        .with_header(
+            Header::from_bytes("CDN-Cache-Control", "public, max-age=31536000, immutable").unwrap(),
+        )
         .with_header(
             Header::from_bytes(
                 "Access-Control-Allow-Origin",
@@ -847,6 +895,64 @@ use std::io::Read;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_cfg() -> ImageConfig {
+        ImageConfig::from_env()
+    }
+
+    fn accept_header(v: &str) -> Vec<Header> {
+        vec![Header::from_bytes("Accept", v).unwrap()]
+    }
+
+    #[test]
+    fn avif_negotiated_only_on_explicit_accept() {
+        let cfg = test_cfg();
+        // Explicit AVIF accept → AVIF.
+        assert_eq!(
+            default_format(&accept_header("image/avif,image/webp,*/*"), &cfg),
+            OutFormat::Avif
+        );
+        // WebP-only accept → WebP.
+        assert_eq!(
+            default_format(&accept_header("image/webp,*/*"), &cfg),
+            OutFormat::Webp
+        );
+        // Empty/unknown Accept must NEVER get AVIF (support isn't
+        // universal) — WebP is the safe default.
+        assert_eq!(default_format(&[], &cfg), OutFormat::Webp);
+    }
+
+    #[test]
+    fn avif_encodes_and_beats_jpeg_size() {
+        // A gradient photo-ish 256px test image.
+        let mut img = image::RgbaImage::new(256, 192);
+        for (x, y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([(x % 256) as u8, (y % 192) as u8, ((x + y) % 256) as u8, 255]);
+        }
+        let mut png = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let cfg = test_cfg();
+        let avif = process(&png, 128, 75, OutFormat::Avif, &cfg).unwrap();
+        let jpeg = process(&png, 128, 75, OutFormat::Jpeg, &cfg).unwrap();
+        // Valid AVIF file signature: ISO BMFF 'ftyp' box with 'avif' brand.
+        assert_eq!(&avif[4..8], b"ftyp", "not an ISO-BMFF container");
+        assert!(
+            avif.windows(4).take(32).any(|w| w == b"avif"),
+            "ftyp carries no avif brand"
+        );
+        assert!(!jpeg.is_empty());
+    }
+
+    #[test]
+    fn rgba_cast_is_layout_faithful() {
+        let bytes = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let px = bytemuck_cast_rgba(&bytes);
+        assert_eq!(px.len(), 2);
+        assert_eq!((px[0].r, px[0].g, px[0].b, px[0].a), (1, 2, 3, 4));
+        assert_eq!((px[1].r, px[1].g, px[1].b, px[1].a), (5, 6, 7, 8));
+    }
 
     #[test]
     fn extract_host_path_strips_userinfo_and_port() {
