@@ -73,3 +73,20 @@ export function identityFor(userId: string): { name: string; color: string } {
     color: COLORS[h % COLORS.length],
   };
 }
+
+/**
+ * Presence identity is PER-TAB, not per-user: two windows of the same
+ * guest are the canonical demo motion, and `useRoom` filters peers by
+ * user_id — with a shared identity the second window would see no
+ * avatar and no cursor. sessionStorage is per-tab, so each window gets
+ * a stable id (and thereby its own name + color) that survives reloads.
+ */
+export function tabIdentity(userId: string): string {
+  const KEY = "pad-tab-id";
+  let suffix = window.sessionStorage.getItem(KEY);
+  if (!suffix) {
+    suffix = Math.random().toString(36).slice(2, 8);
+    window.sessionStorage.setItem(KEY, suffix);
+  }
+  return `${userId || "anon"}#${suffix}`;
+}
