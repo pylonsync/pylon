@@ -34,5 +34,6 @@ pub mod seed;
 pub mod start;
 pub mod test;
 pub mod test_security;
+pub mod update;
 pub mod verify;
 pub mod version;

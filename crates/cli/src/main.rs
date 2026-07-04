@@ -105,6 +105,7 @@ fn run() -> ExitCode {
         Some("lint") => commands::lint::run(&args, json_mode),
         Some("mcp") => commands::mcp::run(&args, json_mode),
         Some("policy") => commands::policy_test::run(&args, json_mode),
+        Some("update") => commands::update::run(&args, json_mode),
         Some("verify") => commands::verify::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
         Some("db") => commands::cloud_db::run(&args, json_mode),
@@ -175,7 +176,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 38] = [
+const TOP_LEVEL_COMMANDS: [&str; 39] = [
     "backup",
     "build",
     "cache",
@@ -196,6 +197,7 @@ const TOP_LEVEL_COMMANDS: [&str; 38] = [
     "lint",
     "mcp",
     "policy",
+    "update",
     "verify",
     "login",
     "logout",
@@ -389,6 +391,7 @@ fn print_usage() {
         "  explain <code>            Explain an error code
   mcp [--url <base>]        Serve this app to agents over MCP (stdio)
   policy test <expr>        Dry-run a policy expression (--auth k=v --row json)
+  update [--dry-run]        Bump every @pylonsync/* dependency to the latest release
   verify [--url <base>]     Boot (or target) the app and verify routes + assets serve"
     );
     println!("  version                   Show version");

@@ -598,6 +598,21 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 
 **Project creation** still lives in the dashboard — provisioning a Fly machine + Postgres DB isn't a one-call CLI operation yet. After signup, point the user at `www.pylonsync.com/dashboard` to create the first project; then `pylon projects use <slug>` from the local repo and everything else flows through the CLI.
 
+### Multi-machine (horizontal scaling)
+
+One machine is the recommended shape (a single process serves thousands of rps with a CDN in front) — scale up first. When you do need more than one machine (pylon ≥ 0.3.315):
+
+```bash
+DATABASE_URL=postgres://…          # shared store: entities, sessions, sync log
+PYLON_CLUSTER_BUS=redis://…        # realtime fanout between machines
+```
+
+With both set, the cross-machine story is tested end to end (tools/smoke-cluster.sh in the pylon repo): reads/writes and the sync cursor are shared through Postgres; WS/SSE change events, presence, and CRDT frames relay through Redis; boot-time DDL is serialized across machines (a joining machine waits, then no-ops); and cron fires exactly once cluster-wide (advisory-lock leader). SQLite mode is single-machine by definition.
+
+Known per-machine semantics (documented, not bugs): rate-limit counters are per machine (N machines ≈ N× the configured limit — set PYLON_RATE_LIMIT_MAX accordingly), and the SSR output cache is per machine (put a CDN in front).
+
+Keeping a project current: `pylon update` bumps every @pylonsync/* dependency (workspace members included, `workspace:*` pins untouched) to the latest release and reinstalls — then `pylon verify`.
+
 ## Gotchas & rules
 
 - **Type names** — schema (`field.*`) and validator (`v.*`) both accept two naming conventions so you don't have to remember which camp a given API belongs to:
