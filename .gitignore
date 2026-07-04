@@ -98,3 +98,4 @@ packages/cli-darwin-x64/bin/
 packages/cli-linux-arm64/bin/
 packages/cli-linux-x64/bin/
 .gstack/
+dump.rdb
