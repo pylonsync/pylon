@@ -13,6 +13,7 @@ use serde::Serialize;
 
 use crate::cron::CronExpr;
 use crate::jobs::{JobHandler, JobQueue};
+use crate::leader::{AlwaysLeader, Leadership};
 
 // ---------------------------------------------------------------------------
 // Scheduled task
@@ -50,14 +51,24 @@ pub struct Scheduler {
     tasks: Mutex<Vec<ScheduledTask>>,
     job_queue: Arc<JobQueue>,
     running: AtomicBool,
+    /// Cross-machine singleton gate for the cron tick. Single-machine
+    /// deploys use [`AlwaysLeader`]; multi-machine Postgres deploys use
+    /// the advisory-lock leader so each cron match enqueues ONCE
+    /// cluster-wide, not once per machine.
+    leadership: Arc<dyn Leadership>,
 }
 
 impl Scheduler {
     pub fn new(job_queue: Arc<JobQueue>) -> Self {
+        Self::with_leadership(job_queue, Arc::new(AlwaysLeader))
+    }
+
+    pub fn with_leadership(job_queue: Arc<JobQueue>, leadership: Arc<dyn Leadership>) -> Self {
         Self {
             tasks: Mutex::new(Vec::new()),
             job_queue,
             running: AtomicBool::new(true),
+            leadership,
         }
     }
 
@@ -116,6 +127,16 @@ impl Scheduler {
 
     /// Internal tick with an explicit timestamp (for testability).
     fn tick_at(&self, now: u64) {
+        // Followers keep their task list warm but never enqueue — cron
+        // fires exactly once cluster-wide, on the leader. last_run is
+        // deliberately NOT advanced on followers: a machine promoted
+        // mid-minute may enqueue a task the old leader already fired
+        // that minute (at-least-once during failover) — acceptable for
+        // cron; the failure mode we refuse is N-times-per-minute
+        // steady-state duplication.
+        if !self.leadership.is_leader() {
+            return;
+        }
         let current_minute = now / 60;
 
         let mut tasks = self.tasks.lock().unwrap();

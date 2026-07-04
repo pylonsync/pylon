@@ -16,6 +16,7 @@ pub mod image_optim;
 pub mod ip_limit;
 pub mod job_store;
 pub mod jobs;
+pub mod leader;
 pub mod llm;
 pub mod log;
 pub mod log_ring;

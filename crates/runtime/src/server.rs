@@ -1662,7 +1662,26 @@ fn start_server(
         }
     }
 
-    let scheduler = Arc::new(Scheduler::new(Arc::clone(&job_queue)));
+    // Cron leadership: multi-machine Postgres deploys elect ONE cron
+    // firer via an advisory lock; SQLite is single-machine by
+    // definition and skips the machinery entirely.
+    let scheduler_leadership: Arc<dyn crate::leader::Leadership> =
+        match std::env::var("DATABASE_URL")
+            .ok()
+            .filter(|u| u.starts_with("postgres://") || u.starts_with("postgresql://"))
+        {
+            Some(url) => {
+                tracing::info!(
+                    "[scheduler] postgres mode — contending for cluster cron leadership"
+                );
+                Arc::new(crate::leader::PgAdvisoryLeader::spawn(&url))
+            }
+            None => Arc::new(crate::leader::AlwaysLeader),
+        };
+    let scheduler = Arc::new(Scheduler::with_leadership(
+        Arc::clone(&job_queue),
+        scheduler_leadership,
+    ));
     // Schedule built-in cleanup tasks. Pass the REAL handler to `schedule()`,
     // which registers it with the job queue itself — a separate
     // `job_queue.register(name, real)` BEFORE the schedule call is silently
