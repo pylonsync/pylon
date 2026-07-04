@@ -1289,6 +1289,24 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
         if entity == self.auth_user.entity {
             return;
         }
+        // Cross-machine: ship the raw snapshot bytes BEFORE the local
+        // subscriber check — a peer machine's subscribers are invisible
+        // from here, so gating the publish on LOCAL subscribers made
+        // cross-machine CRDT relay work only when the writing machine
+        // happened to also have a local subscriber (caught by
+        // tools/smoke-cluster.sh: writer on A, only subscriber on B,
+        // frame never left A). The receiving machine's bus subscriber
+        // re-runs the same subscription filter + policy gate as the
+        // local fanout below; User frames never reach this line (guard
+        // above), so they still never cross machines.
+        if self.cluster_bus.is_active() {
+            self.cluster_bus.publish(&pylon_cluster::Envelope::crdt(
+                self.cluster_bus.instance_id(),
+                entity,
+                row_id,
+                snapshot,
+            ));
+        }
         let subscribers = self.ws.subscriptions().subscribers(entity, row_id);
         if subscribers.is_empty() {
             return;
@@ -1328,21 +1346,6 @@ impl pylon_router::ChangeNotifier for WsSseNotifier {
                 // legacy subscribe-time-only auth.
                 self.ws.broadcast_binary_to(&subscribers, frame);
             }
-        }
-        // Cross-machine: ship the raw snapshot bytes. The receiving
-        // machine's bus subscriber re-runs the same subscription
-        // filter + per-tenant policy gate as the local fanout above,
-        // so a User-entity CRDT frame (already short-circuited locally
-        // by the early return) never crosses machines — by virtue of
-        // never reaching this line for `User`. Skip the base64 encode +
-        // envelope build when no peer can receive it (single-machine bus).
-        if self.cluster_bus.is_active() {
-            self.cluster_bus.publish(&pylon_cluster::Envelope::crdt(
-                self.cluster_bus.instance_id(),
-                entity,
-                row_id,
-                snapshot,
-            ));
         }
     }
 
@@ -6593,6 +6596,93 @@ mod hook_enforcing_tests {
             0,
             "rejected transact must not reach the inner store"
         );
+    }
+}
+
+#[cfg(test)]
+mod cluster_crdt_relay_tests {
+    //! Regression: cross-machine CRDT relay must not depend on the
+    //! WRITING machine having local subscribers. notify_crdt used to
+    //! early-return on `subscribers.is_empty()` BEFORE the cluster
+    //! publish, so with the only subscriber on a peer machine the
+    //! frame never left the writer (caught by tools/smoke-cluster.sh:
+    //! writer on A, subscriber on B, relay silently dead).
+    use super::*;
+    use pylon_router::ChangeNotifier;
+    use std::sync::Mutex;
+
+    struct CapturingBus {
+        published: Mutex<Vec<pylon_cluster::Envelope>>,
+    }
+    impl pylon_cluster::ClusterBus for CapturingBus {
+        fn publish(&self, envelope: &pylon_cluster::Envelope) {
+            self.published.lock().unwrap().push(envelope.clone());
+        }
+        fn subscribe(&self, _handler: pylon_cluster::SubscriberHandler) {}
+        fn instance_id(&self) -> &str {
+            "test-instance"
+        }
+        fn is_active(&self) -> bool {
+            true
+        }
+    }
+
+    fn test_hubs() -> (
+        Arc<WsHub>,
+        Arc<SseHub>,
+        pylon_kernel::ManifestAuthUserConfig,
+    ) {
+        let m = pylon_kernel::AppManifest::default();
+        let auth_user = m.auth.user.clone();
+        let pe = Arc::new(pylon_policy::PolicyEngine::from_manifest(&m));
+        let m = Arc::new(m);
+        let ws = WsHub::new(Arc::clone(&pe), Arc::clone(&m), auth_user.clone());
+        let sse = SseHub::new(pe, m, auth_user.clone());
+        (ws, sse, auth_user)
+    }
+
+    #[test]
+    fn crdt_publishes_to_bus_with_zero_local_subscribers() {
+        let bus = Arc::new(CapturingBus {
+            published: Mutex::new(Vec::new()),
+        });
+        let (ws, sse, auth_user) = test_hubs();
+        let notifier = WsSseNotifier::with_cluster_bus(
+            ws,
+            sse,
+            auth_user,
+            bus.clone() as Arc<dyn pylon_cluster::ClusterBus>,
+        );
+        // Nobody subscribed locally — the frame must STILL reach the bus.
+        notifier.notify_crdt("Doc", "row-1", b"snapshot-bytes", None, 7);
+        let published = bus.published.lock().unwrap();
+        assert_eq!(
+            published.len(),
+            1,
+            "cluster publish must not be gated on local subscribers"
+        );
+        let crdt = published[0].as_crdt().expect("crdt envelope");
+        assert_eq!(crdt.entity, "Doc");
+        assert_eq!(crdt.row_id, "row-1");
+        assert_eq!(crdt.snapshot, b"snapshot-bytes");
+    }
+
+    #[test]
+    fn user_entity_crdt_never_reaches_the_bus() {
+        let bus = Arc::new(CapturingBus {
+            published: Mutex::new(Vec::new()),
+        });
+        let (ws, sse, auth_user) = test_hubs();
+        let notifier = WsSseNotifier::with_cluster_bus(
+            ws,
+            sse,
+            auth_user,
+            bus.clone() as Arc<dyn pylon_cluster::ClusterBus>,
+        );
+        // The credential-bearing User doc must stay machine-local even
+        // with the publish hoisted above the subscriber gate.
+        notifier.notify_crdt("User", "u-1", b"secret-doc", None, 7);
+        assert!(bus.published.lock().unwrap().is_empty());
     }
 }
 

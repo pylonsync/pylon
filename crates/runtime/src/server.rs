@@ -2256,6 +2256,11 @@ fn start_server(
         });
     }
 
+    // Every backend that bootstraps tables has run by now — release the
+    // cluster boot-DDL lock so a peer machine's boot can proceed.
+    // No-op on SQLite (never acquired).
+    crate::pg_boot_guard::release();
+
     tracing::warn!("pylon dev server listening on http://localhost:{port}");
     tracing::info!("  WebSocket: ws://localhost:{ws_port}");
     tracing::info!("  Studio: http://localhost:{port}/studio");

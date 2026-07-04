@@ -26,6 +26,7 @@ pub mod metrics;
 pub mod oauth_backend;
 pub mod openapi;
 pub mod org_sso_backend;
+pub mod pg_boot_guard;
 pub mod pg_loro_store;
 pub mod presence;
 pub mod pubsub;
@@ -740,13 +741,17 @@ impl Runtime {
         // against the runtime's own manifest — so this only bites Postgres.)
         ensure_connection_entity(&mut manifest);
         ensure_cron_lease_entity(&mut manifest);
+        // Serialize this machine's boot DDL against peers sharing the
+        // database (see pg_boot_guard) — released by start_server once
+        // every backend has bootstrapped its tables.
+        crate::pg_boot_guard::acquire(url).map_err(|e| RuntimeError {
+            code: "BOOT_DDL_GUARD_FAILED".into(),
+            message: e,
+        })?;
         let store = pylon_storage::pg_datastore::PostgresDataStore::connect(url, manifest.clone())
             .map_err(data_err_to_runtime)?;
-        // Bootstrap the CRDT sidecar table on every open. Idempotent
-        // (`CREATE TABLE IF NOT EXISTS`); same shape as the SQLite
-        // path's `ensure_sidecar` call. Without this, the first
-        // CRDT-mode write would error because `_pylon_crdt_snapshots`
-        // doesn't exist yet on a fresh PG database.
+        // Bootstrap the CRDT sidecar table on every open. Idempotent,
+        // and race-free under the boot-DDL guard acquired above.
         store
             .with_client(|c| crate::pg_loro_store::ensure_sidecar(c))
             .map_err(|e| RuntimeError {
