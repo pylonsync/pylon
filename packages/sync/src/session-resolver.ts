@@ -50,6 +50,7 @@ const EMPTY_SESSION: ResolvedSession = {
 
 export class SessionResolver {
   private _resolved: ResolvedSession = EMPTY_SESSION;
+  private _observed = false;
   /** `undefined` until the first observation — distinguishes "we've
    *  never seen a token" from "the token is null." Same for tenant. */
   private lastSeenToken: string | null | undefined = undefined;
@@ -110,7 +111,15 @@ export class SessionResolver {
   observeSession(next: ResolvedSession): SessionTransition {
     const verdict = this.inspectSession(next);
     this.commitObservation(next);
+    this._observed = true;
     return verdict;
+  }
+
+  /** Has /api/auth/me actually resolved THIS run? False on an offline
+   *  start — callers that would destroy state on an identity mismatch
+   *  (replica wipes) must not act on the EMPTY placeholder session. */
+  hasObserved(): boolean {
+    return this._observed;
   }
 
   /** Feed in the current bearer token. Returns whether it flipped

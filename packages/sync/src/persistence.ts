@@ -7,6 +7,33 @@ import type {
 } from "./index";
 
 // ---------------------------------------------------------------------------
+// Replica persistence contract
+// ---------------------------------------------------------------------------
+
+/**
+ * The engine's durable-replica backend. IndexedDBPersistence is the browser
+ * implementation; non-browser hosts (React Native, Tauri) implement this
+ * and pass it via `SyncEngineConfig.persistence` — the exact call surface
+ * the engine + `persistChange` use, nothing more.
+ */
+export interface ReplicaPersistence {
+  open(): Promise<void>;
+  /** Rows + cursor read as ONE consistent snapshot (see warm-load notes). */
+  loadSnapshot(): Promise<{
+    entities: Record<string, Row[]>;
+    cursor: SyncCursor | null;
+    hadCache: boolean;
+  }>;
+  /** `undefined` = never recorded (fresh install); `null` = anonymous. */
+  loadIdentity(): Promise<string | null | undefined>;
+  saveIdentity(userId: string | null): Promise<boolean>;
+  saveCursor(cursor: SyncCursor): Promise<boolean>;
+  saveRow(entity: string, id: string, data: Row): Promise<boolean>;
+  deleteRow(entity: string, id: string): Promise<boolean>;
+  clear(): Promise<boolean>;
+}
+
+// ---------------------------------------------------------------------------
 // IndexedDB persistence layer
 // ---------------------------------------------------------------------------
 
@@ -23,7 +50,7 @@ const MUTATIONS_STORE = "pendingMutations";
  * IndexedDB-backed persistence for the sync store.
  * Saves entity rows and sync cursor so data survives page refresh.
  */
-export class IndexedDBPersistence {
+export class IndexedDBPersistence implements ReplicaPersistence {
   private db: IDBDatabase | null = null;
   private dbName: string;
 
@@ -330,7 +357,7 @@ export class IndexedDBPersistence {
  * A change with no `data` is a no-op and counts as durable.
  */
 export async function persistChange(
-  persistence: IndexedDBPersistence,
+  persistence: ReplicaPersistence,
   change: ChangeEvent
 ): Promise<boolean> {
   switch (change.kind) {

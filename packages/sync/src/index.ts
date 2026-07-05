@@ -43,6 +43,7 @@ export {
   type RoomSubscriber,
 } from "./room-subscriptions";
 export { IndexedDBPersistence, persistChange } from "./persistence";
+export type { ReplicaPersistence } from "./persistence";
 export {
   buildRequest,
   pylonFetch,
@@ -117,6 +118,13 @@ export interface SyncEngineConfig {
   token?: string;
   /** Enable IndexedDB persistence. Data survives page refresh. Default: true in browser. */
   persist?: boolean;
+  /**
+   * Replica persistence backend. Default: IndexedDB where available
+   * (browsers). Non-browser hosts (React Native, Tauri) inject an adapter
+   * here — without one their replica is memory-only and a cold offline
+   * launch shows an empty store. `persist: false` still disables entirely.
+   */
+  persistence?: import("./persistence").ReplicaPersistence;
   /** App name for IndexedDB database naming. Default: "default". */
   appName?: string;
   /**
@@ -198,7 +206,7 @@ export class SyncEngine {
    *  at all and SSR-only consumers never reach start(). */
   private transport: Transport | null = null;
   private _connectionStatus: SyncConnectionStatus = "offline";
-  private persistence: import("./persistence").IndexedDBPersistence | null = null;
+  private persistence: import("./persistence").ReplicaPersistence | null = null;
 
   /**
    * Flips true once `start()` has either:
@@ -629,11 +637,17 @@ export class SyncEngine {
     this.armInitialSyncFallback();
 
     // Load persisted data if available.
-    const shouldPersist = this.config.persist !== false && typeof indexedDB !== "undefined";
+    const shouldPersist =
+      this.config.persist !== false &&
+      (this.config.persistence != null || typeof indexedDB !== "undefined");
     if (shouldPersist) {
       try {
-        const { IndexedDBPersistence } = await import("./persistence");
-        this.persistence = new IndexedDBPersistence(this.config.appName);
+        if (this.config.persistence) {
+          this.persistence = this.config.persistence;
+        } else {
+          const { IndexedDBPersistence } = await import("./persistence");
+          this.persistence = new IndexedDBPersistence(this.config.appName);
+        }
         await this.persistence.open();
 
         // Warm-load entities + cursor in ONE readonly transaction so
@@ -727,10 +741,20 @@ export class SyncEngine {
         // would let pull+reconcile sweep the optimistic ghosts before
         // push() ever fires.
         try {
-          const { IndexedDBMutationPersistence } = await import("./persistence");
-          const mqPersistence = new IndexedDBMutationPersistence(persistence);
-          this.mutations.attachPersistence(mqPersistence);
-          await this.mutations.hydrate();
+          const { IndexedDBMutationPersistence, IndexedDBPersistence } = await import(
+            "./persistence"
+          );
+          // The durable mutation queue rides the IDB connection; a custom
+          // ReplicaPersistence (RN/Tauri) doesn't carry one, so the queue
+          // stays in-memory there — pending offline writes survive within
+          // the session but not across a force-kill. Durable queues for
+          // custom adapters are a follow-up (MutationQueuePersistence is
+          // already an interface).
+          if (persistence instanceof IndexedDBPersistence) {
+            const mqPersistence = new IndexedDBMutationPersistence(persistence);
+            this.mutations.attachPersistence(mqPersistence);
+            await this.mutations.hydrate();
+          }
           // The hydrated offline writes are drained in the leader path
           // below (after `initMultiTab` settles), NOT here. We're still
           // pre-election at this point, so `isMultiTabLeader` is false
@@ -1447,6 +1471,13 @@ export class SyncEngine {
     if (!this._hadCachedReplica) return;
     const prev = this._replicaIdentity;
     if (prev === undefined) return;
+    // OFFLINE start: /api/auth/me never resolved, so the session is the
+    // EMPTY placeholder (userId null) — that's "unknown", not "anonymous".
+    // Wiping here destroyed the cached replica on every airplane-mode
+    // reload (the offline cold start persistence exists FOR). Keep the
+    // cache; if the session later resolves as a different identity, the
+    // observeSession/observeToken verdicts reset the replica then.
+    if (!this.session.hasObserved()) return;
     const now = this.session.resolved().userId;
     if (prev === now) return;
     // Identity flipped across the reload. Drop the prior identity's rows.

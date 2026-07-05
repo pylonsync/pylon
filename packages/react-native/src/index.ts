@@ -23,6 +23,7 @@ import {
 } from "@pylonsync/react";
 import type { SyncEngineConfig } from "@pylonsync/sync";
 import { createAsyncStorageBridge } from "./storage";
+import { AsyncStorageReplicaPersistence } from "./replica-persistence";
 
 // All hooks, db, callFn, configureClient, etc.
 export * from "@pylonsync/react";
@@ -30,6 +31,7 @@ export * from "@pylonsync/react";
 // React Native specific.
 export { useNetworkStatus } from "./useNetworkStatus";
 export type { NetworkStatus } from "./useNetworkStatus";
+export { AsyncStorageReplicaPersistence } from "./replica-persistence";
 export {
   AsyncStoragePersistence,
   OfflineStore,
@@ -55,5 +57,13 @@ export async function init(
 ): Promise<void> {
   const storage = await createAsyncStorageBridge();
   setReactStorage(storage);
-  reactInit({ ...config, storage });
+  // Durable replica by default — without it a cold offline launch renders
+  // an empty store (RN has no IndexedDB for the engine to fall back to).
+  // Callers can still pass their own adapter or `persist: false`.
+  const persistence =
+    config?.persistence ??
+    (config?.persist === false
+      ? undefined
+      : new AsyncStorageReplicaPersistence(config?.appName ?? "default"));
+  reactInit({ ...config, storage, persistence });
 }
