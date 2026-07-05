@@ -83,28 +83,36 @@ public actor PylonClient {
     /// Exchange a magic code for a session token. Token is stored automatically.
     public func verifyMagicCode(email: String, code: String) async throws -> SessionResponse {
         let resp: SessionResponse = try await request(.post, "/api/auth/verify", body: VerifyMagicCodeRequest(email: email, code: code))
-        setSession(token: resp.session_token)
+        setSession(token: resp.token)
         return resp
     }
 
     /// Sign in with email + password. Token is stored automatically.
     public func signInWithPassword(email: String, password: String) async throws -> SessionResponse {
-        let resp: SessionResponse = try await request(.post, "/api/auth/password", body: PasswordSignInRequest(email: email, password: password))
-        setSession(token: resp.session_token)
+        let resp: SessionResponse = try await request(.post, "/api/auth/password/login", body: PasswordSignInRequest(email: email, password: password))
+        setSession(token: resp.token)
+        return resp
+    }
+
+    /// Create an account with email + password. Token is stored
+    /// automatically — registering signs you in.
+    public func registerWithPassword(email: String, password: String) async throws -> SessionResponse {
+        let resp: SessionResponse = try await request(.post, "/api/auth/password/register", body: PasswordSignInRequest(email: email, password: password))
+        setSession(token: resp.token)
         return resp
     }
 
     /// Exchange a Google ID token for a Pylon session.
     public func signInWithGoogle(idToken: String) async throws -> SessionResponse {
         let resp: SessionResponse = try await request(.post, "/api/auth/oauth/google", body: OAuthGoogleRequest(id_token: idToken))
-        setSession(token: resp.session_token)
+        setSession(token: resp.token)
         return resp
     }
 
     /// Exchange a GitHub OAuth code for a Pylon session.
     public func signInWithGitHub(code: String) async throws -> SessionResponse {
         let resp: SessionResponse = try await request(.post, "/api/auth/oauth/github", body: OAuthGitHubRequest(code: code))
-        setSession(token: resp.session_token)
+        setSession(token: resp.token)
         return resp
     }
 

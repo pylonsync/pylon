@@ -191,9 +191,18 @@ public struct ResolvedSession: Sendable, Codable, Hashable {
     }
 }
 
+/// Session issued by any auth exchange (`/api/auth/verify`,
+/// `/api/auth/password/*`, OAuth). The server's key is `token` on every
+/// session-issuing route.
 public struct SessionResponse: Sendable, Codable {
-    public var session_token: String
+    public var token: String
     public var user_id: String?
+    public var expires_at: Double?
+
+    /// Historical alias — earlier SDK versions (incorrectly) modeled the
+    /// server key as `session_token`.
+    @available(*, deprecated, renamed: "token")
+    public var session_token: String { token }
 }
 
 public struct StartMagicCodeRequest: Sendable, Codable {

@@ -7,12 +7,16 @@ final class PylonClientTests: XCTestCase {
         return PylonClient(config: cfg, storage: storage, transport: transport)
     }
 
+    // NOTE: every session-issuing route on the server returns the key
+    // `token` (crates/router/src/routes/auth.rs) — these mocks mirror the
+    // REAL wire shape. An earlier version of this test mocked
+    // `session_token`, which encoded a decode bug instead of catching it.
     func testMagicCodeFlowStoresToken() async throws {
         let transport = MockTransport()
         transport.setHandler { req in
             if req.url?.path == "/api/auth/session" { return (200, Data("{}".utf8)) }
             if req.url?.path == "/api/auth/verify" {
-                let body: [String: Any] = ["session_token": "tok_abc", "user_id": "u1"]
+                let body: [String: Any] = ["token": "tok_abc", "user_id": "u1", "expires_at": 1785864905]
                 return try jsonResponse(body)
             }
             XCTFail("Unexpected path: \(req.url?.path ?? "")")
@@ -22,8 +26,50 @@ final class PylonClientTests: XCTestCase {
         let client = makeClient(transport: transport, storage: storage)
         try await client.startMagicCode(email: "alice@example.com")
         let resp = try await client.verifyMagicCode(email: "alice@example.com", code: "123456")
-        XCTAssertEqual(resp.session_token, "tok_abc")
+        XCTAssertEqual(resp.token, "tok_abc")
         XCTAssertEqual(storage.get(StorageKeys.token()), "tok_abc")
+    }
+
+    func testPasswordLoginHitsLoginRouteAndStoresToken() async throws {
+        let transport = MockTransport()
+        transport.setHandler { req in
+            // The route is /api/auth/password/login — NOT /api/auth/password,
+            // which the server 404s.
+            if req.url?.path == "/api/auth/password/login", req.httpMethod == "POST" {
+                let body: [String: Any] = ["token": "tok_pw", "user_id": "u2", "expires_at": 1785864905]
+                return try jsonResponse(body)
+            }
+            XCTFail("Unexpected path: \(req.url?.path ?? "")")
+            return (404, Data())
+        }
+        let storage = MemoryStorage()
+        let client = makeClient(transport: transport, storage: storage)
+        let resp = try await client.signInWithPassword(email: "a@b.c", password: "hunter2hunter2")
+        XCTAssertEqual(resp.token, "tok_pw")
+        XCTAssertEqual(resp.user_id, "u2")
+        XCTAssertEqual(storage.get(StorageKeys.token()), "tok_pw")
+    }
+
+    func testPasswordRegisterHitsRegisterRouteAndStoresToken() async throws {
+        let transport = MockTransport()
+        transport.setHandler { req in
+            if req.url?.path == "/api/auth/password/register", req.httpMethod == "POST" {
+                // Real register responses also carry extra keys the client
+                // must tolerate (dev_code, verification_email_sent).
+                let body: [String: Any] = [
+                    "token": "tok_new", "user_id": "u3", "expires_at": 1785864905,
+                    "dev_code": "411527", "verification_email_sent": true,
+                ]
+                return try jsonResponse(body)
+            }
+            XCTFail("Unexpected path: \(req.url?.path ?? "")")
+            return (404, Data())
+        }
+        let storage = MemoryStorage()
+        let client = makeClient(transport: transport, storage: storage)
+        let resp = try await client.registerWithPassword(email: "new@b.c", password: "hunter2hunter2")
+        XCTAssertEqual(resp.token, "tok_new")
+        XCTAssertEqual(storage.get(StorageKeys.token()), "tok_new")
     }
 
     func testAuthHeaderSentAfterSetSession() async throws {
