@@ -96,9 +96,13 @@ final class PylonClientTests: XCTestCase {
         transport.setHandler { req in
             switch (req.httpMethod, req.url?.path) {
             case ("GET", "/api/entities/Todo"):
+                // Real servers wrap lists in {count, data, limit, offset}.
                 return try jsonResponse([
-                    ["id": "t1", "title": "ship swift sdk", "done": false]
-                ])
+                    "count": 1,
+                    "data": [["id": "t1", "title": "ship swift sdk", "done": false]],
+                    "limit": NSNull(),
+                    "offset": 0,
+                ] as [String: Any])
             case ("POST", "/api/entities/Todo"):
                 return try jsonResponse(["id": "t2", "title": "review", "done": false])
             case ("DELETE", "/api/entities/Todo/t2"):

@@ -191,6 +191,25 @@ public struct ResolvedSession: Sendable, Codable, Hashable {
     }
 }
 
+/// Entity list responses arrive as `{count, data, limit, offset}` from the
+/// server; decode that envelope, tolerating a bare array for back-compat.
+public struct ListEnvelope<T: Decodable>: Decodable {
+    public var rows: [T]
+
+    private struct Keyed: Decodable {
+        let data: [T]
+    }
+
+    public init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(),
+           let bare = try? single.decode([T].self) {
+            rows = bare
+            return
+        }
+        rows = try Keyed(from: decoder).data
+    }
+}
+
 /// Session issued by any auth exchange (`/api/auth/verify`,
 /// `/api/auth/password/*`, OAuth). The server's key is `token` on every
 /// session-issuing route.

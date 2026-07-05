@@ -155,9 +155,12 @@ public actor PylonClient {
 
     // MARK: - Entity CRUD
 
-    /// List all rows for an entity.
+    /// List all rows for an entity. The server wraps list responses in a
+    /// `{count, data, limit, offset}` envelope; a bare-array body (older
+    /// servers / proxies) is accepted too.
     public func list<T: Decodable>(_ entity: String, as type: T.Type = T.self) async throws -> [T] {
-        try await request(.get, "/api/entities/\(entity)")
+        let envelope: ListEnvelope<T> = try await request(.get, "/api/entities/\(entity)")
+        return envelope.rows
     }
 
     /// Page through an entity using cursor pagination.
