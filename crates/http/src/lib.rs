@@ -91,6 +91,16 @@ impl std::error::Error for DataError {}
 pub trait DataStore: Send + Sync {
     fn manifest(&self) -> &pylon_kernel::AppManifest;
 
+    /// Per-operation privilege signal from the caller. The function
+    /// runner calls this before every db op with the CURRENT admin
+    /// state, so a mid-call `ctx.auth.elevate({ admin: true })` reaches
+    /// wrappers that captured their auth context at call entry (the
+    /// plugin-chain wrapper does — without this, elevate affected the
+    /// policy gate but the owner/tenant stamp plugins still saw the
+    /// pre-elevation caller and rejected on-behalf-of writes). Default
+    /// no-op: plain stores don't gate on auth.
+    fn set_op_admin(&self, _admin: bool) {}
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError>;
 
     fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError>;

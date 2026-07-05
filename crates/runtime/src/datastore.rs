@@ -2746,6 +2746,13 @@ pub struct HookEnforcingDataStore<'a> {
     inner: &'a dyn DataStore,
     plugins: Arc<pylon_plugin::PluginRegistry>,
     auth: pylon_auth::AuthContext,
+    /// Mid-call elevation (`ctx.auth.elevate({ admin: true })`). The
+    /// wrapper's `auth` is captured at call entry; the runner signals the
+    /// CURRENT admin state per op via `set_op_admin`, and the plugin chain
+    /// sees the elevated context — otherwise on-behalf-of writes (e.g.
+    /// cloning rows owned by another user after in-handler validation)
+    /// die at the owner/tenant stamp even though elevate succeeded.
+    elevated: std::sync::atomic::AtomicBool,
 }
 
 impl<'a> HookEnforcingDataStore<'a> {
@@ -2758,6 +2765,17 @@ impl<'a> HookEnforcingDataStore<'a> {
             inner,
             plugins,
             auth,
+            elevated: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn effective_auth(&self) -> pylon_auth::AuthContext {
+        if self.elevated.load(std::sync::atomic::Ordering::Relaxed) && !self.auth.is_admin {
+            let mut elevated = self.auth.clone();
+            elevated.is_admin = true;
+            elevated
+        } else {
+            self.auth.clone()
         }
     }
 }
@@ -2767,10 +2785,15 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
         self.inner.manifest()
     }
 
+    fn set_op_admin(&self, admin: bool) {
+        self.elevated
+            .store(admin, std::sync::atomic::Ordering::Relaxed);
+    }
+
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
         let mut data = data.clone();
         self.plugins
-            .run_before_insert(entity, &mut data, &self.auth)
+            .run_before_insert(entity, &mut data, &self.effective_auth())
             .map_err(|e| DataError {
                 code: e.code,
                 message: e.message,
@@ -2787,7 +2810,7 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
         }
         let id = self.inner.insert(entity, &data)?;
         self.plugins
-            .run_after_insert(entity, &id, &data, &self.auth);
+            .run_after_insert(entity, &id, &data, &self.effective_auth());
         Ok(id)
     }
 
@@ -2811,28 +2834,30 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         let mut data = data.clone();
         self.plugins
-            .run_before_update(entity, id, &mut data, &self.auth)
+            .run_before_update(entity, id, &mut data, &self.effective_auth())
             .map_err(|e| DataError {
                 code: e.code,
                 message: e.message,
             })?;
         let updated = self.inner.update(entity, id, &data)?;
         if updated {
-            self.plugins.run_after_update(entity, id, &data, &self.auth);
+            self.plugins
+                .run_after_update(entity, id, &data, &self.effective_auth());
         }
         Ok(updated)
     }
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError> {
         self.plugins
-            .run_before_delete(entity, id, &self.auth)
+            .run_before_delete(entity, id, &self.effective_auth())
             .map_err(|e| DataError {
                 code: e.code,
                 message: e.message,
             })?;
         let deleted = self.inner.delete(entity, id)?;
         if deleted {
-            self.plugins.run_after_delete(entity, id, &self.auth);
+            self.plugins
+                .run_after_delete(entity, id, &self.effective_auth());
         }
         Ok(deleted)
     }
@@ -2860,14 +2885,15 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
         // 2026-05-10 codex pass-3 audit (P2 REGRESSION).
         let mut data = serde_json::json!({ relation: target_id });
         self.plugins
-            .run_before_update(entity, id, &mut data, &self.auth)
+            .run_before_update(entity, id, &mut data, &self.effective_auth())
             .map_err(|e| DataError {
                 code: e.code,
                 message: e.message,
             })?;
         let linked = self.inner.link(entity, id, relation, target_id)?;
         if linked {
-            self.plugins.run_after_update(entity, id, &data, &self.auth);
+            self.plugins
+                .run_after_update(entity, id, &data, &self.effective_auth());
         }
         Ok(linked)
     }
@@ -2875,14 +2901,15 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
     fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
         let mut data = serde_json::json!({ relation: serde_json::Value::Null });
         self.plugins
-            .run_before_update(entity, id, &mut data, &self.auth)
+            .run_before_update(entity, id, &mut data, &self.effective_auth())
             .map_err(|e| DataError {
                 code: e.code,
                 message: e.message,
             })?;
         let unlinked = self.inner.unlink(entity, id, relation)?;
         if unlinked {
-            self.plugins.run_after_update(entity, id, &data, &self.auth);
+            self.plugins
+                .run_after_update(entity, id, &data, &self.effective_auth());
         }
         Ok(unlinked)
     }
@@ -2961,7 +2988,7 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
                     }
                     let data = op.get_mut("data").expect("just inserted");
                     self.plugins
-                        .run_before_insert(&entity, data, &self.auth)
+                        .run_before_insert(&entity, data, &self.effective_auth())
                         .map_err(|e| DataError {
                             code: e.code,
                             message: e.message,
@@ -2983,7 +3010,7 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
                     }
                     let data = op.get_mut("data").expect("just inserted");
                     self.plugins
-                        .run_before_update(&entity, &id, data, &self.auth)
+                        .run_before_update(&entity, &id, data, &self.effective_auth())
                         .map_err(|e| DataError {
                             code: e.code,
                             message: e.message,
@@ -2992,7 +3019,7 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
                 "delete" => {
                     let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     self.plugins
-                        .run_before_delete(&entity, id, &self.auth)
+                        .run_before_delete(&entity, id, &self.effective_auth())
                         .map_err(|e| DataError {
                             code: e.code,
                             message: e.message,
@@ -3015,17 +3042,20 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
                         let id = result.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         let empty = serde_json::json!({});
                         let data = op.get("data").unwrap_or(&empty);
-                        self.plugins.run_after_insert(entity, id, data, &self.auth);
+                        self.plugins
+                            .run_after_insert(entity, id, data, &self.effective_auth());
                     }
                     "update" => {
                         let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
                         let empty = serde_json::json!({});
                         let data = op.get("data").unwrap_or(&empty);
-                        self.plugins.run_after_update(entity, id, data, &self.auth);
+                        self.plugins
+                            .run_after_update(entity, id, data, &self.effective_auth());
                     }
                     "delete" => {
                         let id = op.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                        self.plugins.run_after_delete(entity, id, &self.auth);
+                        self.plugins
+                            .run_after_delete(entity, id, &self.effective_auth());
                     }
                     _ => {}
                 }
@@ -6596,6 +6626,40 @@ mod hook_enforcing_tests {
             0,
             "rejected transact must not reach the inner store"
         );
+    }
+
+    /// Mid-call `ctx.auth.elevate({ admin: true })` must reach the plugin
+    /// chain, not just the policy gate. The wrapper captures its auth at
+    /// call entry; the runner signals the current admin state per op via
+    /// `set_op_admin`. Without that, an elevated handler cloning rows on
+    /// behalf of another tenant/user still died at the stamp plugins
+    /// (found by Spotter's assignRoutine: coach clones a routine into
+    /// client-owned rows after validating the coaching link).
+    #[test]
+    fn set_op_admin_elevates_the_plugin_chain_mid_call() {
+        let manifest = manifest_with_tenant_field();
+        let inner = RecordingStore::new(manifest.clone());
+        let plugins = registry_with_tenant_plugin(&manifest);
+        let auth = AuthContext::user("alice".into()).with_tenant("tA".into());
+        let hooked = HookEnforcingDataStore::new(&inner, plugins, auth);
+
+        let row = serde_json::json!({"tenantId": "tB", "title": "on-behalf-of"});
+        hooked
+            .insert("Doc", &row)
+            .expect_err("pre-elevation cross-tenant insert must reject");
+
+        hooked.set_op_admin(true);
+        hooked
+            .insert("Doc", &row)
+            .expect("elevated insert must pass the plugin chain");
+        assert_eq!(inner.inserts().len(), 1);
+
+        // Reverting the signal restores the fence.
+        hooked.set_op_admin(false);
+        hooked
+            .insert("Doc", &row)
+            .expect_err("post-revert cross-tenant insert must reject again");
+        assert_eq!(inner.inserts().len(), 1);
     }
 }
 

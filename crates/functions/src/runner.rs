@@ -1206,6 +1206,11 @@ impl FnRunner {
                         tenant_id: caller_tenant_id.clone(),
                         roles: gate_auth.roles.clone(),
                     };
+                    // Propagate the CURRENT admin state (elevate can flip it
+                    // mid-call) to auth-aware store wrappers — the plugin
+                    // chain captured its context at call entry and would
+                    // otherwise reject elevated on-behalf-of writes.
+                    store.set_op_admin(caller_is_admin);
                     let (result, row_count) = execute_db_op(
                         store,
                         &db_msg,
