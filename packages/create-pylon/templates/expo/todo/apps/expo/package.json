@@ -15,7 +15,7 @@
     "@pylonsync/react": "^__PYLON_VERSION__",
     "@pylonsync/react-native": "^__PYLON_VERSION__",
     "@pylonsync/sync": "^__PYLON_VERSION__",
-    "@react-native-async-storage/async-storage": "~3.1.0",
+    "@react-native-async-storage/async-storage": "2.2.0",
     "@react-native-community/netinfo": "~12.0.0",
     "expo": "~56.0.0",
     "expo-status-bar": "~56.0.0",
