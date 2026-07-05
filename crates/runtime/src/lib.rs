@@ -167,7 +167,7 @@ fn peer_ip_unix(fd: std::os::unix::io::RawFd) -> Option<std::net::IpAddr> {
     }
 }
 
-use pylon_kernel::{AppManifest, ManifestEntity, StudioConfig};
+use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, StudioConfig};
 use rusqlite::Connection;
 
 // ---------------------------------------------------------------------------
@@ -2187,10 +2187,10 @@ impl Runtime {
             message: format!("Failed to prepare query: {e}"),
         })?;
 
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
 
         let mut result = stmt
-            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &columns)))
+            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &fields)))
             .ok();
         if let Some(r) = result.as_mut() {
             self.maybe_decrypt_row(entity, r);
@@ -2217,10 +2217,10 @@ impl Runtime {
             message: format!("Failed to prepare query: {e}"),
         })?;
 
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
 
         let rows = stmt
-            .query_map([], |row| Ok(row_to_json(row, &columns)))
+            .query_map([], |row| Ok(row_to_json(row, &fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -2254,7 +2254,7 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
         let table = quote_ident(entity);
 
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
@@ -2280,7 +2280,7 @@ impl Runtime {
         })?;
 
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &columns)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -2569,11 +2569,11 @@ impl Runtime {
             quote_ident(entity),
             quote_ident(field)
         );
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
 
         let mut result = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![value], |row| {
-                Ok(row_to_json(row, &columns))
+                Ok(row_to_json(row, &fields))
             })
             .ok()
         });
@@ -2643,7 +2643,7 @@ impl Runtime {
         let ent = self.require_entity(entity)?;
         let conn = self.lock_read_conn()?;
 
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
         let obj = filter
             .as_object()
             .unwrap_or(&serde_json::Map::new())
@@ -2826,7 +2826,7 @@ impl Runtime {
         })?;
 
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &columns)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Filtered query failed: {e}"),
@@ -3217,9 +3217,9 @@ impl Runtime {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
         let mut row = stmt
-            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &columns)))
+            .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &fields)))
             .ok();
         if let Some(r) = row.as_mut() {
             self.maybe_decrypt_row(entity, r);
@@ -3239,9 +3239,9 @@ impl Runtime {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
         let rows = stmt
-            .query_map([], |row| Ok(row_to_json(row, &columns)))
+            .query_map([], |row| Ok(row_to_json(row, &fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -3262,7 +3262,7 @@ impl Runtime {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         let ent = self.require_entity(entity)?;
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
         let table = quote_ident(entity);
         let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match after {
             Some(cursor) => (
@@ -3281,7 +3281,7 @@ impl Runtime {
             message: format!("Failed to prepare: {e}"),
         })?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &columns)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -3308,10 +3308,10 @@ impl Runtime {
             quote_ident(entity),
             quote_ident(field)
         );
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
         let mut row = conn.prepare_cached(&sql).ok().and_then(|mut stmt| {
             stmt.query_row(rusqlite::params![value], |row| {
-                Ok(row_to_json(row, &columns))
+                Ok(row_to_json(row, &fields))
             })
             .ok()
         });
@@ -3375,7 +3375,7 @@ impl Runtime {
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         let ent = self.require_entity(entity)?;
-        let columns: Vec<String> = ent.fields.iter().map(|f| f.name.clone()).collect();
+        let fields = ent.fields.clone();
         let empty = serde_json::Map::new();
         let obj = filter.as_object().unwrap_or(&empty);
 
@@ -3514,7 +3514,7 @@ impl Runtime {
             message: format!("Failed to prepare: {e}"),
         })?;
         let rows = stmt
-            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &columns)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -4140,7 +4140,7 @@ fn json_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
 /// stability with callers that compute it from the manifest) — the
 /// name set comes from the row itself now, which always matches the
 /// SELECT's actual column shape.
-fn row_to_json(row: &rusqlite::Row<'_>, _field_names: &[String]) -> serde_json::Value {
+fn row_to_json(row: &rusqlite::Row<'_>, fields: &[ManifestField]) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
 
     let stmt = row.as_ref();
@@ -4153,10 +4153,22 @@ fn row_to_json(row: &rusqlite::Row<'_>, _field_names: &[String]) -> serde_json::
             Ok(n) => n.to_string(),
             Err(_) => continue,
         };
+        let is_bool = fields
+            .iter()
+            .any(|f| f.name == name && f.field_type == "bool");
         let value = if let Ok(s) = row.get::<_, String>(i) {
             serde_json::Value::String(s)
         } else if let Ok(n) = row.get::<_, i64>(i) {
-            serde_json::Value::Number(serde_json::Number::from(n))
+            // SQLite stores bool columns as INTEGER 0/1. Serving that raw
+            // breaks every typed client (Swift's `0 → Bool` decode throws,
+            // strict JS `=== false` checks fail) — map back to real JSON
+            // booleans per the schema. Postgres is unaffected (native
+            // BOOLEAN decodes to Value::Bool already).
+            if is_bool {
+                serde_json::Value::Bool(n != 0)
+            } else {
+                serde_json::Value::Number(serde_json::Number::from(n))
+            }
         } else if let Ok(f) = row.get::<_, f64>(i) {
             serde_json::Number::from_f64(f)
                 .map(serde_json::Value::Number)
@@ -4563,6 +4575,96 @@ mod tests {
         assert_eq!(row["avatarColor"], "#abc");
         assert_eq!(row["createdAt"], "2026-01-01T00:00:00Z");
         assert_eq!(row["passwordHash"], "hashed-password");
+    }
+
+    /// SQLite stores bool columns as INTEGER 0/1. Reads MUST map them back
+    /// to JSON booleans per the schema: raw 0/1 breaks every typed client
+    /// (Swift's `0 → Bool` decode throws, so rows silently vanish from
+    /// generated-struct queries; strict JS `=== false` checks fail too).
+    #[test]
+    fn bool_fields_read_back_as_json_booleans_not_ints() {
+        let mut manifest = test_manifest();
+        manifest.entities[0].fields = vec![
+            ManifestField {
+                name: "email".into(),
+                field_type: "string".into(),
+                optional: false,
+                unique: true,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+            },
+            ManifestField {
+                name: "isWarmup".into(),
+                field_type: "bool".into(),
+                optional: false,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+            },
+            ManifestField {
+                name: "isCompleted".into(),
+                field_type: "bool".into(),
+                optional: false,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+            },
+            ManifestField {
+                name: "reps".into(),
+                field_type: "int".into(),
+                optional: true,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+            },
+        ];
+        manifest.entities[0].crdt = false;
+        let rt = Runtime::in_memory(manifest).unwrap();
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({
+                    "email": "b@c.com",
+                    "isWarmup": false,
+                    "isCompleted": true,
+                    "reps": 5,
+                }),
+            )
+            .unwrap();
+
+        let row = rt.get_by_id("User", &id).unwrap().unwrap();
+        assert_eq!(
+            row["isWarmup"],
+            serde_json::Value::Bool(false),
+            "bool false must read back as JSON false, not 0 — got {:?}",
+            row["isWarmup"]
+        );
+        assert_eq!(row["isCompleted"], serde_json::Value::Bool(true));
+        // Ints stay numbers — only schema-typed bools convert.
+        assert_eq!(row["reps"], serde_json::Value::Number(5.into()));
+
+        let listed = rt.list("User").unwrap();
+        let listed_row = listed
+            .iter()
+            .find(|r| r["id"] == serde_json::Value::String(id.clone()))
+            .unwrap();
+        assert_eq!(listed_row["isCompleted"], serde_json::Value::Bool(true));
     }
 
     /// CRDT-mode entities (the default) populate the sidecar snapshot

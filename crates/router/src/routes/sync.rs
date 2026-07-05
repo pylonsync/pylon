@@ -125,6 +125,20 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         .as_deref()
         .map(url_decode)
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    // A present-but-unparseable cursor MUST fail loudly. Falling through to
+    // "no cursor" silently restarts the snapshot at page 1, and a client
+    // that keeps echoing the bad cursor (e.g. one that re-encoded the
+    // opaque value) pulls page 1 in an infinite loop at full tilt.
+    if snapshot_after_raw.is_some() && snapshot_after_parsed.is_none() {
+        return (
+            400,
+            json_error_safe(
+                "SNAPSHOT_CURSOR_INVALID",
+                "snapshot_after did not parse — pass the server-issued value verbatim (it is already URL-encoded)",
+                "snapshot_after present but not urlenc(json)",
+            ),
+        );
+    }
     let snapshot_after: Option<(String, Option<String>)> =
         snapshot_after_parsed.as_ref().and_then(|v| {
             let entity = v.get("e").and_then(|s| s.as_str())?.to_string();

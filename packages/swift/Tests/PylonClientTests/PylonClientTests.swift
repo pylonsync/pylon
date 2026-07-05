@@ -72,6 +72,30 @@ final class PylonClientTests: XCTestCase {
         XCTAssertEqual(storage.get(StorageKeys.token()), "tok_new")
     }
 
+    func testSyncPullPassesSnapshotAfterVerbatim() async throws {
+        // The server issues snapshot_after ALREADY URL-encoded (opaque
+        // cursor). Re-encoding it double-encodes → the server's parse fails →
+        // it restarts the snapshot at page 1 → infinite pull loop. This test
+        // pins the verbatim pass-through.
+        let opaque = "%7B%22e%22%3A%22Todo%22%2C%22a%22%3A%22t9%22%2C%22s%22%3A42%7D"
+        let transport = MockTransport()
+        transport.setHandler { req in
+            let body: [String: Any] = [
+                "changes": [], "cursor": ["last_seq": 42],
+                "has_more": false, "snapshot_after": NSNull(),
+            ]
+            return try jsonResponse(body)
+        }
+        let client = makeClient(transport: transport)
+        _ = try await client.syncPull(since: 0, snapshotAfter: opaque)
+        let sent = transport.lastRequest()?.url?.absoluteString ?? ""
+        XCTAssertTrue(
+            sent.contains("snapshot_after=\(opaque)"),
+            "cursor must be appended verbatim, got: \(sent)"
+        )
+        XCTAssertFalse(sent.contains("%257B"), "double-encoded cursor detected")
+    }
+
     func testAuthHeaderSentAfterSetSession() async throws {
         let transport = MockTransport()
         transport.setHandler { _ in

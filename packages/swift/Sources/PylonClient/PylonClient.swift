@@ -318,7 +318,11 @@ public actor PylonClient {
     public func syncPull(since: Int64, snapshotAfter: String? = nil) async throws -> PullResponse {
         var path = "/api/sync/pull?since=\(since)"
         if let snapshotAfter, !snapshotAfter.isEmpty {
-            path += "&snapshot_after=\(percentEncode(snapshotAfter))"
+            // OPAQUE cursor the server already URL-encoded — append verbatim.
+            // Re-encoding it double-encodes, the server's parse fails, and it
+            // silently restarts the snapshot from page 1: an infinite pull
+            // loop for any replica whose snapshot spans >1 page.
+            path += "&snapshot_after=\(snapshotAfter)"
         }
         return try await request(.get, path)
     }
