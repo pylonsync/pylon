@@ -44,6 +44,10 @@
     "database"
   ],
   "license": "MIT OR Apache-2.0",
+  "dependencies": {
+    "satori": "^0.26.0",
+    "@resvg/resvg-wasm": "^2.6.2"
+  },
   "devDependencies": {
     "typescript": "^5.5",
     "react": "^19.0.0",

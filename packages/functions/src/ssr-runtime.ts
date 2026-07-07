@@ -816,6 +816,54 @@ function findColocatedImage(
   return null;
 }
 
+const OG_IMAGE_CODE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
+
+/**
+ * Walk up from a page's directory to the nearest colocated dynamic OG
+ * module (`opengraph-image.{tsx,ts,jsx,js}`) and return the CONCRETE
+ * request path that renders it (origin-less), or null.
+ *
+ * The path is derived from the live request URL (`url`), not the file path,
+ * so dynamic params are already substituted:
+ *   - colocated with the page  → `${url}/opengraph-image`
+ *   - an ancestor at depth n    → first n concrete URL segments + `/opengraph-image`
+ *     (root → `/opengraph-image`). Route groups `(x)` don't count toward
+ *     depth; a trailing catch-all only lives at the page's own segment, so
+ *     ancestor slicing stays 1:1 with the URL.
+ * Mirrors `findColocatedImage`'s inheritance walk (closer file wins).
+ */
+function findColocatedOgImageRoute(
+  componentPath: string,
+  url: string,
+): string | null {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const cwd = process.cwd();
+  let dir = componentPath.replace(/\\/g, "/");
+  dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
+  const pageDir = dir;
+  const urlSegs = url.split("/").filter(Boolean);
+  // Non-route-group segment depth of a cwd-relative dir below `app/`.
+  const nonGroupDepth = (d: string): number => {
+    const segs = d.split("/").filter(Boolean);
+    const appIdx = segs.indexOf("app");
+    const below = appIdx >= 0 ? segs.slice(appIdx + 1) : segs;
+    return below.filter((s) => !(s.startsWith("(") && s.endsWith(")"))).length;
+  };
+  while (dir && dir !== "." && dir !== "/") {
+    for (const ext of OG_IMAGE_CODE_EXTS) {
+      if (fs.existsSync(path.join(cwd, dir, `opengraph-image${ext}`))) {
+        const prefix =
+          dir === pageDir ? urlSegs : urlSegs.slice(0, nonGroupDepth(dir));
+        return "/" + [...prefix, "opengraph-image"].join("/");
+      }
+    }
+    const slash = dir.lastIndexOf("/");
+    dir = slash >= 0 ? dir.slice(0, slash) : "";
+  }
+  return null;
+}
+
 /** Best-effort JPEG dimensions: scan SOF markers in the first 128KB. */
 function readJpegSize(fs: any, fd: number): { w: number; h: number } | null {
   const CAP = 128 * 1024;
@@ -1090,6 +1138,7 @@ export function applyAutoSocialImages(
   component: string,
   headers: Record<string, string> | undefined,
   metadata: SsrMetadata | undefined,
+  requestUrl?: string,
 ): SsrMetadata | undefined {
   const hasOg = !!metadata?.openGraph?.image;
   const hasTw = !!metadata?.twitter?.image;
@@ -1099,7 +1148,16 @@ export function applyAutoSocialImages(
   const twFile = hasTw
     ? null
     : findColocatedImage(component, "twitter-image") ?? ogFile;
-  if (!ogFile && !twFile) return metadata;
+
+  // Dynamic (code) OG image: `app/**/opengraph-image.{tsx,ts,jsx,js}`. Only a
+  // fallback when there's no explicit metadata image and no static raster —
+  // a static file colocated at the same/closer level wins (Next parity).
+  const ogRoute =
+    hasOg || ogFile || requestUrl == null
+      ? null
+      : findColocatedOgImageRoute(component, requestUrl);
+
+  if (!ogFile && !twFile && !ogRoute) return metadata;
 
   const origin = resolveRequestOrigin(headers);
   const urlFor = (rel: string, v: number): string =>
@@ -1117,14 +1175,33 @@ export function applyAutoSocialImages(
       ...(m.height ? { imageHeight: m.height } : {}),
       ...(url.startsWith("https:") ? { imageSecureUrl: url } : {}),
     };
-  }
-  if (twFile && !hasTw) {
-    const m = readSocialImageMeta(twFile);
-    out.twitter = {
-      card: "summary_large_image",
-      ...(out.twitter ?? {}),
-      image: urlFor(twFile, m.v),
+  } else if (ogRoute && !hasOg) {
+    const url = `${origin}${ogRoute}`;
+    out.openGraph = {
+      ...(out.openGraph ?? {}),
+      image: url,
+      imageType: "image/png",
+      imageWidth: 1200,
+      imageHeight: 630,
+      ...(url.startsWith("https:") ? { imageSecureUrl: url } : {}),
     };
+  }
+  // Twitter falls back to the OG image (static file first, then dynamic route).
+  if (!hasTw) {
+    if (twFile) {
+      const m = readSocialImageMeta(twFile);
+      out.twitter = {
+        card: "summary_large_image",
+        ...(out.twitter ?? {}),
+        image: urlFor(twFile, m.v),
+      };
+    } else if (ogRoute) {
+      out.twitter = {
+        card: "summary_large_image",
+        ...(out.twitter ?? {}),
+        image: `${origin}${ogRoute}`,
+      };
+    }
   }
   return out;
 }
@@ -2404,6 +2481,106 @@ export async function handleDataRoute(
   }
 }
 
+/**
+ * Import an `opengraph-image.tsx`, call its default export, render the
+ * returned `ImageResponse` (or raw React element) to a PNG via Satori +
+ * resvg (see `./ssr-og-runtime`), and stream the bytes back with an image
+ * content-type. This is the code path behind the `opengraph-image` file
+ * convention (Next.js `next/og` parity). Errors surface as a 500 with a
+ * short plain-text body so a broken OG module doesn't wedge the runner.
+ */
+export async function handleOgImageRoute(
+  msg: RenderRouteMessage,
+  send: Send,
+): Promise<void> {
+  const emitError = (status: number, body: string): void => {
+    send({
+      type: "response_start",
+      call_id: msg.call_id,
+      status,
+      headers: { "content-type": "text/plain; charset=utf-8" },
+    });
+    send({
+      type: "render_chunk",
+      call_id: msg.call_id,
+      data: Buffer.from(body, "utf8").toString("base64"),
+    });
+    send({ type: "render_done", call_id: msg.call_id });
+  };
+  try {
+    const cwd = process.cwd();
+    const mod = await importModule(cwd, msg.component);
+    const exp = mod.default ?? mod.Image ?? mod.image;
+    if (exp == null) {
+      throw new Error(
+        `opengraph-image module "${msg.component}" has no default export`,
+      );
+    }
+    // Next passes `{ params }`; we also hand `searchParams` for query-driven
+    // cards. A non-function default (a pre-built element/response) is used
+    // as-is.
+    const produced =
+      typeof exp === "function"
+        ? await exp({ params: msg.params, searchParams: msg.search_params })
+        : exp;
+
+    // The default export may return an `ImageResponse` (element + options)
+    // or a bare React element. Detect the former structurally (brand set by
+    // @pylonsync/react — no cross-package import / instanceof needed).
+    const isImageResponse =
+      produced != null &&
+      typeof produced === "object" &&
+      (produced as { __pylonImageResponse?: unknown }).__pylonImageResponse ===
+        true;
+    const element = isImageResponse
+      ? (produced as { element: unknown }).element
+      : produced;
+    const options = isImageResponse
+      ? ((produced as { options?: Record<string, any> }).options ?? {})
+      : {};
+
+    // For a bare-element return, honor the Next-style `export const size` /
+    // `export const contentType` module exports.
+    const width = options.width ?? mod.size?.width;
+    const height = options.height ?? mod.size?.height;
+    const contentType =
+      options.contentType ?? mod.contentType ?? "image/png";
+
+    const { renderOgImage } = await import("./ssr-og-runtime");
+    const png = await renderOgImage(element, {
+      width,
+      height,
+      fonts: options.fonts,
+      loadAdditionalAsset: options.loadAdditionalAsset,
+    });
+
+    const headers: Record<string, string> = {
+      "content-type": contentType,
+      // OG cards are expensive to render and change rarely; cache hard at
+      // the CDN. The on-disk ISR layer (serve_via_ssr_rpc) also keys by URL.
+      "cache-control": "public, max-age=3600, s-maxage=86400",
+      ...(options.headers ?? {}),
+    };
+    send({
+      type: "response_start",
+      call_id: msg.call_id,
+      status: 200,
+      headers,
+    });
+    send({
+      type: "render_chunk",
+      call_id: msg.call_id,
+      data: Buffer.from(png).toString("base64"),
+    });
+    send({ type: "render_done", call_id: msg.call_id });
+  } catch (e: any) {
+    emitError(
+      500,
+      `pylon: failed to render opengraph-image (${msg.component}): ${e?.message ?? String(e)}\n`,
+    );
+  }
+}
+
 export async function handleRenderRoute(
   msg: RenderRouteMessage,
   send: Send,
@@ -2422,6 +2599,13 @@ export async function handleRenderRoute(
       ? "robots"
       : null;
   if (dataKind) return handleDataRoute(msg, dataKind, send);
+
+  // `opengraph-image` (and future `twitter-image`) render to a PNG, not
+  // HTML. Same basename-detection contract: the SDK only registers this
+  // component path for app/**/opengraph-image.*.
+  if (/(^|[\\/])opengraph-image$/.test(msg.component)) {
+    return handleOgImageRoute(msg, send);
+  }
 
   // Dev HUD: wall-clock for the whole render, surfaced in the dev overlay's
   // render row. `performance.now()` is monotonic; harmless in prod (unused).
@@ -2619,7 +2803,7 @@ export async function handleRenderRoute(
     // File conventions: auto-wire <meta og:image>/<twitter:image> from a
     // colocated opengraph-image.* / twitter-image.*, and <link rel="icon">
     // from icon.* / apple-icon.* / favicon.ico — unless the page set them.
-    metadata = applyAutoSocialImages(msg.component, msg.headers, metadata);
+    metadata = applyAutoSocialImages(msg.component, msg.headers, metadata, msg.url);
     metadata = applyAutoIcons(msg.component, metadata);
     const metaFragment = renderMetadata(React, metadata);
 

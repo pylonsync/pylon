@@ -147,7 +147,9 @@ cat > /pylon/package.json <<'JSON'
   "private": true,
   "dependencies": {
     "clsx": "*",
-    "loro-crdt": "*"
+    "loro-crdt": "*",
+    "satori": "*",
+    "@resvg/resvg-wasm": "*"
   }
 }
 JSON

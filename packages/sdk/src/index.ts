@@ -429,7 +429,14 @@ export interface RouteDefinition {
    * POST/PUT/PATCH/DELETE) — matched on its `path` for non-GET requests only,
    * never rendered as a page.
    */
-  kind?: "page" | "not-found" | "error" | "route" | "sitemap" | "robots";
+  kind?:
+    | "page"
+    | "not-found"
+    | "error"
+    | "route"
+    | "sitemap"
+    | "robots"
+    | "og-image";
 }
 
 export function defineRoute(route: RouteDefinition): RouteDefinition {
@@ -630,7 +637,14 @@ export interface ManifestRoute {
   component?: string;
   layouts?: string[];
   /** "not-found" / "error" boundaries, or "route" form handlers; omitted for normal pages. */
-  kind?: "page" | "not-found" | "error" | "route" | "sitemap" | "robots";
+  kind?:
+    | "page"
+    | "not-found"
+    | "error"
+    | "route"
+    | "sitemap"
+    | "robots"
+    | "og-image";
 }
 
 export interface ManifestInputField {
@@ -990,6 +1004,11 @@ export async function discoverAppRoutes(opts?: {
   const pages: PageHit[] = [];
   const boundaries: BoundaryHit[] = [];
   const routeHandlers: RouteHandlerHit[] = [];
+  // `opengraph-image.{tsx,ts,jsx,js}` colocated with any segment. Each
+  // default-exports a function returning an `ImageResponse` (or React
+  // element); the SSR runtime renders it to a PNG on demand and pages under
+  // the segment get an auto `og:image` meta tag pointing at it.
+  const ogImages: RouteHandlerHit[] = [];
 
   // Resolve the first existing `<base>.{tsx,ts,jsx,js}` in `dir` and
   // return it as a cwd-relative, extension-less module path (or null).
@@ -1044,6 +1063,12 @@ export async function discoverAppRoutes(opts?: {
     const routeHere = findModule(dir, "route");
     if (routeHere) {
       routeHandlers.push({ segments: [...segments], component: routeHere });
+    }
+    // Dynamic OG image colocated with this segment. Rendered to PNG on
+    // demand; never navigable/hydrated.
+    const ogImageHere = findModule(dir, "opengraph-image");
+    if (ogImageHere) {
+      ogImages.push({ segments: [...segments], component: ogImageHere });
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
@@ -1152,7 +1177,26 @@ export async function discoverAppRoutes(opts?: {
     });
   }
 
-  return [...pageRoutes, ...boundaryRoutes, ...routeRoutes, ...dataRoutes];
+  // Dynamic OG image routes: `<segment>/opengraph-image` (root → just
+  // `/opengraph-image`). Matched like a page (params flow through) but
+  // served as a PNG by the SSR runtime — never rendered as HTML or hydrated.
+  const ogImageRoutes: RouteDefinition[] = ogImages.map((o) => ({
+    path:
+      o.segments.length === 0
+        ? "/opengraph-image"
+        : `${segmentsToPath(o.segments)}/opengraph-image`,
+    mode: "ssr" as const,
+    component: o.component,
+    kind: "og-image" as const,
+  }));
+
+  return [
+    ...pageRoutes,
+    ...boundaryRoutes,
+    ...routeRoutes,
+    ...dataRoutes,
+    ...ogImageRoutes,
+  ];
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {

@@ -10,6 +10,15 @@ export type { ImageProps } from "./Image";
 export { Form } from "./Form";
 export type { FormProps } from "./Form";
 
+// Dynamic image generation for the `opengraph-image.tsx` / `twitter-image.tsx`
+// file convention (Next.js `next/og` parity). `ImageResponse` is a thin
+// holder — the SSR runtime does the Satori→resvg render server-side.
+export { ImageResponse, isImageResponse } from "./image-response";
+export type {
+  ImageResponseOptions,
+  ImageResponseFont,
+} from "./image-response";
+
 // SSR page-author types — the contract every `app/**/page.tsx` is handed
 // in props, plus `metadata` / `generateMetadata`. Type-only.
 export type {

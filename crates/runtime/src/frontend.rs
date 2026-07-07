@@ -4031,6 +4031,26 @@ mod tests {
     }
 
     #[test]
+    fn match_ssr_route_matches_og_image() {
+        // Dynamic OG images (app/**/opengraph-image.tsx → kind:"og-image")
+        // are renderable SSR routes served as PNG by the runner — they must
+        // match like sitemap/robots, NOT be skipped like boundary kinds.
+        let routes = vec![
+            route("/", None),
+            route("/opengraph-image", Some("og-image")),
+            route("/blog/:slug", None),
+            route("/blog/:slug/opengraph-image", Some("og-image")),
+        ];
+        let root = match_ssr_route("/opengraph-image", &routes).expect("/opengraph-image matches");
+        assert_eq!(root.route.kind.as_deref(), Some("og-image"));
+        // Per-page OG with a concrete param resolves the pattern + captures it.
+        let slug = match_ssr_route("/blog/hello/opengraph-image", &routes)
+            .expect("/blog/hello/opengraph-image matches");
+        assert_eq!(slug.route.kind.as_deref(), Some("og-image"));
+        assert_eq!(slug.params.get("slug").map(String::as_str), Some("hello"));
+    }
+
+    #[test]
     fn find_not_found_root_covers_unmatched() {
         let routes = vec![route("/", None), route("/", Some("not-found"))];
         let nf = find_not_found_route("/anything/here", &routes)
