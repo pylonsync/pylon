@@ -320,8 +320,10 @@ fn crud_lifecycle() {
     // Verify the update
     let (_, body) = http_request("GET", &format!("{base}/api/entities/Todo/{id}"), None);
     let row: serde_json::Value = serde_json::from_str(&body).unwrap();
-    // SQLite stores booleans as integers; `true` becomes `1`.
-    assert_eq!(row["done"], 1);
+    // SQLite stores bool columns as INTEGER 0/1, but reads map them
+    // back to JSON booleans per the schema — typed clients (Swift)
+    // reject 0/1 where the codegen says Bool.
+    assert_eq!(row["done"], true);
 
     // DELETE
     let (status, _) = http_request("DELETE", &format!("{base}/api/entities/Todo/{id}"), None);
