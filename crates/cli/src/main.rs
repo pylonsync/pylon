@@ -355,7 +355,7 @@ fn print_usage() {
     println!("  login                     Authenticate against Pylon Cloud");
     println!("  logout                    Remove stored Pylon Cloud credentials");
     println!("  link                      Connect this project to a GitHub repo for auto-deploy");
-    println!("  projects [list|use|current]   List / set / show current cloud project");
+    println!("  projects [list|create|use|current] List / create / set / show cloud projects");
     println!("  secrets  [list|set|rm|import] Manage project secrets");
     println!("  logs tail                 Tail the project's request log");
     println!("  domains  [list|add|verify|rm] Manage custom domains");

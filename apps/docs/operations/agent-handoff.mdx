@@ -76,7 +76,12 @@ I just signed up for Pylon Cloud and want you to help me build. Please run these
 
 4. Show me what's on my account so we know where we're starting:
    pylon projects list
-   pylon status
+
+If the list is empty, create one yourself once we've picked a name:
+`pylon projects create <slug>` provisions it, waits until it's live at
+https://<slug>.pyln.dev, and sets it as the working context. To target
+an existing project instead, run `pylon projects use <slug>` from this
+directory.
 
 Then ask me one question: what am I trying to build?
 

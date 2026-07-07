@@ -39,10 +39,31 @@ Most commands target a single project. Resolution order (first match wins):
 
 ```bash
 pylon projects list                # all projects you can see
+pylon projects create my-app       # create + provision a project, set it as context
 pylon projects use my-app          # writes .pylon/project + adds to .gitignore
 pylon projects current             # what's the current context?
 pylon projects use ""              # clear the context
 ```
+
+### Create
+
+`pylon projects create <slug>` provisions a project on Pylon Cloud without touching
+the dashboard: it creates the project in your org, waits for the machine to come up
+(usually well under a minute; `--db postgres` adds a managed-database provision first),
+pins the slug as your local context, and prints the live `https://<slug>.pyln.dev` URL.
+
+```bash
+pylon projects create my-app                       # SQLite, region iad, waits until live
+pylon projects create my-app --name "My App"       # display name (defaults to the slug)
+pylon projects create my-app --org acme            # required only if you're in multiple orgs
+pylon projects create my-app --db postgres         # managed Postgres instead of SQLite
+pylon projects create my-app --region ord          # Fly region
+pylon projects create my-app --no-wait             # return immediately; check with `pylon status`
+```
+
+With `--json` the final line is a single machine-readable object
+(`{"ok":true,"slug":"my-app","status":"running","url":"https://my-app.pyln.dev",...}`),
+so agents and scripts can chain straight into `pylon deploy`.
 
 ## Test
 

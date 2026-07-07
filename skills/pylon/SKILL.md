@@ -583,6 +583,7 @@ Once logged in (`pylon login`, or via the dashboard's "Hand off to your coding a
 
 ```bash
 pylon projects list                     # all projects you can see
+pylon projects create my-app            # create + provision a project, set it as context
 pylon projects use my-app               # set current project for this dir
 pylon secrets list / set KEY=v / rm KEY / import .env
 pylon logs tail                          # 2s-polling request log
@@ -596,7 +597,7 @@ pylon members list / invite EMAIL [role]
 
 Every command accepts `--json` for piping to `jq`. Project context resolves from `--project` flag → `$PYLON_PROJECT` → `.pylon/project` file → interactive picker. The `.pylon/project` file is what `pylon projects use` writes; subsequent commands in that directory tree auto-target.
 
-**Project creation** still lives in the dashboard — provisioning a Fly machine + Postgres DB isn't a one-call CLI operation yet. After signup, point the user at `www.pylonsync.com/dashboard` to create the first project; then `pylon projects use <slug>` from the local repo and everything else flows through the CLI.
+**Project creation** (pylon ≥ 0.3.317): `pylon projects create <slug> [--name <name>] [--org <org-slug>] [--region iad] [--db sqlite|postgres] [--no-wait]`. Creates the project, waits for the Fly machine to provision (~30–60s; Postgres adds a managed-DB provision), pins it as the local context, and prints the live `https://<slug>.pyln.dev` URL — so login → create → deploy runs end-to-end without the dashboard. `--org` is only needed when the account belongs to multiple orgs. On older CLI versions (or if the account has no org yet), create the project in the dashboard and run `pylon projects use <slug>` instead.
 
 ### Multi-machine (horizontal scaling)
 
@@ -728,7 +729,7 @@ This skill focused on the React/TS happy path. Pylon has more — fetch the docs
 
 ### Pylon Cloud
 Managed Pylon at `www.pylonsync.com`. Same binary, same APIs.
-- `pylon login` then `pylon deploy --target cloud`
+- `pylon login` → `pylon projects create <slug>` → `pylon deploy`
 - Custom domains via `pylon domain add`
 - Environment vars via `pylon env set/list/unset`
 - Includes: managed Postgres, TLS, magic-link email, OAuth (your creds), file storage, Studio, logs/metrics
