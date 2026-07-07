@@ -301,22 +301,58 @@ async function main() {
 	// uses; if THAT fails, fail the build loudly rather than build a
 	// degraded bundle.
 	if (!existsSync(`${appDir}/pylon.manifest.json`)) {
-		console.log("[builder] pylon.manifest.json absent — deriving via pylon codegen");
-		try {
-			await sh(["pylon", "codegen"], appDir);
-		} catch (err) {
+		// Derive the manifest the way `pylon codegen` does INTERNALLY: run the
+		// app entry with Bun, which prints the manifest JSON to stdout (app.ts /
+		// schema.ts end with `console.log(JSON.stringify(manifest))`). This
+		// builder image ships Bun + the app's installed @pylonsync/sdk but NOT
+		// the `pylon` binary (it's a lean build box, not the runtime), so we
+		// invoke Bun directly instead of shelling out to `pylon` — which isn't
+		// on PATH here and failed every deploy of a repo that (correctly)
+		// gitignores its manifest. Fail loudly on error rather than ship a
+		// degraded bundle (missing fonts / SSR route metadata).
+		const entry = ["app.ts", "schema.ts"].find((f) =>
+			existsSync(`${appDir}/${f}`),
+		);
+		if (!entry) {
 			throw new Error(
-				`app manifest could not be derived (pylon codegen failed): ${err}. ` +
-					"The client bundle would silently lose manifest-driven features " +
-					"(fonts, SSR route metadata), so the build stops here instead.",
-			);
-		}
-		if (!existsSync(`${appDir}/pylon.manifest.json`)) {
-			throw new Error(
-				"pylon codegen completed but wrote no pylon.manifest.json — " +
+				"no app.ts or schema.ts found to derive pylon.manifest.json from — " +
 					"cannot build the client bundle without a manifest.",
 			);
 		}
+		console.log(
+			`[builder] pylon.manifest.json absent — deriving from ${entry} via bun`,
+		);
+		// `--` stops Bun treating an entry that starts with `-` as a flag.
+		const proc = Bun.spawn(["bun", "run", "--", entry], {
+			cwd: appDir,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: process.env as Record<string, string>,
+		});
+		const [out, errText, code] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		if (code !== 0) {
+			throw new Error(
+				`app manifest could not be derived (bun run ${entry} exited ${code}): ` +
+					`${errText.trim()}. The client bundle would silently lose ` +
+					"manifest-driven features (fonts, SSR route metadata), so the " +
+					"build stops here instead.",
+			);
+		}
+		const manifestText = out.trim();
+		try {
+			JSON.parse(manifestText);
+		} catch {
+			throw new Error(
+				`deriving the manifest from ${entry} produced no valid JSON on stdout ` +
+					`(${manifestText.length} bytes). ${entry} must end with ` +
+					`\`console.log(JSON.stringify(manifest))\`. stderr: ${errText.trim()}`,
+			);
+		}
+		await Bun.write(`${appDir}/pylon.manifest.json`, manifestText);
 	}
 
 	let clientAssetsPublished = false;
