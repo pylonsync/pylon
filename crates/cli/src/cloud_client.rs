@@ -1,9 +1,10 @@
 //! Pylon Cloud client — credential storage + authenticated HTTP.
 //!
 //! Used by `pylon login`, `pylon logout`, and `pylon deploy --target
-//! cloud`. Talks to https://api.pylonsync.com by default; the
-//! cloud origin is overridable via `PYLON_CLOUD_URL` for staging /
-//! self-hosted Pylon Cloud installations.
+//! cloud`. Talks to https://www.pylonsync.com by default (hosted Pylon
+//! Cloud is one unified app on www — it serves both the API and the
+//! dashboard); the cloud origin is overridable via `PYLON_CLOUD_URL`
+//! for staging / self-hosted Pylon Cloud installations.
 //!
 //! Credentials live in `$XDG_CONFIG_HOME/pylon/credentials.json` (or
 //! `~/.config/pylon/credentials.json` when XDG isn't set). The file
@@ -37,26 +38,29 @@ pub struct Credentials {
 
 /// Default cloud origin. Override with `PYLON_CLOUD_URL` for staging
 /// or self-hosted installs.
-pub const DEFAULT_CLOUD_URL: &str = "https://api.pylonsync.com";
+pub const DEFAULT_CLOUD_URL: &str = "https://www.pylonsync.com";
 
 pub fn cloud_url() -> String {
     std::env::var("PYLON_CLOUD_URL").unwrap_or_else(|_| DEFAULT_CLOUD_URL.to_string())
 }
 
-/// Where the human-facing dashboard lives. The hosted API origin is
-/// api.pylonsync.com but the dashboard is served from www.pylonsync.com —
-/// links the CLI prints for a browser must use the www host. Self-hosted /
-/// staging installs (PYLON_CLOUD_URL set) serve both from one origin, so
-/// the API origin is the right fallback there.
+/// Where the human-facing dashboard lives. Hosted Pylon Cloud is one
+/// unified app on www.pylonsync.com serving both the API and the
+/// dashboard, so this is normally the same origin the CLI talks to.
+/// Credentials minted against the retired `api.pylonsync.com` host (old
+/// logins) are still mapped to www so browser links resolve. Self-hosted
+/// / staging installs (PYLON_CLOUD_URL set) serve both from one origin,
+/// so that origin is returned as-is.
 pub fn dashboard_url() -> String {
     dashboard_url_for(&cloud_url())
 }
 
 fn dashboard_url_for(api: &str) -> String {
-    if api.trim_end_matches('/') == DEFAULT_CLOUD_URL {
+    let trimmed = api.trim_end_matches('/');
+    if trimmed == "https://www.pylonsync.com" || trimmed == "https://api.pylonsync.com" {
         "https://www.pylonsync.com".to_string()
     } else {
-        api.trim_end_matches('/').to_string()
+        trimmed.to_string()
     }
 }
 
@@ -321,9 +325,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_url_maps_hosted_api_origin_to_www() {
-        // Regression: login/deploy/projects used to print browser links on
-        // the api. host, where /dashboard pages 404.
+    fn default_cloud_url_is_www() {
+        // Hosted Pylon Cloud is one unified app on www; api.pylonsync.com
+        // is retired (kept alive only for back-compat with old CLIs).
+        assert_eq!(DEFAULT_CLOUD_URL, "https://www.pylonsync.com");
+    }
+
+    #[test]
+    fn dashboard_url_maps_hosted_origins_to_www() {
+        // www is the canonical dashboard host. Old credentials minted
+        // against the retired api. host still map to www so browser links
+        // don't 404.
+        assert_eq!(
+            dashboard_url_for("https://www.pylonsync.com"),
+            "https://www.pylonsync.com"
+        );
         assert_eq!(
             dashboard_url_for("https://api.pylonsync.com"),
             "https://www.pylonsync.com"
