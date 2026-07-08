@@ -2119,7 +2119,26 @@ impl EmailAdapter {
 
     /// Auth-flow transport (`PYLON_AUTH_EMAIL_*`, else `PYLON_EMAIL_*`).
     pub fn for_auth() -> Self {
-        Self::wrap(HttpEmailTransport::from_env_auth())
+        let http = HttpEmailTransport::from_env_auth();
+        // Fail-LOUD footgun guard. If email verification is REQUIRED but no
+        // auth email provider resolved, verification codes fall back to
+        // ConsoleTransport (printed to stderr, never delivered) and EVERY
+        // email/password signup is permanently locked out — a silent, total
+        // signup outage. (OAuth signups are unaffected; they arrive
+        // pre-verified.) Shout at boot so this can never quietly brick
+        // production again. eprintln in addition to tracing because the
+        // tracing subscriber may not be initialized this early in boot.
+        if http.is_none() && std::env::var("PYLON_REQUIRE_EMAIL_VERIFICATION").as_deref() == Ok("1")
+        {
+            let msg = "PYLON_REQUIRE_EMAIL_VERIFICATION=1 but no auth email provider is \
+                 configured — verification codes fall back to the console (NOT delivered), so \
+                 every email/password signup will be locked out. Set PYLON_AUTH_EMAIL_PROVIDER + \
+                 PYLON_AUTH_EMAIL_API_KEY (+ PYLON_AUTH_EMAIL_FROM), or PYLON_EMAIL_PROVIDER. \
+                 OAuth signups are unaffected.";
+            tracing::error!("{msg}");
+            eprintln!("[pylon] CONFIG ERROR: {msg}");
+        }
+        Self::wrap(http)
     }
 
     fn wrap(http: Option<HttpEmailTransport>) -> Self {
