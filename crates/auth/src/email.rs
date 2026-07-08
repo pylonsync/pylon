@@ -128,16 +128,42 @@ impl HttpEmailTransport {
         })
     }
 
+    /// Split the configured `From` into an optional display name and the bare
+    /// address. Accepts RFC-5322 `Name <email>` and a plain `email`. Used to
+    /// feed providers whose APIs take a structured sender (SendGrid, Stack0)
+    /// rather than a `Name <email>` string — those reject the concatenated form.
+    fn from_parts(&self) -> (Option<&str>, &str) {
+        let s = self.from.trim();
+        if let (Some(lt), Some(gt)) = (s.find('<'), s.rfind('>')) {
+            if lt < gt {
+                let name = s[..lt].trim().trim_matches('"').trim();
+                let email = s[lt + 1..gt].trim();
+                if !email.is_empty() {
+                    return (if name.is_empty() { None } else { Some(name) }, email);
+                }
+            }
+        }
+        (None, s)
+    }
+
     /// Build the JSON body for the provider's API.
     pub fn build_body(&self, to: &str, subject: &str, body: &str) -> String {
+        let (from_name, from_email) = self.from_parts();
         match self.provider {
-            HttpEmailProvider::SendGrid => serde_json::json!({
-                "personalizations": [{"to": [{"email": to}]}],
-                "from": {"email": self.from},
-                "subject": subject,
-                "content": [{"type": "text/plain", "value": body}]
-            })
-            .to_string(),
+            HttpEmailProvider::SendGrid => {
+                let mut from = serde_json::json!({ "email": from_email });
+                if let Some(name) = from_name {
+                    from["name"] = serde_json::Value::String(name.to_string());
+                }
+                serde_json::json!({
+                    "personalizations": [{"to": [{"email": to}]}],
+                    "from": from,
+                    "subject": subject,
+                    "content": [{"type": "text/plain", "value": body}]
+                })
+                .to_string()
+            }
+            // Resend accepts the `Name <email>` string form directly.
             HttpEmailProvider::Resend => serde_json::json!({
                 "from": self.from,
                 "to": [to],
@@ -145,13 +171,22 @@ impl HttpEmailTransport {
                 "text": body
             })
             .to_string(),
-            HttpEmailProvider::Stack0 => serde_json::json!({
-                "from": self.from,
-                "to": [to],
-                "subject": subject,
-                "text": body
-            })
-            .to_string(),
+            // Stack0's mail/send validates `from` as a bare email string and
+            // rejects `Name <email>`; a display name must go through the
+            // structured `{email, name}` form.
+            HttpEmailProvider::Stack0 => {
+                let from = match from_name {
+                    Some(name) => serde_json::json!({ "email": from_email, "name": name }),
+                    None => serde_json::json!(from_email),
+                };
+                serde_json::json!({
+                    "from": from,
+                    "to": [to],
+                    "subject": subject,
+                    "text": body
+                })
+                .to_string()
+            }
             HttpEmailProvider::Webhook => serde_json::json!({
                 "to": to,
                 "from": self.from,
@@ -247,6 +282,34 @@ mod tests {
         assert_eq!(parsed["to"][0], "user@test.com");
         assert_eq!(parsed["subject"], "Your code");
         assert_eq!(parsed["text"], "123456");
+    }
+
+    #[test]
+    fn display_name_sent_as_structured_from() {
+        // Stack0 + SendGrid reject a `Name <email>` string, so a display name
+        // must go through the structured {email, name} form. A bare From (the
+        // test above) stays a plain string.
+        let stack0 = HttpEmailTransport {
+            endpoint: "https://api.stack0.dev/v1/mail/send".into(),
+            api_key: "key".into(),
+            from: "Pylon Cloud <noreply@mail.pylonsync.com>".into(),
+            provider: HttpEmailProvider::Stack0,
+        };
+        let p: serde_json::Value =
+            serde_json::from_str(&stack0.build_body("u@test.com", "s", "b")).unwrap();
+        assert_eq!(p["from"]["email"], "noreply@mail.pylonsync.com");
+        assert_eq!(p["from"]["name"], "Pylon Cloud");
+
+        let sendgrid = HttpEmailTransport {
+            endpoint: "https://api.sendgrid.com/v3/mail/send".into(),
+            api_key: "key".into(),
+            from: "Pylon Cloud <noreply@mail.pylonsync.com>".into(),
+            provider: HttpEmailProvider::SendGrid,
+        };
+        let ps: serde_json::Value =
+            serde_json::from_str(&sendgrid.build_body("u@test.com", "s", "b")).unwrap();
+        assert_eq!(ps["from"]["email"], "noreply@mail.pylonsync.com");
+        assert_eq!(ps["from"]["name"], "Pylon Cloud");
     }
 
     #[test]
