@@ -30,6 +30,9 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dotenvy = "0.15"
+# Device-flow login (`pylon login`): a CSPRNG-generated device code the
+# CLI opens in the browser and polls exchangeCliAuthCode for after approval.
+rand = { workspace = true }
 # Cloud deploy + login flows: sync HTTP, gzip-tar bundling. ureq is
 # chosen over reqwest because the CLI is single-shot — pulling in a
 # Tokio runtime to fire one POST is wasteful + bloats the static

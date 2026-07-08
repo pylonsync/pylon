@@ -1,20 +1,24 @@
 //! `pylon login` — authenticate against Pylon Cloud (or a self-hosted
 //! Pylon Cloud install via `PYLON_CLOUD_URL`).
 //!
-//! Flow:
-//! 1. Print a URL to the cloud's "Generate a CLI token" page.
-//! 2. Try to open it in the user's browser via `open` (macOS) / `xdg-open`
-//!    (Linux) / `start` (Windows). Failure is non-fatal — the URL is
-//!    already printed.
-//! 3. Read the pasted token from stdin.
-//! 4. Validate it by hitting `getMe` on the cloud — proves the token
-//!    works AND surfaces which user account it belongs to.
-//! 5. Persist to `~/.config/pylon/credentials.json` (mode 0600).
+//! Default (interactive) flow — device authorization, no manual paste of a
+//! long token:
+//! 1. Generate a typeable, high-entropy login code locally.
+//! 2. Print it and open a bare `{dashboard}/cli` in the browser (the code is
+//!    NEVER put in the URL — a link alone must not be able to approve a login).
+//! 3. The signed-in user TYPES the code on `/cli` and approves; the browser
+//!    mints a token and stashes it under the typed code.
+//! 4. The CLI polls `exchangeCliAuthCode({code})` until the token appears,
+//!    then persists to `~/.config/pylon/credentials.json` (mode 0600).
 //!
-//! No OAuth callback dance — paste-token is what every CLI of this
-//! shape (Fly, Vercel, Doppler, Wrangler) starts with, and it works
-//! over SSH / headless / corp-firewalled environments where browser
-//! callbacks don't.
+//! Signup happens inline: an unauthenticated visitor to `/cli` is bounced
+//! through signup/login and lands back on the approve screen.
+//!
+//! Non-interactive paths (agents / CI) skip the browser entirely:
+//!   --code <code>       redeem a one-time code minted in the dashboard
+//!   --token <token>     direct
+//!   --token-stdin       read the token from stdin
+//!   PYLON_CLI_TOKEN=…   env var
 
 use std::io::{self, BufRead, Write};
 
@@ -84,77 +88,163 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         return run_with_token(&cloud, &token, json_mode);
     }
 
-    // Interactive fallback for humans at a terminal. Agents should
-    // never reach this — they'll get a paste prompt that hangs.
-    let token_url = format!(
-        "{}/dashboard/account/cli-tokens",
-        crate::cloud_client::dashboard_url()
+    // Interactive default: device-authorization. Opens the browser to the
+    // approve page and polls for the token — no paste. Agents/CI never reach
+    // here (they hit the token/code/env paths above).
+    run_device_flow(&cloud, json_mode)
+}
+
+/// Device-authorization sign-in. Prints a login code, opens a bare
+/// `{dashboard}/cli`, and polls `exchangeCliAuthCode({code})` until the user
+/// types that code in the browser and the approval stashes a token under it.
+fn run_device_flow(cloud: &str, json_mode: bool) -> ExitCode {
+    use crate::cloud_client::post_json;
+    use serde::Deserialize;
+    use std::thread::sleep;
+    use std::time::{Duration, Instant};
+
+    // `login_code` is the canonical form we poll with: 12 uppercase letters +
+    // digits, no separators. We DISPLAY it grouped for readability; the user
+    // may type the hyphens or not — the /cli page strips them to the same 12
+    // characters before stashing, so poll and stash always match.
+    let login_code = generate_login_code();
+    let display_code = format!(
+        "{}-{}-{}",
+        &login_code[0..4],
+        &login_code[4..8],
+        &login_code[8..12]
     );
+    let verify_url = format!("{}/cli", crate::cloud_client::dashboard_url());
 
     if !json_mode {
         println!();
-        println!("→ Sign in at: {token_url}");
-        println!("  Click \"Create CLI token\", copy the value, and paste it below.");
-        println!("  Non-interactive: pylon login --token <token>");
-        println!("                   PYLON_CLI_TOKEN=<token> pylon login");
-        println!("                   echo <token> | pylon login --token-stdin");
+        println!("→ To sign in, open:  {verify_url}");
+        println!("  and enter this code:");
+        println!();
+        println!("      {display_code}");
+        println!();
+        println!("  Only type it on {verify_url} — never a code a link or message sent you.");
+        println!(
+            "  (Headless/CI: pylon login --token <token>  ·  PYLON_CLI_TOKEN=<token> pylon login)"
+        );
         println!();
     }
+    // Best-effort browser launch — the URL is already printed for headless /
+    // SSH callers, who can open it on any device and type the code.
+    let _ = open_browser(&verify_url);
 
-    // Best-effort browser launch. Errors are silent — the URL is
-    // already printed for headless / SSH callers.
-    let _ = open_browser(&token_url);
-
-    print!("Paste token: ");
-    let _ = io::stdout().flush();
-
-    let stdin = io::stdin();
-    let mut line = String::new();
-    if stdin.lock().read_line(&mut line).is_err() {
-        output::print_error("Failed to read token from stdin.");
-        return ExitCode::Usage;
+    #[derive(serde::Serialize)]
+    struct Args<'a> {
+        code: &'a str,
     }
-    let token = line.trim().to_string();
-    if token.is_empty() {
-        output::print_error("No token provided. Aborting.");
-        return ExitCode::Usage;
+    #[derive(Deserialize)]
+    struct Out {
+        token: String,
+        user: UserOut,
+    }
+    #[derive(Deserialize)]
+    struct UserOut {
+        email: String,
     }
 
-    // Validate before persisting — better to fail loudly here than to
-    // write a bad credential to disk and have every subsequent command
-    // hit 401.
-    let email = match validate_token(&cloud, &token) {
-        Ok(email) => email,
-        Err(e) => {
-            output::print_error(&format!("Token did not validate: {e}"));
+    // No credentials yet — the code IS the auth for this public endpoint.
+    let poll_creds = Credentials {
+        cloud_url: cloud.to_string(),
+        token: String::new(),
+        user_email: None,
+    };
+    // The code row's TTL is 5 min; give the user that long to approve.
+    let deadline = Instant::now() + Duration::from_secs(300);
+
+    if !json_mode {
+        print!("  Waiting for approval");
+        let _ = io::stdout().flush();
+    }
+    loop {
+        // Check the deadline BEFORE polling so a token can't be accepted after
+        // the window, and we never start a poll past it.
+        if Instant::now() >= deadline {
+            if !json_mode {
+                println!();
+            }
+            output::print_error("Timed out waiting for approval (5 min). Re-run `pylon login`.");
             return ExitCode::Usage;
         }
-    };
-
-    let creds = Credentials {
-        cloud_url: cloud.clone(),
-        token,
-        user_email: Some(email.clone()),
-    };
-    if let Err(e) = save_credentials(&creds) {
-        output::print_error(&format!("Failed to save credentials: {e}"));
-        return ExitCode::Error;
+        match post_json::<_, Out>(
+            &poll_creds,
+            "/api/fn/exchangeCliAuthCode",
+            &Args { code: &login_code },
+        ) {
+            Ok(resp) => {
+                if !json_mode {
+                    println!();
+                }
+                let creds = Credentials {
+                    cloud_url: cloud.to_string(),
+                    token: resp.token,
+                    user_email: Some(resp.user.email.clone()),
+                };
+                if let Err(e) = save_credentials(&creds) {
+                    output::print_error(&format!("Failed to save credentials: {e}"));
+                    return ExitCode::Error;
+                }
+                if json_mode {
+                    let out = serde_json::json!({
+                        "ok": true,
+                        "cloud_url": cloud,
+                        "user_email": resp.user.email,
+                        "via": "device",
+                    });
+                    println!("{}", serde_json::to_string(&out).unwrap_or_default());
+                } else {
+                    println!("✓ Signed in as {}", resp.user.email);
+                    println!("  Cloud: {cloud}");
+                    println!("  Run `pylon deploy` from any Pylon project to ship it.");
+                }
+                return ExitCode::Ok;
+            }
+            Err(msg) => {
+                // Terminal outcomes — stop and surface. CODE_INVALID (the row
+                // doesn't exist until approval) and transient network blips are
+                // NOT terminal: keep polling until the deadline.
+                let terminal = msg.contains("CODE_USED")
+                    || msg.contains("CODE_EXPIRED")
+                    || msg.contains("CODE_DRAINED");
+                if terminal {
+                    if !json_mode {
+                        println!();
+                    }
+                    output::print_error(&format!("Sign-in failed: {msg}"));
+                    return ExitCode::Error;
+                }
+                // CODE_INVALID (the row doesn't exist until the user approves)
+                // or a transient network blip → keep polling; the deadline is
+                // enforced at the top of the loop.
+                if !json_mode {
+                    print!(".");
+                    let _ = io::stdout().flush();
+                }
+                sleep(Duration::from_secs(2));
+            }
+        }
     }
+}
 
-    if json_mode {
-        let out = serde_json::json!({
-            "ok": true,
-            "cloud_url": cloud,
-            "user_email": email,
-        });
-        println!("{}", serde_json::to_string(&out).unwrap_or_default());
-    } else {
-        println!();
-        println!("✓ Signed in as {email}");
-        println!("  Cloud: {cloud}");
-        println!("  You can now run `pylon deploy --target cloud` from any Pylon project.");
-    }
-    ExitCode::Ok
+/// A typeable, high-entropy login code — 12 characters from a 31-char alphabet
+/// with no visually-confusable characters (no 0/O, 1/I/L). ~59 bits; combined
+/// with the 5-min TTL and the framework's per-IP rate limit, a public poller
+/// can't guess it. Uppercase + separator-free so it survives
+/// `exchangeCliAuthCode`'s case-insensitive lookup and matches the canonical
+/// form the browser stores (which strips any hyphens the user types). The user
+/// types this on the /cli page — never a URL param — which is the anti-phishing
+/// control: a link alone can't approve a code.
+fn generate_login_code() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..12)
+        .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 /// `pylon login --token <token>` (or via stdin / env var) — validate
