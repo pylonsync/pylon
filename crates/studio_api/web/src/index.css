@@ -30,29 +30,31 @@
 :root {
 	--radius: 0.625rem;
 
-	/* Neutral surface — light */
-	--background: oklch(1 0 0);
-	--foreground: oklch(0.141 0.005 285.823);
+	/* Neutral surface — light. Calm console palette: a faintly cool gray page
+	   with white cards + sidebar floating on it (à la Cloudflare / Vercel),
+	   rather than pure-white-on-white. */
+	--background: oklch(0.98 0.002 247);
+	--foreground: oklch(0.21 0.02 260);
 	--card: oklch(1 0 0);
-	--card-foreground: oklch(0.141 0.005 285.823);
+	--card-foreground: oklch(0.21 0.02 260);
 	--popover: oklch(1 0 0);
-	--popover-foreground: oklch(0.141 0.005 285.823);
-	--secondary: oklch(0.967 0.001 286.375);
-	--secondary-foreground: oklch(0.21 0.006 285.885);
-	--muted: oklch(0.967 0.001 286.375);
-	--muted-foreground: oklch(0.552 0.016 285.938);
-	--accent: oklch(0.967 0.001 286.375);
-	--accent-foreground: oklch(0.21 0.006 285.885);
+	--popover-foreground: oklch(0.21 0.02 260);
+	--secondary: oklch(0.968 0.003 247);
+	--secondary-foreground: oklch(0.28 0.02 260);
+	--muted: oklch(0.968 0.003 247);
+	--muted-foreground: oklch(0.55 0.02 258);
+	--accent: oklch(0.968 0.003 247);
+	--accent-foreground: oklch(0.28 0.02 260);
 	--destructive: oklch(0.577 0.245 27.325);
-	--border: oklch(0.92 0.004 286.32);
-	--input: oklch(0.92 0.004 286.32);
+	--border: oklch(0.923 0.004 250);
+	--input: oklch(0.923 0.004 250);
 
-	/* Sidebar surface — light, slightly off-background */
-	--sidebar: oklch(0.985 0 0);
-	--sidebar-foreground: oklch(0.141 0.005 285.823);
-	--sidebar-accent: oklch(0.967 0.001 286.375);
-	--sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-	--sidebar-border: oklch(0.92 0.004 286.32);
+	/* Sidebar surface — white, sits on the gray page like a flush rail */
+	--sidebar: oklch(1 0 0);
+	--sidebar-foreground: oklch(0.21 0.02 260);
+	--sidebar-accent: oklch(0.968 0.003 247);
+	--sidebar-accent-foreground: oklch(0.28 0.02 260);
+	--sidebar-border: oklch(0.923 0.004 250);
 
 	/* Charts (kept from previous theme — used by metrics dashboards) */
 	--chart-1: oklch(0.646 0.222 41.116);
@@ -126,12 +128,14 @@
 }
 
 [data-accent="blue"] {
-	--primary: oklch(0.6 0.165 250);
+	/* Cloudflare-ish blue: a solid, slightly deep link/action blue that reads
+	   AA on white with a white foreground. */
+	--primary: oklch(0.55 0.19 255);
 	--primary-foreground: oklch(0.985 0.005 250);
-	--ring: oklch(0.6 0.165 250);
-	--sidebar-primary: oklch(0.6 0.165 250);
+	--ring: oklch(0.55 0.19 255);
+	--sidebar-primary: oklch(0.55 0.19 255);
 	--sidebar-primary-foreground: oklch(0.985 0.005 250);
-	--sidebar-ring: oklch(0.6 0.165 250);
+	--sidebar-ring: oklch(0.55 0.19 255);
 }
 
 [data-accent="violet"] {

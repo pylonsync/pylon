@@ -3,7 +3,7 @@ title: How Pylon compares
 description: "Honest comparisons against Convex, Supabase, Firebase, Colyseus, Playroom Kit, and Nakama."
 ---
 
-Every backend is good at something. This section is the honest version of "should you use Pylon or X" — written so you can hand it to your tech-lead and they'll trust it. We don't sandbag competitors; we link to their docs and quote them where the comparison matters.
+Every framework and backend is good at something. This section is the honest version of "should you use Pylon or X" — written so you can hand it to your tech-lead and they'll trust it. We don't sandbag competitors; we use primary docs where the comparison matters.
 
 ## App backends
 
@@ -14,10 +14,10 @@ Every backend is good at something. This section is the honest version of "shoul
 | Self-hostable | ✅ | ✅ | ✅ | ❌ |
 | Realtime sync | ✅ | ✅ | ✅ | ✅ |
 | TypeScript functions | ✅ in-repo | ✅ in-repo | ⚠️ Edge Functions (Deno, separate deploy) | ⚠️ Cloud Functions (separate deploy) |
-| Faceted search | ✅ FTS5 + roaring bitmaps | ❌ FTS only | ⚠️ Postgres `tsvector`, no native facets | ❌ requires Algolia |
+| Faceted search | ✅ FTS5 + roaring bitmaps | ⚠️ text/vector search, no native facets | ⚠️ Postgres `tsvector`, no native facets | ⚠️ Enterprise text search or third-party search |
 | Tick-based game shards | ✅ | ❌ | ❌ | ❌ |
 | Open source | ✅ MIT/Apache | ✅ FSL | ✅ Apache 2.0 | ❌ |
-| Pricing model | $0 self-host or per-use Cloud | Per-use only on Convex Cloud | Per-tier on Supabase Cloud | Per-use only on Firebase |
+| Pricing model | Self-host infra or Pylon Cloud plan + machine compute | Hosted usage + team seats; self-host infra | Hosted tiers or self-host infra | Hosted pay-as-you-go meters |
 
 Drill down: [Pylon vs. Convex](/compare/convex) · [Pylon vs. Supabase](/compare/supabase) · [Pylon vs. Firebase](/compare/firebase)
 
@@ -26,25 +26,25 @@ Drill down: [Pylon vs. Convex](/compare/convex) · [Pylon vs. Supabase](/compare
 | | Pylon | Colyseus | Playroom Kit | Nakama |
 | --- | --- | --- | --- | --- |
 | **Best for** | Apps with real-time data + game shards in one stack | Standalone game server in Node | Quick web games with shared state | Production multiplayer with social features |
-| Tick-based authority | ✅ | ✅ | ⚠️ host-relay model | ✅ |
-| Area-of-interest | ✅ built-in | ⚠️ `@filter` decorators (manual) | ❌ | ⚠️ presence-based, manual |
+| Tick-based authority | ✅ | ✅ | ⚠️ host-authoritative client model | ✅ |
+| Area-of-interest | ✅ built-in | ⚠️ StateView/per-client filtering | ❌ | ⚠️ presence-based, manual |
 | Matchmaker | ✅ | ✅ | ✅ | ✅ |
 | Declarative app data | ✅ entities + policies | ❌ game state only | ❌ shared state only | ⚠️ Storage Engine (typed JSON) |
 | Live queries for UI | ✅ | ❌ | ❌ | ❌ |
-| Self-hosted as one binary | ✅ Rust | ⚠️ Node + your code | ❌ managed only | ✅ Go binary + Postgres |
+| Self-hosted as one binary | ✅ Rust | ⚠️ Node + your code | ❌ managed only | ✅ Go binary + external DB |
 | Open source | ✅ MIT/Apache | ✅ MIT | ❌ proprietary | ✅ Apache 2.0 |
 
 Drill down: [Pylon vs. Colyseus](/compare/colyseus) · [Pylon vs. Playroom Kit](/compare/playroom) · [Pylon vs. Nakama](/compare/nakama)
 
 ## How we keep these honest
 
-- **Linked sources for every claim.** If we say "Supabase doesn't have native faceted search", the linked Supabase doc is the receipt.
+- **Primary sources for vendor-sensitive claims.** If a vendor ships a feature, we should describe it the way their current docs describe it.
 - **No scoreboard inflation.** Where a competitor is genuinely better at something, we say so. (Supabase's Postgres-native data layer is more flexible than ours for analytics; Convex's pure-TS dev loop is genuinely tighter for greenfield TS apps.)
-- **Quarterly review.** This page is checked against current vendor docs every quarter. If you spot a stale claim, [open an issue](https://github.com/pylonsync/pylon/issues).
+- **Review when docs or pricing change.** If you spot a stale claim, [open an issue](https://github.com/pylonsync/pylon/issues).
 
 ## How Pylon fits in your stack
 
-Pylon is **the backend**. It's designed to pair with whatever you're already shipping on the frontend — **Next.js, React + Vite, Expo / React Native, Swift / SwiftUI**. The dedicated SDKs ([`@pylonsync/next`](/clients/next), [`@pylonsync/react`](/clients/react), [`@pylonsync/react-native`](/clients/react-native), [Swift SDK](/clients/swift)) exist precisely so you don't have to choose between Pylon and your favorite frontend story. That's the happy path, not a compromise.
+Pylon is a **full-stack realtime framework**. You can use its server-rendered React surface, or pair the backend with whatever you're already shipping on the frontend — **Next.js, React + Vite, Expo / React Native, Swift / SwiftUI**. The dedicated SDKs ([`@pylonsync/next`](/clients/next), [`@pylonsync/react`](/clients/react), [`@pylonsync/react-native`](/clients/react-native), [Swift SDK](/clients/swift)) exist precisely so you don't have to choose between Pylon and your favorite frontend story. That's the happy path, not a compromise.
 
 ## When we'd recommend NOT using Pylon
 
@@ -76,7 +76,7 @@ If you're already on a competitor and considering a move:
 We treat lock-in as a bug. Every Pylon deployment can:
 
 - **Export to JSON or SQL** via `pylon export` / `pylon backup`
-- **Migrate from Cloud to self-hosted** in one command (`pylon backup --source cloud`)
+- **Migrate from Cloud to self-hosted** by downloading a snapshot, restoring it with `pylon restore`, and running the same binary
 - **Self-host with the same binary** — no proprietary runtime, no vendor SDK that only talks to us
 
 Build with confidence that you can leave.

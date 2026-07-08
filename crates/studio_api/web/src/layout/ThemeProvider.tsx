@@ -23,8 +23,8 @@ export function ThemeProvider({
 	children: React.ReactNode;
 }) {
 	const accent: ThemeAccent =
-		theme?.accent && ACCENTS.includes(theme.accent) ? theme.accent : "emerald";
-	const defaultTheme = theme?.appearance ?? "dark";
+		theme?.accent && ACCENTS.includes(theme.accent) ? theme.accent : "blue";
+	const defaultTheme = theme?.appearance ?? "light";
 
 	useEffect(() => {
 		if (typeof document === "undefined") return;

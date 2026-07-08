@@ -9,6 +9,7 @@ export interface Lead {
   email: string;
   source: string;
   message: string;
+  createdAt: string;
 }
 
 // ---------------------------------------------------------------------------

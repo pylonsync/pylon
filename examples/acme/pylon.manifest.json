@@ -23,6 +23,12 @@
           "type": "string",
           "optional": false,
           "unique": false
+        },
+        {
+          "name": "createdAt",
+          "type": "string",
+          "optional": false,
+          "unique": false
         }
       ],
       "indexes": []
@@ -78,6 +84,14 @@
       ]
     },
     {
+      "path": "/contact",
+      "mode": "ssr",
+      "component": "app/contact/page",
+      "layouts": [
+        "app/layout"
+      ]
+    },
+    {
       "path": "/pricing",
       "mode": "ssr",
       "component": "app/pricing/page",
@@ -88,7 +102,16 @@
   ],
   "queries": [],
   "actions": [],
-  "policies": [],
+  "policies": [
+    {
+      "name": "lead_submit",
+      "allowRead": "false",
+      "allowInsert": "true",
+      "allowUpdate": "false",
+      "allowDelete": "false",
+      "entity": "Lead"
+    }
+  ],
   "auth": {
     "user": {
       "entity": "User",
@@ -113,5 +136,27 @@
       "disabled": false
     },
     "trusted_origins": []
-  }
+  },
+  "fonts": [
+    {
+      "family": "Inter",
+      "variable": "--font-sans",
+      "weights": [
+        "400",
+        "500",
+        "600",
+        "700",
+        "800"
+      ],
+      "styles": [
+        "normal"
+      ],
+      "subsets": [
+        "latin"
+      ],
+      "display": "swap",
+      "preload": true,
+      "adjust_font_fallback": true
+    }
+  ]
 }

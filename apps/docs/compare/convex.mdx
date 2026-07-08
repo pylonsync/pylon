@@ -29,11 +29,11 @@ Both ship:
 
 | | Pylon | Convex |
 | --- | --- | --- |
-| Single binary | ✅ | ❌ |
+| Single binary | ✅ | ⚠️ prebuilt binary available; Docker is recommended |
 | Multi-service docker-compose | n/a | ✅ |
-| Default backing store | SQLite | Custom Convex DB |
+| Default backing store | SQLite/Postgres | SQLite, Postgres, or another configured store |
 
-Pylon ships as one Rust binary. Convex's open-source self-host is a docker-compose stack with a custom database. For a hobby project on a $5 VPS, Pylon installs in 30 seconds with no Docker. For a production deployment, both work; the operational story is different.
+Pylon ships as one Rust binary. Convex's self-hosted product can run from Docker or a prebuilt backend binary, with the dashboard and CLI included. For a hobby project on a $5 VPS, Pylon installs in 30 seconds with no Docker. For a production deployment, both work; the operational story is different.
 
 ### License
 
@@ -58,20 +58,21 @@ Convex has no concept of authoritative tick-based game state. If you're building
 
 | | Pylon | Convex |
 | --- | --- | --- |
-| Self-host | $0 (your infra) | $0 (your infra, FSL bound) |
-| Free tier | 1M requests / mo on Pylon Cloud | Free dev project + limited production |
-| Beyond free | $0.50 / 1M requests | $25/mo Pro then per-use |
+| Self-host | Your infra | Your infra, FSL bound |
+| Free / starter | Hobby plan or self-hosted infra | Free or Starter pay-as-you-go plan |
+| Team seats | Included in self-hosted apps; Cloud plan based | Professional plan charges per developer seat |
+| Large teams | Team plan + machine compute, or self-hosted infra | Business/Enterprise minimums |
 
-Pylon Cloud's pricing is usage-based with no monthly minimum. Convex's [pricing page](https://www.convex.dev/pricing) shows tiered plans starting at $0 (dev) → $25/mo (Pro) → custom (Enterprise).
+Pylon Cloud pricing is based on a platform plan plus machine compute and included quotas. Convex's [pricing page](https://www.convex.dev/pricing) combines hosted usage, team seats, and higher-tier minimums.
 
 ### Editor / Studio
 
 | | Pylon | Convex |
 | --- | --- | --- |
 | Built-in inspector | ✅ Pylon Studio at `/studio` | ✅ Convex dashboard |
-| Self-hosted | Studio ships with the binary | Dashboard is hosted; OSS self-host has a separate dashboard |
+| Self-hosted | Studio ships with the binary | Dashboard is included in the self-hosted product |
 
-Both have web-based inspectors. Pylon's runs against your local binary by default; Convex's is hosted unless you self-host with the OSS bundle.
+Both have web-based inspectors. Pylon's runs against your local binary by default; Convex's hosted dashboard is the default for cloud projects, and the self-hosted product includes its own dashboard.
 
 ### CRDTs
 
@@ -81,7 +82,7 @@ Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/tree
 
 - **Pure-TS dev loop** — Convex has invested heavily in DX polish. Type inference flows end-to-end without codegen. Pylon requires `pylon codegen` (one CLI call); Convex's TypeScript flow is a bit tighter.
 - **Larger team behind it** — well-funded YC company, more docs, more examples.
-- **Cron + scheduled functions** — Convex has clean primitives for scheduled jobs. Pylon has them too (the scheduler module + jobs queue) but Convex's are more polished.
+- **Cron + scheduled functions** — Convex has clean durable primitives for scheduled jobs. Pylon has cron, queues, and workflow primitives too, but Convex's scheduler UI is more polished.
 - **Convex Vector Search** — first-class vector search; Pylon has the `vector_search` plugin but Convex's is more featureful.
 
 ## Where Pylon is better
@@ -103,7 +104,7 @@ Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/tree
 | `ctx.db.insert("tasks", {...})` | `ctx.db.insert("Task", {...})` |
 | Convex auth | Magic codes / password / OAuth |
 | Convex file storage | `/api/files/init` → direct PUT → `/api/files/confirm` (Stack0 / S3 / local) |
-| Convex scheduled functions | `crates/runtime` scheduler + `actions` |
+| Convex scheduled functions | `cron(...)`, scheduled workflows, or background jobs |
 | Convex search index | Per-entity `search` config |
 
 Most of the dev surface is 1:1. The biggest delta is the codegen step (Pylon) vs. inline TS types (Convex) — one extra CLI call.
