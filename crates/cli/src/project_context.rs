@@ -32,6 +32,49 @@ struct ProjectPickerEntry {
     org_slug: Option<String>,
 }
 
+/// Resolve the project slug WITHOUT any interactive fallback: `--project`
+/// flag → `$PYLON_PROJECT` → `.pylon/project` context file → global default.
+/// Returns `None` when nothing is linked. Callers like `deploy` use this to
+/// detect "no project here" so they can offer to provision one, instead of
+/// dropping into the shared picker (which only lists existing projects).
+pub fn resolve_project_slug_noninteractive(args: &[String]) -> Option<String> {
+    // 1 + 2. --project flag (with or without =).
+    if let Some(slug) = args
+        .windows(2)
+        .find(|w| w[0] == "--project")
+        .map(|w| w[1].clone())
+    {
+        return Some(slug);
+    }
+    if let Some(slug) = args
+        .iter()
+        .find(|a| a.starts_with("--project="))
+        .map(|a| a.trim_start_matches("--project=").to_string())
+    {
+        return Some(slug);
+    }
+    // 3. $PYLON_PROJECT
+    if let Ok(slug) = std::env::var("PYLON_PROJECT") {
+        if !slug.is_empty() {
+            return Some(slug);
+        }
+    }
+    // 4. .pylon/project from cwd or any ancestor.
+    if let Some(slug) = read_context_file() {
+        return Some(slug);
+    }
+    // 5. Global default from ~/.config/pylon/state.json (set by
+    //    `pylon projects use <slug>` / the picker / auto-provision).
+    if let Ok(state) = crate::cloud_client::load_state() {
+        if let Some(slug) = state.default_project {
+            if !slug.is_empty() {
+                return Some(slug);
+            }
+        }
+    }
+    None
+}
+
 /// Resolve the project slug for a cloud-aware command. `args` is the
 /// full argv slice; we inspect it for `--project` / `--project=` so
 /// callers don't have to.
@@ -40,42 +83,8 @@ pub fn resolve_project_slug(
     creds: &Credentials,
     json_mode: bool,
 ) -> Result<String, String> {
-    // 1 + 2. --project flag (with or without =).
-    if let Some(slug) = args
-        .windows(2)
-        .find(|w| w[0] == "--project")
-        .map(|w| w[1].clone())
-    {
+    if let Some(slug) = resolve_project_slug_noninteractive(args) {
         return Ok(slug);
-    }
-    if let Some(slug) = args
-        .iter()
-        .find(|a| a.starts_with("--project="))
-        .map(|a| a.trim_start_matches("--project=").to_string())
-    {
-        return Ok(slug);
-    }
-    // 3. $PYLON_PROJECT
-    if let Ok(slug) = std::env::var("PYLON_PROJECT") {
-        if !slug.is_empty() {
-            return Ok(slug);
-        }
-    }
-    // 4. .pylon/project from cwd or any ancestor.
-    if let Some(slug) = read_context_file() {
-        return Ok(slug);
-    }
-    // 5. Global default from ~/.config/pylon/state.json. Set by
-    //    `pylon projects use <slug>` (and by the interactive picker
-    //    below). Lets agents `projects use yapless` once and have
-    //    every subsequent invocation know about it regardless of cwd.
-    //    Per-dir context above still wins so monorepos can override.
-    if let Ok(state) = crate::cloud_client::load_state() {
-        if let Some(slug) = state.default_project {
-            if !slug.is_empty() {
-                return Ok(slug);
-            }
-        }
     }
     // 6. Interactive picker — TTY only. CI / --json gets an error
     //    pointing at the flag so a misconfigured pipeline doesn't

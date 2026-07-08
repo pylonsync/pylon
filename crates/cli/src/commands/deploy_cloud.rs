@@ -82,15 +82,18 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     };
 
-    // 2. Resolve the project slug — same resolver as every other
-    //    cloud-aware command, so `pylon projects use <slug>` sticks
-    //    for deploys too.
-    let project_slug = match crate::project_context::resolve_project_slug(args, &creds, json_mode) {
-        Ok(slug) => slug,
-        Err(e) => {
-            output::print_error(&e);
-            return ExitCode::Usage;
-        }
+    // 2. Resolve the project slug (flag → env → context → default). When
+    //    nothing is linked, `pylon deploy` PROVISIONS one on the spot instead
+    //    of dead-ending — so a first-time deploy is a single command.
+    let project_slug = match crate::project_context::resolve_project_slug_noninteractive(args) {
+        Some(slug) => slug,
+        None => match ensure_deploy_project(&creds, json_mode) {
+            Ok(slug) => slug,
+            Err(e) => {
+                output::print_error(&e);
+                return ExitCode::Usage;
+            }
+        },
     };
 
     // 3. Build the tarball from the current directory.
@@ -674,6 +677,192 @@ fn count_tar_entries(tarball: &[u8]) -> io::Result<usize> {
         // when we drop the entry — no manual seek needed.
     }
     Ok(count)
+}
+
+/// No project is linked in this directory. On a TTY, offer to create + link
+/// one so `pylon deploy` is a true one-command first deploy; off a TTY, point
+/// the user at the explicit path. Reuses createProject + the same context
+/// files `pylon projects use` writes, so subsequent deploys target it.
+fn ensure_deploy_project(
+    creds: &crate::cloud_client::Credentials,
+    json_mode: bool,
+) -> Result<String, String> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    let dirname = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("app");
+    let default_slug = sanitize_slug(dirname);
+
+    // Non-interactive (CI / --json / piped): don't guess a slug — tell them how.
+    if json_mode || !std::io::stdin().is_terminal() {
+        return Err(format!(
+            "No project is linked here. Create one first:\n  pylon projects create {default_slug}\nthen re-run `pylon deploy` (or pass --project <slug>)."
+        ));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct ProjRow {
+        slug: String,
+        name: String,
+        #[serde(rename = "orgSlug")]
+        org_slug: Option<String>,
+    }
+    let projects: Vec<ProjRow> =
+        crate::cloud_client::post_json(creds, "/api/fn/listMyProjectsForCli", &())
+            .map_err(|e| format!("Couldn't list your projects: {e}"))?;
+
+    println!();
+    if projects.is_empty() {
+        print!("No project is linked here. Create \"{default_slug}\" and deploy? [Y/n] ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        let lc = line.trim().to_ascii_lowercase();
+        if lc == "n" || lc == "no" {
+            return Err("Aborted — nothing deployed.".into());
+        }
+    } else {
+        println!("No project is linked in this directory.");
+        println!("  [Enter]  create a new project \"{default_slug}\"");
+        for (i, p) in projects.iter().enumerate() {
+            let org = p.org_slug.as_deref().unwrap_or("?");
+            println!("  {:>2}.     use existing {}/{} ({})", i + 1, org, p.slug, p.name);
+        }
+        print!("Choice: ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        std::io::stdin()
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| e.to_string())?;
+        let choice = line.trim();
+        if !choice.is_empty() {
+            match choice.parse::<usize>() {
+                Ok(n) if n >= 1 && n <= projects.len() => {
+                    let slug = projects[n - 1].slug.clone();
+                    crate::cloud_client::set_default_project(&slug);
+                    let _ = crate::project_context::write_context_file(&slug);
+                    return Ok(slug);
+                }
+                _ => return Err("Out of range.".into()),
+            }
+        }
+        // empty (Enter) falls through to create.
+    }
+
+    create_project_for_deploy(creds, &default_slug)
+}
+
+/// Create a project for the current directory via createProject, then link it
+/// (default project + `.pylon/project`) so this and future deploys target it.
+fn create_project_for_deploy(
+    creds: &crate::cloud_client::Credentials,
+    slug: &str,
+) -> Result<String, String> {
+    let bytes = slug.as_bytes();
+    let valid_slug = bytes.len() >= 2
+        && bytes.len() <= 40
+        && (bytes[0].is_ascii_lowercase() || bytes[0].is_ascii_digit())
+        && bytes[1..]
+            .iter()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+    if !valid_slug {
+        return Err(
+            "Couldn't derive a valid project name from this directory — run \
+             `pylon projects create <slug>` with an explicit slug (lowercase \
+             letters, digits, hyphens), then `pylon deploy`."
+                .into(),
+        );
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OrgRow {
+        id: String,
+        slug: String,
+    }
+    let orgs: Vec<OrgRow> =
+        crate::cloud_client::post_json(creds, "/api/fn/listMyOrgsForCli", &())
+            .map_err(|e| format!("Couldn't list your orgs: {e}"))?;
+    if orgs.is_empty() {
+        return Err(format!(
+            "Your account has no organizations — finish signup at {}/dashboard.",
+            crate::cloud_client::dashboard_url()
+        ));
+    }
+    let org = if orgs.len() == 1 {
+        &orgs[0]
+    } else {
+        return Err(
+            "You belong to multiple orgs — run `pylon projects create <slug> --org <org>`, \
+             then `pylon deploy`."
+                .into(),
+        );
+    };
+
+    #[derive(serde::Serialize)]
+    struct CreateArgs<'a> {
+        #[serde(rename = "orgId")]
+        org_id: &'a str,
+        name: &'a str,
+        slug: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct Created {
+        slug: String,
+    }
+    let created: Created = crate::cloud_client::post_json(
+        creds,
+        "/api/fn/createProject",
+        &CreateArgs {
+            org_id: &org.id,
+            name: slug,
+            slug,
+        },
+    )
+    .map_err(|e| format!("Create failed: {e}"))?;
+    crate::cloud_client::set_default_project(&created.slug);
+    let _ = crate::project_context::write_context_file(&created.slug);
+    println!(
+        "✓ Created project {} in org {} — deploying...",
+        created.slug, org.slug
+    );
+    Ok(created.slug)
+}
+
+/// Turn a directory name into a valid project slug (lowercase alnum + hyphens,
+/// 2–40 chars, starts alnum). Best-effort; the user can always pass an explicit
+/// slug via `pylon projects create`.
+fn sanitize_slug(name: &str) -> String {
+    let lowered: String = name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let mut collapsed = lowered;
+    while collapsed.contains("--") {
+        collapsed = collapsed.replace("--", "-");
+    }
+    let trimmed = collapsed.trim_matches('-');
+    let based = if trimmed
+        .chars()
+        .next()
+        .map(|c| c.is_ascii_alphanumeric())
+        .unwrap_or(false)
+    {
+        trimmed.to_string()
+    } else {
+        format!("app-{trimmed}")
+    };
+    let capped: String = based.chars().take(40).collect();
+    let capped = capped.trim_matches('-').to_string();
+    if capped.len() < 2 {
+        "app".to_string()
+    } else {
+        capped
+    }
 }
 
 #[cfg(test)]
