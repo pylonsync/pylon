@@ -2596,6 +2596,7 @@ dependencies = [
  "pylon-schema",
  "pylon-staticgen",
  "pylon-storage",
+ "rand 0.8.5",
  "rusqlite",
  "serde",
  "serde_json",

@@ -729,7 +729,13 @@ fn ensure_deploy_project(
         println!("  [Enter]  create a new project \"{default_slug}\"");
         for (i, p) in projects.iter().enumerate() {
             let org = p.org_slug.as_deref().unwrap_or("?");
-            println!("  {:>2}.     use existing {}/{} ({})", i + 1, org, p.slug, p.name);
+            println!(
+                "  {:>2}.     use existing {}/{} ({})",
+                i + 1,
+                org,
+                p.slug,
+                p.name
+            );
         }
         print!("Choice: ");
         let _ = std::io::stdout().flush();
@@ -783,9 +789,8 @@ fn create_project_for_deploy(
         id: String,
         slug: String,
     }
-    let orgs: Vec<OrgRow> =
-        crate::cloud_client::post_json(creds, "/api/fn/listMyOrgsForCli", &())
-            .map_err(|e| format!("Couldn't list your orgs: {e}"))?;
+    let orgs: Vec<OrgRow> = crate::cloud_client::post_json(creds, "/api/fn/listMyOrgsForCli", &())
+        .map_err(|e| format!("Couldn't list your orgs: {e}"))?;
     if orgs.is_empty() {
         return Err(format!(
             "Your account has no organizations — finish signup at {}/dashboard.",
