@@ -700,8 +700,13 @@ function BillingView({
       await fn();
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // A missing STRIPE_PRICE_PRO surfaces as "plan pro has no monthly
+      // priceId" rather than STRIPE_NOT_CONFIGURED, so treat the price/config
+      // errors the same — both mean "finish the Stripe setup".
       setError(
-        /not.?configured|STRIPE_NOT_CONFIGURED/i.test(msg)
+        /not.?configured|STRIPE_NOT_CONFIGURED|no monthly price|priceId/i.test(
+          msg,
+        )
           ? "Stripe isn't configured yet — set STRIPE_SECRET_KEY + STRIPE_PRICE_PRO to enable billing."
           : msg,
       );
