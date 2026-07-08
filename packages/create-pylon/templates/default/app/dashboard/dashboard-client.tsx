@@ -382,7 +382,7 @@ function MembersList({
                         </span>
                       )}
                     </div>
-                    {m.name && m.email && (
+                    {m.name && m.email && m.name !== m.email && (
                       <div className="truncate text-xs text-zinc-500">
                         {m.email}
                       </div>

@@ -110,7 +110,7 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
         {mode === "signup" ? (
           <p className="text-[12px] leading-snug text-zinc-500">
             By joining, you agree to our{" "}
-            <a href="/company/privacy" className="underline underline-offset-2">
+            <a href="/company/terms" className="underline underline-offset-2">
               Terms
             </a>{" "}
             &amp;{" "}

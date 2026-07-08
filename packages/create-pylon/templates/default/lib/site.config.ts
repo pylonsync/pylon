@@ -665,6 +665,18 @@ export const siteConfig: SiteConfig = {
         { title: "Your control", body: "Export or delete your data at any time." },
       ],
     },
+    {
+      slug: "terms",
+      navLabel: "Terms",
+      eyebrow: "Company",
+      title: "Terms of Service.",
+      summary: "The rules for using Acme, in plain language.",
+      sections: [
+        { title: "Using Acme", body: "Use it for lawful work; don't abuse the service or other customers." },
+        { title: "Your content", body: "You own your data — you grant us only what's needed to run the product for you." },
+        { title: "Changes & cancellation", body: "Cancel anytime; we give notice before any material change to these terms." },
+      ],
+    },
   ],
 
   // Generic, made-up competitors so the template ships no real brand names.

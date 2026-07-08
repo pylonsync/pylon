@@ -88,13 +88,23 @@ const TEXT_EXT = new Set([
   ".txt",
 ]);
 
-// Copy one template file → work dir, substituting placeholders in text files
-// and renaming `gitignore` → `.gitignore` (npm strips dotfiles from packages,
-// so templates ship it un-dotted).
+// Copy one template file → work dir, restoring the names the scaffolder
+// restores on publish: `gitignore` → `.gitignore` and `bunfig` → `bunfig.toml`
+// (npm strips dotfiles, and refuses to ship a literal `bunfig.toml`, so
+// templates ship both renamed). Without the bunfig rename Bun ignores the
+// config, the happy-dom `[test] preload` never runs, and every component test
+// fails with `document is not defined` — a spurious failure the real
+// `create-pylon` scaffold never has. Keep this rename set in sync with
+// bin/create-pylon.js.
 function syncFile(rel) {
   const from = join(srcDir, rel);
   if (!existsSync(from) || statSync(from).isDirectory()) return;
-  const destRel = rel === "gitignore" ? ".gitignore" : rel;
+  const destRel =
+    rel === "gitignore"
+      ? ".gitignore"
+      : rel === "bunfig"
+        ? "bunfig.toml"
+        : rel;
   const to = join(workDir, destRel);
   mkdirSync(dirname(to), { recursive: true });
   const ext = destRel.slice(destRel.lastIndexOf("."));
