@@ -2,6 +2,7 @@ pub mod args;
 pub mod backup;
 pub mod build;
 pub mod cache;
+pub mod cloud_billing;
 pub mod cloud_data;
 pub mod cloud_db;
 pub mod cloud_deployments;

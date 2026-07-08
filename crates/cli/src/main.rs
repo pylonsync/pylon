@@ -107,6 +107,8 @@ fn run() -> ExitCode {
         Some("policy") => commands::policy_test::run(&args, json_mode),
         Some("update") => commands::update::run(&args, json_mode),
         Some("verify") => commands::verify::run(&args, json_mode),
+        Some("billing") => commands::cloud_billing::run(&args, json_mode),
+        Some("upgrade") => commands::cloud_billing::run_upgrade(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
         Some("db") => commands::cloud_db::run(&args, json_mode),
         Some("deployments") => commands::cloud_deployments::run(&args, json_mode),
@@ -176,8 +178,9 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 39] = [
+const TOP_LEVEL_COMMANDS: [&str; 41] = [
     "backup",
+    "billing",
     "build",
     "cache",
     "codegen",
@@ -198,6 +201,7 @@ const TOP_LEVEL_COMMANDS: [&str; 39] = [
     "mcp",
     "policy",
     "update",
+    "upgrade",
     "verify",
     "login",
     "logout",
@@ -365,6 +369,8 @@ fn print_usage() {
     println!("  members  [list|invite]    Org members");
     println!("  fn <name> [k=v ...]       Call any Pylon Cloud function by name");
     println!("  status                    One-glance project health");
+    println!("  billing                   Plan, this month's usage + projected charge, invoices");
+    println!("  upgrade                   Upgrade the org to Pro (opens Stripe checkout)");
     println!();
     println!("  schema check              Validate schema");
     println!("  schema diff               Show schema changes");
