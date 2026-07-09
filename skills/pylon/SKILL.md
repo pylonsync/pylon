@@ -7,7 +7,7 @@ description: Build real full-stack apps with Pylon — schema, policies, server 
 
 You are helping build a real application on **Pylon** (pylonsync.com), an agent-native full-stack framework written in Rust with a TypeScript SDK. **Pylon renders your React frontend AND runs your backend** — schema, live queries, auth, server functions, jobs, search, and native server-side rendering, all on one port. It's a Rust server that runs your TypeScript and SSR on Bun. SQLite by default or Postgres. It's production infrastructure, not a sandbox: real auth, row-level policies, and one-command deploy — build like it ships. This skill gives you the shape, conventions, and gotchas to build Pylon apps correctly.
 
-Scaffold a new app with `npm create @pylonsync/pylon@latest` (the default template is a full-stack SSR app).
+**Scaffold a new app with `npm create @pylonsync/pylon@latest my-app`** — the default template is a full-stack SSR app and needs **no global install**: `@pylonsync/cli` ships as a devDependency, so `npm run dev` runs the server. Prefer this. `pylon init` (needs the global CLI) scaffolds a **backend-only** app by default — add `--frontend nextjs|react|tanstack` to pair a separate frontend host. Global CLI install: `curl -fsSL https://www.pylonsync.com/install.sh | bash`. **Bun ≥ 1.0 must be on PATH** — the Rust server spawns Bun to run your TypeScript + SSR.
 
 ## Authoritative references
 
@@ -58,7 +58,8 @@ my-app/
     sitemap.ts           #   served at /sitemap.xml (optional)
     robots.ts            #   served at /robots.txt (optional)
   public/                # static assets served verbatim at the root
-  package.json           # deps: @pylonsync/sdk, @pylonsync/functions, @pylonsync/react, react, react-dom
+  package.json           # deps: @pylonsync/sdk, @pylonsync/functions, @pylonsync/react, @pylonsync/client, react, react-dom
+                         #   + @pylonsync/cli as a devDependency (so `npm run dev` needs no global install)
   pylon.manifest.json    # GENERATED — never edit by hand
 ```
 
@@ -71,7 +72,7 @@ my-app/
 Every Pylon app has an `app.ts` that imports from `@pylonsync/sdk`, declares entities + policies, and calls `buildManifest`.
 
 ```ts
-import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
+import { entity, field, policy, buildManifest, discoverAppRoutes } from "@pylonsync/sdk";
 
 const User = entity(
   "User",
@@ -116,13 +117,13 @@ const manifest = buildManifest({
   policies: [messagePolicy],
   queries: [],
   actions: [],
-  routes: [],
+  routes: await discoverAppRoutes(),   // full-stack SSR: enumerates app/**/page.tsx (a backend-only app can pass routes: [])
 });
 
 console.log(JSON.stringify(manifest, null, 2));
 ```
 
-**The last line is required** — `pylon dev` runs `bun run app.ts` and captures stdout as the manifest.
+**The last line is required** — `pylon dev` runs `bun run app.ts` and captures stdout as the manifest. Top-level `await` works because Bun runs `app.ts` as an ES module. (Note: `queries`/`actions` here are for `defineRoute`-style HTTP route bindings — your RPC functions live in `functions/*.ts` and are discovered separately, NOT listed here.)
 
 ### Field types — EXACT API
 
@@ -139,7 +140,15 @@ field.id("OtherEntity") // FK to another entity's id column
 **Modifiers (chainable):**
 - `.optional()` — nullable
 - `.unique()` — implicit unique index on one column
+- `.default(value)` — static insert-time default (e.g. `field.bool().default(false)`)
+- `.defaultNow()` — datetime defaults to insert time (e.g. `createdAt: field.datetime().defaultNow()`)
+- `.owner()` — stamps the field with `auth.userId` on insert and **rejects a forged value** (403 `OWNER_MISMATCH`); also locked on update. Use for `authorId`/`buyerId`/`createdBy` so optimistic `db.insert` stays secure. Guests count (their stable guest id is stamped).
+- `.serverOnly()` — never serialized in HTTP responses (secrets, `passwordHash`, `stripeCustomerId`). Still readable inside functions via `ctx.db.*`.
+- `.readonly()` — settable on insert, rejected on client update (closes IDOR-via-PATCH).
+- `.encrypted()` — AEAD-encrypted at rest (needs `PYLON_ENCRYPTION_KEY`).
 - `.crdt("text")` — upgrade string/richtext to LoroText for collaborative merge
+
+`field.enum(["pending", "paid", "failed"])` also exists (stored as a string with allowed-values metadata so codegen emits a precise literal union). Note: there is **no `v.enum()`** validator counterpart — validate an enum arg with `v.union(v.literal("pending"), v.literal("paid"), ...)` or a plain `v.string()`.
 
 **Common mistakes to avoid:**
 - Both `field.float()` / `field.number()` work (same type). Both `field.bool()` / `field.boolean()` work. Pick whichever reads better.
@@ -161,7 +170,9 @@ Declare composite indexes in the options block. Live queries use indexed columns
 
 ## Policies
 
-Policies are boolean string expressions. They guard direct `/api/entities/*` access. Server functions bypass policies — trust yourself to check inside handlers.
+Policies are boolean string expressions. They guard direct `/api/entities/*` access (and sync). Server functions bypass policies — trust yourself to check inside handlers.
+
+**Default-deny is the headline rule: an entity with NO registered policy refuses EVERY request** (`_default_deny`). This is the deliberate fix for the "forgot to lock the table" footgun — a new entity is invisible until you write its policy. For an intentionally-public entity, be explicit: `policy({ entity: "X", allowRead: "true" })`.
 
 **Bindings available in expressions:**
 - `auth.userId` — `string | null`
@@ -248,6 +259,27 @@ policy({
 
 Three flavors, all default-exported. The **filename** becomes the RPC name — `functions/createIssue.ts` is callable at `POST /api/fn/createIssue`.
 
+### Auth levels — read this before you write a public/pre-login feature
+
+Every `query` / `mutation` / `action` carries an `auth` level. **The default is `"user"`.** The router enforces it *before* your handler runs — a caller who doesn't meet the bar gets a typed rejection and the handler never executes. The four levels:
+
+| `auth:` | Who can call it | Use for |
+|---|---|---|
+| `"user"` **(default)** | A real signed-in user. **Guest sessions are REJECTED.** | Everything behind login. `ctx.auth.userId` narrows to `string`. |
+| `"guest"` | Guest sessions (`/api/auth/guest`) **and** signed-in users | Pre-login state: carts, public demos, "try it before signing up". |
+| `"public"` | Anyone, including fully unauthenticated | Webhook receivers, healthchecks, landing-page form submits. |
+| `"admin"` | `ctx.auth.isAdmin === true` | Ops endpoints. |
+
+**THE gotcha (this bites everyone): a guest session cannot call a default (`auth: "user"`) function.** If you mint a guest with `POST /api/auth/guest` and then `callFn("addToCart", …)`, the call fails with `401 AUTH_REQUIRED` ("requires a session — sign in or POST /api/auth/guest first") **unless that function declares `auth: "guest"`**. Public demos, pre-login carts, and anonymous "kick the tires" flows must set `auth: "guest"` (or `"public"`) on **every** function they call. Forgetting this is the #1 reason a scaffolded public demo returns 401s.
+
+```ts
+export default mutation({
+  auth: "guest",                 // guest sessions AND users may call this
+  args: { sku: v.string() },
+  async handler(ctx, args) { /* ctx.auth.userId may be null — check it */ },
+});
+```
+
 ### Validators — EXACT API
 
 Import from `@pylonsync/functions`:
@@ -264,6 +296,9 @@ v.optional(v.string())
 v.array(v.string())
 v.literal("open")    // exact string/number/bool
 v.object({ k: v.string() })
+v.union(v.literal("a"), v.literal("b"))   // discriminated union / enum-of-literals
+v.null()
+v.any()
 ```
 
 `v.float()` and `v.number()` are aliases for the same 64-bit float validator. Use whichever matches your `field.*` choice.
@@ -281,9 +316,10 @@ export default mutation({
     description: v.optional(v.string()),
     priority: v.optional(v.int()),
   },
-  // `auth: "user"` is the default — framework rejects anon callers
-  // BEFORE the handler runs, so `ctx.auth.userId` is `string`
-  // (not nullable) here. Use `auth: "public"` only when intentional.
+  // `auth: "user"` is the default — the framework rejects BOTH anon
+  // AND guest callers BEFORE the handler runs, so `ctx.auth.userId` is
+  // `string` (not nullable) here. Use `auth: "guest"` for pre-login
+  // callers, `auth: "public"` for webhooks/healthchecks.
   async handler(ctx, args) {
     const id = await ctx.db.insert("Issue", {
       teamId: args.teamId,
@@ -328,40 +364,59 @@ export default action({
   // = open vulnerability. `auth: "public"` for webhook receivers only.
   args: { email: v.string(), orgId: v.id("Org") },
   async handler(ctx, args) {
-    await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${process.env.RESEND_KEY}` },
-      body: JSON.stringify({ to: args.email, subject: "Invite" }),
-    });
+    // Built-in transactional email — no HTTP call, uses the runtime's
+    // PYLON_EMAIL_* provider (Resend / SendGrid / Stack0 / SMTP):
+    await ctx.email.send(args.email, "Invite", "You're invited!");
+    // (Or hit an external HTTP API directly with fetch(...) + ctx.env.KEY.)
     return { ok: true };
   },
 });
 ```
 
-Actions are **not transactional** — use mutations for atomic multi-row writes.
+**Actions have NO `ctx.db`.** They're for external I/O and are non-transactional. To read/write data from an action, call a registered function: `ctx.runQuery("listX", args)` / `ctx.runMutation("createX", args)` (each runs in its own transaction). Use mutations for atomic multi-row writes.
 
 ### `ctx` surface (inside handlers)
 
+**The three ctx shapes are NOT the same.** In particular an `action` has **no `ctx.db`**, and a `query` ctx has no `error`/`scheduler`/writes. Don't reach for a field the flavor doesn't have.
+
 ```ts
-ctx.auth.userId       // string | null  (string when auth: "user")
+// ---- On EVERY ctx (query / mutation / action) ----
+ctx.auth.userId       // string | null  (narrows to string when auth: "user"/"admin")
 ctx.auth.isAdmin      // boolean
 ctx.auth.tenantId     // string | null  (selected org)
 ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER you verify a webhook/HMAC
+ctx.env               // Record<string,string> — secrets / env (same values as process.env)
+ctx.requireMember(orgId, { role })     // assert org membership/role — throws (UNAUTHENTICATED / MISSING_ORG / FORBIDDEN), fails closed
 // NOTE: there is NO ctx.auth.email and NO ctx.auth.roles on the handler ctx.
-// Need the email? -> const u = await ctx.db.get("User", ctx.auth.userId)
+// Need the email? -> const u = await ctx.db.get("User", ctx.auth.userId)  (query/mutation only)
 
-ctx.db.insert(entity, data)            // => id
+// ---- query ctx — ctx.db is a READ-ONLY reader (no error, no scheduler, no writes) ----
 ctx.db.get(entity, id)                 // => row | null
-ctx.db.query(entity, filter?)          // => row[]
-ctx.db.update(entity, id, patch)       // => void
-ctx.db.delete(entity, id)              // => void
+ctx.db.list(entity)                    // => row[]
+ctx.db.query(entity, filter)           // => row[]   filter: { field: value, $gt, $lt, $in, $like, $order, $limit }
+ctx.db.lookup(entity, field, value)    // => row | null
+ctx.db.search(entity, spec)            // => { hits, facetCounts, total }  (needs the `search` plugin)
+ctx.db.paginate(entity, { cursor, numItems })
 
-ctx.error("CODE", "message")           // throw typed error (mutation/action ctx only — NOT query ctx)
+// ---- mutation ctx — ctx.db ALSO has writes (transactional); + error, scheduler, llm, connections ----
+ctx.db.insert(entity, data)            // => id (string)
+ctx.db.update(entity, id, patch)       // => boolean (true if the row existed)
+ctx.db.delete(entity, id)              // => boolean
+ctx.db.link(entity, id, relation, targetId) / ctx.db.unlink(entity, id, relation)
+ctx.db.advisoryLock(key)               // serialize a TOCTOU-prone quota/uniqueness check
+throw ctx.error("CODE", "message")     // typed error → rolls the tx back
 ctx.scheduler.runAfter(delayMs, "fnName", args)   // enqueue delayed call
 ctx.scheduler.runAt(unixMs, "fnName", args)       // enqueue at a wall-clock time (Unix ms, e.g. new Date(iso).getTime())
-ctx.requireMember(orgId, { role })     // assert org membership/role — throws, fails closed
-ctx.db.link(entity, id, relation, targetId) / ctx.db.unlink(entity, id, relation)
+
+// ---- action ctx — NO ctx.db. Read/write via runQuery/runMutation; + email, error, scheduler ----
+ctx.runQuery("fnName", args)           // read by invoking a registered query
+ctx.runMutation("fnName", args)        // write by invoking a registered mutation (own tx)
+ctx.email.send(to, subject, body)      // transactional email via PYLON_EMAIL_* provider
+throw ctx.error("CODE", "message")
+ctx.request?.rawBody / ctx.request?.headers   // raw HTTP request (verify Stripe/GitHub webhook sigs)
 ```
+
+`ctx.llm` (provider-abstracted completions) and `ctx.connections` (per-user OAuth tokens) are on **mutation + action** ctx only — never on `query` (reactive purity: a subscribed query must be a pure function of its `ctx.db` reads).
 
 **Functions bypass policies** — a `mutation`/`action` that reads or writes another tenant's
 rows without re-checking membership is an IDOR. Use `ctx.requireMember(orgId, { role })` (it
@@ -463,16 +518,18 @@ async function ensureGuest(): Promise<string> {
 }
 ```
 
+The response is `{ guest: true, token, user_id }`. **Minting a guest is only half of it** — every function this guest then calls must declare `auth: "guest"` (or `"public"`). A guest token against a default `auth: "user"` function still returns `401 AUTH_REQUIRED`. See "Auth levels" above.
+
 ## Server-side rendering (full-stack frontend)
 
-Pylon natively server-renders React from the same binary — Next-style, but no Next. Routes are files under `app/`.
+Pylon natively server-renders React from the same server that runs your backend (the Rust server spawns Bun to execute the render) — Next-style, but no Next. Routes are files under `app/`.
 
 ### Routing & components
 
 - `app/page.tsx` → `/`, `app/blog/page.tsx` → `/blog`, `app/blog/[slug]/page.tsx` → `/blog/:slug`, `app/docs/[...slug]/page.tsx` → catch-all, `[[...slug]]` → optional catch-all.
 - `app/layout.tsx` wraps every page (nest `layout.tsx` per segment for sub-layouts).
 - **A page is a server component by default** (runs only on the server — no JS shipped). Add `"use client"` at the top of a file to make it (and its tree) an interactive island that hydrates in the browser. Proven pattern: a thin server `page.tsx` (for metadata + auth) that renders one `"use client"` view containing the interactive UI.
-- The page receives props: `{ params, searchParams, auth, url, headers, cookies, response }`. `auth` is `{ user_id, is_admin, tenant_id, roles }` resolved from the shared session.
+- The page receives props: `{ url, params, searchParams, auth, response, serverData }` — type them with `PageProps<{ slug: string }>` from `@pylonsync/react` instead of hand-rolling. `auth` is `{ user_id, is_admin, tenant_id, roles }` resolved from the shared session. **The request's `headers` and `cookies` are intentionally NOT props** — they're server-only and stripped from the hydration payload (a session cookie must never reach client JS), so reading them in a component body would hydrate-mismatch. Read request-derived data through `serverData` or a server function.
 
 ```tsx
 // app/blog/[slug]/page.tsx  (server component)
@@ -486,6 +543,29 @@ export default function PostPage({ params, auth }: { params: { slug: string }; a
   return <Article slug={params.slug} signedIn={Boolean(auth?.user_id)} />;
 }
 ```
+
+### Loading data during the server render (`serverData`)
+
+A server component reads the DB during render through the `serverData` prop — a **read-only, policy-gated** handle (same store + policy gate as a query's `ctx.db`). Await it with React 19 `use()` inside `<Suspense>`; resolved values are replayed into the hydration payload so the client doesn't re-fetch. Writes are rejected (`SSR_WRITE_FORBIDDEN`) — mutations belong in functions.
+
+```tsx
+import { use, Suspense } from "react";
+import type { PageProps } from "@pylonsync/react";
+
+export default function Page({ serverData }: PageProps) {
+  return (
+    <Suspense fallback={<Skeleton />}>
+      <PostList promise={serverData.list<Post>("Post")} />
+    </Suspense>
+  );
+}
+function PostList({ promise }: { promise: Promise<Post[]> }) {
+  const posts = use(promise);
+  return <ul>{posts.map((p) => <li key={p.id}>{p.title}</li>)}</ul>;
+}
+```
+
+`serverData` has `get` / `list` / `lookup` / `query` / `queryGraph` / `paginate` / `search` (same read shapes as `ctx.db`). For live, client-updating data prefer a `"use client"` island with `db.useQuery` instead.
 
 ### Navigation, images, metadata
 
@@ -520,7 +600,7 @@ export default async function sitemap(): Promise<Sitemap> {
 
 Pages are **dynamic by default**. Two opt-ins make a render shareable (a hit skips the Bun render entirely):
 
-- **Anonymous cache** — `export const revalidate = 60` (seconds). Stored + reused for ALL anonymous visitors. Cached ONLY if the render never read per-request identity — reading `props.auth` / `props.headers` / `props.cookies`, setting a cookie, a non-200, or streaming opts it out. Use for fully public pages.
+- **Anonymous cache** — `export const revalidate = 60` (seconds). Stored + reused for ALL anonymous visitors. Cached ONLY if the render never read per-request identity — reading `props.auth`, setting a cookie via `response.setCookie`, a non-200, or streaming opts it out. (Request headers/cookies aren't page props, so there's nothing to accidentally read there.) `export const dynamic = "force-static"` caches until the next deploy; `"force-dynamic"` never caches. Use for fully public pages.
 - **Auth-bucketed cache** — `export const cache = "auth-bucketed"` + `export const revalidate = 60`. Caches TWO identity-free shells keyed on whether the request is signed in. Read `props.session.exists` (a binary signed-in bit, **never** identity) to render a signed-in vs signed-out shell and still get a per-bucket hit. Reading real `props.auth` still opts out (output would be identity-specific).
   - **Purity contract:** an `auth-bucketed` page MUST be a pure function of its props. NEVER stash request data (auth/cookies/headers, or values derived from them) in module/global scope and render it on a later request — that leaks across users (same rule as Next: no request data in module scope).
   - CDN: bucket responses are browser-`private` by default (the origin still skips the render). A shared-CDN hit requires the operator to set `PYLON_SSR_BUCKET_CDN=1` after adding a CDN cache-key rule on session-cookie presence.
@@ -538,7 +618,7 @@ pylon dev
 
 That's it — no second terminal for the UI. `pylon dev` watches `app.ts` + `functions/` + `app/`, recompiles Tailwind, and live-reloads the browser. (A backend-only app runs the same `pylon dev`.) The first run creates `.pylon/dev.db` (SQLite) and auto-migrates. Set `DATABASE_URL=postgres://...` to target Postgres instead — the adapter is chosen at startup, and all schema/policy/function/SSR code is identical either way.
 
-In production, use `pylon start app.ts` instead of `pylon dev`. Same server, no file watcher, blocks on the server thread so a fatal error exits the process and lets the supervisor (systemd / Docker / Fly init) restart cleanly.
+In production, use `pylon start app.ts` instead of `pylon dev` (run `pylon build` first — it compiles the manifest, typed client, and SSR bundle; the deploy targets below do this for you). Same server, no file watcher, blocks on the server thread so a fatal error exits the process and lets the supervisor (systemd / Docker / Fly init) restart cleanly.
 
 ### Debugging — the dev HUD + `pylon diagnostics` (read this when iterating)
 
@@ -650,10 +730,11 @@ Keeping a project current: `pylon update` bumps every @pylonsync/* dependency (w
 | Presence / cursors / typing | `useRoom(roomId, userId)` — ephemeral, not persisted |
 | Multiplayer game / tick sim | `useShard(shardId, { subscriberId })` |
 | A form submission / write | A `mutation()` in `functions/X.ts` + `await callFn("X", args)` in the component (or `db.useMutation` for optimistic UI) |
-| Auth-gated functions | `auth: "user"` is the default on every `query` / `mutation` / `action`. Anon callers get `401 AUTH_REQUIRED` before the handler runs. `auth: "public"` to opt out (webhooks, healthchecks). CRITICAL on actions — policies don't gate them. |
+| Auth-gated functions | `auth: "user"` is the default on every `query` / `mutation` / `action`. Anon AND guest callers get `401 AUTH_REQUIRED` before the handler runs. `auth: "guest"` for pre-login callers (carts, public demos), `auth: "public"` for webhooks/healthchecks, `auth: "admin"` for ops. CRITICAL on actions — policies don't gate them. |
 | Access rules | `policy({ allowRead: "...", allowInsert: "..." })` — not middleware, not function guards |
 | Email / external API | `action()` (not `mutation()`) |
-| A scheduled job | `ctx.scheduler.runAfter(delayMs, "fnName", args)` (or `runAt(unixMs, ...)` — Unix ms, not an ISO string) inside a mutation/action |
+| A one-shot deferred job | `ctx.scheduler.runAfter(delayMs, "fnName", args)` (or `runAt(unixMs, ...)` — Unix ms, not an ISO string) inside a mutation/action |
+| A recurring job | a **cron**: `cron("0 * * * *", "fnName")` (import `cron` from `@pylonsync/sdk`) in `buildManifest({ crons: [...] })`; point it at an `internal: true` function |
 | Deploy | `pylon deploy --target fly` then `fly deploy . --config fly.toml` |
 
 ### Agent tooling — verify, policy dry-runs, MCP (pylon ≥ 0.3.313)
@@ -693,6 +774,8 @@ Dev-mode failures are disclosed where you'll see them: unhandled function errors
 
 - Run `bun run app.ts` in the project root — if it errors, the manifest won't build and `pylon dev` will fail silently on function load.
 - Run `pylon verify` — it boots the app and fails on any route/asset that doesn't serve. This is the cheap end-to-end check; don't skip it.
+- Run `pylon lint` — flags wide-open dev policies (`allow*: "true"`) and other policy smells before they ship. Tighten what it reports.
+- Run `pylon test` — discovers `*.test.ts` / `*.test.tsx` under `tests/` (or `functions/`) and runs them with Bun's test runner (`import { test, expect } from "bun:test"`).
 - If you added a function, verify it's discoverable by opening the project and checking that `pylon dev` logs list your new function name in the `Loaded N functions` output.
 - If you changed an entity, schema auto-migration runs — but destructive changes (dropping a required column) will refuse to apply without bumping `manifest.version`.
 - If you wrote or changed a policy, dry-run it: `pylon policy test '<expr>' --auth ... --row ...` for both the allow case AND the deny case.
@@ -730,7 +813,7 @@ This skill focused on the React/TS happy path. Pylon has more — fetch the docs
 ### Pylon Cloud
 Managed Pylon at `www.pylonsync.com`. Same binary, same APIs.
 - `pylon login` → `pylon projects create <slug>` → `pylon deploy`
-- Custom domains via `pylon domain add`
+- Custom domains via `pylon domains add`
 - Environment vars via `pylon env set/list/unset`
 - Includes: managed Postgres, TLS, magic-link email, OAuth (your creds), file storage, Studio, logs/metrics
 - Pricing: usage-based, no monthly minimums; free tier covers small projects
