@@ -1,238 +1,100 @@
 ---
-title: "Search & AI plugins"
+title: "Search & AI"
 sidebarTitle: "Search & AI"
-description: "Full-text search (FTS5), vector similarity, AI provider proxy, MCP server."
+description: "Full-text search (FTS5 + facets) and the built-in LLM proxy. Vector search and MCP are on the roadmap."
 ---
 
-Search and AI plugins turn Pylon into the substrate for AI-native apps — keyword search, semantic similarity, LLM API proxying, and MCP server exposure. Use them together: text-index your entities, vector-index the same content, expose both as MCP tools an LLM agent can call.
+Two capabilities ship today: **full-text search** (configured per-entity) and a **built-in LLM proxy** (configured by env). Neither is enabled through a `manifest.plugins` list.
 
 ## `search`
 
-Full-text search backed by SQLite's FTS5 extension (or Postgres `tsvector` when on Postgres). Maintained automatically — every insert/update/delete to indexed entities updates the index.
+Full-text search backed by SQLite's FTS5 (or Postgres `tsvector` on Postgres). Configured on the **entity**, not as a plugin — the presence of a `search` config creates FTS5 + facet-bitmap shadow tables on schema push, maintained on every write.
 
-Configure in your manifest at the entity level (not as a plugin entry — search is a property of the entity):
+Declare it with the fluent builder's `.search({...})` (or the `search` key in the entity options):
 
-```jsonc
-{
-  "name": "Post",
-  "fields": [
-    { "name": "title", "type": "string" },
-    { "name": "body",  "type": "richtext" },
-    { "name": "tags",  "type": "string" },
-    { "name": "authorId", "type": "id(User)" }
-  ],
-  "search": {
-    "text_fields": ["title", "body"],
-    "facets":      ["authorId", "tags"],
-    "sortable":    ["createdAt", "viewCount"]
-  }
-}
-```
+```ts
+import { e, field } from "@pylonsync/sdk";
 
-| Field | Purpose |
-| --- | --- |
-| `text_fields` | Tokenized into the FTS5 index for keyword matching |
-| `facets` | Materialized as roaring bitmaps for instant `groupBy`-style counts |
-| `sortable` | Indexed so result sets paginate stably |
-
-Query via `POST /api/search/<entity>`:
-
-```typescript
-const results = await client.search("Post", {
-  query: "rust async runtime",
-  filters: { authorId: "u_123", tags: "performance" },
-  facets: ["tags", "authorId"],
-  sort: { createdAt: "desc" },
-  page: 0,
-  pageSize: 20,
+export const Post = e.entity("Post", {
+  title:    field.string(),
+  body:     field.string(),
+  tags:     field.string(),
+  authorId: field.string(),
+  viewCount: field.int(),
+}).search({
+  text:     ["title", "body"],   // tokenized into the FTS5 index
+  facets:   ["authorId", "tags"], // materialized as facet bitmaps
+  sortable: ["viewCount"],        // indexed for stable pagination
 });
-// → { hits, facetCounts, total, tookMs }
 ```
 
-Or the React hook:
+| Key | Purpose |
+| --- | --- |
+| `text` | Fields tokenized into the FTS5 index for keyword matching |
+| `facets` | Fields materialized as bitmaps for instant per-value counts |
+| `sortable` | Fields indexed so result sets paginate stably |
+
+Query via `POST /api/search/<Entity>`, or the React hook:
 
 ```tsx
-const { hits, facetCounts, loading } = useSearch("Post", {
+const { hits, facetCounts, total, loading } = db.useSearch<Post>("Post", {
   query: input,
   facets: ["tags"],
 });
 ```
 
-`facetCounts` is the live count per facet value over the current filtered hit set — perfect for building Algolia-style faceted UIs without Algolia.
+`facetCounts` is the live count per facet value over the current filtered hit set — enough to build Algolia-style faceted UIs without Algolia.
 
-## `vector_search`
+## LLM proxy
 
-Nearest-neighbor search over embeddings. Cosine similarity, in-memory index, snapshot-on-write to disk for restart durability.
+A built-in proxy to LLM providers so your API key stays server-side and clients never see it. It's configured by **environment variables**, not a plugin entry.
 
-Pylon doesn't compute embeddings — pass them in from your favorite model.
+Two endpoints, both requiring an authenticated session:
 
-```jsonc
-{
-  "name": "vector_search",
-  "config": {
-    "entity": "Post",
-    "field": "embedding",
-    "dimensions": 1536,
-    "persist_path": "/var/lib/pylon/post-embeddings.json"
-  }
-}
+- `POST /api/llm/complete` — non-streaming completion.
+- `POST /api/ai/stream` — SSE streaming completion.
+
+And, inside a server **action**, `ctx.llm.complete(...)` (server-only — the key never reaches the client; not available in queries).
+
+### Env
+
+```bash
+# /api/llm/complete and ctx.llm.complete
+PYLON_LLM_PROVIDER=anthropic          # anthropic | openai
+ANTHROPIC_API_KEY=sk-ant-...          # or OPENAI_API_KEY for openai
+
+# /api/ai/stream (SSE)
+PYLON_AI_PROVIDER=anthropic           # anthropic | openai | custom
+PYLON_AI_API_KEY=sk-ant-...
+PYLON_AI_MODEL=claude-sonnet-4-5
+PYLON_AI_BASE_URL=https://...         # required for provider "custom"
 ```
 
-Index a row's embedding:
+### Model allowlist
 
-```typescript
-import { vectorIndex } from "@pylonsync/sdk";
+Clients may request a specific model on `/api/ai/stream` only if it's allowlisted — otherwise the request is rejected with `MODEL_NOT_ALLOWED`. Set the allowlist via the manifest `llm()` helper or `PYLON_AI_MODELS_ALLOWED`:
 
-const embedding = await openai.embeddings.create({
-  model: "text-embedding-3-small",
-  input: post.body,
+```ts
+import { buildManifest, llm } from "@pylonsync/sdk";
+
+buildManifest({
+  name: "myapp",
+  llm: llm({ allowedModels: ["claude-sonnet-4-5", "claude-haiku-4-5"] }),
+  // ...
 });
-
-await vectorIndex("Post", post.id, embedding.data[0].embedding);
 ```
-
-Query:
-
-```typescript
-import { vectorSearch } from "@pylonsync/sdk";
-
-const queryEmbedding = await openai.embeddings.create({
-  model: "text-embedding-3-small",
-  input: "how do I deploy a Rust service?",
-});
-
-const hits = await vectorSearch("Post", queryEmbedding.data[0].embedding, {
-  k: 10,
-  threshold: 0.7,
-});
-// → [{ rowId, score, row }, ...]
-```
-
-Use cases:
-
-- **Semantic search** — "posts that *mean* what I asked", not just "posts containing my words"
-- **Related content** — vector-search by an existing row's embedding to find similar items
-- **Retrieval-augmented generation (RAG)** — pull the top-k relevant chunks into an LLM's context window
-
-### Scaling notes
-
-- Search complexity is O(n × d) per query. 10k rows × 1536-dim vectors ≈ 10M float ops ≈ `<10ms` on commodity hardware.
-- Above ~100k rows, switch to a dedicated vector store (`pgvector`, `Qdrant`, `Turso libsql`).
-- Persistence is snapshot-on-write — if you have millions of writes per minute, the snapshot becomes a bottleneck. Pair with a more sophisticated index in that range.
-
-## `ai_proxy`
-
-Pass-through proxy to LLM providers (OpenAI, Anthropic, Google, etc.) with token counting, rate limiting, cost tracking, and per-user budgets — all the things you'd otherwise rebuild for every AI feature.
-
-```jsonc
-{
-  "name": "ai_proxy",
-  "config": {
-    "providers": {
-      "openai":    { "api_key_env": "OPENAI_API_KEY",    "base_url": "https://api.openai.com/v1" },
-      "anthropic": { "api_key_env": "ANTHROPIC_API_KEY", "base_url": "https://api.anthropic.com/v1" }
-    },
-    "rate_limits": {
-      "user": { "requests_per_minute": 30, "tokens_per_day": 100000 }
-    },
-    "log_to_entity": "AiCall"
-  }
-}
-```
-
-Endpoints:
-
-- `POST /api/ai/openai/v1/chat/completions` — proxies to `https://api.openai.com/v1/chat/completions`
-- `POST /api/ai/anthropic/v1/messages` — proxies to `https://api.anthropic.com/v1/messages`
-- Same shape for any provider you configure
 
 Why proxy:
 
-1. **API keys stay server-side.** Browser/native clients never see your `OPENAI_API_KEY`.
-2. **Per-user rate limits.** Cap free tier at N requests/day; bump for paid users.
-3. **Cost tracking per user.** Every request logged with token counts.
-4. **One set of credentials.** Rotate the provider key in one place.
+1. **API keys stay server-side** — browser / native clients never see them.
+2. **Auth-gated** — both endpoints require a session.
+3. **Model allowlist** — cap which models clients can invoke.
 
-When `log_to_entity` is set, every call writes a row:
+## Not yet built in
 
-```jsonc
-{
-  "name": "AiCall",
-  "fields": [
-    { "name": "userId",      "type": "id(User)" },
-    { "name": "provider",    "type": "string" },
-    { "name": "model",       "type": "string" },
-    { "name": "input_tokens","type": "int" },
-    { "name": "output_tokens","type": "int" },
-    { "name": "cost_cents",  "type": "int" },
-    { "name": "createdAt",   "type": "datetime" }
-  ]
-}
-```
+The roadmap catalog (`pylon plugins list`) names a few AI capabilities that are **not** implemented as built-ins today:
 
-Then you can query "how much did Alice spend this month?" with a regular Pylon aggregate.
+- **Vector / semantic search** — Pylon has no built-in embedding index. For RAG or similarity today, compute embeddings in a server function and store/query them yourself (a dedicated store like pgvector or Qdrant, or a table you scan), or wait for the built-in.
+- **MCP server** — exposing your entities/functions as Model Context Protocol tools is planned, not shipped.
 
-## `mcp`
-
-Exposes your Pylon entities and functions as [Model Context Protocol](https://modelcontextprotocol.io) tools — LLM agents (Claude, ChatGPT desktop, Cursor, Continue) can call into your app.
-
-```jsonc
-{
-  "name": "mcp",
-  "config": {
-    "entities": ["Todo", "Note"],
-    "functions": ["createTodo", "completeTodo", "searchNotes"],
-    "auth_required": true
-  }
-}
-```
-
-Endpoints (per the MCP spec):
-
-- `GET /mcp/sse` — Server-Sent Events stream for the MCP transport
-- `POST /mcp/messages` — JSON-RPC message endpoint
-
-Auto-generated tools:
-
-| Tool | What it does |
-| --- | --- |
-| `pylon_list_<entity>` | List rows of an exposed entity |
-| `pylon_get_<entity>` | Fetch a row by id |
-| `pylon_create_<entity>` | Create a row (subject to policies) |
-| `pylon_call_<fn>` | Invoke an exposed function |
-| `pylon_search_<entity>` | Full-text search if the entity has search config |
-
-LLM clients connect by pointing at `https://your-app/mcp/sse` with their API key as `Authorization: Bearer pk_...` (use an [API key](/auth/api-keys), not a session).
-
-Now you can ask Claude:
-
-> "Create a todo titled 'review PR #42' for me, and list any other open PR-related todos."
-
-And the model will call `pylon_create_Todo` and `pylon_search_Todo` against your live app, scoped to whatever the API key's owner can access.
-
-## Recommended pairings
-
-**Knowledge base / docs site**:
-
-```jsonc
-[
-  { "name": "search" },          // configured per-entity
-  { "name": "vector_search", "config": { "entity": "Doc", "field": "embedding", "dimensions": 1536 } },
-  { "name": "ai_proxy",      "config": { "providers": { "openai": { "api_key_env": "OPENAI_API_KEY" } } } },
-  { "name": "mcp",           "config": { "entities": ["Doc"], "functions": ["semanticSearch"] } }
-]
-```
-
-Now: keyword search via `useSearch`, semantic search via vector_search, LLM-powered Q&A via ai_proxy, and an MCP server for direct LLM integration.
-
-**Customer support tool**:
-
-```jsonc
-[
-  { "name": "search" },          // tickets full-text search
-  { "name": "ai_proxy",      "config": { "rate_limits": { "user": { "requests_per_minute": 60 } } } },
-  { "name": "mcp",           "config": { "entities": ["Ticket", "Customer"] } }
-]
-```
-
-Support agents can ask the AI sidecar to summarize tickets, draft replies, or pull customer history — all via MCP without leaving their existing tooling.
+Don't build against these until they land.
