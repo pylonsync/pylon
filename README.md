@@ -1,6 +1,6 @@
 # pylon
 
-A self-hostable, single-binary backend for web, mobile, and real-time apps.
+A self-hostable, full-stack framework for web, mobile, and real-time apps.
 
 [![CI](https://github.com/pylonsync/pylon/actions/workflows/ci.yml/badge.svg)](https://github.com/pylonsync/pylon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
@@ -58,7 +58,7 @@ npx skills add pylonsync/pylon
 
 |  | pylon | Convex | Supabase | Firebase |
 |---|---|---|---|---|
-| Self-host | ✅ single binary | ✅ docker-compose | ✅ multi-service | ❌ |
+| Self-host | ✅ binary + Bun | ✅ docker-compose | ✅ multi-service | ❌ |
 | Deploy targets | managed cloud, self-host, AWS, Workers (experimental) | their cloud or self-host | their cloud, self-host, k8s | their cloud only |
 | Real-time sync | ✅ | ✅ reactive | ✅ Realtime | ✅ |
 | Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
@@ -68,69 +68,45 @@ npx skills add pylonsync/pylon
 
 ## Quickstart
 
-### 1. Install
+Install the binary (Bun ≥ 1.0 is also needed at runtime — Pylon runs your TypeScript and SSR on it):
 
 ```sh
 curl -fsSL https://www.pylonsync.com/install.sh | bash
+# or: cargo install pylon-cli   •   docker pull ghcr.io/pylonsync/pylon:latest
 ```
 
-Other install paths:
+The fastest start is `npm create @pylonsync/pylon@latest my-app` (above) — a full-stack app you run with `npm run dev`, no global install needed. To build a backend by hand, one `app.ts` is the whole thing — schema + policies:
 
-```sh
-# Cargo (compiles from source)
-cargo install pylon-cli
+```ts
+import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
 
-# Docker
-docker pull ghcr.io/pylonsync/pylon:latest
+const Todo = entity("Todo", {
+  title: field.string(),
+  done: field.boolean().default(false),
+  authorId: field.string(),
+});
+
+const todoPolicy = policy({
+  name: "todo_owner",
+  entity: "Todo",
+  allowRead: "true",
+  allowInsert: "auth.userId == data.authorId",
+  allowUpdate: "auth.userId == data.authorId",
+  allowDelete: "auth.userId == data.authorId",
+});
+
+const manifest = buildManifest({
+  name: "todos",
+  version: "0.1.0",
+  entities: [Todo],
+  policies: [todoPolicy],
+});
+
+console.log(JSON.stringify(manifest, null, 2)); // pylon dev reads stdout as the manifest
+export default manifest;
 ```
 
-### 2. Define your schema
-
-`pylon.manifest.json`:
-
-```json
-{
-  "manifest_version": 1,
-  "name": "todos",
-  "version": "0.1.0",
-  "entities": [
-    { "name": "Todo", "fields": [
-      { "name": "title", "type": "string", "optional": false, "unique": false },
-      { "name": "done", "type": "bool", "optional": false, "unique": false }
-    ], "indexes": [], "relations": [] }
-  ],
-  "routes": [], "queries": [], "actions": [], "policies": []
-}
-```
-
-### 3. Run
-
-```sh
-pylon dev
-```
-
-### 4. Connect from React
-
-```tsx
-import { init, db } from "@pylonsync/react";
-init({ baseUrl: "http://localhost:4321" });
-
-function TodoList() {
-  const { data: todos } = db.useQuery("Todo");
-  const { mutate: add } = db.useMutation("createTodo");
-
-  return (
-    <>
-      {todos.map(t => <li key={t.id}>{t.title}</li>)}
-      <button onClick={() => add({ title: "New todo" })}>Add</button>
-    </>
-  );
-}
-```
-
-### 5. Add server-side logic
-
-`functions/createTodo.ts`:
+Add a server function under `functions/createTodo.ts`:
 
 ```ts
 import { mutation, v } from "@pylonsync/functions";
@@ -138,36 +114,34 @@ import { mutation, v } from "@pylonsync/functions";
 export default mutation({
   args: { title: v.string() },
   async handler(ctx, args) {
-    const id = await ctx.db.insert("Todo", {
-      title: args.title,
-      done: false,
-      authorId: ctx.auth.userId,
-    });
-    return { id };
+    return {
+      id: await ctx.db.insert("Todo", {
+        title: args.title,
+        done: false,
+        authorId: ctx.auth.userId,
+      }),
+    };
   },
 });
 ```
 
-### 6. Add a multiplayer shard (optional)
-
-```rust
-use pylon_realtime::{Shard, ShardConfig, SimState};
-
-struct MyGame { /* state */ }
-impl SimState for MyGame { /* tick, snapshot, apply_input */ }
-
-let shard = Shard::new("match_1", MyGame::default(), ShardConfig {
-    tick_rate_hz: 20,
-    ..Default::default()
-});
-```
-
-Then connect from the client:
+`pylon dev` serves it on `http://localhost:4321`. Read it from React with the typed client:
 
 ```tsx
-import { useShard } from "@pylonsync/react";
-const { snapshot, send } = useShard("match_1", { subscriberId: "player_42" });
+import { db, callFn } from "@pylonsync/react";
+
+function TodoList() {
+  const { data: todos } = db.useQuery("Todo"); // live — updates as rows change
+  return (
+    <>
+      {todos.map((t) => <li key={t.id}>{t.title}</li>)}
+      <button onClick={() => callFn("createTodo", { title: "New todo" })}>Add</button>
+    </>
+  );
+}
 ```
+
+Full walkthrough — auth, live sync, and deploy — in the [Quickstart docs](https://docs.pylonsync.com/quickstart).
 
 ## Project layout
 
