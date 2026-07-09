@@ -35,6 +35,6 @@ include = [
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.3.322" }
+pylon-kernel = { path = "../core", version = "0.3.323" }
 serde_json = { workspace = true }
 
