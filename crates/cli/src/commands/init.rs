@@ -199,7 +199,11 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     //   1. --frontend CLI flag (always wins; used by CI / scripts)
     //   2. Interactive prompt (only when stdin is a TTY and not --no-prompt
     //      and not JSON-mode)
-    //   3. Default to Next.js
+    //   3. Default to no frontend. Pylon serves React on the server natively
+    //      (file-based SSR, one port), so we never scaffold a Next.js — or any
+    //      other — frontend framework by default. Next.js/React/TanStack stay
+    //      available as opt-in `--frontend` examples, and the full-stack
+    //      native-SSR app is `npm create @pylonsync/pylon`.
     let frontend = match frontend_arg {
         Some(s) => match Frontend::parse(s) {
             Some(f) => f,
@@ -221,7 +225,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             if !json_mode && !no_prompt && std::io::stdin().is_terminal() {
                 prompt_frontend()
             } else {
-                Frontend::NextJs
+                Frontend::None
             }
         }
     };
@@ -436,15 +440,21 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 // ---------------------------------------------------------------------------
 
 fn prompt_frontend() -> Frontend {
+    // No frontend framework is the default — Pylon renders React on the server
+    // natively. Next.js / React / TanStack are opt-in examples for pairing Pylon
+    // with an existing frontend app.
     let options = [
-        ("Next.js", Frontend::NextJs),
+        ("No frontend — backend + native React SSR", Frontend::None),
         ("React + Vite", Frontend::React),
         ("TanStack Start", Frontend::TanStack),
-        ("No frontend (API only)", Frontend::None),
+        ("Next.js", Frontend::NextJs),
     ];
 
     println!();
-    println!("Which frontend would you like?");
+    println!("Pylon renders React on the server natively — for a full-stack app");
+    println!("with SSR pages, run `npm create @pylonsync/pylon@latest` instead.");
+    println!();
+    println!("Add a separate frontend framework?");
     for (i, (label, _)) in options.iter().enumerate() {
         let marker = if i == 0 { " (default)" } else { "" };
         println!("  {}) {}{}", i + 1, label, marker);
@@ -456,7 +466,7 @@ fn prompt_frontend() -> Frontend {
     let _ = std::io::stdin().read_line(&mut input);
     let trimmed = input.trim();
     if trimmed.is_empty() {
-        return Frontend::NextJs;
+        return Frontend::None;
     }
     if let Ok(n) = trimmed.parse::<usize>() {
         if n >= 1 && n <= options.len() {
@@ -466,8 +476,8 @@ fn prompt_frontend() -> Frontend {
     if let Some(f) = Frontend::parse(trimmed) {
         return f;
     }
-    eprintln!("(unrecognized choice; defaulting to Next.js)");
-    Frontend::NextJs
+    eprintln!("(unrecognized choice; defaulting to no frontend)");
+    Frontend::None
 }
 
 // ---------------------------------------------------------------------------

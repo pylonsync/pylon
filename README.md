@@ -11,18 +11,21 @@ real-time sync, server functions, auth, file storage — but as a single Rust
 binary you can `scp` to a VPS or run with SQLite or Postgres.
 
 ```sh
-# Install
+# Install the pylon binary
 curl -fsSL https://www.pylonsync.com/install.sh | bash
 
-# New project
-pylon init my-app
+# Scaffold a full-stack app — auth, a multi-tenant dashboard, and
+# server-rendered React, all on one port
+npm create @pylonsync/pylon@latest my-app
 cd my-app
 
 # Dev server with live reload
 pylon dev
 ```
 
-Visit `http://localhost:4321/studio` for the inspector.
+Open `http://localhost:4321`. Prefer just the backend? `pylon init my-app`
+scaffolds an API-only project (add a frontend with `--frontend
+react|tanstack|nextjs`), and `http://localhost:4321/studio` is the inspector.
 
 ## Use with your coding agent
 
@@ -48,11 +51,7 @@ npx skills add pylonsync/pylon
   with built-in Rust optimizer (mozjpeg + libwebp), Tailwind v4 first-class —
   full-stack apps without Next.js. See [examples/ssr-hello](examples/ssr-hello/)
   and the [SSR docs](https://docs.pylonsync.com/ssr/overview).
-- **Real-time shards** for multiplayer games & collab apps
-  - Tick-driven simulations
-  - Matchmaker, area-of-interest, replay
 - **Background jobs** + cron scheduler
-- **Workflows** — long-running, durable
 - **File storage**, **email**, **rate limiting**, **policies**, **plugins**
 
 ## How does it compare?
@@ -63,7 +62,7 @@ npx skills add pylonsync/pylon
 | Deploy targets | managed cloud, self-host, AWS, Workers (experimental) | their cloud or self-host | their cloud, self-host, k8s | their cloud only |
 | Real-time sync | ✅ | ✅ reactive | ✅ Realtime | ✅ |
 | Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
-| Game shards | ✅ tick-based | ❌ | ❌ | ❌ |
+| Native SSR | ✅ file-based React, one port | ❌ | ❌ | ❌ |
 | Built on | Rust + SQLite | Rust + custom db | PG + Go + Deno | proprietary |
 | Single process | ✅ | ❌ | ❌ | n/a |
 
