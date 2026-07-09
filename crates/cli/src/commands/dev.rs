@@ -71,6 +71,18 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     }
 
+    // React's client bundle and the SSR runner must agree on build mode or
+    // hydration fails with React #418 (dev/prod builds emit different hydration
+    // markers). `pylon dev` is a development server, so default
+    // NODE_ENV=development: the client bundler then compiles React's dev build
+    // (ssr-client-bundler reads process.env.NODE_ENV), matching the SSR runner
+    // (dev by default), which clears the #418 AND surfaces React's dev-only
+    // warnings. Set only when unset so a user's process env / .env choice wins.
+    // Safety: single-threaded here — server/runner threads spawn later.
+    if std::env::var_os("NODE_ENV").is_none() {
+        std::env::set_var("NODE_ENV", "development");
+    }
+
     let port = parse_port(args, DEFAULT_PORT);
 
     let positional: Vec<&str> = collect_positional(args, "dev");
