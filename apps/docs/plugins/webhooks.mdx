@@ -40,7 +40,7 @@ export default action({
     await dispatch(ctx, hooks.config, {
       type: "invoice.paid",
       data: invoice,
-      // optional — auto-resolves to ctx.auth.tenantId
+      // optional — otherwise resolved via the `getApplicationId` config hook
       applicationId: invoice.orgId,
     });
   },

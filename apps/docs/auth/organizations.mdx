@@ -59,17 +59,17 @@ export const OrgInvite = entity("OrgInvite", {
 If your codebase uses `Organization` instead of `Org` (or you have a legacy schema), point the framework at your names via the manifest:
 
 ```typescript
-import { app } from "@pylonsync/sdk";
+import { auth, buildManifest } from "@pylonsync/sdk";
 
-export default app({
+const manifest = buildManifest({
   // ...
-  auth: {
+  auth: auth({
     org: {
       entity: "Organization",
-      member_entity: "Membership",
-      invite_entity: "Invite",
+      memberEntity: "Membership",
+      inviteEntity: "Invite",
     },
-  },
+  }),
 });
 ```
 
@@ -78,9 +78,9 @@ export default app({
 Apps that implement org management entirely in their own TypeScript (like older pylon-cloud builds) can opt out of `/api/auth/orgs/*`:
 
 ```typescript
-auth: {
+auth: auth({
   org: { disabled: true },
-}
+}),
 ```
 
 With `disabled: true`, the routes return `501 ORG_NOT_CONFIGURED` and the framework's `OrgStore` is a no-op. Use this when you want full control of the schema + flow.

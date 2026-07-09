@@ -80,11 +80,10 @@ Modifier keys + middle-click also fall through automatically — no special hand
 `<Link>` is the prop-based API. For imperative nav (after a form submit, post-login redirect, etc.), call the global runtime:
 
 ```tsx
-"use client";
 window.__pylon?.navigate("/welcome");
 ```
 
-The runtime is loaded as part of the shared chunk; `window.__pylon` is defined as soon as hydration completes. Use the `?.` form to be safe on the first render.
+The runtime is loaded as part of the shared chunk; `window.__pylon` is defined as soon as hydration completes. Use the `?.` form to be safe on the first render. (Pylon has no RSC boundary, so there's no `"use client"` directive — every page component already hydrates on the client.)
 
 ## How nav actually works
 

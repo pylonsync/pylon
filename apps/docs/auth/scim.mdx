@@ -37,6 +37,7 @@ export const User = entity("User", {
   displayName: field.string().optional(),
   scimId: field.string().optional(),           // IdP's id for this user
   scimActive: field.bool().optional(),         // true on create; false on SCIM DELETE
+  scimExternalId: field.string().optional(),   // PATCH `externalId` writes here (Okta/Azure send it)
   createdAt: field.string(),
 });
 ```
@@ -116,7 +117,7 @@ Response:
 }
 ```
 
-Pagination + filtering (`?startIndex=&count=&filter=`) are **not yet implemented**. Lists are bounded by your User table size; if you have 50k+ users provisioned via SCIM, plan accordingly.
+Only the `?filter=userName eq "..."` probe is supported (case-insensitive per RFC 7643). Pagination (`?startIndex=&count=`) is **not yet implemented** — an unfiltered list returns every row, bounded by your User table size. If you have 50k+ users provisioned via SCIM, plan accordingly.
 
 ## Soft delete
 

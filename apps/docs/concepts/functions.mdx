@@ -53,17 +53,26 @@ ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER verifying a w
 // No ctx.auth.email / ctx.auth.roles on the handler ctx — fetch the user row for email:
 //   const u = await ctx.db.get("User", ctx.auth.userId)
 
+// ctx.db — on queries (read-only) and mutations (read + write). NOT on actions.
 ctx.db.insert(entity, data)
 ctx.db.get(entity, id)
 ctx.db.query(entity, filter?)
+ctx.db.list(entity)                   // whole entity (no filter)
 ctx.db.update(entity, id, patch)
 ctx.db.delete(entity, id)
 ctx.db.link(entity, id, relation, targetId)
 ctx.db.unlink(entity, id, relation)
 
-ctx.error(code, message)              // throw typed error → rolls back
+// Mutations + actions only (not queries):
+ctx.error(code, message)              // throw typed error → mutation rolls back
 ctx.scheduler.runAfter(delayMs, ...)  // schedule (deferred until COMMIT)
 ```
+
+The three flavors expose different context surfaces:
+
+- **Query** — `ctx.db` (read-only), `ctx.auth`, `ctx.env`, `ctx.requireMember`.
+- **Mutation** — the above plus writes on `ctx.db`, `ctx.scheduler`, `ctx.error`, `ctx.llm`, `ctx.connections`, `ctx.stream`.
+- **Action** — **no `ctx.db`.** Reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` (each runs as its own transaction). Actions also get `ctx.scheduler`, `ctx.error`, `ctx.email`, `ctx.llm`, `ctx.connections`, and `ctx.request` (raw HTTP request — the only ctx that has it, so webhook signature checks live in actions).
 
 > A mutation handler IS the transaction — every `ctx.db.*` call inside the handler shares one BEGIN/COMMIT, and a thrown error rolls everything back atomically. There's no `ctx.db.transact([...])` because the handler already wraps your writes; if you need batch atomicity from outside a mutation, use the HTTP `/api/transact` endpoint or call `runMutation` from an action.
 
@@ -124,15 +133,31 @@ When strict mode is on, the canonical Pylon-shaped IDOR — "I wrote `getRecordi
 For the legitimate cross-tenant cases (admin tools, webhook receivers post signature verification, scheduled cron sweeps), use the explicit escape hatch:
 
 ```ts
+// functions/stripeWebhook.ts
+// The webhook is an action — only actions get ctx.request (the raw
+// body a signature check needs). Actions have no ctx.db, so the DB
+// work runs in an internal mutation the action hands off to.
 export default action({
   auth: "public",  // webhook — provider doesn't sign in
-  async handler(ctx, args) {
+  async handler(ctx) {
+    const sig = ctx.request!.headers["stripe-signature"];
     const ok = verifyStripeSignature(secret, ctx.request!.rawBody, sig);
     if (!ok) throw ctx.error("INVALID_SIGNATURE", "bad sig");
     // Trust boundary crossed — the webhook is the trusted caller.
+    await ctx.runMutation("settleStripeEvent", { customerId });
+  },
+});
+```
+
+```ts
+// functions/settleStripeEvent.ts — internal: unreachable over HTTP
+export default mutation({
+  internal: true,
+  args: { customerId: v.string() },
+  async handler(ctx, args) {
     // Use ctx.db.unsafe to read any org's row regardless of who's
     // calling. Comment justifies the bypass for code review.
-    const org = await ctx.db.unsafe.lookup("Org", "stripeCustomerId", customerId);
+    const org = await ctx.db.unsafe.lookup("Org", "stripeCustomerId", args.customerId);
     // ...
   },
 });
@@ -199,7 +224,7 @@ export default action({
 });
 ```
 
-Actions can read and write the database but are not transactional — if you need atomicity, use a mutation.
+Actions have no `ctx.db`. They reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` — each of those runs as its own transaction, but the action as a whole is **not** atomic. If a sequence of writes must commit or roll back together, do them inside a single mutation and have the action call it once.
 
 ## Calling functions from the client
 

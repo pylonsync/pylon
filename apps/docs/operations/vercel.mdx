@@ -3,17 +3,17 @@ title: Deploying to Vercel
 description: "Ship a Next.js + Pylon app to production on Vercel — env vars, cookie config, CORS checklist."
 ---
 
-The canonical Pylon production stack is **frontend on Vercel**, **backend on Pylon Cloud** (Fly Machines under the hood). This guide takes you from a working `npm create @pylonsync/pylon` app to a live production URL.
+One supported production shape is a **Next.js frontend on Vercel** with the **Pylon backend on Pylon Cloud** (Fly Machines under the hood). This guide takes you from a scaffolded Next.js + Pylon monorepo to a live production URL. (If you don't need a separate Next.js app, Pylon's default scaffold serves server-rendered React and the API from one port — see [Deploy](/operations/deploy) — and you can skip Vercel entirely.)
 
-If you haven't scaffolded yet:
+If you haven't scaffolded yet, generate the Next.js + Pylon monorepo:
 
 ```bash
-npm create @pylonsync/pylon@latest my-app -- --template todo --platforms web
+pylon init my-app --frontend nextjs
 cd my-app
-bun install && bun run dev
+bun install && bun dev
 ```
 
-That gives you `apps/api` (Pylon backend) and `apps/web` (Next.js frontend) ready to deploy.
+That gives you `apps/api` (Pylon backend) and `apps/web` (Next.js frontend) ready to deploy — `apps/web/next.config.js` already proxies `/api/*` to the backend on `:4321`.
 
 ## 1. Deploy the backend to Pylon Cloud
 
@@ -84,7 +84,7 @@ Once both finish, open your Vercel URL. You should see your app, and the Network
 If session cookies aren't sticking, work through this list:
 
 - **Cookie name matches.** Pylon emits `${app_name}_session`. Your `createPylonServer({ cookieName })` and `createPylonProxy({ cookieName })` must pass the same name. Mismatch = silent 401s.
-- **Same-site = Lax.** Pylon defaults to `SameSite=Lax`, which works with Next.js's same-origin pattern. If you must use cross-site (skipping the rewrite), set `PYLON_COOKIE_SAMESITE=None` and `PYLON_COOKIE_SECURE=true`.
+- **Same-site = Lax.** Pylon defaults to `SameSite=Lax`, which works with Next.js's same-origin pattern. If you must use cross-site (skipping the rewrite), set `PYLON_COOKIE_SAME_SITE=None` and `PYLON_COOKIE_SECURE=true`.
 - **Domain matches.** If frontend is `app.example.com` and backend is `api.example.com`, set `PYLON_COOKIE_DOMAIN=.example.com` so the cookie applies to both subdomains. Don't set this if you're using the rewrite pattern — host-only cookies are tighter.
 - **iOS Chrome / Safari.** iOS browsers reject domain-scoped cookies when a host-only cookie of the same name is present. Pylon v0.3.140+ handles this by pairing every domain-scoped set with a host-only `Max-Age=0` clear. Make sure your Pylon backend is on a recent framework version.
 

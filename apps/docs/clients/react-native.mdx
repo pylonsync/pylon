@@ -5,8 +5,8 @@ description: "@pylonsync/react-native — Expo SQLite-backed offline replica + A
 
 `@pylonsync/react-native` brings the React hooks to mobile. Same API as `@pylonsync/react` plus:
 
-- **Expo SQLite-backed persistence** — the local replica survives app kills
-- **AsyncStorage bridge** — auth tokens persist correctly on iOS / Android
+- **AsyncStorage-backed durable replica** — the local sync replica survives app kills (via `AsyncStorageReplicaPersistence`, enabled by default)
+- **AsyncStorage bridge** — auth tokens + client id persist correctly on iOS / Android
 - **`useNetworkStatus`** hook for offline-aware UI
 - **Foreground/background lifecycle handling** — sync pauses when backgrounded, catches up on resume
 
@@ -14,39 +14,39 @@ description: "@pylonsync/react-native — Expo SQLite-backed offline replica + A
 
 ```bash
 bun add @pylonsync/sdk @pylonsync/react @pylonsync/react-native
-bun add @react-native-async-storage/async-storage expo-sqlite
+bun add @react-native-async-storage/async-storage @react-native-community/netinfo
 ```
 
-For Expo projects you're done. For bare React Native, link the native modules per the AsyncStorage and expo-sqlite docs.
+`@react-native-async-storage/async-storage` and `@react-native-community/netinfo` are peer dependencies. For Expo projects you're done. For bare React Native, link the native modules per their docs.
 
 ## Configure
 
+Call `init()` from `@pylonsync/react-native` once before your first hook. It bootstraps the AsyncStorage bridge (tokens + client id), installs the durable `AsyncStorageReplicaPersistence`, and starts sync:
+
 ```typescript
-import { configureClient } from "@pylonsync/react";
-import { createAsyncStorageBridge, OfflineStore } from "@pylonsync/react-native";
+import { init } from "@pylonsync/react-native";
 
-const storage = await createAsyncStorageBridge();
-
-configureClient({
+// await it before rendering — otherwise the first paint renders against
+// an unauthenticated / empty cache.
+await init({
   baseUrl: "https://your-app.com",
   appName: "myapp",
-  storage,
 });
 ```
 
-`createAsyncStorageBridge()` reads existing pylon keys (`pylon:client_id`, `pylon_token`, etc.) into an in-memory cache and writes through to AsyncStorage. The sync engine's storage interface is synchronous — the bridge keeps it that way without making your call sites async.
+`init()` reads existing pylon keys (`pylon:<app>:client_id`, `pylon:<app>:token`, etc.) into an in-memory cache and writes through to AsyncStorage. The sync engine's storage interface is synchronous — the bridge keeps it that way without making your call sites async. Pass `persist: false` to skip the durable replica, or your own `persistence` adapter.
 
 ## Use the React hooks
 
-Same as web:
+Same as web — use the `db.*` namespace (it wires the global engine for you) and `useSession(db.sync)`:
 
 ```tsx
-import { useQuery, useEntityMutation, useSession } from "@pylonsync/react";
+import { db, useSession } from "@pylonsync/react-native";
 
 function TodoScreen() {
-  const session = useSession();
-  const { data: todos } = useQuery("Todo");
-  const { insert, update, remove } = useEntityMutation("Todo");
+  const { auth } = useSession(db.sync);
+  const { data: todos } = db.useQuery("Todo");
+  const { insert, update, remove } = db.useEntity("Todo");
 
   return (
     <FlatList
@@ -66,13 +66,17 @@ function TodoScreen() {
 
 ## Offline persistence
 
-The sync engine ships with `IndexedDBPersistence` for browsers; on RN you swap in the SQLite-backed equivalent:
+The sync engine ships with `IndexedDBPersistence` for browsers; on RN you swap in the AsyncStorage-backed equivalent. `init()` already installs it by default — wire it manually only when you construct the engine yourself:
 
 ```typescript
 import { createSyncEngine } from "@pylonsync/sync";
-import { ExpoSQLitePersistence } from "@pylonsync/react-native";
+import {
+  AsyncStorageReplicaPersistence,
+  createAsyncStorageBridge,
+} from "@pylonsync/react-native";
 
-const persistence = await ExpoSQLitePersistence.open("pylon.db");
+const storage = await createAsyncStorageBridge();
+const persistence = new AsyncStorageReplicaPersistence("myapp");
 
 const engine = createSyncEngine("https://your-app.com", {
   storage,
@@ -82,11 +86,11 @@ const engine = createSyncEngine("https://your-app.com", {
 
 Now:
 
-- Every sync change is written to SQLite before the cursor advances (durable)
+- The replica snapshot + cursor are persisted to AsyncStorage (durable across cold launches)
 - The mutation queue is persisted (offline writes survive app kill)
-- App startup hydrates from SQLite first, then catches up via pull
+- App startup hydrates from the persisted replica first, then catches up via pull
 
-The SQLite path mirrors the IndexedDB schema used by the web client — same columns, same merge semantics, same crash safety.
+The RN replica persistence mirrors the crash-safety model of the web client's IndexedDB path — the replica is written before the cursor advances, so a crash mid-pull can't leave the cursor ahead of durable state.
 
 ## Network status
 
@@ -94,9 +98,9 @@ The SQLite path mirrors the IndexedDB schema used by the web client — same col
 import { useNetworkStatus } from "@pylonsync/react-native";
 
 function Header() {
-  const { online, type } = useNetworkStatus();
-  if (!online) return <OfflineBanner />;
-  if (type === "cellular") return <SlowConnectionBanner />;
+  const { isOnline, connectionType } = useNetworkStatus();
+  if (!isOnline) return <OfflineBanner />;
+  if (connectionType === "cellular") return <SlowConnectionBanner />;
   return null;
 }
 ```
@@ -147,7 +151,7 @@ Pylon doesn't ship a push provider — use Expo Push, Firebase, OneSignal, or AP
 ## Tested combinations
 
 - Expo SDK 50+
-- React Native 0.73+
+- React Native 0.74+ (peer-dependency floor)
 - New Architecture (Fabric / TurboModules) — works
 - Hermes JS engine — works (no Loro CRDT WASM dependency in this package)
 - Bare React Native — works after manual native module linking
@@ -157,7 +161,7 @@ Pylon doesn't ship a push provider — use Expo Push, Firebase, OneSignal, or AP
 | Feature | Web | RN |
 | --- | --- | --- |
 | Storage | `localStorage` | AsyncStorage bridge |
-| Persistence | IndexedDB | Expo SQLite |
+| Persistence | IndexedDB | AsyncStorage replica |
 | Transport | WebSocket | WebSocket (polyfilled by RN) |
 | Network status | `navigator.onLine` | `useNetworkStatus` |
 | File upload | `Blob` / `File` | `FormData` with file URI |

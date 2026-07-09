@@ -9,7 +9,7 @@ description: "Firebase is the OG mobile-first BaaS. Pylon is what you'd build if
 ## TL;DR
 
 - **Choose Firebase** if you're building a mobile app, you want Google's ecosystem (FCM push notifications, Crashlytics, GA4 integration), and you're OK with a closed-source backend.
-- **Choose Pylon** if you want self-host, no vendor lock-in, structured data, faceted search, or game shards.
+- **Choose Pylon** if you want self-host, no vendor lock-in, structured data, faceted search, or game shards (authored in Rust).
 
 ## Big picture differences
 
@@ -25,7 +25,7 @@ description: "Firebase is the OG mobile-first BaaS. Pylon is what you'd build if
 | Push notifications | ❌ (use any provider) | ✅ FCM |
 | Analytics | ❌ (use any provider) | ✅ GA4 |
 | Crash reporting | ❌ (use Sentry/Crashlytics) | ✅ Crashlytics |
-| Game shards | ✅ | ❌ |
+| Game shards | ✅ Rust `Shard` (TS client hook) | ❌ |
 | Faceted search | ✅ | ⚠️ Enterprise text search or third-party search; no built-in facets |
 
 If you want everything Google ships — push notifications, analytics, A/B testing, remote config, and the broader Google Cloud ecosystem — Firebase is a better fit. Pylon focuses on the backend; pair it with best-in-class single-purpose services.

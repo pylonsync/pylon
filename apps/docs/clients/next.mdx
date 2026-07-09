@@ -10,7 +10,7 @@ description: "@pylonsync/next — server-side helpers, edge proxy, cookie-based 
 - **`createPylonProxy`** — middleware that gates protected routes on session presence so the UI doesn't flash before redirect
 - **`@pylonsync/next/auth`** — cookie-aware sign-up / sign-in / OAuth flows
 
-Works with App Router (Next.js 13.4+); Pages Router users can still use [`@pylonsync/react`](/clients/react) directly.
+Requires the App Router on Next.js 16+ (the package's peer-dependency floor); Pages Router users can still use [`@pylonsync/react`](/clients/react) directly.
 
 The fastest path to a Next.js + Pylon project is `npm create @pylonsync/pylon` — pick the `todo` (or any) template with `--platforms web` and you get a working App Router setup with all of this wired up. The rest of this page documents the pieces so you can integrate Pylon into an existing Next.js app.
 

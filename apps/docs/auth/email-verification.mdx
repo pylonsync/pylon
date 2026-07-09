@@ -28,7 +28,7 @@ export const User = entity("User", {
 });
 ```
 
-If your schema lacks this field, `update` will reject the unknown column and `/email/verify` returns a 4xx with the storage layer's error code instead of silently succeeding.
+If your schema lacks this field, `update` rejects the unknown column and `/email/verify` returns `500 PERSIST_FAILED` (with a hint to add an `emailVerified` datetime field to the User entity) instead of silently succeeding.
 
 ## Sending a verification code
 
@@ -75,10 +75,10 @@ curl -X POST https://your-app/api/auth/email/verify \
 Response on success:
 
 ```json
-{ "verified": true }
+{ "verified": true, "emailVerified": "2026-01-15T10:30:00Z" }
 ```
 
-Pylon stamps `emailVerified` to the current ISO 8601 timestamp (e.g. `"2026-01-15T10:30:00Z"`).
+Pylon stamps `emailVerified` to the current ISO 8601 timestamp and echoes it back in the response.
 
 Errors:
 

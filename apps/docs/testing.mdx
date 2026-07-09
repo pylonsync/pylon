@@ -98,6 +98,10 @@ test("createThing then read it back", async () => {
 });
 ```
 
+<Note>
+  These calls are unauthenticated, so they only pass if the surface is reachable by an anonymous client: server functions default to `auth: "user"` (a call with no session gets a `401`), and an entity with no read policy is default-denied (`403`). Mark the function `auth: "guest"` and give the entity a read policy to exercise it this way — otherwise authenticate the request first (`POST /api/auth/guest` for a guest session, then send the token as `Authorization: Bearer <token>`).
+</Note>
+
 ## Adding tests to an existing project
 
 If your project predates the test scaffolding, add the on-ramp by hand:

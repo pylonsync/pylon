@@ -37,22 +37,20 @@ The SDKs share the same wire formats; you can use `@pylonsync/react` on the web,
 Every SDK shares the same shape. The TypeScript flow:
 
 ```typescript
-import { configureClient } from "@pylonsync/react";
+import { init, db, fetchList } from "@pylonsync/react";
+import { sendMagicLink, verifyMagicLink } from "@pylonsync/client";
 
-configureClient({ baseUrl: "https://your-app.com" });
+init({ baseUrl: "https://your-app.com" });
 
 // Sign in
-await startMagicLink("alice@example.com");
+await sendMagicLink("alice@example.com");
 const session = await verifyMagicLink("alice@example.com", code);
 
-// Use entities
+// Read entities (one-shot)
 const todos = await fetchList("Todo");
 
-// Or via sync engine for live updates + optimistic writes
-import { createSyncEngine } from "@pylonsync/sync";
-const engine = createSyncEngine("https://your-app.com");
-await engine.start();
-await engine.insert("Todo", { title: "ship it", done: false });
+// Live updates + optimistic writes go through the global sync engine
+await db.insert("Todo", { title: "ship it", done: false });
 ```
 
 The Swift flow (mirror image):

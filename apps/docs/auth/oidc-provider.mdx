@@ -32,7 +32,7 @@ The full auth-code + PKCE flow:
 PYLON_OIDC_ISSUER=https://auth.your-app.com
 PYLON_OIDC_CLIENTS='[{"client_id":"docs-portal","client_secret":"shh-1234","redirect_uris":["https://docs.example.com/oauth/callback"]}]'
 
-# Optional — defaults to <data_dir>/oidc-signing-key.pem with 0600 perms
+# Optional — defaults to a .oidc-key.pem file next to your session DB, 0600 perms
 PYLON_OIDC_KEY_PATH=/var/lib/pylon/oidc-signing-key.pem
 
 # Optional — defaults to /login, the dashboard's own login page

@@ -39,6 +39,8 @@ This is brilliant for "trivia game with 4 friends" — no custom server code, si
 
 Pylon (and Colyseus, and Nakama) use a **server-authoritative** model: the server runs the tick loop, all state lives on the server, clients send inputs and receive state. More expensive operationally; more robust.
 
+One thing to know up front, since Playroom's audience is web/JS developers: Pylon's authoritative tick loop is written in **Rust** (the `Shard<S: SimState>` crate), with a `useShard` React hook to connect from the client. There's no TypeScript API for the server simulation today. Your app data, auth, and functions stay in TypeScript — but the shard authority itself means writing Rust.
+
 ## Where Playroom is better
 
 - **Time-to-first-multiplayer** — minutes, not hours. The SDK includes a discovery UI, joins via room codes, and "just works" with a few lines of code.
@@ -82,7 +84,7 @@ Pylon self-hosting is just infrastructure cost. Pylon Cloud uses plan quotas plu
 
 If you started with Playroom and outgrew it:
 
-1. **Move authority to the server** — port your "host" logic into a `SimState::tick` impl on the Pylon side
+1. **Move authority to the server** — port your "host" logic into a `SimState::tick` impl on the Pylon side (this is Rust — Pylon's shard authority isn't a TypeScript API today, so budget for that rewrite)
 2. **Convert room state from key-value to entities** — Playroom's `getState`/`setState` pattern maps to Pylon's entity CRUD
 3. **Add real auth** — replace guest sessions with magic-code sign-in (or keep guest sessions for "just play" via `/api/auth/guest`)
 4. **Persist player data** — move from Playroom's volatile state to Pylon entities

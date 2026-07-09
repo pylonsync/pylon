@@ -21,7 +21,7 @@ const User = entity(
 );
 ```
 
-Every entity gets an auto-generated `id` (ULID string) and the column order you declared.
+Every entity gets an auto-generated `id` — a 40-char lowercase-hex, lexicographically-sortable string (timestamp + counter) — plus the column order you declared. (The runtime rejects non-conforming ids like ULIDs/UUIDs, because cursor pagination relies on the fixed 40-char width.)
 
 ## Field types
 

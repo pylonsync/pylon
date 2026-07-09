@@ -51,6 +51,15 @@ my-pylon-app/
 └── package.json
 ```
 
+<Note>
+  The container image must bundle the **Pylon binary + Bun** — the binary spawns
+  Bun to run your TypeScript functions and SSR. Pylon's published image
+  (`ghcr.io/pylonsync/pylon`, which `pylon deploy --target docker` builds on)
+  already includes both. If you write your own Dockerfile, install Bun (`curl
+  -fsSL https://bun.sh/install | bash`) or your app's functions/SSR will fail at
+  runtime.
+</Note>
+
 ## The default config — Aurora + S3
 
 ```typescript
@@ -141,22 +150,22 @@ export default $config({
 });
 ```
 
-Add `file_storage` to your `pylon.manifest.json` so Pylon knows to use S3:
+<Warning>
+  **S3 file storage is not currently wired into the runtime.** File-storage
+  selection (`select_from_env` in `crates/storage/src/files.rs`) only recognizes
+  `PYLON_FILES_PROVIDER=stack0` and `local` — an `s3` value **silently falls back
+  to local disk**. On a stateless Fargate container that means uploads land on
+  ephemeral container disk and are lost on every redeploy or scale-in. There is
+  no `file_storage` manifest plugin; file storage is configured entirely through
+  `PYLON_FILES_PROVIDER` + the provider's env vars.
 
-```jsonc
-{
-  "plugins": [
-    {
-      "name": "file_storage",
-      "config": {
-        "backend": "s3",
-        "bucket": "${env.PYLON_S3_BUCKET}",
-        "region": "${env.PYLON_S3_REGION}"
-      }
-    }
-  ]
-}
-```
+  Until S3 is wired, either use `PYLON_FILES_PROVIDER=stack0` (see
+  [Deploy → Required environment](/operations/deploy#required-environment)) for
+  externalized files, or use the single-replica **EFS + SQLite** shape below,
+  which keeps uploads on the mounted EFS volume. The `PYLON_S3_*` env vars and the
+  `S3Config` struct exist in the codebase but aren't reachable from the runtime's
+  storage selector yet.
+</Warning>
 
 ## Local development
 
@@ -351,23 +360,25 @@ scaling: {
 }
 ```
 
-Requirements that the default config already satisfies:
+Requirements for a correct multi-replica deploy:
 
-1. **Postgres backend** ✅ (DATABASE_URL set, no SQLite)
-2. **External file storage** ✅ (S3 via `file_storage` plugin)
-3. **Sticky WebSocket sessions** ✅ (`stickySessions: true` on the load balancer)
+1. **Postgres backend** ✅ — `DATABASE_URL` set, no SQLite. The default config satisfies this.
+2. **Externalized file storage** ⚠️ — the default config points at S3, which isn't wired yet (see the warning under *The default config*). Use `PYLON_FILES_PROVIDER=stack0` for externalized files, or keep a single replica on the EFS + SQLite shape.
+3. **Sticky WebSocket sessions** ✅ — `stickySessions: true` on the load balancer. The default config satisfies this.
+4. **Cross-replica live fanout** ❌ — WebSocket broadcasts are in-process by default, so a mutation handled by replica A never reaches clients on replica B until their next `reconcile()`. The default config does **not** address this; set the cluster bus before scaling past one replica.
 
-For multi-replica deployments that need a shared cache (rate limiting counters, computed-value caches), add the `cache_client` plugin pointed at ElastiCache Redis:
+For cross-replica fanout, run ElastiCache Redis and point every replica at it with `PYLON_CLUSTER_BUS`. Pylon refuses to boot if the bus is set but unreachable (loud failure beats silent split-brain). See [Horizontal scaling](/operations/scaling).
 
 ```typescript
-const redis = new sst.aws.Redis("PylonCache", { vpc: { id: db.nodes.vpc.id } });
+const redis = new sst.aws.Redis("PylonBus", { vpc: { id: db.nodes.vpc.id } });
 
 new sst.aws.Service("PylonService", {
   // ...
   link: [uploads, redis],
   environment: {
     // ...
-    REDIS_URL: redis.url,
+    PYLON_CLUSTER_BUS: redis.url,      // redis://… — cross-machine change/presence/CRDT fanout
+    PYLON_CLUSTER_NAMESPACE: "my-pylon-app",
   },
 });
 ```
@@ -406,7 +417,7 @@ Both are valid. Pylon's wire protocol is identical regardless of how you host it
 
 **Cold start takes 10+ minutes the first time** — Aurora Serverless v2's first cold start provisions storage. Subsequent deploys are `<2 min`.
 
-**File uploads fail with 403** — confirm the service has the bucket linked (`link: [uploads]`) and that your manifest's `file_storage` plugin reads `${env.PYLON_S3_BUCKET}`. SST emits the bucket name into the env automatically; without `link`, the IAM permissions to write to it aren't attached.
+**Uploads don't land in S3** — expected: the runtime's storage selector doesn't wire the S3 backend yet (see the warning under *The default config*), so `PYLON_FILES_PROVIDER=s3` writes to local container disk. Use `PYLON_FILES_PROVIDER=stack0` for externalized storage, or the single-replica EFS + SQLite shape. (The `link: [uploads]` IAM grant is still correct for when S3 lands.)
 
 **Local dev errors `connection refused`** — Postgres isn't running. `docker compose -f docker-compose.dev.yml ps` should show the `db` service `Up`. If not: `docker compose up -d db`.
 

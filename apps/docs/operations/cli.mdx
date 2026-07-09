@@ -15,8 +15,13 @@ pylon <cmd> --help  # per-command flags
 ```bash
 curl -fsSL https://www.pylonsync.com/install.sh | bash
 
-pylon login        # opens www.pylonsync.com/dashboard/account/cli-tokens,
-                   # prompts you to paste a token
+pylon login        # device-authorization flow: prints a login code, opens
+                   # www.pylonsync.com/cli, and polls until you type + approve
+                   # that code in the browser. No token paste.
+
+pylon login --token <token>        # non-interactive: pass a token directly
+pylon login --token-stdin          # read the token from stdin (CI / pipes)
+                                   # (PYLON_CLI_TOKEN=… also works)
 
 pylon login --code XXXX-XXXX
                    # agent-handoff path: redeems a one-time code minted by

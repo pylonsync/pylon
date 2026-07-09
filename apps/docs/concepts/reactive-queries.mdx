@@ -21,19 +21,22 @@ decorator. The reactivity is unlocked at the call site by using
 
 ```ts
 // functions/getFeed.ts
-import { query } from "@pylonsync/functions";
+import { query, v } from "@pylonsync/functions";
 
-export default query(async (ctx, args: { userId: string }) => {
-  const posts = await ctx.db.list("Post");
-  return Promise.all(
-    posts
-      .filter((p) => p.authorId !== args.userId) // exclude self
-      .slice(0, 50)
-      .map(async (p) => ({
-        ...p,
-        author: await ctx.db.get("User", p.authorId),
-      })),
-  );
+export default query({
+  args: { userId: v.id("User") },
+  async handler(ctx, args) {
+    const posts = await ctx.db.list("Post");
+    return Promise.all(
+      posts
+        .filter((p) => p.authorId !== args.userId) // exclude self
+        .slice(0, 50)
+        .map(async (p) => ({
+          ...p,
+          author: await ctx.db.get("User", p.authorId),
+        })),
+    );
+  },
 });
 ```
 

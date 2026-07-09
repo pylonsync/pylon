@@ -105,9 +105,9 @@ The bundler emits a `manifest.json` listing every route's entry file + the chunk
 
 ## What's not here yet
 
-- **`loading.tsx` / `error.tsx` / `not-found.tsx`** — special files like Next.js's app router. Phase 3.
-- **Server Actions / RSC** — Pylon serves dynamic pages but doesn't ship React Server Components today. Functions + the typed client handle the same use cases.
-- **Streaming with `<Suspense>`** — the stream itself works (React emits multiple chunks), but boundary-level suspense fallbacks aren't yet wired through the manifest.
+- **Server Actions / RSC** — Pylon serves dynamic pages but doesn't ship React Server Components or the `"use server"` action model. Server functions (`query` / `mutation` / `action`) plus the typed client cover the same ground: call them from client components instead of inlining server code into the render tree.
+
+Special files (`loading.tsx`, `error.tsx`, `not-found.tsx`), `<Suspense>` streaming (opt in with a `loading.tsx` boundary or `export const streaming = true`), and metadata (`metadata` / `generateMetadata`, plus dynamic `opengraph-image.tsx`) have all shipped since this list was first written.
 
 ## Try it
 

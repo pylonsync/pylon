@@ -34,44 +34,43 @@ Create `app.ts`:
 import {
   buildManifest,
   entity,
-  string,
-  int,
-  bool,
-  datetime,
-  id,
-  relation,
+  field,
   query,
   action,
   policy,
 } from "@pylonsync/sdk";
 
 const User = entity("User", {
-  email:        string({ unique: true }),
-  displayName:  string(),
-  passwordHash: string({ optional: true }),
-  createdAt:    datetime(),
+  email:        field.string().unique(),
+  displayName:  field.string(),
+  passwordHash: field.string().serverOnly().optional(),
+  createdAt:    field.datetime().defaultNow(),
 });
 
 const Todo = entity("Todo", {
-  title:    string(),
-  done:     bool({ default: false }),
-  authorId: id("User"),
-  createdAt:datetime(),
+  title:    field.string(),
+  done:     field.bool().default(false),
+  authorId: field.id("User"),
+  createdAt:field.datetime().defaultNow(),
 }, {
   indexes: [{ name: "by_author", fields: ["authorId"] }],
 });
 
-const todosByAuthor = query("todosByAuthor", { authorId: id("User") });
+const todosByAuthor = query("todosByAuthor", {
+  input: [{ name: "authorId", type: "id(User)" }],
+});
 
 const createTodo = action("createTodo", {
-  title:    string(),
-  authorId: id("User"),
+  input: [
+    { name: "title", type: "string" },
+    { name: "authorId", type: "id(User)" },
+  ],
 });
 
 const todoPolicy = policy({
-  match: "Todo",
-  read:  "auth.userId != null && data.authorId == auth.userId",
-  write: "auth.userId == data.authorId",
+  entity:     "Todo",
+  allowRead:  "auth.userId != null && data.authorId == auth.userId",
+  allowWrite: "auth.userId == data.authorId",
 });
 
 export default buildManifest({
@@ -81,8 +80,11 @@ export default buildManifest({
   queries:   [todosByAuthor],
   actions:   [createTodo],
   policies:  [todoPolicy],
+  routes:    [],
 });
 ```
+
+Fields are built with the `field` helper (`field.string()`, `field.int()`, `field.id("User")`, …) and refined with chained modifiers (`.unique()`, `.optional()`, `.default(v)`, `.defaultNow()`, `.owner()`, `.serverOnly()`, `.crdt(...)`). `query` / `action` register a name plus a typed `input` list; the handler itself lives in a `functions/*.ts` file (see [Actions](#actions)).
 
 Then run codegen to materialize the manifest:
 
@@ -96,41 +98,42 @@ pylon codegen app.ts --out pylon.manifest.json
 
 | DSL | Wire type | Notes |
 | --- | --- | --- |
-| `string()` | `string` | UTF-8 text |
-| `int()` | `number` | 64-bit signed |
-| `float()` | `number` | 64-bit float |
-| `bool()` | `boolean` | |
-| `datetime()` | `string` | ISO 8601 |
-| `richtext()` | `string` | Rendered as rich text in Studio |
-| `id("User")` | `string` | Reference to another entity |
+| `field.string()` | `string` | UTF-8 text |
+| `field.int()` | `number` | 64-bit signed |
+| `field.float()` (`field.number()`) | `number` | 64-bit float |
+| `field.bool()` (`field.boolean()`) | `boolean` | |
+| `field.datetime()` | `string` | ISO 8601 |
+| `field.richtext()` | `string` | LoroText by default; rich text in Studio |
+| `field.id("User")` | `string` | Reference to another entity |
+| `field.enum(["a", "b"])` | `string` | Codegen emits a literal union |
 
-Modifiers (chained):
-
-```typescript
-string({ unique: true, optional: false, default: "" })
-int({ min: 0, max: 100 })
-datetime({ default: "now()" })
-```
-
-For CRDT-backed fields:
+Modifiers are chained methods, not option objects:
 
 ```typescript
-text()       // LoroText — collaborative rich text
-counter()    // LoroCounter — multi-writer increments
-list()       // LoroList — append/insert/move
-movableList()// LoroMovableList — with stable ids
-tree()       // LoroTree — hierarchical
+field.string().unique()          // enforce uniqueness
+field.string().optional()        // nullable
+field.bool().default(false)      // static insert-time default
+field.datetime().defaultNow()    // stamp now() on insert
+field.string().owner()           // stamp the row owner from the session
+field.string().serverOnly()      // read on the server, never serialized to clients
 ```
 
-CRDT-backed fields don't go through normal LWW merge; they sync via the binary CRDT broadcast channel. See [Loro](/clients/loro) for the full picture.
+For CRDT-backed fields, use `.crdt(annotation)`:
+
+```typescript
+field.string().crdt("text")    // LoroText — collaborative text (or field.richtext())
+field.int().crdt("counter")    // LoroCounter — multi-writer increments
+```
+
+`"text"` and `"counter"` are wired end-to-end; the `"list"`, `"movable-list"`, and `"tree"` annotations are reserved (wire format locked in, server-side projection still landing). CRDT-backed fields don't go through normal LWW merge; they sync via the binary CRDT broadcast channel. See [Loro](/clients/loro) for the full picture.
 
 ## Indexes
 
 ```typescript
 entity("Todo", {
-  authorId: id("User"),
-  status:   string(),
-  createdAt:datetime(),
+  authorId: field.id("User"),
+  status:   field.string(),
+  createdAt:field.datetime().defaultNow(),
 }, {
   indexes: [
     { name: "by_author",        fields: ["authorId"] },
@@ -146,15 +149,15 @@ The first matching prefix on a multi-column index wins for query planning. Pylon
 
 ```typescript
 entity("Post", {
-  title:    string(),
-  body:     richtext(),
-  tags:     string(),
-  authorId: id("User"),
+  title:    field.string(),
+  body:     field.richtext(),
+  tags:     field.string(),
+  authorId: field.id("User"),
 }, {
   search: {
-    text_fields: ["title", "body"],
-    facets:      ["authorId", "tags"],
-    sortable:    ["createdAt", "viewCount"],
+    text:     ["title", "body"],
+    facets:   ["authorId", "tags"],
+    sortable: ["createdAt", "viewCount"],
   },
 });
 ```
@@ -164,46 +167,48 @@ This wires the entity into the [`search` plugin](/plugins/search-ai). Once enabl
 ## Relations
 
 ```typescript
+import { entity, field, relation } from "@pylonsync/sdk";
+
 const Post = entity("Post", {
-  title:    string(),
-  authorId: id("User"),
+  title:    field.string(),
+  authorId: field.id("User"),
+}, {
+  relations: [
+    // name = accessor on the parent, target = entity, field = the FK on the target
+    relation({ name: "comments", target: "Comment", field: "postId", many: true }),
+  ],
 });
 
 const Comment = entity("Comment", {
-  postId: id("Post"),
-  body:   string(),
-});
-
-const PostWithComments = relation("Post.comments", {
-  from: "Post",
-  to:   "Comment",
-  via:  "postId",
-  type: "one-to-many",
+  postId: field.id("Post"),
+  body:   field.string(),
 });
 ```
 
-Relations enable `include` joins on queries:
+Relations enable `include` joins on queries. On the client, request them through the query's `include` map (an object keyed by relation name):
 
 ```typescript
-const post = await fetchById("Post", id, { include: ["comments"] });
-// post.comments is a Comment[]
+import { db } from "@pylonsync/react";
+
+const { data: posts } = db.useQuery("Post", { include: { comments: {} } });
+// each post.comments is a Comment[]
 ```
 
 ## Queries
 
-Named, typed query inputs. Resolve to `/api/query/<name>`:
+Named, typed query inputs. Each `input` entry is `{ name, type, optional? }`, where `type` is a field-type string (`"string"`, `"int"`, `` `id(User)` ``, …). Resolve to `/api/query/<name>`:
 
 ```typescript
 const recentTodos = query("recentTodos", {
-  limit: int({ default: 10 }),
+  input: [{ name: "limit", type: "int", optional: true }],
 });
 
 const todosByAuthor = query("todosByAuthor", {
-  authorId: id("User"),
+  input: [{ name: "authorId", type: "id(User)" }],
 });
 ```
 
-Queries are pure-data filters; for computed results, use an `action` instead.
+`query` / `action` register the name + input contract; the handler lives in a `functions/<name>.ts` file. Use a `query()` handler for reads and a `mutation()` / `action()` handler for writes and computed results.
 
 ## Actions
 
@@ -211,7 +216,7 @@ Server-side functions with typed args. Resolve to `/api/fn/<name>`:
 
 ```typescript
 const completeTodo = action("completeTodo", {
-  todoId: id("Todo"),
+  input: [{ name: "todoId", type: "id(Todo)" }],
 });
 ```
 
@@ -238,36 +243,36 @@ See [Functions](/concepts/functions) for the full handler API.
 
 ```typescript
 policy({
-  match:  "Todo",
-  read:   "auth.userId != null && data.authorId == auth.userId",
-  write:  "data.authorId == auth.userId",
-  delete: "data.authorId == auth.userId || auth.hasRole('admin')",
+  entity:      "Todo",
+  allowRead:   "auth.userId != null && data.authorId == auth.userId",
+  allowInsert: "auth.userId == data.authorId",
+  allowUpdate: "auth.userId == data.authorId",
+  allowDelete: "auth.userId == data.authorId || auth.hasRole('admin')",
 })
 ```
 
-Expression syntax in [RBAC](/auth/rbac).
+Each rule is a per-operation gate: `allowRead`, `allowInsert`, `allowUpdate`, `allowDelete`. `allowWrite` is a shared fallback for the three write ops, and `allow` is the fallback for all four. Expression syntax in [RBAC](/auth/rbac).
 
-## Plugins from TS
+## Plugins
 
-Plugins that take callbacks (custom validation, computed fields, webhook handlers) configure cleanly from TS:
+`definePlugin({ name, hooks })` returns a `PluginDefinition` — a named set of server-side entity lifecycle hooks:
 
 ```typescript
 import { definePlugin } from "@pylonsync/sdk";
 
-definePlugin("validation", {
-  rules: { "User.email": [{ type: "email" }] },
-});
-
-definePlugin("computed", {
-  fields: { "Order.total": (row) => row.subtotal + row.tax },
-});
-
-definePlugin("webhooks", {
-  hooks: [{ entity: "Order", events: ["insert"], url: "https://hooks.example.com/order-created" }],
+const audit = definePlugin({
+  name: "audit",
+  hooks: {
+    // Return modified data to rewrite the row, or null to abort the write.
+    beforeInsert: (entity, data) => ({ ...data, createdVia: "api" }),
+    afterUpdate:  (entity, id, data) => console.log(`${entity} ${id} updated`),
+  },
 });
 ```
 
-`pylon codegen` merges these into `manifest.plugins` automatically.
+Available hooks: `beforeInsert`, `afterInsert`, `beforeUpdate`, `afterUpdate`, `beforeDelete`, `afterDelete`.
+
+Many capabilities don't need a plugin at all — they're declarative: full-text search is an entity's `search:` option (above), and auth / scheduled jobs are configured with the `auth()` / `cron()` helpers passed to `buildManifest`.
 
 ## Manifest output
 
@@ -280,10 +285,11 @@ definePlugin("webhooks", {
   "name": "todo-app",
   "version": "0.1.0",
   "entities":  [...],
+  "routes":    [...],
   "queries":   [...],
   "actions":   [...],
   "policies":  [...],
-  "plugins":   [...]
+  "auth":      { ... }
 }
 ```
 

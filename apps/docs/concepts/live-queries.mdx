@@ -75,16 +75,24 @@ See the [`bench` example](/examples/bench) to measure for yourself.
 
 ## Falling back to non-live
 
-Sometimes you want a one-shot read without the subscription overhead:
+Sometimes you want a one-shot read without the subscription overhead. Call a query function once with `db.fn` (or `callFn`) instead of subscribing:
 
 ```tsx
-const rows = await db.list("Message", { roomId });
+const rows = await db.fn("listMessages", { roomId });
 ```
 
-Or from a server function:
+Where `listMessages` is a server function:
 
 ```ts
-const rows = await ctx.db.query("Message", { roomId });
+// functions/listMessages.ts
+import { query, v } from "@pylonsync/functions";
+
+export default query({
+  args: { roomId: v.id("Room") },
+  async handler(ctx, args) {
+    return ctx.db.query("Message", { roomId: args.roomId });
+  },
+});
 ```
 
 ## Next

@@ -46,7 +46,7 @@ Scheduled cron Worker triggers a function that writes to D1 in a loop, gets rate
 
 One room with 10k concurrent WS clients all pinned to one DO = 1M+ DO requests/hour per room.
 
-**Fix**: shard rooms; `pylon-workers`' `RoomDO` wraps `DynShardRegistry`, so you can trivially split a "global chat" room into 100 regional rooms.
+**Fix**: shard rooms. On Workers each Pylon room maps to one (sticky) Durable Object, so split a hot "global chat" room into many smaller rooms (e.g. per-region) to spread load across DOs instead of pinning everyone to one.
 
 ### Crawlers / bots
 

@@ -5,9 +5,21 @@ description: "Install the Pylon CLI and runtime."
 
 ## Requirements
 
-- **Bun** ≥ 1.0 (runs TypeScript functions + codegen)
-- **Rust** ≥ 1.85 (required to build the CLI from source — edition 2024)
+- **Bun** ≥ 1.0 — a required runtime dependency, not just a build tool. The `pylon` server binary spawns Bun as a child process to run your TypeScript functions and render React SSR. Every install path below (except Pylon Cloud) needs Bun on the host.
+- **Rust** — a recent stable toolchain (edition 2021). Only needed if you build the CLI from source; the prebuilt binary and Docker image need no Rust.
 - **Node.js** ≥ 18 (optional, for client tooling)
+
+## Fastest start — scaffold an app
+
+The quickest path to a running full-stack app is the project scaffolder — no global install required, because it wires `@pylonsync/cli` in as a dev dependency:
+
+```bash
+npm create @pylonsync/pylon@latest my-app
+cd my-app
+npm run dev
+```
+
+That scaffolds a full-stack SSR app (schema, policies, functions, and file-based React routes under `app/`) and `npm run dev` runs the bundled CLI. Install the standalone CLI below if you want `pylon` on your `PATH` for other projects or CI.
 
 ## Skip the install — use Pylon Cloud
 
@@ -32,7 +44,7 @@ docker pull ghcr.io/pylonsync/pylon:latest
 ```
 
 ```bash Cargo (compiles from source)
-cargo install pylon-cli
+cargo install --git https://github.com/pylonsync/pylon pylon-cli
 ```
 </CodeGroup>
 

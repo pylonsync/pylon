@@ -61,7 +61,7 @@ Both:
 | Backing services | None (SQLite included) | Redis/presence driver for multi-process; app DB is whatever you add |
 | Process model | Single binary | Node app + dependencies |
 
-Both deploy to a Linux VPS. Colyseus's "standard Node.js application" is straightforward to deploy; Pylon's single binary is just one more level of "drop and run."
+Both deploy to a Linux VPS. Colyseus's "standard Node.js application" is straightforward to deploy; Pylon ships as one Rust binary (it spawns a bundled Bun runtime for any TypeScript functions/SSR you add), which keeps the deploy close to "drop and run."
 
 ## Use case fit
 
@@ -106,7 +106,7 @@ The Pylon side is Rust, not TS — that's the largest porting cost. If your team
 
 Pylon's realtime shard system is **newer**. Colyseus has 8 years of production hardening, edge-case fixes, integration guides, and deployment patterns. For mission-critical multiplayer where every minute of downtime costs money, Colyseus's maturity is a real asset.
 
-Pylon's shard implementation is built on the same primitives the Pylon team uses internally for [Mooncraft](https://github.com/pylonsync/pylon) (the canonical example). It's tested, but not yet at Colyseus's deployment-count level.
+Pylon's shard implementation is built on the same `pylon_realtime` primitives the Pylon team uses internally. It's tested, but not yet at Colyseus's deployment-count level.
 
 ## Both / and
 

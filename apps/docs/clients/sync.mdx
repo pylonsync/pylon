@@ -15,7 +15,7 @@ The sync engine maintains an **in-memory replica** of the rows the server has sh
 - **Tombstone-aware** — deletes can't be resurrected by an out-of-order replay
 - **Optimistic** — local mutations update the replica immediately; a background queue ships them to the server with idempotency tokens
 - **Identity-flip-safe** — when the auth token or active tenant changes, the replica resets so you don't see stale rows from the previous identity
-- **Crash-safe** — the persistence layer (IndexedDB on web, SQLite on native) writes through every change before advancing the cursor, so a crash mid-pull can never leave the cursor ahead of the durable replica
+- **Crash-safe** — the persistence layer (IndexedDB on web, an AsyncStorage-backed replica in `@pylonsync/react-native`, SQLite in the Swift SDK) writes through every change before advancing the cursor, so a crash mid-pull can never leave the cursor ahead of the durable replica
 
 The engine subscribes to the server via one of three transports — **WebSocket** (primary), **SSE** (fallback), or **polling** (last resort) — all with full-jitter exponential reconnect.
 
@@ -67,8 +67,9 @@ The `store` always reflects the **post-merged state** — server pushes and opti
 ## Optimistic mutations
 
 ```typescript
-// Insert — returns a temporary id; server replaces with the real id on push
-const tempId = await engine.insert("Todo", { title: "x", done: false });
+// Insert — generates a stable client-side id and returns it. Pylon ids are
+// client-generated, so this id is canonical: the server doesn't reassign it.
+const id = await engine.insert("Todo", { title: "x", done: false });
 
 // Update — applies locally, queues the change
 await engine.update("Todo", id, { done: true });
@@ -77,19 +78,17 @@ await engine.update("Todo", id, { done: true });
 await engine.delete("Todo", id);
 ```
 
-If the server rejects the mutation, the engine marks it `failed` in the queue. Subscribe to `engine.mutations` to surface failures to the UI:
+If the server rejects a mutation, the engine marks it `failed` in the queue (`engine.mutations`, a `MutationQueue`) and keeps it there — it isn't silently dropped. Look one up by op id with `engine.mutations.get(id)` (its `.status` is `"pending" | "applied" | "failed"`, with `.error` set on failure), and drop it once resolved:
 
 ```typescript
-import { mutationQueueListener } from "@pylonsync/sync";
-
-mutationQueueListener(engine.mutations, ({ status, change, error }) => {
-  if (status === "failed") {
-    toast.error(`failed to ${change.kind} ${change.entity}: ${error}`);
-  }
-});
+const m = engine.mutations.get(opId);
+if (m?.status === "failed") {
+  toast.error(`write failed: ${m.error}`);
+  engine.mutations.remove(opId); // clear it after showing a retry affordance
+}
 ```
 
-Failed mutations stay in the queue until you call `engine.mutations.remove(id)`. This lets you show "retry" affordances without losing the user's intent.
+For a per-call ergonomic surface, prefer the React [`db.useMutation`](/clients/react) hook — it exposes `loading` / `data` / `error` for the specific call without reaching into the queue.
 
 ## Pagination
 
@@ -246,7 +245,7 @@ The engine writes through to IndexedDB by default in browsers. The schema:
 
 On startup, the engine loads every entity row and the cursor, then catches up via pull. Mutations queued offline are hydrated and pushed on the next `push()` tick.
 
-For non-browser hosts (RN, Tauri, Electron, native Swift), pass a different persistence backend — `@pylonsync/react-native` ships an Expo SQLite implementation; the Swift SDK has its own.
+For non-browser hosts (RN, Tauri, Electron, native Swift), pass a different persistence backend — `@pylonsync/react-native` ships `AsyncStorageReplicaPersistence`; the Swift SDK has its own SQLite implementation.
 
 ## Resetting
 
@@ -276,12 +275,18 @@ type SyncEngineConfig = {
 
 ## Direct calls (skip the engine)
 
-For one-off operations that don't need the local store:
+For one-off operations that don't need the local store, use the low-level `pylonFetch` primitive — it builds the request (base URL + bearer token) and parses JSON, without touching the engine's replica:
 
 ```typescript
-import { fetchList, fetchById, insert, update, remove, callFn } from "@pylonsync/sync";
+import { pylonFetch } from "@pylonsync/sync";
 
-const todos = await fetchList("https://your-app.com", "Todo", { token });
+const config = { baseUrl: "https://your-app.com", token };
+
+const todos = await pylonFetch<Todo[]>(config, "/api/entities/Todo");
+await pylonFetch(config, "/api/entities/Todo", {
+  method: "POST",
+  body: JSON.stringify({ title: "x", done: false }),
+});
 ```
 
-These hit the same endpoints but don't update the engine's local store. Use for server-side scripts or operations the user shouldn't see in the UI.
+These hit the same endpoints but don't update the engine's local store. Use for server-side scripts or operations the user shouldn't see in the UI. (`@pylonsync/react` also ships convenience `fetchList` / `fetchById` wrappers that read the configured client's base URL + token for you.)

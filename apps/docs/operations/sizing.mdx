@@ -88,4 +88,4 @@ For multiplayer apps with sticky shard connections, latency to your players matt
 - Network RTT — production numbers will be bounded by network first
 - Shard tick budget for realtime game state — depends on `SimState::tick`
 
-For a real capacity estimate under your workload, run `pylon bench` against a representative fixture and the manifest you'll ship with.
+For a real capacity estimate under your workload, run `cargo bench -p pylon-runtime` (see the commands at the top of this page) against a representative fixture and the manifest you'll ship with.

@@ -31,7 +31,7 @@ The production transport is **Redis PUB/SUB**.
 ```bash
 PYLON_CLUSTER_BUS=redis://default:pass@redis.internal:6379/0 \
 PYLON_CLUSTER_NAMESPACE=my-app \
-  pylon serve
+  pylon start app.ts
 ```
 
 `PYLON_CLUSTER_NAMESPACE` prefixes the Redis channel so multiple

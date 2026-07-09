@@ -15,10 +15,10 @@ description: "Supabase is Postgres-as-a-platform. Pylon is one binary. Here's wh
 
 | | Pylon | Supabase |
 | --- | --- | --- |
-| Process count | 1 | 5+ services (Postgres, GoTrue, PostgREST, Realtime, Storage, Studio, optional Edge Functions) |
+| Services / ports | 1 service, 1 port | 5+ services (Postgres, GoTrue, PostgREST, Realtime, Storage, Studio, optional Edge Functions) |
 | Default DB | SQLite | Postgres |
-| Backed by | Rust | Postgres + Go + Elixir + Deno |
-| Self-host | `scp` + `systemctl` | Docker Compose stack |
+| Backed by | Rust server + a bundled Bun runtime for your TS | Postgres + Go + Elixir + Deno |
+| Self-host | binary + Bun + `systemctl` | Docker Compose stack |
 
 Supabase is a curated stack of best-in-class single-purpose services. Pylon is one binary that does many of those things itself. Both are valid; pick the trade-off.
 
@@ -47,7 +47,7 @@ Both ship:
 
 - **One service** — one binary plus Bun, one port, one config file. Compare to a Docker Compose stack.
 - **Faceted search** — Supabase has Postgres `tsvector` for FTS but no native facets ([docs](https://supabase.com/docs/guides/database/full-text-search)). Pylon ships FTS5 + roaring-bitmap facet counts.
-- **Game shards** — `Shard<S: SimState>` for tick-based multiplayer. Supabase has nothing equivalent.
+- **Game shards** — `Shard<S: SimState>` for tick-based multiplayer (authored in Rust, with a `useShard` client hook; there's no TypeScript shard-authoring API yet). Supabase has nothing equivalent.
 - **In-process mutations** — Pylon mutations run as typed handler-level transactions in the app process. Supabase Edge Functions are separate Deno functions that call Postgres over HTTP or a database client, so you manage transaction boundaries explicitly.
 - **CRDTs** — Pylon integrates Loro for collaborative editing. Supabase Realtime gives you Postgres Changes, Broadcast, and Presence; CRDT-backed collaborative data is still something you bring yourself.
 - **Plugin system** — built-in plugins for cross-cutting concerns such as search, files, presence, audit logs, and payments. Supabase has extensions, but they're Postgres extensions, not framework-level.

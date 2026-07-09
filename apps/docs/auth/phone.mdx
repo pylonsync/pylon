@@ -108,7 +108,7 @@ When all three are set, `/phone/send-code` ships an SMS via Twilio's REST API. W
 
 ## Custom SMS providers
 
-The framework's `SmsSender` trait is the integration point. Wire your provider — MessageBird, Vonage, Plivo, AWS SNS, an internal SMS gateway — by implementing the trait and registering it as the active transport:
+The `pylon-auth` crate exposes an `SmsSender` trait — the crate-level extension point for a non-Twilio provider (MessageBird, Vonage, Plivo, AWS SNS, an internal SMS gateway):
 
 ```rust
 use pylon_auth::phone::SmsSender;
@@ -116,14 +116,14 @@ use pylon_auth::phone::SmsSender;
 struct MyProvider;
 
 impl SmsSender for MyProvider {
-  fn send_sms(&self, to: &str, body: &str) -> Result<(), String> {
+  fn send_sms(&self, phone: &str, body: &str) -> Result<(), String> {
     // POST to your provider's API, return Ok(()) on success
     Ok(())
   }
 }
 ```
 
-(For the runtime-wiring, see the Pylon binary's `crates/auth/src/phone.rs` — the framework reads the Twilio transport from env by default but `PhoneCodeStore` accepts any `SmsSender` impl.)
+Note the shipped `pylon` binary only wires the built-in **Twilio** transport, invoked directly from the `/phone/send-code` route handler via `TwilioSmsTransport::from_env()` — there is no env-var switch or registration hook to swap in a custom `SmsSender` in the prebuilt binary. (`PhoneCodeStore` itself only generates + persists the 6-digit code — it returns the code to the caller, which is responsible for delivery; it does not hold an `SmsSender`.) To run a different provider today you build on the `pylon-auth` crate directly in your own Rust binary; env-configurable third-party transports for the shipped binary are not yet available.
 
 ## Security guarantees
 
@@ -133,7 +133,7 @@ impl SmsSender for MyProvider {
 - **Constant-time code comparison** — no timing leak on verify.
 - **Per-number rate limit** on `send-code` so a phone-number enumeration attack can't tie up SMS budget.
 - **Optional CAPTCHA gate** — set `PYLON_CAPTCHA_PROVIDER` to require a captcha token before send. See [CAPTCHA](/auth/captcha).
-- **Twilio credentials never logged.** SMS body text IS logged at warn level on transport failure for debugging.
+- **Twilio credentials never logged.** On transport failure only the provider error is logged at warn level (`[phone] twilio send failed: <error>`) — the SMS body and the code itself are never written to logs.
 
 ## Where to go next
 

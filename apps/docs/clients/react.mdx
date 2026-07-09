@@ -134,12 +134,14 @@ Requires the `search` plugin enabled per-entity in your schema. See [Search](/co
 
 ```tsx
 const { data: stats } = db.useAggregate("Order", {
-  count: true,
-  sum: { amount: "total" },
-  groupBy: "status",
+  count: "*",
+  sum: ["amount"],
+  groupBy: ["status"],
   where: { customerId: "c_xyz" },
 });
 ```
+
+`count` is `"*"` (or a column name for `COUNT(col)`); `sum` / `avg` / `min` / `max` take arrays of column names; `groupBy` takes an array of columns (or date-bucket specs). `data` is one row per group.
 
 ## Sessions
 

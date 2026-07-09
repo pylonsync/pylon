@@ -60,7 +60,7 @@ Every org page in Pylon Cloud has a **Hand off to your coding agent** card. Clic
 
 The canonical Pylon production stack is **frontend on Vercel**, **backend on Pylon Cloud**. Vercel handles your Next.js / SvelteKit / etc. build + global edge; Pylon Cloud owns the realtime backend, database, and auth.
 
-Set `PYLON_TARGET=https://pylon-<your-slug>.fly.dev` in Vercel's project env vars and the Next.js template's rewrite forwards `/api/*` to your Pylon backend — the browser talks same-origin, session cookies ride along, no CORS needed.
+Set `PYLON_TARGET=https://your-app.pyln.dev` (your project's Cloud URL) in Vercel's project env vars and the Next.js template's rewrite forwards `/api/*` to your Pylon backend — the browser talks same-origin, session cookies ride along, no CORS needed.
 
 Full checklist: [Deploying to Vercel](/operations/vercel).
 

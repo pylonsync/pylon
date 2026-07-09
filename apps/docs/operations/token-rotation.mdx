@@ -25,7 +25,7 @@ The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires a restar
    openssl rand -hex 32 > /etc/pylon/admin_token.new
    ```
 
-2. **Deploy side-by-side**. Start a new instance with the new token, let the load balancer health-check promote it, then drain + `SIGTERM` the old one. The 30-second in-flight window covers admin calls that were mid-request.
+2. **Deploy side-by-side**. Start a new instance with the new token, let the load balancer health-check promote it, stop routing traffic to the old one, and let your load balancer's connection drain finish so mid-request admin calls complete before you `SIGTERM` it. (SIGTERM itself is not graceful — see [Deploy → Shutdown and rolling deploys](/operations/deploy#shutdown-and-rolling-deploys) — so the drain has to happen at the load balancer.)
 
 3. **Update clients**. Any automation (CI, runbooks, cron, admin UIs) that hardcodes the old token must update. Grep for the old token prefix in Vault, 1Password, GitHub Actions secrets, Cloudflare environment, etc. before deleting the value.
 
@@ -39,14 +39,10 @@ The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires a restar
    openssl rand -hex 32 > /etc/pylon/admin_token.new
    ```
 
-2. **Revoke every active session and force re-login**:
-
-   ```sh
-   curl -X POST -H "Authorization: Bearer $OLD_TOKEN" \
-     https://your-host/api/admin/sessions/purge
-   ```
-
-   If you can't reach the admin API with the old token, stop the service and clear the session DB:
+2. **Revoke every active session and force re-login.** There is no global
+   session-purge endpoint — invalidate all sessions by clearing the session
+   DB and restarting. Every user signs back in on their next request (sessions
+   are recoverable; only the login is lost):
 
    ```sh
    systemctl stop pylon

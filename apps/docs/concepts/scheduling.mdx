@@ -35,7 +35,7 @@ export default mutation({
   args: {},
   async handler(ctx) {
     // Server-side ctx.db.* is trusted — write your entities directly.
-    const events = await ctx.db.query("Event").collect();
+    const events = await ctx.db.query("Event");
     await ctx.db.insert("HourlyRollup", { count: events.length, at: new Date().toISOString() });
   },
 });

@@ -198,7 +198,9 @@ export default mutation({
   args: { targetUserId: v.string(), role: v.string() },
   async handler(ctx, args) {
     if (!ctx.auth.tenantId) throw new Error("must select an org first");
-    if (!ctx.auth.hasRole("owner")) throw new Error("only owners can grant roles");
+    // ctx.auth has no hasRole inside functions — gate on the membership row.
+    // requireMember reads OrgMember and throws FORBIDDEN if the caller isn't an owner.
+    await ctx.requireMember(ctx.auth.tenantId, { role: "owner" });
 
     const existing = await ctx.db.query("OrgMember", {
       where: { userId: args.targetUserId, orgId: ctx.auth.tenantId },

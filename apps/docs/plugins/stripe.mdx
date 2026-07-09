@@ -111,11 +111,11 @@ The `authorizeReference` hook gates subscription mutations. Defaults:
 
 - `referenceType: "org"` — caller must be the org's owner or admin.
 - `referenceType: "user"` — caller must be the user themselves.
-- `referenceType: "custom"` — you must supply your own `authorizeReference`.
+- `referenceType: "custom"` — you must supply your own `resolveCustomer` hook (maps `referenceId` → Stripe customer id, creating one if needed). There's no default authorization for `custom`, so supply `authorizeReference` too.
 
 ## Security
 
-- **Constant-time signature verification** with 5-minute replay window and multi-secret rotation (supports overlap window during secret rotation).
+- **Constant-time signature verification** with a 5-minute replay window. The `Stripe-Signature` header can carry multiple `v1=` signatures (Stripe emits several during a signing-secret rotation); the verifier accepts a match on any of them against your `STRIPE_WEBHOOK_SECRET`.
 - **URL allowlist** auto-derived from `PYLON_PUBLIC_URL` + `PYLON_CORS_ORIGIN` — no hardcoded host strings.
 - **Three-signal plan resolver** (lookup_key → nickname → priceId match) — Stripe occasionally elides the first two on webhook payloads.
 - **Double-trial guard** — prior `Subscription` rows for the same reference disable the trial period regardless of plan config.

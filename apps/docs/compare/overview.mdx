@@ -9,19 +9,21 @@ Every framework and backend is good at something. This section is the honest ver
 
 | | Pylon | Convex | Supabase | Firebase |
 | --- | --- | --- | --- | --- |
-| **Best for** | Apps that need real-time + multiplayer in one process | TypeScript-first reactive apps | Postgres apps with managed auth/storage | Mobile apps with managed everything |
-| Single process / binary | ✅ | ❌ docker-compose | ❌ multi-service | n/a (managed only) |
+| **Best for** | Real-time apps that also want Rust game shards, in one service | TypeScript-first reactive apps | Postgres apps with managed auth/storage | Mobile apps with managed everything |
+| One service / one port | ✅ | ❌ docker-compose | ❌ multi-service | n/a (managed only) |
 | Self-hostable | ✅ | ✅ | ✅ | ❌ |
 | Realtime sync | ✅ | ✅ | ✅ | ✅ |
 | TypeScript functions | ✅ in-repo | ✅ in-repo | ⚠️ Edge Functions (Deno, separate deploy) | ⚠️ Cloud Functions (separate deploy) |
 | Faceted search | ✅ FTS5 + roaring bitmaps | ⚠️ text/vector search, no native facets | ⚠️ Postgres `tsvector`, no native facets | ⚠️ Enterprise text search or third-party search |
-| Tick-based game shards | ✅ | ❌ | ❌ | ❌ |
+| Tick-based game shards | ✅ Rust `Shard` (client hook in TS) | ❌ | ❌ | ❌ |
 | Open source | ✅ MIT/Apache | ✅ FSL | ✅ Apache 2.0 | ❌ |
 | Pricing model | Self-host infra or Pylon Cloud plan + machine compute | Hosted usage + team seats; self-host infra | Hosted tiers or self-host infra | Hosted pay-as-you-go meters |
 
 Drill down: [Pylon vs. Convex](/compare/convex) · [Pylon vs. Supabase](/compare/supabase) · [Pylon vs. Firebase](/compare/firebase)
 
 ## Game servers
+
+One important qualifier before the comparison: Pylon's authoritative game shards are written in **Rust** — the `Shard<S: SimState>` crate — with a `useShard` React hook to connect from the client. Unlike Pylon's app-data side (schema, policies, functions, sync are all TypeScript), there is **no TypeScript API for authoring a shard's server simulation** today. So these rows compare a Rust shard runtime against Node/Go/managed game servers; if your team won't write Rust, the shard column doesn't apply.
 
 | | Pylon | Colyseus | Playroom Kit | Nakama |
 | --- | --- | --- | --- | --- |
@@ -67,7 +69,7 @@ If you're already on a competitor and considering a move:
 | **Convex** | Medium — port `defineSchema` to Pylon's schema DSL, port reactive queries to `useQuery`, port functions to `mutation`/`action` |
 | **Supabase** | Medium-high — port SQL schema to Pylon's manifest, port RLS to Pylon policies, replace Realtime subscriptions with `useQuery` |
 | **Firebase** | High — denormalized Firestore data needs reshaping; auth migration is tractable via the magic-code flow |
-| **Colyseus** | Medium — port Schema classes to Pylon's `SimState`, keep your tick logic |
+| **Colyseus** | Medium-high — port Schema classes to Pylon's `SimState`; the tick logic is rewritten in Rust, not reused from JS |
 | **Playroom Kit** | Low — Playroom's small surface area maps cleanly |
 | **Nakama** | High — Lua/Go match handlers need rewriting in Rust |
 

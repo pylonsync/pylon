@@ -17,7 +17,7 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | Roles (RBAC) | `auth.hasRole('admin')` in policies; multi-role aware |
 | API keys | First-class — `pk.…` bearer tokens, optional scopes + expiry, server-issued at `/api/auth/api-keys` |
 | HIBP password check | Argon2 + Pwned Passwords k-anonymity check at register/change. Disable with `PYLON_DISABLE_HIBP=1` (tests) |
-| Password change/reset | `/api/auth/password/change` (requires current password); reset flow rides on magic codes |
+| Password change/reset | `/api/auth/password/change` (requires current password); forgot-password via `/api/auth/password/reset/request` + `/reset/complete` (emailed single-use link) |
 | Account deletion | `DELETE /api/auth/account` — revokes sessions, API keys, OAuth links + deletes user row |
 | TOTP / 2FA | RFC 6238 6-digit codes. `/api/auth/totp/enroll` + `/verify` + `/disable`. Compatible with every authenticator app |
 | WebAuthn / passkeys | ES256 + Ed25519. Counter-regression detection. Endpoints: `/api/auth/passkey/{register,login}/{begin,finish}` + key management. Compose `verify_assertion` directly for custom flows. |
@@ -69,6 +69,8 @@ All under `/api/auth/`:
 | `/guest` | POST | Mint a guest session with a stable anonymous id |
 | `/upgrade` | POST | Convert a guest session to a real user (admin / dev only) |
 | `/password/change` | POST | Change password (requires current; HIBP-checked; revokes other sessions) |
+| `/password/reset/request` | POST | Email a single-use password-reset link (always 200; enumeration-safe) |
+| `/password/reset/complete` | POST | Consume the reset token, set the new password, revoke all sessions |
 | `/api-keys` | POST | Mint an API key (returns plaintext exactly once) |
 | `/api-keys` | GET | List the current user's API keys (no plaintext) |
 | `/api-keys/:id` | DELETE | Revoke a single API key by id |
@@ -228,7 +230,7 @@ Cookie auth (browser apps):
 
 ```bash
 PYLON_COOKIE_DOMAIN=.yourdomain.com
-PYLON_COOKIE_SAMESITE=lax        # lax | strict | none
+PYLON_COOKIE_SAME_SITE=lax       # lax | strict | none (none forces Secure)
 PYLON_COOKIE_SECURE=true         # forces HTTPS-only cookies
 ```
 

@@ -16,7 +16,7 @@ CRDT-backed fields don't go through normal LWW merge. They sync via a dedicated 
 - **Counter** — multi-writer increment/decrement that always converges
 - **Cursor positions** — anchor a cursor to a position that survives concurrent edits
 
-All four CRDTs share the same wire format and the same convergence guarantees.
+These CRDTs share the same wire format and the same convergence guarantees.
 
 ## Install
 
@@ -31,17 +31,17 @@ The Swift SDK ships Loro bridging in `PylonSync` — no separate install.
 In your schema:
 
 ```typescript
-import { entity, text, list, counter, tree } from "@pylonsync/sdk";
+import { entity, field } from "@pylonsync/sdk";
 
 const Document = entity("Document", {
-  title:  string(),                   // normal LWW field
-  body:   text(),                     // LoroText
-  outline:tree(),                     // LoroTree
-  views:  counter(),                  // LoroCounter
-  tags:   list(),                     // LoroList
-  authorId: id("User"),
+  title:    field.string(),               // normal LWW field
+  body:     field.string().crdt("text"),  // LoroText  (or field.richtext())
+  views:    field.int().crdt("counter"),  // LoroCounter
+  authorId: field.id("User"),
 });
 ```
+
+CRDT container overrides are set with `.crdt(annotation)` on a field builder. `"text"` and `"counter"` are wired end-to-end today; `"list"`, `"movable-list"`, and `"tree"` are reserved (wire format locked in, server-side projection still landing) — but you can still edit list/map/tree containers on the per-row `LoroDoc` (see below), because the server stores every CRDT payload as opaque bytes and never interprets it.
 
 The Pylon server stores CRDT fields as opaque bytes — it doesn't interpret them. Clients decode the bytes into Loro containers and edit them locally; updates broadcast to other subscribers via the binary WebSocket channel.
 
@@ -53,9 +53,6 @@ import { LoroDoc } from "loro-crdt";
 
 function DocumentEditor({ docId }: { docId: string }) {
   const doc = useLoroDoc("Document", docId);
-
-  if (!doc) return <Loading />;
-
   const text = doc.getText("body");
 
   return (
@@ -172,24 +169,30 @@ Combined with `engine.setPresence({ cursor: myCursor })`, you get the multiplaye
 
 ## Awareness / presence
 
-For lightweight ephemeral state (who's editing, where their cursor is, what they're typing) that doesn't need to be persisted:
+For lightweight ephemeral state (who's editing, where their cursor is, what they're typing) that doesn't need to be persisted, use the `useRoom` hook from `@pylonsync/react`. It returns the live peer list plus a `setPresence` you call as the local cursor moves:
 
-```typescript
-engine.setPresence({
-  userId: currentUser.id,
-  color: "#ff7700",
-  cursor: text.getCursor(currentPosition),
-});
+```tsx
+import { useRoom } from "@pylonsync/react";
 
-// Subscribe to other users' presence
-engine.onPresenceChange((peers) => {
-  for (const peer of peers) {
-    renderRemoteCursor(peer.color, peer.cursor);
-  }
-});
+function PresenceLayer({ docId, me }: { docId: string; me: User }) {
+  const room = useRoom(`doc:${docId}`, me.id);
+
+  return (
+    <>
+      {room.peers.map((peer) => (
+        <RemoteCursor key={peer.id} presence={peer.presence} />
+      ))}
+      <textarea
+        onSelect={(e) =>
+          room.setPresence({ color: "#ff7700", cursor: e.currentTarget.selectionStart })
+        }
+      />
+    </>
+  );
+}
 ```
 
-Presence rides the same WebSocket as CRDT updates but doesn't go into the CRDT itself — it's transient.
+Each `peer.presence` is the last object that peer pushed via `setPresence`. Presence rides the same WebSocket as CRDT updates but doesn't go into the CRDT itself — it's transient (peers who disconnect drop out of `room.peers`).
 
 ## Saving and loading
 
@@ -292,6 +295,6 @@ Mix CRDT and non-CRDT fields freely on the same entity — `Document.title` can 
 
 ## Examples
 
-- [`examples/collaborative-doc`](https://github.com/pylonsync/pylon/tree/main/examples/collaborative-doc) — minimal CRDT-backed text editor
+- [`examples/pad`](https://github.com/pylonsync/pylon/tree/main/examples/pad) — CRDT-backed collaborative markdown editor
 - [`examples/forge`](https://github.com/pylonsync/pylon/tree/main/examples/forge) — design-tool-style multi-cursor editing
 - [`examples/linear`](https://github.com/pylonsync/pylon/tree/main/examples/linear) — issue tracker with CRDT-backed comment threads

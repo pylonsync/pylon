@@ -1,86 +1,73 @@
 ---
 title: API keys
-description: "Long-lived keys for server-to-server calls — create, scope, rotate, revoke."
+description: "Long-lived keys for server-to-server calls — create, use, expire, revoke."
 ---
 
-Sessions are the right shape for users — short-lived, refresh-able, revocable per device. For **server-to-server** calls (a webhook from Stripe, a cron job in another service, a CI script), you want long-lived **API keys** scoped to specific actions, not 30-day session tokens.
+Sessions are the right shape for users — short-lived, refresh-able, revocable per device. For **server-to-server** calls (a webhook from Stripe, a cron job in another service, a CI script), you want long-lived, independently-revocable **API keys**, not 30-day session tokens.
 
 The framework ships this in the box.
 
-## Enable the plugin
+## Built in — nothing to enable
 
-In `pylon.manifest.json`:
+API keys are first-class and always on. There's no plugin to add and no
+manifest entity to declare — the framework owns a dedicated key store
+(persisted to your `PYLON_SESSION_DB` SQLite file, in-memory if unset) and
+mounts the management endpoints under `/api/auth/api-keys`.
 
-```jsonc
-{
-  "plugins": [
-    {
-      "name": "api_keys",
-      "config": {
-        "entity": "ApiKey",
-        "default_lifetime_days": null
-      }
-    }
-  ]
-}
-```
+What you get:
 
-This adds:
+- `/api/auth/api-keys` endpoints to create, list, and revoke keys
+- Bearer-token resolution: a request with `Authorization: Bearer pk.<...>`
+  resolves to the key's owner instead of looking up a session
 
-- An `ApiKey` entity to your schema
-- `/api/keys` admin endpoints to create/list/rotate/revoke
-- Bearer-token resolution: requests with `Authorization: Bearer pk_*` resolve to the API key's owner instead of looking up a session
+## What's stored
 
-## Schema
+The key store keeps an internal record per key (not a manifest entity):
 
-The plugin auto-provisions:
+| Field | Notes |
+| --- | --- |
+| `id` | `key_<24 chars>` — used to revoke a key |
+| `user_id` | Owner of the key |
+| `name` | Human label |
+| `prefix` | First 16 chars of the plaintext (`pk.key_<8 id chars>`) — safe to show |
+| `secret_hash` | HMAC-SHA256 of the secret (see [Security](#security)) |
+| `scopes` | Optional, opaque comma-separated string (your app defines the meaning) |
+| `expires_at` | Optional unix timestamp; unset = no expiry |
+| `last_used_at` | Refreshed on every successful auth |
+| `created_at` | Unix timestamp |
 
-```jsonc
-{
-  "name": "ApiKey",
-  "fields": [
-    { "name": "userId",      "type": "id(User)", "optional": false },
-    { "name": "name",        "type": "string",   "optional": false },
-    { "name": "keyPrefix",   "type": "string",   "optional": false },
-    { "name": "keyHash",     "type": "string",   "optional": false },
-    { "name": "scopes",      "type": "string",   "optional": true  },
-    { "name": "expiresAt",   "type": "datetime", "optional": true  },
-    { "name": "lastUsedAt",  "type": "datetime", "optional": true  },
-    { "name": "createdAt",   "type": "datetime", "optional": false }
-  ]
-}
-```
-
-Only the `keyPrefix` (first 8 chars after the `pk_` prefix) is shown in lists — the full key is shown **once**, at creation time, and never again.
+Only the `prefix` is shown in lists — the full key is shown **once**, at creation time, and never again.
 
 ## Create a key
 
 ```bash
-curl -X POST https://your-app/api/keys \
+curl -X POST https://your-app/api/auth/api-keys \
   -H 'Authorization: Bearer pylon_<session>' \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "Stripe webhook handler",
-    "scopes": ["fn:processStripeEvent", "entity:Payment:write"],
-    "expiresAt": null
+    "scopes": "webhooks,payments:write",
+    "expires_at": null
   }'
 ```
 
-Response (201):
+`scopes` is an optional free-form string and `expires_at` is an optional unix timestamp (seconds). API-key auth can't create keys — a real session is required (`403 API_KEY_AUTH_FORBIDDEN` otherwise), so a leaked key can't mint more keys.
+
+Response (200):
 
 ```json
 {
-  "id": "ak_xyz",
-  "key": "pk_a1b2c3d4e5f6...",
-  "keyPrefix": "a1b2c3d4",
+  "key": "pk.key_a1b2c3d4....secret",
+  "id": "key_a1b2c3d4...",
+  "prefix": "pk.key_a1b2c3d4e",
   "name": "Stripe webhook handler",
-  "scopes": ["fn:processStripeEvent", "entity:Payment:write"],
-  "expiresAt": null,
-  "createdAt": "2026-04-28T..."
+  "scopes": "webhooks,payments:write",
+  "expires_at": null,
+  "created_at": 1735000000
 }
 ```
 
-**The `key` field is shown exactly once** — copy it now or rotate the key. The server stores only the Argon2id hash.
+**The `key` field is shown exactly once** — copy it now or revoke and re-create. The server stores only the hash.
 
 ## Use a key
 
@@ -88,34 +75,38 @@ Just like a session — `Authorization: Bearer <key>`:
 
 ```bash
 curl -X POST https://your-app/api/fn/processStripeEvent \
-  -H 'Authorization: Bearer pk_a1b2c3...' \
+  -H 'Authorization: Bearer pk.key_a1b2c3d4....secret' \
   -H 'Content-Type: application/json' \
   -d '{ "event": {...} }'
 ```
 
-The runtime resolves the key via constant-time hash comparison and produces an `AuthContext` with the key owner's `userId` and the scopes intersected with the owner's roles.
+The runtime resolves the key via constant-time hash comparison and produces an `AuthContext` with the key owner's `userId`. The key's `scopes` are **not** interpreted or enforced by pylon — see below.
 
 ## Scopes
 
-Scopes are strings the plugin interprets as access predicates. The built-in vocabulary:
+Scopes are an **opaque, application-defined** label. Pylon stores whatever
+string you pass and shows it back when you list keys, but it does **not**
+parse or enforce it — there is no built-in scope vocabulary, no automatic
+"read vs write" gating, and the scope string is **not** surfaced to your
+function or policy code. Treat it as metadata for humans auditing the key
+list, not as an access-control mechanism.
 
-| Scope | Allows |
-| --- | --- |
-| `fn:<name>` | Calling that specific function |
-| `fn:*` | Calling any function |
-| `entity:<Name>:read` | Listing/reading rows of that entity |
-| `entity:<Name>:write` | Creating/updating rows |
-| `entity:<Name>:delete` | Deleting rows |
-| `entity:<Name>:*` | All ops on that entity |
-| `entity:*` | All ops on all entities |
-| `*` | Unrestricted (use sparingly) |
+Two things actually constrain what a key can do:
 
-Scopes intersect with the owner's RBAC roles — a key can never grant more access than the user who minted it. So a key owned by an editor can't escalate to admin even with `scope: "*"`.
+- **It resolves to the key's owner `userId`.** A key can do whatever that
+  user can do, subject to your entity policies.
+- **It does not load the owner's roles.** `auth.hasRole(...)` is `false` for
+  key-authenticated requests, so a key can't exercise role-gated policies its
+  owner otherwise could.
+
+If you need finer per-key restriction, the reliable levers are minting the
+key under a narrowly-privileged service user, and checking `expires_at`.
+Don't rely on the `scopes` string to enforce anything on its own.
 
 ## List keys
 
 ```bash
-curl https://your-app/api/keys \
+curl https://your-app/api/auth/api-keys \
   -H 'Authorization: Bearer pylon_<session>'
 ```
 
@@ -124,13 +115,13 @@ Response:
 ```json
 [
   {
-    "id": "ak_xyz",
+    "id": "key_a1b2c3d4...",
     "name": "Stripe webhook handler",
-    "keyPrefix": "a1b2c3d4",
-    "scopes": ["fn:processStripeEvent", "entity:Payment:write"],
-    "expiresAt": null,
-    "lastUsedAt": "2026-04-28T10:32:00Z",
-    "createdAt": "2026-04-25T..."
+    "prefix": "pk.key_a1b2c3d4e",
+    "scopes": "webhooks,payments:write",
+    "expires_at": null,
+    "last_used_at": 1735003920,
+    "created_at": 1735000000
   }
 ]
 ```
@@ -139,62 +130,53 @@ The full key is **not** returned. Only the prefix and metadata.
 
 ## Rotate
 
+There's no dedicated rotate endpoint — rotate by creating a fresh key and revoking the old one:
+
 ```bash
-curl -X POST https://your-app/api/keys/ak_xyz/rotate \
+# 1. Mint the replacement
+curl -X POST https://your-app/api/auth/api-keys \
+  -H 'Authorization: Bearer pylon_<session>' \
+  -d '{ "name": "Stripe webhook handler", "scopes": "webhooks,payments:write" }'
+
+# 2. Roll the new key out to your downstream system, then revoke the old one
+curl -X DELETE https://your-app/api/auth/api-keys/key_old... \
   -H 'Authorization: Bearer pylon_<session>'
 ```
 
-Issues a new key for the same `name` and `scopes`, revokes the old key. Update your downstream system, then the old key stops working immediately.
+The old key stops working the instant it's revoked.
 
 ## Revoke
 
 ```bash
-curl -X DELETE https://your-app/api/keys/ak_xyz \
+curl -X DELETE https://your-app/api/auth/api-keys/key_a1b2c3d4... \
   -H 'Authorization: Bearer pylon_<session>'
 ```
 
-The key is hard-deleted. Any subsequent request with that key gets 401 `INVALID_API_KEY`.
+Ownership is checked first — you can only revoke your own keys (`404 NOT_FOUND` otherwise). Returns `{"revoked": true}`, and any subsequent request with that key gets `401 INVALID_API_KEY`.
 
 ## Expiry
 
-Set `expiresAt` to an ISO 8601 datetime to make a key auto-expire:
+Set `expires_at` (unix seconds) to make a key auto-expire:
 
 ```bash
-curl -X POST https://your-app/api/keys \
+curl -X POST https://your-app/api/auth/api-keys \
   -H 'Authorization: Bearer pylon_<session>' \
   -d '{
     "name": "CI deploy key",
-    "scopes": ["fn:deploy"],
-    "expiresAt": "2026-12-31T23:59:59Z"
+    "scopes": "deploy",
+    "expires_at": 1798761599
   }'
 ```
 
-Or set the plugin-level `default_lifetime_days` to apply a default to every newly-minted key:
-
-```jsonc
-{
-  "name": "api_keys",
-  "config": { "entity": "ApiKey", "default_lifetime_days": 90 }
-}
-```
-
-Expired keys get 401 `API_KEY_EXPIRED`. The `lastUsedAt` field updates on every successful request — use it to find dormant keys you can safely revoke:
-
-```typescript
-// Cleanup query: keys not used in 30 days
-const stale = await ctx.db.query("ApiKey", {
-  where: { lastUsedAt: { lt: new Date(Date.now() - 30 * 86400 * 1000) } },
-});
-```
+Once past `expires_at`, the key is rejected at resolution as `401 INVALID_API_KEY`. The `last_used_at` field updates on every successful request — list your keys and diff it against now to find dormant keys you can safely revoke.
 
 ## Security
 
-- **Keys are CSPRNG-generated** with 256 bits of entropy, prefixed `pk_`.
-- **Hashed with Argon2id** server-side — same algorithm as passwords.
-- **Constant-time lookup** — no timing leak on key resolution.
+- **Keys are CSPRNG-generated** — a 256-bit random secret, wire format `pk.key_<id>.<secret>`.
+- **Hashed with HMAC-SHA256** server-side. Unlike passwords (Argon2id), API-key secrets are full-entropy random, so a fast keyed hash is safe here and adds no per-request latency; a slow KDF would buy nothing.
+- **Constant-time comparison** — no timing leak on key resolution.
 - **Shown once** — the plaintext key never touches the database; only the hash is stored.
-- **Scoped to the owner's role intersection** — a key can't grant access the owner doesn't have.
-- **Auto-rotation candidates surfaced** via `lastUsedAt` for dormant detection.
+- **Owner-scoped management** — creating, listing, and revoking keys all require a real session, never an API key.
 
 ## Common patterns
 
@@ -208,7 +190,7 @@ CI key for staging, separate key for prod. Rotate independently. If a CI build l
 
 ### Time-limited keys for handoffs
 
-A consultant needs read access for two weeks? Mint a key with `expiresAt` 14 days out and `scopes: ["entity:*:read"]`. Auto-expires; no one needs to remember to revoke it.
+A consultant needs access for two weeks? Mint a key with `expires_at` 14 days out (and enforce read-only in your functions if you tag it with a `read` scope). Auto-expires; no one needs to remember to revoke it.
 
 ### Webhook signature backup
 
@@ -223,9 +205,9 @@ Even with HMAC-signed webhooks, requiring an API key on top means a leaked HMAC 
 | Per-device tracking | Per-integration tracking |
 | Cookie or bearer | Bearer only |
 | User-bound | User-bound, but typically used for service-to-service |
-| Token prefix `pylon_` | Token prefix `pk_` |
+| Token prefix `pylon_` | Token prefix `pk.` |
 | Shown only via `/api/auth/sessions` (prefix only) | Shown once at creation, then prefix only |
 
-## Without the plugin
+## When to use a session instead
 
-If you don't enable the `api_keys` plugin, you can still do server-to-server auth via long-lived sessions — but you lose scoping, expiry, rotation, and the per-key audit trail. Always prefer keys for non-user callers.
+You *can* do server-to-server auth with a long-lived session token — but you lose per-integration tracking, explicit expiry, and clean revocation. Prefer keys for any non-user caller.
