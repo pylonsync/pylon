@@ -6,7 +6,7 @@ description: Running pylon across multiple machines without losing live updates.
 # Horizontal scaling
 
 Pylon is a single Rust binary. Single-machine deploys are the happy path
-— one process serves HTTP, WebSocket, SSE, and job execution for the
+— one machine serves HTTP, WebSocket, SSE, and job execution for the
 whole app. When traffic outgrows one machine, you scale horizontally
 by running `pylon` on multiple instances behind a load balancer.
 

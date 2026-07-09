@@ -9,7 +9,7 @@ description: "Supabase is Postgres-as-a-platform. Pylon is one binary. Here's wh
 ## TL;DR
 
 - **Choose Supabase** if you want full Postgres SQL surface, you're comfortable with multi-service deployments, or you need pgvector + edge functions + storage in one place.
-- **Choose Pylon** if you want one binary on a VPS, native faceted search, game shards, or a tighter integration between sync and policies.
+- **Choose Pylon** if you want one binary on a VPS, native faceted search, or a tighter integration between sync and policies.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ Both ship:
 
 ## Where Pylon is better
 
-- **Single binary** — one process, one port, one config file. Compare to a Docker Compose stack.
+- **One service** — one binary plus Bun, one port, one config file. Compare to a Docker Compose stack.
 - **Faceted search** — Supabase has Postgres `tsvector` for FTS but no native facets ([docs](https://supabase.com/docs/guides/database/full-text-search)). Pylon ships FTS5 + roaring-bitmap facet counts.
 - **Game shards** — `Shard<S: SimState>` for tick-based multiplayer. Supabase has nothing equivalent.
 - **In-process mutations** — Pylon mutations run as typed handler-level transactions in the app process. Supabase Edge Functions are separate Deno functions that call Postgres over HTTP or a database client, so you manage transaction boundaries explicitly.

@@ -3,7 +3,7 @@ title: Deploy
 description: "Production deployment shapes — single VPS, AWS ECS, Cloudflare Workers, or Pylon Cloud."
 ---
 
-Pylon runs as a single binary behind a TLS-terminating reverse proxy. This page covers the supported self-hosted deploy shapes plus the experimental Workers path. If you'd rather not run any of this yourself, [Pylon Cloud](/cloud) hosts the same binary.
+Pylon runs as a Rust binary (plus Bun, which runs your TypeScript and SSR) behind a TLS-terminating reverse proxy. This page covers the supported self-hosted deploy shapes plus the experimental Workers path. If you'd rather not run any of this yourself, [Pylon Cloud](/cloud) hosts the same binary.
 
 ## Required environment
 
@@ -75,7 +75,7 @@ Your reverse proxy needs to forward all relevant ports. For deployments with a s
 
 ## Shape 1: single VPS (SSH + systemd)
 
-Simplest and cheapest. One binary, one systemd unit, one reverse proxy. `pylon deploy --target systemd` generates this unit (plus step-by-step install commands) for your app; the shape looks like:
+Simplest and cheapest. The pylon binary plus Bun, one systemd unit, one reverse proxy. `pylon deploy --target systemd` generates this unit (plus step-by-step install commands) for your app; the shape looks like:
 
 ```ini
 # /etc/systemd/system/pylon.service

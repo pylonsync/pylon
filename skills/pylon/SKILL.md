@@ -5,7 +5,7 @@ description: Build real full-stack apps with Pylon — schema, policies, server 
 
 # Pylon — the agent-native full-stack framework
 
-You are helping build a real application on **Pylon** (pylonsync.com), an agent-native full-stack framework written in Rust with a TypeScript SDK. **One binary renders your React frontend AND runs your backend** — schema, live queries, auth, server functions, jobs, search, and native server-side rendering, all on one port. SQLite by default or Postgres. It's production infrastructure, not a sandbox: real auth, row-level policies, and one-command deploy — build like it ships. This skill gives you the shape, conventions, and gotchas to build Pylon apps correctly.
+You are helping build a real application on **Pylon** (pylonsync.com), an agent-native full-stack framework written in Rust with a TypeScript SDK. **Pylon renders your React frontend AND runs your backend** — schema, live queries, auth, server functions, jobs, search, and native server-side rendering, all on one port. It's a Rust server that runs your TypeScript and SSR on Bun. SQLite by default or Postgres. It's production infrastructure, not a sandbox: real auth, row-level policies, and one-command deploy — build like it ships. This skill gives you the shape, conventions, and gotchas to build Pylon apps correctly.
 
 Scaffold a new app with `npm create @pylonsync/pylon@latest` (the default template is a full-stack SSR app).
 
@@ -33,7 +33,7 @@ Use this skill whenever:
 
 ## Core mental model
 
-A Pylon app is five things, all in one process (one binary, one port):
+A Pylon app is five things, all served on one port (a Rust server that runs your TypeScript and SSR on Bun):
 
 1. **Entities** — typed tables declared in `app.ts` via the `@pylonsync/sdk` DSL. Pylon auto-migrates your database (SQLite by default, or Postgres via `DATABASE_URL`) to match.
 2. **Policies** — row-level access rules evaluated as string expressions. Live alongside entities.
@@ -532,7 +532,7 @@ To show signed-in nav on a cacheable page, read `props.session.exists` (bucketed
 ## Running the app
 
 ```bash
-# ONE process — serves the SSR frontend, the API, and the WebSocket on one port.
+# One port — a Rust server serves the SSR frontend, the API, and the WebSocket (it runs your TypeScript on Bun).
 pylon dev
 ```
 
@@ -601,7 +601,7 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 
 ### Multi-machine (horizontal scaling)
 
-One machine is the recommended shape (a single process serves thousands of rps with a CDN in front) — scale up first. When you do need more than one machine (pylon ≥ 0.3.315):
+One machine is the recommended shape (a single machine serves thousands of rps with a CDN in front) — scale up first. When you do need more than one machine (pylon ≥ 0.3.315):
 
 ```bash
 DATABASE_URL=postgres://…          # shared store: entities, sessions, sync log

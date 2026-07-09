@@ -64,7 +64,7 @@ npx skills add pylonsync/pylon
 | Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
 | Native SSR | ✅ file-based React, one port | ❌ | ❌ | ❌ |
 | Built on | Rust + SQLite | Rust + custom db | PG + Go + Deno | proprietary |
-| Single process | ✅ | ❌ | ❌ | n/a |
+| One service, one port | ✅ | ❌ | ❌ | n/a |
 
 ## Quickstart
 

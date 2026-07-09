@@ -5,7 +5,7 @@ description: "Pylon is an agent-native full-stack framework. One binary, typed e
 
 ## What is Pylon?
 
-Pylon is an agent-native full-stack framework: point a coding agent at it and it ships a real app — typed schema, row-level policies, server functions, live queries, auth, and native React SSR, all from a single binary you run and deploy with one command each. You (or your agent) write the schema, policies, and functions in TypeScript; Pylon gives you a typed client and runs the whole backend, with realtime sync built in — apps that need shared, synchronized state (dashboards, CRMs, collaborative tools, chat) work without a separate realtime layer.
+Pylon is an agent-native full-stack framework: point a coding agent at it and it ships a real app — typed schema, row-level policies, server functions, live queries, auth, and native React SSR, all from a single Rust server — it runs your TypeScript and SSR on Bun — that you run and deploy with one command each. You (or your agent) write the schema, policies, and functions in TypeScript; Pylon gives you a typed client and runs the whole backend, with realtime sync built in — apps that need shared, synchronized state (dashboards, CRMs, collaborative tools, chat) work without a separate realtime layer.
 
 It's production infrastructure, not a sandbox — SQLite or Postgres, real auth, one-command deploy — so what you build is something you'd run a business on, not a throwaway capsule. No glue between your database, your API, and your WebSocket server. Everything is one system.
 
@@ -32,7 +32,7 @@ It's production infrastructure, not a sandbox — SQLite or Postgres, real auth,
 - **Live queries** — `db.useQuery(...)` subscribes to results and updates on write.
 - **Auth** — email magic links, OAuth, guest sessions. No third-party SDK.
 - **SSR** — file-based React routes with [`<Link>`](/ssr/link), [`<Image>`](/ssr/image), and built-in [Tailwind](/ssr/styling) — no Next.js required.
-- **One binary** — the runtime is a single Rust executable. Deploy anywhere.
+- **One server** — a Rust binary that runs your TypeScript and SSR on Bun, on one port. Deploy anywhere.
 
 ## Why another backend framework?
 
@@ -51,12 +51,7 @@ Pylon collapses the stack. Writes go through the same runtime that serves reads 
 ## Storage
 
 Pylon runs on **SQLite** or **Postgres**. SQLite is the default — a single file, zero setup, great for local dev and many production workloads (single-node, up to tens of GB). Switch to Postgres for horizontal scale, existing Postgres infra, or shared-nothing deployments. The schema, policies, functions, and client APIs are identical across both — set `DATABASE_URL=postgres://...` and Pylon uses the Postgres adapter.
-
-## What it's not
-
-- *Only* a BaaS you rent. Pylon is self-hostable infrastructure first. A managed cloud is also available at [www.pylonsync.com/dashboard](https://www.pylonsync.com/dashboard) if you'd rather not run it yourself.
-- An analytics engine. Heavy OLAP / warehouse workloads belong in ClickHouse, DuckDB, or BigQuery — Pylon is for transactional, realtime application state.
-
+ 
 ## How to read these docs
 
 Start with the [Quickstart](/quickstart) to feel the shape of a Pylon app in five minutes. Then [Core concepts](/concepts/entities) walks through entities, policies, functions, and live queries in depth. [SSR](/ssr/overview) covers file-based routing, `<Link>`, `<Image>`, and the rest of the full-stack story. [Deploy](/operations/deploy) covers self-hosting, and [Deploying to Vercel](/operations/vercel) is the canonical Next.js + Pylon Cloud production stack. Browse [examples on GitHub](https://github.com/pylonsync/pylon/tree/main/examples) for end-to-end apps (CRM, ERP, chat, 3D world, SSR demos, ten+ total) you can clone.

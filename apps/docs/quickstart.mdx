@@ -6,17 +6,19 @@ description: "See Pylon running in five minutes — schema, policy, server, live
 This walkthrough gets a Pylon server running with a schema, one policy, and one server function. You'll then hit the API with `curl` to see it work end-to-end. Once you want a realtime UI on top, point the [React SDK](/clients/react), [Swift SDK](/clients/swift), or [React Native SDK](/clients/react-native) at the running server, or clone one of the [example apps](https://github.com/pylonsync/pylon/tree/main/examples).
 
 <Tip>
-  **Just want a working app?** Skip the manual setup with one command:
+  **Just want a working app?** One command, no separate install:
 
   ```bash
   npm create @pylonsync/pylon@latest my-app -- --template todo
   cd my-app && npm run dev
   ```
 
-  That scaffolds a single full-stack Pylon app — SSR React 19 frontend + API served from one port by `pylon dev`, no Next.js, no monorepo. Templates: `default` (SaaS), `todo`, `chat`, `shop`, `consumer`, `waitlist`, `ai-chat`, and more — run `npm create @pylonsync/pylon@latest` with no args to pick one. Every app ships with a test harness (`pylon test`) wired up.
+  That scaffolds a single full-stack Pylon app — SSR React 19 frontend + API served from one port, no Next.js, no monorepo. The Pylon CLI ships as a dependency, so `npm run dev` runs it — you don't need to install anything globally. Templates: `default` (SaaS), `todo`, `chat`, `shop`, `consumer`, `waitlist`, `ai-chat`, and more — run `npm create @pylonsync/pylon@latest` with no args to pick one. Every app ships with a test harness (`pylon test`) wired up.
 
-  Ready to ship? `pylon deploy` (see [Deploy](/operations/deploy)).
+  Ready to ship? `npm run deploy` (or `pylon deploy` — see [Deploy](/operations/deploy)).
 </Tip>
+
+The rest of this page builds a minimal backend by hand so you can see each piece. It uses a global `pylon` binary; if you'd rather start from the scaffold above, skip to [Concepts](/concepts/entities).
 
 ## 1. Install the CLI
 
@@ -24,9 +26,9 @@ This walkthrough gets a Pylon server running with a schema, one policy, and one 
 curl -fsSL https://www.pylonsync.com/install.sh | bash
 ```
 
-Downloads a prebuilt `pylon` binary to `~/.local/bin`. Linux and macOS, x86_64 and arm64. No Rust toolchain required.
+Downloads a prebuilt `pylon` binary to `~/.local/bin`. Linux and macOS, x86_64 and arm64. No Rust toolchain required. (The `npm create` scaffold above doesn't need this — it bundles the CLI. Install globally when you want `pylon` on your PATH for the from-scratch flow below.)
 
-Bun ≥ 1.0 is needed at runtime to execute server functions.
+Bun ≥ 1.0 is needed at runtime to execute server functions and render SSR — Pylon runs your TypeScript on it.
 
 Verify:
 
@@ -47,7 +49,7 @@ docker pull ghcr.io/pylonsync/pylon:latest
 ## 2. Scaffold a new app
 
 ```bash
-pylon init notes --frontend=none
+pylon init notes
 cd notes
 ```
 
@@ -66,7 +68,7 @@ notes/
   README.md
 ```
 
-`--frontend=none` skips the optional `apps/web/` scaffold. Drop the flag to also generate a Next.js, React, or TanStack frontend (or pick interactively when stdin is a TTY).
+`pylon init` scaffolds the backend only — no frontend framework, because Pylon renders React on the server natively. To also generate a separate frontend, pass `--frontend react` (Vite), `--frontend tanstack`, or `--frontend nextjs`, or pick interactively when stdin is a TTY. For a full-stack app with SSR pages, use `npm create @pylonsync/pylon` (above) instead.
 
 You'll add a `functions/` directory under `apps/api/` by hand in step 4.
 
@@ -81,7 +83,7 @@ const Note = entity(
   "Note",
   {
     title: field.string(),
-    body: field.richtext(),
+    body: field.string(),
     authorId: field.string(),
     updatedAt: field.datetime(),
   },
@@ -122,9 +124,11 @@ Create `apps/api/functions/createNote.ts`:
 import { mutation, v } from "@pylonsync/functions";
 
 export default mutation({
-  // `auth: "user"` is the default — the framework rejects
-  // anonymous callers with 401 before the handler runs. So
-  // `ctx.auth.userId` is `string`, not nullable, here.
+  // `auth: "guest"` lets the guest session from step 6 call this. The
+  // default is `auth: "user"`, which rejects guest sessions — switch to it
+  // once you have real accounts. Either way `ctx.auth.userId` is a stable
+  // string, so it's safe to use as the author id.
+  auth: "guest",
   args: {
     title: v.string(),
     body: v.string(),
@@ -175,7 +179,7 @@ curl -X POST http://localhost:4321/api/auth/guest
 # → { "token": "eyJ…", "user_id": "usr_01H…" }
 ```
 
-Call the mutation (replace `TOKEN` + `USER_ID` with the values from above):
+Call the mutation (replace `TOKEN` with the value from above):
 
 ```bash
 curl -X POST http://localhost:4321/api/fn/createNote \

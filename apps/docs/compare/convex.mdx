@@ -9,7 +9,7 @@ description: "Pylon and Convex are the two TypeScript-first reactive backends. H
 ## TL;DR
 
 - **Choose Convex** if you want a polished pure-TS experience, you'll stay on their cloud (or accept their FSL-licensed self-host), and you don't need game shards or facets.
-- **Choose Pylon** if you want a single-binary self-host, FOSS license, native faceted search, or game shards alongside your app data.
+- **Choose Pylon** if you want a single-binary self-host, FOSS license, native faceted search, or in-process functions that share a transaction with your writes.
 
 ## Same shape
 
@@ -87,7 +87,7 @@ Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/tree
 
 ## Where Pylon is better
 
-- **Single binary** — `scp` to a VPS, run `systemctl start pylon`. Done.
+- **Small footprint** — install the pylon binary + Bun on a VPS, or `pylon deploy`. No Docker daemon.
 - **Faceted search** — first-class with live counts. Convex requires custom queries.
 - **Game shards** — `Shard<S: SimState>` for tick-based authority.
 - **Open license** — MIT/Apache, not FSL.
