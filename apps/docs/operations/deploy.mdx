@@ -40,11 +40,20 @@ PYLON_EMAIL_FROM=noreply@yourdomain.com       # verified sender
 PYLON_EMAIL_ENDPOINT=...                      # only when PYLON_EMAIL_PROVIDER=webhook
 
 # File storage (defaults to local disk)
-PYLON_FILES_PROVIDER=stack0                   # or local (default)
+PYLON_FILES_PROVIDER=stack0                   # local (default) | stack0 | s3
 PYLON_STACK0_API_KEY=sk_live_...              # required when provider=stack0
 PYLON_STACK0_PROJECT_SLUG=your-project        # required when provider=stack0
 PYLON_STACK0_FOLDER=uploads                   # optional folder/prefix
 PYLON_FILES_DIR=/var/lib/pylon/uploads        # local provider only
+# S3-compatible (AWS S3, R2, Tigris, MinIO). Boot-validated; never silently
+# falls back to local disk. Credentials from env only (no IAM-role discovery).
+PYLON_S3_BUCKET=my-bucket                     # required when provider=s3
+PYLON_S3_ACCESS_KEY=AKIA...                   # required when provider=s3
+PYLON_S3_SECRET_KEY=...                       # required when provider=s3
+PYLON_S3_REGION=us-east-1                     # optional, default us-east-1
+PYLON_S3_ENDPOINT=https://...                 # optional; R2/Tigris/MinIO (path-style)
+PYLON_S3_PUBLIC_URL=https://cdn...            # optional; public bucket/CDN base
+PYLON_S3_SESSION_TOKEN=...                    # optional; STS/temporary credentials
 PYLON_FILES_URL_PREFIX=/api/files             # local provider only
 
 # Cookie auth (browser apps)

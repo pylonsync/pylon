@@ -29,6 +29,11 @@ chrono = { workspace = true, optional = true }
 tracing = { workspace = true }
 roaring = { workspace = true }
 ureq = { workspace = true }
+# S3-compatible file storage: SigV4 request signing (HMAC-SHA256 + SHA256)
+# and CSPRNG object-key nonces. Same crates the auth crate already uses.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
 
 [features]
 default = []

@@ -184,30 +184,42 @@ impl std::error::Error for FileStorageError {}
 ///   `PYLON_FILES_URL_PREFIX` (default `/api/files`).
 /// - `stack0` — `Stack0FileStorage` from `PYLON_STACK0_API_KEY`
 ///   (+ optional `PYLON_STACK0_FOLDER`, `PYLON_STACK0_BASE_URL`).
-///   If the API key is missing, logs a warning and falls back to
-///   local storage rather than failing uploads outright.
+/// - `s3` — [`crate::s3::S3FileStorage`] against any S3-compatible bucket
+///   (AWS S3, Cloudflare R2, Tigris, MinIO, GCS interop) from
+///   `PYLON_S3_BUCKET` / `PYLON_S3_ACCESS_KEY` / `PYLON_S3_SECRET_KEY`
+///   (+ optional `PYLON_S3_REGION`, `PYLON_S3_ENDPOINT`,
+///   `PYLON_S3_PUBLIC_URL`, `PYLON_S3_FOLDER`).
+///
+/// For `stack0`/`s3`, a missing companion var logs a warning and falls back
+/// to local storage rather than failing uploads outright — but the
+/// user-visible error already fired at boot via [`validate_provider_env`],
+/// so this branch is only reachable if the env was mutated mid-run.
 ///
 /// Real-world bug this exists to prevent: pylon ≤0.3.86 had the
 /// runtime upload handler hardcoded to `LocalFileStorage::new(...)`,
 /// so every upload landed on local disk regardless of provider env.
 /// Apps set `PYLON_FILES_PROVIDER=stack0` thinking files would go to
-/// the CDN, and got silent local storage instead.
+/// the CDN, and got silent local storage instead. A misconfigured `s3`
+/// provider is worse — files silently land on a stateless container's
+/// disk and vanish on the next deploy — which is why `s3` is validated at
+/// boot too.
 pub fn select_from_env() -> Box<dyn FileStorage> {
     let provider = std::env::var("PYLON_FILES_PROVIDER").unwrap_or_else(|_| "local".into());
     match provider.as_str() {
         "stack0" => match Stack0FileStorage::from_env() {
             Some(s) => Box::new(s),
             None => {
-                // Post-boot guarantee: server startup calls
-                // `validate_provider_env()` and refuses to start when
-                // stack0 vars are missing, so reaching this branch
-                // post-startup means the env was mutated mid-run
-                // (rare; container restart usually re-reads). Keep
-                // the warn + fallback so the server doesn't crash on
-                // every upload after that, but the user-visible
-                // failure already fired at boot.
                 tracing::warn!(
                     "PYLON_FILES_PROVIDER=stack0 but PYLON_STACK0_API_KEY / PYLON_STACK0_PROJECT_SLUG is not set; falling back to local storage"
+                );
+                Box::new(local_from_env())
+            }
+        },
+        "s3" => match crate::s3::S3FileStorage::from_env() {
+            Some(s) => Box::new(s),
+            None => {
+                tracing::warn!(
+                    "PYLON_FILES_PROVIDER=s3 but PYLON_S3_BUCKET / PYLON_S3_ACCESS_KEY / PYLON_S3_SECRET_KEY is not set; falling back to local storage"
                 );
                 Box::new(local_from_env())
             }
@@ -232,20 +244,31 @@ pub fn select_from_env() -> Box<dyn FileStorage> {
 /// at boot, before any user ever tries to upload.
 pub fn validate_provider_env() -> Result<(), String> {
     let provider = std::env::var("PYLON_FILES_PROVIDER").unwrap_or_else(|_| "local".into());
-    if provider == "stack0" {
-        let missing: Vec<&str> = ["PYLON_STACK0_API_KEY", "PYLON_STACK0_PROJECT_SLUG"]
-            .into_iter()
-            .filter(|k| std::env::var(k).map(|v| v.is_empty()).unwrap_or(true))
-            .collect();
-        if !missing.is_empty() {
-            return Err(format!(
-                "PYLON_FILES_PROVIDER=stack0 requires {} to be set. \
-                 Configure {} alongside PYLON_FILES_PROVIDER, or remove \
-                 PYLON_FILES_PROVIDER (defaults to local disk).",
-                missing.join(" + "),
-                missing.join(" + "),
-            ));
-        }
+    let required: &[&str] = match provider.as_str() {
+        "stack0" => &["PYLON_STACK0_API_KEY", "PYLON_STACK0_PROJECT_SLUG"],
+        // S3 needs the bucket + both credentials. Region defaults to
+        // us-east-1 and endpoint/public-url/folder are optional, so they're
+        // not required here.
+        "s3" => &[
+            "PYLON_S3_BUCKET",
+            "PYLON_S3_ACCESS_KEY",
+            "PYLON_S3_SECRET_KEY",
+        ],
+        _ => &[],
+    };
+    let missing: Vec<&str> = required
+        .iter()
+        .copied()
+        .filter(|k| std::env::var(k).map(|v| v.is_empty()).unwrap_or(true))
+        .collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "PYLON_FILES_PROVIDER={provider} requires {} to be set. \
+             Configure {} alongside PYLON_FILES_PROVIDER, or remove \
+             PYLON_FILES_PROVIDER (defaults to local disk).",
+            missing.join(" + "),
+            missing.join(" + "),
+        ));
     }
     Ok(())
 }
@@ -470,37 +493,10 @@ impl FileStorage for LocalFileStorage {
     }
 }
 
-// ---------------------------------------------------------------------------
-// S3-compatible storage (stub — needs an HTTP client at runtime)
-// ---------------------------------------------------------------------------
-
-/// Configuration for S3-compatible storage (S3, R2, GCS, MinIO).
-#[derive(Debug, Clone)]
-pub struct S3Config {
-    pub bucket: String,
-    pub region: String,
-    pub endpoint: Option<String>,
-    pub access_key: String,
-    pub secret_key: String,
-    pub public_url_prefix: Option<String>,
-}
-
-impl S3Config {
-    /// Create from environment variables.
-    ///
-    /// Reads: PYLON_S3_BUCKET, PYLON_S3_REGION, PYLON_S3_ENDPOINT,
-    /// PYLON_S3_ACCESS_KEY, PYLON_S3_SECRET_KEY, PYLON_S3_PUBLIC_URL
-    pub fn from_env() -> Option<Self> {
-        Some(Self {
-            bucket: std::env::var("PYLON_S3_BUCKET").ok()?,
-            region: std::env::var("PYLON_S3_REGION").unwrap_or_else(|_| "us-east-1".into()),
-            endpoint: std::env::var("PYLON_S3_ENDPOINT").ok(),
-            access_key: std::env::var("PYLON_S3_ACCESS_KEY").ok()?,
-            secret_key: std::env::var("PYLON_S3_SECRET_KEY").ok()?,
-            public_url_prefix: std::env::var("PYLON_S3_PUBLIC_URL").ok(),
-        })
-    }
-}
+// S3-compatible storage (AWS S3, R2, Tigris, MinIO, GCS interop) lives in
+// the sibling `crate::s3` module: a full SigV4 presigned-URL implementation,
+// not a stub. `S3Config` + `S3FileStorage` are defined there and wired into
+// `select_from_env` / `validate_provider_env` below.
 
 // ---------------------------------------------------------------------------
 // Stack0 CDN/storage implementation
@@ -958,16 +954,27 @@ mod tests {
 
     // ---- select_from_env: regression coverage for the v0.3.86 bug ----
 
-    /// Helper to set/clear several env vars atomically for the duration
-    /// of a closure. Reverts on drop. Std `env::set_var` is process-wide
-    /// so these tests can't actually run in parallel safely; cargo test
-    /// runs them serially within the binary anyway, but we keep the
-    /// helper terse so the intent is obvious.
+    /// Process-wide lock serialising every env-mutating test. `std::env`
+    /// is global, so without this the provider tests race each other when
+    /// cargo runs the suite multi-threaded (one test's `PYLON_FILES_PROVIDER`
+    /// bleeds into another's read). `EnvGuard` holds this for its lifetime.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Helper to set/clear several env vars for the duration of a test.
+    /// Acquires [`env_lock`] on construction so env-mutating tests can't
+    /// interleave, and reverts every touched var on drop.
     struct EnvGuard {
         saved: Vec<(String, Option<String>)>,
+        // Held for the guard's lifetime; recovers from a poisoned lock so a
+        // panicking test doesn't wedge the rest of the suite.
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
     impl EnvGuard {
         fn new(keys: &[&str]) -> Self {
+            let lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
             let saved = keys
                 .iter()
                 .map(|k| (k.to_string(), std::env::var(k).ok()))
@@ -975,7 +982,7 @@ mod tests {
             for k in keys {
                 std::env::remove_var(k);
             }
-            Self { saved }
+            Self { saved, _lock: lock }
         }
         fn set(&self, key: &str, value: &str) {
             std::env::set_var(key, value);

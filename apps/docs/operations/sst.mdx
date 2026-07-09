@@ -88,9 +88,27 @@ export default $config({
     });
 
     // ── File storage ─────────────────────────────────────────────
-    // `link` grants the service IAM permissions on this bucket
-    // automatically — no manual policy attachment needed.
+    // Pylon's S3 backend signs requests with static credentials read
+    // from env — it does NOT auto-discover the ECS task role — so
+    // provision a bucket-scoped IAM user and hand the service its key.
     const uploads = new sst.aws.Bucket("PylonUploads");
+    const s3User = new aws.iam.User("PylonS3User");
+    new aws.iam.UserPolicy("PylonS3UserPolicy", {
+      user: s3User.name,
+      policy: uploads.arn.apply((arn) =>
+        JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+              Resource: `${arn}/*`,
+            },
+          ],
+        }),
+      ),
+    });
+    const s3Key = new aws.iam.AccessKey("PylonS3Key", { user: s3User.name });
 
     // ── Cluster + service ────────────────────────────────────────
     const cluster = new sst.aws.Cluster("PylonCluster", {
@@ -111,10 +129,12 @@ export default $config({
         DATABASE_URL: db.url,
         PYLON_PORT: "4321",
         PYLON_DEV_MODE: "false",
-        // File storage — read by the file_storage plugin in your manifest.
+        // File storage — pylon's built-in S3 backend (SigV4 presigned URLs).
         PYLON_FILES_PROVIDER: "s3",
         PYLON_S3_BUCKET: uploads.name,
         PYLON_S3_REGION: "us-east-1",
+        PYLON_S3_ACCESS_KEY: s3Key.id,
+        PYLON_S3_SECRET_KEY: s3Key.secret,
         // Auth (secrets)
         PYLON_ADMIN_TOKEN: adminToken.value,
         // Client-facing
@@ -150,22 +170,21 @@ export default $config({
 });
 ```
 
-<Warning>
-  **S3 file storage is not currently wired into the runtime.** File-storage
-  selection (`select_from_env` in `crates/storage/src/files.rs`) only recognizes
-  `PYLON_FILES_PROVIDER=stack0` and `local` — an `s3` value **silently falls back
-  to local disk**. On a stateless Fargate container that means uploads land on
-  ephemeral container disk and are lost on every redeploy or scale-in. There is
-  no `file_storage` manifest plugin; file storage is configured entirely through
-  `PYLON_FILES_PROVIDER` + the provider's env vars.
+<Note>
+  **Credentials are read from env only.** Pylon's S3 backend signs requests
+  with `PYLON_S3_ACCESS_KEY` / `PYLON_S3_SECRET_KEY` (plus an optional
+  `PYLON_S3_SESSION_TOKEN` for temporary/STS credentials). It does **not**
+  auto-discover the ECS task role from the container credentials endpoint or
+  EC2 IMDS, so `link: [uploads]` alone isn't enough — provision a
+  bucket-scoped IAM user's static key as shown above, or inject the task
+  role's temporary credentials (access key + secret + session token) into env
+  via your entrypoint.
 
-  Until S3 is wired, either use `PYLON_FILES_PROVIDER=stack0` (see
-  [Deploy → Required environment](/operations/deploy#required-environment)) for
-  externalized files, or use the single-replica **EFS + SQLite** shape below,
-  which keeps uploads on the mounted EFS volume. The `PYLON_S3_*` env vars and the
-  `S3Config` struct exist in the codebase but aren't reachable from the runtime's
-  storage selector yet.
-</Warning>
+  The server validates the S3 env at boot and **fails fast** if
+  `PYLON_FILES_PROVIDER=s3` but a required var is missing — it never silently
+  falls back to local disk (which on a stateless Fargate container would lose
+  uploads on every redeploy).
+</Note>
 
 ## Local development
 
