@@ -11,21 +11,22 @@ real-time sync, server functions, auth, file storage — but as a Rust server
 you self-host on a small VPS (SQLite or Postgres), not a stack of services.
 
 ```sh
-# Install the pylon binary
-curl -fsSL https://www.pylonsync.com/install.sh | bash
-
 # Scaffold a full-stack app — auth, a multi-tenant dashboard, and
-# server-rendered React, all on one port
+# server-rendered React, all on one port. No global install needed.
 npm create @pylonsync/pylon@latest my-app
 cd my-app
-
-# Dev server with live reload
-pylon dev
+npm run dev
 ```
 
-Open `http://localhost:4321`. Prefer just the backend? `pylon init my-app`
-scaffolds an API-only project (add a frontend with `--frontend
-react|tanstack|nextjs`), and `http://localhost:4321/studio` is the inspector.
+Open `http://localhost:4321`. The Pylon CLI ships as a dependency, so `npm run
+dev` runs it — you just need [Bun](https://bun.sh) ≥ 1.0 on your PATH (Pylon runs
+your TypeScript and SSR on it).
+
+Want `pylon` on your PATH (for `pylon init`, or `pylon deploy` from anywhere)?
+`curl -fsSL https://www.pylonsync.com/install.sh | bash`. Prefer a backend-only
+project? `pylon init my-app` scaffolds an API-only app (add a frontend with
+`--frontend react|tanstack|nextjs`); `http://localhost:4321/studio` is the
+inspector.
 
 ## Use with your coding agent
 
@@ -43,12 +44,13 @@ npx skills add pylonsync/pylon
 
 - **Declarative schema** in JSON or DSL → tables, types, OpenAPI, client types
 - **Real-time sync** — clients see updates as they happen (WebSocket + SSE)
-- **TypeScript functions** — `mutation`/`query`/`action` with typed `ctx.db`
-  - Handler IS the transaction (atomic by default)
+- **TypeScript functions** — `query`/`mutation`/`action` with a typed `ctx`
+  - The mutation handler IS the transaction (atomic by default)
   - Streaming responses for AI chat / live data
-- **Auth** — sessions, magic codes, OAuth (Google + GitHub), RBAC
+- **Auth** — sessions, passwords, magic codes, OAuth (25 providers), passkeys,
+  TOTP, RBAC, organizations
 - **SSR** — file-based React routes, `<Link>` with instant client nav, `<Image>`
-  with built-in Rust optimizer (mozjpeg + libwebp), Tailwind v4 first-class —
+  with built-in Rust optimizer (AVIF/WebP/JPEG), Tailwind v4 first-class —
   full-stack apps without Next.js. See [examples/ssr-hello](examples/ssr-hello/)
   and the [SSR docs](https://docs.pylonsync.com/ssr/overview).
 - **Background jobs** + cron scheduler
@@ -63,19 +65,23 @@ npx skills add pylonsync/pylon
 | Real-time sync | ✅ | ✅ reactive | ✅ Realtime | ✅ |
 | Server functions | ✅ TypeScript | ✅ TypeScript | ✅ Edge Functions (Deno) | ✅ Cloud Functions |
 | Native SSR | ✅ file-based React, one port | ❌ | ❌ | ❌ |
-| Built on | Rust + SQLite | Rust + custom db | PG + Go + Deno | proprietary |
+| Built on | Rust + Bun + SQLite | Rust + custom db | PG + Go + Deno | proprietary |
 | One service, one port | ✅ | ❌ | ❌ | n/a |
 
 ## Quickstart
 
-Install the binary (Bun ≥ 1.0 is also needed at runtime — Pylon runs your TypeScript and SSR on it):
+`npm create @pylonsync/pylon@latest` (top of the README) is the fastest start — a
+full-stack app, no global install. To build a **backend by hand**, install the
+`pylon` binary (Bun ≥ 1.0 is also needed at runtime — Pylon runs your TypeScript
+and SSR on it):
 
 ```sh
 curl -fsSL https://www.pylonsync.com/install.sh | bash
-# or: cargo install pylon-cli   •   docker pull ghcr.io/pylonsync/pylon:latest
+# or: cargo install --git https://github.com/pylonsync/pylon pylon-cli
+# or: docker pull ghcr.io/pylonsync/pylon:latest
 ```
 
-The fastest start is `npm create @pylonsync/pylon@latest my-app` (above) — a full-stack app you run with `npm run dev`, no global install needed. To build a backend by hand, one `app.ts` is the whole thing — schema + policies:
+One `app.ts` is the whole backend — schema + policies:
 
 ```ts
 import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
@@ -159,7 +165,7 @@ pylon/
 │   ├── policy/          Access control rules engine
 │   ├── sync/            Change log + push/pull
 │   ├── storage/         SQLite + Postgres backends, file storage
-│   ├── plugin/          Built-in plugins (cache, webhooks, soft delete, ...)
+│   ├── plugin/          Built-in plugins (cache, rate limit, CSRF, tenant scoping, ...)
 │   ├── migrate/         Schema migration diff engine
 │   ├── cli/             The `pylon` binary
 │   └── ...
