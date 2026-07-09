@@ -44,6 +44,12 @@ export interface UseQueryOneReturn<T> {
 }
 
 // ---------------------------------------------------------------------------
+// A single shared empty array reused as every useQuery's SSR snapshot. A fresh
+// `[]` per call makes React's useSyncExternalStore warn "The result of
+// getServerSnapshot should be cached to avoid an infinite loop", so hand it one
+// stable reference.
+const EMPTY_SNAPSHOT: readonly unknown[] = [];
+
 // useQuery — high-level hook returning {data, loading, error}
 // ---------------------------------------------------------------------------
 
@@ -127,7 +133,7 @@ export function useQuery<T = Row>(
     return snapshotCache.current.rows;
   }, [sync, entity, optionsKey, options]);
 
-  const getServerSnapshot = useCallback((): T[] => [] as T[], []);
+  const getServerSnapshot = useCallback((): T[] => EMPTY_SNAPSHOT as T[], []);
 
   const data = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 
