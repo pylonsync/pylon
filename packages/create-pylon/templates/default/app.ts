@@ -107,6 +107,10 @@ const Project = entity(
   {
     orgId: field.id("Org"),
     name: field.string(),
+    description: field.string().optional(),
+    // "active" | "archived" — archived projects stay in the workspace but drop
+    // out of the default view. Toggled from the Projects tab.
+    status: field.string().default("active"),
     createdAt: field.datetime().defaultNow(),
   },
   { indexes: [{ name: "by_org", fields: ["orgId"], unique: false }] },

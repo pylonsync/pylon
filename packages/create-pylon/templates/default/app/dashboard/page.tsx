@@ -58,6 +58,8 @@ export default function DashboardPage({
     >
       <Overview
         tenantId={auth.tenant_id}
+        orgName={org?.name}
+        userEmail={me?.email}
         projects={projects}
         memberCount={memberCount}
         plan={plan}
