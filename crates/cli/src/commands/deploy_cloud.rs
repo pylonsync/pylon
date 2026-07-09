@@ -170,25 +170,54 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         tarball_base64: STANDARD.encode(&tarball),
         app_subdir: workspace.as_ref().map(|w| w.app_subdir.clone()),
     };
-    let resp: UploadResponse = match post_json(&creds, "/api/fn/deployProjectFromCliUpload", &body)
-    {
-        Ok(r) => r,
-        Err(e) => {
-            output::print_error(&format!("Cloud deploy failed: {e}"));
-            if e.contains("PAYLOAD_TOO_LARGE") || e.contains("413") {
-                eprintln!(
-                    "  The upload ({:.1} MB source, ~{:.1} MB on the wire as base64 JSON) \
-                     exceeds the server's request cap.",
-                    tarball.len() as f64 / 1_048_576.0,
-                    (tarball.len() as f64 * 4.0 / 3.0) / 1_048_576.0,
-                );
-                eprintln!(
-                    "  On Pylon Cloud: deploy via the connected git repo instead \
-                     (Settings → Git), or trim large static assets out of the upload."
-                );
-                eprintln!("  Self-hosting the control plane: raise PYLON_HTTP_BODY_MAX_BYTES.");
+    // The cloud's ephemeral Fly builder occasionally fails to start with a
+    // transient BUILD_START_FAILED ("an unexpected error"); a fresh attempt
+    // almost always succeeds. Auto-retry transient failures so a flaky builder
+    // doesn't surface as a deploy failure. Permanent errors (4xx like
+    // PAYLOAD_TOO_LARGE, a missing project) are not retried.
+    let resp: UploadResponse = {
+        let mut attempt: u32 = 0;
+        loop {
+            attempt += 1;
+            match post_json(&creds, "/api/fn/deployProjectFromCliUpload", &body) {
+                Ok(r) => break r,
+                Err(e) => {
+                    let transient = e.contains("BUILD_START_FAILED")
+                        || e.contains("502")
+                        || e.contains("503")
+                        || e.contains("504")
+                        || e.contains("timed out")
+                        || e.contains("connection");
+                    if transient && attempt < 3 {
+                        let wait = std::time::Duration::from_millis(1500 * attempt as u64);
+                        if !json_mode {
+                            println!(
+                                "  transient build-start error (attempt {attempt}/3) — retrying in {}s…",
+                                wait.as_secs()
+                            );
+                        }
+                        std::thread::sleep(wait);
+                        continue;
+                    }
+                    output::print_error(&format!("Cloud deploy failed: {e}"));
+                    if e.contains("PAYLOAD_TOO_LARGE") || e.contains("413") {
+                        eprintln!(
+                            "  The upload ({:.1} MB source, ~{:.1} MB on the wire as base64 JSON) \
+                             exceeds the server's request cap.",
+                            tarball.len() as f64 / 1_048_576.0,
+                            (tarball.len() as f64 * 4.0 / 3.0) / 1_048_576.0,
+                        );
+                        eprintln!(
+                            "  On Pylon Cloud: deploy via the connected git repo instead \
+                             (Settings → Git), or trim large static assets out of the upload."
+                        );
+                        eprintln!(
+                            "  Self-hosting the control plane: raise PYLON_HTTP_BODY_MAX_BYTES."
+                        );
+                    }
+                    return ExitCode::Error;
+                }
             }
-            return ExitCode::Error;
         }
     };
 
