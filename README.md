@@ -7,8 +7,8 @@ A self-hostable, single-binary backend for web, mobile, and real-time apps.
 [![skills.sh](https://skills.sh/b/pylonsync/pylon)](https://skills.sh/pylonsync/pylon)
 
 pylon gives you what Convex / Firebase / Supabase do — declarative schema,
-real-time sync, server functions, auth, file storage — but as a single Rust
-binary you can `scp` to a VPS or run with SQLite or Postgres.
+real-time sync, server functions, auth, file storage — but as a Rust server
+you self-host on a small VPS (SQLite or Postgres), not a stack of services.
 
 ```sh
 # Install the pylon binary
