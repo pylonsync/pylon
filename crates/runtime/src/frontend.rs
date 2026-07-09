@@ -1544,6 +1544,24 @@ fn serve_via_ssr_rpc(
         Some(f) => f.clone(),
         None => return Err(request),
     };
+    // Build the client bundle BEFORE dispatching the render. The Bun renderer
+    // reads the bundle manifest off disk for head injection — a render racing
+    // the boot-time warm (fire-and-forget thread in server.rs) finds no
+    // manifest and emits HTML with NO stylesheet <link> and no hydration
+    // entries. Served once, that self-heals; CACHED (revalidate /
+    // auth-bucketed), it froze an unstyled shell for the full TTL — the
+    // 2026-07-09 pylonsync.com launch incident, where a deploy under live
+    // traffic poisoned every marketing page for an hour.
+    // `warm_client_bundle` holds the outdir lock across the build, so
+    // concurrent early requests serialize behind ONE build (~0.4-1.5s) and
+    // all render styled. Already-warm boots pay one uncontended lock. On
+    // build failure we log and fall through to the unstyled render — which
+    // `maybe_cache_render` now refuses to store.
+    if let Err(e) = warm_client_bundle(&fn_ops, &derive_app_dir(&cfg.ssr_routes)) {
+        tracing::warn!(
+            "SSR render proceeding without client bundle (build failed): {e}"
+        );
+    }
     let component = match matched.route.component.as_deref() {
         Some(c) => c.to_string(),
         None => {
@@ -2132,6 +2150,24 @@ fn maybe_cache_render(
         Some((s, CacheWriteLane::Anon)) => (s, anon_vary),
         None => return,
     };
+    // Never store a render made without a built client bundle: its HTML lacks
+    // the stylesheet <link> + hydration entries (the bundler manifest wasn't
+    // on disk when the Bun renderer read it), and caching one freezes an
+    // unstyled shell for the full revalidate window (the 2026-07-09
+    // pylonsync.com launch incident). serve_via_ssr_rpc builds the bundle
+    // before dispatch, so this only fires on its build-failed fallthrough —
+    // which must stay servable, but never cacheable.
+    if cached_bundle_outdir()
+        .lock()
+        .map(|c| c.is_none())
+        .unwrap_or(true)
+    {
+        tracing::debug!(
+            route = %route_path,
+            "SSR cache write skipped: client bundle not built"
+        );
+        return;
+    }
     // Wait for the render thread, then confirm it didn't error AFTER
     // response_start — a partial/aborted body must never be cached. respond()
     // already drained to EOF, so the join returns immediately.
