@@ -1558,9 +1558,7 @@ fn serve_via_ssr_rpc(
     // build failure we log and fall through to the unstyled render — which
     // `maybe_cache_render` now refuses to store.
     if let Err(e) = warm_client_bundle(&fn_ops, &derive_app_dir(&cfg.ssr_routes)) {
-        tracing::warn!(
-            "SSR render proceeding without client bundle (build failed): {e}"
-        );
+        tracing::warn!("SSR render proceeding without client bundle (build failed): {e}");
     }
     let component = match matched.route.component.as_deref() {
         Some(c) => c.to_string(),
