@@ -288,7 +288,18 @@ fn is_spa_eligible(url: &str) -> bool {
         || path.starts_with("/metrics/")
         || path == "/health"
         || path.starts_with("/health/")
-        || path.starts_with("/admin/")
+        // The framework's admin surface is these specific token-gated
+        // endpoints (see server.rs), NOT the whole /admin/* namespace —
+        // apps legitimately serve SSR pages like /admin/orgs. A blanket
+        // starts_with("/admin/") 404'd every app-defined admin page.
+        || path == "/admin/entities"
+        || path.starts_with("/admin/entities/")
+        || path.starts_with("/admin/fn/")
+        || path == "/admin/jobs"
+        || path.starts_with("/admin/jobs/")
+        || path.starts_with("/admin/logs/")
+        || path == "/admin/workflows"
+        || path.starts_with("/admin/workflows/")
         || path.starts_with("/.well-known/"))
 }
 
@@ -3814,6 +3825,11 @@ mod tests {
         assert!(!is_spa_eligible("/health"));
         assert!(!is_spa_eligible("/health/deep"));
         assert!(!is_spa_eligible("/admin/logs/tail"));
+        assert!(!is_spa_eligible("/admin/entities"));
+        assert!(!is_spa_eligible("/admin/entities/User"));
+        assert!(!is_spa_eligible("/admin/fn/traces"));
+        assert!(!is_spa_eligible("/admin/jobs"));
+        assert!(!is_spa_eligible("/admin/workflows"));
         assert!(!is_spa_eligible("/.well-known/acme-challenge/x"));
     }
 
@@ -3824,6 +3840,11 @@ mod tests {
         assert!(is_spa_eligible("/channels/general"));
         assert!(is_spa_eligible("/assets/index-abc123.js"));
         assert!(is_spa_eligible("/favicon.ico"));
+        // App-defined admin pages live under /admin/* alongside the
+        // framework's token-gated endpoints — only the latter are reserved.
+        assert!(is_spa_eligible("/admin/orgs"));
+        assert!(is_spa_eligible("/admin/fly-costs"));
+        assert!(is_spa_eligible("/admin"));
     }
 
     #[test]
