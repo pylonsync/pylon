@@ -483,6 +483,10 @@ function preloadChunks(routeInfo) {
   const prefix = routeInfo.public_prefix || "/_pylon/build/";
   const all = [routeInfo.file, ...(routeInfo.imports || [])];
   for (const c of all) {
+    // prefetch() passes file: "" (HTML-only prefetch has no route entry);
+    // an empty name would modulepreload the bare prefix ("/_pylon/build/")
+    // and the host answers that with a 400 on every page load.
+    if (!c) continue;
     if (prefetchedChunks.has(c)) continue;
     prefetchedChunks.add(c);
     const link = document.createElement("link");
