@@ -445,9 +445,10 @@ function IconBtn({
   );
 }
 
-// One project card. Reads/writes live via the reactive `db` — rename, archive,
-// and delete are optimistic and sync across tabs (all gated by the tenant
-// policy). Editing swaps the card for an inline name + description form.
+// One project card. Archive + delete are optimistic client `db` writes (gated
+// by the tenant policy) that sync across tabs; editing details saves through the
+// updateProject server function. Editing swaps the card for an inline name +
+// description form.
 function ProjectCard({ p }: { p: Project }) {
   const archived = (p.status ?? "active") === "archived";
   const [editing, setEditing] = useState(false);
@@ -459,7 +460,12 @@ function ProjectCard({ p }: { p: Project }) {
     const n = name.trim();
     if (!n) return;
     setEditing(false);
-    await db.update("Project", p.id, {
+    // Saving details goes through the updateProject server function (server-side
+    // validation + a workspace-membership re-check) rather than a bare
+    // db.update — see functions/updateProject.ts. The reactive `db` still
+    // re-renders this card the moment the write lands.
+    await callFn("updateProject", {
+      projectId: p.id,
       name: n,
       description: desc.trim() || undefined,
     });
