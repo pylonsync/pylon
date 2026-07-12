@@ -17,6 +17,7 @@ import { describe, expect, test } from "bun:test";
 import React, { Suspense, use } from "react";
 import { renderToReadableStream } from "react-dom/server.browser";
 import {
+  asRouteControl,
   buildHydrationTail,
   computeBucketVerdict,
   computeCacheVerdict,
@@ -25,6 +26,7 @@ import {
   describeCacheVerdict,
   diffCommittedResponse,
   isDevMode,
+  PylonRouteControl,
 } from "./ssr-runtime";
 
 // ---------------------------------------------------------------------------
@@ -402,6 +404,106 @@ describe("react streaming mechanism", () => {
     expect(rest).toContain("<li>a</li>");
     expect(rest).toContain("<li>b</li>");
     expect(/\$RC|completeBoundary|<template/.test(rest)).toBe(true); // reveal
+  });
+});
+
+// ---------------------------------------------------------------------------
+// onError gating: a redirect()/notFound() is only "ignored" once the HTTP head
+// is committed. The runtime tracks a `headCommitted` flag and only logs the
+// scary "[ssr] … was ignored — head already sent" warning when it's true.
+// Before that (every BUFFERED render, and a streaming render pre-commit) the
+// control signal rejects the render and the outer catch turns it into the real
+// 3xx/404 — so warning there would fire on every CORRECT synchronous-shell
+// auth-guard redirect. These tests lock the React behavior that makes the gate
+// correct, using the real PylonRouteControl + asRouteControl classifier.
+// ---------------------------------------------------------------------------
+
+function makeRedirect(url: string): PylonRouteControl {
+  const e = new PylonRouteControl("redirect");
+  e.url = url;
+  e.redirectStatus = 307;
+  return e;
+}
+
+describe("SSR onError gating (redirect only 'ignored' after head commit)", () => {
+  test("BUFFERED shell redirect: render REJECTS (→ outer catch emits 307); no warning fires pre-commit", async () => {
+    // The auth-guard shape: response.redirect() throws a PylonRouteControl in
+    // the synchronous shell, before any await/<Suspense>.
+    function GuardedPage(): any {
+      throw makeRedirect("/login");
+    }
+    let headCommitted = false;
+    const warnings: string[] = [];
+    let rejectedWith: PylonRouteControl | null = null;
+    try {
+      const stream = await renderToReadableStream(
+        React.createElement(GuardedPage, {}),
+        {
+          onError(err: unknown) {
+            const ctrl = asRouteControl(err);
+            // Mirror the runtime's gate exactly: only warn once head is out.
+            if (ctrl && headCommitted) warnings.push(ctrl.kind);
+          },
+        },
+      );
+      // Buffered path: the runtime awaits allReady, THEN sends response_start
+      // (commits the head). A shell throw never gets here.
+      await (stream as any).allReady;
+      headCommitted = true;
+    } catch (err) {
+      // This is the runtime's outer catch — where the real 307 is emitted.
+      rejectedWith = asRouteControl(err);
+    }
+    expect(rejectedWith?.kind).toBe("redirect"); // honored, not lost
+    expect(rejectedWith?.url).toBe("/login");
+    expect(headCommitted).toBe(false); // head never committed → NOT ignored
+    expect(warnings).toEqual([]); // ← the fix: no false warning on a correct redirect
+  });
+
+  test("STREAMING below-<Suspense> redirect: onError fires AFTER head commit → warns", async () => {
+    const d = makeDeferred<string[]>();
+    // Throws a redirect from BELOW the boundary, only once its data resolves —
+    // i.e. after the shell (and head) have already been flushed.
+    function LateRedirect({ p }: { p: Promise<string[]> }): any {
+      use(p);
+      throw makeRedirect("/login");
+    }
+    function StreamPage({ p }: { p: Promise<string[]> }) {
+      return React.createElement(
+        "div",
+        null,
+        React.createElement("h1", null, "Shell"),
+        React.createElement(
+          Suspense,
+          { fallback: React.createElement("p", null, "L") },
+          React.createElement(LateRedirect, { p }),
+        ),
+      );
+    }
+    let headCommitted = false;
+    const warnings: string[] = [];
+    const stream = await renderToReadableStream(
+      React.createElement(StreamPage, { p: d.promise }),
+      {
+        onError(err: unknown) {
+          const ctrl = asRouteControl(err);
+          if (ctrl && headCommitted) warnings.push(ctrl.kind);
+        },
+      },
+    );
+    const reader = stream.getReader();
+    await reader.read(); // first flush = shell + fallback → head is on the wire
+    headCommitted = true; // runtime sends response_start at this point
+    d.resolve(["x"]); // resolve → LateRedirect throws below the committed boundary
+    try {
+      for (;;) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+    } catch {
+      /* the stream may error after the late throw; irrelevant here */
+    }
+    expect(warnings).toEqual(["redirect"]); // genuinely ignored → correctly warned
   });
 });
 

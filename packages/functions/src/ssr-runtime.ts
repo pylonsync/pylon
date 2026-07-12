@@ -2864,6 +2864,15 @@ export async function handleRenderRoute(
       : pageLeaf;
     tree = await buildLayoutTree(cwd, tree, msg.layouts, props, React);
     const element = tree;
+    // Tracks whether the HTTP head (response_start) has actually gone out. A
+    // redirect()/notFound() from a suspended subtree is only genuinely IGNORED
+    // once the head is committed. Before that — every buffered render, and a
+    // streaming render up until response_start — the control signal rejects the
+    // render and the outer catch below emits the real 3xx/404, so the redirect
+    // IS honored. Gating the onError warning on this stops a false "head already
+    // sent" error from firing on every correct synchronous-shell auth-guard
+    // redirect (the buffered path is the overwhelmingly common case).
+    let headCommitted = false;
     const stream: ReadableStream<Uint8Array> = await renderToReadableStream(
       element,
       {
@@ -2877,18 +2886,24 @@ export async function handleRenderRoute(
           // their error through the catch/boundary path below.
           const ctrl = asRouteControl(err);
           if (ctrl) {
-            // A redirect()/notFound() thrown from BELOW a <Suspense> boundary:
-            // the shell already committed the head, so React swallowed it and
-            // it can't change the response. This is a known limitation on BOTH
-            // the buffered and streamed paths (response.* must fire in the
-            // synchronous shell). Surface it loudly instead of silently losing.
-            // eslint-disable-next-line no-console
-            console.error(
-              `[ssr] ${ctrl.kind}() called below a <Suspense> boundary was ignored — ` +
-                `the HTTP head was already sent. Call response.redirect()/notFound() (or ` +
-                `notFound() from @pylonsync/react) in the synchronous shell render, before ` +
-                `any await/<Suspense>.`,
-            );
+            // A redirect()/notFound() control signal surfaced during render. It
+            // was only truly ignored if the head is already committed: past
+            // response_start on a STREAMING render, a signal from a suspended
+            // subtree can't change the already-sent response — surface it
+            // loudly. Otherwise (every buffered render, and a streaming render
+            // pre-commit) the signal rejects the render and the outer catch
+            // turns it into the real 3xx/404, so the redirect is honored and
+            // nothing was lost — warning there would fire on every correct
+            // auth-guard redirect.
+            if (headCommitted) {
+              // eslint-disable-next-line no-console
+              console.error(
+                `[ssr] ${ctrl.kind}() called below a <Suspense> boundary was ignored — ` +
+                  `the HTTP head was already sent. Call response.redirect()/notFound() (or ` +
+                  `notFound() from @pylonsync/react) in the synchronous shell render, before ` +
+                  `any await/<Suspense>.`,
+              );
+            }
             return;
           }
           // eslint-disable-next-line no-console
@@ -3067,6 +3082,10 @@ export async function handleRenderRoute(
           : {}),
       }),
     });
+    // The head is on the wire now — from here a redirect()/notFound() thrown by
+    // a suspended subtree (streaming render) is genuinely too late to change the
+    // response, so onError above will (correctly) warn.
+    headCommitted = true;
 
     // Pre-load the manifest BEFORE the React stream starts emitting
     // so we know which `<link rel="stylesheet">` and
