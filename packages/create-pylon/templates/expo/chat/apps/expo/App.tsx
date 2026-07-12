@@ -10,8 +10,8 @@ import {
 	Platform,
 	Alert,
 	KeyboardAvoidingView,
-	SafeAreaView,
 } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { init, db, callFn } from "@pylonsync/react-native";
 
@@ -47,6 +47,14 @@ function ensureInit() {
 }
 
 export default function App() {
+	return (
+		<SafeAreaProvider>
+			<AppContent />
+		</SafeAreaProvider>
+	);
+}
+
+function AppContent() {
 	const [ready, setReady] = useState(false);
 	useEffect(() => {
 		ensureInit().then(() => setReady(true));

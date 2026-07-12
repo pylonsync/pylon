@@ -9,8 +9,8 @@ import {
 	StyleSheet,
 	Platform,
 	Alert,
-	SafeAreaView,
 } from "react-native";
+import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { init, db, callFn } from "@pylonsync/react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -56,6 +56,14 @@ function ensureInit() {
 }
 
 export default function App() {
+	return (
+		<SafeAreaProvider>
+			<AppContent />
+		</SafeAreaProvider>
+	);
+}
+
+function AppContent() {
 	const [ready, setReady] = useState(false);
 	const [profileId, setProfileId] = useState<string | null>(null);
 	useEffect(() => {

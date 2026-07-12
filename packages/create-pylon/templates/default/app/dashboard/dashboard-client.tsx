@@ -1049,12 +1049,14 @@ function BillingView({
       const msg = e instanceof Error ? e.message : String(e);
       // A missing STRIPE_PRICE_PRO surfaces as "plan pro has no monthly
       // priceId" rather than STRIPE_NOT_CONFIGURED, so treat the price/config
-      // errors the same — both mean "finish the Stripe setup".
+      // errors the same — both mean the Stripe setup isn't finished (set
+      // STRIPE_SECRET_KEY + STRIPE_PRICE_PRO). That guidance is for you, the
+      // developer; the customer just sees the generic "contact support" line.
       setError(
         /not.?configured|STRIPE_NOT_CONFIGURED|no monthly price|priceId/i.test(
           msg,
         )
-          ? "Stripe isn't configured yet — set STRIPE_SECRET_KEY + STRIPE_PRICE_PRO to enable billing."
+          ? "Billing isn't available yet. Contact support and we'll get you set up."
           : msg,
       );
       setBusy(null);
@@ -1174,10 +1176,12 @@ function BillingView({
         {error && <p className="mt-3 text-xs text-red-600">{error}</p>}
       </Card>
 
+      {/* Dev setup (not shown to customers): set STRIPE_SECRET_KEY,
+          STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_PRO to go live; point the
+          Stripe webhook at /api/fn/stripeWebhook. Billing is wired through
+          @pylonsync/stripe — see lib/billing.ts. */}
       <p className="text-xs text-zinc-400">
-        Powered by Stripe Checkout + Customer Portal via the @pylonsync/stripe
-        plugin. Set STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, and STRIPE_PRICE_PRO
-        to go live; point the webhook at <code>/api/fn/stripeWebhook</code>.
+        Payments and invoices are processed securely by Stripe.
       </p>
     </div>
   );

@@ -439,17 +439,8 @@ function SiteFooter() {
           </div>
         </div>
 
-        <div className="mt-14 flex flex-col items-start justify-between gap-3 border-t border-zinc-200/70 pt-6 text-[12px] text-zinc-400 sm:flex-row sm:items-center">
+        <div className="mt-14 border-t border-zinc-200/70 pt-6 text-[12px] text-zinc-400">
           <span>© {new Date().getFullYear()} {siteConfig.brand.copyrightName}</span>
-          <span>
-            Built with{" "}
-            <a
-              href="https://pylonsync.com"
-              className="font-medium text-zinc-600 hover:text-zinc-900"
-            >
-              Pylon
-            </a>
-          </span>
         </div>
       </div>
     </footer>
