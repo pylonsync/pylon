@@ -1557,8 +1557,62 @@ impl Runtime {
                 .filter(|f| matches!(f.field_type.as_str(), "string" | "richtext" | "text"))
                 .map(|f| f.name.as_str())
                 .collect();
-            if !text_fields.is_empty() {
-                let fts_name = format!("{}_fts", entity.name);
+            let fts_name = format!("{}_fts", entity.name);
+            // Columns of the FTS table as it exists on disk (empty = no
+            // table). Migrations only ALTER the entity table, so when the
+            // manifest's text-field set changes the FTS table keeps its old
+            // shape — it must be rebuilt here or writes crash: a SQLite
+            // table-rebuild migration drops the sync triggers with the
+            // table, this startup path then recreates them against the
+            // CURRENT field list, and the first INSERT dies with
+            // "table <Entity>_fts has no column named <newField>"
+            // (hit live: Batch gained `backgrounds`).
+            let existing_fts_cols: Vec<String> = conn
+                .prepare(&format!("PRAGMA table_info({})", quote_ident(&fts_name)))
+                .ok()
+                .map(|mut stmt| {
+                    stmt.query_map([], |row| row.get::<_, String>(1))
+                        .map(|rows| rows.filter_map(Result::ok).collect())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let drop_fts = |conn: &Connection| {
+                for suffix in ["ai", "ad", "au"] {
+                    let _ = conn.execute(
+                        &format!(
+                            "DROP TRIGGER IF EXISTS {}",
+                            quote_ident(&format!("{fts_name}_{suffix}"))
+                        ),
+                        [],
+                    );
+                }
+                let _ = conn.execute(
+                    &format!("DROP TABLE IF EXISTS {}", quote_ident(&fts_name)),
+                    [],
+                );
+            };
+            if text_fields.is_empty() {
+                // Entity no longer has text columns — retire any leftover
+                // index so $search doesn't join (and triggers don't write) a
+                // stale table.
+                if !existing_fts_cols.is_empty() {
+                    drop_fts(&conn);
+                }
+            } else {
+                let mut desired_sorted: Vec<&str> = text_fields.clone();
+                desired_sorted.sort_unstable();
+                let mut existing_sorted: Vec<&str> =
+                    existing_fts_cols.iter().map(String::as_str).collect();
+                existing_sorted.sort_unstable();
+                let stale = !existing_fts_cols.is_empty() && existing_sorted != desired_sorted;
+                if stale {
+                    drop_fts(&conn);
+                }
+                // Backfill whenever the table is (re)created this boot: after
+                // a stale rebuild the index must reflect existing rows, and on
+                // an empty fresh table the rebuild is a no-op.
+                let needs_backfill = stale || existing_fts_cols.is_empty();
+
                 let quoted_cols: Vec<String> = text_fields.iter().map(|f| quote_ident(f)).collect();
                 let fts_sql = format!(
                     "CREATE VIRTUAL TABLE IF NOT EXISTS {} USING fts5({}, content={}, content_rowid='rowid')",
@@ -1571,6 +1625,20 @@ impl Runtime {
                 let fts_ok = conn.execute(&fts_sql, []).is_ok();
 
                 if fts_ok {
+                    if needs_backfill {
+                        // External-content rebuild: repopulate the index from
+                        // the entity table it points at.
+                        let rebuild = format!(
+                            "INSERT INTO {ftb}({ftb}) VALUES('rebuild')",
+                            ftb = quote_ident(&fts_name),
+                        );
+                        if let Err(e) = conn.execute(&rebuild, []) {
+                            tracing::warn!(
+                                "[fts] failed to rebuild index for {}: {e}",
+                                entity.name
+                            );
+                        }
+                    }
                     // Sync triggers: keep FTS index current on INSERT/UPDATE/DELETE.
                     //
                     // Subtle bug fixed: the trigger NAME must be built from
@@ -1597,18 +1665,22 @@ impl Runtime {
                     let trigger_ad = quote_ident(&format!("{}_ad", fts_name));
                     let trigger_au = quote_ident(&format!("{}_au", fts_name));
 
+                    // Triggers are DROPped and recreated every boot (not
+                    // IF NOT EXISTS): their column lists are baked into the
+                    // trigger body, so a leftover trigger from an older
+                    // manifest silently stops indexing new text fields.
                     let trigger_ins = format!(
-                        "CREATE TRIGGER IF NOT EXISTS {trigger_ai} AFTER INSERT ON {tbl} BEGIN \
+                        "CREATE TRIGGER {trigger_ai} AFTER INSERT ON {tbl} BEGIN \
                          INSERT INTO {ftb}(rowid, {cols_list}) VALUES (new.rowid, {new_vals}); END",
                         new_vals = new_list.join(", "),
                     );
                     let trigger_del = format!(
-                        "CREATE TRIGGER IF NOT EXISTS {trigger_ad} AFTER DELETE ON {tbl} BEGIN \
+                        "CREATE TRIGGER {trigger_ad} AFTER DELETE ON {tbl} BEGIN \
                          INSERT INTO {ftb}({ftb}, rowid, {cols_list}) VALUES('delete', old.rowid, {old_vals}); END",
                         old_vals = old_list.join(", "),
                     );
                     let trigger_upd = format!(
-                        "CREATE TRIGGER IF NOT EXISTS {trigger_au} AFTER UPDATE ON {tbl} BEGIN \
+                        "CREATE TRIGGER {trigger_au} AFTER UPDATE ON {tbl} BEGIN \
                          INSERT INTO {ftb}({ftb}, rowid, {cols_list}) VALUES('delete', old.rowid, {old_vals}); \
                          INSERT INTO {ftb}(rowid, {cols_list}) VALUES (new.rowid, {new_vals}); END",
                         new_vals = new_list.join(", "),
@@ -1616,11 +1688,12 @@ impl Runtime {
                     );
                     // Log failures instead of silently dropping — FTS going
                     // stale should be visible to operators.
-                    for (label, sql) in [
-                        ("ai", &trigger_ins),
-                        ("ad", &trigger_del),
-                        ("au", &trigger_upd),
+                    for (label, trigger_name, sql) in [
+                        ("ai", &trigger_ai, &trigger_ins),
+                        ("ad", &trigger_ad, &trigger_del),
+                        ("au", &trigger_au, &trigger_upd),
                     ] {
+                        let _ = conn.execute(&format!("DROP TRIGGER IF EXISTS {trigger_name}"), []);
                         if let Err(e) = conn.execute(sql, []) {
                             tracing::warn!(
                                 "[fts] failed to create {label} trigger for {}: {e}",
@@ -4575,6 +4648,91 @@ mod tests {
         assert_eq!(row["avatarColor"], "#abc");
         assert_eq!(row["createdAt"], "2026-01-01T00:00:00Z");
         assert_eq!(row["passwordHash"], "hashed-password");
+    }
+
+    /// Regression: when an entity's text-field set changes, its
+    /// `<Entity>_fts` FTS5 table must be rebuilt at boot. Migrations only
+    /// ALTER the entity table; before this fix the FTS table (created
+    /// IF NOT EXISTS) kept its old columns while the sync triggers —
+    /// dropped alongside a SQLite table-rebuild migration and recreated
+    /// at boot from the CURRENT manifest — referenced the new field. The
+    /// first INSERT then failed with "table <Entity>_fts has no column
+    /// named <newField>" (hit live: Batch gained `backgrounds`).
+    #[test]
+    fn fts_table_rebuilt_when_entity_gains_a_text_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("app.db");
+        let db = db_path.to_str().unwrap();
+
+        // v1: User(email, displayName). Write one row and close.
+        let old_id;
+        {
+            let mut manifest = test_manifest();
+            manifest.entities[0].crdt = false;
+            let rt = Runtime::open(db, manifest).unwrap();
+            old_id = rt
+                .insert(
+                    "User",
+                    &serde_json::json!({"email": "a@b.com", "displayName": "Alice Zephyr"}),
+                )
+                .unwrap();
+        }
+
+        // Simulate `pylon migrate` adding the new column — plus the trigger
+        // loss that comes with a SQLite table-rebuild migration (dropping or
+        // renaming a table drops its triggers).
+        {
+            let conn = Connection::open(db).unwrap();
+            conn.execute("ALTER TABLE \"User\" ADD COLUMN \"bio\" TEXT", [])
+                .unwrap();
+            for t in ["User_fts_ai", "User_fts_ad", "User_fts_au"] {
+                conn.execute(&format!("DROP TRIGGER IF EXISTS \"{t}\""), [])
+                    .unwrap();
+            }
+        }
+
+        // v2: the manifest now declares `bio`. Boot must reconcile the FTS
+        // table with the new text-field set.
+        let mut manifest = test_manifest();
+        manifest.entities[0].crdt = false;
+        manifest.entities[0].fields.push(ManifestField {
+            name: "bio".into(),
+            field_type: "string".into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        });
+        let rt = Runtime::open(db, manifest).unwrap();
+
+        // Pre-fix this insert crashed: the recreated AFTER INSERT trigger
+        // wrote `bio` into an FTS table that didn't have the column.
+        rt.insert(
+            "User",
+            &serde_json::json!({
+                "email": "b@c.com",
+                "displayName": "Bob",
+                "bio": "quixotic wanderer",
+            }),
+        )
+        .unwrap();
+
+        // The new text field is searchable...
+        let hits = rt
+            .query_filtered("User", &serde_json::json!({"$search": "quixotic"}))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["email"], "b@c.com");
+        // ...and the rebuild backfilled the row written under the old schema.
+        let hits = rt
+            .query_filtered("User", &serde_json::json!({"$search": "Zephyr"}))
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["id"], serde_json::json!(old_id));
     }
 
     /// SQLite stores bool columns as INTEGER 0/1. Reads MUST map them back
