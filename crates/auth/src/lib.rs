@@ -1904,8 +1904,34 @@ pub fn validate_trusted_redirect(
     if url.is_empty() {
         return Err(TrustedOriginError::Empty);
     }
-    // Must be absolute http(s) URL — no relative paths, no schemes
-    // like javascript:, file:, data:.
+    // A same-origin RELATIVE path (`/dashboard`, `/onboarding?x=1`) is always
+    // safe: it stays on the current origin, so it can't be an open redirect, and
+    // it works verbatim as a 302 `Location` (the browser resolves it against the
+    // request URL). Accept it with no allowlist — this matches better-auth /
+    // NextAuth, and it's exactly what the OAuth login button ships
+    // (`?callback=/dashboard`). Requiring an absolute URL here silently broke
+    // OAuth for every app whose callback was a path.
+    //
+    // The trap: a PROTOCOL-RELATIVE URL only LOOKS relative — `//evil.com` (and
+    // `/\evil.com`, which browsers normalize to `//evil.com`) is treated as
+    // absolute, so it IS an open redirect. Browsers also strip ASCII tab/CR/LF
+    // from URLs before parsing, so `/\t/evil.com` becomes `//evil.com` too.
+    // Strip those, then reject anything that resolves to `//` or `/\`.
+    if url.starts_with('/') {
+        let normalized: String = url
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+            .collect();
+        return if normalized.starts_with("//") || normalized.starts_with("/\\") {
+            Err(TrustedOriginError::NotTrusted {
+                origin: url.chars().take(64).collect(),
+            })
+        } else {
+            Ok(())
+        };
+    }
+    // Otherwise it must be an absolute http(s) URL — no `javascript:`, `data:`,
+    // `file:` — whose origin is loopback or explicitly trusted.
     if !url.starts_with("http://") && !url.starts_with("https://") {
         return Err(TrustedOriginError::NotHttp);
     }
@@ -3900,6 +3926,52 @@ mod tests {
             validate_trusted_redirect("", &trusted),
             Err(TrustedOriginError::Empty)
         ));
+    }
+
+    #[test]
+    fn relative_callbacks_are_trusted_without_any_allowlist() {
+        // The default template's OAuth button ships `?callback=/onboarding` — a
+        // same-origin path. It must work with an EMPTY allowlist (no
+        // trustedOrigins, no env), which is the whole point: a default Pylon
+        // Cloud deploy has no per-app redirect config.
+        let empty: Vec<String> = Vec::new();
+        for url in [
+            "/",
+            "/dashboard",
+            "/onboarding",
+            "/onboarding?next=/x&from=login",
+            "/auth/callback#frag",
+            "/x\\y",           // backslash IN the path (not a leading `/\`) is same-origin
+            "/ /still-a-path", // space after slash is a path, not protocol-relative
+        ] {
+            assert!(
+                validate_trusted_redirect(url, &empty).is_ok(),
+                "relative path {url:?} should be trusted with no allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_relative_open_redirects_are_rejected() {
+        // These LOOK relative (leading `/`) but browsers treat them as absolute
+        // → off-origin. Must be rejected even though they start with `/`.
+        let empty: Vec<String> = Vec::new();
+        for url in [
+            "//evil.com",
+            "//evil.com/steal",
+            "/\\evil.com",   // `/\` → browsers normalize to `//`
+            "/\t/evil.com",  // tab is stripped → `//evil.com`
+            "/\n/evil.com",  // newline stripped → `//evil.com`
+            "/\r//evil.com", // CR stripped → `//evil.com`
+        ] {
+            assert!(
+                matches!(
+                    validate_trusted_redirect(url, &empty),
+                    Err(TrustedOriginError::NotTrusted { .. })
+                ),
+                "protocol-relative {url:?} must be rejected as an open redirect"
+            );
+        }
     }
 
     #[test]
