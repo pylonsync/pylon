@@ -11,6 +11,7 @@ pub mod cloud_fn;
 pub mod cloud_logs;
 pub mod cloud_members;
 pub mod cloud_projects;
+pub mod cloud_runtime;
 pub mod cloud_secrets;
 pub mod cloud_status;
 pub mod codegen;

@@ -119,6 +119,7 @@ fn run() -> ExitCode {
         Some("members") => commands::cloud_members::run(&args, json_mode),
         Some("migrate") => commands::migrate::run(&args, json_mode),
         Some("projects") => commands::cloud_projects::run(&args, json_mode),
+        Some("runtime") => commands::cloud_runtime::run(&args, json_mode),
         Some("secrets") => commands::cloud_secrets::run(&args, json_mode),
         Some("status") => commands::cloud_status::run(&args, json_mode),
         Some("plugins") => commands::plugins::run(&args, json_mode),
