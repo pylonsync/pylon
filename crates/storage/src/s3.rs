@@ -208,7 +208,25 @@ impl S3FileStorage {
     }
 
     /// Presign a request for `method` on `key`, valid for `expires` seconds.
+    /// Non-upload operations preserve the host-only signing contract.
     fn presign(&self, method: &str, key: &str, expires: i64) -> String {
+        self.presign_with_content_length(method, key, expires, None)
+    }
+
+    /// Presign a client PUT whose Content-Length must exactly match the size
+    /// admitted by `/api/files/init`. A reusable upload URL can therefore
+    /// overwrite the key only with another body of the same declared size.
+    fn presign_upload(&self, key: &str, expires: i64, content_length: usize) -> String {
+        self.presign_with_content_length("PUT", key, expires, Some(content_length))
+    }
+
+    fn presign_with_content_length(
+        &self,
+        method: &str,
+        key: &str,
+        expires: i64,
+        content_length: Option<usize>,
+    ) -> String {
         let (amz_date, date_stamp) = now_timestamps();
         let params = PresignParams {
             method,
@@ -222,6 +240,7 @@ impl S3FileStorage {
             date_stamp: &date_stamp,
             expires,
             session_token: self.cfg.session_token.as_deref(),
+            content_length,
         };
         presign_url(&params).0
     }
@@ -231,18 +250,30 @@ fn owner_key(key: &str) -> String {
     format!("{key}.owner")
 }
 
+fn parse_content_length(value: Option<&str>) -> Result<usize, FileStorageError> {
+    let value = value.ok_or_else(|| FileStorageError {
+        code: "S3_INVALID_CONTENT_LENGTH".into(),
+        message: "S3 HEAD response omitted Content-Length".into(),
+    })?;
+    value.parse::<usize>().map_err(|_| FileStorageError {
+        code: "S3_INVALID_CONTENT_LENGTH".into(),
+        message: format!("S3 HEAD returned invalid Content-Length {value:?}"),
+    })
+}
+
 impl FileStorage for S3FileStorage {
     fn init_upload(
         &self,
         name: &str,
         _content_type: &str,
-        _size: usize,
+        size: usize,
     ) -> Result<UploadInit, FileStorageError> {
-        // Presigned PUT: the client uploads bytes straight to S3. The payload
-        // hash is `UNSIGNED-PAYLOAD` and only `host` is signed, so the client
-        // may send any Content-Type — nothing else is pinned into the URL.
+        // Presigned PUT: the client uploads bytes straight to S3. Content-Length
+        // is signed so this reusable one-hour capability cannot overwrite the
+        // key with a body of any other size. Content-Type remains intentionally
+        // unsigned; the payload hash is `UNSIGNED-PAYLOAD`.
         let key = self.mint_key(name);
-        let upload_url = self.presign("PUT", &key, UPLOAD_URL_EXPIRES);
+        let upload_url = self.presign_upload(&key, UPLOAD_URL_EXPIRES, size);
         Ok(UploadInit {
             asset_id: key.clone(),
             upload_url,
@@ -266,10 +297,7 @@ impl FileStorage for S3FileStorage {
                 ),
                 _ => s3_err("S3_HEAD_FAILED", e),
             })?;
-        let size = resp
-            .header("Content-Length")
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(0);
+        let size = parse_content_length(resp.header("Content-Length"))?;
         Ok(StoredFile {
             id: asset_id.to_string(),
             url: self.served_url(asset_id),
@@ -417,18 +445,28 @@ struct PresignParams<'a> {
     /// STS/temporary-credential session token, if any. Added to the signed
     /// canonical query as `X-Amz-Security-Token`.
     session_token: Option<&'a str>,
+    /// Client-upload body size. When present, `content-length` joins `host` in
+    /// both the canonical headers and `X-Amz-SignedHeaders`.
+    content_length: Option<usize>,
 }
 
 /// Compute a SigV4 presigned URL. Returns `(url, signature)`; the signature is
 /// returned separately so tests can assert it against AWS's published vector.
 ///
 /// Follows the AWS "Query String Request Authentication" algorithm: the
-/// `X-Amz-*` query parameters are signed (host is the only signed header, the
-/// payload hash is the literal `UNSIGNED-PAYLOAD`), and `X-Amz-Signature` is
-/// appended to the canonical query string afterwards.
+/// `X-Amz-*` query parameters are signed (`host`, plus `content-length` for a
+/// client upload, are the signed headers), the payload hash is the literal
+/// `UNSIGNED-PAYLOAD`, and `X-Amz-Signature` is appended afterwards.
 fn presign_url(p: &PresignParams) -> (String, String) {
     let credential_scope = format!("{}/{}/{}/aws4_request", p.date_stamp, p.region, SERVICE);
     let credential = format!("{}/{}", p.access_key, credential_scope);
+    let (canonical_headers, signed_headers) = match p.content_length {
+        Some(content_length) => (
+            format!("content-length:{content_length}\nhost:{}\n", p.host),
+            "content-length;host",
+        ),
+        None => (format!("host:{}\n", p.host), "host"),
+    };
 
     // Canonical query params, each key/value percent-encoded. A session token
     // (temporary/STS creds) is a *signed* parameter, so it goes in here before
@@ -438,7 +476,7 @@ fn presign_url(p: &PresignParams) -> (String, String) {
         ("X-Amz-Credential", credential),
         ("X-Amz-Date", p.amz_date.to_string()),
         ("X-Amz-Expires", p.expires.to_string()),
-        ("X-Amz-SignedHeaders", "host".to_string()),
+        ("X-Amz-SignedHeaders", signed_headers.to_string()),
     ];
     if let Some(token) = p.session_token {
         query_params.push(("X-Amz-Security-Token", token.to_string()));
@@ -452,10 +490,8 @@ fn presign_url(p: &PresignParams) -> (String, String) {
         .collect::<Vec<_>>()
         .join("&");
 
-    // Only `host` is signed. canonical_headers ends in a newline, so the
-    // canonical request has the required blank line before signed_headers.
-    let canonical_headers = format!("host:{}\n", p.host);
-    let signed_headers = "host";
+    // canonical_headers ends in a newline, so the canonical request has the
+    // required blank line before signed_headers.
     let payload_hash = "UNSIGNED-PAYLOAD";
 
     let canonical_request = format!(
@@ -608,6 +644,24 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn content_length_requires_authoritative_numeric_value() {
+        assert_eq!(parse_content_length(Some("0")).unwrap(), 0);
+        assert_eq!(
+            parse_content_length(Some("209715200")).unwrap(),
+            209_715_200
+        );
+
+        for value in [None, Some(""), Some("not-a-number")] {
+            let err = parse_content_length(value).unwrap_err();
+            assert_eq!(err.code, "S3_INVALID_CONTENT_LENGTH");
+        }
+
+        let err =
+            parse_content_length(Some("999999999999999999999999999999999999999")).unwrap_err();
+        assert_eq!(err.code, "S3_INVALID_CONTENT_LENGTH");
+    }
+
     fn cfg(endpoint: Option<&str>, public: Option<&str>) -> S3Config {
         S3Config {
             bucket: "my-bucket".into(),
@@ -640,6 +694,7 @@ mod tests {
             date_stamp: "20130524",
             expires: 86400,
             session_token: None,
+            content_length: None,
         };
         let (url, signature) = presign_url(&params);
         assert_eq!(
@@ -672,6 +727,7 @@ mod tests {
             date_stamp: "20130524",
             expires: 86400,
             session_token: None,
+            content_length: None,
         };
         let (_, sig_none) = presign_url(&base);
         let with_token = PresignParams {
@@ -688,6 +744,51 @@ mod tests {
         let st = url.find("X-Amz-Security-Token=").unwrap();
         let sh = url.find("X-Amz-SignedHeaders=").unwrap();
         assert!(st < sh, "Security-Token must sort before SignedHeaders");
+    }
+
+    #[test]
+    fn upload_content_length_is_signed_and_changes_the_signature() {
+        let params = |content_length| PresignParams {
+            method: "PUT",
+            scheme: "https",
+            host: "examplebucket.s3.amazonaws.com",
+            canonical_uri: "/upload.bin",
+            region: "us-east-1",
+            access_key: "AKIAIOSFODNN7EXAMPLE",
+            secret_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            amz_date: "20130524T000000Z",
+            date_stamp: "20130524",
+            expires: 3600,
+            session_token: None,
+            content_length,
+        };
+
+        let (url_42, signature_42) = presign_url(&params(Some(42)));
+        let (_, signature_43) = presign_url(&params(Some(43)));
+        let (host_only_url, host_only_signature) = presign_url(&params(None));
+
+        assert!(url_42.contains("X-Amz-SignedHeaders=content-length%3Bhost"));
+        assert_ne!(
+            signature_42, signature_43,
+            "changing Content-Length must change the canonical signature inputs"
+        );
+        assert_ne!(signature_42, host_only_signature);
+        assert!(host_only_url.contains("X-Amz-SignedHeaders=host"));
+        assert!(!host_only_url.contains("content-length"));
+    }
+
+    #[test]
+    fn init_upload_requires_the_declared_content_length_header() {
+        let storage = S3FileStorage::new(cfg(None, None));
+        let init = storage
+            .init_upload("upload.bin", "application/octet-stream", 42)
+            .unwrap();
+
+        assert!(
+            init.upload_url
+                .contains("X-Amz-SignedHeaders=content-length%3Bhost"),
+            "client upload URL must require the signed Content-Length header"
+        );
     }
 
     #[test]

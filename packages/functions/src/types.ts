@@ -658,9 +658,23 @@ export interface FnDefinition<TArgs = unknown, TReturn = unknown> {
 // Validators
 // ---------------------------------------------------------------------------
 
-export interface Validator {
+declare const validatorType: unique symbol;
+declare const validatorOptional: unique symbol;
+
+/**
+ * Runtime validator carrying its validated TypeScript type.
+ *
+ * The symbol properties are type-only markers: they emit no runtime data and
+ * let the function constructors derive handler arguments from an `args` schema.
+ */
+export interface Validator<
+  T = unknown,
+  TOptional extends boolean = boolean,
+> {
   type: string;
   optional?: boolean;
+  readonly [validatorType]?: T;
+  readonly [validatorOptional]?: TOptional;
   /** For v.id("tableName") */
   table?: string;
   /** For v.array(v.string()) */
@@ -672,3 +686,31 @@ export interface Validator {
   /** For v.literal("value") */
   value?: unknown;
 }
+
+/** Any validator accepted in an argument schema. */
+export type AnyValidator = Validator<any, boolean>;
+
+/** A function argument schema keyed by argument name. */
+export type ValidatorSchema = Record<string, AnyValidator>;
+
+/** Extract the value accepted by a validator. */
+export type InferValidator<TValidator extends AnyValidator> =
+  TValidator extends Validator<infer TValue, boolean> ? TValue : never;
+
+type OptionalValidatorKeys<TSchema extends ValidatorSchema> = {
+  [TKey in keyof TSchema]-?: TSchema[TKey] extends Validator<any, true>
+    ? TKey
+    : never;
+}[keyof TSchema];
+
+type RequiredValidatorKeys<TSchema extends ValidatorSchema> = Exclude<
+  keyof TSchema,
+  OptionalValidatorKeys<TSchema>
+>;
+
+/** Derive a handler argument object from a validator schema. */
+export type InferArgs<TSchema extends ValidatorSchema> = {
+  [TKey in RequiredValidatorKeys<TSchema>]: InferValidator<TSchema[TKey]>;
+} & {
+  [TKey in OptionalValidatorKeys<TSchema>]?: InferValidator<TSchema[TKey]>;
+};

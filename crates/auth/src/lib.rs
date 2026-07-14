@@ -1931,12 +1931,25 @@ pub fn validate_trusted_redirect(
         };
     }
     // Otherwise it must be an absolute http(s) URL — no `javascript:`, `data:`,
-    // `file:` — whose origin is loopback or explicitly trusted.
-    if !url.starts_with("http://") && !url.starts_with("https://") {
+    // `file:` — whose parsed origin is loopback or explicitly trusted.
+    let parsed = url::Url::parse(url).map_err(|_| TrustedOriginError::NotHttp)?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return Err(TrustedOriginError::NotHttp);
     }
-    let url_origin = origin_of(url);
-    if is_localhost_origin(&url_origin) || trusted_origins.iter().any(|t| t == &url_origin) {
+    let url_origin =
+        normalized_http_origin(&parsed).ok_or_else(|| TrustedOriginError::NotTrusted {
+            origin: url.chars().take(64).collect(),
+        })?;
+    if has_credentials(&parsed) {
+        return Err(TrustedOriginError::NotTrusted { origin: url_origin });
+    }
+
+    let trusted = is_localhost_url(&parsed)
+        || trusted_origins
+            .iter()
+            .filter_map(|origin| normalized_trusted_origin(origin))
+            .any(|origin| origin == url_origin);
+    if trusted {
         Ok(())
     } else {
         Err(TrustedOriginError::NotTrusted { origin: url_origin })
@@ -1959,30 +1972,44 @@ pub fn validate_trusted_redirect(
 /// origin in a production CORS context smells like a misconfigured
 /// proxy that the operator should see fail loudly.
 pub fn is_localhost_origin(origin: &str) -> bool {
-    let host = match origin.strip_prefix("http://") {
-        Some(rest) => rest,
-        None => return false,
-    };
-    // Trim any trailing path/query/fragment — defensive, callers
-    // should pass origins not URLs.
-    let host = host
-        .split(|c: char| c == '/' || c == '?' || c == '#')
-        .next()
-        .unwrap_or("");
-    // Strip the optional :port suffix. IPv6 loopback `[::1]:N` keeps
-    // its bracketed form intact because `[::1]` has no `:` *outside*
-    // the brackets.
-    let host_no_port = if let Some(rest) = host.strip_prefix('[') {
-        // Bracketed IPv6 — strip everything from the closing bracket on.
-        match rest.find(']') {
-            Some(end) => &host[..end + 2], // keep `[..]`
-            None => host,
-        }
-    } else {
-        // host[:port] — split on the last colon for IPv4/hostname.
-        host.split(':').next().unwrap_or(host)
-    };
-    matches!(host_no_port, "localhost" | "127.0.0.1" | "[::1]")
+    url::Url::parse(origin)
+        .ok()
+        .is_some_and(|parsed| !has_credentials(&parsed) && is_localhost_url(&parsed))
+}
+
+fn has_credentials(url: &url::Url) -> bool {
+    !url.username().is_empty() || url.password().is_some()
+}
+
+fn normalized_http_origin(url: &url::Url) -> Option<String> {
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
+}
+
+fn normalized_trusted_origin(origin: &str) -> Option<String> {
+    let parsed = url::Url::parse(origin).ok()?;
+    if has_credentials(&parsed)
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return None;
+    }
+    normalized_http_origin(&parsed)
+}
+
+fn is_localhost_url(url: &url::Url) -> bool {
+    if url.scheme() != "http" {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(host)) => host == std::net::Ipv4Addr::LOCALHOST,
+        Some(url::Host::Ipv6(host)) => host == std::net::Ipv6Addr::LOCALHOST,
+        None => false,
+    }
 }
 
 /// Reasons a redirect URL might be rejected by [`validate_trusted_redirect`].
@@ -2009,19 +2036,24 @@ impl std::fmt::Display for TrustedOriginError {
     }
 }
 
-/// Extract the origin (`scheme://host[:port]`) from a URL string,
-/// stripping any path/query/fragment. Best-effort string slicing —
-/// no full URL parser dep. Public so router crates can reuse the same
-/// logic when comparing redirect URLs against the trusted-origins list.
+/// Extract the normalized origin (`scheme://host[:port]`) from an absolute
+/// HTTP(S) URL, stripping any path/query/fragment. Public so router crates can
+/// reuse the same logic when comparing redirect URLs against the
+/// trusted-origins list. Non-HTTP or malformed inputs retain the legacy
+/// best-effort result; callers making trust decisions must parse them first.
 pub fn origin_of(url: &str) -> String {
+    if let Ok(parsed) = url::Url::parse(url) {
+        if let Some(origin) = normalized_http_origin(&parsed) {
+            return origin;
+        }
+    }
+
     let after_scheme = match url.find("://") {
         Some(i) => i + 3,
         None => return url.trim_end_matches('/').to_string(),
     };
     let rest = &url[after_scheme..];
-    let cut = rest
-        .find(|c: char| c == '/' || c == '?' || c == '#')
-        .unwrap_or(rest.len());
+    let cut = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     url[..after_scheme + cut].to_string()
 }
 
@@ -3929,6 +3961,50 @@ mod tests {
     }
 
     #[test]
+    fn validate_trusted_redirect_parses_authorities_before_trusting_them() {
+        let trusted = vec!["https://app.example.com".to_string()];
+
+        // URL normalization is shared by the callback and the allowlist.
+        assert!(
+            validate_trusted_redirect("HTTPS://APP.EXAMPLE.COM:443/callback", &trusted).is_ok()
+        );
+        let normalized_trusted = vec!["HTTPS://APP.EXAMPLE.COM:443".to_string()];
+        assert!(
+            validate_trusted_redirect("https://app.example.com/callback", &normalized_trusted)
+                .is_ok()
+        );
+
+        // Text that looks like loopback in userinfo is not the parsed host.
+        for url in [
+            "http://localhost@example.invalid/callback",
+            "http://[::1]@example.invalid/callback",
+            "https://user@app.example.com/callback",
+            "https://user:password@app.example.com/callback",
+            "https://app.example.com:not-a-port/callback",
+        ] {
+            assert!(
+                validate_trusted_redirect(url, &trusted).is_err(),
+                "authority-confusion URL {url:?} must be rejected"
+            );
+        }
+
+        // Allowlist entries are origins, not arbitrary URLs or credentialed
+        // authorities.
+        for invalid_trusted in [
+            "https://app.example.com/login",
+            "https://user@app.example.com",
+        ] {
+            assert!(matches!(
+                validate_trusted_redirect(
+                    "https://app.example.com/callback",
+                    &[invalid_trusted.to_string()]
+                ),
+                Err(TrustedOriginError::NotTrusted { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn relative_callbacks_are_trusted_without_any_allowlist() {
         // The default template's OAuth button ships `?callback=/onboarding` — a
         // same-origin path. It must work with an EMPTY allowlist (no
@@ -3998,6 +4074,7 @@ mod tests {
     fn is_localhost_origin_recognises_loopback_variants() {
         assert!(is_localhost_origin("http://localhost"));
         assert!(is_localhost_origin("http://localhost:3000"));
+        assert!(is_localhost_origin("HTTP://LOCALHOST:3000"));
         assert!(is_localhost_origin("http://127.0.0.1"));
         assert!(is_localhost_origin("http://127.0.0.1:4321"));
         assert!(is_localhost_origin("http://[::1]"));
@@ -4016,8 +4093,13 @@ mod tests {
         assert!(!is_localhost_origin("http://evil.com"));
         assert!(!is_localhost_origin("http://localhost.attacker.com"));
         assert!(!is_localhost_origin("http://127.0.0.1.attacker.com"));
+        assert!(!is_localhost_origin("http://127.0.0.2"));
         assert!(!is_localhost_origin("http://10.0.0.1"));
         assert!(!is_localhost_origin("http://192.168.1.1"));
+        assert!(!is_localhost_origin("http://user@localhost"));
+        assert!(!is_localhost_origin("http://localhost@example.invalid"));
+        assert!(!is_localhost_origin("http://[::1]@example.invalid"));
+        assert!(!is_localhost_origin("http://localhost:not-a-port"));
         assert!(!is_localhost_origin(""));
     }
 

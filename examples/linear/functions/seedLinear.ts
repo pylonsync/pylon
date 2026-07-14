@@ -23,6 +23,8 @@ export default mutation({
     const teams = await ctx.db.query("Team", { orgId });
     if (teams.length === 0) return { seeded: false, reason: "no team to seed into" };
     const teamId = teams[0].id;
+    if (typeof teamId !== "string")
+      throw ctx.error("INTERNAL", "team record is missing its id");
 
     const userId = ctx.auth.userId;
     const now = Date.now();

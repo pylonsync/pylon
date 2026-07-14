@@ -2342,9 +2342,8 @@ pub fn reject_readonly_payload(
     Ok(())
 }
 
-/// Same projection logic as `crate::routes::auth::project_user_row`,
-/// but lifted here so non-auth routes can use it. Callers must have
-/// already confirmed the row belongs to the User entity.
+/// Core User projection used by every client-bound User-row path.
+/// Callers must have already confirmed the row belongs to the User entity.
 fn project_user_fields(
     row: serde_json::Value,
     cfg: &pylon_kernel::ManifestAuthUserConfig,
@@ -2803,7 +2802,7 @@ mod field_gate_tests {
 mod auth_gate_tests {
     use super::*;
     use pylon_auth::{AuthContext, CookieConfig, MagicCodeStore, OAuthStateStore, SessionStore};
-    use pylon_kernel::{AppManifest, MANIFEST_VERSION};
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestField, MANIFEST_VERSION};
     use pylon_policy::PolicyEngine;
     use pylon_sync::ChangeLog;
 
@@ -2814,6 +2813,22 @@ mod auth_gate_tests {
 
     struct StubDataStore {
         manifest: AppManifest,
+        user_row: Option<serde_json::Value>,
+    }
+    impl StubDataStore {
+        fn empty(manifest: AppManifest) -> Self {
+            Self {
+                manifest,
+                user_row: None,
+            }
+        }
+
+        fn with_user(manifest: AppManifest, user_row: serde_json::Value) -> Self {
+            Self {
+                manifest,
+                user_row: Some(user_row),
+            }
+        }
     }
     impl pylon_http::DataStore for StubDataStore {
         fn manifest(&self) -> &AppManifest {
@@ -2828,10 +2843,15 @@ mod auth_gate_tests {
         }
         fn get_by_id(
             &self,
-            _entity: &str,
-            _id: &str,
+            entity: &str,
+            id: &str,
         ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
-            Ok(None)
+            let user_entity = &self.manifest.auth.user.entity;
+            Ok(self.user_row.as_ref().and_then(|row| {
+                (entity == user_entity
+                    && row.get("id").and_then(|value| value.as_str()) == Some(id))
+                .then(|| row.clone())
+            }))
         }
         fn list(&self, _entity: &str) -> Result<Vec<serde_json::Value>, pylon_http::DataError> {
             Ok(Vec::new())
@@ -3142,9 +3162,32 @@ mod auth_gate_tests {
         F: FnOnce(&RouterContext),
     {
         let manifest = empty_manifest();
-        let store = StubDataStore {
-            manifest: manifest.clone(),
-        };
+        let store = StubDataStore::empty(manifest.clone());
+        with_ctx_store(
+            is_dev,
+            auth,
+            hooks,
+            cookie_config_override,
+            notifier_override,
+            manifest,
+            store,
+            f,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_ctx_store<F>(
+        is_dev: bool,
+        auth: &AuthContext,
+        hooks: &dyn PluginHookOps,
+        cookie_config_override: Option<CookieConfig>,
+        notifier_override: Option<&dyn ChangeNotifier>,
+        manifest: AppManifest,
+        store: StubDataStore,
+        f: F,
+    ) where
+        F: FnOnce(&RouterContext),
+    {
         let session_store = SessionStore::new();
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
@@ -3153,9 +3196,7 @@ mod auth_gate_tests {
         // OrgStore reads/writes via DataStore. Tests share the
         // routing-context stub.
         let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
-            std::sync::Arc::new(StubDataStore {
-                manifest: manifest.clone(),
-            });
+            std::sync::Arc::new(StubDataStore::empty(manifest.clone()));
         let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
@@ -3258,6 +3299,86 @@ mod auth_gate_tests {
             );
             assert_eq!(status, 201);
         });
+    }
+
+    #[test]
+    fn auth_session_hides_server_only_user_fields() {
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "test".into(),
+            version: "0.1.0".into(),
+            entities: vec![ManifestEntity {
+                name: "User".into(),
+                fields: vec![
+                    ManifestField {
+                        name: "email".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    ManifestField {
+                        name: "displayName".into(),
+                        field_type: "string".into(),
+                        ..Default::default()
+                    },
+                    ManifestField {
+                        name: "billingKey".into(),
+                        field_type: "string".into(),
+                        server_only: true,
+                        ..Default::default()
+                    },
+                ],
+                indexes: vec![],
+                relations: vec![],
+                search: None,
+                crdt: true,
+                sync: true,
+            }],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+            crons: vec![],
+            fonts: vec![],
+        };
+        let user_row = serde_json::json!({
+            "id": "user_1",
+            "email": "alice@example.com",
+            "displayName": "Alice",
+            "passwordHash": "$argon2id$v=19$secret",
+            "_internalFlag": true,
+            "billingKey": "billing-secret",
+        });
+        let store = StubDataStore::with_user(manifest.clone(), user_row);
+        let auth = AuthContext::authenticated("user_1".into());
+
+        with_ctx_store(
+            false,
+            &auth,
+            &NoopPluginHooks,
+            None,
+            None,
+            manifest,
+            store,
+            |ctx| {
+                let (status, body, _ct) =
+                    route(ctx, HttpMethod::Get, "/api/auth/session", "", None);
+                assert_eq!(status, 200);
+
+                let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let user = response["user"].as_object().expect("session user object");
+                assert_eq!(
+                    user.get("email"),
+                    Some(&serde_json::json!("alice@example.com"))
+                );
+                assert_eq!(user.get("displayName"), Some(&serde_json::json!("Alice")));
+                assert!(!user.contains_key("passwordHash"));
+                assert!(!user.contains_key("_internalFlag"));
+                assert!(!user.contains_key("billingKey"));
+            },
+        );
     }
 
     /// /api/auth/native-session refuses anonymous callers — there's
@@ -3760,9 +3881,7 @@ mod auth_gate_tests {
         // OrgStore reads/writes via DataStore. Tests share the
         // routing-context stub.
         let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
-            std::sync::Arc::new(StubDataStore {
-                manifest: manifest.clone(),
-            });
+            std::sync::Arc::new(StubDataStore::empty(manifest.clone()));
         let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
@@ -4322,9 +4441,7 @@ mod auth_gate_tests {
             crons: vec![],
             fonts: vec![],
         };
-        let store = StubDataStore {
-            manifest: manifest.clone(),
-        };
+        let store = StubDataStore::empty(manifest.clone());
         let session_store = SessionStore::new();
         let magic_codes = MagicCodeStore::new();
         let oauth_state = OAuthStateStore::new();
@@ -4333,9 +4450,7 @@ mod auth_gate_tests {
         // OrgStore reads/writes via DataStore. Tests share the
         // routing-context stub.
         let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
-            std::sync::Arc::new(StubDataStore {
-                manifest: manifest.clone(),
-            });
+            std::sync::Arc::new(StubDataStore::empty(manifest.clone()));
         let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
@@ -4713,9 +4828,7 @@ mod auth_gate_tests {
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
         let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
-            std::sync::Arc::new(StubDataStore {
-                manifest: manifest.clone(),
-            });
+            std::sync::Arc::new(StubDataStore::empty(manifest.clone()));
         let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
@@ -4929,9 +5042,7 @@ mod auth_gate_tests {
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
         let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
-            std::sync::Arc::new(StubDataStore {
-                manifest: manifest.clone(),
-            });
+            std::sync::Arc::new(StubDataStore::empty(manifest.clone()));
         let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();
@@ -5243,9 +5354,7 @@ mod auth_gate_tests {
         let account_store = pylon_auth::AccountStore::new();
         let api_keys = pylon_auth::api_key::ApiKeyStore::new();
         let orgs_store: std::sync::Arc<dyn pylon_http::DataStore> =
-            std::sync::Arc::new(StubDataStore {
-                manifest: manifest.clone(),
-            });
+            std::sync::Arc::new(StubDataStore::empty(manifest.clone()));
         let orgs = pylon_auth::org::OrgStore::new(orgs_store, manifest.auth.org.clone());
         let siwe = pylon_auth::siwe::NonceStore::new();
         let phone_codes = pylon_auth::phone::PhoneCodeStore::new();

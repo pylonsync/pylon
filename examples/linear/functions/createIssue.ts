@@ -34,6 +34,11 @@ export default mutation({
     const team = await ctx.db.get("Team", args.teamId);
     if (!team || team.orgId !== ctx.auth.tenantId)
       throw ctx.error("TEAM_NOT_FOUND", "team not in this org");
+    const issueSequence =
+      typeof team.issueSequence === "number" ? team.issueSequence : 0;
+    const teamKey = team.key;
+    if (typeof teamKey !== "string")
+      throw ctx.error("INTERNAL", "team record is missing its key");
 
     const validStates = [
       "backlog", "todo", "in_progress", "in_review", "done", "cancelled", "triage",
@@ -47,8 +52,8 @@ export default mutation({
       throw ctx.error("INVALID_PRIORITY", "priority ∈ 0..4");
 
     const now = new Date().toISOString();
-    const nextNumber = (team.issueSequence ?? 0) + 1;
-    await ctx.db.update("Team", team.id, { issueSequence: nextNumber });
+    const nextNumber = issueSequence + 1;
+    await ctx.db.update("Team", args.teamId, { issueSequence: nextNumber });
 
     const issueId = await ctx.db.insert("Issue", {
       orgId: ctx.auth.tenantId,
@@ -79,6 +84,6 @@ export default mutation({
       createdAt: now,
     });
 
-    return { issueId, number: nextNumber, identifier: `${team.key}-${nextNumber}` };
+    return { issueId, number: nextNumber, identifier: `${teamKey}-${nextNumber}` };
   },
 });

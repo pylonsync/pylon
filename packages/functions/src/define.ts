@@ -26,15 +26,18 @@ import type {
   QueryCtx,
   MutationCtx,
   ActionCtx,
-  Validator,
+  ValidatorSchema,
+  InferArgs,
   AuthMode,
 } from "./types";
 
 /** Default auth mode applied when a definition omits `auth`. */
 const DEFAULT_AUTH: AuthMode = "user";
 
-interface CommonDef {
-  args?: Record<string, Validator>;
+interface CommonDef<
+  TSchema extends ValidatorSchema | undefined = ValidatorSchema | undefined,
+> {
+  args?: TSchema;
   /**
    * When true, the function is callable only via `ctx.runQuery()` /
    * `ctx.runMutation()` / `ctx.runAction()` from another function
@@ -69,7 +72,11 @@ interface CommonDef {
   timeout?: number;
 }
 
-interface QueryDefRequired<TArgs, TReturn> extends CommonDef {
+interface QueryDefRequired<
+  TArgs,
+  TReturn,
+  TSchema extends ValidatorSchema | undefined = ValidatorSchema | undefined,
+> extends CommonDef<TSchema> {
   /** Defaults to `"user"`. See [`AuthMode`] for the full surface. */
   auth?: "user" | "admin";
   handler: (
@@ -78,7 +85,11 @@ interface QueryDefRequired<TArgs, TReturn> extends CommonDef {
   ) => Promise<TReturn>;
 }
 
-interface QueryDefOptional<TArgs, TReturn> extends CommonDef {
+interface QueryDefOptional<
+  TArgs,
+  TReturn,
+  TSchema extends ValidatorSchema | undefined = ValidatorSchema | undefined,
+> extends CommonDef<TSchema> {
   auth: "public" | "guest";
   handler: (
     ctx: QueryCtx<"optional">,
@@ -86,7 +97,11 @@ interface QueryDefOptional<TArgs, TReturn> extends CommonDef {
   ) => Promise<TReturn>;
 }
 
-interface MutationDefRequired<TArgs, TReturn> extends CommonDef {
+interface MutationDefRequired<
+  TArgs,
+  TReturn,
+  TSchema extends ValidatorSchema | undefined = ValidatorSchema | undefined,
+> extends CommonDef<TSchema> {
   auth?: "user" | "admin";
   handler: (
     ctx: MutationCtx<"required">,
@@ -94,7 +109,11 @@ interface MutationDefRequired<TArgs, TReturn> extends CommonDef {
   ) => Promise<TReturn>;
 }
 
-interface MutationDefOptional<TArgs, TReturn> extends CommonDef {
+interface MutationDefOptional<
+  TArgs,
+  TReturn,
+  TSchema extends ValidatorSchema | undefined = ValidatorSchema | undefined,
+> extends CommonDef<TSchema> {
   auth: "public" | "guest";
   handler: (
     ctx: MutationCtx<"optional">,
@@ -102,7 +121,11 @@ interface MutationDefOptional<TArgs, TReturn> extends CommonDef {
   ) => Promise<TReturn>;
 }
 
-interface ActionDefRequired<TArgs, TReturn> extends CommonDef {
+interface ActionDefRequired<
+  TArgs,
+  TReturn,
+  TSchema extends ValidatorSchema | undefined = ValidatorSchema | undefined,
+> extends CommonDef<TSchema> {
   auth?: "user" | "admin";
   handler: (
     ctx: ActionCtx<"required">,
@@ -110,7 +133,11 @@ interface ActionDefRequired<TArgs, TReturn> extends CommonDef {
   ) => Promise<TReturn>;
 }
 
-interface ActionDefOptional<TArgs, TReturn> extends CommonDef {
+interface ActionDefOptional<
+  TArgs,
+  TReturn,
+  TSchema extends ValidatorSchema | undefined = ValidatorSchema | undefined,
+> extends CommonDef<TSchema> {
   auth: "public" | "guest";
   handler: (
     ctx: ActionCtx<"optional">,
@@ -150,6 +177,26 @@ interface ActionDefOptional<TArgs, TReturn> extends CommonDef {
  * });
  * ```
  */
+export function query<
+  const TSchema extends ValidatorSchema,
+  TReturn,
+  TAuth extends "user" | "admin" | undefined,
+>(
+  def: QueryDefRequired<InferArgs<TSchema>, TReturn, TSchema> & {
+    args: TSchema;
+    auth?: TAuth;
+  },
+): FnDefinition<InferArgs<TSchema>, TReturn>;
+export function query<
+  const TSchema extends ValidatorSchema,
+  TReturn,
+  TAuth extends "public" | "guest",
+>(
+  def: QueryDefOptional<InferArgs<TSchema>, TReturn, TSchema> & {
+    args: TSchema;
+    auth: TAuth;
+  },
+): FnDefinition<InferArgs<TSchema>, TReturn>;
 export function query<TArgs = Record<string, unknown>, TReturn = unknown>(
   def: QueryDefRequired<TArgs, TReturn>,
 ): FnDefinition<TArgs, TReturn>;
@@ -200,6 +247,26 @@ export function query<TArgs, TReturn>(
  * });
  * ```
  */
+export function mutation<
+  const TSchema extends ValidatorSchema,
+  TReturn,
+  TAuth extends "user" | "admin" | undefined,
+>(
+  def: MutationDefRequired<InferArgs<TSchema>, TReturn, TSchema> & {
+    args: TSchema;
+    auth?: TAuth;
+  },
+): FnDefinition<InferArgs<TSchema>, TReturn>;
+export function mutation<
+  const TSchema extends ValidatorSchema,
+  TReturn,
+  TAuth extends "public" | "guest",
+>(
+  def: MutationDefOptional<InferArgs<TSchema>, TReturn, TSchema> & {
+    args: TSchema;
+    auth: TAuth;
+  },
+): FnDefinition<InferArgs<TSchema>, TReturn>;
 export function mutation<TArgs = Record<string, unknown>, TReturn = unknown>(
   def: MutationDefRequired<TArgs, TReturn>,
 ): FnDefinition<TArgs, TReturn>;
@@ -265,6 +332,26 @@ export function mutation<TArgs, TReturn>(
  * });
  * ```
  */
+export function action<
+  const TSchema extends ValidatorSchema,
+  TReturn,
+  TAuth extends "user" | "admin" | undefined,
+>(
+  def: ActionDefRequired<InferArgs<TSchema>, TReturn, TSchema> & {
+    args: TSchema;
+    auth?: TAuth;
+  },
+): FnDefinition<InferArgs<TSchema>, TReturn>;
+export function action<
+  const TSchema extends ValidatorSchema,
+  TReturn,
+  TAuth extends "public" | "guest",
+>(
+  def: ActionDefOptional<InferArgs<TSchema>, TReturn, TSchema> & {
+    args: TSchema;
+    auth: TAuth;
+  },
+): FnDefinition<InferArgs<TSchema>, TReturn>;
 export function action<TArgs = Record<string, unknown>, TReturn = unknown>(
   def: ActionDefRequired<TArgs, TReturn>,
 ): FnDefinition<TArgs, TReturn>;

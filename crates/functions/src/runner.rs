@@ -48,6 +48,16 @@ use crate::trace::{TraceBuilder, TraceLog};
 /// [`FnRunner::set_call_timeout`] or `PYLON_FN_CALL_TIMEOUT` (server-side).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Clone the call's auth context while applying its current mutable admin
+/// state. In-call elevation changes only `is_admin`; identity, tenancy, and
+/// roles remain anchored to the entry auth snapshot.
+fn current_auth_snapshot(auth: &AuthInfo, is_admin: bool) -> AuthInfo {
+    AuthInfo {
+        is_admin,
+        ..auth.clone()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Stream callback — receives SSE chunks during execution
 // ---------------------------------------------------------------------------
@@ -1200,12 +1210,7 @@ impl FnRunner {
                     // flag flips `caller_is_admin` below; reconstruct
                     // the AuthInfo here so the policy gate sees the
                     // current (possibly elevated) state.
-                    let per_op_auth = AuthInfo {
-                        user_id: caller_user_id.clone(),
-                        is_admin: caller_is_admin,
-                        tenant_id: caller_tenant_id.clone(),
-                        roles: gate_auth.roles.clone(),
-                    };
+                    let per_op_auth = current_auth_snapshot(&gate_auth, caller_is_admin);
                     // Propagate the CURRENT admin state (elevate can flip it
                     // mid-call) to auth-aware store wrappers — the plugin
                     // chain captured its context at call entry and would
@@ -1340,23 +1345,10 @@ impl FnRunner {
                 TsMessage::RunFn(run) if run.call_id == call_id => {
                     // Nested function call (action calling query/mutation).
                     // Execute recursively. The nested call gets its own trace
-                    // but inherits user + tenant from the caller so row-level
-                    // policies (`auth.tenantId == data.orgId`) keep working
-                    // when an action stamps tenant-scoped writes via helper
-                    // mutations. Callers that need to cross tenant boundaries
-                    // must do so on the client side — no silent elevation
-                    // happens here; the caller's tenant carries through.
-                    let nested_auth = AuthInfo {
-                        user_id: trace.user_id().map(|s| s.to_string()),
-                        is_admin: false,
-                        tenant_id: trace.tenant_id().map(|s| s.to_string()),
-                        // Nested calls don't currently propagate the
-                        // outer trace's roles — trace_log doesn't capture
-                        // them. Empty here matches pre-roles behavior;
-                        // RBAC-gated nested calls fall back to denying
-                        // unless the outer is admin (which bypasses).
-                        roles: Vec::new(),
-                    };
+                    // and inherits the caller's current admin state, roles,
+                    // user, and tenant. This keeps authorization consistent
+                    // with other host operations after an in-call elevation.
+                    let nested_auth = current_auth_snapshot(&gate_auth, caller_is_admin);
                     // Prefer the nested_call_hook if installed — it lets the
                     // caller wrap mutations in their own BEGIN/COMMIT around
                     // a TxStore. Falling back to direct recursion leaves
@@ -1426,12 +1418,7 @@ impl FnRunner {
                     }
                     // Build an AuthInfo snapshot for the hook so it can
                     // enforce per-user model gating / spend accounting.
-                    let auth_snapshot = AuthInfo {
-                        user_id: caller_user_id.clone(),
-                        is_admin: caller_is_admin,
-                        tenant_id: caller_tenant_id.clone(),
-                        roles: gate_auth.roles.clone(),
-                    };
+                    let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
                     let result: Result<serde_json::Value, (String, String)> = {
                         let hook = self.llm_hook.lock().unwrap();
                         match *hook {
@@ -1462,12 +1449,7 @@ impl FnRunner {
                         self.send(&reply)?;
                         continue;
                     }
-                    let auth_snapshot = AuthInfo {
-                        user_id: caller_user_id.clone(),
-                        is_admin: caller_is_admin,
-                        tenant_id: caller_tenant_id.clone(),
-                        roles: gate_auth.roles.clone(),
-                    };
+                    let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
                     let result: Result<serde_json::Value, (String, String)> = {
                         let hook = self.connection_hook.lock().unwrap();
                         match *hook {
@@ -2467,6 +2449,37 @@ mod tests {
             tenant_id: None,
             roles: vec![],
         }
+    }
+
+    #[test]
+    fn current_auth_snapshot_preserves_identity_tenant_roles_and_false_admin() {
+        let auth = AuthInfo {
+            user_id: Some("user-42".into()),
+            is_admin: false,
+            tenant_id: Some("tenant-7".into()),
+            roles: vec!["editor".into(), "reviewer".into()],
+        };
+
+        let snapshot = current_auth_snapshot(&auth, false);
+
+        assert_eq!(snapshot.user_id, auth.user_id);
+        assert_eq!(snapshot.tenant_id, auth.tenant_id);
+        assert_eq!(snapshot.roles, vec!["editor", "reviewer"]);
+        assert!(!snapshot.is_admin);
+    }
+
+    #[test]
+    fn current_auth_snapshot_applies_elevated_admin_state() {
+        let snapshot = current_auth_snapshot(&user_auth(), true);
+
+        assert!(snapshot.is_admin);
+    }
+
+    #[test]
+    fn current_auth_snapshot_preserves_true_admin_state() {
+        let snapshot = current_auth_snapshot(&admin_auth(), true);
+
+        assert!(snapshot.is_admin);
     }
 
     fn db_msg(op: DbOp, entity: &str, unsafe_op: bool) -> DbOpMessage {

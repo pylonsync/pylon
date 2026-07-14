@@ -2578,6 +2578,7 @@ dependencies = [
  "sha3",
  "tracing",
  "ureq",
+ "url",
 ]
 
 [[package]]

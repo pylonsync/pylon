@@ -89,7 +89,7 @@ function Detail({
   // the authoritative row IN PLACE (no Suspense fallback → no flash). On a hard
   // load / direct URL there's no seed, so it suspends and the server streams the
   // real product (the <Suspense> above catches it). See its docs in @pylonsync/react.
-  const product = useRouteData<Product>(
+  const product = useRouteData<Product | null>(
     () => resolveProduct(serverData, slug),
     [serverData, slug],
   );

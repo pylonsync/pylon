@@ -72,7 +72,8 @@ afterEach(() => {
 });
 
 function offlineFetch(): typeof fetch {
-  return (() => Promise.reject(new TypeError("network down"))) as typeof fetch;
+  return (() =>
+    Promise.reject(new TypeError("network down"))) as unknown as typeof fetch;
 }
 
 function makeEngine(persistence: ReplicaPersistence): SyncEngine {

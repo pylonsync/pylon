@@ -49,7 +49,7 @@ describe("initial-sync loading signal", () => {
     // The crux: mid-pull the signal was still false (a UI would show a
     // skeleton, not its empty state). If `loading` reverts to gating on
     // `isHydrated()`, this captured value flips to true and the test fails.
-    expect(settledMidPull).toBe(false);
+    expect(settledMidPull as boolean | null).toBe(false);
 
     // Once the pull confirms (here: an empty result), it settles — so an empty
     // list now reads as a real "no rows", not "still fetching".

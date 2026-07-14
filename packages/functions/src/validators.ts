@@ -22,75 +22,99 @@
  * ```
  */
 
-import type { Validator } from "./types";
+import type {
+  AnyValidator,
+  InferArgs,
+  InferValidator,
+  Validator,
+  ValidatorSchema,
+} from "./types";
 
-function validator(type: string, extra?: Partial<Validator>): Validator {
+function validator<T>(
+  type: string,
+  extra?: Partial<Validator<T, false>>,
+): Validator<T, false> {
   return { type, ...extra };
 }
 
 export const v = {
   /** String value. */
-  string: (): Validator => validator("string"),
+  string: (): Validator<string, false> => validator("string"),
 
   /** Number (float64). Same as `v.float()`. */
-  number: (): Validator => validator("number"),
+  number: (): Validator<number, false> => validator("number"),
 
   /**
    * 64-bit float. Alias for `v.number()` so the validator API matches the
    * schema DSL (which uses `field.float()`). Prefer this in new code.
    */
-  float: (): Validator => validator("number"),
+  float: (): Validator<number, false> => validator("number"),
 
   /** Integer. */
-  int: (): Validator => validator("int"),
+  int: (): Validator<number, false> => validator("int"),
 
   /** Boolean. Same as `v.bool()`. */
-  boolean: (): Validator => validator("boolean"),
+  boolean: (): Validator<boolean, false> => validator("boolean"),
 
   /**
    * Boolean. Alias for `v.boolean()` so the validator API matches the
    * schema DSL (which uses `field.bool()`). Prefer this in new code.
    */
-  bool: (): Validator => validator("boolean"),
+  bool: (): Validator<boolean, false> => validator("boolean"),
 
   /**
    * ISO-8601 datetime string. Validates the shape of a string value; the
    * stored column type comes from the schema (`field.datetime()`).
    */
-  datetime: (): Validator => validator("string"),
+  datetime: (): Validator<string, false> => validator("string"),
 
   /**
    * Richtext string. Same runtime validation as `v.string()`; named
    * explicitly so server functions read as the matching schema type.
    */
-  richtext: (): Validator => validator("string"),
+  richtext: (): Validator<string, false> => validator("string"),
 
   /** ID reference to another entity. */
-  id: (table: string): Validator => validator("id", { table }),
+  id: (table: string): Validator<string, false> =>
+    validator("id", { table }),
 
   /** Null value. */
-  null: (): Validator => validator("null"),
+  null: (): Validator<null, false> => validator("null"),
 
   /** Array of values. */
-  array: (items: Validator): Validator => validator("array", { items }),
+  array: <TValidator extends AnyValidator>(
+    items: TValidator,
+  ): Validator<InferValidator<TValidator>[], false> =>
+    validator("array", { items }),
 
   /** Object with typed fields. */
-  object: (fields: Record<string, Validator>): Validator =>
+  object: <TSchema extends ValidatorSchema>(
+    fields: TSchema,
+  ): Validator<InferArgs<TSchema>, false> =>
     validator("object", { fields }),
 
   /** Optional value (may be omitted). */
-  optional: (inner: Validator): Validator => ({ ...inner, optional: true }),
+  optional: <TValidator extends AnyValidator>(
+    inner: TValidator,
+  ): Validator<InferValidator<TValidator>, true> =>
+    ({
+      ...inner,
+      optional: true,
+    }) as Validator<InferValidator<TValidator>, true>,
 
   /** Union of multiple types. */
-  union: (...variants: Validator[]): Validator =>
+  union: <TVariants extends AnyValidator[]>(
+    ...variants: TVariants
+  ): Validator<InferValidator<TVariants[number]>, false> =>
     validator("union", { variants }),
 
   /** Exact literal value. */
-  literal: (value: string | number | boolean): Validator =>
-    validator("literal", { value }),
+  literal: <const TValue extends string | number | boolean>(
+    value: TValue,
+  ): Validator<TValue, false> => validator("literal", { value }),
 
   /** Any valid JSON value. */
-  any: (): Validator => validator("any"),
+  any: (): Validator<any, false> => validator("any"),
 };
 
 // ---------------------------------------------------------------------------

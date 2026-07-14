@@ -694,20 +694,66 @@ fn ws_cookie_origin_trusted(origin: Option<&str>, allowlist: &[String]) -> bool 
 
 /// Authorization decision for `GET /api/files/<id>` on an ownership-tracking
 /// backend. FAIL CLOSED: serve only when the asset has a recorded owner that
-/// matches the caller. A missing owner (`Ok(None)` — written-but-unconfirmed,
+/// matches the caller's user + active tenant. A missing owner (`Ok(None)` — written-but-unconfirmed,
 /// or a `store()`'d file with no sidecar) or an unreadable sidecar (`Err`)
 /// must NOT serve the bytes (the IDOR this closes). Admin + non-ownership
 /// backends are gated by the caller before this is consulted.
 fn file_read_authorized(
     owner: &Result<Option<pylon_storage::files::FileOwner>, pylon_storage::files::FileStorageError>,
     caller_user_id: Option<&str>,
+    caller_tenant_id: Option<&str>,
 ) -> bool {
-    matches!(owner, Ok(Some(o)) if Some(o.user_id.as_str()) == caller_user_id)
+    matches!(owner, Ok(Some(o)) if file_owner_matches(o, caller_user_id, caller_tenant_id))
+}
+
+fn file_owner_matches(
+    owner: &pylon_storage::files::FileOwner,
+    caller_user_id: Option<&str>,
+    caller_tenant_id: Option<&str>,
+) -> bool {
+    Some(owner.user_id.as_str()) == caller_user_id && owner.tenant_id.as_deref() == caller_tenant_id
+}
+
+/// Authorization decision for `POST /api/files/confirm` on an ownership-
+/// tracking backend. Confirmation is stricter than ordinary file access: the
+/// caller must be the exact user + tenant that initialized the upload. There
+/// is deliberately no admin bypass because confirmation must never double as
+/// an implicit ownership-transfer operation.
+fn file_confirm_authorized(
+    owner: &Result<Option<pylon_storage::files::FileOwner>, pylon_storage::files::FileStorageError>,
+    caller_user_id: Option<&str>,
+    caller_tenant_id: Option<&str>,
+) -> bool {
+    matches!(
+        owner,
+        Ok(Some(o)) if file_owner_matches(o, caller_user_id, caller_tenant_id)
+    )
+}
+
+const DEFAULT_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
+
+fn upload_max_bytes_from(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_UPLOAD_MAX_BYTES)
+}
+
+fn upload_max_bytes() -> usize {
+    let configured = std::env::var("PYLON_MAX_UPLOAD_BYTES").ok();
+    upload_max_bytes_from(configured.as_deref())
+}
+
+fn upload_size_allowed(actual: usize, maximum: usize) -> bool {
+    actual <= maximum
 }
 
 #[cfg(test)]
 mod file_auth_tests {
-    use super::{ephemeral_sessions_boot_check, file_read_authorized, local_put_owned_by_other};
+    use super::{
+        ephemeral_sessions_boot_check, file_confirm_authorized, file_read_authorized,
+        local_put_owned_by_other, upload_max_bytes_from, upload_size_allowed,
+        DEFAULT_UPLOAD_MAX_BYTES,
+    };
     use pylon_storage::files::{FileOwner, FileStorageError};
 
     fn owner(uid: &str) -> Result<Option<FileOwner>, FileStorageError> {
@@ -717,27 +763,104 @@ mod file_auth_tests {
         }))
     }
 
+    fn tenant_owner(
+        uid: &str,
+        tenant: Option<&str>,
+    ) -> Result<Option<FileOwner>, FileStorageError> {
+        Ok(Some(FileOwner {
+            user_id: uid.into(),
+            tenant_id: tenant.map(str::to_owned),
+        }))
+    }
+
+    #[test]
+    fn file_confirm_authorized_requires_exact_initiator() {
+        assert!(file_confirm_authorized(
+            &tenant_owner("u1", Some("t1")),
+            Some("u1"),
+            Some("t1")
+        ));
+        assert!(file_confirm_authorized(
+            &tenant_owner("u1", None),
+            Some("u1"),
+            None
+        ));
+        assert!(!file_confirm_authorized(
+            &tenant_owner("u2", Some("t1")),
+            Some("u1"),
+            Some("t1")
+        ));
+        assert!(!file_confirm_authorized(
+            &tenant_owner("u1", Some("t2")),
+            Some("u1"),
+            Some("t1")
+        ));
+        assert!(!file_confirm_authorized(
+            &tenant_owner("u1", None),
+            None,
+            None
+        ));
+        assert!(!file_confirm_authorized(&Ok(None), Some("u1"), None));
+        assert!(!file_confirm_authorized(
+            &Err(FileStorageError {
+                code: "IO".into(),
+                message: "boom".into(),
+            }),
+            Some("u1"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn upload_max_parser_preserves_default_and_valid_overrides() {
+        assert_eq!(upload_max_bytes_from(None), DEFAULT_UPLOAD_MAX_BYTES);
+        assert_eq!(upload_max_bytes_from(Some("123")), 123);
+        assert_eq!(upload_max_bytes_from(Some("0")), 0);
+        assert_eq!(
+            upload_max_bytes_from(Some("invalid")),
+            DEFAULT_UPLOAD_MAX_BYTES
+        );
+        assert_eq!(
+            upload_max_bytes_from(Some("999999999999999999999999999999999999999")),
+            DEFAULT_UPLOAD_MAX_BYTES
+        );
+    }
+
+    #[test]
+    fn upload_max_accepts_boundary_and_rejects_larger_actual_size() {
+        assert!(upload_size_allowed(0, 0));
+        assert!(upload_size_allowed(100, 100));
+        assert!(!upload_size_allowed(101, 100));
+    }
+
     #[test]
     fn file_get_fails_closed_on_missing_or_unreadable_owner() {
         // Owner present + matches → allowed.
-        assert!(file_read_authorized(&owner("u1"), Some("u1")));
+        assert!(file_read_authorized(&owner("u1"), Some("u1"), None));
         // Owner present + mismatch → denied.
-        assert!(!file_read_authorized(&owner("u2"), Some("u1")));
+        assert!(!file_read_authorized(&owner("u2"), Some("u1"), None));
         // NO owner recorded (Ok(None)) → MUST deny (the IDOR — pre-fix served).
-        assert!(!file_read_authorized(&Ok(None), Some("u1")));
+        assert!(!file_read_authorized(&Ok(None), Some("u1"), None));
         // Unreadable sidecar (Err) → MUST deny.
         assert!(!file_read_authorized(
             &Err(FileStorageError {
                 code: "IO".into(),
                 message: "boom".into(),
             }),
-            Some("u1")
+            Some("u1"),
+            None,
         ));
         // Anonymous caller against an owned asset → denied.
-        assert!(!file_read_authorized(&owner("u1"), None));
+        assert!(!file_read_authorized(&owner("u1"), None, None));
         // Anonymous caller against an unowned asset → still denied (no
         // `None == None` foot-gun serving ownerless files to anon).
-        assert!(!file_read_authorized(&Ok(None), None));
+        assert!(!file_read_authorized(&Ok(None), None, None));
+
+        assert!(!file_read_authorized(
+            &tenant_owner("u1", Some("tenant-a")),
+            Some("u1"),
+            Some("tenant-b"),
+        ));
     }
 
     #[test]
@@ -747,14 +870,20 @@ mod file_auth_tests {
         assert!(local_put_owned_by_other(
             &owner("victim"),
             "attacker",
+            None,
             false
         ));
         // Owned by the caller → allowed (the legitimate upload completing).
-        assert!(!local_put_owned_by_other(&owner("me"), "me", false));
+        assert!(!local_put_owned_by_other(&owner("me"), "me", None, false));
         // Admin may overwrite anyone's asset (matches DELETE's admin bypass).
-        assert!(!local_put_owned_by_other(&owner("victim"), "admin", true));
+        assert!(!local_put_owned_by_other(
+            &owner("victim"),
+            "admin",
+            None,
+            true
+        ));
         // Unowned (Ok(None)) → allowed; the caller claims it on write.
-        assert!(!local_put_owned_by_other(&Ok(None), "me", false));
+        assert!(!local_put_owned_by_other(&Ok(None), "me", None, false));
         // Unreadable sidecar (Err) → fail CLOSED, refuse the write.
         assert!(local_put_owned_by_other(
             &Err(FileStorageError {
@@ -762,6 +891,14 @@ mod file_auth_tests {
                 message: "boom".into(),
             }),
             "me",
+            None,
+            false,
+        ));
+
+        assert!(local_put_owned_by_other(
+            &tenant_owner("me", Some("tenant-a")),
+            "me",
+            Some("tenant-b"),
             false,
         ));
     }
@@ -785,6 +922,7 @@ mod file_auth_tests {
         assert!(!local_put_owned_by_other(
             &owner("victim"),
             "anyone",
+            None,
             admin.is_unscoped_admin()
         ));
 
@@ -798,6 +936,7 @@ mod file_auth_tests {
         assert!(local_put_owned_by_other(
             &owner("victim"),
             admin_scoped.user_id.as_deref().unwrap_or_default(),
+            admin_scoped.tenant_id.as_deref(),
             admin_scoped.is_unscoped_admin(),
         ));
         // READ: the GET gate is `requires_owner_check() && !is_unscoped_admin()`,
@@ -805,7 +944,8 @@ mod file_auth_tests {
         // is denied.
         assert!(!file_read_authorized(
             &owner("victim"),
-            admin_scoped.user_id.as_deref()
+            admin_scoped.user_id.as_deref(),
+            admin_scoped.tenant_id.as_deref(),
         ));
     }
 
@@ -3968,15 +4108,11 @@ fn start_server(
             let mime_type = v["mimeType"].as_str().unwrap_or("application/octet-stream");
             let size = v["size"].as_u64().unwrap_or(0) as usize;
 
-            // Enforce upload-max BEFORE handing out the URL — otherwise
-            // a client could PUT 10GB to S3 and pylon would have no
-            // mechanism to stop it. Stack0 enforces its own limits
-            // server-side, but checking here gives operators one knob
-            // (`PYLON_MAX_UPLOAD_BYTES`) regardless of backend.
-            let upload_max: usize = std::env::var("PYLON_MAX_UPLOAD_BYTES")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(200 * 1024 * 1024);
+            // Enforce upload-max BEFORE handing out the URL. S3 binds this
+            // declared size into the presigned PUT's Content-Length, while
+            // Stack0 enforces its own limits server-side. Confirmation still
+            // checks stored metadata as defense-in-depth across backends.
+            let upload_max = upload_max_bytes();
             if size > upload_max {
                 let err = json_error(
                     "PAYLOAD_TOO_LARGE",
@@ -4011,27 +4147,45 @@ fn start_server(
                     // owner was only recorded at confirm-time (after the PUT),
                     // leaving a window where any authed user who knew/guessed
                     // the id could overwrite another user's bytes. Ownership-
-                    // less backends (Stack0/S3 — gated by the presigned URL +
-                    // API key) no-op via `requires_owner_check()`.
-                    if storage.requires_owner_check() {
-                        if let Some(uid) = auth_ctx.user_id.as_ref() {
-                            let owner = pylon_storage::files::FileOwner {
-                                user_id: uid.clone(),
-                                tenant_id: auth_ctx.tenant_id.clone(),
-                            };
-                            if let Err(e) = storage.record_owner(&init.asset_id, &owner) {
-                                tracing::warn!(
-                                    file_id = %init.asset_id,
-                                    error = %e.message,
-                                    "Failed to bind file owner at init"
-                                );
-                            }
+                    // less backends (Stack0/public S3 — gated by the opaque URL
+                    // or intentionally public CDN) skip via
+                    // `requires_owner_check()`.
+                    let owner_result = if storage.requires_owner_check() {
+                        match auth_ctx.user_id.as_ref() {
+                            Some(uid) => storage.record_owner(
+                                &init.asset_id,
+                                &pylon_storage::files::FileOwner {
+                                    user_id: uid.clone(),
+                                    tenant_id: auth_ctx.tenant_id.clone(),
+                                },
+                            ),
+                            None => Err(pylon_storage::files::FileStorageError {
+                                code: "INTERNAL".into(),
+                                message: "auth lost between checks".into(),
+                            }),
+                        }
+                    } else {
+                        Ok(())
+                    };
+
+                    match owner_result {
+                        Ok(()) => (
+                            200u16,
+                            serde_json::to_string(&init).unwrap_or_else(|_| "{}".into()),
+                        ),
+                        Err(e) => {
+                            tracing::error!(
+                                file_id = %init.asset_id,
+                                error = %e.message,
+                                "Failed to bind file owner at init"
+                            );
+                            let _ = storage.delete(&init.asset_id);
+                            (
+                                500u16,
+                                json_error("OWNERSHIP_RECORD_FAILED", &e.message),
+                            )
                         }
                     }
-                    (
-                        200u16,
-                        serde_json::to_string(&init).unwrap_or_else(|_| "{}".into()),
-                    )
                 }
                 Err(e) => (500u16, json_error(&e.code, &e.message)),
             };
@@ -4052,7 +4206,8 @@ fn start_server(
             return;
         }
 
-        // POST /api/files/confirm — step 3. Owner gets recorded here.
+        // POST /api/files/confirm — step 3. Ownership-tracking backends only
+        // allow the exact init-time user + tenant to complete the upload.
         if url == "/api/files/confirm" && method == Method::Post {
             if auth_ctx.user_id.is_none() {
                 let err = json_error(
@@ -4133,9 +4288,71 @@ fn start_server(
 
             let storage = pylon_storage::files::select_from_env();
             let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
+            let requires_owner_check = storage.requires_owner_check();
+            if requires_owner_check
+                && !file_confirm_authorized(
+                    &storage.owner_of(&asset_id),
+                    auth_ctx.user_id.as_deref(),
+                    auth_ctx.tenant_id.as_deref(),
+                )
+            {
+                let err = json_error("NOT_FOUND", "File not found");
+                let response = with_security_headers(
+                    Response::from_string(&err)
+                        .with_status_code(404u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 404);
+                return;
+            }
+
             let (status, body) = match storage.confirm_upload(&asset_id) {
                 Ok(stored) => {
-                    if let Some(uid) = auth_ctx.user_id.as_ref() {
+                    let upload_max = upload_max_bytes();
+                    if !upload_size_allowed(stored.size, upload_max) {
+                        // S3 binds the admitted size into the upload signature;
+                        // this metadata check is defense-in-depth. Destructive
+                        // cleanup is safe only after the owner check above has
+                        // proven this caller's init-time claim. Public S3 and
+                        // Stack0 have no such claim, so a caller-supplied ID
+                        // must never be allowed to delete an existing asset.
+                        if requires_owner_check {
+                            if let Err(e) = storage.delete(&stored.id) {
+                                tracing::error!(
+                                    file_id = %stored.id,
+                                    error = %e.message,
+                                    "Failed to delete oversized upload"
+                                );
+                            }
+                        }
+                        (
+                            413u16,
+                            json_error(
+                                "PAYLOAD_TOO_LARGE",
+                                &format!(
+                                    "actual size {} exceeds upload max of {upload_max}",
+                                    stored.size
+                                ),
+                            ),
+                        )
+                    } else if requires_owner_check {
+                        // The init-time owner is authoritative. Rewriting it
+                        // here would turn confirmation into an ownership claim.
+                        (
+                            200u16,
+                            serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
+                        )
+                    } else if let Some(uid) = auth_ctx.user_id.as_ref() {
                         let owner = pylon_storage::files::FileOwner {
                             user_id: uid.clone(),
                             tenant_id: auth_ctx.tenant_id.clone(),
@@ -4208,10 +4425,7 @@ fn start_server(
                     mt.record_request("PUT", 401);
                     return;
                 }
-                let upload_max: usize = std::env::var("PYLON_MAX_UPLOAD_BYTES")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(200 * 1024 * 1024);
+                let upload_max = upload_max_bytes();
                 if let Some(declared) = request.body_length() {
                     if declared > upload_max {
                         let err = json_error(
@@ -4281,7 +4495,12 @@ fn start_server(
                 // WITHIN a tenant context must stay scoped to the owner check
                 // (the #354/#355 access-control rule). Only an admin with NO
                 // active tenant may overwrite another user's asset.
-                if local_put_owned_by_other(&prior_owner, &caller, auth_ctx.is_unscoped_admin()) {
+                if local_put_owned_by_other(
+                    &prior_owner,
+                    &caller,
+                    auth_ctx.tenant_id.as_deref(),
+                    auth_ctx.is_unscoped_admin(),
+                ) {
                     // 404 (not 403) to avoid confirming the asset exists —
                     // matches the GET/DELETE owner-mismatch behaviour.
                     let err = json_error("NOT_FOUND", "File not found");
@@ -4380,7 +4599,11 @@ fn start_server(
                             // to the owner check (#354/#355). Only an admin with
                             // no active tenant may delete another user's asset.
                             if !auth_ctx.is_unscoped_admin()
-                                && Some(&owner.user_id) != auth_ctx.user_id.as_ref()
+                                && !file_owner_matches(
+                                    &owner,
+                                    auth_ctx.user_id.as_deref(),
+                                    auth_ctx.tenant_id.as_deref(),
+                                )
                             {
                                 let err = json_error("NOT_FOUND", "File not found");
                                 let response = with_security_headers(
@@ -4428,7 +4651,35 @@ fn start_server(
                             mt.record_request("DELETE", 404);
                             return;
                         }
-                        Err(_) => {}
+                        Err(e) => {
+                            tracing::error!(
+                                file_id = %asset_id,
+                                error = %e.message,
+                                "Failed to authorize file deletion"
+                            );
+                            let err = json_error(
+                                "FILE_AUTH_FAILED",
+                                "Unable to authorize file deletion",
+                            );
+                            let response = with_security_headers(
+                                Response::from_string(&err)
+                                    .with_status_code(500u16)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("DELETE", 500);
+                            return;
+                        }
                     }
                 }
                 let (status, body) = match storage.delete(asset_id) {
@@ -4514,6 +4765,7 @@ fn start_server(
                         let owned_by_caller = file_read_authorized(
                             &storage.owner_of(asset_id),
                             auth_ctx.user_id.as_deref(),
+                            auth_ctx.tenant_id.as_deref(),
                         );
                         if !owned_by_caller {
                             {
@@ -7049,7 +7301,7 @@ fn ephemeral_sessions_boot_check(force_in_memory: bool, is_dev: bool) -> Result<
 }
 
 /// Decide whether a `local-put` byte write must be REFUSED because the asset is
-/// already owned by someone other than the caller. Fails CLOSED: an ownership-
+/// already owned by another user or tenant. Fails CLOSED: an ownership-
 /// lookup error refuses the write. An unowned asset (`Ok(None)`) is allowed —
 /// the caller claims it on write. Admins bypass the owner match.
 fn local_put_owned_by_other(
@@ -7058,10 +7310,11 @@ fn local_put_owned_by_other(
         pylon_storage::files::FileStorageError,
     >,
     caller: &str,
+    caller_tenant_id: Option<&str>,
     is_admin: bool,
 ) -> bool {
     match prior_owner {
-        Ok(Some(owner)) => !is_admin && owner.user_id != caller,
+        Ok(Some(owner)) => !is_admin && !file_owner_matches(owner, Some(caller), caller_tenant_id),
         Ok(None) => false,
         Err(_) => true,
     }

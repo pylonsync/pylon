@@ -927,10 +927,10 @@ pub(crate) fn handle(
     // - User row is fetched by id from the manifest's User entity
     //   (conventionally named "User"; configurable user-entity is
     //   a follow-up).
-    // - Sensitive fields stripped: `passwordHash` + anything starting
-    //   with `_` (framework-internal columns). Apps wanting a custom
-    //   projection can still expose a TS `getMe` function and call it
-    //   alongside this endpoint.
+    // - Sensitive fields stripped: `passwordHash`, anything starting
+    //   with `_` (framework-internal columns), and manifest fields marked
+    //   `serverOnly`. Apps wanting a custom projection can still expose a
+    //   TS `getMe` function and call it alongside this endpoint.
     // - Returns `user: null` when the caller is anonymous, a guest,
     //   or the User row was deleted out from under the session.
     if url == "/api/auth/session" && method == HttpMethod::Get {
@@ -945,7 +945,9 @@ pub(crate) fn handle(
             .as_deref()
             .filter(|_| !ctx.auth_ctx.is_guest)
             .and_then(|uid| ctx.store.get_by_id(user_entity, uid).ok().flatten())
-            .map(|row| project_user_row(row, &auth_cfg.user))
+            .map(|row| {
+                crate::project_row_for_wire(ctx.store.manifest(), &auth_cfg.user, user_entity, row)
+            })
             .unwrap_or(serde_json::Value::Null);
         body.insert("user".into(), user_value);
         return Some((200, serde_json::Value::Object(body).to_string()));
@@ -6554,18 +6556,4 @@ pub(crate) fn handle(
     }
 
     None
-}
-
-/// Project a User row down to the fields safe for `/api/auth/session`.
-///
-/// Thin wrapper around the crate-shared `maybe_project_user_row` —
-/// kept here so the `/api/auth/session` call site reads the same as
-/// before, but now every read path that surfaces a User row
-/// (entity GET/LIST, sync change events, etc.) goes through the same
-/// projection. See `crate::maybe_project_user_row` for the field rules.
-fn project_user_row(
-    row: serde_json::Value,
-    cfg: &pylon_kernel::ManifestAuthUserConfig,
-) -> serde_json::Value {
-    crate::maybe_project_user_row(&cfg.entity, row, cfg)
 }
