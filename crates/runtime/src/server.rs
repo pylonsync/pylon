@@ -2276,6 +2276,32 @@ fn start_server(
             combined.push(m.clone());
         }
     }
+    // The app's own public origin (PYLON_PUBLIC_URL) is always trusted:
+    // it's the origin this server advertises for its OAuth callbacks and
+    // email links, so redirecting the user back to it can't be an open
+    // redirect. Without this, a deploy that gains a custom domain (Pylon
+    // Cloud rewrites PYLON_PUBLIC_URL when one goes ready) 403s
+    // UNTRUSTED_REDIRECT on absolute callbacks to its own site unless the
+    // operator also hand-maintains PYLON_TRUSTED_ORIGINS.
+    if let Ok(public) = std::env::var("PYLON_PUBLIC_URL") {
+        if let Some(origin) = pylon_auth::http_origin_of(&public) {
+            if !combined.contains(&origin) {
+                combined.push(origin);
+            }
+        }
+    }
+    // A scheme-less entry ("app.example.com") never matches anything —
+    // the matcher requires a parseable scheme://host[:port]. Warn at boot
+    // instead of letting the operator debug a gate that silently rejects
+    // every sign-in.
+    for o in &combined {
+        if !pylon_auth::is_valid_trusted_origin(o) {
+            tracing::warn!(
+                "[auth] trusted origin {o:?} is not a valid scheme://host[:port] origin \
+                 and will never match — did you mean \"https://{o}\"?"
+            );
+        }
+    }
     let trusted_origins = Arc::new(combined);
 
     // Start WebSocket server on port+1.

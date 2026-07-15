@@ -1988,6 +1988,28 @@ fn normalized_http_origin(url: &url::Url) -> Option<String> {
     Some(url.origin().ascii_serialization())
 }
 
+/// Normalized origin (`scheme://host[:port]`) of an absolute http(s) URL.
+/// Unlike a trusted-origins entry, the input may carry a path / query /
+/// trailing slash (a `PYLON_PUBLIC_URL` like `https://app.example.com/` is
+/// fine) — only the origin is returned. `None` for non-http(s),
+/// credentialed, or unparseable input.
+pub fn http_origin_of(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if has_credentials(&parsed) {
+        return None;
+    }
+    normalized_http_origin(&parsed)
+}
+
+/// Whether a trusted-origins entry will ever match anything. A bare host
+/// (`app.example.com`, no scheme) fails `Url::parse` and is silently
+/// skipped by the matcher — an operator who sets one gets a gate that
+/// rejects everything with no hint why. Boot-time callers use this to
+/// warn loudly instead.
+pub fn is_valid_trusted_origin(origin: &str) -> bool {
+    normalized_trusted_origin(origin).is_some()
+}
+
 fn normalized_trusted_origin(origin: &str) -> Option<String> {
     let parsed = url::Url::parse(origin).ok()?;
     if has_credentials(&parsed)
@@ -3935,6 +3957,59 @@ mod tests {
     fn oauth_state_store_invalid_state_rejected() {
         let store = OAuthStateStore::new();
         assert!(store.validate("nonexistent", "google").is_none());
+    }
+
+    #[test]
+    fn http_origin_of_extracts_origin_from_public_url_shapes() {
+        // PYLON_PUBLIC_URL as stamped by Pylon Cloud — bare origin.
+        assert_eq!(
+            http_origin_of("https://www.reelbear.app").as_deref(),
+            Some("https://www.reelbear.app")
+        );
+        // Trailing slash / path / query are tolerated — only the origin
+        // matters for the redirect gate.
+        assert_eq!(
+            http_origin_of("https://app.example.com/").as_deref(),
+            Some("https://app.example.com")
+        );
+        assert_eq!(
+            http_origin_of("https://app.example.com/base?x=1").as_deref(),
+            Some("https://app.example.com")
+        );
+        // Non-default port survives.
+        assert_eq!(
+            http_origin_of("http://localhost:3000").as_deref(),
+            Some("http://localhost:3000")
+        );
+        // Garbage / non-http / credentialed → None.
+        assert_eq!(http_origin_of("app.example.com"), None);
+        assert_eq!(http_origin_of("file:///etc/passwd"), None);
+        assert_eq!(http_origin_of("https://user:pw@app.example.com"), None);
+    }
+
+    #[test]
+    fn scheme_less_trusted_origin_entries_are_inert_and_detectable() {
+        // A bare-host entry never matches — the exact misconfig that made a
+        // custom-domain OAuth callback 403 (PYLON_TRUSTED_ORIGINS=reelbear.pyln.dev).
+        let trusted = vec!["reelbear.pyln.dev".to_string()];
+        assert!(matches!(
+            validate_trusted_redirect("https://reelbear.pyln.dev/onboarding", &trusted),
+            Err(TrustedOriginError::NotTrusted { .. })
+        ));
+        // is_valid_trusted_origin is the boot-time detector for that footgun.
+        assert!(!is_valid_trusted_origin("reelbear.pyln.dev"));
+        assert!(is_valid_trusted_origin("https://reelbear.pyln.dev"));
+        // Entries with a path are also rejected by the matcher's strictness.
+        assert!(!is_valid_trusted_origin("https://reelbear.pyln.dev/app"));
+    }
+
+    #[test]
+    fn public_url_origin_satisfies_redirect_gate_when_appended() {
+        // What server.rs does at boot: append http_origin_of(PYLON_PUBLIC_URL)
+        // to the trusted list so absolute callbacks to the app's own public
+        // origin always pass, custom domain included.
+        let trusted = vec![http_origin_of("https://www.reelbear.app/").unwrap()];
+        assert!(validate_trusted_redirect("https://www.reelbear.app/onboarding", &trusted).is_ok());
     }
 
     #[test]
