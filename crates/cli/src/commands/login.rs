@@ -207,14 +207,11 @@ fn run_device_flow(cloud: &str, json_mode: bool) -> ExitCode {
                 // Terminal outcomes — stop and surface. CODE_INVALID (the row
                 // doesn't exist until approval) and transient network blips are
                 // NOT terminal: keep polling until the deadline.
-                let terminal = msg.contains("CODE_USED")
-                    || msg.contains("CODE_EXPIRED")
-                    || msg.contains("CODE_DRAINED");
-                if terminal {
+                if let Some(err) = device_poll_fatal(&msg) {
                     if !json_mode {
                         println!();
                     }
-                    output::print_error(&format!("Sign-in failed: {msg}"));
+                    output::print_error(&err);
                     return ExitCode::Error;
                 }
                 // CODE_INVALID (the row doesn't exist until the user approves)
@@ -228,6 +225,27 @@ fn run_device_flow(cloud: &str, json_mode: bool) -> ExitCode {
             }
         }
     }
+}
+
+/// Classify a device-flow poll error. `None` → keep polling (CODE_INVALID
+/// means the row doesn't exist until the user approves; network blips are
+/// transient). `Some(message)` → stop and surface: consumed/expired/drained
+/// codes can never succeed, and an auth rejection (401 AUTH_REQUIRED) means
+/// the server's `exchangeCliAuthCode` isn't public — every future poll fails
+/// identically, so waiting out the 5-min deadline is a silent hang.
+fn device_poll_fatal(msg: &str) -> Option<String> {
+    if msg.contains("CODE_USED") || msg.contains("CODE_EXPIRED") || msg.contains("CODE_DRAINED") {
+        return Some(format!("Sign-in failed: {msg}"));
+    }
+    if msg.contains("AUTH_REQUIRED") {
+        return Some(format!(
+            "Sign-in failed: the cloud rejected the unauthenticated poll — its \
+             exchangeCliAuthCode function is not public. Update the Pylon Cloud \
+             install (the code, not a session, is the auth for this endpoint). \
+             ({msg})"
+        ));
+    }
+    None
 }
 
 /// A typeable, high-entropy login code — 12 characters from a 31-char alphabet
@@ -374,6 +392,42 @@ pub fn run_logout(_args: &[String], json_mode: bool) -> ExitCode {
             output::print_error(&format!("Failed to delete credentials: {e}"));
             ExitCode::Error
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_poll_fatal;
+
+    #[test]
+    fn code_invalid_and_network_errors_keep_polling() {
+        // The row doesn't exist until the user approves — not fatal.
+        assert!(device_poll_fatal(
+            "Cloud returned 400: {\"error\":{\"code\":\"CODE_INVALID\",\"message\":\"Unknown auth code.\"}}"
+        )
+        .is_none());
+        // Transient network blip — not fatal.
+        assert!(device_poll_fatal("Cloud request failed: connection reset").is_none());
+    }
+
+    #[test]
+    fn consumed_expired_drained_are_fatal() {
+        for code in ["CODE_USED", "CODE_EXPIRED", "CODE_DRAINED"] {
+            let msg = format!("Cloud returned 400: {{\"error\":{{\"code\":\"{code}\"}}}}");
+            assert!(device_poll_fatal(&msg).is_some(), "{code} must be terminal");
+        }
+    }
+
+    #[test]
+    fn auth_required_is_fatal_not_a_silent_hang() {
+        // Regression: a cloud whose exchangeCliAuthCode isn't `auth: "public"`
+        // 401s every unauthenticated poll. That's deterministic — the CLI must
+        // fail fast with a pointer at the server, not spin dots for 5 minutes
+        // while the browser says "You're all set".
+        let msg = "Cloud returned 401: {\"error\":{\"code\":\"AUTH_REQUIRED\",\
+                   \"message\":\"Function \\\"exchangeCliAuthCode\\\" requires a signed-in user\"}}";
+        let err = device_poll_fatal(msg).expect("AUTH_REQUIRED must be terminal");
+        assert!(err.contains("exchangeCliAuthCode"));
     }
 }
 
