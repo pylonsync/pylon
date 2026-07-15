@@ -235,6 +235,15 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
 // Streaming body — bridges mpsc::Receiver to std::io::Read for SSE responses
 // ---------------------------------------------------------------------------
 
+/// Realtime snapshots are disposable once a client falls behind: disconnecting
+/// lets the client resume from its last event ID without retaining an unbounded
+/// backlog of stale state.
+const SHARD_STREAM_BUFFER_CAPACITY: usize = 8;
+
+/// Function and AI streams are finite and ordered, so their producers apply
+/// backpressure when this many chunks are waiting for the HTTP writer.
+const FINITE_STREAM_BUFFER_CAPACITY: usize = 64;
+
 /// A streaming response body backed by an MPSC channel.
 ///
 /// When used as the body of a `tiny_http::Response`, it causes the server to
@@ -254,6 +263,11 @@ impl StreamingBody {
             pos: 0,
         }
     }
+}
+
+fn bounded_stream(capacity: usize) -> (std::sync::mpsc::SyncSender<Vec<u8>>, StreamingBody) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
+    (tx, StreamingBody::new(rx))
 }
 
 impl std::io::Read for StreamingBody {
@@ -286,6 +300,32 @@ impl std::io::Read for StreamingBody {
             }
             Err(_) => Ok(0), // Channel closed = EOF
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_stream_tests {
+    use super::bounded_stream;
+    use std::io::Read;
+
+    #[test]
+    fn bounded_stream_applies_backpressure_and_preserves_order() {
+        let (tx, mut body) = bounded_stream(1);
+        tx.try_send(b"first".to_vec()).unwrap();
+        assert!(matches!(
+            tx.try_send(b"second".to_vec()),
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+
+        let mut first = [0; 5];
+        body.read_exact(&mut first).unwrap();
+        assert_eq!(&first, b"first");
+
+        tx.try_send(b"second".to_vec()).unwrap();
+        drop(tx);
+        let mut rest = Vec::new();
+        body.read_to_end(&mut rest).unwrap();
+        assert_eq!(rest, b"second");
     }
 }
 
@@ -5093,8 +5133,10 @@ fn start_server(
                         });
                     let subscriber_id = pylon_realtime::SubscriberId::new(sub_id);
 
-                    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-                    let streaming_body = StreamingBody::new(rx);
+                    let (tx, streaming_body) =
+                        bounded_stream(SHARD_STREAM_BUFFER_CAPACITY);
+                    let (disconnect_tx, disconnect_rx) =
+                        std::sync::mpsc::sync_channel::<()>(1);
 
                     let tx_clone = tx.clone();
                     let sink: pylon_realtime::SnapshotSink =
@@ -5104,7 +5146,18 @@ fn start_server(
                             let mut frame = format!("id: {tick}\ndata: ").into_bytes();
                             frame.extend_from_slice(bytes);
                             frame.extend_from_slice(b"\n\n");
-                            let _ = tx_clone.send(frame);
+                            match tx_clone.try_send(frame) {
+                                Ok(()) => {}
+                                Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                                    // Never block a shard tick on a slow HTTP
+                                    // client. The cleanup thread removes this
+                                    // subscriber and closes the stream.
+                                    let _ = disconnect_tx.try_send(());
+                                }
+                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                    let _ = disconnect_tx.try_send(());
+                                }
+                            }
                         });
 
                     let shard_auth = pylon_realtime::ShardAuth {
@@ -5143,16 +5196,30 @@ fn start_server(
                         let sub_id_cleanup = subscriber_id.clone();
                         let tx_liveness = tx.clone();
                         std::thread::spawn(move || {
-                            // Send a heartbeat every 30s; if send fails, the
-                            // channel is closed (client disconnected).
+                            // A full snapshot queue means the client is too
+                            // slow to receive current state. Disconnect it so
+                            // memory stays bounded and the client can resume.
                             loop {
-                                std::thread::sleep(std::time::Duration::from_secs(30));
-                                if tx_liveness.send(b": heartbeat\n\n".to_vec()).is_err() {
-                                    shard_cleanup.remove_subscriber(&sub_id_cleanup);
-                                    return;
-                                }
-                                if !shard_cleanup.is_running() {
-                                    return;
+                                match disconnect_rx
+                                    .recv_timeout(std::time::Duration::from_secs(30))
+                                {
+                                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                        shard_cleanup.remove_subscriber(&sub_id_cleanup);
+                                        return;
+                                    }
+                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                                        match tx_liveness.try_send(b": heartbeat\n\n".to_vec()) {
+                                            Ok(()) => {}
+                                            Err(std::sync::mpsc::TrySendError::Full(_))
+                                            | Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                                shard_cleanup.remove_subscriber(&sub_id_cleanup);
+                                                return;
+                                            }
+                                        }
+                                        if !shard_cleanup.is_running() {
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                         });
@@ -5343,8 +5410,8 @@ fn start_server(
                     roles: auth_ctx.roles.clone(),
                 };
 
-                let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-                let streaming_body = StreamingBody::new(rx);
+                let (tx, streaming_body) =
+                    bounded_stream(FINITE_STREAM_BUFFER_CAPACITY);
 
                 let fn_ops_cl = Arc::clone(fn_ops);
                 let tx_stream = tx.clone();
@@ -6115,8 +6182,7 @@ fn start_server(
 
             // Set up a channel-based streaming body so tiny_http streams
             // data to the client as chunks arrive from the AI provider.
-            let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-            let streaming_body = StreamingBody::new(rx);
+            let (tx, streaming_body) = bounded_stream(FINITE_STREAM_BUFFER_CAPACITY);
 
             // Spawn the provider request on a background thread. Each chunk
             // is formatted as an SSE event and pushed through the channel.

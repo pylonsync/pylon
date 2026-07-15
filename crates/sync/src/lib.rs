@@ -330,19 +330,22 @@ impl OpTracker {
     }
 
     fn complete(&mut self, op_id: &str, seq: u64) {
-        // Always overwrite to Applied even if not Pending — a caller
-        // that completes without claiming first still ends up in the
-        // right terminal state.
+        if let Some(entry) = self.state.get_mut(op_id) {
+            // Normal path: claim() already inserted this ID into both
+            // collections, so completion only updates the map entry.
+            *entry = OpEntry::Applied { seq };
+            return;
+        }
+
+        // Defensive path: a caller that completes without claiming first
+        // still ends up in the right terminal state and participates in FIFO
+        // capacity eviction.
         self.state
             .insert(op_id.to_string(), OpEntry::Applied { seq });
-        if !self.order.iter().any(|s| s == op_id) {
-            // Defensive: keep the FIFO + map in sync if a caller
-            // somehow completed without claiming first.
-            self.order.push_back(op_id.to_string());
-            while self.order.len() > self.capacity {
-                if let Some(evicted) = self.order.pop_front() {
-                    self.state.remove(&evicted);
-                }
+        self.order.push_back(op_id.to_string());
+        while self.order.len() > self.capacity {
+            if let Some(evicted) = self.order.pop_front() {
+                self.state.remove(&evicted);
             }
         }
     }
@@ -1288,6 +1291,31 @@ mod tests {
             other => panic!("expected Replayed{{42}}, got {other:?}"),
         }
         assert!(log.has_seen_op_id("op-1"));
+    }
+
+    #[test]
+    fn op_tracker_complete_claimed_preserves_fifo_entry() {
+        let mut tracker = OpTracker::with_capacity(2);
+        assert!(matches!(tracker.claim("op-1"), OpClaim::Proceed));
+        assert!(matches!(tracker.claim("op-2"), OpClaim::Proceed));
+
+        tracker.complete("op-1", 42);
+
+        assert_eq!(tracker.order, ["op-1", "op-2"]);
+        assert_eq!(tracker.applied_seq("op-1"), Some(42));
+    }
+
+    #[test]
+    fn op_tracker_complete_without_claim_respects_capacity() {
+        let mut tracker = OpTracker::with_capacity(2);
+        tracker.complete("op-1", 1);
+        tracker.complete("op-2", 2);
+        tracker.complete("op-3", 3);
+
+        assert_eq!(tracker.order, ["op-2", "op-3"]);
+        assert_eq!(tracker.applied_seq("op-1"), None);
+        assert_eq!(tracker.applied_seq("op-2"), Some(2));
+        assert_eq!(tracker.applied_seq("op-3"), Some(3));
     }
 
     #[test]

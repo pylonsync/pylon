@@ -31,15 +31,15 @@ export interface WebhookEndpoint {
 	/** Logical bucket — usually the customer/org id. */
 	applicationId: string;
 	url: string;
-	/** Hex-encoded HMAC secret. Plaintext on the row by design — only
-	 *  the customer's app reads + uses it, and Pylon's at-rest crypto
-	 *  is the secret-encryption layer apps wire when they want it. */
+	/** Hex-encoded HMAC secret. The plugin manifest always marks this field
+	 *  server-only and optionally encrypts it at rest. */
 	secret: string;
 	/** Subset of event types this endpoint subscribes to. Empty = all. */
 	eventTypes: string[];
 	/**
 	 * Headers to attach on every delivery. Useful for routing /
-	 * authentication beyond the HMAC signature.
+	 * authentication beyond the HMAC signature. The plugin manifest always
+	 * marks this field server-only and optionally encrypts it at rest.
 	 */
 	headers?: Record<string, string>;
 	/** Disabled endpoints don't receive deliveries. */
@@ -52,6 +52,14 @@ export interface WebhookConfig {
 		endpoint?: string;
 		attempt?: string;
 	};
+	/**
+	 * Encrypt endpoint secrets and custom headers at rest. Requires a 32-byte
+	 * `PYLON_ENCRYPTION_KEY`; endpoint writes fail with
+	 * `ENCRYPTION_NOT_CONFIGURED` when the key is absent. Defaults to `false`
+	 * so enabling the plugin does not break existing deployments. Credentials
+	 * remain server-only regardless of this setting.
+	 */
+	encryptCredentials?: boolean;
 	/**
 	 * Retry schedule (seconds offset from initial attempt). Default
 	 * matches Svix's published schedule. After exhausting the

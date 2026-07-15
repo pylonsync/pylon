@@ -1,6 +1,7 @@
 import { action, mutation, query, v } from "@pylonsync/functions";
 
 import { signWebhook } from "./signature";
+import { postWebhookSafely } from "./safe-request";
 import type { WebhookConfig } from "./types";
 
 /**
@@ -137,30 +138,29 @@ export function internalHandlers(
 					secrets: [ep.secret],
 				});
 
-				const headers: Record<string, string> = {
-					"Content-Type": "application/json",
-					"webhook-id": sig.id,
-					"webhook-timestamp": String(sig.timestamp),
-					"webhook-signature": sig.signature,
-				};
+				const headers: Record<string, string> = Object.create(null);
 				if (ep.headers) {
 					try {
 						const extra = JSON.parse(ep.headers) as Record<string, string>;
-						for (const [k, v] of Object.entries(extra)) headers[k] = v;
+						for (const [k, v] of Object.entries(extra)) {
+							if (typeof v === "string" && isAllowedCustomHeader(k, v)) {
+								headers[k] = v;
+							}
+						}
 					} catch {
 						/* malformed headers — ignore */
 					}
 				}
+				headers["Content-Type"] = "application/json";
+				headers["webhook-id"] = sig.id;
+				headers["webhook-timestamp"] = String(sig.timestamp);
+				headers["webhook-signature"] = sig.signature;
 
 				let httpStatus = 0;
 				let errorMsg: string | undefined;
 				let ok = false;
 				try {
-					const res = await fetch(ep.url, {
-						method: "POST",
-						headers,
-						body,
-					});
+					const res = await postWebhookSafely(ep.url, headers, body);
 					httpStatus = res.status;
 					ok = res.ok;
 					if (!ok) errorMsg = `HTTP ${res.status}`;
@@ -212,4 +212,23 @@ export function internalHandlers(
 			},
 		}),
 	};
+}
+
+const RESERVED_HEADERS = new Set([
+	"connection",
+	"content-length",
+	"content-type",
+	"host",
+	"transfer-encoding",
+	"webhook-id",
+	"webhook-signature",
+	"webhook-timestamp",
+]);
+
+function isAllowedCustomHeader(name: string, value: string): boolean {
+	return (
+		/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) &&
+		!RESERVED_HEADERS.has(name.toLowerCase()) &&
+		!/[\r\n]/.test(value)
+	);
 }

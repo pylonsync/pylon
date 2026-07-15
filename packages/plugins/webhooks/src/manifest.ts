@@ -18,13 +18,19 @@ export function buildWebhookManifest(
 ): WebhookManifestFragment {
 	const endpointName = cfg.entities?.endpoint ?? "WebhookEndpoint";
 	const attemptName = cfg.entities?.attempt ?? "WebhookAttempt";
+	const secretField = cfg.encryptCredentials
+		? field.string().serverOnly().encrypted()
+		: field.string().serverOnly();
+	const headersField = cfg.encryptCredentials
+		? field.string().serverOnly().encrypted().optional()
+		: field.string().serverOnly().optional();
 
 	const Endpoint = entity(endpointName, {
 		applicationId: field.string(),
 		url: field.string(),
-		secret: field.string(),
+		secret: secretField,
 		eventTypes: field.string(), // JSON array
-		headers: field.string().optional(), // JSON
+		headers: headersField, // JSON
 		disabled: field.boolean().optional(),
 		createdAt: field.string(),
 	});

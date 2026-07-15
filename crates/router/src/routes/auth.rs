@@ -44,6 +44,35 @@ fn request_user_agent<'a>(ctx: &'a RouterContext) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Resolve the OIDC `email_verified` claim from the app's User row.
+///
+/// Pylon's standard schema stores verification as an RFC 3339 datetime,
+/// while custom schemas may use a boolean. Missing, false, malformed, and
+/// otherwise unexpected values must remain unverified: password signup does
+/// not prove that the caller controls the supplied address.
+fn oidc_email_is_verified(user_row: Option<&serde_json::Value>) -> bool {
+    match user_row.and_then(|row| row.get("emailVerified")) {
+        Some(serde_json::Value::Bool(verified)) => *verified,
+        Some(serde_json::Value::String(timestamp)) => {
+            timestamp.is_ascii() && pylon_kernel::util::iso_to_epoch(timestamp).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Emit the email claims identically for id_tokens and userinfo responses.
+fn insert_oidc_email_claims(
+    claims: &mut serde_json::Map<String, serde_json::Value>,
+    email: &str,
+    verified: bool,
+) {
+    if email.is_empty() {
+        return;
+    }
+    claims.insert("email".into(), serde_json::Value::String(email.to_string()));
+    claims.insert("email_verified".into(), serde_json::Value::Bool(verified));
+}
+
 /// Mint a session pre-tagged with the parsed device label (so
 /// `/api/auth/sessions` can show "Chrome on macOS" instead of the
 /// raw User-Agent). Falls back to a no-device session for non-
@@ -5554,6 +5583,7 @@ pub(crate) fn handle(
             .and_then(|r| r.get("displayName").or_else(|| r.get("name")))
             .and_then(|v| v.as_str())
             .map(String::from);
+        let email_verified = oidc_email_is_verified(user_row.as_ref());
 
         let mut claims = serde_json::Map::new();
         claims.insert("iss".into(), serde_json::Value::String(issuer));
@@ -5573,14 +5603,8 @@ pub(crate) fn handle(
         if let Some(n) = stored.nonce.as_ref() {
             claims.insert("nonce".into(), serde_json::Value::String(n.clone()));
         }
-        if stored.scopes.iter().any(|s| s == "email") && !email.is_empty() {
-            claims.insert("email".into(), serde_json::Value::String(email.clone()));
-            // Pylon doesn't have per-user email_verified today;
-            // every sign-up flow that hits this code path went
-            // through magic-link / OAuth / SAML which all imply
-            // verification. Stamping true is the pragmatic answer
-            // until a real per-user verified flag lands.
-            claims.insert("email_verified".into(), serde_json::Value::Bool(true));
+        if stored.scopes.iter().any(|s| s == "email") {
+            insert_oidc_email_claims(&mut claims, &email, email_verified);
         }
         if stored.scopes.iter().any(|s| s == "profile") {
             if let Some(n) = name.as_ref() {
@@ -5664,6 +5688,7 @@ pub(crate) fn handle(
             Some(r) => r,
             None => return Some((404, json_error("user_not_found", "user no longer exists"))),
         };
+        let email_verified = oidc_email_is_verified(Some(&row));
         // Project the row through auth.user.expose/hide (same path
         // /api/auth/session uses) so passwordHash + underscore-
         // prefixed secrets never leak via userinfo.
@@ -5678,9 +5703,8 @@ pub(crate) fn handle(
             "sub".into(),
             serde_json::Value::String(access.user_id.clone()),
         );
-        if access.scopes.iter().any(|s| s == "email") && !email.is_empty() {
-            response.insert("email".into(), serde_json::Value::String(email.into()));
-            response.insert("email_verified".into(), serde_json::Value::Bool(true));
+        if access.scopes.iter().any(|s| s == "email") {
+            insert_oidc_email_claims(&mut response, email, email_verified);
         }
         if access.scopes.iter().any(|s| s == "profile") {
             if let Some(name) = projected
@@ -6556,4 +6580,66 @@ pub(crate) fn handle(
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{insert_oidc_email_claims, oidc_email_is_verified};
+
+    #[test]
+    fn oidc_email_claims_mark_password_created_user_unverified() {
+        let password_user = serde_json::json!({
+            "id": "user-password",
+            "email": "password@example.com",
+            "passwordHash": "$argon2id$..."
+        });
+
+        let verified = oidc_email_is_verified(Some(&password_user));
+        let mut claims = serde_json::Map::new();
+        insert_oidc_email_claims(&mut claims, "password@example.com", verified);
+
+        assert_eq!(
+            claims.get("email"),
+            Some(&serde_json::json!("password@example.com"))
+        );
+        assert_eq!(
+            claims.get("email_verified"),
+            Some(&serde_json::json!(false))
+        );
+    }
+
+    #[test]
+    fn oidc_email_claims_mark_timestamp_verified_user_verified() {
+        let verified_user = serde_json::json!({
+            "id": "user-verified",
+            "email": "verified@example.com",
+            "emailVerified": "2026-07-14T12:34:56Z"
+        });
+
+        let verified = oidc_email_is_verified(Some(&verified_user));
+        let mut claims = serde_json::Map::new();
+        insert_oidc_email_claims(&mut claims, "verified@example.com", verified);
+
+        assert_eq!(
+            claims.get("email"),
+            Some(&serde_json::json!("verified@example.com"))
+        );
+        assert_eq!(claims.get("email_verified"), Some(&serde_json::json!(true)));
+        assert!(oidc_email_is_verified(Some(
+            &serde_json::json!({"emailVerified": true})
+        )));
+    }
+
+    #[test]
+    fn oidc_email_verification_rejects_false_and_malformed_values() {
+        assert!(!oidc_email_is_verified(Some(
+            &serde_json::json!({"emailVerified": false})
+        )));
+        assert!(!oidc_email_is_verified(Some(
+            &serde_json::json!({"emailVerified": "not-a-timestamp"})
+        )));
+        assert!(!oidc_email_is_verified(Some(
+            &serde_json::json!({"emailVerified": "éééééééééé"})
+        )));
+    }
 }
