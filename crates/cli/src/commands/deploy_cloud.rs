@@ -85,16 +85,38 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // 2. Resolve the project slug (flag → env → context → default). When
     //    nothing is linked, `pylon deploy` PROVISIONS one on the spot instead
     //    of dead-ending — so a first-time deploy is a single command.
-    let project_slug = match crate::project_context::resolve_project_slug_noninteractive(args) {
-        Some(slug) => slug,
-        None => match ensure_deploy_project(&creds, json_mode) {
-            Ok(slug) => slug,
+    use crate::project_context::ProjectSource;
+    let (project_slug, project_source) =
+        match crate::project_context::resolve_project_with_source(args) {
+            Some(resolved) => resolved,
+            None => match ensure_deploy_project(&creds, json_mode) {
+                // ensure_deploy_project writes the context file itself.
+                Ok(slug) => (slug, ProjectSource::ContextFile),
+                Err(e) => {
+                    output::print_error(&e);
+                    return ExitCode::Usage;
+                }
+            },
+        };
+
+    // Deploy overwrites what's live, so the machine-global default (which
+    // just follows the last `pylon login` / `pylon projects use` run
+    // ANYWHERE) is only trusted when it plausibly names this directory's
+    // app. Anything else needs explicit intent — this is the guard that
+    // stops `pylon deploy` in app A from clobbering project B.
+    let deploy_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if project_source == ProjectSource::GlobalDefault
+        && !deploy_target_matches_dir(&project_slug, &deploy_cwd)
+    {
+        match confirm_global_default_deploy(&project_slug, &deploy_cwd, json_mode) {
+            Ok(true) => {}
+            Ok(false) => return ExitCode::Usage,
             Err(e) => {
                 output::print_error(&e);
                 return ExitCode::Usage;
             }
-        },
-    };
+        }
+    }
 
     // 3. Build the tarball from the current directory.
     if !json_mode {
@@ -114,6 +136,27 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
              app.ts, e.g. apps/api in a monorepo).",
         );
         return ExitCode::Usage;
+    }
+
+    // Pin the resolved project to this (now-known-deployable) directory so
+    // the next deploy here can't drift with the machine-global selection.
+    // Flag + (confirmed) global-default only: env-resolved runs are
+    // typically CI, and a context file already pins. Ordered after the
+    // app.ts check so a stray `pylon deploy --project x` from a non-app
+    // directory (worst case: $HOME, whose pin would shadow every child
+    // dir) never writes one.
+    if matches!(
+        project_source,
+        ProjectSource::Flag | ProjectSource::GlobalDefault
+    ) {
+        if let Ok(path) = crate::project_context::write_context_file(&project_slug) {
+            if !json_mode {
+                println!(
+                    "  Linked this directory to '{project_slug}' ({}) — future deploys here target it.",
+                    path.display()
+                );
+            }
+        }
     }
     if let Some(ws) = &workspace {
         if !json_mode {
@@ -896,6 +939,110 @@ fn sanitize_slug(name: &str) -> String {
         "app".to_string()
     } else {
         capped
+    }
+}
+
+/// Does the machine-global project selection plausibly name this
+/// directory's app? Compares the sanitized directory name and the
+/// package.json "name" (scope stripped) against the slug. Used only to
+/// let the global-default fallback pass silently — any mismatch requires
+/// explicit confirmation before deploy will overwrite the target.
+fn deploy_target_matches_dir(slug: &str, cwd: &Path) -> bool {
+    let slug_norm = sanitize_slug(slug);
+    if let Some(dir) = cwd.file_name().and_then(|n| n.to_str()) {
+        if sanitize_slug(dir) == slug_norm {
+            return true;
+        }
+    }
+    if let Ok(raw) = std::fs::read_to_string(cwd.join("package.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                let base = name.rsplit('/').next().unwrap_or(name);
+                if sanitize_slug(base) == slug_norm {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The resolved project came from the machine-global default and doesn't
+/// look like this directory's app. On a TTY, spell out the mismatch and
+/// ask (default No); off a TTY, hard-error — CI must pass --project.
+/// Returns Ok(true) to proceed, Ok(false) after an explicit decline.
+fn confirm_global_default_deploy(slug: &str, cwd: &Path, json_mode: bool) -> Result<bool, String> {
+    use std::io::{BufRead, IsTerminal, Write};
+    let dirname = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+    if json_mode || !std::io::stdin().is_terminal() {
+        return Err(format!(
+            "This directory ('{dirname}') isn't linked to a cloud project, and the \
+             machine-wide default is '{slug}' — which doesn't look like this app. \
+             Refusing to guess: deploying would overwrite what's live on '{slug}'.\n  \
+             Pass --project <slug> (links this directory), or run `pylon projects use <slug>` here."
+        ));
+    }
+    println!();
+    println!("This directory ('{dirname}') isn't linked to a cloud project.");
+    println!("The machine-wide default is '{slug}' (whatever the last `pylon login` /");
+    println!("`pylon projects use` selected) — deploying would overwrite what's live there.");
+    print!("Deploy '{dirname}' to project '{slug}' anyway? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    if line.trim().eq_ignore_ascii_case("y") {
+        return Ok(true);
+    }
+    println!("Aborted. Deploy with --project <slug> to pick the target explicitly.");
+    Ok(false)
+}
+
+#[cfg(test)]
+mod global_default_guard_tests {
+    use super::*;
+    use std::fs;
+
+    fn dir_with_pkg(tag: &str, dirname: &str, pkg_name: Option<&str>) -> PathBuf {
+        let root = std::env::temp_dir()
+            .join(format!("pylon-guard-{}-{tag}", std::process::id()))
+            .join(dirname);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        if let Some(name) = pkg_name {
+            fs::write(root.join("package.json"), format!(r#"{{"name":"{name}"}}"#)).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn matching_dirname_passes() {
+        let cwd = dir_with_pkg("dirname", "revtrail", None);
+        assert!(deploy_target_matches_dir("revtrail", &cwd));
+    }
+
+    #[test]
+    fn sanitization_bridges_naming_variants() {
+        // dir "My Cool App" vs slug "my-cool-app" — both sanitize the same.
+        let cwd = dir_with_pkg("sanitize", "My Cool App", None);
+        assert!(deploy_target_matches_dir("my-cool-app", &cwd));
+    }
+
+    #[test]
+    fn package_name_matches_when_dirname_does_not() {
+        // monorepo-style: dir "web", package "@acme/reelbear".
+        let cwd = dir_with_pkg("pkg", "web", Some("@acme/reelbear"));
+        assert!(deploy_target_matches_dir("reelbear", &cwd));
+    }
+
+    #[test]
+    fn unrelated_project_is_rejected() {
+        // The incident: deploying from revtrail/ while the machine-global
+        // default points at reelbear must NOT pass silently.
+        let cwd = dir_with_pkg("mismatch", "revtrail", Some("revtrail"));
+        assert!(!deploy_target_matches_dir("reelbear", &cwd));
     }
 }
 

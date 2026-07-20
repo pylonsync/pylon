@@ -38,37 +38,58 @@ struct ProjectPickerEntry {
 /// detect "no project here" so they can offer to provision one, instead of
 /// dropping into the shared picker (which only lists existing projects).
 pub fn resolve_project_slug_noninteractive(args: &[String]) -> Option<String> {
+    resolve_project_with_source(args).map(|(slug, _)| slug)
+}
+
+/// Where a resolved slug came from. Mutating commands (deploy) treat the
+/// machine-global default as a WEAK signal: it follows the last
+/// `pylon login` / `pylon projects use` run anywhere on the machine, so
+/// deploying an unlinked directory against it can silently overwrite an
+/// unrelated production app. Explicit sources (flag / env / context file)
+/// are per-invocation or per-directory and carry intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSource {
+    Flag,
+    Env,
+    ContextFile,
+    GlobalDefault,
+}
+
+/// Same resolution order as `resolve_project_slug_noninteractive`, but
+/// reports WHERE the slug came from so callers can gate the dangerous
+/// global-default fallback (see `ProjectSource`).
+pub fn resolve_project_with_source(args: &[String]) -> Option<(String, ProjectSource)> {
     // 1 + 2. --project flag (with or without =).
     if let Some(slug) = args
         .windows(2)
         .find(|w| w[0] == "--project")
         .map(|w| w[1].clone())
     {
-        return Some(slug);
+        return Some((slug, ProjectSource::Flag));
     }
     if let Some(slug) = args
         .iter()
         .find(|a| a.starts_with("--project="))
         .map(|a| a.trim_start_matches("--project=").to_string())
     {
-        return Some(slug);
+        return Some((slug, ProjectSource::Flag));
     }
     // 3. $PYLON_PROJECT
     if let Ok(slug) = std::env::var("PYLON_PROJECT") {
         if !slug.is_empty() {
-            return Some(slug);
+            return Some((slug, ProjectSource::Env));
         }
     }
     // 4. .pylon/project from cwd or any ancestor.
     if let Some(slug) = read_context_file() {
-        return Some(slug);
+        return Some((slug, ProjectSource::ContextFile));
     }
     // 5. Global default from ~/.config/pylon/state.json (set by
     //    `pylon projects use <slug>` / the picker / auto-provision).
     if let Ok(state) = crate::cloud_client::load_state() {
         if let Some(slug) = state.default_project {
             if !slug.is_empty() {
-                return Some(slug);
+                return Some((slug, ProjectSource::GlobalDefault));
             }
         }
     }
