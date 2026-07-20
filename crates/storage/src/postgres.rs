@@ -888,6 +888,77 @@ pub mod live {
         }
     }
 
+    /// A single Postgres connection that heals itself when the server
+    /// (or a proxy in between) drops it.
+    ///
+    /// Managed providers close idle connections aggressively —
+    /// PlanetScale kills them after ~24h idle, PgBouncer/Neon/Supabase
+    /// have their own timeouts, and any NAT hop can silently reap a
+    /// quiet TCP session. A client held for the process lifetime WILL
+    /// eventually go dead, and every operation on it then fails until
+    /// the process restarts. The entity store heals via
+    /// `PostgresDataStore::checkout`; this wrapper gives the auxiliary
+    /// auth backends (sessions, API keys, OAuth state, …) the same
+    /// property for their single dedicated connection.
+    ///
+    /// Healing strategy in `with_client`:
+    ///   1. If the connection is known-dead at entry (`is_closed`),
+    ///      reconnect before running the operation.
+    ///   2. If the operation fails AND the connection died mid-flight,
+    ///      reconnect and retry the operation exactly once. SQL-level
+    ///      errors on a live connection are returned as-is — retrying
+    ///      those would double-execute valid-but-rejected statements.
+    pub struct ReconnectingPgClient {
+        url: String,
+        client: std::sync::Mutex<postgres::Client>,
+    }
+
+    impl ReconnectingPgClient {
+        pub fn connect(url: &str) -> Result<Self, String> {
+            let client = connect_pg(url)?;
+            Ok(Self {
+                url: url.to_string(),
+                client: std::sync::Mutex::new(client),
+            })
+        }
+
+        /// Run `op` against the live client, reconnecting through dead
+        /// connections. Returns the operation's success value, or a
+        /// string error when the statement failed on a live connection
+        /// (or the reconnect itself failed).
+        pub fn with_client<T>(
+            &self,
+            mut op: impl FnMut(&mut postgres::Client) -> Result<T, postgres::Error>,
+        ) -> Result<T, String> {
+            // A poisoned mutex means a previous caller panicked while
+            // holding the lock. The client itself is still structurally
+            // valid (each op is a self-contained statement), so recover
+            // the guard rather than wedging every auth operation forever.
+            let mut guard = self
+                .client
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+            if guard.is_closed() {
+                *guard = connect_pg(&self.url)?;
+            }
+
+            match op(&mut guard) {
+                Ok(v) => Ok(v),
+                Err(first_err) => {
+                    if guard.is_closed() {
+                        // Connection died mid-operation (idle-timeout race,
+                        // server restart). Heal and retry once.
+                        *guard = connect_pg(&self.url)?;
+                        op(&mut guard).map_err(|e| format!("PG statement failed: {e}"))
+                    } else {
+                        Err(format!("PG statement failed: {first_err}"))
+                    }
+                }
+            }
+        }
+    }
+
     /// SSL parsing result for `parse_pg_url_ssl`. Carries:
     ///   - `use_tls`: should TLS be enabled for this connection
     ///   - `ca_path`: optional path to a PEM bundle to use as the

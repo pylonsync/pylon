@@ -74,7 +74,12 @@ pub struct ApiKey {
 /// Storage backend for API keys. Same pluggable pattern as sessions
 /// + magic codes — in-memory default, runtime injects SQLite/Postgres.
 pub trait ApiKeyBackend: Send + Sync {
-    fn put(&self, key: &ApiKey);
+    /// Persist a key. MUST report failure — a swallowed error here
+    /// means the mint endpoint hands the user a plaintext token that
+    /// verifies against nothing (the credential looks live but every
+    /// use 401s). Callers surface `Err` as a 500 instead of returning
+    /// the dead key.
+    fn put(&self, key: &ApiKey) -> Result<(), String>;
     fn get(&self, id: &str) -> Option<ApiKey>;
     fn delete(&self, id: &str) -> bool;
     /// All keys for a given user, used by management endpoints.
@@ -105,11 +110,12 @@ impl Default for InMemoryApiKeyBackend {
 }
 
 impl ApiKeyBackend for InMemoryApiKeyBackend {
-    fn put(&self, key: &ApiKey) {
+    fn put(&self, key: &ApiKey) -> Result<(), String> {
         self.keys
             .lock()
             .unwrap()
             .insert(key.id.clone(), key.clone());
+        Ok(())
     }
     fn get(&self, id: &str) -> Option<ApiKey> {
         self.keys.lock().unwrap().get(id).cloned()
@@ -186,13 +192,17 @@ impl ApiKeyStore {
     /// schemes that store no plaintext id make verification O(N).
     /// `.` separator (not `_`) so it survives the URL-safe base64
     /// alphabet that base64url uses for both id and secret bodies.
+    ///
+    /// `Err` means the backend could not persist the key — the caller
+    /// MUST NOT hand out the plaintext in that case (it would be a
+    /// credential that verifies against nothing).
     pub fn create(
         &self,
         user_id: String,
         name: String,
         scopes: Option<String>,
         expires_at: Option<u64>,
-    ) -> (String, ApiKey) {
+    ) -> Result<(String, ApiKey), String> {
         let id = format!("key_{}", random_token(24));
         let secret = random_token(32);
         let plaintext = format!("pk.{id}.{secret}");
@@ -208,8 +218,8 @@ impl ApiKeyStore {
             last_used_at: None,
             created_at: now_secs(),
         };
-        self.backend.put(&key);
-        (plaintext, key)
+        self.backend.put(&key)?;
+        Ok((plaintext, key))
     }
 
     /// Verify a plaintext token. Touches `last_used_at` on success
@@ -337,17 +347,49 @@ mod tests {
     #[test]
     fn create_and_verify_roundtrip() {
         let store = ApiKeyStore::new();
-        let (plaintext, key) = store.create(
-            "user_1".into(),
-            "test".into(),
-            Some("read,write".into()),
-            None,
-        );
+        let (plaintext, key) = store
+            .create(
+                "user_1".into(),
+                "test".into(),
+                Some("read,write".into()),
+                None,
+            )
+            .expect("create");
         assert!(plaintext.starts_with("pk.key_"));
         let verified = store.verify(&plaintext).expect("verify");
         assert_eq!(verified.id, key.id);
         assert_eq!(verified.user_id, "user_1");
         assert_eq!(verified.scopes.as_deref(), Some("read,write"));
+    }
+
+    /// Regression for the Pylon Cloud dead-credential incident: the PG
+    /// backend's connection died, `put` silently dropped the INSERT, and
+    /// the mint endpoint handed the user a plaintext token that verified
+    /// against nothing. `create` must propagate persist failure so the
+    /// caller can 500 instead.
+    #[test]
+    fn create_propagates_backend_put_failure() {
+        struct FailingBackend;
+        impl ApiKeyBackend for FailingBackend {
+            fn put(&self, _key: &ApiKey) -> Result<(), String> {
+                Err("connection closed".into())
+            }
+            fn get(&self, _id: &str) -> Option<ApiKey> {
+                None
+            }
+            fn delete(&self, _id: &str) -> bool {
+                false
+            }
+            fn list_for_user(&self, _user_id: &str) -> Vec<ApiKey> {
+                vec![]
+            }
+            fn touch(&self, _id: &str, _now: u64) {}
+        }
+        let store = ApiKeyStore::with_backend(Box::new(FailingBackend));
+        let err = store
+            .create("u".into(), "n".into(), None, None)
+            .expect_err("a failed persist must not yield a plaintext key");
+        assert!(err.contains("connection closed"));
     }
 
     #[test]
@@ -369,7 +411,9 @@ mod tests {
     #[test]
     fn wrong_secret_rejected() {
         let store = ApiKeyStore::new();
-        let (plaintext, key) = store.create("u".into(), "n".into(), None, None);
+        let (plaintext, key) = store
+            .create("u".into(), "n".into(), None, None)
+            .expect("create");
         let mut bad = plaintext;
         bad.pop();
         bad.push('X');
@@ -383,7 +427,9 @@ mod tests {
     #[test]
     fn expired_key_rejected() {
         let store = ApiKeyStore::new();
-        let (plaintext, _) = store.create("u".into(), "n".into(), None, Some(now_secs() - 1));
+        let (plaintext, _) = store
+            .create("u".into(), "n".into(), None, Some(now_secs() - 1))
+            .expect("create");
         let err = store.verify(&plaintext).unwrap_err();
         assert!(matches!(err, ApiKeyVerifyError::Expired));
     }
@@ -391,7 +437,9 @@ mod tests {
     #[test]
     fn revoke_removes_key() {
         let store = ApiKeyStore::new();
-        let (plaintext, key) = store.create("u".into(), "n".into(), None, None);
+        let (plaintext, key) = store
+            .create("u".into(), "n".into(), None, None)
+            .expect("create");
         assert!(store.revoke(&key.id));
         let err = store.verify(&plaintext).unwrap_err();
         assert!(matches!(err, ApiKeyVerifyError::NotFound));
@@ -400,7 +448,9 @@ mod tests {
     #[test]
     fn touch_updates_last_used_at() {
         let store = ApiKeyStore::new();
-        let (plaintext, key) = store.create("u".into(), "n".into(), None, None);
+        let (plaintext, key) = store
+            .create("u".into(), "n".into(), None, None)
+            .expect("create");
         assert!(key.last_used_at.is_none());
         let _ = store.verify(&plaintext);
         let after = store.list_for_user("u")[0].clone();
@@ -462,7 +512,9 @@ mod tests {
         let store = ApiKeyStore::new();
         // Run a handful of times to defeat lucky-RNG flakes.
         for _ in 0..20 {
-            let (plaintext, key) = store.create("u".into(), "n".into(), None, None);
+            let (plaintext, key) = store
+                .create("u".into(), "n".into(), None, None)
+                .expect("create");
             let verified = store
                 .verify(&plaintext)
                 .expect("base64url body must verify");

@@ -196,17 +196,17 @@ pub use pg::PostgresTrustedDeviceBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresTrustedDeviceBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresTrustedDeviceBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
                         token TEXT PRIMARY KEY,
                         id TEXT NOT NULL UNIQUE,
@@ -220,22 +220,21 @@ mod pg {
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx
                         ON {PG_TABLE}(expires_at);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl TrustedDeviceStore for PostgresTrustedDeviceBackend {
         fn create(&self, device: TrustedDevice) {
-            if let Ok(mut c) = self.client.lock() {
-                let now = super::current_unix_secs_string();
-                let _ = c.execute(
+            let now = super::current_unix_secs_string();
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!("DELETE FROM {PG_TABLE} WHERE expires_at <= $1"),
                     &[&now],
-                );
-                let _ = c.execute(
+                )?;
+                c.execute(
                     &format!(
                         "INSERT INTO {PG_TABLE}
                            (token, id, user_id, label, created_at, expires_at)
@@ -250,14 +249,15 @@ mod pg {
                         &device.created_at,
                         &device.expires_at,
                     ],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] trusted-device create failed: {e}");
             }
         }
 
         fn find(&self, token: &str) -> Option<TrustedDevice> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            let row = match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT token, id, user_id, label, created_at, expires_at
                          FROM {PG_TABLE}
@@ -265,19 +265,23 @@ mod pg {
                     ),
                     &[&token],
                 )
-                .ok()?
-                .as_ref()
-                .map(pg_row_to_device)?;
-            if row.is_expired() {
+            }) {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::warn!("[pg] trusted-device find failed: {e}");
+                    return None;
+                }
+            };
+            let device = row.as_ref().map(pg_row_to_device)?;
+            if device.is_expired() {
                 return None;
             }
-            Some(row)
+            Some(device)
         }
 
         fn find_by_id(&self, id: &str) -> Option<TrustedDevice> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            let row = match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT token, id, user_id, label, created_at, expires_at
                          FROM {PG_TABLE}
@@ -285,56 +289,69 @@ mod pg {
                     ),
                     &[&id],
                 )
-                .ok()?
-                .as_ref()
-                .map(pg_row_to_device)?;
-            if row.is_expired() {
+            }) {
+                Ok(row) => row,
+                Err(e) => {
+                    tracing::warn!("[pg] trusted-device find_by_id failed: {e}");
+                    return None;
+                }
+            };
+            let device = row.as_ref().map(pg_row_to_device)?;
+            if device.is_expired() {
                 return None;
             }
-            Some(row)
+            Some(device)
         }
 
         fn list_for_user(&self, user_id: &str) -> Vec<TrustedDevice> {
-            let Ok(mut c) = self.client.lock() else {
-                return vec![];
-            };
-            let rows = match c.query(
-                &format!(
-                    "SELECT token, id, user_id, label, created_at, expires_at
-                     FROM {PG_TABLE}
-                     WHERE user_id = $1
-                     ORDER BY expires_at DESC"
-                ),
-                &[&user_id],
-            ) {
-                Ok(r) => r,
-                Err(_) => return vec![],
-            };
-            rows.iter()
-                .map(pg_row_to_device)
-                .filter(|d| !d.is_expired())
-                .collect()
+            match self.conn.with_client(|c| {
+                c.query(
+                    &format!(
+                        "SELECT token, id, user_id, label, created_at, expires_at
+                         FROM {PG_TABLE}
+                         WHERE user_id = $1
+                         ORDER BY expires_at DESC"
+                    ),
+                    &[&user_id],
+                )
+            }) {
+                Ok(rows) => rows
+                    .iter()
+                    .map(pg_row_to_device)
+                    .filter(|d| !d.is_expired())
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!("[pg] trusted-device list failed: {e}");
+                    vec![]
+                }
+            }
         }
 
         fn revoke_by_id(&self, id: &str) -> bool {
-            let Ok(mut c) = self.client.lock() else {
-                return false;
-            };
-            c.execute(&format!("DELETE FROM {PG_TABLE} WHERE id = $1"), &[&id])
-                .map(|n| n > 0)
-                .unwrap_or(false)
+            match self.conn.with_client(|c| {
+                c.execute(&format!("DELETE FROM {PG_TABLE} WHERE id = $1"), &[&id])
+            }) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    tracing::warn!("[pg] trusted-device revoke failed: {e}");
+                    false
+                }
+            }
         }
 
         fn revoke_all_for_user(&self, user_id: &str) -> usize {
-            let Ok(mut c) = self.client.lock() else {
-                return 0;
-            };
-            c.execute(
-                &format!("DELETE FROM {PG_TABLE} WHERE user_id = $1"),
-                &[&user_id],
-            )
-            .map(|n| n as usize)
-            .unwrap_or(0)
+            match self.conn.with_client(|c| {
+                c.execute(
+                    &format!("DELETE FROM {PG_TABLE} WHERE user_id = $1"),
+                    &[&user_id],
+                )
+            }) {
+                Ok(n) => n as usize,
+                Err(e) => {
+                    tracing::warn!("[pg] trusted-device revoke_all failed: {e}");
+                    0
+                }
+            }
         }
     }
 

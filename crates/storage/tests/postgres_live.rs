@@ -363,3 +363,50 @@ fn killed_backend_heals_on_next_checkout() {
         last_err.map(|e| e.message)
     );
 }
+
+/// The auxiliary auth backends (sessions, API keys, OAuth state, …) hold ONE
+/// dedicated connection for the process lifetime via `ReconnectingPgClient`.
+/// Managed providers idle-kill such connections (PlanetScale did, after ~24h,
+/// which silently dropped every CLI API-key INSERT on Pylon Cloud — minted
+/// tokens 401'd forever). This proves the wrapper heals through a server-side
+/// kill instead of failing every subsequent operation.
+#[test]
+fn reconnecting_client_heals_after_backend_kill() {
+    let Some(url) = require_pg_url() else {
+        eprintln!("TEST_POSTGRES_URL not set; skipping");
+        return;
+    };
+    use pylon_storage::postgres::live::ReconnectingPgClient;
+
+    let conn = ReconnectingPgClient::connect(&url).expect("connect");
+
+    // Baseline: the connection works.
+    conn.with_client(|c| c.execute("SELECT 1", &[]))
+        .expect("query before kill");
+
+    // Server-side kill — the same shape as an idle-timeout reap. The
+    // statement itself errors (its own backend died under it), which is fine.
+    let _ = conn.with_client(|c| c.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]));
+
+    // The wrapper must reconnect and serve subsequent operations. Retry a few
+    // times: the client may need one failed op to notice the dead socket.
+    let mut healed = false;
+    let mut last_err = None;
+    for attempt in 0..5 {
+        match conn.with_client(|c| c.execute("SELECT 1", &[])) {
+            Ok(_) => {
+                healed = true;
+                break;
+            }
+            Err(e) => {
+                eprintln!("heal attempt {attempt} failed: {e}");
+                last_err = Some(e);
+                thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
+    assert!(
+        healed,
+        "ReconnectingPgClient never healed after backend kill; last error: {last_err:?}"
+    );
+}

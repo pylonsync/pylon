@@ -200,17 +200,17 @@ pub use pg::PostgresAuditBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresAuditBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresAuditBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
                         id TEXT PRIMARY KEY,
                         created_at BIGINT NOT NULL,
@@ -231,19 +231,17 @@ mod pg {
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_actor_idx
                         ON {PG_TABLE}(actor_id, created_at DESC);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl AuditBackend for PostgresAuditBackend {
         fn append(&self, e: &AuditEvent) {
-            if let Ok(mut c) = self.client.lock() {
-                let metadata_json =
-                    serde_json::to_string(&e.metadata).unwrap_or_else(|_| "{}".into());
-                let _ = c.execute(
+            let metadata_json = serde_json::to_string(&e.metadata).unwrap_or_else(|_| "{}".into());
+            if let Err(err) = self.conn.with_client(|c| {
+                c.execute(
                     &format!(
                         "INSERT INTO {PG_TABLE}
                            (id, created_at, action, user_id, actor_id, tenant_id, ip,
@@ -263,50 +261,56 @@ mod pg {
                         &e.reason,
                         &metadata_json,
                     ],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] audit append failed: {err}");
             }
         }
 
         fn find_for_tenant(&self, tenant_id: &str, limit: usize) -> Vec<AuditEvent> {
-            let Ok(mut c) = self.client.lock() else {
-                return vec![];
-            };
             let bounded = limit.min(10_000) as i64;
-            let rows = match c.query(
-                &format!(
-                    "SELECT id, created_at, action, user_id, actor_id, tenant_id, ip,
-                            user_agent, success, reason, metadata_json
-                     FROM {PG_TABLE}
-                     WHERE tenant_id = $1
-                     ORDER BY created_at DESC
-                     LIMIT $2"
-                ),
-                &[&tenant_id, &bounded],
-            ) {
+            let rows = match self.conn.with_client(|c| {
+                c.query(
+                    &format!(
+                        "SELECT id, created_at, action, user_id, actor_id, tenant_id, ip,
+                                user_agent, success, reason, metadata_json
+                         FROM {PG_TABLE}
+                         WHERE tenant_id = $1
+                         ORDER BY created_at DESC
+                         LIMIT $2"
+                    ),
+                    &[&tenant_id, &bounded],
+                )
+            }) {
                 Ok(r) => r,
-                Err(_) => return vec![],
+                Err(e) => {
+                    tracing::warn!("[pg] audit find_for_tenant failed: {e}");
+                    return vec![];
+                }
             };
             rows.iter().map(pg_row_to_event).collect()
         }
 
         fn find_for_user(&self, user_id: &str, limit: usize) -> Vec<AuditEvent> {
-            let Ok(mut c) = self.client.lock() else {
-                return vec![];
-            };
             let bounded = limit.min(10_000) as i64;
-            let rows = match c.query(
-                &format!(
-                    "SELECT id, created_at, action, user_id, actor_id, tenant_id, ip,
-                            user_agent, success, reason, metadata_json
-                     FROM {PG_TABLE}
-                     WHERE user_id = $1 OR actor_id = $1
-                     ORDER BY created_at DESC
-                     LIMIT $2"
-                ),
-                &[&user_id, &bounded],
-            ) {
+            let rows = match self.conn.with_client(|c| {
+                c.query(
+                    &format!(
+                        "SELECT id, created_at, action, user_id, actor_id, tenant_id, ip,
+                                user_agent, success, reason, metadata_json
+                         FROM {PG_TABLE}
+                         WHERE user_id = $1 OR actor_id = $1
+                         ORDER BY created_at DESC
+                         LIMIT $2"
+                    ),
+                    &[&user_id, &bounded],
+                )
+            }) {
                 Ok(r) => r,
-                Err(_) => return vec![],
+                Err(e) => {
+                    tracing::warn!("[pg] audit find_for_user failed: {e}");
+                    return vec![];
+                }
             };
             rows.iter().map(pg_row_to_event).collect()
         }

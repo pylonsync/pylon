@@ -284,17 +284,17 @@ pub use pg::PostgresAccountBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresAccountBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresAccountBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
                         id TEXT PRIMARY KEY,
                         user_id TEXT NOT NULL,
@@ -313,58 +313,57 @@ mod pg {
                     );
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_user_idx ON {PG_TABLE}(user_id);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl AccountBackend for PostgresAccountBackend {
         fn upsert(&self, a: &Account) {
-            let Ok(mut c) = self.client.lock() else {
-                return;
-            };
-            let _ = c.execute(
-                &format!(
-                    "INSERT INTO {PG_TABLE}
-                       (id, user_id, provider_id, account_id, access_token, refresh_token,
-                        id_token, access_token_expires_at, refresh_token_expires_at,
-                        scope, password, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-                     ON CONFLICT (provider_id, account_id) DO UPDATE SET
-                       user_id = EXCLUDED.user_id,
-                       access_token = EXCLUDED.access_token,
-                       refresh_token = EXCLUDED.refresh_token,
-                       id_token = EXCLUDED.id_token,
-                       access_token_expires_at = EXCLUDED.access_token_expires_at,
-                       refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
-                       scope = EXCLUDED.scope,
-                       password = EXCLUDED.password,
-                       updated_at = EXCLUDED.updated_at"
-                ),
-                &[
-                    &a.id,
-                    &a.user_id,
-                    &a.provider_id,
-                    &a.account_id,
-                    &a.access_token,
-                    &a.refresh_token,
-                    &a.id_token,
-                    &a.access_token_expires_at.map(|n| n as i64),
-                    &a.refresh_token_expires_at.map(|n| n as i64),
-                    &a.scope,
-                    &a.password,
-                    &(a.created_at as i64),
-                    &(a.updated_at as i64),
-                ],
-            );
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
+                    &format!(
+                        "INSERT INTO {PG_TABLE}
+                           (id, user_id, provider_id, account_id, access_token, refresh_token,
+                            id_token, access_token_expires_at, refresh_token_expires_at,
+                            scope, password, created_at, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                         ON CONFLICT (provider_id, account_id) DO UPDATE SET
+                           user_id = EXCLUDED.user_id,
+                           access_token = EXCLUDED.access_token,
+                           refresh_token = EXCLUDED.refresh_token,
+                           id_token = EXCLUDED.id_token,
+                           access_token_expires_at = EXCLUDED.access_token_expires_at,
+                           refresh_token_expires_at = EXCLUDED.refresh_token_expires_at,
+                           scope = EXCLUDED.scope,
+                           password = EXCLUDED.password,
+                           updated_at = EXCLUDED.updated_at"
+                    ),
+                    &[
+                        &a.id,
+                        &a.user_id,
+                        &a.provider_id,
+                        &a.account_id,
+                        &a.access_token,
+                        &a.refresh_token,
+                        &a.id_token,
+                        &a.access_token_expires_at.map(|n| n as i64),
+                        &a.refresh_token_expires_at.map(|n| n as i64),
+                        &a.scope,
+                        &a.password,
+                        &(a.created_at as i64),
+                        &(a.updated_at as i64),
+                    ],
+                )
+            }) {
+                tracing::warn!("[pg] account upsert failed: {e}");
+            }
         }
 
         fn find_by_provider(&self, provider_id: &str, account_id: &str) -> Option<Account> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            let row = match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT {SELECT_COLS}
                          FROM {PG_TABLE}
@@ -372,7 +371,13 @@ mod pg {
                     ),
                     &[&provider_id, &account_id],
                 )
-                .ok()??;
+            }) {
+                Ok(row) => row?,
+                Err(e) => {
+                    tracing::warn!("[pg] account lookup failed: {e}");
+                    return None;
+                }
+            };
             Some(row_to_account(
                 row.get(0),
                 row.get(1),
@@ -391,15 +396,18 @@ mod pg {
         }
 
         fn find_for_user(&self, user_id: &str) -> Vec<Account> {
-            let Ok(mut c) = self.client.lock() else {
-                return Vec::new();
-            };
-            let rows = c
-                .query(
+            let rows = match self.conn.with_client(|c| {
+                c.query(
                     &format!("SELECT {SELECT_COLS} FROM {PG_TABLE} WHERE user_id = $1"),
                     &[&user_id],
                 )
-                .unwrap_or_default();
+            }) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("[pg] account find_for_user failed: {e}");
+                    return Vec::new();
+                }
+            };
             rows.iter()
                 .map(|row| {
                     row_to_account(
@@ -422,24 +430,31 @@ mod pg {
         }
 
         fn unlink(&self, provider_id: &str, account_id: &str) -> bool {
-            let Ok(mut c) = self.client.lock() else {
-                return false;
-            };
-            c.execute(
-                &format!("DELETE FROM {PG_TABLE} WHERE provider_id = $1 AND account_id = $2"),
-                &[&provider_id, &account_id],
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            match self.conn.with_client(|c| {
+                c.execute(
+                    &format!("DELETE FROM {PG_TABLE} WHERE provider_id = $1 AND account_id = $2"),
+                    &[&provider_id, &account_id],
+                )
+            }) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    tracing::warn!("[pg] account unlink failed: {e}");
+                    false
+                }
+            }
         }
 
         fn list_all(&self) -> Vec<Account> {
-            let Ok(mut c) = self.client.lock() else {
-                return Vec::new();
+            let rows = match self
+                .conn
+                .with_client(|c| c.query(&format!("SELECT {SELECT_COLS} FROM {PG_TABLE}"), &[]))
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("[pg] account list_all failed: {e}");
+                    return Vec::new();
+                }
             };
-            let rows = c
-                .query(&format!("SELECT {SELECT_COLS} FROM {PG_TABLE}"), &[])
-                .unwrap_or_default();
             rows.iter()
                 .map(|row| {
                     row_to_account(

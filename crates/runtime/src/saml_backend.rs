@@ -289,17 +289,17 @@ pub use pg::PostgresSamlBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresSamlBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresSamlBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_CONFIG} (
                         org_id TEXT PRIMARY KEY,
                         idp_entity_id TEXT NOT NULL,
@@ -323,18 +323,16 @@ mod pg {
                     CREATE INDEX IF NOT EXISTS {PG_STATE}_created_idx
                         ON {PG_STATE}(created_at);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl SamlStore for PostgresSamlBackend {
         fn get(&self, org_id: &str) -> Option<SamlConfig> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT org_id, idp_entity_id, idp_sso_url, idp_x509_cert_pem,
                                 default_role, email_domains_json, email_attribute,
@@ -343,25 +341,32 @@ mod pg {
                     ),
                     &[&org_id],
                 )
-                .ok()??;
-            Some(pg_row_to_config(&row))
+            }) {
+                Ok(row) => row.map(|r| pg_row_to_config(&r)),
+                Err(e) => {
+                    tracing::warn!("[pg] saml get failed: {e}");
+                    None
+                }
+            }
         }
 
         fn upsert(&self, config: SamlConfig) -> Result<(), DomainConflictError> {
-            let mut c = self.client.lock().map_err(|_| DomainConflictError {
-                domain: String::new(),
-                claimed_by: String::new(),
-            })?;
-            let rows = c
-                .query(
-                    &format!(
-                        "SELECT org_id, email_domains_json FROM {PG_CONFIG} WHERE org_id != $1"
-                    ),
-                    &[&config.org_id],
-                )
-                .map_err(|_| DomainConflictError {
-                    domain: String::new(),
-                    claimed_by: String::new(),
+            let rows = self
+                .conn
+                .with_client(|c| {
+                    c.query(
+                        &format!(
+                            "SELECT org_id, email_domains_json FROM {PG_CONFIG} WHERE org_id != $1"
+                        ),
+                        &[&config.org_id],
+                    )
+                })
+                .map_err(|e| {
+                    tracing::warn!("[pg] saml upsert conflict-check failed: {e}");
+                    DomainConflictError {
+                        domain: String::new(),
+                        claimed_by: String::new(),
+                    }
                 })?;
             let lower_requested: Vec<String> = config
                 .email_domains
@@ -383,60 +388,72 @@ mod pg {
             }
             let domains =
                 serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
-            let _ = c.execute(
-                &format!(
-                    "INSERT INTO {PG_CONFIG}
-                       (org_id, idp_entity_id, idp_sso_url, idp_x509_cert_pem,
-                        default_role, email_domains_json, email_attribute,
-                        name_attribute, created_at, updated_at)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                     ON CONFLICT(org_id) DO UPDATE SET
-                       idp_entity_id = EXCLUDED.idp_entity_id,
-                       idp_sso_url = EXCLUDED.idp_sso_url,
-                       idp_x509_cert_pem = EXCLUDED.idp_x509_cert_pem,
-                       default_role = EXCLUDED.default_role,
-                       email_domains_json = EXCLUDED.email_domains_json,
-                       email_attribute = EXCLUDED.email_attribute,
-                       name_attribute = EXCLUDED.name_attribute,
-                       updated_at = EXCLUDED.updated_at"
-                ),
-                &[
-                    &config.org_id,
-                    &config.idp_entity_id,
-                    &config.idp_sso_url,
-                    &config.idp_x509_cert_pem,
-                    &config.default_role,
-                    &domains,
-                    &config.email_attribute,
-                    &config.name_attribute,
-                    &(config.created_at as i64),
-                    &(config.updated_at as i64),
-                ],
-            );
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
+                    &format!(
+                        "INSERT INTO {PG_CONFIG}
+                           (org_id, idp_entity_id, idp_sso_url, idp_x509_cert_pem,
+                            default_role, email_domains_json, email_attribute,
+                            name_attribute, created_at, updated_at)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                         ON CONFLICT(org_id) DO UPDATE SET
+                           idp_entity_id = EXCLUDED.idp_entity_id,
+                           idp_sso_url = EXCLUDED.idp_sso_url,
+                           idp_x509_cert_pem = EXCLUDED.idp_x509_cert_pem,
+                           default_role = EXCLUDED.default_role,
+                           email_domains_json = EXCLUDED.email_domains_json,
+                           email_attribute = EXCLUDED.email_attribute,
+                           name_attribute = EXCLUDED.name_attribute,
+                           updated_at = EXCLUDED.updated_at"
+                    ),
+                    &[
+                        &config.org_id,
+                        &config.idp_entity_id,
+                        &config.idp_sso_url,
+                        &config.idp_x509_cert_pem,
+                        &config.default_role,
+                        &domains,
+                        &config.email_attribute,
+                        &config.name_attribute,
+                        &(config.created_at as i64),
+                        &(config.updated_at as i64),
+                    ],
+                )
+            }) {
+                tracing::warn!("[pg] saml upsert failed: {e}");
+            }
             Ok(())
         }
 
         fn delete(&self, org_id: &str) -> bool {
-            let Ok(mut c) = self.client.lock() else {
-                return false;
-            };
-            c.execute(
-                &format!("DELETE FROM {PG_CONFIG} WHERE org_id = $1"),
-                &[&org_id],
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            match self.conn.with_client(|c| {
+                c.execute(
+                    &format!("DELETE FROM {PG_CONFIG} WHERE org_id = $1"),
+                    &[&org_id],
+                )
+            }) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    tracing::warn!("[pg] saml delete failed: {e}");
+                    false
+                }
+            }
         }
 
         fn find_by_email_domain(&self, domain: &str) -> Option<String> {
-            let mut c = self.client.lock().ok()?;
             let lower = domain.to_ascii_lowercase();
-            let rows = c
-                .query(
+            let rows = match self.conn.with_client(|c| {
+                c.query(
                     &format!("SELECT org_id, email_domains_json FROM {PG_CONFIG}"),
                     &[],
                 )
-                .ok()?;
+            }) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("[pg] saml domain lookup failed: {e}");
+                    return None;
+                }
+            };
             for r in rows {
                 let domains_json: String = r.get(1);
                 let domains: Vec<String> = serde_json::from_str(&domains_json).unwrap_or_default();
@@ -449,16 +466,16 @@ mod pg {
         }
 
         fn save_state(&self, record: SamlStateRecord) {
-            if let Ok(mut c) = self.client.lock() {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let _ = c.execute(
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!("DELETE FROM {PG_STATE} WHERE created_at < $1"),
                     &[&(now - SAML_STATE_TTL_SECS as i64)],
-                );
-                let _ = c.execute(
+                )?;
+                c.execute(
                     &format!(
                         "INSERT INTO {PG_STATE}
                            (relay_state, org_id, request_id, callback_url, error_callback_url, created_at)
@@ -473,41 +490,53 @@ mod pg {
                         &record.error_callback_url,
                         &(record.created_at as i64),
                     ],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] saml save_state failed: {e}");
             }
         }
 
         fn take_state(&self, relay_state: &str, expected_org_id: &str) -> Option<SamlStateRecord> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match self.conn.with_client(|c| {
+                let Some(row) = c.query_opt(
                     &format!(
                         "SELECT relay_state, org_id, request_id, callback_url, error_callback_url, created_at
                          FROM {PG_STATE} WHERE relay_state = $1"
                     ),
                     &[&relay_state],
-                )
-                .ok()??;
-            let record = pg_state_row_to_record(&row);
-            if record.org_id != expected_org_id {
-                return None;
-            }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if now.saturating_sub(record.created_at) >= SAML_STATE_TTL_SECS {
-                let _ = c.execute(
+                )?
+                else {
+                    return Ok(None);
+                };
+                let record = pg_state_row_to_record(&row);
+                if record.org_id != expected_org_id {
+                    // Cross-org replay attempt: leave the row in place (so
+                    // the legitimate flow still works) and return None.
+                    return Ok(None);
+                }
+                if now.saturating_sub(record.created_at) >= SAML_STATE_TTL_SECS {
+                    c.execute(
+                        &format!("DELETE FROM {PG_STATE} WHERE relay_state = $1"),
+                        &[&relay_state],
+                    )?;
+                    return Ok(None);
+                }
+                c.execute(
                     &format!("DELETE FROM {PG_STATE} WHERE relay_state = $1"),
                     &[&relay_state],
-                );
-                return None;
+                )?;
+                Ok(Some(record))
+            }) {
+                Ok(record) => record,
+                Err(e) => {
+                    tracing::warn!("[pg] saml take_state failed: {e}");
+                    None
+                }
             }
-            let _ = c.execute(
-                &format!("DELETE FROM {PG_STATE} WHERE relay_state = $1"),
-                &[&relay_state],
-            );
-            Some(record)
         }
     }
 

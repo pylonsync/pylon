@@ -179,6 +179,10 @@ fn run_device_flow(cloud: &str, json_mode: bool) -> ExitCode {
                 if !json_mode {
                     println!();
                 }
+                if let Err(e) = verify_minted_token(cloud, &resp.token) {
+                    output::print_error(&e);
+                    return ExitCode::Error;
+                }
                 let creds = Credentials {
                     cloud_url: cloud.to_string(),
                     token: resp.token,
@@ -225,6 +229,24 @@ fn run_device_flow(cloud: &str, json_mode: bool) -> ExitCode {
             }
         }
     }
+}
+
+/// Prove a freshly-redeemed token actually authenticates before we
+/// persist it. The cloud has handed out plaintext keys whose INSERT
+/// was silently dropped server-side (dead PG connection behind the
+/// API-key store) — "login succeeded" then every subsequent command
+/// 401'd INVALID_API_KEY. Round-tripping the token through an authed
+/// call turns that silent server-side failure into a loud login error.
+fn verify_minted_token(cloud: &str, token: &str) -> Result<(), String> {
+    validate_token(cloud, token).map(|_| ()).map_err(|e| {
+        format!(
+            "The cloud minted a token that does not authenticate ({e}). \
+             This is a server-side persistence problem — the key was \
+             handed out but never stored. Nothing was saved locally; \
+             check the Pylon Cloud deployment's database connection \
+             and try again."
+        )
+    })
 }
 
 /// Classify a device-flow poll error. `None` → keep polling (CODE_INVALID
@@ -345,6 +367,10 @@ fn run_with_code(cloud: &str, code: &str, json_mode: bool) -> ExitCode {
         }
     };
 
+    if let Err(e) = verify_minted_token(cloud, &resp.token) {
+        output::print_error(&e);
+        return ExitCode::Error;
+    }
     let creds = Credentials {
         cloud_url: cloud.to_string(),
         token: resp.token,

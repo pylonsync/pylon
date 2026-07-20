@@ -62,9 +62,13 @@ impl SqliteApiKeyBackend {
 }
 
 impl ApiKeyBackend for SqliteApiKeyBackend {
-    fn put(&self, key: &ApiKey) {
-        if let Ok(guard) = self.conn.lock() {
-            let _ = guard.execute(
+    fn put(&self, key: &ApiKey) -> Result<(), String> {
+        let guard = self
+            .conn
+            .lock()
+            .map_err(|_| "api-key store lock poisoned".to_string())?;
+        guard
+            .execute(
                 &format!(
                     "INSERT INTO {SQLITE_TABLE}
                        (id, user_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, created_at)
@@ -88,8 +92,9 @@ impl ApiKeyBackend for SqliteApiKeyBackend {
                     key.last_used_at.map(|v| v as i64),
                     key.created_at as i64,
                 ],
-            );
-        }
+            )
+            .map_err(|e| format!("api-key persist failed: {e}"))?;
+        Ok(())
     }
 
     fn get(&self, id: &str) -> Option<ApiKey> {
@@ -169,17 +174,17 @@ pub use pg::PostgresApiKeyBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresApiKeyBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresApiKeyBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
                         id TEXT PRIMARY KEY,
                         user_id TEXT NOT NULL,
@@ -193,91 +198,102 @@ mod pg {
                     );
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_user_idx ON {PG_TABLE}(user_id);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl ApiKeyBackend for PostgresApiKeyBackend {
-        fn put(&self, key: &ApiKey) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
-                    &format!(
-                        "INSERT INTO {PG_TABLE}
-                           (id, user_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, created_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                         ON CONFLICT (id) DO UPDATE SET
-                           name = EXCLUDED.name,
-                           prefix = EXCLUDED.prefix,
-                           secret_hash = EXCLUDED.secret_hash,
-                           scopes = EXCLUDED.scopes,
-                           expires_at = EXCLUDED.expires_at,
-                           last_used_at = EXCLUDED.last_used_at"
-                    ),
-                    &[
-                        &key.id,
-                        &key.user_id,
-                        &key.name,
-                        &key.prefix,
-                        &key.secret_hash,
-                        &key.scopes,
-                        &key.expires_at.map(|v| v as i64),
-                        &key.last_used_at.map(|v| v as i64),
-                        &(key.created_at as i64),
-                    ],
-                );
-            }
+        fn put(&self, key: &ApiKey) -> Result<(), String> {
+            self.conn
+                .with_client(|c| {
+                    c.execute(
+                        &format!(
+                            "INSERT INTO {PG_TABLE}
+                               (id, user_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, created_at)
+                             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                             ON CONFLICT (id) DO UPDATE SET
+                               name = EXCLUDED.name,
+                               prefix = EXCLUDED.prefix,
+                               secret_hash = EXCLUDED.secret_hash,
+                               scopes = EXCLUDED.scopes,
+                               expires_at = EXCLUDED.expires_at,
+                               last_used_at = EXCLUDED.last_used_at"
+                        ),
+                        &[
+                            &key.id,
+                            &key.user_id,
+                            &key.name,
+                            &key.prefix,
+                            &key.secret_hash,
+                            &key.scopes,
+                            &key.expires_at.map(|v| v as i64),
+                            &key.last_used_at.map(|v| v as i64),
+                            &(key.created_at as i64),
+                        ],
+                    )
+                })
+                .map_err(|e| format!("api-key persist failed: {e}"))?;
+            Ok(())
         }
 
         fn get(&self, id: &str) -> Option<ApiKey> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT id, user_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, created_at
                          FROM {PG_TABLE} WHERE id = $1"
                     ),
                     &[&id],
                 )
-                .ok()??;
-            Some(pg_row_to_key(&row))
+            }) {
+                Ok(row) => row.map(|r| pg_row_to_key(&r)),
+                Err(e) => {
+                    tracing::warn!("[pg] api-key lookup failed: {e}");
+                    None
+                }
+            }
         }
 
         fn delete(&self, id: &str) -> bool {
-            let mut c = match self.client.lock() {
-                Ok(c) => c,
-                Err(_) => return false,
-            };
-            c.execute(&format!("DELETE FROM {PG_TABLE} WHERE id = $1"), &[&id])
-                .map(|n| n > 0)
-                .unwrap_or(false)
+            match self.conn.with_client(|c| {
+                c.execute(&format!("DELETE FROM {PG_TABLE} WHERE id = $1"), &[&id])
+            }) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    tracing::warn!("[pg] api-key delete failed: {e}");
+                    false
+                }
+            }
         }
 
         fn list_for_user(&self, user_id: &str) -> Vec<ApiKey> {
-            let Ok(mut c) = self.client.lock() else {
-                return vec![];
-            };
-            let rows = match c.query(
-                &format!(
-                    "SELECT id, user_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, created_at
-                     FROM {PG_TABLE} WHERE user_id = $1 ORDER BY created_at DESC"
-                ),
-                &[&user_id],
-            ) {
-                Ok(r) => r,
-                Err(_) => return vec![],
-            };
-            rows.iter().map(pg_row_to_key).collect()
+            match self.conn.with_client(|c| {
+                c.query(
+                    &format!(
+                        "SELECT id, user_id, name, prefix, secret_hash, scopes, expires_at, last_used_at, created_at
+                         FROM {PG_TABLE} WHERE user_id = $1 ORDER BY created_at DESC"
+                    ),
+                    &[&user_id],
+                )
+            }) {
+                Ok(rows) => rows.iter().map(pg_row_to_key).collect(),
+                Err(e) => {
+                    tracing::warn!("[pg] api-key list failed: {e}");
+                    vec![]
+                }
+            }
         }
 
         fn touch(&self, id: &str, now: u64) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!("UPDATE {PG_TABLE} SET last_used_at = $2 WHERE id = $1"),
                     &[&id, &(now as i64)],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] api-key touch failed: {e}");
             }
         }
     }
@@ -315,7 +331,7 @@ mod tests {
             last_used_at: None,
             created_at: 100,
         };
-        backend.put(&key);
+        backend.put(&key).expect("put");
         let got = backend.get("key_test").unwrap();
         assert_eq!(got.user_id, "user_1");
         assert_eq!(got.name, "ci");
@@ -333,17 +349,19 @@ mod tests {
     fn sqlite_list_for_user_orders_newest_first() {
         let backend = SqliteApiKeyBackend::in_memory().unwrap();
         for (i, name) in ["a", "b", "c"].iter().enumerate() {
-            backend.put(&ApiKey {
-                id: format!("key_{i}"),
-                user_id: "u".into(),
-                name: name.to_string(),
-                prefix: "p".into(),
-                secret_hash: "h".into(),
-                scopes: None,
-                expires_at: None,
-                last_used_at: None,
-                created_at: 100 + i as u64,
-            });
+            backend
+                .put(&ApiKey {
+                    id: format!("key_{i}"),
+                    user_id: "u".into(),
+                    name: name.to_string(),
+                    prefix: "p".into(),
+                    secret_hash: "h".into(),
+                    scopes: None,
+                    expires_at: None,
+                    last_used_at: None,
+                    created_at: 100 + i as u64,
+                })
+                .expect("put");
         }
         let list = backend.list_for_user("u");
         // Newest first → "c", "b", "a"

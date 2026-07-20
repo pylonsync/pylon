@@ -150,17 +150,17 @@ pub use pg::PostgresMagicCodeBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresMagicCodeBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresMagicCodeBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
                         email TEXT PRIMARY KEY,
                         code TEXT NOT NULL,
@@ -169,45 +169,50 @@ mod pg {
                     );
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl MagicCodeBackend for PostgresMagicCodeBackend {
         fn put(&self, email: &str, code: &MagicCode) {
-            let Ok(mut c) = self.client.lock() else {
-                return;
-            };
-            let _ = c.execute(
-                &format!(
-                    "INSERT INTO {PG_TABLE} (email, code, expires_at, attempts)
-                     VALUES ($1, $2, $3, $4)
-                     ON CONFLICT (email) DO UPDATE SET
-                       code = EXCLUDED.code,
-                       expires_at = EXCLUDED.expires_at,
-                       attempts = EXCLUDED.attempts"
-                ),
-                &[
-                    &email,
-                    &code.code,
-                    &(code.expires_at as i64),
-                    &(code.attempts as i32),
-                ],
-            );
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
+                    &format!(
+                        "INSERT INTO {PG_TABLE} (email, code, expires_at, attempts)
+                         VALUES ($1, $2, $3, $4)
+                         ON CONFLICT (email) DO UPDATE SET
+                           code = EXCLUDED.code,
+                           expires_at = EXCLUDED.expires_at,
+                           attempts = EXCLUDED.attempts"
+                    ),
+                    &[
+                        &email,
+                        &code.code,
+                        &(code.expires_at as i64),
+                        &(code.attempts as i32),
+                    ],
+                )
+            }) {
+                tracing::warn!("[pg] magic-code put failed: {e}");
+            }
         }
         fn get(&self, email: &str) -> Option<MagicCode> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            let row = match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT email, code, expires_at, attempts FROM {PG_TABLE} WHERE email = $1"
                     ),
                     &[&email],
                 )
-                .ok()??;
+            }) {
+                Ok(row) => row?,
+                Err(e) => {
+                    tracing::warn!("[pg] magic-code get failed: {e}");
+                    return None;
+                }
+            };
             Some(MagicCode {
                 email: row.get(0),
                 code: row.get(1),
@@ -216,31 +221,38 @@ mod pg {
             })
         }
         fn remove(&self, email: &str) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!("DELETE FROM {PG_TABLE} WHERE email = $1"),
                     &[&email],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] magic-code remove failed: {e}");
             }
         }
         fn bump_attempts(&self, email: &str) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!("UPDATE {PG_TABLE} SET attempts = attempts + 1 WHERE email = $1"),
                     &[&email],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] magic-code bump_attempts failed: {e}");
             }
         }
         fn load_all(&self) -> Vec<MagicCode> {
-            let Ok(mut c) = self.client.lock() else {
-                return Vec::new();
-            };
-            let rows = c
-                .query(
+            let rows = match self.conn.with_client(|c| {
+                c.query(
                     &format!("SELECT email, code, expires_at, attempts FROM {PG_TABLE}"),
                     &[],
                 )
-                .unwrap_or_default();
+            }) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("[pg] magic-code load_all failed: {e}");
+                    return Vec::new();
+                }
+            };
             rows.iter()
                 .map(|row| MagicCode {
                     email: row.get(0),

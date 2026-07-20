@@ -190,17 +190,17 @@ pub use pg::PostgresVerificationBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresVerificationBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresVerificationBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
                         id TEXT PRIMARY KEY,
                         kind TEXT NOT NULL,
@@ -216,17 +216,16 @@ mod pg {
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_prefix_idx ON {PG_TABLE}(token_prefix);
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl VerificationBackend for PostgresVerificationBackend {
         fn put(&self, t: &VerificationToken) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!(
                         "INSERT INTO {PG_TABLE}
                            (id, kind, email, user_id, payload, token_hash, token_prefix,
@@ -246,14 +245,15 @@ mod pg {
                         &(t.expires_at as i64),
                         &t.consumed_at.map(|v| v as i64),
                     ],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] verification put failed: {e}");
             }
         }
 
         fn get(&self, id: &str) -> Option<VerificationToken> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT id, kind, email, user_id, payload, token_hash, token_prefix,
                                 created_at, expires_at, consumed_at
@@ -261,52 +261,64 @@ mod pg {
                     ),
                     &[&id],
                 )
-                .ok()??;
-            pg_row_to_token(&row)
+            }) {
+                Ok(row) => pg_row_to_token(&row?),
+                Err(e) => {
+                    tracing::warn!("[pg] verification get failed: {e}");
+                    None
+                }
+            }
         }
 
         fn by_prefix(&self, prefix: &str) -> Vec<VerificationToken> {
-            let Ok(mut c) = self.client.lock() else {
-                return vec![];
-            };
-            let rows = match c.query(
-                &format!(
-                    "SELECT id, kind, email, user_id, payload, token_hash, token_prefix,
-                            created_at, expires_at, consumed_at
-                     FROM {PG_TABLE} WHERE token_prefix = $1"
-                ),
-                &[&prefix],
-            ) {
+            let rows = match self.conn.with_client(|c| {
+                c.query(
+                    &format!(
+                        "SELECT id, kind, email, user_id, payload, token_hash, token_prefix,
+                                created_at, expires_at, consumed_at
+                         FROM {PG_TABLE} WHERE token_prefix = $1"
+                    ),
+                    &[&prefix],
+                )
+            }) {
                 Ok(r) => r,
-                Err(_) => return vec![],
+                Err(e) => {
+                    tracing::warn!("[pg] verification by_prefix failed: {e}");
+                    return vec![];
+                }
             };
             rows.iter().filter_map(pg_row_to_token).collect()
         }
 
         fn mark_consumed(&self, id: &str, now: u64) -> bool {
-            let Ok(mut c) = self.client.lock() else {
-                return false;
-            };
-            c.execute(
-                &format!(
-                    "UPDATE {PG_TABLE} SET consumed_at = $2
-                     WHERE id = $1 AND consumed_at IS NULL"
-                ),
-                &[&id, &(now as i64)],
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            match self.conn.with_client(|c| {
+                c.execute(
+                    &format!(
+                        "UPDATE {PG_TABLE} SET consumed_at = $2
+                         WHERE id = $1 AND consumed_at IS NULL"
+                    ),
+                    &[&id, &(now as i64)],
+                )
+            }) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    tracing::warn!("[pg] verification mark_consumed failed: {e}");
+                    false
+                }
+            }
         }
 
         fn purge_expired(&self, now: u64) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!(
                         "DELETE FROM {PG_TABLE}
                          WHERE expires_at <= $1 AND consumed_at IS NOT NULL"
                     ),
                     &[&(now as i64)],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] verification purge_expired failed: {e}");
             }
         }
     }

@@ -321,17 +321,17 @@ pub use pg::PostgresOrgSsoBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     pub struct PostgresOrgSsoBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresOrgSsoBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_CONFIG} (
                         org_id TEXT PRIMARY KEY,
                         issuer_url TEXT NOT NULL,
@@ -361,18 +361,16 @@ mod pg {
                     ALTER TABLE {PG_STATE}
                         ADD COLUMN IF NOT EXISTS nonce TEXT NOT NULL DEFAULT '';"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl OrgSsoStore for PostgresOrgSsoBackend {
         fn get(&self, org_id: &str) -> Option<OrgSsoConfig> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            match self.conn.with_client(|c| {
+                c.query_opt(
                     &format!(
                         "SELECT org_id, issuer_url, client_id, client_secret_sealed,
                                 default_role, email_domains_json, authorization_endpoint,
@@ -382,26 +380,33 @@ mod pg {
                     ),
                     &[&org_id],
                 )
-                .ok()??;
-            Some(pg_row_to_config(&row))
+            }) {
+                Ok(row) => row.map(|r| pg_row_to_config(&r)),
+                Err(e) => {
+                    tracing::warn!("[pg] org-sso get failed: {e}");
+                    None
+                }
+            }
         }
 
         fn upsert(&self, config: OrgSsoConfig) -> Result<(), DomainConflictError> {
-            let mut c = self.client.lock().map_err(|_| DomainConflictError {
-                domain: String::new(),
-                claimed_by: String::new(),
-            })?;
             // Conflict check FIRST — same shape as the SQLite branch.
-            let rows = c
-                .query(
-                    &format!(
-                        "SELECT org_id, email_domains_json FROM {PG_CONFIG} WHERE org_id != $1"
-                    ),
-                    &[&config.org_id],
-                )
-                .map_err(|_| DomainConflictError {
-                    domain: String::new(),
-                    claimed_by: String::new(),
+            let rows = self
+                .conn
+                .with_client(|c| {
+                    c.query(
+                        &format!(
+                            "SELECT org_id, email_domains_json FROM {PG_CONFIG} WHERE org_id != $1"
+                        ),
+                        &[&config.org_id],
+                    )
+                })
+                .map_err(|e| {
+                    tracing::warn!("[pg] org-sso upsert conflict-check failed: {e}");
+                    DomainConflictError {
+                        domain: String::new(),
+                        claimed_by: String::new(),
+                    }
                 })?;
             let lower_requested: Vec<String> = config
                 .email_domains
@@ -423,65 +428,77 @@ mod pg {
             }
             let domains =
                 serde_json::to_string(&config.email_domains).unwrap_or_else(|_| "[]".into());
-            let _ = c.execute(
-                &format!(
-                    "INSERT INTO {PG_CONFIG}
-                       (org_id, issuer_url, client_id, client_secret_sealed,
-                        default_role, email_domains_json, authorization_endpoint,
-                        token_endpoint, userinfo_endpoint, jwks_uri,
-                        created_at, updated_at)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-                     ON CONFLICT(org_id) DO UPDATE SET
-                       issuer_url = EXCLUDED.issuer_url,
-                       client_id = EXCLUDED.client_id,
-                       client_secret_sealed = EXCLUDED.client_secret_sealed,
-                       default_role = EXCLUDED.default_role,
-                       email_domains_json = EXCLUDED.email_domains_json,
-                       authorization_endpoint = EXCLUDED.authorization_endpoint,
-                       token_endpoint = EXCLUDED.token_endpoint,
-                       userinfo_endpoint = EXCLUDED.userinfo_endpoint,
-                       jwks_uri = EXCLUDED.jwks_uri,
-                       updated_at = EXCLUDED.updated_at"
-                ),
-                &[
-                    &config.org_id,
-                    &config.issuer_url,
-                    &config.client_id,
-                    &config.client_secret_sealed,
-                    &config.default_role,
-                    &domains,
-                    &config.authorization_endpoint,
-                    &config.token_endpoint,
-                    &config.userinfo_endpoint,
-                    &config.jwks_uri,
-                    &(config.created_at as i64),
-                    &(config.updated_at as i64),
-                ],
-            );
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
+                    &format!(
+                        "INSERT INTO {PG_CONFIG}
+                           (org_id, issuer_url, client_id, client_secret_sealed,
+                            default_role, email_domains_json, authorization_endpoint,
+                            token_endpoint, userinfo_endpoint, jwks_uri,
+                            created_at, updated_at)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                         ON CONFLICT(org_id) DO UPDATE SET
+                           issuer_url = EXCLUDED.issuer_url,
+                           client_id = EXCLUDED.client_id,
+                           client_secret_sealed = EXCLUDED.client_secret_sealed,
+                           default_role = EXCLUDED.default_role,
+                           email_domains_json = EXCLUDED.email_domains_json,
+                           authorization_endpoint = EXCLUDED.authorization_endpoint,
+                           token_endpoint = EXCLUDED.token_endpoint,
+                           userinfo_endpoint = EXCLUDED.userinfo_endpoint,
+                           jwks_uri = EXCLUDED.jwks_uri,
+                           updated_at = EXCLUDED.updated_at"
+                    ),
+                    &[
+                        &config.org_id,
+                        &config.issuer_url,
+                        &config.client_id,
+                        &config.client_secret_sealed,
+                        &config.default_role,
+                        &domains,
+                        &config.authorization_endpoint,
+                        &config.token_endpoint,
+                        &config.userinfo_endpoint,
+                        &config.jwks_uri,
+                        &(config.created_at as i64),
+                        &(config.updated_at as i64),
+                    ],
+                )
+            }) {
+                tracing::warn!("[pg] org-sso upsert failed: {e}");
+            }
             Ok(())
         }
 
         fn delete(&self, org_id: &str) -> bool {
-            let Ok(mut c) = self.client.lock() else {
-                return false;
-            };
-            c.execute(
-                &format!("DELETE FROM {PG_CONFIG} WHERE org_id = $1"),
-                &[&org_id],
-            )
-            .map(|n| n > 0)
-            .unwrap_or(false)
+            match self.conn.with_client(|c| {
+                c.execute(
+                    &format!("DELETE FROM {PG_CONFIG} WHERE org_id = $1"),
+                    &[&org_id],
+                )
+            }) {
+                Ok(n) => n > 0,
+                Err(e) => {
+                    tracing::warn!("[pg] org-sso delete failed: {e}");
+                    false
+                }
+            }
         }
 
         fn find_by_email_domain(&self, domain: &str) -> Option<String> {
-            let mut c = self.client.lock().ok()?;
             let lower = domain.to_ascii_lowercase();
-            let rows = c
-                .query(
+            let rows = match self.conn.with_client(|c| {
+                c.query(
                     &format!("SELECT org_id, email_domains_json FROM {PG_CONFIG}"),
                     &[],
                 )
-                .ok()?;
+            }) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("[pg] org-sso domain lookup failed: {e}");
+                    return None;
+                }
+            };
             for r in rows {
                 let domains_json: String = r.get(1);
                 let domains: Vec<String> = serde_json::from_str(&domains_json).unwrap_or_default();
@@ -494,16 +511,16 @@ mod pg {
         }
 
         fn save_state(&self, record: OrgSsoStateRecord) {
-            if let Ok(mut c) = self.client.lock() {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                let _ = c.execute(
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!("DELETE FROM {PG_STATE} WHERE created_at < $1"),
                     &[&(now - STATE_TTL_SECS as i64)],
-                );
-                let _ = c.execute(
+                )?;
+                c.execute(
                     &format!(
                         "INSERT INTO {PG_STATE}
                            (state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at)
@@ -519,41 +536,53 @@ mod pg {
                         &record.error_callback_url,
                         &(record.created_at as i64),
                     ],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] org-sso save_state failed: {e}");
             }
         }
 
         fn take_state(&self, state: &str, expected_org_id: &str) -> Option<OrgSsoStateRecord> {
-            let mut c = self.client.lock().ok()?;
-            let row = c
-                .query_opt(
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match self.conn.with_client(|c| {
+                let Some(row) = c.query_opt(
                     &format!(
                         "SELECT state, org_id, pkce_verifier, nonce, callback_url, error_callback_url, created_at
                          FROM {PG_STATE} WHERE state = $1"
                     ),
                     &[&state],
-                )
-                .ok()??;
-            let record = pg_state_row_to_record(&row);
-            if record.org_id != expected_org_id {
-                return None;
-            }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            if now.saturating_sub(record.created_at) >= STATE_TTL_SECS {
-                let _ = c.execute(
+                )?
+                else {
+                    return Ok(None);
+                };
+                let record = pg_state_row_to_record(&row);
+                if record.org_id != expected_org_id {
+                    // Cross-org replay attempt: leave the row in place (so
+                    // the legitimate flow still works) and return None.
+                    return Ok(None);
+                }
+                if now.saturating_sub(record.created_at) >= STATE_TTL_SECS {
+                    c.execute(
+                        &format!("DELETE FROM {PG_STATE} WHERE state = $1"),
+                        &[&state],
+                    )?;
+                    return Ok(None);
+                }
+                c.execute(
                     &format!("DELETE FROM {PG_STATE} WHERE state = $1"),
                     &[&state],
-                );
-                return None;
+                )?;
+                Ok(Some(record))
+            }) {
+                Ok(record) => record,
+                Err(e) => {
+                    tracing::warn!("[pg] org-sso take_state failed: {e}");
+                    None
+                }
             }
-            let _ = c.execute(
-                &format!("DELETE FROM {PG_STATE} WHERE state = $1"),
-                &[&state],
-            );
-            Some(record)
         }
     }
 

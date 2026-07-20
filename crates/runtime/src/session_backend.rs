@@ -148,8 +148,7 @@ pub use pg::PostgresSessionBackend;
 
 mod pg {
     use super::*;
-    use postgres::Client;
-    use std::sync::Mutex;
+    use pylon_storage::postgres::live::ReconnectingPgClient;
 
     const PG_TABLE: &str = "_pylon_sessions";
 
@@ -158,14 +157,14 @@ mod pg {
     /// `DATABASE_URL` from a local SQLite file to a managed PG cluster
     /// only changes WHERE the rows live, not what the rows mean.
     pub struct PostgresSessionBackend {
-        client: Mutex<Client>,
+        conn: ReconnectingPgClient,
     }
 
     impl PostgresSessionBackend {
         pub fn connect(url: &str) -> Result<Self, String> {
-            let mut client = pylon_storage::postgres::live::connect_pg(url)?;
-            client
-                .batch_execute(&format!(
+            let conn = ReconnectingPgClient::connect(url)?;
+            conn.with_client(|c| {
+                c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (
                         token TEXT PRIMARY KEY,
                         user_id TEXT NOT NULL,
@@ -179,27 +178,29 @@ mod pg {
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_user_idx ON {PG_TABLE}(user_id);
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
-                .map_err(|e| format!("PG init schema: {e}"))?;
-            Ok(Self {
-                client: Mutex::new(client),
             })
+            .map_err(|e| format!("PG init schema: {e}"))?;
+            Ok(Self { conn })
         }
     }
 
     impl SessionBackend for PostgresSessionBackend {
         fn load_all(&self) -> Vec<Session> {
-            let Ok(mut c) = self.client.lock() else {
-                return Vec::new();
-            };
-            let rows = c
-                .query(
+            let rows = match self.conn.with_client(|c| {
+                c.query(
                     &format!(
                         "SELECT token, user_id, expires_at, created_at, device, tenant_id, is_guest
                          FROM {PG_TABLE}"
                     ),
                     &[],
                 )
-                .unwrap_or_default();
+            }) {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("[pg] session load_all failed: {e}");
+                    return Vec::new();
+                }
+            };
             rows.iter()
                 .map(|row| Session {
                     token: row.get(0),
@@ -214,8 +215,8 @@ mod pg {
         }
 
         fn save(&self, session: &Session) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!(
                         "INSERT INTO {PG_TABLE} (token, user_id, expires_at, created_at, device, tenant_id, is_guest)
                          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -235,16 +236,20 @@ mod pg {
                         &session.tenant_id,
                         &session.is_guest,
                     ],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] session save failed: {e}");
             }
         }
 
         fn remove(&self, token: &str) {
-            if let Ok(mut c) = self.client.lock() {
-                let _ = c.execute(
+            if let Err(e) = self.conn.with_client(|c| {
+                c.execute(
                     &format!("DELETE FROM {PG_TABLE} WHERE token = $1"),
                     &[&token],
-                );
+                )
+            }) {
+                tracing::warn!("[pg] session remove failed: {e}");
             }
         }
     }

@@ -2843,9 +2843,28 @@ pub(crate) fn handle(
                 .and_then(|v| v.as_str())
                 .map(String::from);
             let expires_at = data.get("expires_at").and_then(|v| v.as_u64());
+            // A key that failed to persist must NOT be returned — the
+            // plaintext would look like a live credential but verify
+            // against nothing (every use 401s INVALID_API_KEY). Seen in
+            // production when the store's PG connection died: mint kept
+            // "succeeding" while every minted key was silently dropped.
             let (plaintext, key) =
-                ctx.api_keys
-                    .create(user_id.to_string(), name, scopes, expires_at);
+                match ctx
+                    .api_keys
+                    .create(user_id.to_string(), name, scopes, expires_at)
+                {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return Some((
+                            500,
+                            json_error_safe(
+                                "API_KEY_PERSIST_FAILED",
+                                "Could not persist the new API key — try again",
+                                &format!("API key persist failed: {e}"),
+                            ),
+                        ));
+                    }
+                };
             return Some((
                 200,
                 serde_json::json!({
