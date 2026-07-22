@@ -1,6 +1,6 @@
 ---
 title: Auth overview
-description: "Sessions, magic codes, password, OAuth, RBAC, API keys — what Pylon ships out of the box."
+description: "Choose among Pylon sessions, magic codes, passwords, OAuth, RBAC, and API keys."
 ---
 
 Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk, or NextAuth — sign-in flows, sessions, RBAC, and OAuth callbacks are all native HTTP endpoints. This page is the map; the rest of this section drills into each method.
@@ -36,7 +36,7 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 
 ## The shape of every auth flow
 
-Every sign-in method ends with the same pair: **the server mints a `Session`, returns a token, the client stores it.** Every authenticated request then carries `Authorization: Bearer <token>`.
+Every sign-in method mints a `Session` and returns a token for the client to store. Authenticated requests then carry `Authorization: Bearer <token>`.
 
 ```
 client → POST /api/auth/<method>     →  { token, user_id, expires_at }

@@ -1,9 +1,9 @@
 ---
 title: How Pylon compares
-description: "Honest comparisons against Convex, Supabase, Firebase, Colyseus, Playroom Kit, and Nakama."
+description: "Compare Pylon with Convex, Supabase, Firebase, Colyseus, Playroom Kit, and Nakama."
 ---
 
-Every framework and backend is good at something. This section is the honest version of "should you use Pylon or X" — written so you can hand it to your tech-lead and they'll trust it. We don't sandbag competitors; we use primary docs where the comparison matters.
+These comparisons spell out where Pylon and each alternative fit. Vendor-sensitive claims use primary documentation, and the tables call out features competitors handle better.
 
 ## App backends
 
@@ -23,7 +23,7 @@ Drill down: [Pylon vs. Convex](/compare/convex) · [Pylon vs. Supabase](/compare
 
 ## Game servers
 
-One important qualifier before the comparison: Pylon's authoritative game shards are written in **Rust** — the `Shard<S: SimState>` crate — with a `useShard` React hook to connect from the client. Unlike Pylon's app-data side (schema, policies, functions, sync are all TypeScript), there is **no TypeScript API for authoring a shard's server simulation** today. So these rows compare a Rust shard runtime against Node/Go/managed game servers; if your team won't write Rust, the shard column doesn't apply.
+Pylon's authoritative game shards are written in Rust with the `Shard<S: SimState>` crate; clients connect through the `useShard` React hook. Schema, policies, functions, and sync use TypeScript, but shard simulations do not have a TypeScript authoring API. The shard comparison therefore applies only to teams willing to write Rust.
 
 | | Pylon | Colyseus | Playroom Kit | Nakama |
 | --- | --- | --- | --- | --- |
@@ -38,19 +38,17 @@ One important qualifier before the comparison: Pylon's authoritative game shards
 
 Drill down: [Pylon vs. Colyseus](/compare/colyseus) · [Pylon vs. Playroom Kit](/compare/playroom) · [Pylon vs. Nakama](/compare/nakama)
 
-## How we keep these honest
+## Comparison policy
 
 - **Primary sources for vendor-sensitive claims.** If a vendor ships a feature, we should describe it the way their current docs describe it.
-- **No scoreboard inflation.** Where a competitor is genuinely better at something, we say so. (Supabase's Postgres-native data layer is more flexible than ours for analytics; Convex's pure-TS dev loop is genuinely tighter for greenfield TS apps.)
+- **No scoreboard inflation.** Where a competitor is better, we say so. Supabase's Postgres-native data layer is more flexible for analytics, and Convex has a tighter pure-TypeScript loop for greenfield apps.
 - **Review when docs or pricing change.** If you spot a stale claim, [open an issue](https://github.com/pylonsync/pylon/issues).
 
 ## How Pylon fits in your stack
 
-Pylon is a **full-stack realtime framework**. You can use its server-rendered React surface, or pair the backend with whatever you're already shipping on the frontend — **Next.js, React + Vite, Expo / React Native, Swift / SwiftUI**. The dedicated SDKs ([`@pylonsync/next`](/clients/next), [`@pylonsync/react`](/clients/react), [`@pylonsync/react-native`](/clients/react-native), [Swift SDK](/clients/swift)) exist precisely so you don't have to choose between Pylon and your favorite frontend story. That's the happy path, not a compromise.
+Pylon is a full-stack realtime framework. Use its server-rendered React surface or pair the backend with Next.js, React and Vite, Expo or React Native, or Swift and SwiftUI. Dedicated SDKs cover each of those clients: [`@pylonsync/next`](/clients/next), [`@pylonsync/react`](/clients/react), [`@pylonsync/react-native`](/clients/react-native), and the [Swift SDK](/clients/swift).
 
-## When we'd recommend NOT using Pylon
-
-There aren't many cases. The honest ones:
+## When Pylon is a poor fit
 
 - **You're already deep in the GCP stack.** Firebase + GCP integrate cleanly with Cloud Run, BigQuery, Pub/Sub, and the long tail of Google services. Pylon doesn't.
 - **You need warehouse-scale analytics.** Move analytical workloads to ClickHouse, DuckDB, or BigQuery. Pylon is for transactional realtime app state, not OLAP.
@@ -58,7 +56,7 @@ There aren't many cases. The honest ones:
 
 ## What about raw Postgres access?
 
-Today Pylon's entity API is the data API — no raw SQL escape hatch. That's a deliberate constraint while we ship the cross-backend (SQLite + Postgres) story, **not a permanent stance**. When you're on Postgres mode there's no architectural reason to gate-keep CTEs, window functions, materialized views, or pgvector — and a raw-SQL escape hatch (e.g. `ctx.pg.query(sql, params)` available only in `postgres-live` builds) is on the roadmap. Until then, if a query genuinely doesn't fit the entity model, you can run a Postgres extension or sidecar against the same database — Pylon doesn't lock the DB.
+Pylon's entity API is currently the only in-process data API. Raw SQL for Postgres builds, such as `ctx.pg.query(sql, params)`, is on the roadmap. Until it lands, queries that need CTEs, window functions, materialized views, or pgvector can run through a Postgres extension or sidecar against the same database.
 
 ## Switching costs
 
@@ -80,5 +78,3 @@ We treat lock-in as a bug. Every Pylon deployment can:
 - **Export to JSON or SQL** via `pylon export` / `pylon backup`
 - **Migrate from Cloud to self-hosted** by downloading a snapshot, restoring it with `pylon restore`, and running the same binary
 - **Self-host with the same binary** — no proprietary runtime, no vendor SDK that only talks to us
-
-Build with confidence that you can leave.

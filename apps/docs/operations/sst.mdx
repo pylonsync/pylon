@@ -1,7 +1,7 @@
 ---
 title: "Deploy with SST"
 sidebarTitle: "SST"
-description: "Ship Pylon to AWS as a stateless Fargate container with managed Aurora Postgres, S3 file storage, ALB, and a CDN — defined in one TypeScript file."
+description: "Define a stateless Pylon deployment on AWS with Fargate, Aurora Postgres, S3, ALB, and CloudFront."
 ---
 
 [SST](https://sst.dev) is a TypeScript framework for defining AWS (and other cloud) infrastructure. It's the cleanest way to deploy Pylon to AWS without writing Terraform — one `sst.config.ts` provisions Aurora Postgres, an S3 bucket for uploads, an ECS Fargate cluster, a load balancer with WebSocket + SSE + shard ports forwarded, and a CloudFront CDN.

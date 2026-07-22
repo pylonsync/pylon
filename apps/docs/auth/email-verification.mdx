@@ -1,6 +1,6 @@
 ---
 title: Email verification
-description: "6-digit code flow to verify an authenticated user's email — same primitive as magic-code sign-in."
+description: "Verify an authenticated user's email with the same six-digit code primitive used for magic-code sign-in."
 ---
 
 After a user signs up (via password, OAuth-with-unverified-email, etc.), you usually want to confirm they own the email address. Pylon's email-verification flow is the same primitive as [magic-code sign-in](/auth/magic-codes), gated on an authenticated session — it sends a 6-digit code to the user's `email` field and stamps `emailVerified` on successful verify.

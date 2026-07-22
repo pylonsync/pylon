@@ -20,7 +20,7 @@ Create `app/globals.css`:
 @source "../app/**/*.{tsx,ts,jsx,js}";
 ```
 
-That's it. `pylon dev` picks up the file on the next bundle and emits `/_pylon/build/styles-<hash>.css`. The SSR runtime adds `<link rel="stylesheet">` to every page's `<head>`.
+`pylon dev` picks up the file on the next bundle and emits `/_pylon/build/styles-<hash>.css`. The SSR runtime adds `<link rel="stylesheet">` to every page's `<head>`.
 
 You don't need a `tailwind.config.js` — Tailwind v4 uses the CSS-first config. Theme tokens go in the `@theme` block:
 

@@ -84,4 +84,4 @@ Use a built-in when the behavior should apply to **every** call. Use a function 
 
 ## Writing your own
 
-There is no dynamic plugin loading yet. To add a Rust built-in you build a custom runtime that registers it; for TypeScript-side logic, use functions and policies. The SDK ships a `definePlugin({ name, entities, hooks })` helper, but the runtime does not consume its output yet. See [Writing your own plugin](/plugins/writing-your-own) for the real `Plugin` trait and the honest state of extensibility.
+There is no dynamic plugin loading yet. Add a Rust built-in through a custom runtime; use functions and policies for TypeScript logic. The SDK ships a `definePlugin({ name, entities, hooks })` helper, but the runtime does not consume its output yet. See [Writing your own plugin](/plugins/writing-your-own) for the current extension points.

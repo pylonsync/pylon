@@ -102,7 +102,7 @@ let shard = Shard::new("match_42", GameState::default(), ShardConfig { tick_rate
 
 The Pylon side is Rust, not TS — that's the largest porting cost. If your team is JS-only, that matters; if you're polyglot, the migration is straightforward.
 
-## Honest weakness
+## Pylon tradeoffs
 
 Pylon's realtime shard system is **newer**. Colyseus has 8 years of production hardening, edge-case fixes, integration guides, and deployment patterns. For mission-critical multiplayer where every minute of downtime costs money, Colyseus's maturity is a real asset.
 

@@ -1,6 +1,6 @@
 ---
 title: Loro CRDTs
-description: "@pylonsync/loro — collaborative text, lists, maps, trees that converge across clients."
+description: "Build collaborative text, lists, maps, and trees that converge across clients with @pylonsync/loro."
 ---
 
 For collaborative-editor-style features (Google Docs, Figma, Linear-style multiplayer), Pylon integrates with [Loro](https://loro.dev) — a fast, well-tested CRDT library with bindings for JavaScript and Swift.
@@ -277,7 +277,7 @@ try text.insert(pos: 0, s: "Hello, world!")
 
 `PylonLoroDoc.attach(to:)` registers the binary handler with the engine and sends the `crdt-subscribe` message. Detach (or let the doc go out of scope) to unsubscribe.
 
-## When NOT to use CRDTs
+## When to skip CRDTs
 
 CRDTs are great for **collaborative state** where two users might edit at the same time. They're overkill for:
 

@@ -1,7 +1,7 @@
 ---
 title: "Pylon vs. Supabase"
 sidebarTitle: "vs. Supabase"
-description: "Supabase is Postgres-as-a-platform. Pylon is one binary. Here's when each wins."
+description: "Compare Supabase's Postgres platform with Pylon's single-server model."
 ---
 
 [Supabase](https://supabase.com) is a well-known open-source Firebase alternative. It's a managed Postgres + GoTrue + PostgREST + Realtime + Storage stack with web/mobile SDKs. Pylon hits the same problem space with a different shape.
@@ -91,14 +91,14 @@ If you're moving an existing Supabase app:
 | `pg_net` outbound HTTP | `fetch` inside an action (with `net_guard` plugin for SSRF defense) |
 | `auth.users` | Pylon's `User` entity (you control the shape) |
 
-The biggest delta today: Pylon's entity API is the data API. If your app relies on raw Postgres queries (CTEs, window functions, materialized views, pgvector), you have two options:
+Pylon's entity API is currently its only in-process data API. Apps that rely on raw Postgres queries such as CTEs, window functions, materialized views, or pgvector have two options:
 
 1. **Express the logic in a Pylon `action`** in TypeScript — for joins and aggregates this is usually fine, and you keep the type-safe entity model.
 2. **Run a sidecar against the same Postgres** — Pylon doesn't lock the DB; you can connect any tool that speaks Postgres for analytics, BI, or specialized queries.
 
 Raw SQL exposure from inside `action` handlers (e.g. `ctx.pg.query(sql, params)` in `postgres-live` builds) is on the roadmap; there's no architectural reason to gate-keep it. For now, most app workloads fit the entity API; if yours needs more Postgres surface, Supabase has a head start.
 
-## Honest weakness
+## Pylon tradeoffs
 
 Supabase's Postgres-native data layer is more flexible than Pylon's for analytics, complex queries, and integrations with tools that speak SQL (Metabase, Hex, Mode, Retool). If your data model needs to interop with a wider data ecosystem, Supabase's "it's just Postgres" is genuinely valuable.
 

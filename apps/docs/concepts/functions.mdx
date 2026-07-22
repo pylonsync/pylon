@@ -1,6 +1,6 @@
 ---
 title: Functions
-description: "Queries, mutations, and actions — your server-side RPC."
+description: "Write server-side RPC with queries, mutations, and actions."
 ---
 
 A **function** is server TypeScript, RPC-callable from the client. Pylon runs them in a Bun process managed by the runtime.
@@ -114,13 +114,13 @@ export default action({
 });
 ```
 
-**Why this matters for actions specifically:** policies gate `ctx.db.*` reads and writes, but **policies don't gate `action` handlers**. An action that charges Stripe, sends email, or hits a private API has no default protection — except `auth`. Forgetting this single field is the canonical action-shaped vulnerability in any TypeScript backend. Pylon makes it the secure default.
+**Action authentication.** Policies gate `ctx.db.*` reads and writes, but they do not gate `action` handlers. An action that charges Stripe, sends email, or calls a private API relies on its `auth` setting, so Pylon requires authentication by default.
 
 `internal: true` functions ignore `auth` — they're unreachable over HTTP and inherit the wrapping handler's context.
 
 ## `ctx.db` honors policies (strict mode)
 
-By default, `ctx.db.*` inside a function bypasses entity policies — server code is trusted. That's the historical Pylon behavior and it's still the default.
+By default, `ctx.db.*` inside a function bypasses entity policies because server code is trusted. This remains the default for compatibility.
 
 **Strict mode** flips the default: every `ctx.db.get/query/insert/update/delete/lookup/search` runs through the policy engine using the function's caller auth, exactly as if the same operation came in through `/api/entities/*`. Enable per deploy:
 
@@ -185,7 +185,7 @@ v.optional(v.string())  v.array(v.string())    v.literal("open" | "closed")
 v.object({ k: v.string() })
 ```
 
-See [SDK reference](/reference/validators) for the full list.
+The same validators work in query, mutation, and action arguments.
 
 ## Queries
 
@@ -253,7 +253,7 @@ if (msg.length > 2000) {
 }
 ```
 
-The client receives `{ code, message }` and can render different UI per code. See [Error codes](/reference/errors) for the canonical list.
+The client receives `{ code, message }` and can render different UI for each code.
 
 ## Next
 
@@ -261,7 +261,7 @@ The client receives `{ code, message }` and can render different UI per code. Se
   <Card title="Live queries" icon="radio" href="/concepts/live-queries">
     How query subscriptions stay in sync.
   </Card>
-  <Card title="Validators" icon="check" href="/reference/validators">
+  <Card title="Validators" icon="check" href="#validators">
     All argument shapes `v.*` supports.
   </Card>
 </CardGroup>

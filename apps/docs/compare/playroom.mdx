@@ -1,7 +1,7 @@
 ---
 title: "Pylon vs. Playroom Kit"
 sidebarTitle: "vs. Playroom Kit"
-description: "Playroom Kit is the easiest way to ship a web multiplayer game today. Pylon is for when 'easiest' isn't enough."
+description: "Compare Playroom Kit's managed web multiplayer model with Pylon's self-hosted server authority."
 ---
 
 [Playroom Kit](https://playroomkit.com) is a managed multiplayer SDK aimed at web games and collaborative apps (HTML5, Unity WebGL, browser puzzles). It optimizes hard for "ship a working multiplayer game in an afternoon" — at the cost of being managed-only infrastructure.
@@ -30,16 +30,16 @@ description: "Playroom Kit is the easiest way to ship a web multiplayer game tod
 
 Playroom uses a **host-authoritative** room-state model: when players join a room, one participant is elected host and is responsible for authoritative state changes. Other participants send changes through that model. For unreliable state updates, Playroom can use WebRTC; reliable updates go through its WebSocket server.
 
-This is brilliant for "trivia game with 4 friends" — no custom server code, simple integration. It struggles when:
+This model fits a four-player trivia game with no custom server code. It becomes harder to use when:
 
 - The host has a slow phone and tanks the room
 - The host disconnects mid-game and state has to be re-synced from peers
 - You need server-side validation (anti-cheat, scoring authority)
 - Concurrent players exceed what the elected host and room model can comfortably simulate
 
-Pylon (and Colyseus, and Nakama) use a **server-authoritative** model: the server runs the tick loop, all state lives on the server, clients send inputs and receive state. More expensive operationally; more robust.
+Pylon, Colyseus, and Nakama use a **server-authoritative** model: the server runs the tick loop, all state lives on the server, and clients send inputs and receive state. It costs more to operate but tolerates unreliable or hostile clients better.
 
-One thing to know up front, since Playroom's audience is web/JS developers: Pylon's authoritative tick loop is written in **Rust** (the `Shard<S: SimState>` crate), with a `useShard` React hook to connect from the client. There's no TypeScript API for the server simulation today. Your app data, auth, and functions stay in TypeScript — but the shard authority itself means writing Rust.
+Pylon's authoritative tick loop is written in Rust with the `Shard<S: SimState>` crate, and clients connect through the `useShard` React hook. App data, auth, and functions stay in TypeScript, but the shard simulation itself requires Rust.
 
 ## Where Playroom is better
 
@@ -78,7 +78,7 @@ One thing to know up front, since Playroom's audience is web/JS developers: Pylo
 
 Check Playroom's current pricing and limits before launch. It is designed to make prototypes and lightweight multiplayer cheap to start.
 
-Pylon self-hosting is just infrastructure cost. Pylon Cloud uses plan quotas plus machine compute. That is more operational responsibility than Playroom, but it gives you a dedicated server runtime, durable data, and a path to move off the hosted platform.
+Pylon self-hosting costs the underlying infrastructure. Pylon Cloud uses plan quotas plus machine compute. Both require more operational responsibility than Playroom but provide a dedicated server runtime, durable data, and a migration path off the hosted platform.
 
 ## Migrating from Playroom
 
@@ -91,12 +91,12 @@ If you started with Playroom and outgrew it:
 
 The hardest part is the mental shift from peer-state to server-authoritative. The code itself is straightforward.
 
-## Honest weakness
+## Pylon tradeoffs
 
-Playroom's developer experience for the "ship a party game this weekend" use case is genuinely better than any server-authoritative option, including Pylon. The SDK is more polished for web games specifically; the room-code join UX is excellent; the phone-as-controller story has no Pylon equivalent.
+Playroom has a better developer experience for shipping a party game in a weekend than any server-authoritative option, including Pylon. Its web-game SDK, room-code flow, and phone-as-controller support are more polished.
 
 If you're building a hackathon project or an MVP to validate a multiplayer game idea, **start with Playroom**. Migrate to Pylon (or Colyseus, or Nakama) when you outgrow the host-authoritative client model.
 
-## Both / and
+## Using both
 
 You can use Playroom for the lightweight lobby UX and Pylon for persistent player data + leaderboards + matchmaking, with the clients pulling from both. This is unusual but valid — Playroom's strength is the realtime party-game shape; Pylon's strength is everything else around it.

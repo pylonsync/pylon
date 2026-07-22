@@ -3,7 +3,7 @@ title: Roles & multi-tenancy (RBAC)
 description: "Roles, the active tenant, and writing row-scoped policies that compose with both."
 ---
 
-Pylon's RBAC layer is intentionally minimal: every `AuthContext` carries a `roles: string[]` array and (optionally) a `tenant_id`. Policies reference both via `auth.hasRole(...)` and `auth.tenantId`. There's no role hierarchy, no permission grids, no `@CanRead("Todo")` decorators — just expressions over the auth context and the row.
+Pylon's RBAC layer keeps roles in `AuthContext.roles` and the active tenant in `AuthContext.tenant_id`. Policies reference them through `auth.hasRole(...)` and `auth.tenantId`. More complex authorization stays in policy expressions or server functions.
 
 This page covers the data model, the policy syntax, and the patterns for typical multi-tenant apps.
 
@@ -39,7 +39,7 @@ When the user calls `/api/auth/select-org`, the runtime loads the matching `OrgM
 | --- | --- |
 | `admin` | Bypasses every policy — `auth.hasRole('x')` returns true for any `x` |
 
-That's it. No other role has built-in meaning. `admin` is granted automatically when a request authenticates with `PYLON_ADMIN_TOKEN`; it's not something you give to user accounts.
+No other role has built-in meaning. Requests authenticated with `PYLON_ADMIN_TOKEN` receive `admin`; user accounts do not.
 
 ## Policy syntax
 
@@ -212,11 +212,10 @@ export default mutation({
 });
 ```
 
-## Why no permission grid?
+## Extending beyond roles
 
-Pylon ships role-based access control, not attribute-based or capability-based. You **could** build a permission table and check it in policies with `exists(Permission where todoId == existing.id and userId == auth.userId)`, but for 90% of apps "owner can write, member can read, admin bypasses" is enough — and policies stay readable.
+For finer-grained access, build a permission table and check it in policies with `exists(Permission where todoId == existing.id and userId == auth.userId)`. Keep complex rules in a server function when they no longer read clearly as policy expressions.
 
-If you outgrow it, the policy expression language is intentionally narrow so you can move complex logic into a function without losing security guarantees.
 
 ## Admin token
 

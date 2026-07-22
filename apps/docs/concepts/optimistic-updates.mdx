@@ -30,7 +30,7 @@ await send.mutate({ channelId, body });
 The user sees their message appear instantly. The canonical row arrives over the WebSocket a beat later and merges in place — no flash, no temp-row swap, no manual cleanup.
 
 <Note>
-**If your write is just "create a row I own," you don't need a function at all.** `db.insert("Entity", …)` is already optimistic — it paints the row locally before the network call. The only reason owned creates used to need a function was security: a plain insert trusts a client-supplied owner id. Mark the owner field [`field.owner()`](/concepts/entities#owned-writes-fieldowner) (0.3.261+) and the server stamps + verifies it from the session, so the optimistic `db.insert` path stays secure. Reach for the `optimistic` callback below only when the write runs real server logic — cross-entity validation, denormalization, multi-row effects.
+For an owned-row create, `db.insert("Entity", …)` is already optimistic. Mark the owner field [`field.owner()`](/concepts/entities#owned-writes-fieldowner) (0.3.261+) so the server stamps and verifies it from the session. Use the `optimistic` callback below when the write also runs server logic such as cross-entity validation, denormalization, or multi-row effects.
 </Note>
 
 ## How it works
@@ -96,7 +96,7 @@ const acceptInvite = db.useMutation<{ inviteId: string }, { membershipId: string
 
 All ghosts use the same `ctx.id`, so they're rolled back together on rejection.
 
-## When NOT to use it
+## When to skip it
 
 Optimistic updates are a UX win when the server almost always succeeds. Skip them when:
 
@@ -104,7 +104,7 @@ Optimistic updates are a UX win when the server almost always succeeds. Skip the
 - The server transforms the data significantly (e.g. computes a slug, generates a thumbnail, runs through an AI). The ghost would be visibly different from the canonical, defeating the point.
 - The feature is rarely-used (settings dialogs, admin pages). The complexity isn't worth the polish.
 
-For everything else — chat, comments, todos, likes, reactions, drag-and-drop reorders — local-first optimistic is the default, and it's one prop.
+Optimistic updates fit chat, comments, todos, likes, reactions, and drag-and-drop reordering where the server usually accepts the write.
 
 ## Manual control
 

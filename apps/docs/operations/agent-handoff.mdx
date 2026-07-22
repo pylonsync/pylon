@@ -20,7 +20,7 @@ The agent will:
 - run `pylon projects list` + `pylon status` so it knows the starting state
 - ask you what you want to build
 
-## Why a code, not the token
+## Short-code security
 
 The dashboard mints a real `pk.*` Pylon API key first (the same kind you'd create manually in `/dashboard/account/cli-tokens`), then stashes it on the server behind the short code. The blurb you paste into the agent only contains the code — the actual token never appears in the chat history, the model provider's logs, or any analytics surface that records the prompt.
 

@@ -1,10 +1,10 @@
 ---
 title: "Pylon vs. Convex"
 sidebarTitle: "vs. Convex"
-description: "Pylon and Convex are the two TypeScript-first reactive backends. Here's how they actually differ."
+description: "Compare Pylon and Convex as TypeScript-first reactive backends."
 ---
 
-[Convex](https://convex.dev) is the closest sibling to Pylon — both pitch "TypeScript backend with reactive queries and managed sync." If you're choosing between them, here's an honest comparison.
+[Convex](https://convex.dev) is the closest sibling to Pylon. Both offer a TypeScript backend with reactive queries and managed sync, but their deployment, licensing, search, and game-server models differ.
 
 ## TL;DR
 
@@ -107,12 +107,12 @@ Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/tree
 | Convex scheduled functions | `ctx.scheduler.runAfter(...)` or background jobs |
 | Convex search index | Per-entity `search` config |
 
-Most of the dev surface is 1:1. The biggest delta is the codegen step (Pylon) vs. inline TS types (Convex) — one extra CLI call.
+Most of the development surface maps directly. Pylon adds a code-generation step; Convex provides inline TypeScript types.
 
-## Honest weakness
+## Pylon tradeoffs
 
 Convex has more developer-mindshare and more polish on edge cases (reactive query batching, type inference depth, IDE integration). If you want the most-polished pure-TS reactive backend and don't need single-binary self-host, faceted search, or Rust game shards, Convex is a great choice.
 
-## Both / and
+## Using both
 
 Convex on web + Pylon for game shards is a legitimate combo if your team prefers Convex's TS surface for app data and you need authoritative tick-based simulation for a multiplayer feature — bearing in mind that the shard simulation itself is written in Rust. The wire formats are different — you'd be running both backends — but it's a real option.

@@ -103,7 +103,7 @@ Add a 50th route → the shared chunk stays the same size and the new page contr
 
 The bundler emits a `manifest.json` listing every route's entry file + the chunks it depends on. The SSR head adapter reads it on each render and emits the right preload tags.
 
-## What's not here yet
+## Current limits
 
 - **Server Actions / RSC** — Pylon serves dynamic pages but doesn't ship React Server Components or the `"use server"` action model. Server functions (`query` / `mutation` / `action`) plus the typed client cover the same ground: call them from client components instead of inlining server code into the render tree.
 

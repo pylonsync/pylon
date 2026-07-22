@@ -133,14 +133,14 @@ const Offer = entity("Offer", {
 });
 ```
 
-The problem it solves: an owned create (`authorId`, `buyerId`, `sellerId`, `createdBy`) used to force a choice — a plain optimistic `db.insert` that *trusts* a client-supplied owner id (spoofable), or a server function that's secure but gives no optimistic feedback unless you hand-write an `optimistic` callback. `field.owner()` removes the trade-off: the client `db.insert`s with its own session id (instant local paint, no round-trip) and the server stamps + verifies the owner, so a forged id is rejected before the row lands.
+`field.owner()` makes owned creates both optimistic and safe. The client inserts with its session id for immediate local feedback, and the server stamps and verifies that id before the row lands. Without it, a plain `db.insert` must trust a spoofable client-supplied owner id or move the write into a server function with a hand-written optimistic callback.
 
 On **insert**, the framework:
 
 - fills the field from `auth.userId` when it's omitted;
-- passes a value through unchanged when it equals the caller's own id — this is the common path: the client sends its own id so the optimistic ghost and the canonical row match, no flash;
-- rejects a non-admin caller who supplies a *different* non-empty value with **`403 OWNER_MISMATCH`** — closing the IDOR shape where a policy gates on `data.ownerId == auth.userId` but the attacker just sends someone else's id;
-- rejects an anonymous caller (no session at all) with **`401 OWNER_REQUIRED`** — you can't own a row anonymously. Guests count: their stable guest id is stamped like any other.
+- passes a value through unchanged when it equals the caller's own id, so the optimistic ghost and canonical row match;
+- rejects a different non-empty value from a non-admin caller with **`403 OWNER_MISMATCH`**;
+- rejects an anonymous caller with **`401 OWNER_REQUIRED`**. Guests count because they have a stable guest id.
 
 On **update**, `.owner()` behaves like [`.readonly()`](#field-gates-serveronly--readonly) — the owner can't be reassigned through the HTTP entity routes. Admin contexts may set an explicit value (migrations, tooling).
 

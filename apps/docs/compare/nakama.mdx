@@ -22,7 +22,7 @@ description: "Nakama is a feature-rich Go game backend with social systems. Pylo
 | Auth | Magic codes / password / OAuth | Email / device / Google / Facebook / Apple / Steam / custom |
 | Live queries (non-game) | ✅ | ⚠️ via Storage Engine pull |
 
-Both are single-binary game backends with built-in user systems. The big architectural delta: Pylon treats app data as first-class declarative entities; Nakama treats it as typed JSON blobs in the Storage Engine. Different trade-offs.
+Both are single-binary game backends with built-in user systems. Pylon treats app data as first-class declarative entities; Nakama stores typed JSON blobs in its Storage Engine.
 
 ## Same shape
 
@@ -103,7 +103,7 @@ The mental model translates with caveats:
 
 The migration's largest cost is **rewriting features Pylon doesn't have built-in**: leaderboards, tournaments, IAP validation, advanced groups. For each one, you'd build the entity + a small action/function. Doable, not turnkey.
 
-## Honest weakness
+## Pylon tradeoffs
 
 Nakama's feature set is genuinely deeper for game-specific concerns. If you need leaderboards-with-reset-schedules, scheduled tournaments, IAP validation, or groups with rank hierarchies — those are real things you'd otherwise build yourself. Pylon's primitives let you build them, but Nakama hands them to you.
 

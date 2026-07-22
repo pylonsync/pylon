@@ -1,13 +1,13 @@
 ---
 title: SCIM 2.0
-description: "RFC 7644 user provisioning — Okta, Azure AD, and other IdPs can create / read / deactivate users in Pylon."
+description: "Provision Pylon users from Okta, Azure AD, and other identity providers through RFC 7644 SCIM."
 ---
 
 SCIM 2.0 is the standard "your IdP creates and deactivates users in your app automatically" protocol. Okta, Azure AD, OneLogin, JumpCloud, and others all speak it. Pylon ships a minimal SCIM 2.0 server in the binary — `Users` endpoint, bearer-token gated, soft-delete on `DELETE`.
 
 ## What's implemented
 
-Scope is **deliberately narrow**: User provisioning only. Not Groups, not Bulk, not the full SCIM filter grammar (one shape supported — `userName eq "..."`, the one IdPs actually probe with). Enough to plug into Okta's or Azure AD's "Provisioning" tab and have new hires automatically appear, departed employees automatically deactivate.
+The implementation covers user provisioning and the `userName eq "..."` filter that identity providers use for lookup. It does not yet cover Groups, Bulk, or the full SCIM filter grammar. This surface supports the standard Okta and Azure AD provisioning flow for creating and deactivating users.
 
 | Endpoint | Method | Behavior |
 | --- | --- | --- |

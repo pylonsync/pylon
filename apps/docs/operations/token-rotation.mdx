@@ -60,7 +60,7 @@ The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires a restar
 
 Admin tokens are scoped per-workspace and managed via the dashboard. Rotation is a one-click operation with no downtime — Cloud handles the side-by-side restart for you. Old tokens stop working immediately on rotation.
 
-## What NOT to do
+## Avoid
 
 - **Don't use the admin token as a session token.** Admin is not "a user", it's a break-glass credential.
 - **Don't commit the token to git, even in a test fixture.** The pre-commit hook rejects 32+ hex strings in tracked files.

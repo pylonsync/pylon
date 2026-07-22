@@ -1,11 +1,11 @@
 ---
 title: Sessions
-description: "Opaque tokens, refresh, revoke, persistent storage, cookies — how Pylon manages auth state."
+description: "How Pylon manages opaque tokens, refresh, revocation, persistent storage, and cookies."
 ---
 
-A Pylon session is an opaque 256-bit token (prefixed `pylon_`) that maps to a `Session { token, user_id, expires_at, device, created_at, tenant_id }`. Tokens flow either as `Authorization: Bearer <token>` headers or `HttpOnly` cookies — both resolve through the same `SessionStore`.
+A Pylon session is an opaque 256-bit token (prefixed `pylon_`) that maps to a `Session { token, user_id, expires_at, device, created_at, tenant_id }`. Bearer headers and `HttpOnly` cookies both resolve through the same `SessionStore`.
 
-There's no JWT, no signing key to rotate, no refresh-token dance. Just opaque strings you can revoke.
+Because session tokens are opaque and server-resolved, they need no signing key and can be revoked immediately.
 
 ## Session shape
 

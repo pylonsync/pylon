@@ -1,9 +1,9 @@
 ---
 title: Phone / SMS sign-in
-description: "E.164-normalized phone sign-in with 6-digit SMS codes — Twilio transport built in, custom SmsSender for any provider."
+description: "Sign users in with E.164-normalized phone numbers and six-digit SMS codes through Twilio or a custom sender."
 ---
 
-Same shape as magic-code email sign-in, just with SMS as the delivery channel. The user enters a phone number, Pylon sends a 6-digit code, the user types it back, Pylon mints a session. Phone numbers are E.164-normalized (`+15551234567`) before any storage or transport call.
+Phone sign-in follows the magic-code flow with SMS as the delivery channel. The user enters a phone number, Pylon sends a six-digit code, and a successful verification mints a session. Phone numbers are E.164-normalized (`+15551234567`) before storage or transport.
 
 ## Endpoints
 

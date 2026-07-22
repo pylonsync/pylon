@@ -95,7 +95,7 @@ This is the hardest migration of any of the comparisons. Firestore's schemaless 
 
 Auth migration is tractable: export Firebase Auth users, import as Pylon `User` rows with `emailVerified` set, ask users to sign in once via magic code (which auto-binds their existing email).
 
-## Honest weakness
+## Pylon tradeoffs
 
 Firebase's mobile-first integrations (FCM, Crashlytics, A/B testing via Remote Config, in-app messaging) have no Pylon equivalent. If your app's most important behaviors are around push notifications and mobile experimentation, Firebase has more polish. Pylon assumes you'll bring your own analytics + crash reporting + push provider.
 

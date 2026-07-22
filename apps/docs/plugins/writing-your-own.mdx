@@ -1,6 +1,6 @@
 ---
 title: Writing your own plugin
-description: "The real Rust Plugin trait, how built-ins are registered, and the honest state of extensibility."
+description: "The Rust Plugin trait, built-in registration, and the current extension model."
 ---
 
 Pylon's plugin system is a Rust trait registered inside the runtime at boot. It's how the built-ins (`rate_limit`, `tenant_scope`, `owner_stamp`, `csrf`) are wired.
@@ -183,11 +183,11 @@ reg.register(Arc::new(Timestamps));
 // The default runtime also registers rate_limit, tenant_scope, owner_stamp here.
 ```
 
-There is no name-to-constructor lookup from a manifest, and no runtime-loaded plugin bundle. **To ship your own today you fork the runtime** (`crates/runtime`) and add your `reg.register(...)` call, then build your own `pylon` binary from it. That's the honest state — a dynamic/loadable plugin path and a wired `definePlugin` are on the roadmap.
+The runtime has no manifest lookup or dynamically loaded plugin bundle. **To ship your own today, fork the runtime** (`crates/runtime`), add your `reg.register(...)` call, and build a custom `pylon` binary. Dynamic plugin loading and a wired `definePlugin` remain on the roadmap.
 
 ## Testing
 
-The trait is plain Rust — no harness needed:
+The trait is plain Rust and needs no wrapper:
 
 ```rust
 #[test]

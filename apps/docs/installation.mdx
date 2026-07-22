@@ -5,7 +5,7 @@ description: "Install the Pylon CLI and runtime."
 
 ## Requirements
 
-- **Bun** ≥ 1.0 — a required runtime dependency, not just a build tool. The `pylon` server binary spawns Bun as a child process to run your TypeScript functions and render React SSR. Every install path below (except Pylon Cloud) needs Bun on the host.
+- **Bun** ≥ 1.0 is a runtime dependency. The `pylon` server binary spawns Bun as a child process to run TypeScript functions and render React SSR. Every install path below except Pylon Cloud needs Bun on the host.
 - **Rust** — a recent stable toolchain (edition 2021). Only needed if you build the CLI from source; the prebuilt binary and Docker image need no Rust.
 - **Node.js** ≥ 18 (optional, for client tooling)
 
@@ -151,4 +151,4 @@ my-app/
 | `PYLON_RATE_LIMIT_WINDOW` | `60` | Window in seconds (applies to both anon + authed limits). |
 | `PYLON_FN_RATE_LIMIT_MAX` | `30` | Function calls per window |
 
-See [Reference → CLI](/reference/cli) for the full list.
+See the [CLI reference](/operations/cli) for the full list.

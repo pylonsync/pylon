@@ -1,6 +1,6 @@
 ---
 title: OAuth — 25+ providers + OIDC
-description: "Built-in OAuth for Google, GitHub, Apple, Microsoft, Discord, Slack, plus 19 more — and any OpenID Connect provider via discovery."
+description: "Configure built-in OAuth providers or connect any OpenID Connect provider through discovery."
 ---
 
 Pylon ships native OAuth for **25 providers** out of the box, plus **OpenID Connect discovery** for any compliant IdP (Auth0, Okta, Keycloak, Cognito, Logto, Authentik, Zitadel...). Users click sign in, get redirected to the provider, come back with a session token. CSRF-protected via single-use state tokens that survive a server restart mid-handshake. PKCE for providers that require it (Twitter/X, Kick). `response_mode=form_post` for Apple. The provider-specific quirks are handled — you set two env vars per provider.

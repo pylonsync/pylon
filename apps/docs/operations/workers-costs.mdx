@@ -1,9 +1,9 @@
 ---
 title: Cloudflare Workers costs
-description: "When Workers' scale-to-zero bites: pricing model, runaway patterns, kill switches."
+description: "Cloudflare Workers pricing, runaway request patterns, budget alerts, and kill switches."
 ---
 
-Workers deploys scale to zero — idle apps cost $0. That's the attractive case. This page is about the *un*attractive cases: when scale-to-zero bites, what runaway patterns look like, and how to cap your bill.
+Idle Workers apps cost $0 because deployments scale to zero. This page covers the cases that cost money: scale-to-zero tradeoffs, runaway request patterns, and bill caps.
 
 ## The pricing dimensions that matter
 
@@ -34,7 +34,7 @@ As of 2026, the Workers Paid plan ($5/mo base) includes:
 
 A client that polls `/api/sync/pull` every 500ms is 172,800 requests/day per client. 100 such clients = 17M/day → $5/day.
 
-**Fix**: use WebSocket push (Durable Objects on Workers), or widen the polling interval with jitter. Pylon's sync protocol supports cursor-based pulls — clients only pay for deltas, not a full list every tick.
+**Fix**: use WebSocket push (Durable Objects on Workers), or widen the polling interval with jitter. Pylon's sync protocol supports cursor-based pulls, so clients pay only for deltas.
 
 ### Loops inside a worker handler
 
@@ -102,7 +102,7 @@ Plug these into your own dashboard. For Pylon specifically, watch:
 - WS connection count vs. rejection rate (IP cap) — rejections = attack
 - D1 write volume vs. change_log append rate — these should match
 
-## When NOT to use Workers
+## When a server is a better fit
 
 Workers scale-to-zero doesn't help if:
 

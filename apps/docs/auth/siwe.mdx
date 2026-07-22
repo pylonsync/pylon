@@ -1,6 +1,6 @@
 ---
 title: SIWE (Sign-In With Ethereum)
-description: "EIP-4361 sign-in keyed on wallet addresses — secp256k1 ECDSA + Keccak-256 recovery, no third-party wallet service."
+description: "Verify EIP-4361 wallet sign-in with secp256k1 ECDSA and Keccak-256 recovery."
 ---
 
 Pylon ships a complete [EIP-4361](https://eips.ethereum.org/EIPS/eip-4361) (Sign-In With Ethereum) implementation in the binary. Users prove ownership of their Ethereum address by signing a structured message; Pylon recovers the address from the signature and mints a session. No Magic.link, no WalletConnect server, no third-party SIWE service.

@@ -3,10 +3,10 @@ title: Sizing
 description: "Measured throughput numbers, capacity planning, and when to switch from SQLite to Postgres."
 ---
 
-Numbers are per-process throughput — SQLite is single-writer, so vertical scaling of writes is bounded. Reads scale across a connection pool.
+Numbers are per-process throughput. SQLite is single-writer, so vertical scaling of writes is bounded. Reads scale across a connection pool.
 
 <Note>
-  The values in the tables below were measured on earlier reference hardware (a 2024 Apple M-series laptop, 16 GB RAM) and are pending re-measurement on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB). Expect the M3 Ultra to land meaningfully higher — treat these as a lower bound until refreshed.
+  The values below were measured on earlier reference hardware (a 2024 Apple M-series laptop, 16 GB RAM) and are pending re-measurement on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB). Treat them as a lower bound until refreshed.
 </Note>
 
 Re-run with:
@@ -81,7 +81,7 @@ Cloud autoscales the HTTP, WebSocket, and shard tiers separately. You don't pre-
 
 For multiplayer apps with sticky shard connections, latency to your players matters — set the workspace region accordingly when signing up.
 
-## What's NOT measured here
+## Benchmark gaps
 
 - Multi-client read contention (connection-pool fair-share)
 - TLS handshake cost (reverse proxy terminates TLS)

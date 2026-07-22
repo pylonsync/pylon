@@ -87,9 +87,9 @@ export const User = entity("User", {
 
 For richer validation (length limits, regex, cross-field rules), do the check in a `mutation` handler before writing, and gate access with [policies](/concepts/policies).
 
-## What is *not* a plugin
+## Where other data features live
 
-These were previously documented as data plugins; they don't exist as configurable plugins. Here's where the real capability lives:
+These features are implemented through fields, functions, policies, or auth rather than configurable plugins:
 
 | Was documented as | Reality |
 | --- | --- |

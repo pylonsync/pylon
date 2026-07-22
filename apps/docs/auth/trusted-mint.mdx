@@ -3,9 +3,9 @@ title: Trusted server-side session mint
 description: "Sign a user into Pylon from a trusted server (Stripe Checkout success, custom IdP, internal SSO bridge) using an HMAC-signed request."
 ---
 
-`POST /api/auth/sessions/trusted-mint` lets a server you control mint a Pylon session for a given email — no password, no magic link, no OAuth roundtrip. It's the right tool when **another trusted system has already verified the user's identity** and the only thing left is to land them in your app signed in.
+`POST /api/auth/sessions/trusted-mint` lets a server you control mint a Pylon session after another trusted system has verified the user's identity. It skips the password, magic-link, and OAuth flows.
 
-The canonical use case: Stripe Checkout success. Stripe verified the buyer's email + collected payment; forcing them through a magic-link dance between "paid" and "in the dashboard" costs measurable conversion.
+Stripe Checkout is the canonical use case. After Stripe verifies the buyer's email and collects payment, trusted mint can land the buyer in the dashboard without another sign-in step.
 
 <Warning>
 The endpoint is **HMAC-gated**, not session-gated. Anyone who knows `PYLON_TRUSTED_SECRET` can sign in as any user. Treat the secret like a database password — env-only, rotated when it leaks, never logged.
@@ -168,7 +168,7 @@ Every call writes one of three event shapes to the audit log:
 
 The `intent` field is the free-form string from the request body — use it to discriminate "Stripe checkout success" from "internal SSO bridge" from "BYOC migration backfill" without parsing audit reasons.
 
-## Replay window — be honest about what HMAC + timestamp buys
+## Replay window
 
 The signature scheme protects against **tamper** (an attacker can't change the email in a captured request without invalidating the sig) and **stale replay** (a signature is dead after 5 minutes). It does NOT protect against **fresh replay**.
 
@@ -195,7 +195,7 @@ The trade-off is deliberate: a per-request nonce store would add complexity and 
 - [ ] Audit log shipped somewhere queryable (Tinybird, Loki, Datadog) so a `sign_in_failed` spike on the `trusted_mint` method is alertable. Every post-signature rejection (invalid JSON, missing/invalid email, USER_NOT_FOUND, INVALID_USER_ROW, USER_INSERT_FAILED, ACCOUNT_LOCKED) emits one with the matching `meta.reason`.
 - [ ] Signed-request payloads aren't logged at the TLS-terminator (Cloudflare, Fly proxy, etc.) — bodies are sensitive even though headers usually aren't.
 
-## Why not service tokens?
+## HMAC requests vs. service tokens
 
 A long-lived service bearer token would work for the same use case, but:
 

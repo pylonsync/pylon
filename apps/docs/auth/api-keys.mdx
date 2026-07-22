@@ -1,18 +1,16 @@
 ---
 title: API keys
-description: "Long-lived keys for server-to-server calls — create, use, expire, revoke."
+description: "Create, use, expire, and revoke long-lived keys for server-to-server calls."
 ---
 
-Sessions are the right shape for users — short-lived, refresh-able, revocable per device. For **server-to-server** calls (a webhook from Stripe, a cron job in another service, a CI script), you want long-lived, independently-revocable **API keys**, not 30-day session tokens.
+Use short-lived, per-device sessions for users. Use long-lived, independently revocable API keys for server-to-server calls such as Stripe webhooks, external cron jobs, and CI scripts.
 
-The framework ships this in the box.
+## Availability
 
-## Built in — nothing to enable
-
-API keys are first-class and always on. There's no plugin to add and no
-manifest entity to declare — the framework owns a dedicated key store
-(persisted to your `PYLON_SESSION_DB` SQLite file, in-memory if unset) and
-mounts the management endpoints under `/api/auth/api-keys`.
+API keys are always available. The framework owns a dedicated key store, so
+there is no plugin or manifest entity to declare. The store persists to the
+`PYLON_SESSION_DB` SQLite file, or stays in memory when that variable is unset.
+Management endpoints are mounted under `/api/auth/api-keys`.
 
 What you get:
 
@@ -36,7 +34,7 @@ The key store keeps an internal record per key (not a manifest entity):
 | `last_used_at` | Refreshed on every successful auth |
 | `created_at` | Unix timestamp |
 
-Only the `prefix` is shown in lists — the full key is shown **once**, at creation time, and never again.
+Lists show only the `prefix`. The full key appears once at creation time.
 
 ## Create a key
 
@@ -91,7 +89,7 @@ parse or enforce it — there is no built-in scope vocabulary, no automatic
 function or policy code. Treat it as metadata for humans auditing the key
 list, not as an access-control mechanism.
 
-Two things actually constrain what a key can do:
+Two things constrain what a key can do:
 
 - **It resolves to the key's owner `userId`.** A key can do whatever that
   user can do, subject to your entity policies.

@@ -1,9 +1,9 @@
 ---
 title: JWT sessions
-description: "Optional stateless `Authorization: Bearer <jwt>` mode — exchange an opaque session for a short-lived signed JWT."
+description: "Exchange an opaque session for an optional short-lived, stateless JWT."
 ---
 
-By default Pylon sessions are opaque 256-bit tokens — server-resolved, revocable, no signing key to rotate. That's the right shape for most apps.
+By default, Pylon sessions are opaque 256-bit tokens that the server resolves and can revoke immediately. Most apps should use them.
 
 When you need a **stateless** token format — to authenticate microservices that can verify without a session-store round-trip, or to ride through systems that expect "the JWT shape" — Pylon mints HS256 JWTs from an existing session. The opaque session stays the source of truth (revoke / refresh / list still hit it); the JWT is a short-lived projection that downstream services validate independently.
 

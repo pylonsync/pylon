@@ -1,6 +1,6 @@
 ---
 title: TOTP / 2FA
-description: "RFC 6238 time-based one-time passwords — enroll, verify, backup codes, encryption at rest."
+description: "Enroll and verify RFC 6238 one-time passwords with backup codes and encrypted seeds."
 ---
 
 Pylon ships RFC 6238 TOTP in the binary — works with Google Authenticator, 1Password, Authy, Apple's Passwords, Bitwarden, and every other authenticator app. Plus single-use backup codes (SHA-256 hashed at rest), per-account rate limiting on verify, and at-rest encryption of the TOTP seed.

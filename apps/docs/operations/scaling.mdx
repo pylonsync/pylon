@@ -56,7 +56,7 @@ harder to diagnose. Loud failure is the right default.
   into the JSON envelope so a single pubsub channel handles every
   payload shape.
 
-## What's NOT fanned out
+## State that remains local
 
 - **`/api/sync/pull?since=N` cursor catch-up.** Each pylon process
   keeps its own in-memory `ChangeLog`; seqs are per-machine. Clients
@@ -115,7 +115,7 @@ network blip), you'll see them in the logs too:
   traffic simultaneously.
 - Local multi-process dev simulating production.
 
-## When NOT to enable
+## When to leave it disabled
 
 - Single-machine deploys. NoopBus is free; adding Redis is added
   failure surface for zero benefit.

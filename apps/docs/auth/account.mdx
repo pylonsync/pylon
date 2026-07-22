@@ -1,6 +1,6 @@
 ---
 title: Account deletion
-description: "GDPR-style hard account deletion — revoke every session, API key, OAuth link, trusted device, and delete the User row in one call."
+description: "Delete an account and revoke its sessions, API keys, OAuth links, and trusted devices in one call."
 ---
 
 `DELETE /api/auth/account` is the "user clicked Delete Account" button. It wipes the user's auth state across every system Pylon owns — sessions, API keys, linked OAuth accounts, trusted-device records, and the User row itself — in one transactional sweep. App-owned tables that reference the user are **not** cascade-deleted (see below) — the host schema is the source of truth for what gets purged.
