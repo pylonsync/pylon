@@ -3,15 +3,15 @@
 This document describes what Pylon syncs, what converges as a CRDT, and
 where the server is still authoritative.
 
-## The honest one-liner
+## Summary
 
-**Pylon is a server-backed realtime sync system with a CRDT row substrate.**
-Each CRDT-mode entity row is backed by a Loro document, projected into the
+Pylon is a server-backed realtime sync system with a CRDT row substrate. Each
+CRDT-mode entity row is backed by a Loro document, projected into the
 normal SQLite/Postgres row shape for queries and indexes, and broadcast to
 clients over the same WebSocket used by live queries.
 
-The important nuance: not every field has the same merge behavior. `richtext`
-and fields marked `crdt: "text"` use `LoroText` and merge concurrent text
+Fields do not all have the same merge behavior. `richtext` and fields marked
+`crdt: "text"` use `LoroText` and merge concurrent text
 edits. Most scalar fields use LWW registers inside the row doc because names,
 emails, statuses, slugs, and timestamps do not benefit from character-level
 merge.

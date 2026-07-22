@@ -14,7 +14,7 @@ rotate on any suspicion of compromise.
 
 ## Admin token vs. admin user
 
-`PYLON_ADMIN_TOKEN` is an **operator-role** secret — automation, cron,
+`PYLON_ADMIN_TOKEN` is an **operator-role** secret for automation, cron,
 migrations, break-glass scripts. It's not a user identity; routes
 authenticated by the bearer don't have a `user_id`.
 
@@ -28,13 +28,13 @@ For **designating a human as a platform admin**, use one of:
    users get `auth.is_admin` lifted on every successful auth
    resolution. Case-insensitive, requires `emailVerified=true`. When
    `adminField` is configured, the flag is persisted on first match
-   so removing the email from the env doesn't demote — revoke
+   so removing the email from the env doesn't demote the user. Revoke
    explicitly via Studio/dashboard/SQL.
 
 Both paths apply on top of cookie/JWT/API-key auth, so admins sign in
 with their normal account and Studio respects the role.
 
-Don't use `PYLON_ADMIN_TOKEN` to "log in as admin" — see the
+Don't use `PYLON_ADMIN_TOKEN` to "log in as admin." See the
 "Don't use the admin token as a session token" guidance below.
 
 ## Without downtime (two-token rotation)
@@ -63,7 +63,7 @@ a restart. To do it without dropping traffic:
 
 ## Emergency (suspected compromise)
 
-1. Generate a new token — skip no-downtime, it's not worth the risk:
+1. Generate a new token. Skip the no-downtime path because it is not worth the risk:
 
    ```sh
    openssl rand -hex 32 > /etc/pylon/admin_token.new
@@ -85,7 +85,7 @@ a restart. To do it without dropping traffic:
    systemctl start pylon
    ```
 
-3. Rotate OAuth secrets too — same blast radius if the admin account was
+3. Rotate OAuth secrets too; they have the same blast radius if the admin account was
    used to configure them.
 
 4. Audit `audit_log` for the period the old token was valid. The
@@ -95,7 +95,7 @@ a restart. To do it without dropping traffic:
 
 ## What NOT to do
 
-- Don't use the admin token as a session token — admin is not "a user",
+- Don't use the admin token as a session token. Admin is not "a user";
   it's a break-glass credential.
 - Don't commit the token to git, even in a test fixture. The
   pre-commit hook rejects 32+ hex strings in tracked files.

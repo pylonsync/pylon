@@ -1,40 +1,38 @@
-# SSR auth-bucketed caching (PPR Phase 0) — design
+# SSR auth-bucketed caching (PPR Phase 0): design
 
 Status: proposal · 2026-06-28 · builds on the cache-path hardening in v0.3.298
 
 ## Goal
 
-Make the dominant pattern — a public page with a **binary** auth-aware nav
-("Sign in" vs "Dashboard") — genuinely CDN-cacheable, with **no flash** and
-without forcing the dev to rip auth out of the layout. This is the cheap win that
-solves the notbehind case; full PPR (arbitrary per-user holes) is the later,
-heavier tool.
+Make a public page with a binary auth-aware nav ("Sign in" vs. "Dashboard")
+CDN-cacheable without a flash or moving auth out of the layout. This solves the
+notbehind case. Full PPR, with arbitrary per-user holes, remains the heavier
+option for more complex pages.
 
-The idea: cache **two anonymous variants** keyed on session-cookie *presence*
-(not identity) — a "signed-out" shell and a "signed-in" shell — both of which
-depend only on the coarse bucket, never on *which* user. Each variant is correct
-for its bucket, so there's no flash, and both are shareable within their bucket.
+Cache two anonymous variants keyed on session-cookie presence rather than
+identity: a "signed-out" shell and a "signed-in" shell. Both depend only on the
+coarse bucket, never on the specific user, so each can be shared within its
+bucket without a flash.
 
-## Why this is safe ONLY with three coupled changes
+## Why three coupled changes are required
 
-The v0.3.298 hardening made one invariant load-bearing: **a render that reads the
-real `auth` (or headers/cookies) is not shareable, and the hydration tail carries
-the request's real identity.** Auth-bucketed caching deliberately caches a
-*signed-in* response and replays it to *other* signed-in users — so it is correct
-**iff** the cached bytes contain only the bucket, never a specific identity. That
-requires all three of:
+The v0.3.298 hardening established a load-bearing invariant: a render that reads
+the real `auth` (or headers/cookies) is not shareable, and the hydration tail
+carries the request's real identity. Auth-bucketed caching replays a signed-in
+response to other signed-in users. The cached bytes must therefore contain only
+the bucket, never a specific identity. That requires all three changes:
 
 1. **A coarse `props.session.exists` primitive** that exposes signed-in-or-not
-   WITHOUT reading or serializing identity — so a page can render the binary nav
+   without reading or serializing identity, so a page can render the binary nav
    without tripping `authTouched`/`dynamicTouched`.
 2. **A session-presence cache bucket** so the two variants are stored separately.
-3. **Tail anonymization for bucketed renders** — the `__PYLON_DATA__` hydration
+3. **Tail anonymization for bucketed renders.** The `__PYLON_DATA__` hydration
    blob must serialize an identity-stripped auth (just `{ signedIn: bool }`),
-   NEVER `user_id`/`tenant_id`/`roles`. (This is the item the PPR doc flagged as
+   never `user_id`/`tenant_id`/`roles`. (This is the item the PPR doc flagged as
    "PPR-era"; auth-bucketing needs it too.)
 
-Miss any one → a signed-in user's identity is cached and replayed to another
-signed-in user. So this ships as one reviewed unit, not piecemeal.
+If any change is missing, one signed-in user's identity could be cached and
+replayed to another. Ship all three as one reviewed unit.
 
 ## The pieces (grounded in current code)
 
@@ -42,13 +40,13 @@ signed-in user. So this ships as one reviewed unit, not piecemeal.
 - Rust (`frontend.rs`): `session_cookie_present(cfg, &request)` already computes
   it for the eligibility gate. Thread it into the SSR render message
   (`serve_via_ssr_rpc` → the runner `msg`) as `session_present: bool`.
-- TS (`ssr-runtime.ts`): add `props.session = { exists: msg.session_present }` — a
+- TS (`ssr-runtime.ts`): add `props.session = { exists: msg.session_present }`, a
   plain boolean, NOT wrapped in a touch-proxy and NOT derived from `auth`, so
   reading it does not set `authTouched`/`dynamicTouched`.
 - Contract: `session.exists` is a *presence* bit, not auth. It says "a session
   cookie is present", not "valid" and not "who". A present-but-invalid cookie
   reads `true` and renders the signed-in shell whose client JS then resolves the
-  real (anonymous) session — acceptable, fail-safe direction, no identity leaked.
+  real anonymous session. This fails safely without leaking identity.
 
 ### 2. Session-presence cache bucket
 - `ssr_cache.rs::cache_key` already takes a `vary` slice; `ssr_cache_vary`
@@ -62,7 +60,7 @@ signed-in user. So this ships as one reviewed unit, not piecemeal.
   `revalidate`; may compose with it for the TTL).
 - New `computeBucketVerdict`: cacheable-bucketed iff opted in, status 200, no
   Set-Cookie, `!forceDynamic`, `!wantsStream`, and **`!authTouched` &&
-  `!dynamicTouched`** (reading real auth/headers/cookies still vetoes — only
+  `!dynamicTouched`** (reading real auth/headers/cookies still vetoes; only
   `session.exists` is permitted). The existing `computeCacheVerdict` invariants
   carry over unchanged.
 
@@ -70,23 +68,23 @@ signed-in user. So this ships as one reviewed unit, not piecemeal.
 - Today `cacheable_eligible` requires `!session_cookie_present`. Add a parallel
   **bucket-eligible** path: GET + no query + Host-bucketed, **session cookie
   ALLOWED**, that reads/writes the session-keyed entry. A bucketed entry is still
-  served from Rust (no Bun) on a hit — unlike PPR, no per-request resume.
+  served from Rust (no Bun) on a hit. PPR still requires a per-request resume.
 - `build_ssr_response_headers`: a bucketed response is shareable *within its
   bucket*. The public Cache-Control must therefore carry `Vary: Cookie` (or a
-  Cloudflare cache-key rule on the session cookie) so the CDN buckets too — and
+  Cloudflare cache-key rule on the session cookie) so the CDN buckets too. It
   MUST still be gated by the v0.3.298 `may_share`/`is_non_shared_cc` invariant.
   (Open question O-CDN below.)
 
 ### 5. Tail anonymization
 - `buildHydrationTail` (`ssr-runtime.ts:~1140`) currently keeps `auth` in
   `restProps`. For a bucketed render, replace `props.auth` in the serialized
-  payload with `{ signedIn: session.exists }` — no `user_id`/`tenant`/`roles`.
+  payload with `{ signedIn: session.exists }`, without `user_id`/`tenant`/`roles`.
   The client then resolves the real session client-side (it already has the
   cookie) without a flash (the shell already shows the correct binary state).
 
 ## Security invariants (must be tests)
-1. A bucketed cache entry's bytes contain NO `user_id`/`tenant_id`/`roles` —
-   for ANY signed-in user. Two different signed-in identities → byte-identical
+1. A bucketed cache entry's bytes contain no `user_id`/`tenant_id`/`roles` for
+   any signed-in user. Two different signed-in identities → byte-identical
    signed-in entry.
 2. Reading real `auth`/headers/cookies in a bucketed page → veto (falls back to
    per-request, never cached). Only `session.exists` is allowed.
@@ -112,38 +110,42 @@ signed-in user. So this ships as one reviewed unit, not piecemeal.
 1. `props.session.exists` plumbing + test (no caching behavior yet).
 2. Tail anonymization for bucketed renders + invariant tests (the leak class).
 3. Bucket vary + bucket verdict + eligibility; Pylon-ISR bucketing only.
-4. codex adversarial review (the leak class) BEFORE enabling on any app.
+4. Adversarial security review of the leak class before enabling any app.
 5. CDN cache-key rule (Cloudflare) + browser-verify on notbehind.
 6. Docs/skill: the `session.exists` pattern + when to use bucketing vs PPR.
 
 ## Implementation status (2026-06-28)
-Steps 1–4 SHIPPED (unreleased, default-OFF). Resolved open questions:
-- **O-INVALID resolved the OTHER way**: `session.exists` reflects RESOLVED auth
-  (`auth.user_id.is_some()`), not raw cookie presence — an expired/invalid cookie
-  maps to the signed-OUT bucket. The read path resolves only for cookie-bearing
+Steps 1–4 shipped (unreleased and off by default). Resolved open questions:
+- **O-INVALID changed**: `session.exists` reflects resolved auth
+  (`auth.user_id.is_some()`), not raw cookie presence. An expired or invalid cookie
+  maps to the signed-out bucket. The read path resolves only for cookie-bearing
   requests (`session_authenticated`), so the cost is a local store lookup only
   when a cookie is present. This is what makes read-key and write-key agree.
 - **O-CDN**: Pylon-ISR bucketing ships first (origin render-skip). A bucket
   response is browser-`private`/`no-store` by default; it advertises
-  `public, s-maxage` ONLY when `PYLON_SSR_BUCKET_CDN=1` tells the host the CDN
+  `public, s-maxage` only when `PYLON_SSR_BUCKET_CDN=1` tells the host the CDN
   keys its cache on session-cookie presence (a Cloudflare cache-key rule). Flag
-  default OFF → no shared cache can mis-serve across buckets before the rule is in.
+  remains off by default, so a shared cache cannot serve across buckets before
+  the rule is in place.
 
-### Security review (codex, 3 rounds — each found real holes, all fixed)
-- Signed-in request must not write the SHARED anon lane (`cache_write_plan` gates
+### Security review
+
+Three review rounds found and fixed these issues:
+
+- Signed-in requests must not write the shared anonymous lane (`cache_write_plan` gates
   the anon proof on `cacheable_eligible`; the bucket lane is identity-free).
-- The hydration tail of a bucketed render serializes a strict ALLOWLIST
+- The hydration tail of a bucketed render serializes a strict allowlist
   (url/params/searchParams + `{ signedIn }`), from an immutable pre-render
-  snapshot (`bucketTailBase`) — a page can't smuggle identity via a top-level or
+  snapshot (`bucketTailBase`), so a page can't smuggle identity via a top-level or
   nested prop mutation. Per-request proxies are revocable + revoked after render.
 - A bucket render's shareability is governed only by `bucket_shareable`, so a
   page-set `public` Cache-Control can't escape the bucket policy.
 
 ### Purity contract (the residual, documented)
-An `auth-bucketed` page MUST be a pure function of its props. It MUST NOT stash
+An `auth-bucketed` page must be a pure function of its props. It must not stash
 request-derived data (auth/cookies/headers, or values computed from them) in
 module/global scope and render it on a later request. This is the same constraint
 every SSR framework draws (Next.js: "don't put request data in module scope");
-it is undefendable by the framework — and a page that renders another request's
+the framework cannot defend against it. A page that renders another request's
 data already has an app-level IDOR independent of caching. The framework catches
 every *prop-mediated* vector; module-global stashing is the author's contract.

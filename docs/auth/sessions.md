@@ -1,11 +1,11 @@
 # Auth: session tokens for native apps
 
-Pylon's web flow is cookie-based — `/api/auth/password/login`,
+Pylon's web flow is cookie-based. `/api/auth/password/login`,
 `/api/auth/login/<provider>`, etc. set a `pylon_session` HTTP-only
 cookie that proxies as identity for HTTP and the WebSocket
 subprotocol bearer.
 
-Native apps (desktop, mobile, CLI) can't use cookies — they need a
+Native apps (desktop, mobile, CLI) need a
 bearer token. Pylon ships **two** mint endpoints; pick the one that
 matches your transport.
 
@@ -20,7 +20,7 @@ If your app uses `SyncEngine` / `useQuery` / `db.useQuery` (anything
 that opens a WebSocket back to Pylon), **use
 `/api/auth/native-session`**. JWTs from `/api/auth/jwt` aren't in
 `SessionStore`, and the WS auth path resolves bearer tokens by
-SessionStore lookup — so a JWT-only client passes HTTP fine but the
+SessionStore lookup. A JWT-only client passes HTTP but the
 WebSocket reconnect-loops with `unauthorized: bearer token required`.
 
 ## `POST /api/auth/native-session`
@@ -30,9 +30,9 @@ authenticated user.
 
 **Auth**: cookie session must already be valid. No admin token
 required (unlike `POST /api/auth/session`, which can mint a session
-for ANY `user_id` and is therefore admin-gated). Here we mint a
-session for the *same user* the cookie already represents — no
-privilege escalation.
+for any `user_id` and is therefore admin-gated). This endpoint mints a
+session for the same user the cookie already represents, without escalating
+privileges.
 
 **Request**:
 
@@ -41,7 +41,7 @@ POST /api/auth/native-session HTTP/1.1
 Cookie: pylon_session=<existing cookie>
 ```
 
-(No body — the user identity comes from the cookie.)
+(No body. The user identity comes from the cookie.)
 
 **Response**:
 
@@ -62,7 +62,7 @@ Content-Type: application/json
 | --- | --- | --- |
 | 401 | `AUTH_REQUIRED` | Cookie missing, expired, or anonymous |
 
-The minted token has its own SessionStore row — revokable
+The minted token has its own SessionStore row and can be revoked
 independently of the browser cookie that minted it
 (`POST /api/auth/logout` with the bearer drops it without affecting
 the cookie session). Lifetime matches the framework's session
@@ -85,7 +85,7 @@ app gets a token":
 4. Native app receives the deep-link, validates `state` against what
    it generated in step 1, and calls
    `PylonClient.setSession(token: token)`. From then on every HTTP
-   request carries the bearer header AND the WebSocket reconnect
+   request carries the bearer header, and the WebSocket reconnect
    uses `Sec-WebSocket-Protocol: bearer.<urlencode(token)>`.
 
 The token persists in the framework's session store, so killing

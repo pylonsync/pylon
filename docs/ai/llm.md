@@ -1,9 +1,9 @@
-# Pylon: ctx.llm — provider-abstracted LLM client
+# Pylon: `ctx.llm`, a provider-abstracted LLM client
 
 A server-side LLM client for `ctx.llm.complete(...)` calls from
-queries, mutations, and actions. Configured once at boot from env;
-provider-agnostic on the call site (Anthropic + OpenAI today, custom
-HTTPS endpoint via base-URL override).
+mutations and actions. Configure it once at boot from env, then use the same
+call shape for Anthropic, OpenAI, or a custom HTTPS endpoint set through the
+base-URL override.
 
 ## Quick start
 
@@ -36,8 +36,7 @@ export default action({
 
 ## Why a Pylon primitive
 
-You could call Anthropic / OpenAI directly from a function — Pylon
-isn't blocking the network. But `ctx.llm.complete` adds:
+`ctx.llm.complete` adds these controls to direct Anthropic or OpenAI calls:
 
 - **Single wire shape** across providers. Code written against
   Anthropic Messages content blocks (text + tool_use + tool_result)
@@ -46,7 +45,7 @@ isn't blocking the network. But `ctx.llm.complete` adds:
   call the host runtime, which holds the key.
 - **Built-in rate limit** + per-user model allowlist (same `PYLON_AI_*`
   envs as `/api/ai/stream`).
-- **Auditable usage** — every call passes through the runtime's
+- **Auditable usage.** Every call passes through the runtime's
   request trace + metrics path.
 - **Tool-use loops first-class.** The content-block shape lets you
   feed `tool_use` blocks back as `tool_result` blocks in the next
@@ -85,7 +84,7 @@ export default {
 };
 ```
 
-Env always wins when set — operators can override per deploy
+Env takes precedence when set, so operators can override per deploy
 without changing the bundle.
 
 ### Env reference
@@ -138,7 +137,7 @@ The response:
 }
 ```
 
-OpenAI requests translate at the transport boundary — `tool_use`
+OpenAI requests translate at the transport boundary. `tool_use`
 blocks emit as `tool_calls`, `tool_result` blocks emit as
 `role: "tool"` follow-ups, and the response shape comes back in the
 canonical Anthropic format.
@@ -190,17 +189,17 @@ for (let turn = 0; turn < 10; turn++) {
 }
 ```
 
-Cap the loop count — a runaway model that keeps requesting tools
+Cap the loop count. A runaway model that keeps requesting tools
 will burn through quota.
 
 ## HTTP routes
 
-`POST /api/llm/complete` — non-streaming, same wire shape as
+`POST /api/llm/complete` is non-streaming and uses the same wire shape as
 `ctx.llm.complete`. Authenticated callers only; rate-limited per
 user with the same `PYLON_AI_*` envs. Browser clients hit this
 when they want the full response in one shot.
 
-`POST /api/ai/stream` — SSE streaming. Emits OpenAI-style chunks
+`POST /api/ai/stream` uses SSE streaming. It emits OpenAI-style chunks
 (`data: {choices:[{delta:{content:"..."}}]}`) for compatibility
 with existing clients. Use this for progressive UI.
 
@@ -219,28 +218,28 @@ with existing clients. Use this for progressive UI.
 | `INVALID_REQUEST`           | 400  | Request body didn't deserialize.                                 |
 | `INVALID_RESPONSE`          | 500  | Provider returned a body we couldn't parse.                      |
 
-Provider error bodies are redacted before reaching the caller — any
+Provider error bodies are redacted before reaching the caller. Any
 substring that looks like an API key (`sk-ant-*`, `sk-proj-*`,
 `sk-*`) is replaced with `<redacted>` before egress.
 
-## What `ctx.llm` is not
+## Limits
 
-- Not available in query handlers. Queries are reactive — re-runs
+- Query handlers cannot use `ctx.llm`. Reactive re-runs
   on dep invalidation would silently re-bill the LLM call and
   violate the reactive purity contract. Put LLM calls in mutations
   or actions; from a query, call `ctx.runAction("doLlmThing", {...})`
   via an action wrapper.
-- Not available to anonymous callers. The hook rejects with
+- Anonymous calls reject with
   `LLM_REQUIRES_AUTH` when `auth.userId` is null and the caller
   isn't admin. Webhook receivers that pass HMAC verification
   must call `ctx.auth.elevate({ admin: true, reason: "..." })`
   before reaching for `ctx.llm`.
-- Not a chat-history store. Persist message arrays in your own
-  entities; `ctx.llm` is stateless.
-- Not a queue / batch processor. For background fan-out, schedule
+- Persist chat-history message arrays in your own entities; `ctx.llm` is
+  stateless.
+- For background fan-out, schedule
   an action via `ctx.scheduler.runAfter(0, "draftReply", { ... })`
   and call `ctx.llm.complete` inside the action.
-- Not a streaming surface from `ctx.llm` directly — `ctx.llm.complete`
-  is request/response. Use `POST /api/ai/stream` from the browser
+- `ctx.llm.complete` uses request/response rather than streaming. Use
+  `POST /api/ai/stream` from the browser
   when you need progressive output, or wait for `ctx.llm.stream(...)`
   in a future release.

@@ -127,7 +127,7 @@ Test restore quarterly per the test at `crates/runtime/tests/backup_restore.rs`.
 
 Minimum bill: ~$25/mo for a production deployment.
 
-`DATABASE_URL=postgres://...` is all the binary needs — `postgres-live`
+`DATABASE_URL=postgres://...` is all the binary needs. `postgres-live`
 is on by default for the runtime's storage dep, so no special build
 flags. Apply schema before first start with `pylon migrate` (or let the
 server auto-apply on boot, same as the SQLite path).
@@ -143,22 +143,22 @@ The runtime picks its backend from the URL prefix:
 ### Postgres caveats (current)
 
 What works on Postgres today:
-- Entity CRUD (`/api/entities/*`) — insert / get / update / delete /
+- Entity CRUD (`/api/entities/*`): insert / get / update / delete /
   list / list_after / lookup / link / unlink
 - Filtered queries, graph queries, aggregations
-- `/api/transact` — real PG transactions with auto-rollback on Drop
+- `/api/transact`: real PG transactions with auto-rollback on Drop
 - Multi-replica horizontal scaling for the data plane
 
 What still uses local SQLite even with `DATABASE_URL` set:
-- Sessions (`PYLON_SESSION_DB`) — local per-replica today; multi-replica
+- Sessions (`PYLON_SESSION_DB`): local per-replica today; multi-replica
   deploys should put the cookie behind a sticky-session LB until the
   Postgres session backend lands. Tracking issue: PG aux stores.
-- Job queue (`PYLON_JOBS_DB`) — local per-replica, same caveat. A job
+- Job queue (`PYLON_JOBS_DB`): local per-replica, with the same caveat. A job
   enqueued on replica A is only run by replica A.
-- Workflow engine — same shape as jobs, local per-replica.
-- OAuth state — local per-replica; OAuth flows must complete on the same
+- Workflow engine: same shape as jobs, local per-replica.
+- OAuth state: local per-replica; OAuth flows must complete on the same
   replica that started them (sticky-session covers this too).
-- CRDT mode + FTS5 search — supported on both backends. CRDT uses
+- CRDT mode + FTS5 search: supported on both backends. CRDT uses
   per-row Loro snapshots stored in `_crdt_<entity>` (a separate table
   on Postgres, alongside the row table on SQLite). FTS5 maps to a
   `_fts_<entity>` table with `tsvector` columns + GIN index on
@@ -166,7 +166,7 @@ What still uses local SQLite even with `DATABASE_URL` set:
   on every insert/update/delete.
 
 For a single-replica Postgres deploy (one ECS task, one Fly machine)
-none of these caveats apply — sticky sessions are trivially satisfied
+none of these caveats apply. Sticky sessions are trivially satisfied
 when there's only one replica. Multi-replica is when they bite.
 
 ## Shape 3: Cloudflare Workers (edge, experimental)
@@ -176,7 +176,7 @@ runs on Workers with a D1 binding. See `crates/workers/README.md` for
 current limitations. Scale-to-zero: idle apps cost $0. Cost rises with
 actual request volume. See `docs/ops/WORKERS_COSTS.md`.
 
-Realtime shards (tick-based sims) are not yet supported on Workers —
+Realtime shards (tick-based sims) are not yet supported on Workers because
 they need persistent state that Workers-only can't hold efficiently.
 Use shape 1 or 2 for game shards.
 
@@ -195,7 +195,7 @@ Starts on port 4321 with `PYLON_DEV_MODE=true` defaults. Studio at
 - `GET /metrics` returns Prometheus text when `Accept: text/plain`
 - `GET /readyz` checks DB connectivity
 
-Hook these into your load balancer — unhealthy instances should drain.
+Hook these into your load balancer and drain unhealthy instances.
 
 ## Graceful shutdown
 
@@ -206,7 +206,7 @@ Send `SIGTERM`. The server:
 4. Flushes the WAL
 5. Exits with 0
 
-Rolling deploys are safe — start the new instance, let the load balancer
+For a rolling deploy, start the new instance, let the load balancer
 promote it, send SIGTERM to the old one.
 
 ## Scale-out

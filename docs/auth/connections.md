@@ -1,14 +1,14 @@
-# Pylon: ctx.connections — per-user OAuth integrations
+# Pylon: `ctx.connections` for per-user OAuth integrations
 
 `ctx.connections.*` lets server-side actions act on behalf of the
 signed-in user against external services (Google Calendar, GitHub,
 Slack, Notion, etc.). The framework handles the OAuth dance,
-encrypted token storage, and silent refresh — your handler just
+encrypted token storage, and silent refresh. Your handler
 asks for a fresh access token and makes the API call.
 
 > Distinct from the framework's "sign in with Google" flow. That
 > one establishes the user's Pylon identity. `ctx.connections.*`
-> links additional accounts AFTER the user is already signed in.
+> links additional accounts after the user is already signed in.
 
 ## Quick start
 
@@ -37,7 +37,7 @@ PYLON_OAUTH_GOOGLE_CLIENT_SECRET=yyy
 ```
 
 ```ts
-// functions/listEvents.ts — read the user's calendar
+// functions/listEvents.ts: read the user's calendar
 import { action } from "@pylonsync/functions";
 
 export default action({
@@ -51,7 +51,7 @@ export default action({
   },
 });
 
-// functions/connectGoogle.ts — start the OAuth flow
+// functions/connectGoogle.ts: start the OAuth flow
 import { action } from "@pylonsync/functions";
 
 export default action({
@@ -71,7 +71,7 @@ redirects to `/api/connections/google-calendar/callback?code=...&state=...`
 
 ## Why a primitive
 
-You could do OAuth yourself per-app. The Pylon primitive gives you:
+The Pylon primitive provides:
 
 - **One declaration** instead of three (auth URL builder, callback
   handler, refresh logic) per provider.
@@ -79,12 +79,12 @@ You could do OAuth yourself per-app. The Pylon primitive gives you:
   entity stores `accessToken` + `refreshToken` with
   `field.string().serverOnly().encrypted()`. SQL dump leak →
   attacker sees only ciphertext.
-- **Silent refresh** — `ctx.connections.get(name)` checks expiry
+- **Silent refresh.** `ctx.connections.get(name)` checks expiry
   and refreshes via the provider's refresh-token grant when
   needed. Refresh-token rotation (Google, Auth0) is handled.
 - **Per-user rate limit** on refresh (1/sec per user+connection)
   so a buggy handler can't batter the provider's refresh endpoint.
-- **CSRF defense** built in — state tokens are single-use +
+- **CSRF defense.** State tokens are single-use and
   expire in 10 minutes.
 
 ## Configuration
@@ -94,11 +94,11 @@ You could do OAuth yourself per-app. The Pylon primitive gives you:
 | Env                                       | Purpose                                                |
 | ----------------------------------------- | ------------------------------------------------------ |
 | `PYLON_PUBLIC_URL`                        | Base URL for the callback (e.g. `https://app.com`).    |
-| `PYLON_ENCRYPTION_KEY`                    | 32-byte AEAD key — refresh tokens MUST be encrypted.   |
+| `PYLON_ENCRYPTION_KEY`                    | 32-byte AEAD key; refresh tokens must be encrypted.    |
 | `PYLON_OAUTH_<PROVIDER>_CLIENT_ID`        | OAuth client id from the provider's developer console. |
 | `PYLON_OAUTH_<PROVIDER>_CLIENT_SECRET`    | OAuth client secret.                                   |
 
-`<PROVIDER>` is uppercased — `google` → `PYLON_OAUTH_GOOGLE_CLIENT_ID`.
+`<PROVIDER>` is uppercased: `google` → `PYLON_OAUTH_GOOGLE_CLIENT_ID`.
 
 ### Optional env
 
@@ -108,7 +108,7 @@ You could do OAuth yourself per-app. The Pylon primitive gives you:
 
 ### Built-in providers
 
-Anything pylon-auth's OAuth client supports — Google, GitHub, Slack,
+The built-in OAuth client supports Google, GitHub, Slack,
 Microsoft, Notion, GitLab, LinkedIn, Discord, Twitter/X, Apple,
 Reddit, Spotify, Twitch, Auth0, Okta (via `oidc:` prefix), and
 more. See `crates/auth/src/provider.rs` for the full list.
@@ -136,15 +136,15 @@ scopes (e.g. `google-mail` vs `google-calendar`).
 
 Returns `{ url: string }`. Redirect the browser to that URL.
 `opts.postRedirect` (optional) is where the browser lands after
-the OAuth callback succeeds — defaults to `/`.
+the OAuth callback succeeds; it defaults to `/`.
 
 Throws on:
 
-- `CONNECTIONS_NOT_CONFIGURED` — no `defineConnection(...)` in the manifest
-- `CONNECTION_UNKNOWN` — `name` doesn't match any declared connection
-- `PROVIDER_NOT_CONFIGURED` — missing `PYLON_OAUTH_<PROVIDER>_*` env
-- `ENCRYPTION_REQUIRED` — `PYLON_ENCRYPTION_KEY` is unset
-- `CONNECTION_REQUIRES_AUTH` — caller is anonymous
+- `CONNECTIONS_NOT_CONFIGURED`: no `defineConnection(...)` in the manifest
+- `CONNECTION_UNKNOWN`: `name` doesn't match any declared connection
+- `PROVIDER_NOT_CONFIGURED`: missing `PYLON_OAUTH_<PROVIDER>_*` env
+- `ENCRYPTION_REQUIRED`: `PYLON_ENCRYPTION_KEY` is unset
+- `CONNECTION_REQUIRES_AUTH`: caller is anonymous
 
 ### `ctx.connections.get(name)`
 
@@ -159,30 +159,30 @@ Behavior:
   and returns the new access token.
 - If there's no refresh token (some providers don't return one
   on second-link without `prompt=consent`), `get` throws
-  `REFRESH_FAILED` — the user must re-link.
+  `REFRESH_FAILED`; the user must re-link.
 
 Throws on:
 
-- `CONNECTION_NOT_LINKED` — user hasn't started the OAuth flow yet
-- `REFRESH_FAILED` — provider rejected the refresh token
-- `PROVIDER_NOT_CONFIGURED` — missing env
+- `CONNECTION_NOT_LINKED`: user hasn't started the OAuth flow yet
+- `REFRESH_FAILED`: provider rejected the refresh token
+- `PROVIDER_NOT_CONFIGURED`: missing env
 
 ### `ctx.connections.list()`
 
 Returns `{ connections: Array<{ name, provider, scope, expiresAt, updatedAt }> }`.
-Tokens are NOT included — call `get(name)` for those.
+Tokens are not included. Call `get(name)` for those.
 
 ### `ctx.connections.disconnect(name)`
 
 Removes the `_Connection` row. Provider-side revocation is the
-caller's responsibility — most providers expose a separate `/revoke`
+caller's responsibility. Most providers expose a separate `/revoke`
 endpoint that this surface intentionally doesn't call (revoke vs
 unlink semantics differ per provider).
 
 ## HTTP surface
 
 These two routes exist regardless of whether your app declares
-connections — they 503 with `CONNECTIONS_NOT_CONFIGURED` when no
+connections. They return 503 with `CONNECTIONS_NOT_CONFIGURED` when no
 `defineConnection(...)` exists.
 
 ### `POST /api/connections/<name>/auth-url`
@@ -222,13 +222,13 @@ On failure, returns a JSON error envelope.
 - **Google**: the framework forces `prompt=consent&access_type=offline`
   so a refresh token is issued on every link. Without this, Google
   omits the refresh token on subsequent re-links and you can't
-  refresh expired access tokens — users would have to fully re-consent.
+  refresh expired access tokens; users would have to fully re-consent.
 - **GitHub**: classic personal-OAuth-app tokens don't expire and
   don't return refresh tokens. `ctx.connections.get` returns the
   stored access token forever (no refresh path). GitHub Apps + the
   newer GitHub OAuth flows DO return refresh tokens.
 - **Slack**: returns a workspace-scoped token. The connection is
-  per-(user, workspace) — multiple workspaces means multiple
+  per-(user, workspace), so multiple workspaces need multiple
   `defineConnection` entries.
 - **Custom OIDC** (Auth0, Okta, Keycloak): not yet supported in
   `ctx.connections.*`. Use the framework's general OAuth surface
@@ -247,15 +247,14 @@ On failure, returns a JSON error envelope.
 | `AUTH_FAILED`               | `callback`                  | State token invalid/expired, or provider rejected code.  |
 | `REFRESH_FAILED`            | `get`                       | Provider rejected the refresh token (user must re-link). |
 
-## What `ctx.connections` is NOT
+## Limits
 
-- Not a provider SDK. You still call `fetch("https://googleapis.com/...")`
-  yourself — Pylon supplies the bearer token.
-- Not a connection between two Pylon apps. It's strictly an
-  OAuth client for external providers.
-- Not available in query handlers — same reason as `ctx.llm.*`
-  (reactive re-runs would loop the refresh + DB write).
-- Not bound to a specific tenant. The connection is per-`userId`;
-  multi-tenant apps that want per-tenant connections should
+- Call the provider SDK or `fetch("https://googleapis.com/...")` yourself;
+  Pylon supplies the bearer token.
+- Connections link users to external OAuth providers, not two Pylon apps.
+- Query handlers cannot use `ctx.connections`, because reactive re-runs could
+  loop the refresh and database write.
+- A connection belongs to a `userId`, not a specific tenant. Multi-tenant apps
+  that want per-tenant connections should
   include the tenant id in the connection `name` (e.g.
   `slack-workspace-${tenantId}`).

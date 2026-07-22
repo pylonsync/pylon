@@ -4,7 +4,7 @@
 
 Build a field-first mobile utility for HVAC technicians working with A2L refrigerants, especially R-454B and R-32. The app provides offline pressure-temperature charts, superheat and subcooling calculators, charge-limit helpers, job history, and branded service reports.
 
-The product is designed to acquire users primarily through App Store Optimization (ASO), not sales-led outreach.
+App Store Optimization (ASO) is the primary acquisition channel.
 
 ## Product Positioning
 

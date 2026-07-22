@@ -1,8 +1,8 @@
 # Cloudflare Workers cost guide
 
-Workers deploys scale to zero — idle apps cost $0. That's the attractive
-case. This doc is about the *un*attractive cases: when scale-to-zero
-bites, what runaway patterns look like, and how to cap your bill.
+Idle Workers apps cost $0 because deployments scale to zero. This guide covers
+the cases that cost money: scale-to-zero tradeoffs, runaway patterns, and bill
+caps.
 
 ## The pricing dimensions that matter
 
@@ -31,7 +31,7 @@ As of 2026, the Workers Paid plan ($5/mo base) includes:
 A client that polls `/api/sync/pull` every 500ms is 172,800 requests/day
 per client. 100 such clients = 17M/day → $5/day. **Fix**: use WebSocket
 push (Durable Objects on Workers), or widen the polling interval with
-jitter. pylon's sync protocol supports cursor-based pulls — clients
+jitter. pylon's sync protocol supports cursor-based pulls, so clients
 only pay for deltas, not a full list every tick.
 
 ### Loops inside a worker handler
@@ -102,21 +102,21 @@ Cloudflare's analytics dashboard shows:
 
 Plug these into your own dashboard. For pylon specifically, watch:
 
-- `/api/sync/pull` rate — anything > 10 req/sec/client is suspicious
-- `/api/entities/*` error rate — 403 spike = policy regression, 5xx = bug
-- WS connection count vs. rejection rate (IP cap) — rejections = attack
-- D1 write volume vs. change_log append rate — these should match
+- `/api/sync/pull` rate: anything > 10 req/sec/client is suspicious
+- `/api/entities/*` error rate: 403 spike = policy regression, 5xx = bug
+- WS connection count vs. rejection rate (IP cap): rejections = attack
+- D1 write volume vs. change_log append rate: these should match
 
-## When NOT to use Workers
+## When a server is a better fit
 
 Workers scale-to-zero doesn't help if:
-- You have steady ≥100 req/sec — a $25/mo AWS deploy will be cheaper
-- You need shards / long-lived game simulations — Durable Object
+- You have steady ≥100 req/sec; a $25/mo AWS deploy will be cheaper
+- You need shards or long-lived game simulations; Durable Object
   hibernation costs add up fast
-- Your p99 matters and cold starts aren't acceptable — a warm VPS is
+- Your p99 matters and cold starts aren't acceptable; a warm VPS is
   more predictable
-- You need Postgres (`postgres-live` feature) — Workers is D1-only
-- You need large file uploads — Workers has 100 MB request cap
+- You need Postgres (`postgres-live` feature); Workers is D1-only
+- You need large file uploads; Workers has a 100 MB request cap
 
 For those cases, see `DEPLOY.md` shape 2 (AWS ECS + Aurora).
 

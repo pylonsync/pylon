@@ -6,12 +6,12 @@ A self-hostable, full-stack framework for web, mobile, and real-time apps.
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![skills.sh](https://skills.sh/b/pylonsync/pylon)](https://skills.sh/pylonsync/pylon)
 
-pylon gives you what Convex / Firebase / Supabase do — declarative schema,
-real-time sync, server functions, auth, file storage — but as a Rust server
-you self-host on a small VPS (SQLite or Postgres), not a stack of services.
+Like Convex, Firebase, and Supabase, pylon gives you declarative schema,
+real-time sync, server functions, auth, and file storage. It packages them in a
+Rust server you can self-host on a small VPS with SQLite or Postgres.
 
 ```sh
-# Scaffold a full-stack app — auth, a multi-tenant dashboard, and
+# Scaffold a full-stack app with auth, a multi-tenant dashboard, and
 # server-rendered React, all on one port. No global install needed.
 npm create @pylonsync/pylon@latest my-app
 cd my-app
@@ -19,7 +19,7 @@ npm run dev
 ```
 
 Open `http://localhost:4321`. The Pylon CLI ships as a dependency, so `npm run
-dev` runs it — you just need [Bun](https://bun.sh) ≥ 1.0 on your PATH (Pylon runs
+dev` runs it. You only need [Bun](https://bun.sh) ≥ 1.0 on your PATH (Pylon runs
 your TypeScript and SSR on it).
 
 Want `pylon` on your PATH (for `pylon init`, or `pylon deploy` from anywhere)?
@@ -30,9 +30,9 @@ inspector.
 
 ## Use with your coding agent
 
-Pylon ships a [skill](skills/pylon/SKILL.md) that teaches Claude Code, Codex,
-or Cursor how to build Pylon apps correctly — schema, policies, server
-functions, SSR, and the gotchas. Add it to your agent with one command:
+Pylon includes a [skill](skills/pylon/SKILL.md) with guidance for Claude Code,
+Codex, and Cursor on schema, policies, server functions, SSR, and common
+gotchas. Add it to your agent with one command:
 
 ```sh
 npx skills add pylonsync/pylon
@@ -43,14 +43,14 @@ npx skills add pylonsync/pylon
 ## What you get
 
 - **Declarative schema** in JSON or DSL → tables, types, OpenAPI, client types
-- **Real-time sync** — clients see updates as they happen (WebSocket + SSE)
-- **TypeScript functions** — `query`/`mutation`/`action` with a typed `ctx`
+- **Real-time sync** over WebSocket and SSE
+- **TypeScript functions**: `query`/`mutation`/`action` with a typed `ctx`
   - The mutation handler IS the transaction (atomic by default)
   - Streaming responses for AI chat / live data
-- **Auth** — sessions, passwords, magic codes, OAuth (25 providers), passkeys,
+- **Auth**: sessions, passwords, magic codes, OAuth (25 providers), passkeys,
   TOTP, RBAC, organizations
-- **SSR** — file-based React routes, `<Link>` with instant client nav, `<Image>`
-  with built-in Rust optimizer (AVIF/WebP/JPEG), Tailwind v4 first-class —
+- **SSR**: file-based React routes, `<Link>` with instant client nav, `<Image>`
+  with a built-in Rust optimizer (AVIF/WebP/JPEG), and first-class Tailwind v4;
   full-stack apps without Next.js. See [examples/ssr-hello](examples/ssr-hello/)
   and the [SSR docs](https://docs.pylonsync.com/ssr/overview).
 - **Background jobs** + cron scheduler
@@ -70,10 +70,9 @@ npx skills add pylonsync/pylon
 
 ## Quickstart
 
-`npm create @pylonsync/pylon@latest` (top of the README) is the fastest start — a
-full-stack app, no global install. To build a **backend by hand**, install the
-`pylon` binary (Bun ≥ 1.0 is also needed at runtime — Pylon runs your TypeScript
-and SSR on it):
+`npm create @pylonsync/pylon@latest` is the fastest way to start a full-stack
+app, with no global install. To build a **backend by hand**, install the `pylon`
+binary. Bun ≥ 1.0 is also required at runtime for TypeScript and SSR:
 
 ```sh
 curl -fsSL https://www.pylonsync.com/install.sh | bash
@@ -81,7 +80,7 @@ curl -fsSL https://www.pylonsync.com/install.sh | bash
 # or: docker pull ghcr.io/pylonsync/pylon:latest
 ```
 
-One `app.ts` is the whole backend — schema + policies:
+The schema and policies for this backend fit in one `app.ts`:
 
 ```ts
 import { entity, field, policy, buildManifest } from "@pylonsync/sdk";
@@ -137,7 +136,7 @@ export default mutation({
 import { db, callFn } from "@pylonsync/react";
 
 function TodoList() {
-  const { data: todos } = db.useQuery("Todo"); // live — updates as rows change
+  const { data: todos } = db.useQuery("Todo"); // updates live as rows change
   return (
     <>
       {todos.map((t) => <li key={t.id}>{t.title}</li>)}
@@ -147,7 +146,8 @@ function TodoList() {
 }
 ```
 
-Full walkthrough — auth, live sync, and deploy — in the [Quickstart docs](https://docs.pylonsync.com/quickstart).
+The [Quickstart docs](https://docs.pylonsync.com/quickstart) cover auth, live
+sync, and deployment.
 
 ## Project layout
 
@@ -174,7 +174,7 @@ pylon/
     ├── react/           React hooks + typed client
     ├── react-native/    RN hooks + offline storage
     ├── next/            Next.js integration
-    ├── swift/           Swift SDK (iOS, macOS, Linux) — sync, realtime, SwiftUI
+    ├── swift/           Swift SDK (iOS, macOS, Linux): sync, realtime, SwiftUI
     ├── functions/       Function definitions + Bun runtime
     ├── sync/            Sync engine (optimistic + offline-capable)
     ├── workflows/       Durable workflow runner
@@ -200,29 +200,32 @@ PYLON_DEV_MODE=false
 
 ## Deployment
 
-- **Managed cloud**: [pylonsync.com](https://www.pylonsync.com) — same binary, hosted; sign up and `pylon deploy`
-- **Self-host**: `curl … | bash` or `docker run` — see [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
+- **Managed cloud**: [pylonsync.com](https://www.pylonsync.com) hosts the same
+  binary; sign up and run `pylon deploy`
+- **Self-host**: use `curl … | bash` or `docker run`; see
+  [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
 - **AWS ECS**: see `deploy/terraform/` and `deploy/sst/`
 - **Cloudflare Workers**: see `crates/workers/README.md` (experimental)
 
 Architecture docs:
-- [RUNTIME.md](docs/RUNTIME.md) — how TypeScript functions execute, what JS engine, what we evaluated
-- [SYNC.md](docs/SYNC.md) — sync semantics, CRDT-backed rows, offline behavior
-- [ARCHITECTURE.md](ARCHITECTURE.md) — crate-by-crate map of the system
+- [RUNTIME.md](docs/RUNTIME.md): how TypeScript functions execute, which JS
+  engine Pylon uses, and the alternatives evaluated
+- [SYNC.md](docs/SYNC.md): sync semantics, CRDT-backed rows, and offline behavior
+- [ARCHITECTURE.md](ARCHITECTURE.md): crate-by-crate map of the system
 
 Operational docs:
-- [DEPLOY.md](docs/ops/DEPLOY.md) — env vars, reverse proxy, health checks
-- [SIZING.md](docs/ops/SIZING.md) — measured throughput, capacity planning
-- [TOKEN_ROTATION.md](docs/ops/TOKEN_ROTATION.md) — admin token rotation
-- [INCIDENT.md](docs/ops/INCIDENT.md) — incident response playbook
-- [WORKERS_COSTS.md](docs/ops/WORKERS_COSTS.md) — cost patterns on Cloudflare
+- [DEPLOY.md](docs/ops/DEPLOY.md): env vars, reverse proxy, and health checks
+- [SIZING.md](docs/ops/SIZING.md): measured throughput and capacity planning
+- [TOKEN_ROTATION.md](docs/ops/TOKEN_ROTATION.md): admin token rotation
+- [INCIDENT.md](docs/ops/INCIDENT.md): incident response playbook
+- [WORKERS_COSTS.md](docs/ops/WORKERS_COSTS.md): cost patterns on Cloudflare
 
 ## Project status
 
 **Pre-1.0.** API is stable enough to build with but may evolve. SQLite is
 the default backend and Postgres is supported for deployments that need an
 external database or horizontal database operations. Cloudflare Workers / D1
-is experimental — see `SECURITY.md` for a list of pre-1.0 hardening gaps.
+is experimental. See `SECURITY.md` for a list of pre-1.0 hardening gaps.
 
 ## Contributing
 

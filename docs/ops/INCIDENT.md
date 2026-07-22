@@ -41,7 +41,7 @@ as admin-level env vars, rotate those too.
 ### Policy bypass / data exposure
 
 1. Reproduce with a throwaway session token against staging.
-2. Check `audit_log` for rows accessed during the window — this is the
+2. Check `audit_log` for rows accessed during the window; this is the
    GDPR notification trigger in the EU.
 3. Patch, ship, verify the regression test in
    `crates/policy/src/lib.rs::tests` covers it.
@@ -54,7 +54,7 @@ unbounded, disk filling.
 
 1. Identify the source: check recent deploys + `audit_log` for the
    offending `user_id` or IP.
-2. Rate-limit or block at the proxy — don't try to fix inside the server
+2. Rate-limit or block at the proxy. Do not try to fix inside the server
    while it's under load.
 3. Once stable, investigate the trigger. Common cause: a client in an
    exponential-backoff retry loop without jitter.
@@ -64,7 +64,7 @@ unbounded, disk filling.
 SQLite in WAL mode delays checkpoints. If checkpoint isn't completing:
 
 ```sh
-# Offline checkpoint — needs exclusive DB access.
+# Offline checkpoint; needs exclusive DB access.
 systemctl stop pylon
 sqlite3 /var/lib/pylon/pylon.db "PRAGMA wal_checkpoint(TRUNCATE)"
 systemctl start pylon
@@ -79,11 +79,11 @@ client holding the lock.
 Signal: ws-broadcast-N threads at 100% CPU, clients reporting missed
 events, queue-full warnings in the log.
 
-1. Check client count — per-IP cap is 64; if one IP has 64, a client is
+1. Check client count. The per-IP cap is 64; if one IP has 64, a client is
    looping.
 2. Check broadcast rate. The event that's being broadcast might not be
-   expected — e.g. a retry loop creating 1000 inserts/sec.
-3. Bounce the ws server (`kill -HUP <pid>`) only as a last resort —
+   expected, such as a retry loop creating 1000 inserts/sec.
+3. Bounce the ws server (`kill -HUP <pid>`) only as a last resort;
    every client has to reconnect.
 
 ### Cloudflare Workers billing spike
@@ -93,12 +93,12 @@ week. See `docs/ops/WORKERS_COSTS.md` for patterns.
 
 ## Post-mortem template
 
-1. **Summary** — one paragraph, what happened, duration, blast radius.
-2. **Timeline** — UTC timestamps from first signal to all-clear.
-3. **Root cause** — what went wrong, not who.
-4. **What worked** — detection, containment, comms.
-5. **What didn't** — slow alerts, unclear runbooks, missing graphs.
-6. **Action items** — with owners and target dates. Track in the sprint.
+1. **Summary:** one paragraph covering what happened, duration, and blast radius.
+2. **Timeline:** UTC timestamps from first signal to all-clear.
+3. **Root cause:** what went wrong, not who.
+4. **What worked:** detection, containment, and comms.
+5. **What didn't:** slow alerts, unclear runbooks, and missing graphs.
+6. **Action items:** owners and target dates. Track them in the sprint.
 
 Publish internally within 5 business days. External disclosure for
 user-impacting incidents per your privacy policy.

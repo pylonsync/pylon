@@ -1,12 +1,12 @@
 # Sizing
 
-Numbers are per-process throughput — SQLite is single-writer, so vertical
+Numbers are per-process throughput. SQLite is single-writer, so vertical
 scaling of writes is bounded. Reads scale across a connection pool.
 
 > NOTE: Values in the tables below were measured on earlier reference
 > hardware (a 2024 Apple M-series laptop, 16 GB). Pending re-measurement
-> on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB) —
-> expect higher values on the new hardware. Treat these as a lower bound.
+> on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB).
+> Expect higher values on the new hardware. Treat these as a lower bound.
 
 Re-run with:
 
@@ -78,8 +78,8 @@ depends on client count, message size, and TCP send buffers.
 
 - Multi-client read contention (connection-pool fair-share)
 - TLS handshake cost (reverse proxy terminates TLS)
-- Network RTT — production numbers will be bounded by network first
-- Shard tick budget for realtime game state — depends on `SimState::tick`
+- Network RTT: production numbers will be bounded by network first
+- Shard tick budget for realtime game state: depends on `SimState::tick`
 
 For a real capacity estimate under your workload, run `pylon bench`
 against a representative fixture and the manifest you'll ship with.

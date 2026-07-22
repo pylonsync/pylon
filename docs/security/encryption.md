@@ -1,4 +1,4 @@
-# Pylon: field.encrypted() — at-rest AEAD encryption
+# Pylon: `field.encrypted()` for at-rest AEAD encryption
 
 Mark a manifest field `encrypted()` and Pylon AEAD-encrypts it
 before the storage backend sees the value. Reads through any
@@ -25,7 +25,7 @@ export default entity("Customer", {
   email: field.string().unique(),
   // Encrypted at rest. Plaintext only exists inside the Pylon process.
   ssn: field.string().serverOnly().encrypted(),
-  // OAuth tokens — encrypt + serverOnly so they never reach the wire.
+  // Encrypt OAuth tokens and keep them off the wire.
   refreshToken: field.string().serverOnly().encrypted(),
 });
 ```
@@ -37,21 +37,21 @@ prefix → no decrypt attempt).
 
 ## Threat model
 
-**What this defends against**:
+**Protects against**:
 - DB file copy, SQL dump leak, backup left in a misconfigured bucket.
 - A read-only SQL replica that ends up with broader read access than
   intended.
 - Postgres + SQLite both store the ciphertext directly in the column
   cell; no separate keystore is needed.
 
-**What this does NOT defend against**:
-- An attacker with code execution on the Pylon process — the key
+**Does not protect against**:
+- An attacker with code execution on the Pylon process; the key
   lives in env / process memory.
 - Side-channel attacks against the AEAD primitive itself. Pylon uses
   `ring`'s constant-time implementations to minimize this.
 - Memory-dump attacks (key in RAM during process lifetime).
 - Trusted server-side function code that legitimately reads the
-  decrypted value — that's by design.
+  decrypted value. Server-side code is trusted by design.
 
 If your threat model requires KMS-backed or HSM-backed key
 material, sub in your own key source by setting
@@ -69,8 +69,8 @@ options:
 | Base64     | `AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=` (use `openssl rand -base64 32`) |
 
 The key must decode to exactly 32 bytes. Anything else fails fast at
-boot with `ENCRYPTION_NOT_CONFIGURED` (good — better than silently
-writing plaintext).
+boot with `ENCRYPTION_NOT_CONFIGURED` instead of silently writing
+plaintext.
 
 When the manifest declares encrypted fields but `PYLON_ENCRYPTION_KEY`
 is unset, writes to those fields reject with `ENCRYPTION_NOT_CONFIGURED`.
@@ -93,8 +93,8 @@ enc:v1:<base64(nonce)>:<base64(ciphertext + tag)>
   records.
 
 The wire format is the value stored in the SQL column. CRDT projection,
-FTS shadow tables, change-log events, sync push/pull — every wire path
-sees the ciphertext as an opaque string, not the plaintext.
+FTS shadow tables, change-log events, and sync push/pull all
+see the ciphertext as an opaque string, not the plaintext.
 
 ## Restrictions enforced at boot
 
@@ -113,10 +113,10 @@ misconfigurations before a single byte hits the disk.
 
 ## Other limits
 
-- **Not queryable.** Because every write uses a fresh nonce, two
-  encrypted writes of the same plaintext produce different
+- **Queries by value are unsupported.** Because every write uses a fresh nonce,
+  two encrypted writes of the same plaintext produce different
   ciphertext. `ctx.db.lookup("Customer", "ssn", "111-22-3333")`
-  always returns `null` — there's no way to find a row by an
+  always returns `null`; the runtime cannot find a row by an
   encrypted column's value. If you need lookup, store a hashed
   version in a separate non-encrypted field.
 - **Indexes**: Indexing an encrypted field is allowed but pointless
@@ -131,29 +131,29 @@ misconfigurations before a single byte hits the disk.
 Every cell binds `("pylon-aead-v1:", entity, "\0", field_name)` as
 additional authenticated data on the AEAD seal. An attacker who copies
 a ciphertext blob from one (row, column) to another in the DB file
-cannot make decrypt succeed — the tag check fails because the AAD
+cannot make decryption succeed because the tag check fails when the AAD
 mismatches.
 
 ## Known gaps (tracked, not yet covered)
 
-These paths are NOT yet wrapped — writing through them lands
-plaintext, reading through them returns ciphertext. Surfaces:
+These paths are not yet wrapped. Writes through them store plaintext, and reads
+through them return ciphertext:
 
-- `Runtime::transact` (atomic batch `/api/transact`) — SQLite path
+- `Runtime::transact` (atomic batch `/api/transact`): the SQLite path
   uses raw `insert_with_conn`/`update_with_conn`, but
   `pg_transact_with_crdt` (Postgres) bypasses the encryption layer
   entirely. Until this is fixed, **do not use `/api/transact` to
   write rows with encrypted fields on a Postgres-backed deploy**.
 - `Runtime::query_filtered`, `Runtime::query_graph`, `Runtime::search`
-  — read paths that return rows without decrypting. Callers see
+  return rows without decrypting. Callers see
   ciphertext for encrypted fields. Fix: thread `maybe_decrypt_row`
   through these methods.
 
-Standard reads (`ctx.db.get`, `ctx.db.list`, `ctx.db.lookup`) +
-standard writes (`ctx.db.insert`, `ctx.db.update`) + the action-
-handler transaction path (`TxStore`, `PgBufferedTxStore` via
-`*_with_conn`) ARE wrapped. That covers the dominant write surface
-on both SQLite and Postgres deploys.
+The wrapper covers standard reads (`ctx.db.get`, `ctx.db.list`,
+`ctx.db.lookup`), standard writes (`ctx.db.insert`, `ctx.db.update`), and the
+action-handler transaction path (`TxStore`, `PgBufferedTxStore` via
+`*_with_conn`). This covers the main access paths on both SQLite and Postgres
+deploys.
 
 ## Operational notes
 
@@ -178,7 +178,7 @@ export default action({
 
 Reading any row that still carries plaintext returns the plaintext as-is
 (the framework's decrypt logic skips values without the `enc:v1:` prefix).
-This means `encrypted()` is a non-breaking change to deploy — old rows keep
+Adding `encrypted()` is a non-breaking deployment. Old rows keep
 working until they're rewritten.
 
 ### Key rotation
@@ -189,15 +189,16 @@ key, write with the new). A future release will support key
 versioning (`PYLON_ENCRYPTION_KEY_V1`, `PYLON_ENCRYPTION_KEY_V2`) so
 old rows can be read while new writes use the new key.
 
-For now: don't rotate. If you must, do an offline migration.
+Do not rotate the key until versioned keys are supported. If rotation is
+unavoidable, use an offline migration.
 
 ### Backup + restore
 
 The ciphertext is fully self-contained (nonce + ciphertext + tag in
 one cell). A backup that copies the SQL data + nothing else is
 useless without the key. Treat `PYLON_ENCRYPTION_KEY` like a
-production secret: store it in your secret manager, NOT in the
-repo, NOT in the same place as your DB backups.
+production secret: store it in your secret manager, outside the repo and away
+from your database backups.
 
 ## Errors
 
@@ -206,14 +207,3 @@ repo, NOT in the same place as your DB backups.
 | `ENCRYPTION_NOT_CONFIGURED` | Manifest declares encrypted fields but `PYLON_ENCRYPTION_KEY` is unset. |
 | `ENCRYPTION_FAILED`         | AEAD operation rejected (corrupt ciphertext on read, RNG failure on write). |
 | `Invalid PYLON_ENCRYPTION_KEY` | Boot-time: the env value isn't 32 bytes hex or base64. Server logs warn; encrypted writes fail until fixed. |
-
-## What encrypted() is not
-
-- Not a guarantee against an active attacker with code execution.
-  See "Threat model" above.
-- Not full-disk encryption. Use that too (LUKS, FileVault, AWS EBS
-  encryption) — field-level encryption is defense-in-depth, not a
-  replacement.
-- Not a substitute for `serverOnly()`. Use both: `serverOnly()`
-  keeps the field out of HTTP responses; `encrypted()` keeps it
-  encrypted in the database. They compose.

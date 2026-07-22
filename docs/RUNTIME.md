@@ -1,7 +1,7 @@
 # Pylon: Function Runtime
 
-How TypeScript functions actually execute in Pylon — and an honest evaluation
-of whether the current choice is the right one.
+How TypeScript functions execute in Pylon and when the current runtime may need
+to change.
 
 ## TL;DR
 
@@ -9,7 +9,7 @@ of whether the current choice is the right one.
 - **Protocol:** NDJSON over stdio. The Rust supervisor sends `call`
   messages, the Bun process replies with `db` / `stream` / `schedule` /
   `runFn` / `return` / `error` messages, all line-delimited JSON.
-- **Concurrency model:** Single-threaded — every top-level function call
+- **Concurrency model:** Single-threaded. Every top-level function call
   serializes on `FnRunner::io_lock`. Bun is one process and the protocol
   isn't multiplexed at this layer.
 - **Data access:** TypeScript code does **not** touch SQLite directly. Every
@@ -20,11 +20,10 @@ of whether the current choice is the right one.
 - **Failure handling:** 30-second per-call timeout. On timeout the supervisor
   kills the Bun process and respawns it. The supervisor also respawns on any
   unexpected exit. A killed/respawned process loses all in-flight calls.
-- **Why a subprocess and not embedded V8?** Two reasons: (1) Bun ships with
-  TypeScript transformation, Node compat, and a fast cold start out of the
-  box — embedding V8 means re-implementing all of that in Rust; (2) keeping
-  the JS engine out-of-process means a buggy handler crashes only the Bun
-  child, not the whole Pylon binary.
+- **Why a subprocess:** Bun ships with TypeScript transformation, Node compat,
+  and a fast cold start out of the box. Embedding V8 would mean reimplementing
+  all of that in Rust. Keeping the JS engine out of process also means a buggy
+  handler crashes only the Bun child, not the whole Pylon binary.
 
 ## How a function call flows
 
@@ -64,7 +63,7 @@ HTTP POST /api/fn/createOrder
 Per call the cost is:
 - **One spawn-time handshake** (paid once at boot, ~50-150ms on a hot disk).
 - **One `call` message + one `return` message** to the child.
-- **N round-trips** for `N` `ctx.db.*` operations the handler makes — each
+- **N round-trips** for `N` `ctx.db.*` operations the handler makes. Each
   is a stdio write + JSON parse on both sides.
 
 ## What runs where
@@ -82,7 +81,7 @@ Per call the cost is:
 ## Concurrency, in detail
 
 There is exactly one Bun child per Pylon instance. Inside that child, calls
-*can* run concurrently in JS (they're just promises) — the Rust side just
+*can* run concurrently in JS (they're just promises); the Rust side
 won't *send* a second `call` message until the first one returns, because
 `io_lock` serializes the top-level dispatch.
 
@@ -91,11 +90,11 @@ That decision is deliberate:
   inbox demux on the Rust side).
 - The single Bun event loop already serializes JS execution, so true
   parallelism inside the child wouldn't buy much.
-- Mutations hold the SQLite write lock for the whole handler anyway — the
+- Mutations hold the SQLite write lock for the whole handler anyway, so the
   bottleneck is writes, not JS execution.
 
 **Reads (queries)** could parallelize across the read pool, but currently
-don't — every fn call goes through `io_lock`. This is the single biggest
+do not: every fn call goes through `io_lock`. This is the single biggest
 performance limit at the function layer today; see *Limits* below.
 
 ## Limits (read this before benchmarking)
@@ -104,7 +103,7 @@ performance limit at the function layer today; see *Limits* below.
   behind the call ahead. ~10K small-handler calls/sec on an M2 Mac;
   workloads dominated by complex handlers will be lower.
 - **DB ops are stdio JSON.** Every `ctx.db.get(id)` is a stdio round-trip
-  with two JSON encode/decode cycles. Cheap (~10µs) but it adds up — a
+  with two JSON encode/decode cycles. Cheap (~10µs), but it adds up. A
   handler that does 100 sequential `ctx.db.get()` calls eats ~1ms in
   protocol overhead before any actual work.
 - **No per-call resource limits.** A handler can `while(true)` and the
@@ -119,12 +118,10 @@ performance limit at the function layer today; see *Limits* below.
   invalidates Bun's module cache for everything; the supervisor restarts
   the whole runtime.
 - **No sandboxing.** Handlers can read the filesystem, open sockets, exec
-  subprocesses — whatever Bun lets them do. Fine for self-host, dangerous
+  subprocesses: whatever Bun lets them do. Fine for self-host, dangerous
   for multi-tenant.
 
 ## Alternatives we evaluated
-
-This is honest, not a pitch. Each option is real and we considered it.
 
 ### 1. Stay with Bun subprocess (current)
 
@@ -140,7 +137,7 @@ This is honest, not a pitch. Each option is real and we considered it.
 
 - **Pros:** Cheap upgrade path. Spin up `N` Bun processes, route calls by
   `call_id % N`. Read queries parallelize across workers. Fault isolation
-  improves — one worker crashing only drops its in-flight calls. ~1 day
+  improves because one worker crashing only drops its in-flight calls. ~1 day
   of work, no architectural change.
 - **Cons:** Doesn't solve the SQLite single-writer bottleneck (mutations
   still queue). Worker pool needs a supervisor + load balancer that
@@ -150,30 +147,30 @@ This is honest, not a pitch. Each option is real and we considered it.
   bottleneck under read-heavy workloads. Plan to ship behind
   `PYLON_FN_WORKERS=N` with default `1`.
 
-### 3. `deno_core` / `rusty_v8` — embedded V8 isolates
+### 3. `deno_core` / `rusty_v8`: embedded V8 isolates
 
 - **Pros:** True per-call isolates (each function call could get its own
-  fresh JS context). Shared-memory DB ops (no JSON serialization — pass
+  fresh JS context). Shared-memory DB ops (no JSON serialization; pass
   `serde_json::Value` directly across the FFI boundary). Cheap to spawn
   (microseconds vs Bun's ~50ms cold start). Memory limits per isolate.
   V8 snapshots make cold starts faster still.
 - **Cons:** Embedding V8 is non-trivial (~2-3 weeks to get to parity with
   the current Bun-based runtime). Binary size grows by ~15MB. No automatic
-  Node API compat — handlers can't `import` arbitrary npm packages without
+  Node API compat. Handlers can't `import` arbitrary npm packages without
   us writing polyfills or restricting to a curated stdlib. TypeScript
   transform needs SWC (separate dependency, ~5MB).
 - **Verdict:** The right choice if and when we ship a managed
   multi-tenant cloud. The isolation story is what makes per-tenant
   sandboxing tractable. Not worth the rebuild for self-host.
 
-### 4. `workerd` — Cloudflare's open-source Workers runtime
+### 4. `workerd`: Cloudflare's open-source Workers runtime
 
 - **Pros:** Battle-tested isolate-per-request semantics. V8-based. Async
   by design. If we want first-class Cloudflare Workers parity, building
   on workerd locally means handlers behave identically in dev and on the
   Workers deploy target.
 - **Cons:** Heavy (~120MB binary). Designed for HTTP-shaped workloads, not
-  RPC-shaped — embedding it for our `ctx.db` round-trip pattern would be
+  RPC-shaped; embedding it for our `ctx.db` round-trip pattern would be
   fighting the grain. Less flexible than `deno_core` for non-Workers
   targets.
 - **Verdict:** Compelling specifically for the Workers target. If we end
@@ -181,7 +178,7 @@ This is honest, not a pitch. Each option is real and we considered it.
   should evaluate using workerd in dev too so handler behavior stays
   consistent. Not the right choice for the general runtime.
 
-### 5. `deno_runtime` — full Deno as an embedded library
+### 5. `deno_runtime`: full Deno as an embedded library
 
 - **Pros:** Most complete embedded option. Sandboxed by default
   (permissions). TypeScript native. Top-tier Node API compat.
@@ -199,7 +196,7 @@ This is honest, not a pitch. Each option is real and we considered it.
   perf characteristics Pylon needs.
 - **Verdict:** Not a serious option today.
 
-### 7. QuickJS / Boa — pure-Rust embedded JS
+### 7. QuickJS / Boa: pure-Rust embedded JS
 
 - **Pros:** Tiny binary impact. Fully in-process.
 - **Cons:** Both are 10-50x slower than V8. No real Node compat. TypeScript
@@ -223,6 +220,5 @@ Two things to add when the bottleneck becomes real:
    needs sandboxing. ~3 weeks of work; ship it as
    `PYLON_FN_RUNTIME=isolates`, keep Bun as the default.
 
-The wrong move would be to swap engines speculatively — every option above
-has real costs and the demo workloads don't need any of them. Pick the
-upgrade when the data justifies it.
+Every alternative has real costs, and the current workloads do not need them.
+Change engines when measurements justify the work.
