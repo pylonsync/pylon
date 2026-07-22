@@ -1,11 +1,10 @@
-// THE single source of truth for everything business-specific. The landing
-// page, layout, AND the createBooking server function all read from here, so
-// services, prices, weekly hours, and lead time stay in lockstep — rebrand and
-// reconfigure the whole site by editing this ONE file.
+// Business-specific copy and settings live here. The landing page, layout, and
+// createBooking function all read the same services, prices, weekly hours, and
+// lead time.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
 //
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -108,7 +107,7 @@ export const siteConfig: LocalServiceConfig = {
     tagline: "Dallas · est. 2014",
     headline: "A proper haircut, booked in ten seconds.",
     subcopy:
-      "Classic cuts, beard work, and hot-towel shaves from barbers who've been at it a while. Pick a time that's actually open — availability updates live — and you're set.",
+      "Classic cuts, beard work, and hot-towel shaves from experienced barbers. The booking calendar updates as chairs fill.",
     ctaLabel: "Book a chair",
     quickFacts: {
       hours: "Tue–Sat, 9–6",
@@ -119,7 +118,7 @@ export const siteConfig: LocalServiceConfig = {
 
   services: {
     eyebrow: "Services",
-    headline: "Simple menu, honest prices.",
+    headline: "Services and prices, up front.",
     items: [
       {
         slug: "haircut",
@@ -157,7 +156,7 @@ export const siteConfig: LocalServiceConfig = {
     eyebrow: "Book",
     headline: "Find a time that's open.",
     subcopy:
-      "Pick a service and a day — open slots are live, so what you see is what's actually free. No account, no phone tag.",
+      "Pick a service and a day from the live availability calendar. Book without creating an account or making a phone call.",
     slotMinutes: 30,
     leadTimeHours: 2,
     daysAhead: 14,
@@ -171,7 +170,7 @@ export const siteConfig: LocalServiceConfig = {
       6: { open: "09:00", close: "16:00" }, // Sat — shorter
     },
     confirmationMessage:
-      "You're booked. We'll see you then — a reminder will go out the day before.",
+      "You're booked. We'll send a reminder the day before.",
   },
 
   reviews: {

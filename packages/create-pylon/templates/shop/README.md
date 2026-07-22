@@ -1,12 +1,11 @@
 # __APP_NAME__
 
-A small DTC store built with [Pylon](https://pylonsync.com) — a server-rendered
-storefront with a **cart, real Stripe checkout, and live inventory**, plus a
-private owner dashboard, all from one binary on one port. No Next.js, no
-separate API server.
+A small DTC store built with [Pylon](https://pylonsync.com), with a
+server-rendered storefront, cart, Stripe Checkout, live inventory, and a
+private owner dashboard.
 
-The realtime point: each product shows its stock, and the moment someone buys
-the last unit it flips to "Sold out" for everyone with the page open.
+Each product shows current stock. When someone buys the last unit, it changes
+to "Sold out" on every open page.
 
 ## Develop
 
@@ -14,9 +13,8 @@ the last unit it flips to "Sold out" for everyone with the page open.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Then **open a second tab**, add the last of an item
-to your cart and check out in one, and watch it flip to "Sold out" in the
-other — with no refresh.
+Open http://localhost:4321. Add the last unit of an item to your cart and check
+out in one tab, then watch it change to "Sold out" in another.
 
 > Checkout works with **zero config**: with no Stripe keys set, it holds the
 > stock and records a "reserved" order for you to follow up on. Add
@@ -36,7 +34,7 @@ other — with no refresh.
 - `functions/seedProducts.ts` loads the catalog from config into the DB on first
   visit (idempotent).
 
-## Privacy — read this
+## Privacy
 
 The `Order` entity holds the customer's name + email (PII), so its policy in
 `app.ts` **denies every client read and write**. The public page only reads
@@ -71,9 +69,9 @@ listen` setup.
 
 ## Rebrand it
 
-Everything lives in **`lib/site.config.ts`** — brand, colors, the product list
-(with starting stock), value props, reviews, policies. Edit that one file and
-the whole store re-themes; the products re-seed on a fresh database.
+Brand, colors, products and starting stock, value props, reviews, and policies
+live in **`lib/site.config.ts`**. Editing that file updates the store, and a
+fresh database seeds products from it.
 
 ## Layout
 

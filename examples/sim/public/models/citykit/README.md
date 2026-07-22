@@ -1,7 +1,7 @@
 # City kit models
 
-Drop **GLB** building models here and they load automatically — until
-then the game renders clean procedural massing so it's never empty.
+Drop **GLB** building models here and they load automatically. Without
+them, the game falls back to procedural massing.
 
 Built for the [Quaternius Downtown City MegaKit](https://quaternius.com/packs/downtowncitymegakit.html)
 (CC0), but any low-poly GLBs work. Models are auto-scaled and centred to

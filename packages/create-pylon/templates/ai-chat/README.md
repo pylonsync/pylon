@@ -1,12 +1,11 @@
 # __APP_NAME__
 
-A streaming **AI chat** app built with [Pylon](https://pylonsync.com) — token
-streaming, multi-conversation history, and realtime cross-tab sync, all from one
-binary on one port. No Next.js, no separate API server.
+A streaming AI chat app built with [Pylon](https://pylonsync.com). One server
+handles token streaming, conversation history, and cross-tab sync.
 
 Tokens stream from the built-in `POST /api/ai/stream` endpoint, so your provider
 API key never reaches the browser. Conversations are sync-backed and
-owner-scoped — open two tabs and a chat you send in one shows up in the other.
+owner-scoped; a chat sent in one tab appears in the other.
 
 ## Develop
 
@@ -14,14 +13,14 @@ owner-scoped — open two tabs and a chat you send in one shows up in the other.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. You can create chats right away; to get **replies**,
-point it at an LLM provider (see below). Then **open a second tab** — your
-conversations and messages stay in lockstep.
+Open http://localhost:4321. You can create chats immediately. Configure an LLM
+provider to receive replies, then open a second tab to see conversations and
+messages sync.
 
 ## Configure the model
 
-The assistant replies only once you set a provider (the app boots fine without
-it and shows a friendly notice):
+The assistant replies after you configure a provider. Without one, the app
+still boots and displays a configuration notice:
 
 ```bash
 # .env
@@ -77,8 +76,8 @@ data.userId`) — you can only ever read or write your own. `User.passwordHash` 
 
 ## Rebrand it
 
-Everything brand-specific — name, colors, the assistant's system prompt, the
-empty-state copy, and starter prompts — lives in **`lib/site.config.ts`**.
+The name, colors, system prompt, empty-state copy, and starter prompts live in
+**`lib/site.config.ts`**.
 
 ## Layout
 

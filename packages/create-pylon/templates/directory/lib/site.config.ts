@@ -1,11 +1,9 @@
-// THE single source of truth for everything business-specific on this directory
-// site. Rebrand the whole thing by editing this ONE file — the landing page,
-// layout, and the seedListings function all read from here. The create-pylon
-// scaffolder and Mast target this file: a whole directory is themed + seeded
-// from one typed object.
+// Business-specific copy and settings live here. The landing page, layout,
+// seedListings function, create-pylon scaffolder, and Mast all read this typed
+// object.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -68,7 +66,7 @@ export const siteConfig: DirectoryConfig = {
     domain: "stacked.dev",
     email: "hello@stacked.example",
     footerBlurb:
-      "A hand-checked directory of the tools developers actually reach for. Search it, sort by votes, and submit the ones we're missing.",
+      "A hand-checked directory of developer tools. Search it, sort by votes, and submit missing entries.",
     copyrightName: "Stacked",
     socials: [
       {
@@ -89,9 +87,9 @@ export const siteConfig: DirectoryConfig = {
 
   hero: {
     tagline: "The dev tools directory",
-    headline: "The tools developers actually use.",
+    headline: "Developer tools, checked by hand.",
     subcopy:
-      "Search a hand-checked directory of developer tools, filter by category, and upvote the ones that earn it. Live results, live votes — no signup to browse.",
+      "Search a hand-checked directory, filter by category, and upvote useful tools. Results and vote counts update live, and browsing requires no account.",
     ctaLabel: "Submit a tool",
     searchPlaceholder: "Search tools — try “database”, “deploy”, “auth”…",
   },

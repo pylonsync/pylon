@@ -4,23 +4,23 @@ A Slack-style chat app in one manifest + six functions + one React file.
 
 Demonstrates:
 
-- **Live sync** — messages appear in every connected client instantly. No
+- **Live sync**: messages appear in every connected client instantly. No
   explicit push code; the change log fan-out handles it.
-- **Rooms API** — `useRoom("channel:<id>")` gives you per-channel presence
+- **Rooms API**: `useRoom("channel:<id>")` gives you per-channel presence
   ("3 others here") and typing indicators ("Alice is typing…").
-- **Tenant isolation** — `Workspace` is the tenant. Every scoped entity has
+- **Tenant isolation**: `Workspace` is the tenant. Every scoped entity has
   a `tenantId` field; the `tenant_scope` plugin stamps it automatically on
-  inserts and rejects cross-tenant reads/writes. Default posture — no code
-  in the functions has to call `.where({ tenantId })`.
-- **Transactional mutations** — `sendMessage.ts` is atomic: the channel
+  inserts and rejects cross-tenant reads/writes. Functions do not need to
+  call `.where({ tenantId })`.
+- **Transactional mutations**: `sendMessage.ts` is atomic: the channel
   lookup, membership check, and message insert all roll back together if
   any step throws.
-- **Optimistic UI** — `useMutation("sendMessage")` clears the input
+- **Optimistic UI**: `useMutation("sendMessage")` clears the input
   instantly; the sync engine reconciles when the server confirms.
-- **Reactions with racing double-tap** — `toggleReaction.ts` handles
+- **Reactions with racing double-tap**: `toggleReaction.ts` handles
   concurrent "+👍" clicks safely via the `(messageId, userId, emoji)`
   unique index.
-- **Read markers** — `markChannelRead.ts` upserts one marker per
+- **Read markers**: `markChannelRead.ts` upserts one marker per
   (user, channel); the client compares `lastReadAt` against message
   timestamps to render unread counts.
 
@@ -52,7 +52,7 @@ Studio at `http://localhost:4321/studio` lets you inspect rows directly
 | `functions/toggleReaction.ts` | Race-safe toggle with unique-index fallback |
 | `web/src/ChatApp.tsx` | React UI — `useQuery`, `useRoom`, `useMutation` |
 
-## What this example does NOT do
+## Out of scope
 
 - **No real magic-code login.** `upsertUser` accepts any email. Delete it
   before shipping; wire up `/api/auth/magic/send` + `/magic/verify`.
@@ -80,5 +80,3 @@ Studio at `http://localhost:4321/studio` lets you inspect rows directly
 | Unique indexes | Reaction dedup + channel-name uniqueness |
 | Paginated queries | `usePaginatedQuery` ready for long histories |
 | Session auth | Guest → upgrade → named user |
-
-If it works here, it works anywhere.

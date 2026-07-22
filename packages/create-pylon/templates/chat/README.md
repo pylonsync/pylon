@@ -1,8 +1,7 @@
 # __APP_NAME__
 
-A realtime chat room on [Pylon](https://pylonsync.com) — a live, shared message
-room served over one synced backend. One binary, one port. No Next.js, no
-separate API server, no realtime sidecar.
+A realtime chat room on [Pylon](https://pylonsync.com), served from one synced
+backend.
 
 ## Develop
 
@@ -10,9 +9,8 @@ separate API server, no realtime sidecar.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321, then open a **second tab** — type in one and the
-message appears in the other instantly. Edit any file under `app/` and save —
-the page reloads.
+Open http://localhost:4321, then open a second tab. A message sent in one appears
+in the other. Editing a file under `app/` reloads the page.
 
 ## Layout
 

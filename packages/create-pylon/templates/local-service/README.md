@@ -1,12 +1,11 @@
 # __APP_NAME__
 
-A booking site for an appointment business (salon, barber, trainer, clinic,
-trades…) built with [Pylon](https://pylonsync.com) — a server-rendered
-marketing page with **live slot availability** and a private owner dashboard,
-all served from one binary on one port. No Next.js, no separate API server.
+A booking site for salons, barbers, trainers, clinics, trades, and other
+appointment businesses. [Pylon](https://pylonsync.com) serves the marketing
+page, live slot availability, and private owner dashboard from one process.
 
-The realtime point: the time picker shows what's *actually* free, and a slot
-greys out for everyone the instant someone books it.
+The time picker shows current availability. A slot greys out on every open page
+as soon as someone books it.
 
 ## Develop
 
@@ -14,9 +13,8 @@ greys out for everyone the instant someone books it.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Pick a service and a time. Then **open a second
-tab**, book a slot in one, and watch that slot grey out in the other — with no
-refresh.
+Open http://localhost:4321 and pick a service and time. Book a slot in one tab
+and watch it grey out in another without refreshing.
 
 ## How the realtime works
 
@@ -29,7 +27,7 @@ refresh.
 - `functions/cancelBooking.ts` deletes the `BookedSlot`, which frees the time
   on every open picker instantly.
 
-## Privacy — read this
+## Privacy
 
 The `Booking` entity holds the customer's name, email, and phone (PII), so its
 policy in `app.ts` **denies every client read and write**. The public page only
@@ -49,11 +47,10 @@ bookings.
 
 ## Rebrand + reconfigure it
 
-Everything lives in **`lib/site.config.ts`** — brand, colors, services (name /
-duration / price), weekly hours, slot length, lead time, reviews, location, FAQ.
-Edit that one file (or have a generator produce it) and the whole site — and the
-booking engine — reconfigures. Services and hours are config, not a database to
-manage.
+Brand, colors, services, weekly hours, slot length, lead time, reviews,
+location, and FAQ content live in **`lib/site.config.ts`**. Editing or
+generating that file updates both the site and booking engine. Services and
+hours stay in config rather than a separate database.
 
 ## Layout
 

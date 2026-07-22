@@ -1,9 +1,8 @@
-// THE single source of truth for everything brand-specific on this AI media
-// studio. Rebrand by editing this ONE file — the layout + studio UI read from
-// here. The create-pylon scaffolder and Mast target this file.
+// Brand-specific copy and settings live here. The layout, studio UI,
+// create-pylon scaffolder, and Mast all read this file.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 import type { GenerationKind } from "./studio";
 
@@ -42,7 +41,7 @@ export const siteConfig: StudioConfig = {
     letter: "P",
     domain: "prism.studio",
     email: "hello@prism.example",
-    footerBlurb: "A generative media studio built on Pylon — image, audio, and video from a prompt.",
+    footerBlurb: "Generate images, audio, and video from a prompt with Pylon.",
     copyrightName: "Prism",
     socials: [
       {
@@ -63,7 +62,7 @@ export const siteConfig: StudioConfig = {
 
   studio: {
     headline: "Make something.",
-    subcopy: "Describe it, pick a medium, and watch it land in your gallery — live, the moment it's done.",
+    subcopy: "Describe it and pick a medium. The result appears in your gallery when the job finishes.",
     inputPlaceholder: "A neon koi swimming through a rainy Tokyo alley at night…",
     kinds: [
       { id: "image", label: "Image", wired: true },

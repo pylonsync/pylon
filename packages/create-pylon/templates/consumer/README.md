@@ -1,8 +1,7 @@
 # __APP_NAME__
 
-A live social feed on [Pylon](https://pylonsync.com) — a public timeline with
-optimistic posts and likes, server-rendered over one synced backend. One
-binary, one port. No Next.js, no separate API server.
+A live social feed on [Pylon](https://pylonsync.com) with a public timeline,
+optimistic posts, and likes over one synced backend.
 
 ## Develop
 
@@ -10,9 +9,9 @@ binary, one port. No Next.js, no separate API server.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Post something — it appears instantly and syncs;
-open a second tab to watch the feed and like counts update live. Edit any file
-under `app/` and save — the page reloads instantly.
+Open http://localhost:4321 and post something. It appears optimistically and
+syncs to a second tab along with like counts. Editing a file under `app/`
+reloads the page.
 
 ## Layout
 

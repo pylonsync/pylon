@@ -1,12 +1,10 @@
 # __APP_NAME__
 
 A full-stack, multi-tenant SaaS starter on [Pylon](https://pylonsync.com),
-branded as a fictional product called **Acme**: a server-rendered marketing
-site (landing page + product / solution / compare / company pages), first-run
-onboarding, email/password + Google auth, organizations with members, roles,
-and invites, tenant-scoped projects, and per-workspace Stripe billing — all
-from one binary on one port. No Next.js, no separate API server, no realtime
-sidecar.
+branded as the fictional product **Acme**. It includes a server-rendered
+marketing site, first-run onboarding, email/password and Google auth,
+organizations with members and roles, tenant-scoped projects, and per-workspace
+Stripe billing. Pylon serves it from one process.
 
 ## Develop
 
@@ -14,10 +12,10 @@ sidecar.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. You get the **Acme landing page**. Sign up, create
-an organization, and you land in a **workspace** with tenant-scoped projects and
-a members panel. Create a second org and switch between them — each org's data
-is private to it. Edit any file under `app/` and save — the page reloads.
+Open http://localhost:4321 to load the Acme landing page. Sign up and create an
+organization to enter a workspace with tenant-scoped projects and a members
+panel. Create a second organization and switch between them; each one's data
+remains private. Editing a file under `app/` reloads the page.
 
 ## Layout
 

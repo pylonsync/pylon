@@ -1,11 +1,10 @@
 # __APP_NAME__
 
-A restaurant site built with [Pylon](https://pylonsync.com) — a server-rendered
-menu + landing page with **live table availability** and a private owner
-dashboard, all from one binary on one port. No Next.js, no separate API server.
+A restaurant site built with [Pylon](https://pylonsync.com). One server handles
+the menu, landing page, live table availability, and private owner dashboard.
 
-The realtime point: every seating shows how many tables are left, and a time
-greys out to "Full" for everyone the instant the last table goes.
+Each seating shows how many tables remain. When someone takes the last table,
+that time changes to "Full" on every open page.
 
 ## Develop
 
@@ -13,9 +12,8 @@ greys out to "Full" for everyone the instant the last table goes.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321, scroll to **Reserve**. Then **open a second tab**,
-book the last table at a time in one, and watch that time flip to "Full" in the
-other — with no refresh.
+Open http://localhost:4321 and scroll to **Reserve**. Book the last table for a
+time in one tab and watch it change to "Full" in another without refreshing.
 
 ## How the realtime works
 
@@ -29,7 +27,7 @@ other — with no refresh.
 - `functions/cancelReservation.ts` deletes the marker, which frees a table on
   every open picker instantly.
 
-## Privacy — read this
+## Privacy
 
 The `Reservation` entity holds the guest's name, email, phone, and notes (PII),
 so its policy in `app.ts` **denies every client read and write**. The public
@@ -47,10 +45,9 @@ in with, then create that account at `/login`.
 
 ## Rebrand + reconfigure it
 
-Everything lives in **`lib/site.config.ts`** — brand, colors, the full menu,
-seating hours, tables-per-seating, lead time, reviews, location, FAQ. Edit that
-one file (or have a generator produce it) and the whole site — and the
-reservation engine — reconfigures.
+Brand, colors, the menu, seating hours, tables per seating, lead time, reviews,
+location, and FAQ content live in **`lib/site.config.ts`**. Editing or
+generating that file updates both the site and reservation engine.
 
 ## Layout
 

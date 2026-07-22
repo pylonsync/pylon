@@ -1,8 +1,8 @@
 # __APP_NAME__
 
-The smallest useful [Pylon](https://pylonsync.com) app — one entity, a live
-list, and an optimistic create, server-rendered over one synced backend. One
-binary, one port. No Next.js, no separate API server.
+The smallest useful [Pylon](https://pylonsync.com) app has one entity, a live
+list, and an optimistic create. Pylon server-renders the page and serves the
+synced backend from one process.
 
 ## Develop
 
@@ -10,9 +10,8 @@ binary, one port. No Next.js, no separate API server.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Add an item — it appears instantly (optimistic)
-and syncs; open a second tab to watch it arrive live. Edit any file under
-`app/` and save — the page reloads instantly.
+Open http://localhost:4321 and add an item. It appears optimistically and syncs
+to a second tab. Editing a file under `app/` reloads the page.
 
 ## Layout
 

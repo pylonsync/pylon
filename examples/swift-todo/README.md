@@ -50,12 +50,12 @@ swift run PylonTodoApp
 
 ## What it does
 
-1. **Sign-in screen** — enter an email, get a 6-digit dev code printed to the Pylon dev server's stdout, type it back, you're in.
-2. **Todo list** — `PylonQuery<Todo>` keeps the list in sync. Mutations from other clients (open `localhost:4321/studio` and edit there) appear instantly.
-3. **Add todo** — typed via the generated `client.createTodo(NewTodo(...))`. Optimistic — the row appears before the server confirms.
-4. **Mark done / delete** — same shape; rolls back on server rejection.
-5. **Offline support** — kill the network with airplane mode; mutations queue locally; reconnect drains the queue.
-6. **Persistence** — kill the app entirely; restart; your data is still there because `SQLitePersistence` wrote it to `~/Documents/pylon-todo.db`.
+1. **Sign-in screen:** enter an email, copy the six-digit development code from the Pylon server's output, and submit it.
+2. **Todo list:** `PylonQuery<Todo>` keeps the list in sync. Mutations from other clients, including Studio at `localhost:4321/studio`, appear immediately.
+3. **Add todo:** the generated `client.createTodo(NewTodo(...))` adds the row optimistically before the server confirms it.
+4. **Mark done or delete:** both operations roll back if the server rejects them.
+5. **Offline support:** airplane mode queues mutations locally; reconnecting drains the queue.
+6. **Persistence:** `SQLitePersistence` writes data to `~/Documents/pylon-todo.db`, so it survives app restarts.
 
 ## Architecture
 

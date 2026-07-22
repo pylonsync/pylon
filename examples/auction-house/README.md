@@ -2,20 +2,20 @@
 
 A real-time auction platform with two sale formats. Demonstrates:
 
-- **Transactional bids** — `placeBid.ts` reads the lot, validates the bid
+- **Transactional bids**: `placeBid.ts` reads the lot, validates the bid
   amount against the current price + minimum increment, checks balance, and
   writes the Bid row + updates the lot atomically. Any check failure is a
   no-op.
-- **Scheduled settlement** — timed lots close automatically via a recurring
+- **Scheduled settlement**: timed lots close automatically via a recurring
   `sweepTimedLots` scheduler that walks open lots every 2 seconds and
   closes expired ones, awarding the winner.
-- **Antishill timer** — live auction lots get a sliding 12-second deadline
+- **Antishill timer**: live auction lots get a sliding 12-second deadline
   that resets on every fresh bid, preventing last-second sniping.
-- **Live UI** — `db.useQuery` keeps bid feeds and lot state live with
+- **Live UI**: `db.useQuery` keeps bid feeds and lot state live with
   zero app-specific WebSocket code.
-- **Per-user watchlist** — optimistic `db.insert` / `db.delete` on the
+- **Per-user watchlist**: optimistic `db.insert` / `db.delete` on the
   `Watch` entity, scoped by `watch_owner` policy.
-- **Self-seeding** — `seedAuctionHouse.ts` populates sample auctions
+- **Self-seeding**: `seedAuctionHouse.ts` populates sample auctions
   on first launch; idempotent on subsequent visits.
 
 ## Run it
@@ -43,10 +43,10 @@ Open http://localhost:4321/studio to inspect entities.
 | `client/LiveRoom.tsx` | Live auction room — spotlight + bid stream |
 | `client/Account.tsx` | Bid history + watchlist + wins |
 
-## Things this example does NOT do
+## Out of scope
 
-- No payment integration (bids debit fake `balanceCents`)
-- No image uploads on lots (use `db.uploadFile` for that)
-- No bidder notifications
-- No daily cron bootstrap (call `/api/fn/dailyAuctionCron` once after deploy
+- Payment integration; bids debit fake `balanceCents`
+- Lot image uploads; use `db.uploadFile` for those
+- Bidder notifications
+- Automatic daily cron bootstrap; call `/api/fn/dailyAuctionCron` once after deploy
   to start the self-perpetuating daily auction cycle)

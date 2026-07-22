@@ -1,12 +1,11 @@
 # __APP_NAME__
 
-A live, two-sided **marketplace** built with [Pylon](https://pylonsync.com) —
-server-rendered listings (great for SEO) plus realtime offers, from one binary
-on one port. No Next.js, no separate realtime service.
+A live, two-sided marketplace built with [Pylon](https://pylonsync.com), with
+server-rendered listings and realtime offers.
 
 Anyone can list an item; anyone else can make an offer or buy it now; sellers
-watch offers arrive live and accept or decline — every write fanned out to every
-open tab instantly.
+watch offers arrive and accept or decline them. Every write reaches each open
+tab.
 
 ## Develop
 
@@ -14,8 +13,8 @@ open tab instantly.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321 — the grid seeds itself on first load. Then **open a
-second tab**, post something from `/sell` in one, and watch it hit the "just
+Open http://localhost:4321. The grid seeds itself on first load. Open a
+second tab, post something from `/sell` in one, and watch it hit the "just
 listed" ticker in the other with no refresh. Sign in (the `/sell` form prefills
 a demo account) to list, make offers, and watch your `/me` inbox light up live.
 
@@ -34,7 +33,7 @@ a demo account) to list, make offers, and watch your `/me` inbox light up live.
   be spoofed. The heavier logic (accept = mark sold + auto-decline the rest)
   runs in `functions/respondToOffer.ts` where it enforces "only the seller".
 
-## Privacy & policies
+## Privacy and policies
 
 - `Listing` + `Offer` are **public-read** (buyers and sellers both see live
   state); writes are owner-scoped.

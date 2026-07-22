@@ -1,10 +1,10 @@
 # Market — a live local marketplace
 
-Buy and sell locally, in realtime. Anyone can list an item; anyone else can
-make an offer; sellers watch offers arrive and accept or decline them — every
-write fanned out to every open tab instantly.
+Buy and sell locally in realtime. Anyone can list an item or make an offer,
+while sellers see offers arrive and accept or decline them. Every write reaches
+each open tab.
 
-It's the example that shows the two halves of Pylon working together:
+The example combines server rendering and realtime sync:
 
 - **Server-rendered for SEO + LCP.** The browse grid (`/`) and every listing
   page (`/listing/:id`) are rendered on the server with real rows from the
@@ -16,8 +16,7 @@ It's the example that shows the two halves of Pylon working together:
   `db.useQuery` per view, no polling. List something in one tab and watch it
   appear in another; make an offer and watch the seller's inbox light up.
 
-One binary, one port. SSR + REST + WebSockets all from `pylon dev` — no
-Next.js app, no separate realtime service.
+`pylon dev` serves SSR, REST, and WebSockets from one binary on one port.
 
 ## Run it
 
@@ -26,9 +25,8 @@ pylon dev
 ```
 
 Open <http://localhost:4321>. Browsing is public; **buying, selling, or
-making an offer needs an account** — real email/password auth, no
-verification email. A demo shopper is seeded and the login form is
-**prefilled** with it, so you're one click from a working session:
+making an offer needs an account** using email and password. The example skips
+verification email. A seeded demo shopper is prefilled in the login form:
 
 ```
 demo@pylon.market  /  pylondemo123
@@ -66,8 +64,8 @@ couple owned by the demo itself. Try it:
   owner-scoped writes.
 - **Optimism is the default.** Posting a listing is a plain
   `db.insert("Listing", …)` — no server function. The row paints into the
-  local store instantly (it's in the "just listed" ticker before the network
-  round-trip finishes) because that's how the sync engine works. It stays
+  local store before the network round-trip finishes, so it appears in the
+  "just listed" ticker immediately. It stays
   secure because `sellerId` is declared **`field.owner()`** in `app.ts`: the
   server stamps + verifies the owner from the session, so a forged seller id
   is rejected. Reach for `field.owner()` (instead of writing a function) any

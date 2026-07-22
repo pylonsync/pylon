@@ -1,11 +1,10 @@
-// THE single source of truth for everything business-specific on this waitlist.
-// Rebrand the whole page by editing this ONE file — the landing page and layout
-// read from here and stay generic.
+// Business-specific copy and settings live here. The landing page and layout
+// both read this file.
 //
 // Colors live here too (applied as CSS variables on <html> in app/layout.tsx),
-// so you don't touch globals.css to re-theme.
+// so re-theming does not require changes to globals.css.
 //
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -65,7 +64,7 @@ export const siteConfig: WaitlistConfig = {
     domain: "lumo.app",
     email: "hello@lumo.example",
     footerBlurb:
-      "Lumo is the calm, focused home for everything you're working on. Launching soon — join the list to get an invite first.",
+      "Lumo keeps projects, notes, and tasks in one focused workspace. Join the list for an early invite.",
     copyrightName: "Lumo, Inc.",
     socials: [
       {
@@ -91,9 +90,9 @@ export const siteConfig: WaitlistConfig = {
 
   hero: {
     badge: "Launching this fall",
-    headline: "Your work, finally in one calm place.",
+    headline: "Projects, notes, and tasks in one calm place.",
     subcopy:
-      "Lumo is the focused home for your projects, notes, and tasks — no clutter, no busywork. We're opening the doors soon. Join the list and we'll send you an invite first.",
+      "Lumo keeps your projects, notes, and tasks together in a focused workspace. Join the list for an early invite.",
     emailPlaceholder: "you@work.com",
     ctaLabel: "Join the waitlist",
     successMessage: "You're on the list — we'll email your invite soon.",
@@ -107,7 +106,7 @@ export const siteConfig: WaitlistConfig = {
 
   valueProps: {
     eyebrow: "Why Lumo",
-    headline: "Built for focus, not for busywork.",
+    headline: "Keep your attention on the work.",
     items: [
       {
         icon: "◇",
@@ -122,7 +121,7 @@ export const siteConfig: WaitlistConfig = {
       {
         icon: "✦",
         title: "Calm by default",
-        body: "No noisy notifications, no endless feeds. Lumo shows you what matters now and gets out of the way.",
+        body: "Lumo keeps notifications and feeds quiet, then shows the work that needs attention now.",
       },
     ],
   },
@@ -132,13 +131,13 @@ export const siteConfig: WaitlistConfig = {
     quotes: [
       {
         quote:
-          "I've tried every productivity app out there. Lumo is the first one that actually made me feel calmer, not busier.",
+          "I've tried every productivity app out there. Lumo is the first one that leaves me calmer after planning my week.",
         name: "Maya Chen",
         role: "Product designer",
       },
       {
         quote:
-          "Finally, one place for all my half-finished projects. I check it every morning and actually know what to do next.",
+          "All my half-finished projects are in one place. I check it every morning and know what to do next.",
         name: "Daniel Reyes",
         role: "Indie founder",
       },

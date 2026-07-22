@@ -133,7 +133,7 @@ function Testimonial() {
             </p>
             <blockquote className="mt-6 text-2xl leading-snug text-foreground sm:text-3xl">
               "We replaced four tools with Acme and stopped losing track of
-              work between them. The whole team finally sees the same thing."
+              work between them. The whole team sees the same plan."
             </blockquote>
             <Link
               href="/contact"

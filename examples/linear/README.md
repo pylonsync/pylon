@@ -1,8 +1,8 @@
 # Linear — issue tracker
 
-A Linear-style issue tracker. Multi-tenant via Organization → Team → Issue, with labels, comments, and per-team monotonic issue numbers ("ENG-1", "DESIGN-42"). Built on Pylon's manifest + functions + live queries — no proprietary realtime SDK, no separate WebSocket layer.
+A Linear-style issue tracker with Organization → Team → Issue tenancy, labels, comments, and per-team monotonic issue numbers such as `ENG-1` and `DESIGN-42`. Pylon's manifest, functions, and live queries handle the backend and realtime updates.
 
-**What this example demonstrates:**
+## What this example demonstrates
 
 - **Multi-tenant org structure.** `Organization → OrgMember → User` with `tenantId` flowing through every scoped entity. Switch orgs via `/api/auth/select-org` and the entire UI re-renders against the new tenant — policies enforce isolation, no app code asks "is this row in my org?"
 - **Per-team monotonic counters.** `Team.issueSequence` bumps inside `createIssue.ts`'s transaction so issue IDs (`ENG-1`, `ENG-2`, `ENG-3`) are gapless and conflict-free even under concurrent creates.

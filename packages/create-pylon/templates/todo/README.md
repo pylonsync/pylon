@@ -1,8 +1,7 @@
 # __APP_NAME__
 
-A full-stack [Pylon](https://pylonsync.com) todo app — a server-rendered page
-and a live, optimistic, per-user todo list over a synced database, all served
-from one binary on one port. No Next.js, no separate API server.
+A full-stack [Pylon](https://pylonsync.com) todo app with a server-rendered page
+and a live, optimistic, per-user list over a synced database.
 
 ## Develop
 
@@ -10,9 +9,8 @@ from one binary on one port. No Next.js, no separate API server.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Add a todo — it appears instantly (optimistic) and
-syncs; open a second tab to watch writes arrive live. Edit any file under
-`app/` and save — the page reloads instantly.
+Open http://localhost:4321 and add a todo. It appears optimistically and syncs
+to a second tab. Editing a file under `app/` reloads the page.
 
 ## Layout
 

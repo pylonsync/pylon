@@ -1,9 +1,8 @@
-// Single source of truth for everything brand-specific on this AI chat app —
-// edit this one file to rebrand; the layout + chat UI read from here. The
-// create-pylon scaffolder and Mast target this file.
+// Brand-specific copy and settings live here. The layout, chat UI,
+// create-pylon scaffolder, and Mast all read this file.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 

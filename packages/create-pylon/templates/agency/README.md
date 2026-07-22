@@ -1,13 +1,11 @@
 # __APP_NAME__
 
-A studio / agency site built with [Pylon](https://pylonsync.com) — a
-server-rendered marketing page with **live availability**, a private project
-inquiry form, and an owner dashboard, all from one binary on one port. No
-Next.js, no separate API server.
+A studio or agency site built with [Pylon](https://pylonsync.com). It combines
+a server-rendered marketing page, live availability, a private project inquiry
+form, and an owner dashboard in one server.
 
-The realtime point: boutique studios take on a few projects at a time. The hero
-shows how many slots are open this quarter, and the moment the owner books a new
-client from the dashboard, that number drops for everyone with the page open.
+The hero shows how many project slots are open this quarter. When the owner
+books a client from the dashboard, the count drops for every open page.
 
 ## Develop
 
@@ -15,7 +13,7 @@ client from the dashboard, that number drops for everyone with the page open.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Then **open a second tab**, sign in as the owner
+Open http://localhost:4321. In a second tab, sign in as the owner
 (see below), book a lead from the dashboard, and watch the "N slots open" pill on
 the public page tick down — with no refresh.
 
@@ -25,14 +23,14 @@ the public page tick down — with no refresh.
   slot count. `app/contact-form.tsx` reads it with `db.useQuery("Capacity")`, so
   the hero's "N project slots open" pill is live everywhere.
 - `functions/submitInquiry.ts` is a public **mutation** — anyone can send a
-  project lead. It does NOT consume a slot (a lead isn't a booking).
+  project lead. A lead does not consume a slot because it is not a booking.
 - `functions/bookInquiry.ts` / `declineInquiry.ts` are owner-only mutations that
-  mark a lead booked/declined AND adjust `Capacity.openSlots` (under an advisory
+  mark a lead booked or declined and adjust `Capacity.openSlots` under an advisory
   lock), so the public counter moves live.
 - `functions/seedCapacity.ts` creates the Capacity row from config on first
   visit (idempotent).
 
-## Privacy — read this
+## Privacy
 
 The `Inquiry` entity holds the prospect's name, email, company, and budget (PII),
 so its policy in `app.ts` **denies every client read and write**. The public page
@@ -62,10 +60,11 @@ The logo cloud uses sample names — replace with your real client logos.
 
 ## Rebrand it
 
-Everything lives in **`lib/site.config.ts`** — brand, colors, hero, services,
+Brand, colors, hero copy, services,
 case studies, process, team, testimonials, and the contact form's project-type
-and budget options. Edit that one file (or have Mast generate it) and the whole
-studio re-themes; the capacity re-seeds on a fresh database.
+and budget options live in **`lib/site.config.ts`**. Edit that file, or have
+Mast generate it, to update the studio. A fresh database seeds capacity from
+the same config.
 
 ## Layout
 

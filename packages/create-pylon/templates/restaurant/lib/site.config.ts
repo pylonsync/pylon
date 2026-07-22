@@ -1,10 +1,9 @@
-// THE single source of truth for everything business-specific. Rebrand the
-// whole site — and reconfigure the reservation engine — by editing this ONE
-// file. The landing page, layout, AND the createReservation server function all
-// read from here, so the menu, seating hours, and table count stay in lockstep.
+// Business-specific copy and settings live here. The landing page, layout, and
+// createReservation function all read the same menu, seating hours, and table
+// count.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -90,14 +89,14 @@ export const siteConfig: RestaurantConfig = {
   seo: {
     title: "Cedar & Vine — a seasonal bistro in Dallas. Reserve a table.",
     description:
-      "Wood-fired seasonal plates and natural wine in Dallas. See live table availability and reserve in seconds — no phone tag.",
+      "Wood-fired seasonal plates and natural wine in Dallas. Check live table availability and reserve online.",
   },
 
   hero: {
     tagline: "Dallas · Bishop Arts",
     headline: "A table by the fire, whenever you're ready.",
     subcopy:
-      "Seasonal small plates, wood-fired mains, and a short natural-wine list. Reserve a table in seconds — availability is live, so the time you see is a time you can actually get.",
+      "Seasonal small plates, wood-fired mains, and a short natural-wine list. The reservation calendar shows current table availability.",
     ctaLabel: "Reserve a table",
     quickFacts: {
       hours: "Wed–Sun, 5–10",
@@ -143,7 +142,7 @@ export const siteConfig: RestaurantConfig = {
     eyebrow: "Reserve",
     headline: "Find a table that's open.",
     subcopy:
-      "Pick a date, a time, and your party size — open tables are live, so what you see is what's actually free. We hold it; you just show up.",
+      "Pick a date, time, and party size from the live table calendar. We'll hold the reservation for you.",
     slotMinutes: 30,
     leadTimeHours: 2,
     daysAhead: 21,

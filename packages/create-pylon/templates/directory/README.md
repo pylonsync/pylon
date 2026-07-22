@@ -1,12 +1,10 @@
 # __APP_NAME__
 
-A curated, searchable **directory** built with [Pylon](https://pylonsync.com) —
-live full-text search + facets, community upvotes, and a moderated submit flow,
-all from one binary on one port. No Next.js, no search service.
+A curated directory built with [Pylon](https://pylonsync.com), with live
+full-text search, facets, community upvotes, and moderated submissions.
 
-It's the template that shows off Pylon's **full-text search**: the browse page
-is a live `db.useSearch` over the listing table — type in the box and results +
-facet counts update instantly, and vote counts tick up across every open tab.
+The browse page runs `db.useSearch` against the listing table. Search results,
+facet counts, and votes update across every open tab.
 
 ## Develop
 
@@ -14,9 +12,8 @@ facet counts update instantly, and vote counts tick up across every open tab.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321 — the directory seeds itself on first load. Search,
-filter by category, and upvote. Then **open a second tab** and upvote something —
-watch the count rise in both.
+Open http://localhost:4321. The directory seeds itself on first load. Search,
+filter by category, and upvote, then open a second tab to watch vote counts sync.
 
 ## How it works
 
@@ -32,7 +29,7 @@ watch the count rise in both.
   `Submission`; the curator approves it from `/dashboard`, which copies the
   public fields into a new `Listing` (`approveSubmission`).
 
-## Privacy — read this
+## Privacy
 
 The `Submission` entity holds the submitter's name + email (PII), so its policy
 in `app.ts` **denies every client read and write**. The public directory only
@@ -50,10 +47,9 @@ in with, then create that account at `/login`.
 
 ## Rebrand it
 
-Everything lives in **`lib/site.config.ts`** — brand, colors, hero copy, the
-category list, the starter listings (which seed the directory), and the submit
-copy. Edit that one file and the whole directory re-themes; it re-seeds on a
-fresh database.
+Brand, colors, hero copy, categories, starter listings, and submission copy
+live in **`lib/site.config.ts`**. Editing that file updates the directory, and
+a fresh database seeds from its starter listings.
 
 ## Layout
 

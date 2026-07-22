@@ -1,12 +1,10 @@
 # __APP_NAME__
 
-A pre-launch / coming-soon landing page built with [Pylon](https://pylonsync.com) —
-a server-rendered marketing page with a **live signup counter** and a private
-owner dashboard, all served from one binary on one port. No Next.js, no separate
-API server.
+A pre-launch landing page built with [Pylon](https://pylonsync.com), with a
+server-rendered marketing page, live signup counter, and private owner
+dashboard.
 
-The whole point is that it's a *real live app*, not a static page: the signup
-counter ticks up in realtime for everyone with the page open.
+The signup counter updates on every open page as people join the waitlist.
 
 ## Develop
 
@@ -14,23 +12,22 @@ counter ticks up in realtime for everyone with the page open.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. Then **open a second tab**, submit an email in one,
-and watch the counter increment in the other — with no refresh. That's the live
-backend doing its thing.
+Open http://localhost:4321, submit an email in one tab, and watch the counter
+increment in another without refreshing.
 
 ## How the realtime works
 
-- `functions/joinWaitlist.ts` — a public **mutation** that validates, lowercases,
+- `functions/joinWaitlist.ts`: a public **mutation** that validates, lowercases,
   and dedupes the email, then inserts one `Signup` row. The insert fires a
   change event.
-- `functions/waitlistCount.ts` — a public **query** the landing page subscribes
+- `functions/waitlistCount.ts`: a public **query** the landing page subscribes
   to with `db.useReactiveQuery`. The server records that it read the `Signup`
   table, so every new signup re-runs it and pushes the fresh count to every open
   tab. No polling.
 - The counter island (`app/waitlist-hero.tsx`) is wrapped in `<EnsureGuest>`,
   which mints an anonymous session so the live WebSocket can connect.
 
-## Privacy — read this
+## Privacy
 
 The `Signup` entity holds visitor emails (PII), so its policy in `app.ts`
 **denies every client read and write**. Emails can never be pulled from the
@@ -50,10 +47,9 @@ account can see signups; anyone else gets a locked screen.
 
 ## Rebrand it
 
-Everything business-specific lives in **`lib/site.config.ts`** — brand, colors,
-hero copy, value props, social proof, FAQ. Edit that one file (or have a
-generator produce it) and the whole page re-themes; you never touch the JSX or
-CSS.
+Brand, colors, hero copy, value props, social proof, and FAQ content live in
+**`lib/site.config.ts`**. Edit or generate that file to update the page without
+changing JSX or CSS.
 
 ## Layout
 

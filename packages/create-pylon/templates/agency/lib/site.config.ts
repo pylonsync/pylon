@@ -1,11 +1,10 @@
-// The single source of truth for everything business-specific on this agency
-// site. Rebrand the whole studio by editing this one file — the landing page,
-// layout, and the seedCapacity function all read from here.
+// Business-specific copy and settings live here. The landing page, layout, and
+// seedCapacity function all read this file.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy — replace the values, keep the shape. Anywhere a real
+// Fictional demo copy. Replace the values and keep the shape. Anywhere a real
 // photo belongs (case-study shots, team headshots) the page renders a clearly
-// marked placeholder — swap those for <img>s when you have the assets.
+// marked placeholder; swap those for <img>s when you have the assets.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -122,7 +121,7 @@ export const siteConfig: AgencyConfig = {
     domain: "halyard.studio",
     email: "hello@halyard.example",
     footerBlurb:
-      "A product studio in Dallas. We design and build the software ambitious teams bet on — and we only take on a few projects at a time, so the work stays sharp.",
+      "A Dallas product studio that designs and builds software for ambitious teams. We take on only a few projects at a time.",
     copyrightName: "Halyard Studio",
     socials: [
       {
@@ -143,14 +142,14 @@ export const siteConfig: AgencyConfig = {
   seo: {
     title: "Halyard — a product studio for ambitious teams.",
     description:
-      "Halyard is a Dallas product studio. We design and build web and mobile software end-to-end. We take on a few projects at a time — see how many slots are open this quarter.",
+      "Halyard is a Dallas product studio for web and mobile software. See how many project slots are open this quarter.",
   },
 
   hero: {
     tagline: "Product studio · Dallas",
     headline: "We build the products teams bet on.",
     subcopy:
-      "Halyard is a small, senior team that designs and ships web and mobile software end-to-end. We take on a handful of projects at a time, so the work — and your launch — stays sharp.",
+      "Halyard is a small, senior team that designs and ships web and mobile software. We take on a handful of projects at a time so each launch gets the team's attention.",
     ctaLabel: "Start a project",
     secondaryCtaLabel: "See our work",
   },
@@ -202,7 +201,7 @@ export const siteConfig: AgencyConfig = {
         tags: ["Product design", "iOS", "Brand"],
         selected: true,
         challenge:
-          "A two-founder fintech had funding and a thesis, but no product, no brand, and a hard 12-week runway to a launchable app the App Store would approve.",
+          "A two-founder fintech had funding, a thesis, and 12 weeks to create its product, brand, and App Store-ready launch.",
         approach:
           "We ran a one-week scope sprint, then designed and built in parallel — a clickable prototype on real data by week three, weekly TestFlight builds after that. Brand and UI moved together so nothing felt bolted on.",
         outcome:
@@ -355,7 +354,7 @@ export const siteConfig: AgencyConfig = {
       },
       {
         title: "Design",
-        body: "Clickable, real-data prototypes — not slide decks. You react to something you can use within two weeks.",
+        body: "Within two weeks, you can test a clickable prototype running on real data.",
       },
       {
         title: "Build",

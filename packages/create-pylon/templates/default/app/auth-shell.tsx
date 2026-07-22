@@ -50,8 +50,8 @@ export function AuthShell({
             &ldquo;
           </div>
           <blockquote className="mt-2 text-[1.6rem] font-medium leading-snug tracking-tight text-zinc-900">
-            Our whole team finally works in one place. Acme makes it easy to
-            plan, build, and ship without the busywork.
+            Acme gives our team one view of the work, from planning through
+            launch.
           </blockquote>
           <div className="mt-8 flex items-center gap-3">
             <span className="flex size-10 items-center justify-center rounded-full bg-zinc-200 text-[13px] font-semibold text-zinc-500">

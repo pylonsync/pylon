@@ -25,10 +25,10 @@ bun install   # or pnpm install / yarn / npm install
 bun run dev
 ```
 
-- **api** on http://localhost:4321 — Pylon control plane
-- **web** on http://localhost:3000 — Next.js (if scaffolded)
+- **api:** http://localhost:4321, Pylon control plane
+- **web:** http://localhost:3000, Next.js (if scaffolded)
 - **expo** runs Metro on a separate port (if scaffolded)
-- **mobile** lives in `apps/mobile/` — open in Xcode or run `swift run`
+- **mobile** lives in `apps/mobile/`; open it in Xcode or run `swift run`
 
 ## What to do next
 

@@ -1,13 +1,12 @@
 # __APP_NAME__
 
-A generative **AI media studio** (image / audio / video) built with
-[Pylon](https://pylonsync.com) — a live gallery that fills in as each generation
-finishes, from one binary on one port. No Next.js, no separate job service.
+A generative image, audio, and video studio built with
+[Pylon](https://pylonsync.com). One server runs background jobs and updates the
+gallery as each generation finishes.
 
-Kick off a generation and a card appears instantly, then flips to the finished
-result the moment the generation completes — live, across every open tab. The
-generation runs in a **background job** (so even a minutes-long video never
-blocks your request), and the provider call + API token stay on the server.
+Start a generation and a pending card appears immediately in every open tab.
+The card updates when the background job finishes. Provider calls and API
+tokens stay on the server, and long video jobs do not block the request.
 
 ## Develop
 
@@ -15,9 +14,9 @@ blocks your request), and the provider call + API token stay on the server.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321 and generate something — it works with **no config**
-(a clearly-labeled placeholder). Add a Replicate token for real media (below).
-Then **open a second tab** — your gallery stays in sync.
+Open http://localhost:4321 and generate something. Without configuration, the
+app returns a clearly labeled placeholder. Add a Replicate token for provider
+output, then open a second tab to see the gallery sync.
 
 ## Enable real generation (Replicate)
 
@@ -53,8 +52,8 @@ hosted URLs.
   runs, so you can see the realtime gallery with zero config.
 - Results are Replicate's hosted URLs (fine for a live studio). For permanent
   storage, download the asset in the job and persist via `/api/files`.
-- Video is genuinely wired (Replicate has text-to-video models) — it just takes
-  longer, which is exactly why the work runs in a background job.
+- Video uses Replicate's text-to-video models. These slower requests run as
+  background jobs.
 
 ## Rebrand it
 

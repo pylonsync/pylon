@@ -113,11 +113,11 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
     <div className="space-y-6">
       <section className="space-y-1">
         <h1 className="text-3xl font-semibold tracking-tight">
-          The local marketplace that's actually live
+          A local marketplace with live listings and offers
         </h1>
         <p className="text-muted-foreground">
           Listings are server-rendered for search engines; offers are realtime.
-          Open this in two tabs — list in one, watch it appear in the other.
+          Open two tabs, list an item in one, and watch it appear in the other.
         </p>
       </section>
 

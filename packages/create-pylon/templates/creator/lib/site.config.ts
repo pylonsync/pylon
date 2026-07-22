@@ -1,10 +1,8 @@
-// THE single source of truth for everything personal/business-specific on this
-// creator site. Rebrand the whole page by editing this ONE file — the landing
-// page and layout read from here and stay generic. The create-pylon scaffolder
-// and Mast target this file too.
+// Personal and business-specific copy lives here. The landing page, layout,
+// create-pylon scaffolder, and Mast all read this file.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -98,7 +96,7 @@ export const siteConfig: CreatorConfig = {
     headline: "Hi, I'm Maya.",
     paragraphs: [
       "I've led design at two startups and a public company, shipped products to millions, and mentored designers who now lead teams of their own.",
-      "These days I coach one-on-one, review portfolios, and write a weekly newsletter about the craft and the career. No fluff, no hustle — just the things that actually move your work forward.",
+      "These days I coach one-on-one, review portfolios, and write a weekly newsletter about the craft and the career. Every issue focuses on practical ways to move the work forward.",
     ],
   },
 
@@ -113,7 +111,7 @@ export const siteConfig: CreatorConfig = {
       },
       {
         title: "Portfolio review",
-        body: "A deep, honest teardown of your portfolio and a recorded walkthrough with everything I'd change.",
+        body: "A detailed portfolio critique and a recorded walkthrough of the changes I'd make.",
         price: "$250",
       },
       {
@@ -142,7 +140,7 @@ export const siteConfig: CreatorConfig = {
       },
       {
         quote:
-          "The newsletter is the only one I actually read every week. It's like a coaching session in my inbox.",
+          "I read the newsletter every week. It feels like a coaching session in my inbox.",
         name: "Marcus Bell",
         role: "Product Designer",
       },

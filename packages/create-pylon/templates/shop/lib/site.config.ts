@@ -1,10 +1,9 @@
-// THE single source of truth for everything business-specific. Rebrand the
-// whole store by editing this ONE file — the landing page and layout read from
-// here. The product list (incl. starting stock) seeds the Product table on
+// Business-specific copy and settings live here. The landing page and layout
+// read this file. The product list, including starting stock, seeds the Product table on
 // first visit; after that, stock lives in the database and updates live.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -71,7 +70,7 @@ export const siteConfig: ShopConfig = {
   seo: {
     title: "Ember Goods — hand-poured candles, made in Dallas.",
     description:
-      "Small-batch candles and home goods, hand-poured in Dallas. Live stock — what you see is what's in the studio. Free shipping over $50.",
+      "Small-batch candles and home goods, hand-poured in Dallas. Stock counts match the studio shelf. Free shipping over $50.",
   },
 
   hero: {

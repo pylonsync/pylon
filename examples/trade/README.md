@@ -43,25 +43,25 @@ ticker button.
 
 ## Files
 
-- `app.ts` — `Ticker`, `Trade`, `Watch` entities + policies
-- `functions/seedMarket.ts` — idempotent symbol setup
-- `functions/recordTrade.ts` — single-trade tick write (updates Ticker,
+- `app.ts`: `Ticker`, `Trade`, `Watch` entities + policies
+- `functions/seedMarket.ts`: idempotent symbol setup
+- `functions/recordTrade.ts`: single-trade tick write (updates Ticker,
   appends to Trade log)
-- `functions/toggleWatch.ts` — watchlist toggle (uses `ctx.auth.userId`,
+- `functions/toggleWatch.ts`: watchlist toggle (uses `ctx.auth.userId`,
   never trusts caller-supplied user ID)
-- `app/TradeIsland.tsx` — SSR shell that bootstraps the guest session before
+- `app/TradeIsland.tsx`: SSR shell that bootstraps the guest session before
   mounting the client island
-- `client/TradeApp.tsx` — dashboard UI (movers table, watchlist,
+- `client/TradeApp.tsx`: dashboard UI (movers table, watchlist,
   detail panel with sparkline)
 
 ## What to look for
 
-Open two tabs side-by-side, start the ticker in one, watch sparklines update in real-time in the other — that's a single live query subscription doing all the fanout, no app-specific socket.
+Open two tabs side by side and start the ticker in one. A single live-query subscription updates the sparklines in the other without an app-specific socket.
 
-The interesting axes to push:
+Try these load dimensions:
 
-- **Inner batch size** — bump from 20 to 50 to 100 to drive higher writes/sec per tick
-- **Symbol count** — expand `SYMBOLS` in `functions/seedMarket.ts` (20 → 100 → 500 → 5000) to see how live-query fan-out cost scales with subscribed-row count
-- **Subscriber count** — open more reader tabs (or use the bot driver) to put fan-out load on the server
+- **Inner batch size**: bump from 20 to 50 to 100 to drive higher writes/sec per tick
+- **Symbol count**: expand `SYMBOLS` in `functions/seedMarket.ts` (20 → 100 → 500 → 5000) to see how live-query fan-out cost scales with subscribed-row count
+- **Subscriber count**: open more reader tabs (or use the bot driver) to put fan-out load on the server
 
 For canonical throughput numbers across hardware tiers, see [Sizing](https://docs.pylonsync.com/operations/sizing). Run the [`bench`](../bench) example to measure your own box.

@@ -1,12 +1,10 @@
-// THE single source of truth for everything business-specific in this template.
-// Rebrand the entire site by editing this ONE file — the marketing components
-// (hero, pricing, FAQ, footer, nav) all read from here and stay generic. The
-// `create-pylon` scaffolder and automated generators target this file too.
+// Business-specific copy and settings live here. The marketing components,
+// `create-pylon` scaffolder, and automated generators all read this file.
 //
 // Colors live here (applied as CSS variables on <html> in app/layout.tsx), so
 // you don't touch globals.css to re-theme the marketing pages.
 //
-// Fictional demo copy — replace the values, keep the shape.
+// Fictional demo copy. Replace the values and keep the shape.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -119,7 +117,7 @@ export const siteConfig: SiteConfig = {
     domain: "acme.app",
     email: "hello@acme.example",
     footerBlurb:
-      "The workspace where your team plans, builds, and ships together — projects, docs, and automation in one place.",
+      "Plan, build, and ship with projects, docs, and automation in one workspace.",
     copyrightName: "Acme, Inc.",
     socials: [
       {
@@ -158,7 +156,7 @@ export const siteConfig: SiteConfig = {
 
   outcomes: {
     eyebrow: "Why Acme",
-    headline: "Everything your team needs to stay in motion.",
+    headline: "Keep work moving from kickoff to launch.",
     body: "Most teams lose work somewhere between the kickoff and the ship date. Acme keeps the whole path in one place, so every idea has a clear route from planned, to in progress, to done.",
     items: [
       {
@@ -182,7 +180,7 @@ export const siteConfig: SiteConfig = {
 
   featuredTestimonial: {
     quote:
-      "Our whole team finally works in one place. Acme made it easy to see what is happening, decide what is next, and keep everyone moving in the same direction.",
+      "Acme gives our team one view of the work. We can see what is happening, decide what is next, and move in the same direction.",
     name: "Maya Chen",
     role: "Head of Product, Northwind",
   },
@@ -211,7 +209,7 @@ export const siteConfig: SiteConfig = {
     paragraphs: [
       "Someone shares an idea, it lands in a list, and that is the last anyone hears of it. Acme treats every idea as the start of a loop, not the end of one.",
       "When the status moves to planned, the people who care hear about it. When it ships, they hear about it first. And every week a digest pulls them back with the work worth weighing in on.",
-      "None of it is something you configure. Turn Acme on, and the loop starts running the same day.",
+      "The loop starts running the same day, without a separate configuration step.",
     ],
     items: [
       {
@@ -240,19 +238,19 @@ export const siteConfig: SiteConfig = {
     quotes: [
       {
         quote:
-          "We finally have one source of truth for the work. The whole team can see what is happening without a status meeting.",
+          "The whole team sees the same work, so we spend less time in status meetings.",
         name: "Daniel Reyes",
         role: "Founder, Globex",
       },
       {
         quote:
-          "Acme noticeably improved how we plan. Instead of piecing together five tools, we have one hub for everything.",
+          "We replaced five disconnected tools with one place to plan the work.",
         name: "Hannah Brooks",
         role: "Founder, OpenLane",
       },
       {
         quote:
-          "Ever since we added Acme, people actually feel heard. It has helped us build a loyal community of users.",
+          "People can follow their ideas from submission to launch, which helps us keep them involved.",
         name: "Marcus Bell",
         role: "Cofounder, Initech",
       },
@@ -262,11 +260,11 @@ export const siteConfig: SiteConfig = {
   gettingStarted: {
     eyebrow: "Get started",
     headline: "Up and running in 60 seconds.",
-    body: "No credit card, no sales call, no setup wizard. An email and a workspace name are all it takes to start.",
+    body: "Start with an email and a workspace name. No credit card or sales call required.",
     steps: [
       {
         title: "Create a workspace",
-        body: "Sign up with just an email. Pick a name. That is the entire form.",
+        body: "Enter an email and choose a workspace name.",
       },
       {
         title: "Invite your team",
@@ -282,7 +280,7 @@ export const siteConfig: SiteConfig = {
   pricing: {
     eyebrow: "Pricing",
     headline: "Simple pricing. Every plan.",
-    body: "Start free and upgrade when your team grows. No per-seat surprises, no annual lock-in.",
+    body: "Start free and upgrade as your team grows, with predictable pricing and no annual commitment.",
     plans: [
       {
         name: "Free",
@@ -336,7 +334,7 @@ export const siteConfig: SiteConfig = {
     items: [
       {
         title: "A small team",
-        body: "No committees. Every feature ships because someone decided it was worth building.",
+        body: "A small team decides what is worth building and ships it.",
       },
       {
         title: "Design first",
@@ -356,10 +354,9 @@ export const siteConfig: SiteConfig = {
   finalCta: {
     eyebrow: "Start building",
     headline: "Stop losing momentum to busywork.",
-    bodyLead:
-      "When your team can see the work, decide what is next, and ship in one place, momentum takes care of itself. This is what ",
-    highlight: "working in flow",
-    bodyTail: " looks like.",
+    bodyLead: "Plan, decide, and ship in ",
+    highlight: "one shared workspace",
+    bodyTail: ".",
     cta: "Start building with Acme",
     footnote: "Free to start · No credit card · Cancel anytime",
   },
@@ -495,8 +492,8 @@ export const siteConfig: SiteConfig = {
       summary:
         "Keep a small team aligned as everything changes weekly. Acme gives you one place to plan, build, and ship before the next pivot.",
       sections: [
-        { title: "One tool, not ten", body: "Projects, tasks, and docs in one place, so you are not paying for or stitching together five apps." },
-        { title: "Set up in minutes", body: "No admin overhead. Invite the team and start working the same day." },
+        { title: "One workspace", body: "Keep projects, tasks, and docs together instead of stitching together separate apps." },
+        { title: "Set up in minutes", body: "Invite the team and start working the same day." },
         { title: "Grows with you", body: "The same workspace works at five people and at fifty." },
       ],
     },
@@ -530,9 +527,9 @@ export const siteConfig: SiteConfig = {
       slug: "teams",
       navLabel: "For teams",
       eyebrow: "Solutions",
-      title: "Built for how your team works.",
+      title: "Match Acme to your workflow.",
       summary:
-        "Whether you build, design, market, or support, Acme adapts to your process instead of forcing a new one.",
+        "Custom fields and statuses adapt Acme to product, design, marketing, and support workflows.",
       sections: [
         { title: "Your workflow", body: "Custom statuses and fields match the way your team already works." },
         { title: "Cross-team work", body: "Hand work between teams without it falling through a crack." },
@@ -547,7 +544,7 @@ export const siteConfig: SiteConfig = {
       navLabel: "Docs",
       eyebrow: "Resources",
       title: "Documentation.",
-      summary: "Everything you need to set up Acme and get your team productive.",
+      summary: "Set up Acme, invite your team, and configure projects, automations, and integrations.",
       sections: [
         { title: "Getting started", body: "Create a workspace, invite your team, and ship your first project." },
         { title: "Guides", body: "Deep dives on projects, tasks, docs, automations, and analytics." },
@@ -646,7 +643,7 @@ export const siteConfig: SiteConfig = {
       navLabel: "Contact",
       eyebrow: "Company",
       title: "Get in touch.",
-      summary: "Questions, feedback, or just want to say hi? We would love to hear from you.",
+      summary: "Contact the Acme team about sales, support, or press.",
       sections: [
         { title: "Sales", body: "Talk through whether Acme is a fit for your team." },
         { title: "Support", body: "Get help from a human, usually within a few hours." },
@@ -687,7 +684,7 @@ export const siteConfig: SiteConfig = {
       competitor: "Beacon",
       title: "Acme vs Beacon",
       summary:
-        "Beacon is a capable tool, but it splits projects, docs, and automation across separate products. Acme brings them into one fast workspace.",
+        "Beacon separates projects, docs, and automation across products. Acme keeps them in one workspace.",
       rows: [
         { dim: "Projects, tasks, and docs", acme: "In one workspace", them: "Separate products" },
         { dim: "Real-time sync", acme: "Built in", them: "Add-on" },
@@ -702,7 +699,7 @@ export const siteConfig: SiteConfig = {
       competitor: "Orbit",
       title: "Acme vs Orbit",
       summary:
-        "Orbit is flexible but slow to set up and heavy to run. Acme gives you the same power with a fraction of the overhead.",
+        "Orbit requires more setup and administration. Acme focuses on same-day setup and a smaller operational footprint.",
       rows: [
         { dim: "Time to first project", acme: "Same day", them: "Onboarding required" },
         { dim: "Speed", acme: "Instant, real-time", them: "Page reloads" },
@@ -717,7 +714,7 @@ export const siteConfig: SiteConfig = {
       competitor: "Tempo",
       title: "Acme vs Tempo",
       summary:
-        "Tempo is built for managers; Acme is built for the whole team. Everyone gets a fast, shared view of the work.",
+        "Tempo centers management reporting. Acme gives the whole team a shared view of daily work.",
       rows: [
         { dim: "Designed for", acme: "The whole team", them: "Managers" },
         { dim: "Daily driver", acme: "Yes", them: "Reporting layer" },

@@ -23,16 +23,16 @@ bun dev
 
 ## What's in it
 
-- **Orgs + roles** — `Organization` + `OrgMember` with roles
+- **Orgs + roles**: `Organization` + `OrgMember` with roles
   (`owner / admin / estimator / production / viewer`). Users can belong
   to multiple orgs; the active one lives on the session.
-- **Policies** — every org-scoped entity uses the new row-level policy
+- **Policies**: every org-scoped entity uses the new row-level policy
   DSL (`allowRead`, `allowUpdate`, `allowDelete`) to gate on
   `data.orgId == auth.tenantId`. The raw `/api/entities/*` endpoints
   enforce the same rules without going through a function.
-- **Inventory ledger** — `Material` + append-only `StockMovement` so you
+- **Inventory ledger**: `Material` + append-only `StockMovement` so you
   can reconcile physical counts without losing history.
-- **Orders + line items** — `createOrder` writes header + lines in one
+- **Orders + line items**: `createOrder` writes header + lines in one
   mutation, computes totals server-side, and supports a simple status
   state machine via `advanceOrderStatus`.
 
