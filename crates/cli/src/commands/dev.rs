@@ -582,30 +582,40 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             exec_restart(json_mode); // does not return
         }
 
-        // Rebuild the manifest. If it's byte-for-byte identical to the running
-        // one, the edit changed only component/CSS *content* — and if every
-        // changed file is under the UI route dir (`app/`), the server's schema
-        // and warm bun runner are still correct, so we can reload IN PLACE
-        // (rebuild the client bundle + ping open tabs) instead of re-exec'ing.
-        // Any manifest change (new route, schema, policy) or a non-`app/` edit
-        // (lib / emails / config the runner imports) falls back to a full
-        // restart. On a codegen/validation error, keep the running server up.
+        // Rebuild the manifest. We can reload IN PLACE (rebuild the client
+        // bundle + ping open tabs) instead of re-exec'ing ONLY when the
+        // manifest is byte-for-byte identical AND every changed file is a
+        // stylesheet under `app/`. CSS is the one kind of edit that's safe
+        // this way: it's a client asset the bun runner never imports.
+        //
+        // A `.ts`/`.tsx` edit is NOT safe in place. The warm runner
+        // import-caches each route/component module for SSR `render_route`;
+        // the in-process reload rebuilds the CLIENT bundle but never re-imports
+        // those modules, so the server keeps rendering the STALE component —
+        // intermittently, as requests round-robin across the runner pool
+        // (verified: an in-place `.tsx` edit served old/new/old across
+        // consecutive GETs, and fully stale on a cold cloud machine). So any
+        // code edit — plus any manifest change (new route, schema, policy) or
+        // non-`app/` edit — falls through to a full restart, which respawns the
+        // runner pool and makes SSR re-import. On a codegen/validation error,
+        // keep the running server up.
         if let Some((_manifest, manifest_json)) =
             run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count)
         {
             let app_dir_only = changed.iter().all(|p| p.starts_with(&app_dir));
             if manifest_json == last_manifest_json
                 && app_dir_only
+                && is_css_only(&changed)
                 && pylon_runtime::frontend::trigger_dev_reload()
             {
                 if !json_mode {
                     println!();
-                    println!("  ✓ UI changed — reloaded");
+                    println!("  ✓ styles changed — reloaded");
                     println!();
                 }
             } else {
                 last_manifest_json = manifest_json;
-                print_reload_reason("schema changed", json_mode);
+                print_reload_reason("code changed", json_mode);
                 exec_restart(json_mode);
             }
         }
@@ -1075,6 +1085,19 @@ fn is_watched_source(path: &Path) -> bool {
     })
 }
 
+/// True when a change set is safe for an in-process reload — i.e. every
+/// changed file is a stylesheet. CSS is a client asset the bun runner never
+/// imports, so rebuilding the client bundle reflects it fully. A `.ts`/`.tsx`
+/// edit is NOT safe: the warm runner import-caches route/component modules for
+/// SSR, so an in-place reload would render stale content until the pool is
+/// respawned by a full restart. Empty set → false (nothing to reload).
+fn is_css_only(changed: &HashSet<PathBuf>) -> bool {
+    !changed.is_empty()
+        && changed
+            .iter()
+            .all(|p| p.extension().and_then(|e| e.to_str()) == Some("css"))
+}
+
 /// Insert every watched source path carried by an fs event into `out`.
 fn collect_watched_paths(ev: &notify::Event, out: &mut HashSet<PathBuf>) {
     for p in &ev.paths {
@@ -1201,5 +1224,31 @@ mod tests {
             "/app/target/debug/build.rs.tsx"
         )));
         assert!(!is_watched_source(Path::new("/app/dist/bundle.css")));
+    }
+
+    #[test]
+    fn is_css_only_gates_the_in_process_reload() {
+        use super::is_css_only;
+        use std::collections::HashSet;
+        let set = |paths: &[&str]| paths.iter().map(PathBuf::from).collect::<HashSet<_>>();
+
+        // Pure-CSS change sets reload in place.
+        assert!(is_css_only(&set(&["/app/app/globals.css"])));
+        assert!(is_css_only(&set(&[
+            "/app/app/globals.css",
+            "/app/app/theme.css"
+        ])));
+
+        // Any `.ts`/`.tsx` edit must restart — the runner import-caches route
+        // modules for SSR, so an in-place reload would serve stale content.
+        assert!(!is_css_only(&set(&["/app/app/page.tsx"])));
+        assert!(!is_css_only(&set(&["/app/app/lib.ts"])));
+        // A mixed batch (CSS + code) also restarts — the code edit is decisive.
+        assert!(!is_css_only(&set(&[
+            "/app/app/globals.css",
+            "/app/app/page.tsx"
+        ])));
+        // Empty set is never a valid in-place reload.
+        assert!(!is_css_only(&HashSet::new()));
     }
 }
