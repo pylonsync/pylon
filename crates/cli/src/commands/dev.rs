@@ -290,7 +290,11 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
     // Initial build — also start the dev server on success.
     let mut rebuild_count: u32 = 0;
     let t_codegen = std::time::Instant::now();
-    let manifest = run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count);
+    let (manifest, mut last_manifest_json) =
+        match run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count) {
+            Some((m, json)) => (Some(m), json),
+            None => (None, String::new()),
+        };
     dev_timing(boot_kind, "codegen+bun_install", t_codegen.elapsed());
 
     // Start dev server in background if initial build succeeded.
@@ -510,10 +514,11 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         }
     };
 
-    // notify reports absolute (symlink-resolved) paths, so classify against a
-    // canonical `functions/` prefix rather than the relative join.
+    // notify reports absolute (symlink-resolved) paths, so classify against
+    // canonical prefixes rather than the relative join.
     let base = std::fs::canonicalize(watch_dir).unwrap_or_else(|_| watch_dir.to_path_buf());
     let functions_dir = base.join("functions");
+    let app_dir = base.join("app");
 
     loop {
         // Block on the next event, but wake every 400ms to re-check env files
@@ -564,9 +569,32 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             exec_restart(json_mode); // does not return
         }
 
-        if run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count).is_some() {
-            print_reload_reason("schema changed", json_mode);
-            exec_restart(json_mode);
+        // Rebuild the manifest. If it's byte-for-byte identical to the running
+        // one, the edit changed only component/CSS *content* — and if every
+        // changed file is under the UI route dir (`app/`), the server's schema
+        // and warm bun runner are still correct, so we can reload IN PLACE
+        // (rebuild the client bundle + ping open tabs) instead of re-exec'ing.
+        // Any manifest change (new route, schema, policy) or a non-`app/` edit
+        // (lib / emails / config the runner imports) falls back to a full
+        // restart. On a codegen/validation error, keep the running server up.
+        if let Some((_manifest, manifest_json)) =
+            run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count)
+        {
+            let app_dir_only = changed.iter().all(|p| p.starts_with(&app_dir));
+            if manifest_json == last_manifest_json
+                && app_dir_only
+                && pylon_runtime::frontend::trigger_dev_reload()
+            {
+                if !json_mode {
+                    println!();
+                    println!("  ✓ UI changed — reloaded");
+                    println!();
+                }
+            } else {
+                last_manifest_json = manifest_json;
+                print_reload_reason("schema changed", json_mode);
+                exec_restart(json_mode);
+            }
         }
     }
 }
@@ -576,7 +604,7 @@ fn run_rebuild_and_get_manifest(
     entry_file: &str,
     json_mode: bool,
     count: &mut u32,
-) -> Option<pylon_kernel::AppManifest> {
+) -> Option<(pylon_kernel::AppManifest, String)> {
     *count += 1;
     let n = *count;
 
@@ -682,7 +710,7 @@ fn run_rebuild_and_get_manifest(
     if has_errors {
         None
     } else {
-        Some(manifest)
+        Some((manifest, manifest_json))
     }
 }
 

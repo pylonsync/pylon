@@ -2561,6 +2561,12 @@ fn start_server(
             // client bundler must walk the SAME dir or it finds no routes
             // and ships no hydration bundle.
             let warm_app_dir = crate::frontend::derive_app_dir(&frontend_config.ssr_routes);
+            // Dev only: register the rebuild context so a UI-only edit can
+            // reload in place (rebuild the client bundle + ping open tabs)
+            // instead of re-exec'ing `pylon dev`.
+            if is_dev {
+                crate::frontend::set_dev_rebuild_ctx(fn_ops_warm.clone(), warm_app_dir.clone());
+            }
             let _ = std::thread::Builder::new()
                 .name("ssr-bundle-warm".into())
                 .spawn(move || {

@@ -675,6 +675,11 @@ fn serve_dev_live_reload(request: Request, cors_origin: &str) -> Result<(), Requ
         dev_boot_id()
     );
     let mut writer = request.into_writer();
+    // Register this connection so an in-process reload (`trigger_dev_reload`,
+    // used for UI-only edits that don't re-exec the process) can push it a
+    // reload event. Dead senders are reaped by the trigger on its next fire.
+    let (tx, rx) = std::sync::mpsc::channel::<u64>();
+    dev_reload_registry().lock().unwrap().push(tx);
     // Dedicated thread per open dev tab (dev-only endpoint). The heartbeat
     // keeps proxies/connections alive; a failed write/flush means the client
     // went away → exit, dropping the writer, which closes the connection.
@@ -687,9 +692,23 @@ fn serve_dev_live_reload(request: Request, cors_origin: &str) -> Result<(), Requ
                 return;
             }
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if writer.write_all(b": ping\n\n").is_err() || writer.flush().is_err() {
-                    return;
+                match rx.recv_timeout(std::time::Duration::from_secs(1)) {
+                    Ok(generation) => {
+                        // In-process reload: re-emit `hello` with a fresh id so
+                        // the client's EventSource sees the data change and
+                        // reloads — the same signal a restart gives, without one.
+                        let frame =
+                            format!("event: hello\ndata: {}:r{}\n\n", dev_boot_id(), generation);
+                        if writer.write_all(frame.as_bytes()).is_err() || writer.flush().is_err() {
+                            return;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        if writer.write_all(b": ping\n\n").is_err() || writer.flush().is_err() {
+                            return;
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
         })
@@ -3098,6 +3117,61 @@ pub fn warm_client_bundle(
         }
         Err(e) => Err(format!("{}: {}", e.code, e.message)),
     }
+}
+
+/// Registry of live-reload SSE senders (one per open dev tab). `trigger_dev_reload`
+/// fans a reload out to them; each `serve_dev_live_reload` connection registers
+/// itself. Reaped lazily: a send to a closed tab errors and is dropped.
+fn dev_reload_registry() -> &'static std::sync::Mutex<Vec<std::sync::mpsc::Sender<u64>>> {
+    static R: std::sync::OnceLock<std::sync::Mutex<Vec<std::sync::mpsc::Sender<u64>>>> =
+        std::sync::OnceLock::new();
+    R.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// Bun runner + app dir needed to rebuild the client bundle in place. Set once
+/// by the dev SSR server at boot; `None` elsewhere so `trigger_dev_reload`
+/// reports it can't and the caller falls back to a full restart.
+type DevRebuildCtx = (std::sync::Arc<dyn pylon_router::FnOps>, String);
+fn dev_rebuild_ctx() -> &'static std::sync::Mutex<Option<DevRebuildCtx>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<DevRebuildCtx>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Register the bundle-rebuild context so an in-process dev reload can rebuild
+/// the client bundle. Called once from the dev SSR server at boot.
+pub fn set_dev_rebuild_ctx(fn_ops: std::sync::Arc<dyn pylon_router::FnOps>, app_dir: String) {
+    *dev_rebuild_ctx().lock().unwrap() = Some((fn_ops, app_dir));
+}
+
+static DEV_RELOAD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// In-process dev reload for a UI-only edit (no manifest change): rebuild the
+/// client bundle synchronously — so the fresh manifest + newly-hashed assets are
+/// on disk before any tab reloads — then tell every connected live-reload client
+/// to reload, WITHOUT re-exec'ing the process (the warm bun runner pool is kept).
+///
+/// Returns false when the rebuild context isn't registered (not a dev SSR
+/// server) or the rebuild failed, so the caller falls back to a full restart.
+pub fn trigger_dev_reload() -> bool {
+    let Some((fn_ops, app_dir)) = dev_rebuild_ctx().lock().unwrap().clone() else {
+        return false;
+    };
+    // Bundle filenames are content-hashed, so a tab must never reload against a
+    // stale hash: invalidate the memo, then rebuild synchronously. The rebuild
+    // re-memoizes the cache and rewrites `client-build/manifest.json` (read by
+    // the SSR render path), keeping the reloaded HTML + its assets coherent.
+    *cached_bundle_outdir().lock().unwrap() = None;
+    if let Err(e) = warm_client_bundle(&fn_ops, &app_dir) {
+        tracing::warn!("dev reload: client bundle rebuild failed ({e}); falling back to restart");
+        return false;
+    }
+    let generation = DEV_RELOAD_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    dev_reload_registry()
+        .lock()
+        .unwrap()
+        .retain(|tx| tx.send(generation).is_ok());
+    true
 }
 
 /// Recover the project-relative route directory (the `appDir` the
