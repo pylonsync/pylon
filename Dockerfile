@@ -102,6 +102,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -s /usr/local/bin/bun /usr/bin/bun
 
 COPY --from=rust-builder /usr/local/bin/pylon /usr/local/bin/pylon
+# Cloud dev-mode env bootstrap. Not used by the default `pylon start` CMD —
+# Pylon Cloud's provisionDevEnvironment sets this as a machine's init.cmd to
+# turn it into a live, mutable `pylon dev` workspace (seed → bun install →
+# pylon dev) that an agent / build.pylonsync.com authors via the file-write API.
+COPY --from=rust-builder /build/docker/dev-env-boot.sh /usr/local/bin/dev-env-boot.sh
+RUN chmod 0755 /usr/local/bin/dev-env-boot.sh
 COPY --from=rust-builder /build/packages /pylon/packages
 # The monorepo's root tsconfig.base.json — each @pylonsync/* package
 # (react, client, sync, loro, sdk, next, workflows) has a tsconfig.json
