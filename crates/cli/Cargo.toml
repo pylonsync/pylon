@@ -38,6 +38,11 @@ rand = { workspace = true }
 # Tokio runtime to fire one POST is wasteful + bloats the static
 # binary by ~3MB. ureq also handles HTTPS natively via rustls.
 ureq = { version = "2.10", features = ["json", "tls"] }
+# `pylon dev` hot reload: event-driven filesystem watcher (FSEvents on
+# macOS, inotify on Linux). Replaces a 500ms mtime poll that measured as
+# the single largest slice of edit→reload latency. Falls back to the poll
+# if the platform watcher can't be created.
+notify = "6.1.1"
 tar = "0.4"
 flate2 = "1.0"
 base64 = { workspace = true }

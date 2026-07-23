@@ -1,7 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use pylon_kernel::{Diagnostic, ExitCode, Severity};
 use serde::Serialize;
@@ -258,9 +258,27 @@ fn resolve_watch_dir(entry_file: &str) -> PathBuf {
     }
 }
 
+/// Emit a per-phase dev boot/reload timing line when PYLON_DEV_TIMING is set.
+/// Gated so default `pylon dev` output is unchanged; the measurement harness
+/// sets the env to collect the cold-boot / per-edit reload breakdown.
+fn dev_timing(kind: &str, phase: &str, dur: std::time::Duration) {
+    if std::env::var("PYLON_DEV_TIMING").is_ok() {
+        eprintln!(
+            "[dev-timing] {kind} {phase} {:.1}ms",
+            dur.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
     let watch_dir_buf = resolve_watch_dir(entry_file);
     let watch_dir = watch_dir_buf.as_path();
+    let boot_t0 = std::time::Instant::now();
+    let boot_kind = if std::env::var("PYLON_DEV_RELOAD").is_ok() {
+        "reload"
+    } else {
+        "cold"
+    };
 
     if !json_mode {
         println!("pylon dev");
@@ -271,7 +289,9 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
     // Initial build — also start the dev server on success.
     let mut rebuild_count: u32 = 0;
+    let t_codegen = std::time::Instant::now();
     let manifest = run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count);
+    dev_timing(boot_kind, "codegen+bun_install", t_codegen.elapsed());
 
     // Start dev server in background if initial build succeeded.
     if let Some(m) = manifest {
@@ -346,6 +366,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         // Auto-push schema to the dev database. Postgres path uses
         // `LivePostgresAdapter`; SQLite path keeps the existing
         // history-tracked apply.
+        let t_db = std::time::Instant::now();
         if is_pg {
             match pylon_storage::postgres::live::LivePostgresAdapter::connect(&db_str) {
                 Ok(mut adapter) => {
@@ -385,7 +406,10 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
         }
 
+        dev_timing(boot_kind, "db_schema_push", t_db.elapsed());
+
         // Open runtime against the persistent DB.
+        let t_rt = std::time::Instant::now();
         let runtime = match pylon_runtime::Runtime::open(&db_str, m) {
             Ok(rt) => Arc::new(rt),
             Err(e) => {
@@ -395,6 +419,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 return ExitCode::Error;
             }
         };
+        dev_timing(boot_kind, "runtime_open", t_rt.elapsed());
 
         // Point /studio at the studio artefacts inside .pylon/. The
         // runtime re-reads the config file on every render so dev
@@ -433,92 +458,115 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 std::process::exit(1);
             }
         });
+        dev_timing(
+            boot_kind,
+            "boot_to_server_thread_spawned",
+            boot_t0.elapsed(),
+        );
     }
 
-    // Poll loop. We track file mtimes under the watch dir and react
-    // depending on what changed:
+    // Filesystem watcher. `pylon dev` reacts to a source edit by re-exec'ing
+    // itself — the manifest and the bun runner pool both live in this
+    // process's memory, so picking up a change means a fresh process. We used
+    // to mtime-poll every 500ms; measured, that poll was the single largest
+    // slice of edit→reload latency (a fixed ~250ms average), so we now drive
+    // off real OS filesystem events (FSEvents / inotify) and fall back to the
+    // poll only if the platform watcher can't be created.
     //
-    //   - Any file in `functions/` (including new files): the functions
-    //     runtime is a bun subprocess that reads the functions dir once
-    //     at startup. To pick up new handlers or edits, we need to
-    //     restart the whole process. We exec a fresh `pylon dev` with
-    //     the same argv so the terminal session continues seamlessly.
-    //   - Other .ts files (primarily app.ts): regenerate the manifest +
-    //     typed client in place. No restart needed; the running server
-    //     still serves the old in-memory schema until the next restart,
-    //     but client bindings are up to date for codegen consumers.
-    let mut last_mtimes = collect_ts_mtimes(watch_dir);
-    let functions_dir = watch_dir.join("functions");
+    // Change classes (unchanged from the poll):
+    //   - env file (.env / .env.local): restart — secrets are read at boot.
+    //   - anything under `functions/`: restart — the bun runner reads the
+    //     functions dir once at startup.
+    //   - other .ts/.tsx/.css (app.ts / schema / lib / globals.css): rebuild
+    //     the manifest first, restart only if codegen succeeds, so a mid-edit
+    //     syntax error leaves the running server up.
+    let functions_dir_rel = watch_dir.join("functions");
+    let env_watch = env_watch_paths();
+    let mut last_env_mtimes = collect_env_mtimes(&env_watch);
 
-    // Watch env files too so editing OAuth secrets etc. triggers a restart
-    // without needing to Ctrl-C. We re-derive the candidate set here (env
-    // files were already loaded in run() so the runtime above sees them);
-    // this just gives us paths to mtime-poll.
-    let env_watch_paths = env_watch_paths();
-    let mut last_env_mtimes = collect_env_mtimes(&env_watch_paths);
+    use notify::Watcher as _;
+    let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+    let watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .and_then(|mut w| {
+        w.watch(watch_dir, notify::RecursiveMode::Recursive)?;
+        Ok(w)
+    });
+    // Held for the process lifetime; dropping the watcher stops the events.
+    let _watcher = match watcher {
+        Ok(w) => w,
+        Err(e) => {
+            if !json_mode {
+                eprintln!("[dev] filesystem watcher unavailable ({e}); using 500ms poll");
+            }
+            return run_poll_watch(
+                entry_file,
+                watch_dir,
+                &functions_dir_rel,
+                json_mode,
+                rebuild_count,
+            );
+        }
+    };
+
+    // notify reports absolute (symlink-resolved) paths, so classify against a
+    // canonical `functions/` prefix rather than the relative join.
+    let base = std::fs::canonicalize(watch_dir).unwrap_or_else(|_| watch_dir.to_path_buf());
+    let functions_dir = base.join("functions");
 
     loop {
-        std::thread::sleep(Duration::from_millis(500));
+        // Block on the next event, but wake every 400ms to re-check env files
+        // (they can live in a parent dir the recursive watch doesn't cover).
+        let first = rx.recv_timeout(Duration::from_millis(400));
 
-        let current_env_mtimes = collect_env_mtimes(&env_watch_paths);
-        let env_changed = current_env_mtimes != last_env_mtimes;
-        last_env_mtimes = current_env_mtimes;
-
-        let current_mtimes = collect_ts_mtimes(watch_dir);
-        if env_changed {
-            if !json_mode {
-                println!();
-                println!("  ✓ env changed — restarting");
-                println!();
-            }
-            last_mtimes = current_mtimes;
-            exec_restart(json_mode);
-            continue;
+        let current_env_mtimes = collect_env_mtimes(&env_watch);
+        if current_env_mtimes != last_env_mtimes {
+            last_env_mtimes = current_env_mtimes;
+            print_reload_reason("env changed", json_mode);
+            exec_restart(json_mode); // replaces this process — does not return
         }
 
-        if current_mtimes != last_mtimes {
-            // Compute which files actually changed.
-            let functions_changed = current_mtimes.iter().any(|(path, mtime)| {
-                let is_in_functions = Path::new(path).starts_with(&functions_dir);
-                if !is_in_functions {
-                    return false;
-                }
-                match last_mtimes.get(path) {
-                    Some(prev) => prev != mtime,
-                    None => true, // new file in functions/
-                }
-            }) || last_mtimes.iter().any(|(path, _)| {
-                Path::new(path).starts_with(&functions_dir) && !current_mtimes.contains_key(path)
-            }); // deletion
-
-            last_mtimes = current_mtimes;
-
-            if functions_changed {
-                if !json_mode {
-                    println!();
-                    println!("  ✓ functions changed — restarting");
-                    println!();
-                }
-                exec_restart(json_mode);
-                continue;
+        let mut changed: HashSet<PathBuf> = HashSet::new();
+        match first {
+            Ok(Ok(ev)) => collect_watched_paths(&ev, &mut changed),
+            Ok(Err(_)) => {} // backend error event — ignore
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return run_poll_watch(
+                    entry_file,
+                    watch_dir,
+                    &functions_dir_rel,
+                    json_mode,
+                    rebuild_count,
+                );
             }
+        }
 
-            // Non-functions change (app.ts / schema helpers / lib). The
-            // manifest — entities, policies, auth config, routes — lives in
-            // the running server's memory, so re-running codegen alone left
-            // the server enforcing the OLD schema until the next manual
-            // restart (edit a policy, see no effect). Rebuild first; if
-            // codegen + validation succeed, restart so the new schema takes
-            // effect. On error, keep the running server alive (the user is
-            // mid-edit) and just surface the diagnostics.
-            if run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count).is_some() {
-                if !json_mode {
-                    println!();
-                    println!("  ✓ schema changed — restarting");
-                    println!();
-                }
-                exec_restart(json_mode);
+        // Debounce: one editor save (and codegen's own writes) burst several
+        // events. Drain whatever queues within a short quiet window so a save
+        // triggers one restart, not several.
+        let deadline = Instant::now() + Duration::from_millis(80);
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            match rx.recv_timeout(remaining) {
+                Ok(Ok(ev)) => collect_watched_paths(&ev, &mut changed),
+                Ok(Err(_)) => {}
+                Err(_) => break,
             }
+        }
+
+        if changed.is_empty() {
+            continue; // only generated / vendored files touched
+        }
+
+        if changed.iter().any(|p| p.starts_with(&functions_dir)) {
+            print_reload_reason("functions changed", json_mode);
+            exec_restart(json_mode); // does not return
+        }
+
+        if run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count).is_some() {
+            print_reload_reason("schema changed", json_mode);
+            exec_restart(json_mode);
         }
     }
 }
@@ -767,12 +815,20 @@ fn exec_restart(_json_mode: bool) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
+        // Mark the successor process as a reload so `pylon dev` labels its
+        // boot-phase timing correctly; the replacement process inherits env.
+        unsafe {
+            std::env::set_var("PYLON_DEV_RELOAD", "1");
+        }
         let err = std::process::Command::new(&exe).args(&args[1..]).exec();
         eprintln!("[dev] exec failed: {err}");
     }
     #[cfg(not(unix))]
     {
-        let _ = std::process::Command::new(&exe).args(&args[1..]).spawn();
+        let _ = std::process::Command::new(&exe)
+            .args(&args[1..])
+            .env("PYLON_DEV_RELOAD", "1")
+            .spawn();
         std::process::exit(0);
     }
 }
@@ -944,6 +1000,117 @@ fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) 
     }
 }
 
+/// Whether a path is a source file `pylon dev` should hot-reload on: a
+/// `.ts` / `.tsx` / `.css` file that is not a generated `pylon.*` artifact
+/// and does not live under a vendored / generated / VCS tree. Mirrors the
+/// filtering in `collect_ts_mtimes_into` so the event watcher and the poll
+/// fallback react to exactly the same set of files.
+fn is_watched_source(path: &Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("ts") | Some("tsx") | Some("css") => {}
+        _ => return false,
+    }
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        // Generated files (`pylon.manifest.json`, `pylon.client.ts`, …) — the
+        // dev server writes these itself; reacting to them would loop forever.
+        if name.starts_with("pylon.") {
+            return false;
+        }
+    }
+    const EXCLUDED_DIRS: &[&str] = &[
+        "node_modules",
+        ".pylon",
+        ".git",
+        "dist",
+        ".next",
+        "target",
+        "build",
+        ".turbo",
+        "coverage",
+    ];
+    !path.components().any(|c| {
+        matches!(c, std::path::Component::Normal(os)
+            if os.to_str().is_some_and(|s| EXCLUDED_DIRS.contains(&s)))
+    })
+}
+
+/// Insert every watched source path carried by an fs event into `out`.
+fn collect_watched_paths(ev: &notify::Event, out: &mut HashSet<PathBuf>) {
+    for p in &ev.paths {
+        if is_watched_source(p) {
+            out.insert(p.clone());
+        }
+    }
+}
+
+/// The "restarting" banner shared by every reload trigger.
+fn print_reload_reason(reason: &str, json_mode: bool) {
+    if !json_mode {
+        println!();
+        println!("  ✓ {reason} — restarting");
+        println!();
+    }
+}
+
+/// Legacy 500ms mtime poll — the fallback used only when the platform
+/// filesystem watcher can't be created. Behaviourally identical to the
+/// pre-watcher hot-reload loop.
+fn run_poll_watch(
+    entry_file: &str,
+    watch_dir: &Path,
+    functions_dir: &Path,
+    json_mode: bool,
+    mut rebuild_count: u32,
+) -> ExitCode {
+    let mut last_mtimes = collect_ts_mtimes(watch_dir);
+    let env_watch = env_watch_paths();
+    let mut last_env_mtimes = collect_env_mtimes(&env_watch);
+
+    loop {
+        std::thread::sleep(Duration::from_millis(500));
+
+        let current_env_mtimes = collect_env_mtimes(&env_watch);
+        let env_changed = current_env_mtimes != last_env_mtimes;
+        last_env_mtimes = current_env_mtimes;
+
+        let current_mtimes = collect_ts_mtimes(watch_dir);
+        if env_changed {
+            print_reload_reason("env changed", json_mode);
+            last_mtimes = current_mtimes;
+            exec_restart(json_mode);
+            continue;
+        }
+
+        if current_mtimes != last_mtimes {
+            let functions_changed = current_mtimes.iter().any(|(path, mtime)| {
+                let is_in_functions = Path::new(path).starts_with(functions_dir);
+                if !is_in_functions {
+                    return false;
+                }
+                match last_mtimes.get(path) {
+                    Some(prev) => prev != mtime,
+                    None => true,
+                }
+            }) || last_mtimes.iter().any(|(path, _)| {
+                Path::new(path).starts_with(functions_dir) && !current_mtimes.contains_key(path)
+            });
+
+            last_mtimes = current_mtimes;
+
+            if functions_changed {
+                print_reload_reason("functions changed", json_mode);
+                exec_restart(json_mode);
+                continue;
+            }
+
+            if run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count).is_some() {
+                print_reload_reason("schema changed", json_mode);
+                exec_restart(json_mode);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::resolve_watch_dir;
@@ -967,5 +1134,31 @@ mod tests {
             resolve_watch_dir("/srv/app/app.ts"),
             PathBuf::from("/srv/app")
         );
+    }
+
+    #[test]
+    fn is_watched_source_matches_poll_filter() {
+        use super::is_watched_source;
+        use std::path::Path;
+        // Source files the user edits — reload.
+        assert!(is_watched_source(Path::new("/app/app.ts")));
+        assert!(is_watched_source(Path::new("/app/functions/createTodo.ts")));
+        assert!(is_watched_source(Path::new("/app/app/page.tsx")));
+        assert!(is_watched_source(Path::new("/app/app/globals.css")));
+        // Non-source extensions — ignore.
+        assert!(!is_watched_source(Path::new("/app/pylon.manifest.json")));
+        assert!(!is_watched_source(Path::new("/app/README.md")));
+        // Generated `pylon.*` artifacts — reacting to these would loop forever
+        // (the dev server writes pylon.client.ts on every rebuild).
+        assert!(!is_watched_source(Path::new("/app/pylon.client.ts")));
+        // Vendored / generated / runtime trees — never source.
+        assert!(!is_watched_source(Path::new(
+            "/app/node_modules/x/index.ts"
+        )));
+        assert!(!is_watched_source(Path::new("/app/.pylon/dev.db.ts")));
+        assert!(!is_watched_source(Path::new(
+            "/app/target/debug/build.rs.tsx"
+        )));
+        assert!(!is_watched_source(Path::new("/app/dist/bundle.css")));
     }
 }

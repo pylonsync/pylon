@@ -2049,6 +2049,7 @@ fn start_server(
     // frontend dispatcher's FnOps directly, so skip spawning the Bun runner
     // pool — the integration test drives the real request loop (routing, CSRF
     // gate, form dispatch) without a live Bun process.
+    let t_runner = std::time::Instant::now();
     let fn_ops_maybe = if fn_ops_override.is_some() {
         None
     } else {
@@ -2067,6 +2068,12 @@ fn start_server(
             Arc::clone(&policy_engine),
         )
     };
+    if std::env::var("PYLON_DEV_TIMING").is_ok() {
+        eprintln!(
+            "[dev-timing] server runner_pool_ready {:.1}ms",
+            t_runner.elapsed().as_secs_f64() * 1000.0
+        );
+    }
 
     // Reactive registry needs FnOps to invoke handlers for initial
     // run + re-run. Wire it now that fn_ops is built, then spawn the
