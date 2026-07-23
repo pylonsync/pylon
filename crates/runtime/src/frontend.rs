@@ -751,6 +751,151 @@ fn resolve_safe(root: &Path, request_path: &str) -> Option<PathBuf> {
     }
 }
 
+/// Like `resolve_safe` but for a WRITE target: the leaf need not exist yet.
+/// Rejects `..`/`.`/empty segments (so the join can't climb out of `root`) and,
+/// as defense-in-depth against a symlinked subdir, canonicalizes the parent when
+/// it exists and confirms it's still inside `root`. Returns the absolute path.
+fn resolve_safe_for_write(root: &Path, rel_path: &str) -> Option<PathBuf> {
+    let path_only = rel_path.split('?').next()?.split('#').next()?;
+    let trimmed = path_only.trim_start_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed
+        .split('/')
+        .any(|seg| seg == ".." || seg == "." || seg.is_empty())
+    {
+        return None;
+    }
+    let canonical_root = root.canonicalize().ok()?;
+    let target = canonical_root.join(trimmed);
+    if let Some(parent) = target.parent() {
+        if parent.exists() {
+            let cp = parent.canonicalize().ok()?;
+            if !cp.starts_with(&canonical_root) {
+                return None;
+            }
+        }
+    }
+    Some(target)
+}
+
+/// Dev-only remote file-write endpoint (`PUT`/`POST`/`DELETE
+/// /_pylon/dev/files/<path>`). Writes/removes a file in the live `pylon dev`
+/// workspace (`PYLON_DEV_WATCH_DIR`, else cwd); the fs-watcher hot-reloads the
+/// change. Optionally requires `Authorization: Bearer <PYLON_DEV_FILE_API_TOKEN>`
+/// when that env is set (the cloud sets a per-env token; unset = open locally).
+fn serve_dev_file_write(
+    mut request: Request,
+    path_only: &str,
+    cors_origin: &str,
+) -> Result<(), Request> {
+    use std::io::Read as _;
+
+    // CORS preflight — build.pylonsync.com calls this cross-origin.
+    if matches!(request.method(), Method::Options) {
+        let mut resp = Response::empty(204u16);
+        for (k, v) in [
+            ("Access-Control-Allow-Origin", cors_origin),
+            ("Access-Control-Allow-Methods", "PUT, POST, DELETE, OPTIONS"),
+            (
+                "Access-Control-Allow-Headers",
+                "Authorization, Content-Type",
+            ),
+        ] {
+            if let Ok(h) = Header::from_bytes(k, v) {
+                resp = resp.with_header(h);
+            }
+        }
+        let _ = request.respond(resp);
+        return Ok(());
+    }
+
+    // Optional bearer-token gate (unset = open, and it's dev-mode only anyway).
+    if let Ok(token) = std::env::var("PYLON_DEV_FILE_API_TOKEN") {
+        if !token.is_empty() {
+            let want = format!("Bearer {token}");
+            let ok = request.headers().iter().any(|h| {
+                let field = h.field.as_str();
+                (field == "Authorization" || field == "authorization")
+                    && h.value.as_str() == want.as_str()
+            });
+            if !ok {
+                let _ =
+                    request.respond(Response::from_string("unauthorized").with_status_code(401u16));
+                return Ok(());
+            }
+        }
+    }
+
+    let root = std::env::var("PYLON_DEV_WATCH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let rel = path_only.strip_prefix("/_pylon/dev/files/").unwrap_or("");
+    let cors = |resp: Response<std::io::Cursor<Vec<u8>>>| match Header::from_bytes(
+        "Access-Control-Allow-Origin",
+        cors_origin.as_bytes(),
+    ) {
+        Ok(h) => resp.with_header(h),
+        Err(_) => resp,
+    };
+
+    let Some(target) = resolve_safe_for_write(&root, rel) else {
+        let _ = request.respond(cors(
+            Response::from_string("{\"ok\":false,\"error\":\"bad path\"}").with_status_code(400u16),
+        ));
+        return Ok(());
+    };
+
+    let method = request.method().clone();
+    match method {
+        Method::Delete => {
+            let resp = match std::fs::remove_file(&target) {
+                Ok(()) => Response::from_string("{\"ok\":true}"),
+                Err(e) => Response::from_string(format!("{{\"ok\":false,\"error\":\"{e}\"}}"))
+                    .with_status_code(500u16),
+            };
+            let _ = request.respond(cors(resp));
+            Ok(())
+        }
+        Method::Put | Method::Post => {
+            const MAX: u64 = 10 * 1024 * 1024;
+            let mut body = Vec::new();
+            let read = request.as_reader().take(MAX + 1).read_to_end(&mut body);
+            if read.is_err() || body.len() as u64 > MAX {
+                let _ = request.respond(cors(
+                    Response::from_string("{\"ok\":false,\"error\":\"body too large\"}")
+                        .with_status_code(413u16),
+                ));
+                return Ok(());
+            }
+            if let Some(parent) = target.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    let _ = request.respond(cors(
+                        Response::from_string(format!("{{\"ok\":false,\"error\":\"{e}\"}}"))
+                            .with_status_code(500u16),
+                    ));
+                    return Ok(());
+                }
+            }
+            let resp = match std::fs::write(&target, &body) {
+                Ok(()) => Response::from_string("{\"ok\":true}"),
+                Err(e) => Response::from_string(format!("{{\"ok\":false,\"error\":\"{e}\"}}"))
+                    .with_status_code(500u16),
+            };
+            let _ = request.respond(cors(resp));
+            Ok(())
+        }
+        _ => {
+            let _ = request.respond(cors(
+                Response::from_string("{\"ok\":false,\"error\":\"method not allowed\"}")
+                    .with_status_code(405u16),
+            ));
+            Ok(())
+        }
+    }
+}
+
 /// Top-level entry. Decides between dev-proxy and disk-serving based
 /// on config, applies eligibility rules, sends the response.
 ///
@@ -763,6 +908,20 @@ pub fn try_handle(
     request: Request,
     cors_origin: &str,
 ) -> Result<(), Request> {
+    // Dev-only remote file-write API (#dev-mode-env). Handled FIRST: it's a
+    // non-GET (PUT/POST/DELETE/OPTIONS) request that must NOT fall through the
+    // non-GET early-return below into API routing. 404 in prod (dev-mode gate).
+    {
+        let url = request.url().to_string();
+        let path_only = url.split('?').next().unwrap_or(&url);
+        if path_only.starts_with("/_pylon/dev/files/") {
+            if is_dev_mode() {
+                return serve_dev_file_write(request, path_only, cors_origin);
+            }
+            return Err(request);
+        }
+    }
+
     // route.ts form/method handlers (#276): a non-GET request that matches a
     // discovered `kind:"route"` path is dispatched to its POST/PUT/PATCH/DELETE
     // handler. CSRF is enforced by the caller (`server.rs`) BEFORE `try_handle`
@@ -3960,6 +4119,35 @@ mod tests {
         // Empty / root path returns None (caller will use index.html fallback)
         assert!(resolve_safe(root, "/").is_none());
         assert!(resolve_safe(root, "").is_none());
+    }
+
+    #[test]
+    fn resolve_safe_for_write_allows_new_leaf_rejects_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("app")).unwrap();
+
+        // A new (non-existent) leaf in an existing dir is allowed — a write
+        // target need not exist yet (this is the whole point vs resolve_safe).
+        let t = resolve_safe_for_write(root, "app/page.tsx").unwrap();
+        assert!(t.starts_with(root.canonicalize().unwrap()));
+        assert!(t.ends_with("app/page.tsx"));
+
+        // A nested path whose parent dirs don't exist yet is allowed (the
+        // caller mkdir -p's before writing).
+        assert!(resolve_safe_for_write(root, "app/new/deep/file.ts").is_some());
+
+        // Overwriting an existing file is allowed.
+        fs::write(root.join("app/existing.ts"), b"x").unwrap();
+        assert!(resolve_safe_for_write(root, "app/existing.ts").is_some());
+
+        // Traversal / dot / empty segments are rejected.
+        assert!(resolve_safe_for_write(root, "../etc/passwd").is_none());
+        assert!(resolve_safe_for_write(root, "app/../../etc/passwd").is_none());
+        assert!(resolve_safe_for_write(root, "./app/page.tsx").is_none());
+        assert!(resolve_safe_for_write(root, "app//page.tsx").is_none());
+        assert!(resolve_safe_for_write(root, "").is_none());
+        assert!(resolve_safe_for_write(root, "/").is_none());
     }
 
     #[test]

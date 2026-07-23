@@ -355,6 +355,19 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             }
         }
 
+        // Tell the runtime where the live workspace lives so the dev-only
+        // file-write API (`PUT /_pylon/dev/files/<path>`) lands edits inside the
+        // watched tree — the fs-watcher then hot-reloads them like a local edit.
+        // This is the write-path a remote agent / build.pylonsync.com uses to
+        // author a running `pylon dev` in place.
+        unsafe {
+            if std::env::var("PYLON_DEV_WATCH_DIR").is_err() {
+                let abs =
+                    std::fs::canonicalize(watch_dir).unwrap_or_else(|_| watch_dir.to_path_buf());
+                std::env::set_var("PYLON_DEV_WATCH_DIR", abs);
+            }
+        }
+
         // Dev-mode rate limits — production defaults (30 fn calls / min)
         // strangle realtime demos like world3d that write pose at 10 Hz.
         // Operators can still override any of these for stress testing.
