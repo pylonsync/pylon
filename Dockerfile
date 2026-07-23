@@ -101,6 +101,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
     && ln -s /usr/local/bin/bun /usr/bin/bun
 
+# OpenCode — the colocated coding agent for cloud dev-mode envs
+# (build.pylonsync.com). Installed to /usr/local so the non-root `pylon` user
+# can run it; dev-env-boot.sh starts `opencode serve` next to `pylon dev` when
+# the control plane grants model access (via pylon-model-proxy, never a raw key).
+RUN BUN_INSTALL=/usr/local bun install -g opencode-ai
+
 COPY --from=rust-builder /usr/local/bin/pylon /usr/local/bin/pylon
 # Cloud dev-mode env bootstrap. Not used by the default `pylon start` CMD —
 # Pylon Cloud's provisionDevEnvironment sets this as a machine's init.cmd to
