@@ -854,6 +854,65 @@ fn collect_env_mtimes(paths: &[PathBuf]) -> HashMap<PathBuf, Option<SystemTime>>
 /// Replace the current process with a fresh `pylon dev` invocation.
 /// On-disk state (sessions, DB, uploads) survives in `.pylon/`. WS
 /// connections drop and reconnect in ~100ms.
+/// Close every inherited descriptor above stdio, immediately before `exec`.
+///
+/// `exec` replaces the process image but does NOT close open file descriptors.
+/// Without this, every socket the outgoing image had already accepted survives
+/// into the new image as a live descriptor that nothing knows about: the kernel
+/// keeps the connection ESTABLISHED, so a request caught in the restart window
+/// never receives a response — and never receives a reset either. The client
+/// just waits. Measured on the pylon-cloud control plane: the server was
+/// serving new connections again ~3s after the reload while a request accepted
+/// at the instant of the exec hung for the full 180s test timeout. With a
+/// coding agent saving files continuously, requests land in that window
+/// constantly, which reads as "hot reload keeps hanging".
+///
+/// Closing them makes the peer see EOF at once and retry against the new image.
+/// Nothing needs to be inherited — the successor rebinds its listeners,
+/// reconnects the database pool, and respawns the Bun runner pool during its
+/// own boot. Dropping the runner pipes also lets orphaned runners from the
+/// outgoing image exit instead of lingering.
+///
+/// stdin/stdout/stderr (0/1/2) are deliberately kept: the successor inherits
+/// the terminal.
+#[cfg(unix)]
+fn close_inherited_fds() {
+    for fd in inherited_fds_to_close() {
+        // SAFETY: this process is about to be replaced by exec, so no other
+        // code can observe these descriptors afterwards. close() on an
+        // already-invalid fd just returns EBADF.
+        unsafe {
+            libc::close(fd);
+        }
+    }
+}
+
+/// The descriptors `close_inherited_fds` will close: everything currently open
+/// above stdio. Split out from the closing loop so it can be tested without the
+/// test process closing its own harness descriptors.
+#[cfg(unix)]
+fn inherited_fds_to_close() -> Vec<i32> {
+    // Both platforms expose the open descriptors as a directory. Linux also
+    // has /proc/self/fd; macOS only has /dev/fd.
+    let dir = if Path::new("/proc/self/fd").is_dir() {
+        "/proc/self/fd"
+    } else {
+        "/dev/fd"
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    // Collect before closing: closing descriptors while the directory handle
+    // is still being iterated would invalidate the iterator mid-walk.
+    let mut fds: Vec<i32> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().and_then(|s| s.parse::<i32>().ok()))
+        .filter(|fd| *fd > 2)
+        .collect();
+    fds.sort_unstable();
+    fds
+}
+
 fn exec_restart(_json_mode: bool) {
     let args: Vec<String> = std::env::args().collect();
     let exe = match std::env::current_exe() {
@@ -871,6 +930,7 @@ fn exec_restart(_json_mode: bool) {
         unsafe {
             std::env::set_var("PYLON_DEV_RELOAD", "1");
         }
+        close_inherited_fds();
         let err = std::process::Command::new(&exe).args(&args[1..]).exec();
         eprintln!("[dev] exec failed: {err}");
     }
@@ -1290,6 +1350,44 @@ mod tests {
             Path::new("/Users/me/dist/my-app/app/page.tsx"),
             nested
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inherited_fds_to_close_covers_sockets_but_spares_stdio() {
+        use super::inherited_fds_to_close;
+        use std::os::fd::AsRawFd;
+
+        // The bug this guards: `exec` does not close open descriptors, so a
+        // connection the outgoing image had already accepted survived into the
+        // new one as a live socket nothing was servicing. The kernel kept it
+        // ESTABLISHED, so a request caught in the restart window got no
+        // response and no reset — it hung until the client gave up (measured
+        // at 180s+ against the pylon-cloud control plane).
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let fd = listener.as_raw_fd();
+        assert!(fd > 2, "expected a real socket fd above stdio, got {fd}");
+
+        let doomed = inherited_fds_to_close();
+        assert!(
+            doomed.contains(&fd),
+            "an open socket ({fd}) must be closed before exec, got {doomed:?}"
+        );
+
+        // stdin/stdout/stderr must survive — the successor inherits the terminal.
+        for stdio in [0, 1, 2] {
+            assert!(
+                !doomed.contains(&stdio),
+                "stdio fd {stdio} must not be closed"
+            );
+        }
+
+        // Sorted, so closing walks descriptors in a deterministic order.
+        let mut sorted = doomed.clone();
+        sorted.sort_unstable();
+        assert_eq!(doomed, sorted, "fd list should be sorted");
+
+        drop(listener);
     }
 
     #[test]

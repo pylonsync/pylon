@@ -43,6 +43,10 @@ ureq = { version = "2.10", features = ["json", "tls"] }
 # the single largest slice of edit→reload latency. Falls back to the poll
 # if the platform watcher can't be created.
 notify = "6.1.1"
+# `pylon dev` hot reload: close inherited descriptors before re-exec'ing so
+# sockets accepted by the outgoing process image don't survive into the new
+# one as connections nothing is servicing (see close_inherited_fds).
+libc = "0.2"
 tar = "0.4"
 flate2 = "1.0"
 base64 = { workspace = true }

@@ -2683,6 +2683,7 @@ dependencies = [
  "base64",
  "dotenvy",
  "flate2",
+ "libc",
  "notify",
  "pylon-auth",
  "pylon-kernel",
