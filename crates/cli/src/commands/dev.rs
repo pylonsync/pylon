@@ -282,7 +282,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
     if !json_mode {
         println!("pylon dev");
-        println!("  Watching: {} (*.ts)", watch_dir.display());
+        println!("  Watching: {} (*.ts, *.tsx, *.css)", watch_dir.display());
         println!("  Server:   http://localhost:{port}");
         println!();
     }
@@ -547,7 +547,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
 
         let mut changed: HashSet<PathBuf> = HashSet::new();
         match first {
-            Ok(Ok(ev)) => collect_watched_paths(&ev, &mut changed),
+            Ok(Ok(ev)) => collect_watched_paths(&ev, &base, &mut changed),
             Ok(Err(_)) => {} // backend error event — ignore
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -567,7 +567,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         let deadline = Instant::now() + Duration::from_millis(80);
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(remaining) {
-                Ok(Ok(ev)) => collect_watched_paths(&ev, &mut changed),
+                Ok(Ok(ev)) => collect_watched_paths(&ev, &base, &mut changed),
                 Ok(Err(_)) => {}
                 Err(_) => break,
             }
@@ -992,9 +992,28 @@ fn package_json_has_dev_script(path: &Path) -> bool {
 /// `studio.config.ts`.
 fn collect_ts_mtimes(dir: &Path) -> HashMap<String, SystemTime> {
     let mut mtimes = HashMap::new();
-    collect_ts_mtimes_into(dir, &mut mtimes);
+    collect_ts_mtimes_into(dir, &mut mtimes, 0);
     mtimes
 }
+
+/// Directory names that can never hold app source, at whatever depth they
+/// appear: package, tooling, and VCS trees.
+const VENDOR_DIRS: &[&str] = &[
+    "node_modules",
+    ".pylon",
+    ".git",
+    ".next",
+    ".turbo",
+    "target",
+];
+
+/// Build-output conventions, excluded ONLY at the root of the watched tree.
+/// `build`, `dist`, and `coverage` are also perfectly ordinary route names —
+/// `app/build/page.tsx` serves `/build` — so treating them as generated at any
+/// depth silently disabled hot-reload for those routes: edits landed on disk
+/// and the dev server never noticed. A real build output dir sits at the
+/// project root, which is exactly where this still skips it.
+const OUTPUT_DIRS: &[&str] = &["dist", "build", "coverage"];
 
 /// Recursively walk `dir` collecting mtimes of every `*.ts` / `*.tsx` /
 /// `*.css` source file. Recursion matters: app source lives in
@@ -1006,7 +1025,7 @@ fn collect_ts_mtimes(dir: &Path) -> HashMap<String, SystemTime> {
 /// SSR build and recompiles the stylesheet instead of serving stale CSS.
 /// Heavy / generated trees are skipped so the 500ms poll doesn't crawl
 /// node_modules.
-fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) {
+fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>, depth: usize) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -1016,22 +1035,13 @@ fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) 
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 // Vendored / generated / VCS trees can't hold app source
                 // and would make the poll loop walk thousands of files.
-                if matches!(
-                    name,
-                    "node_modules"
-                        | ".pylon"
-                        | ".git"
-                        | "dist"
-                        | ".next"
-                        | "target"
-                        | "build"
-                        | ".turbo"
-                        | "coverage"
-                ) {
+                // Build-output names are skipped only at the root — nested
+                // ones are routes (see OUTPUT_DIRS).
+                if VENDOR_DIRS.contains(&name) || (depth == 0 && OUTPUT_DIRS.contains(&name)) {
                     continue;
                 }
             }
-            collect_ts_mtimes_into(&path, mtimes);
+            collect_ts_mtimes_into(&path, mtimes, depth + 1);
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str());
@@ -1056,7 +1066,13 @@ fn collect_ts_mtimes_into(dir: &Path, mtimes: &mut HashMap<String, SystemTime>) 
 /// and does not live under a vendored / generated / VCS tree. Mirrors the
 /// filtering in `collect_ts_mtimes_into` so the event watcher and the poll
 /// fallback react to exactly the same set of files.
-fn is_watched_source(path: &Path) -> bool {
+///
+/// `base` is the watch root. Exclusions are judged on the path RELATIVE to it,
+/// so a build-output name only disqualifies a file when it sits at the project
+/// root — not when it's a route directory (`app/build/page.tsx`) and not when
+/// it merely appears somewhere in the absolute prefix (a checkout living under
+/// `~/dist/` must not disable the whole watcher).
+fn is_watched_source(path: &Path, base: &Path) -> bool {
     match path.extension().and_then(|e| e.to_str()) {
         Some("ts") | Some("tsx") | Some("css") => {}
         _ => return false,
@@ -1068,21 +1084,22 @@ fn is_watched_source(path: &Path) -> bool {
             return false;
         }
     }
-    const EXCLUDED_DIRS: &[&str] = &[
-        "node_modules",
-        ".pylon",
-        ".git",
-        "dist",
-        ".next",
-        "target",
-        "build",
-        ".turbo",
-        "coverage",
-    ];
-    !path.components().any(|c| {
-        matches!(c, std::path::Component::Normal(os)
-            if os.to_str().is_some_and(|s| EXCLUDED_DIRS.contains(&s)))
-    })
+    // Outside the watch root we can only judge the vendor names — an absolute
+    // prefix we don't own must not be read as project structure.
+    let rel = path.strip_prefix(base).unwrap_or(path);
+    let dirs: Vec<&str> = rel
+        .parent()
+        .into_iter()
+        .flat_map(|p| p.components())
+        .filter_map(|c| match c {
+            std::path::Component::Normal(os) => os.to_str(),
+            _ => None,
+        })
+        .collect();
+    if dirs.iter().any(|d| VENDOR_DIRS.contains(d)) {
+        return false;
+    }
+    !dirs.first().is_some_and(|d| OUTPUT_DIRS.contains(d))
 }
 
 /// True when a change set is safe for an in-process reload — i.e. every
@@ -1099,9 +1116,10 @@ fn is_css_only(changed: &HashSet<PathBuf>) -> bool {
 }
 
 /// Insert every watched source path carried by an fs event into `out`.
-fn collect_watched_paths(ev: &notify::Event, out: &mut HashSet<PathBuf>) {
+/// `base` is the canonical watch root — exclusions are judged relative to it.
+fn collect_watched_paths(ev: &notify::Event, base: &Path, out: &mut HashSet<PathBuf>) {
     for p in &ev.paths {
-        if is_watched_source(p) {
+        if is_watched_source(p, base) {
             out.insert(p.clone());
         }
     }
@@ -1204,26 +1222,74 @@ mod tests {
     fn is_watched_source_matches_poll_filter() {
         use super::is_watched_source;
         use std::path::Path;
+        let base = Path::new("/app");
         // Source files the user edits — reload.
-        assert!(is_watched_source(Path::new("/app/app.ts")));
-        assert!(is_watched_source(Path::new("/app/functions/createTodo.ts")));
-        assert!(is_watched_source(Path::new("/app/app/page.tsx")));
-        assert!(is_watched_source(Path::new("/app/app/globals.css")));
+        assert!(is_watched_source(Path::new("/app/app.ts"), base));
+        assert!(is_watched_source(
+            Path::new("/app/functions/createTodo.ts"),
+            base
+        ));
+        assert!(is_watched_source(Path::new("/app/app/page.tsx"), base));
+        assert!(is_watched_source(Path::new("/app/app/globals.css"), base));
         // Non-source extensions — ignore.
-        assert!(!is_watched_source(Path::new("/app/pylon.manifest.json")));
-        assert!(!is_watched_source(Path::new("/app/README.md")));
+        assert!(!is_watched_source(
+            Path::new("/app/pylon.manifest.json"),
+            base
+        ));
+        assert!(!is_watched_source(Path::new("/app/README.md"), base));
         // Generated `pylon.*` artifacts — reacting to these would loop forever
         // (the dev server writes pylon.client.ts on every rebuild).
-        assert!(!is_watched_source(Path::new("/app/pylon.client.ts")));
+        assert!(!is_watched_source(Path::new("/app/pylon.client.ts"), base));
         // Vendored / generated / runtime trees — never source.
-        assert!(!is_watched_source(Path::new(
-            "/app/node_modules/x/index.ts"
-        )));
-        assert!(!is_watched_source(Path::new("/app/.pylon/dev.db.ts")));
-        assert!(!is_watched_source(Path::new(
-            "/app/target/debug/build.rs.tsx"
-        )));
-        assert!(!is_watched_source(Path::new("/app/dist/bundle.css")));
+        assert!(!is_watched_source(
+            Path::new("/app/node_modules/x/index.ts"),
+            base
+        ));
+        assert!(!is_watched_source(Path::new("/app/.pylon/dev.db.ts"), base));
+        assert!(!is_watched_source(
+            Path::new("/app/target/debug/build.rs.tsx"),
+            base
+        ));
+        // Build output AT THE ROOT is still skipped.
+        assert!(!is_watched_source(Path::new("/app/dist/bundle.css"), base));
+        assert!(!is_watched_source(Path::new("/app/build/out.ts"), base));
+    }
+
+    #[test]
+    fn is_watched_source_reloads_routes_named_like_build_output() {
+        use super::is_watched_source;
+        use std::path::Path;
+        let base = Path::new("/app");
+        // The bug: `build` / `dist` / `coverage` were excluded at ANY depth, so
+        // a route directory that happened to use one of those names — the
+        // hosted builder's own `/build` page — never hot-reloaded. Edits landed
+        // on disk and `pylon dev` stayed silent.
+        assert!(is_watched_source(
+            Path::new("/app/app/build/page.tsx"),
+            base
+        ));
+        assert!(is_watched_source(Path::new("/app/app/dist/page.tsx"), base));
+        assert!(is_watched_source(
+            Path::new("/app/web/app/build/page.tsx"),
+            base
+        ));
+        assert!(is_watched_source(
+            Path::new("/app/app/coverage/page.tsx"),
+            base
+        ));
+        // Nested vendor trees stay excluded at any depth.
+        assert!(!is_watched_source(
+            Path::new("/app/web/node_modules/x/index.ts"),
+            base
+        ));
+
+        // The absolute prefix above the watch root is NOT project structure: a
+        // checkout living under ~/dist must not disable the whole watcher.
+        let nested = Path::new("/Users/me/dist/my-app");
+        assert!(is_watched_source(
+            Path::new("/Users/me/dist/my-app/app/page.tsx"),
+            nested
+        ));
     }
 
     #[test]
