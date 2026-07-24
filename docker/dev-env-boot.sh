@@ -24,8 +24,11 @@
 # Colocated coding agent (OpenCode) — started only when ALL three are set:
 #   PYLON_DEV_MODEL_PROXY_URL    base URL of pylon-model-proxy (holds the real key)
 #   PYLON_DEV_MODEL_PROXY_TOKEN  per-env token the box uses instead of a real key
-#   PYLON_DEV_MODEL              provider model id (e.g. moonshotai/kimi-k3,
-#                                gpt-4o, deepseek-chat) — matches the proxy's upstream
+#   PYLON_DEV_MODELS             comma-separated set of provider model ids the
+#                                env may use (e.g. gpt-5.6-luna,gpt-5.6-sol) — a
+#                                build picks one per request. Matches the proxy's upstream.
+#   PYLON_DEV_MODEL              default model when a build doesn't specify one
+#                                (defaults to the first of PYLON_DEV_MODELS)
 #   PYLON_DEV_OPENCODE_PORT      opencode serve port           (default 4096)
 #   PYLON_DEV_OPENCODE_PASSWORD  basic-auth for the opencode server (control plane
 #                                sets + uses it; server is 6PN-private regardless)
@@ -69,16 +72,30 @@ export PYLON_DEV_WATCH_DIR="$WORKSPACE"
 # When the control plane grants model access, run `opencode serve` next to
 # `pylon dev` so an agent authors THIS workspace with hot-reload feedback.
 # OpenCode never sees a real provider key — it calls pylon-model-proxy with a
-# per-env, model-pinned token (PYLON_DEV_MODEL_PROXY_TOKEN). The server binds
-# the private net for the control-plane driver to reach over 6PN; it's NOT on
-# the machine's public services, and is basic-auth gated on top.
+# per-env token (PYLON_DEV_MODEL_PROXY_TOKEN) scoped to a SET of models
+# (PYLON_DEV_MODELS); each BUILD picks one per request. The server binds the
+# private net for the control-plane driver to reach over 6PN; it's NOT on the
+# machine's public services, and is basic-auth gated on top.
 if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	[ -n "${PYLON_DEV_MODEL_PROXY_TOKEN:-}" ] &&
-	[ -n "${PYLON_DEV_MODEL:-}" ] &&
+	[ -n "${PYLON_DEV_MODELS:-${PYLON_DEV_MODEL:-}}" ] &&
 	command -v opencode >/dev/null 2>&1; then
 	OC_PORT="${PYLON_DEV_OPENCODE_PORT:-4096}"
 	OC_CFG="${HOME:-/app}/.config/opencode"
 	mkdir -p "$OC_CFG"
+	# Build the provider's models map from the comma-separated allowed set so a
+	# build can pick any of them per request. Falls back to the single default.
+	OC_MODELS_JSON=""
+	OLD_IFS="$IFS"
+	IFS=","
+	for m in ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}; do
+		m="$(printf '%s' "$m" | sed 's/^ *//;s/ *$//')"
+		[ -z "$m" ] && continue
+		entry="\"$m\": { \"name\": \"$m\" }"
+		if [ -z "$OC_MODELS_JSON" ]; then OC_MODELS_JSON="$entry"; else OC_MODELS_JSON="$OC_MODELS_JSON, $entry"; fi
+	done
+	IFS="$OLD_IFS"
+	OC_DEFAULT="${PYLON_DEV_MODEL:-$(printf '%s' "$PYLON_DEV_MODELS" | cut -d, -f1 | sed 's/^ *//;s/ *$//')}"
 	# Regenerated every boot from env (rootfs is ephemeral) — no secrets persist.
 	cat >"$OC_CFG/opencode.json" <<JSON
 {
@@ -87,14 +104,14 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
       "npm": "@ai-sdk/openai-compatible",
       "name": "Pylon Build",
       "options": { "baseURL": "${PYLON_DEV_MODEL_PROXY_URL}/v1", "apiKey": "${PYLON_DEV_MODEL_PROXY_TOKEN}" },
-      "models": { "${PYLON_DEV_MODEL}": { "name": "${PYLON_DEV_MODEL}" } }
+      "models": { ${OC_MODELS_JSON} }
     }
   },
-  "model": "pylon/${PYLON_DEV_MODEL}"
+  "model": "pylon/${OC_DEFAULT}"
 }
 JSON
 	export OPENCODE_SERVER_PASSWORD="${PYLON_DEV_OPENCODE_PASSWORD:-}"
-	echo "[dev-boot] starting opencode serve on :$OC_PORT (model pylon/${PYLON_DEV_MODEL})"
+	echo "[dev-boot] starting opencode serve on :$OC_PORT (models: ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}, default pylon/${OC_DEFAULT})"
 	(opencode serve --port "$OC_PORT" --hostname :: >/tmp/opencode.log 2>&1 &)
 fi
 
