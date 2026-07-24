@@ -24,7 +24,8 @@
 # Colocated coding agent (OpenCode) — started only when ALL three are set:
 #   PYLON_DEV_MODEL_PROXY_URL    base URL of pylon-model-proxy (holds the real key)
 #   PYLON_DEV_MODEL_PROXY_TOKEN  per-env token the box uses instead of a real key
-#   PYLON_DEV_MODEL              OpenRouter model id (e.g. moonshotai/kimi-k3)
+#   PYLON_DEV_MODEL              provider model id (e.g. moonshotai/kimi-k3,
+#                                gpt-4o, deepseek-chat) — matches the proxy's upstream
 #   PYLON_DEV_OPENCODE_PORT      opencode serve port           (default 4096)
 #   PYLON_DEV_OPENCODE_PASSWORD  basic-auth for the opencode server (control plane
 #                                sets + uses it; server is 6PN-private regardless)
