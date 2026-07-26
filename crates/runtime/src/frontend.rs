@@ -2990,22 +2990,96 @@ fn build_ssr_response_headers(
         out.iter()
             .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
     };
+    // An operator can name specific origins allowed to frame this app
+    // (PYLON_FRAME_ANCESTORS) — Pylon Cloud sets it on dev-mode envs so the
+    // builder can show the running app in its live-preview iframe. That has to
+    // be expressed as CSP `frame-ancestors`: X-Frame-Options can only say
+    // DENY/SAMEORIGIN, and its ALLOW-FROM form is dead in every current
+    // browser, so leaving SAMEORIGIN alongside would still block the frame.
+    // Unset (the default) keeps SAMEORIGIN and ships no CSP.
+    let ancestors = configured_frame_ancestors();
+    match ancestors {
+        Some(list) if !has(&out, "Content-Security-Policy") => {
+            let value = format!("frame-ancestors 'self' {list}");
+            if let Ok(h) = Header::from_bytes("Content-Security-Policy", value.as_bytes()) {
+                out.push(h);
+            }
+        }
+        _ => {}
+    }
+    let frame_default: &[(&str, &str)] = if configured_frame_ancestors().is_some() {
+        &[]
+    } else {
+        &[("X-Frame-Options", "SAMEORIGIN")]
+    };
     for (name, value) in [
         ("X-Content-Type-Options", "nosniff"),
-        ("X-Frame-Options", "SAMEORIGIN"),
         ("Referrer-Policy", "strict-origin-when-cross-origin"),
         (
             "Permissions-Policy",
             "accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()",
         ),
-    ] {
+    ]
+    .iter()
+    .chain(frame_default.iter())
+    {
         if !has(&out, name) {
-            if let Ok(h) = Header::from_bytes(name, value.as_bytes()) {
+            if let Ok(h) = Header::from_bytes(*name, value.as_bytes()) {
                 out.push(h);
             }
         }
     }
     out
+}
+
+/// Origins allowed to frame this app, from `PYLON_FRAME_ANCESTORS`
+/// (comma- or space-separated, e.g. "https://www.pylonsync.com").
+///
+/// Returns the validated, space-joined source list for a CSP
+/// `frame-ancestors` directive, or `None` when unset/empty — in which case the
+/// caller keeps the default `X-Frame-Options: SAMEORIGIN`.
+///
+/// Every entry must be a bare `scheme://host[:port]` origin. Anything else is
+/// dropped: a value carrying a comma, semicolon, whitespace, or control
+/// character could otherwise close the directive and inject a second CSP
+/// directive into the header.
+fn configured_frame_ancestors() -> Option<&'static str> {
+    static ANCESTORS: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    ANCESTORS
+        .get_or_init(|| parse_frame_ancestors(&std::env::var("PYLON_FRAME_ANCESTORS").ok()?))
+        .as_deref()
+}
+
+/// Split + validate a `PYLON_FRAME_ANCESTORS` value. Pure so the filtering can
+/// be tested directly — `configured_frame_ancestors` caches this in a OnceLock,
+/// which a test can't re-drive.
+fn parse_frame_ancestors(raw: &str) -> Option<String> {
+    let list = raw
+        .split([',', ' ', '\t'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|s| is_valid_frame_ancestor(s))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
+}
+
+/// A single `frame-ancestors` source: `scheme://host[:port]`, nothing else.
+fn is_valid_frame_ancestor(value: &str) -> bool {
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '*'))
 }
 
 /// A minimal, structured SSR error response (used when the render can't
@@ -5205,6 +5279,62 @@ mod tests {
             .collect();
         assert_eq!(xfo.len(), 1, "no duplicate X-Frame-Options");
         assert_eq!(xfo[0], "ALLOWALL");
+    }
+
+    #[test]
+    fn frame_ancestors_allowlist_parses_and_rejects_injection() {
+        use super::parse_frame_ancestors;
+
+        // Why this exists: Pylon Cloud's builder shows a running dev-mode env in
+        // a live-preview iframe on another origin. The default
+        // X-Frame-Options: SAMEORIGIN blocks that, and XFO has no way to name a
+        // permitted cross origin (ALLOW-FROM is dead), so the allowlist has to
+        // be emitted as CSP frame-ancestors instead.
+        assert_eq!(
+            parse_frame_ancestors("https://www.pylonsync.com").as_deref(),
+            Some("https://www.pylonsync.com")
+        );
+        // Comma-, space-, and tab-separated all work; ports and wildcards too.
+        assert_eq!(
+            parse_frame_ancestors("https://a.com, http://localhost:4321\thttps://*.pyln.dev")
+                .as_deref(),
+            Some("https://a.com http://localhost:4321 https://*.pyln.dev")
+        );
+
+        // Nothing configured → None, so the caller keeps SAMEORIGIN.
+        assert_eq!(parse_frame_ancestors(""), None);
+        assert_eq!(parse_frame_ancestors("   "), None);
+
+        // A source that could close the directive and append another one is
+        // dropped — otherwise `PYLON_FRAME_ANCESTORS` becomes arbitrary CSP
+        // injection (e.g. smuggling `script-src` into the policy).
+        // `;` is not a separator, so the whole token fails validation and is
+        // dropped — the origin does not survive in a "cleaned up" form. Failing
+        // closed is deliberate: a half-honoured allowlist is worse than none.
+        assert_eq!(
+            parse_frame_ancestors("https://ok.com;script-src 'none'"),
+            None,
+            "a source carrying a directive separator must be rejected outright"
+        );
+        // A well-formed origin alongside a malformed one still works — only the
+        // bad source is dropped.
+        assert_eq!(
+            parse_frame_ancestors("https://ok.com, https://bad.com;script-src").as_deref(),
+            Some("https://ok.com")
+        );
+        assert_eq!(parse_frame_ancestors("'none'"), None);
+        assert_eq!(parse_frame_ancestors("javascript:alert(1)"), None);
+        assert_eq!(
+            parse_frame_ancestors("example.com"),
+            None,
+            "scheme required"
+        );
+        assert_eq!(parse_frame_ancestors("https://"), None, "host required");
+        assert_eq!(
+            parse_frame_ancestors("https://a.com\r\nx-evil: 1"),
+            None,
+            "CR/LF must never survive into a header value"
+        );
     }
 
     #[test]
