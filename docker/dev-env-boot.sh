@@ -29,6 +29,10 @@
 #                                build picks one per request. Matches the proxy's upstream.
 #   PYLON_DEV_MODEL              default model when a build doesn't specify one
 #                                (defaults to the first of PYLON_DEV_MODELS)
+#   PYLON_DEV_RESPONSES_MODELS   subset of PYLON_DEV_MODELS that speak the
+#                                /v1/responses API rather than
+#                                /v1/chat/completions (OpenAI GPT-5.x needs
+#                                this to use function tools with reasoning)
 #   PYLON_DEV_OPENCODE_PORT      opencode serve port           (default 4096)
 #   PYLON_DEV_OPENCODE_PASSWORD  basic-auth for the opencode server (control plane
 #                                sets + uses it; server is 6PN-private regardless)
@@ -85,6 +89,16 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	mkdir -p "$OC_CFG"
 	# Build the provider's models map from the comma-separated allowed set so a
 	# build can pick any of them per request. Falls back to the single default.
+	#
+	# Models listed in PYLON_DEV_RESPONSES_MODELS get a per-model `npm`
+	# override. OpenCode picks the wire protocol from the package:
+	# @ai-sdk/openai-compatible speaks /v1/chat/completions, @ai-sdk/openai
+	# speaks /v1/responses. OpenAI's GPT-5.x family REFUSES function tools over
+	# chat/completions whenever reasoning is enabled — a coding agent without
+	# tools does nothing — so those models have to go through /v1/responses to
+	# be usable with reasoning at all. The override is per-model because one org
+	# can mix vendors: a Responses-only OpenAI model beside a chat-completions
+	# model from someone else, under the same proxy.
 	OC_MODELS_JSON=""
 	OLD_IFS="$IFS"
 	IFS=","
@@ -92,6 +106,13 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 		m="$(printf '%s' "$m" | sed 's/^ *//;s/ *$//')"
 		[ -z "$m" ] && continue
 		entry="\"$m\": { \"name\": \"$m\" }"
+		for r in ${PYLON_DEV_RESPONSES_MODELS:-}; do
+			r="$(printf '%s' "$r" | sed 's/^ *//;s/ *$//')"
+			if [ "$r" = "$m" ]; then
+				entry="\"$m\": { \"name\": \"$m\", \"npm\": \"@ai-sdk/openai\" }"
+				break
+			fi
+		done
 		if [ -z "$OC_MODELS_JSON" ]; then OC_MODELS_JSON="$entry"; else OC_MODELS_JSON="$OC_MODELS_JSON, $entry"; fi
 	done
 	IFS="$OLD_IFS"
