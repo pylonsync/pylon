@@ -529,6 +529,16 @@ Pylon natively server-renders React from the same server that runs your backend 
 - `app/page.tsx` → `/`, `app/blog/page.tsx` → `/blog`, `app/blog/[slug]/page.tsx` → `/blog/:slug`, `app/docs/[...slug]/page.tsx` → catch-all, `[[...slug]]` → optional catch-all.
 - `app/layout.tsx` wraps every page (nest `layout.tsx` per segment for sub-layouts).
 - **A page is a server component by default** (runs only on the server — no JS shipped). Add `"use client"` at the top of a file to make it (and its tree) an interactive island that hydrates in the browser. Proven pattern: a thin server `page.tsx` (for metadata + auth) that renders one `"use client"` view containing the interactive UI.
+- **Compose small components; don't grow one giant page.** A page that fetches, formats, and renders in one file can't be tested without standing up the whole app, and an agent extending it has one huge file to edit. Split along the data boundary:
+
+  | Layer | Contains | How it's tested |
+  |---|---|---|
+  | `lib/*.ts` | pure functions — formatting, grouping, derivation. No React, no `db`. | direct unit tests, no DOM, no mocks |
+  | `components/*.tsx` | presentational. Data arrives as **props**; writes go out through **callbacks**. Never calls `db.useQuery` itself. | `render(<C {...fixtures} />)` — no mocking, because there's no data layer to mock |
+  | `app/**/page.tsx` + one `"use client"` container | the **only** place that touches `db` / `callFn`. Fetch, then hand plain data down. | `pylon verify`, or a container test that mocks just this boundary |
+
+  Keeping the data boundary in exactly one module is what makes everything below it trivially testable. The `create-pylon` starters are generated in this shape — read one for a worked example.
+
 - The page receives props: `{ url, params, searchParams, auth, response, serverData }` — type them with `PageProps<{ slug: string }>` from `@pylonsync/react` instead of hand-rolling. `auth` is `{ user_id, is_admin, tenant_id, roles }` resolved from the shared session. **The request's `headers` and `cookies` are intentionally NOT props** — they're server-only and stripped from the hydration payload (a session cookie must never reach client JS), so reading them in a component body would hydrate-mismatch. Read request-derived data through `serverData` or a server function.
 
 ```tsx
@@ -775,6 +785,7 @@ Dev-mode failures are disclosed where you'll see them: unhandled function errors
 - Run `bun run app.ts` in the project root — if it errors, the manifest won't build and `pylon dev` will fail silently on function load.
 - Run `pylon verify` — it boots the app and fails on any route/asset that doesn't serve. This is the cheap end-to-end check; don't skip it.
 - Run `pylon lint` — flags wide-open dev policies (`allow*: "true"`) and other policy smells before they ship. Tighten what it reports.
+- **Test in tiers, cheapest first.** Tier 1: pure helpers in `lib/` (milliseconds, no DOM). Tier 2: components with fixture props via `@testing-library/react` (happy-dom is preloaded through `bunfig.toml`). Tier 3: functions/policies through `pylon policy test` and `pylon verify`. If a component is hard to test, it's usually because it fetches its own data — lift that to the container.
 - Run `pylon test` — discovers `*.test.ts` / `*.test.tsx` under `tests/` (or `functions/`) and runs them with Bun's test runner (`import { test, expect } from "bun:test"`).
 - If you added a function, verify it's discoverable by opening the project and checking that `pylon dev` logs list your new function name in the `Loaded N functions` output.
 - If you changed an entity, schema auto-migration runs — but destructive changes (dropping a required column) will refuse to apply without bumping `manifest.version`.
