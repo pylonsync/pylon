@@ -235,6 +235,14 @@ git diff --stat | sed 's/^/  /'
 # negligible (workspaces are local, third-party deps come from bun's
 # global cache).
 #
+# The bun that regenerates this lockfile MUST match the bun CI installs
+# (.github/workflows/*.yml `bun-version`). bun 1.3 writes a "configVersion"
+# field that 1.2 doesn't understand, so a lockfile written here by a newer bun
+# resolved differently under CI's older one — @types/react stopped being
+# visible to examples/acme and `bun run check` failed. Because only a release
+# rewrites the lockfile, CI went red on every `chore: release` commit while
+# staying green on feature commits, for five releases running.
+#
 # Skip silently if bun isn't installed locally (CI verifies bun.lock
 # is fresh anyway via --frozen-lockfile).
 if command -v bun >/dev/null 2>&1; then
