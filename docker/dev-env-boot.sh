@@ -87,48 +87,61 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	OC_PORT="${PYLON_DEV_OPENCODE_PORT:-4096}"
 	OC_CFG="${HOME:-/app}/.config/opencode"
 	mkdir -p "$OC_CFG"
-	# Build the provider's models map from the comma-separated allowed set so a
-	# build can pick any of them per request. Falls back to the single default.
+	# Split the allowed models across TWO providers, because OpenCode picks the
+	# wire protocol from the provider's npm package and that package can only be
+	# set per PROVIDER (the config schema has no per-model override):
 	#
-	# Models listed in PYLON_DEV_RESPONSES_MODELS get a per-model `npm`
-	# override. OpenCode picks the wire protocol from the package:
-	# @ai-sdk/openai-compatible speaks /v1/chat/completions, @ai-sdk/openai
-	# speaks /v1/responses. OpenAI's GPT-5.x family REFUSES function tools over
-	# chat/completions whenever reasoning is enabled — a coding agent without
-	# tools does nothing — so those models have to go through /v1/responses to
-	# be usable with reasoning at all. The override is per-model because one org
-	# can mix vendors: a Responses-only OpenAI model beside a chat-completions
-	# model from someone else, under the same proxy.
-	OC_MODELS_JSON=""
+	#   pylon            @ai-sdk/openai-compatible  ->  /v1/chat/completions
+	#   pylon-responses  @ai-sdk/openai             ->  /v1/responses
+	#
+	# OpenAI's GPT-5.x family REFUSES function tools over chat/completions while
+	# reasoning is enabled, and a coding agent without tools does nothing — so
+	# models named in PYLON_DEV_RESPONSES_MODELS have to go through the second
+	# provider. Both point at the same proxy with the same token; only the
+	# protocol differs. An org mixing vendors gets some models in each.
+	OC_CHAT_JSON=""
+	OC_RESP_JSON=""
 	OLD_IFS="$IFS"
 	IFS=","
 	for m in ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}; do
 		m="$(printf '%s' "$m" | sed 's/^ *//;s/ *$//')"
 		[ -z "$m" ] && continue
 		entry="\"$m\": { \"name\": \"$m\" }"
-		for r in ${PYLON_DEV_RESPONSES_MODELS:-}; do
-			r="$(printf '%s' "$r" | sed 's/^ *//;s/ *$//')"
-			if [ "$r" = "$m" ]; then
-				entry="\"$m\": { \"name\": \"$m\", \"npm\": \"@ai-sdk/openai\" }"
-				break
-			fi
-		done
-		if [ -z "$OC_MODELS_JSON" ]; then OC_MODELS_JSON="$entry"; else OC_MODELS_JSON="$OC_MODELS_JSON, $entry"; fi
+		# Exact membership test that does NOT depend on IFS — this loop runs
+		# with IFS="," to split the model list, which would otherwise swallow a
+		# nested word-split and silently classify every model as chat.
+		is_resp=0
+		case ",$(printf '%s' "${PYLON_DEV_RESPONSES_MODELS:-}" | tr -d ' ')," in
+		*",$m,"*) is_resp=1 ;;
+		esac
+		if [ "$is_resp" = "1" ]; then
+			if [ -z "$OC_RESP_JSON" ]; then OC_RESP_JSON="$entry"; else OC_RESP_JSON="$OC_RESP_JSON, $entry"; fi
+		else
+			if [ -z "$OC_CHAT_JSON" ]; then OC_CHAT_JSON="$entry"; else OC_CHAT_JSON="$OC_CHAT_JSON, $entry"; fi
+		fi
 	done
 	IFS="$OLD_IFS"
 	OC_DEFAULT="${PYLON_DEV_MODEL:-$(printf '%s' "$PYLON_DEV_MODELS" | cut -d, -f1 | sed 's/^ *//;s/ *$//')}"
+	# Which provider serves the default model decides the `model` line.
+	OC_DEFAULT_PROVIDER="pylon"
+	case ",$(printf '%s' "${PYLON_DEV_RESPONSES_MODELS:-}" | tr -d ' ')," in
+	*",$OC_DEFAULT,"*) OC_DEFAULT_PROVIDER="pylon-responses" ;;
+	esac
+
+	OC_PROVIDERS=""
+	if [ -n "$OC_CHAT_JSON" ]; then
+		OC_PROVIDERS="\"pylon\": { \"npm\": \"@ai-sdk/openai-compatible\", \"name\": \"Pylon Build\", \"options\": { \"baseURL\": \"${PYLON_DEV_MODEL_PROXY_URL}/v1\", \"apiKey\": \"${PYLON_DEV_MODEL_PROXY_TOKEN}\" }, \"models\": { ${OC_CHAT_JSON} } }"
+	fi
+	if [ -n "$OC_RESP_JSON" ]; then
+		RESP_BLOCK="\"pylon-responses\": { \"npm\": \"@ai-sdk/openai\", \"name\": \"Pylon Build (Responses)\", \"options\": { \"baseURL\": \"${PYLON_DEV_MODEL_PROXY_URL}/v1\", \"apiKey\": \"${PYLON_DEV_MODEL_PROXY_TOKEN}\" }, \"models\": { ${OC_RESP_JSON} } }"
+		if [ -z "$OC_PROVIDERS" ]; then OC_PROVIDERS="$RESP_BLOCK"; else OC_PROVIDERS="$OC_PROVIDERS, $RESP_BLOCK"; fi
+	fi
+
 	# Regenerated every boot from env (rootfs is ephemeral) — no secrets persist.
 	cat >"$OC_CFG/opencode.json" <<JSON
 {
-  "provider": {
-    "pylon": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Pylon Build",
-      "options": { "baseURL": "${PYLON_DEV_MODEL_PROXY_URL}/v1", "apiKey": "${PYLON_DEV_MODEL_PROXY_TOKEN}" },
-      "models": { ${OC_MODELS_JSON} }
-    }
-  },
-  "model": "pylon/${OC_DEFAULT}"
+  "provider": { ${OC_PROVIDERS} },
+  "model": "${OC_DEFAULT_PROVIDER}/${OC_DEFAULT}"
 }
 JSON
 	export OPENCODE_SERVER_PASSWORD="${PYLON_DEV_OPENCODE_PASSWORD:-}"
