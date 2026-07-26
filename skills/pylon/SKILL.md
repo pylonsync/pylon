@@ -619,6 +619,58 @@ To show signed-in nav on a cacheable page, read `props.session.exists` (bucketed
 
 **"Why isn't my page caching?"** → run `pylon diagnostics` or open the dev HUD; it reports the exact verdict + reason per route (see "Running the app").
 
+### Performance
+
+Ordered by how much they actually cost. The first two are where nearly all real
+latency lives; the rest matter once those are clean.
+
+**1. Don't serialize waterfalls.** `serverData` reads are promises — start them
+all, then await together. Awaiting one before creating the next turns two 50ms
+reads into 100ms:
+
+```tsx
+// Waterfall: the second read doesn't start until the first resolves.
+const org = use(serverData.get("Organization", id));
+const members = use(serverData.query("OrgMember", { orgId: id }));
+
+// Parallel: both in flight, one wait.
+const [org, members] = use(
+  Promise.all([
+    serverData.get("Organization", id),
+    serverData.query("OrgMember", { orgId: id }),
+  ]),
+);
+```
+
+Independent sections should be separate `<Suspense>` boundaries so a slow one
+streams in without blocking the rest — that's what `export const streaming =
+true` is for.
+
+**2. Ship less to the client.** Resolved `serverData` is replayed into the
+hydration payload so the client doesn't re-fetch — which means over-fetching in
+a server component inflates the HTML for every visitor. Select the fields the UI
+renders; don't pass whole rows into a `"use client"` island to use two of them.
+
+**3. Never keep mutable state in module scope.** The SSR runner is warm and
+import-caches route modules, so a module-level variable persists **across
+requests and across users**. This is the same purity contract as the
+`auth-bucketed` cache, and it's a correctness bug before it's a performance one.
+
+**4. Prefer `db.useQuery` to per-component `callFn`.** The synced replica already
+dedupes and updates live; N components each calling `callFn` on mount is N
+round-trips for data the client usually already has.
+
+**5. Client-render hygiene** — the usual React rules, and the two that bite most:
+never define a component inside another component (it remounts the whole subtree
+every render), and derive values during render instead of syncing them in an
+effect.
+
+For the full catalogue — bundle analysis, memoization, hydration, SVG and DOM
+detail — use Vercel's `react-best-practices` skill
+(<https://github.com/vercel-labs/agent-skills/tree/main/skills/react-best-practices>);
+70 rules ranked by impact. It's Next-flavoured, so read `next/dynamic` as a
+plain `import()` and server actions as Pylon functions.
+
 ## Running the app
 
 ```bash
