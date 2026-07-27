@@ -1,0 +1,4 @@
+[test]
+# Register a DOM (happy-dom) before any test runs so React component tests can
+# render under `pylon test` / `bun test`. Harmless for pure-logic tests.
+preload = ["./tests/setup.ts"]

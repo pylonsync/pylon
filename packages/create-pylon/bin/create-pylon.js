@@ -170,6 +170,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	helpdesk: {
+		blurb:
+			"Support inbox — tickets triaged by priority and SLA, a LIVE queue that reorders as breaches approach, shared threads with internal notes, and assignment that lands on every agent's screen at once. ⌘K search. Seeds a demo queue on first sign-in. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 	"ai-chat": {
 		blurb:
 			"Streaming AI chat — token streaming via the built-in /api/ai/stream (your key stays server-side), multi-conversation history that's owner-scoped + synced across tabs in realtime, guest or signed-in. Set PYLON_AI_API_KEY to enable. One SSR app.",
@@ -255,6 +261,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template marketplace  # two-sided marketplace + realtime offers
   npm create @pylonsync/pylon my-app --template directory    # searchable directory + facets + live upvotes
   npm create @pylonsync/pylon my-app --template crm          # sales CRM — live pipeline board, ⌘K, activity timeline
+  npm create @pylonsync/pylon my-app --template helpdesk     # support inbox — SLA triage, shared threads, internal notes
   npm create @pylonsync/pylon my-app --template ai-chat      # streaming LLM chat + synced history
   npm create @pylonsync/pylon my-app --template ai-studio    # generative media studio + live gallery
 `);
