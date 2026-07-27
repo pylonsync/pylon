@@ -57,6 +57,11 @@ my-app/
       [slug]/page.tsx    #   dynamic route "/blog/:slug"
     sitemap.ts           #   served at /sitemap.xml (optional)
     robots.ts            #   served at /robots.txt (optional)
+  components/            # your components (see the layering table below)
+    ui/                  #   shadcn primitives — button, card, input, label,
+                         #   select, badge, table, textarea
+  components.json        # shadcn config — `npx shadcn@latest add <name>` works
+  lib/utils.ts           # `cn` (clsx + tailwind-merge)
   public/                # static assets served verbatim at the root
   package.json           # deps: @pylonsync/sdk, @pylonsync/functions, @pylonsync/react, @pylonsync/client, react, react-dom
                          #   + @pylonsync/cli as a devDependency (so `npm run dev` needs no global install)
@@ -538,6 +543,16 @@ Pylon natively server-renders React from the same server that runs your backend 
   | `app/**/page.tsx` + one `"use client"` container | the **only** place that touches `db` / `callFn`. Fetch, then hand plain data down. | `pylon verify`, or a container test that mocks just this boundary |
 
   Keeping the data boundary in exactly one module is what makes everything below it trivially testable. The `create-pylon` starters are generated in this shape — read one for a worked example.
+
+- **Build on the UI kit that's already there.** Scaffolded apps ship `components/ui/` with shadcn primitives (`button`, `card`, `input`, `label`, `select`, `badge`, `table`, `textarea`), `lib/utils.ts` (`cn`), and a configured `components.json`. Use them, and style with the semantic tokens (`bg-background`, `bg-card`, `text-muted-foreground`, `border`) rather than hardcoded palette classes like `bg-zinc-50` — a raw `<input>` or a fixed color renders as an unstyled control next to the kit and breaks dark mode.
+
+  Need a primitive that isn't there (dialog, dropdown, tabs, popover, …)? Add it rather than hand-rolling:
+
+  ```sh
+  npx shadcn@latest add dialog
+  ```
+
+  `components.json` is preconfigured (new-york, zinc, `@/components/ui`), so the component lands with the right imports and tokens.
 
 - The page receives props: `{ url, params, searchParams, auth, response, serverData }` — type them with `PageProps<{ slug: string }>` from `@pylonsync/react` instead of hand-rolling. `auth` is `{ user_id, is_admin, tenant_id, roles }` resolved from the shared session. **The request's `headers` and `cookies` are intentionally NOT props** — they're server-only and stripped from the hydration payload (a session cookie must never reach client JS), so reading them in a component body would hydrate-mismatch. Read request-derived data through `serverData` or a server function.
 
