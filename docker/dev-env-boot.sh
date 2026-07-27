@@ -63,6 +63,25 @@ if [ ! -f "$MARKER" ]; then
 		echo "[dev-boot] bun install"
 		(cd "$WORKSPACE" && bun install)
 	fi
+	# Make the workspace a git repository with the starter as its first commit.
+	# OpenCode derives a session's file diff from git, so without a repo the
+	# builder can never report which files a build touched — the diff endpoint
+	# answers 200 with an empty array. A baseline commit also gives every
+	# subsequent build something to diff against, which is what per-build
+	# history and revert are built on.
+	#
+	# Best-effort: a workspace that fails to become a repo should still boot and
+	# serve. Identity is set locally so commits don't depend on global config.
+	if command -v git >/dev/null 2>&1 && [ ! -d "$WORKSPACE/.git" ]; then
+		(
+			cd "$WORKSPACE" || exit 0
+			git init -q 2>/dev/null || exit 0
+			git config user.email "agent@pylonsync.com"
+			git config user.name "Pylon Build"
+			git add -A 2>/dev/null
+			git commit -qm "Starter workspace" 2>/dev/null
+		) || echo "[dev-boot] git init skipped (non-fatal)"
+	fi
 	touch "$MARKER"
 	echo "[dev-boot] seed complete"
 fi

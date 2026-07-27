@@ -89,6 +89,11 @@ FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl unzip \
+    # git: OpenCode computes a session's file diff from the repository, so
+    # without it /session/:id/diff returns 200 with an empty array and the
+    # builder can never say which files a build touched. It's also what makes
+    # per-build history and revert possible at all.
+    git \
     # Runtime shared libs for samael's SAML XMLDSig verification path —
     # the binary dynamically links against these at startup.
     libxml2 libxmlsec1 libxmlsec1-openssl \
