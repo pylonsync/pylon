@@ -86,6 +86,20 @@ if [ ! -f "$MARKER" ]; then
 	echo "[dev-boot] seed complete"
 fi
 
+# Git refuses to touch a repository owned by another user ("detected dubious
+# ownership"), and that is the situation here: the volume is owned by `pylon`
+# while the boot script and the agent run as root. Without this the repo exists
+# and every git call against it still fails, so the session diff stays empty.
+#
+# Set on EVERY boot, not just at seed time: this writes to /etc/gitconfig, which
+# lives on the ephemeral rootfs and is wiped by any machine restart — a
+# seed-only write would silently stop applying the first time the box bounced.
+# The guard protects against operating on someone else's repo on a shared
+# machine; this is a single-tenant sandbox holding exactly one workspace.
+if command -v git >/dev/null 2>&1; then
+	git config --system --add safe.directory "$WORKSPACE" 2>/dev/null || true
+fi
+
 cd "$WORKSPACE"
 # The runtime writes file-API edits into the watched tree; point it at the
 # workspace so a PUT lands where the fs-watcher sees it.
