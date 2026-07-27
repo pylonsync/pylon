@@ -20,10 +20,7 @@
 #                            templates `npm create @pylonsync/pylon` offers,
 #                            scaffolded by the same code, baked into the image
 #                            at /pylon/packages/create-pylon
-#   PYLON_DEV_SEED_URL       legacy: tarball to seed the workspace
-#                            (http(s):// | file:// | path). Only consulted when
-#                            PYLON_DEV_TEMPLATE is unset.
-#                            neither = start from an empty workspace
+#                            unset = start from an empty workspace
 #   PYLON_DEV_FILE_API_TOKEN bearer token gating the file-write API (set by the
 #                            control plane; unset = open, local dev only)
 #   PYLON_BIN                pylon binary to exec          (default `pylon` on PATH)
@@ -47,7 +44,6 @@ set -eu
 
 WORKSPACE="${PYLON_DEV_WORKSPACE:-/data/workspace}"
 PORT="${PYLON_PORT:-8080}"
-SEED_URL="${PYLON_DEV_SEED_URL:-}"
 TEMPLATE="${PYLON_DEV_TEMPLATE:-}"
 PYLON_BIN="${PYLON_BIN:-pylon}"
 MARKER="$WORKSPACE/.pylon-seeded"
@@ -59,10 +55,7 @@ if [ ! -f "$MARKER" ]; then
 	if [ -n "$TEMPLATE" ] && [ -f "$CREATE_PYLON" ]; then
 		# Scaffold the SAME templates `npm create @pylonsync/pylon` offers, using
 		# the scaffolder itself — the image already ships packages/, so the
-		# templates and their substitution logic are right here. Previously the
-		# cloud carried its own base64'd copy of one template plus a generator
-		# that hand-wrote app code, which drifted from the real templates and
-		# never picked up their component kit.
+		# templates and their substitution logic are right here.
 		#
 		# create-pylon refuses a non-empty target, and writes into ./<name>, so
 		# run it from the workspace's parent with the workspace as the name.
@@ -72,16 +65,8 @@ if [ ! -f "$MARKER" ]; then
 				bun "$CREATE_PYLON" "$(basename "$WORKSPACE")" \
 					--template "$TEMPLATE" --skip-install --no-skill --bun </dev/null
 		) || echo "[dev-boot] scaffold failed — continuing with an empty workspace"
-	elif [ -n "$SEED_URL" ]; then
-		# Legacy tarball seed. Still honoured so an env provisioned before the
-		# template switch can restart, and for local one-off workspaces.
-		case "$SEED_URL" in
-		http://* | https://*) curl -fsSL "$SEED_URL" | tar -xz -C "$WORKSPACE" ;;
-		file://*) tar -xzf "${SEED_URL#file://}" -C "$WORKSPACE" ;;
-		*) tar -xzf "$SEED_URL" -C "$WORKSPACE" ;;
-		esac
 	else
-		echo "[dev-boot] no PYLON_DEV_TEMPLATE or PYLON_DEV_SEED_URL — starting from an empty workspace"
+		echo "[dev-boot] no PYLON_DEV_TEMPLATE — starting from an empty workspace"
 	fi
 	# Deps come from npm, pinned to the image version by the template's
 	# package.json — same model as `npm create @pylonsync/pylon`. A hosted
