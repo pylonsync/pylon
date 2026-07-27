@@ -1,0 +1,201 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@source "../app/**/*.{tsx,ts,jsx,js}";
+@source "../components/**/*.{tsx,ts,jsx,js}";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------------------
+   Design tokens.
+
+   Tuned for a dense internal tool rather than a marketing page: a near-neutral
+   surface ramp, hairline borders instead of shadows, and one accent used
+   sparingly so status colour still means something. Dark is the primary theme —
+   `app/layout.tsx` sets `class="dark"` — and light is a real, tested
+   alternative, not an afterthought.
+
+   These are the same variable names shadcn/ui generates against, so
+   `npx shadcn@latest add <component>` drops in already themed.
+--------------------------------------------------------------------------- */
+:root {
+  --radius: 0.5rem;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.21 0.006 285.9);
+  --card: oklch(1 0 0);
+  --card-foreground: var(--foreground);
+  --popover: oklch(1 0 0);
+  --popover-foreground: var(--foreground);
+
+  --primary: oklch(0.55 0.204 274.5);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.968 0.002 286.4);
+  --secondary-foreground: oklch(0.27 0.006 286);
+  --muted: oklch(0.972 0.002 286.4);
+  --muted-foreground: oklch(0.53 0.013 286);
+  --accent: oklch(0.96 0.003 286.4);
+  --accent-foreground: oklch(0.27 0.006 286);
+  --destructive: oklch(0.58 0.216 27.3);
+
+  --border: oklch(0.918 0.004 286.3);
+  --input: oklch(0.918 0.004 286.3);
+  --ring: oklch(0.55 0.204 274.5);
+
+  /* Surfaces above the page: sidebar, popovers, hover rows. */
+  --surface-1: oklch(0.985 0.001 286.4);
+  --surface-2: oklch(0.968 0.002 286.4);
+
+  /* Pipeline + status. Muted on purpose — a board of saturated chips is
+     unreadable, and the eye should land on the one that's actually urgent. */
+  --stage-lead: oklch(0.62 0.03 264);
+  --stage-qualified: oklch(0.6 0.13 240);
+  --stage-proposal: oklch(0.68 0.15 78);
+  --stage-won: oklch(0.6 0.15 155);
+  --stage-lost: oklch(0.6 0.11 25);
+}
+
+.dark {
+  --background: oklch(0.165 0.004 285.9);
+  --foreground: oklch(0.93 0.002 286.3);
+  --card: oklch(0.196 0.005 285.9);
+  --card-foreground: var(--foreground);
+  --popover: oklch(0.216 0.006 285.9);
+  --popover-foreground: var(--foreground);
+
+  --primary: oklch(0.62 0.19 274.5);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.25 0.006 286);
+  --secondary-foreground: oklch(0.93 0.002 286.3);
+  --muted: oklch(0.25 0.006 286);
+  --muted-foreground: oklch(0.65 0.012 286);
+  --accent: oklch(0.26 0.006 286);
+  --accent-foreground: oklch(0.93 0.002 286.3);
+  --destructive: oklch(0.65 0.19 25);
+
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 12%);
+  --ring: oklch(0.62 0.19 274.5);
+
+  --surface-1: oklch(0.186 0.004 285.9);
+  --surface-2: oklch(0.216 0.006 285.9);
+
+  --stage-lead: oklch(0.68 0.03 264);
+  --stage-qualified: oklch(0.68 0.13 240);
+  --stage-proposal: oklch(0.75 0.14 78);
+  --stage-won: oklch(0.7 0.15 155);
+  --stage-lost: oklch(0.68 0.14 25);
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 3px);
+  --radius-md: calc(var(--radius) - 1px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+
+  --color-stage-lead: var(--stage-lead);
+  --color-stage-qualified: var(--stage-qualified);
+  --color-stage-proposal: var(--stage-proposal);
+  --color-stage-won: var(--stage-won);
+  --color-stage-lost: var(--stage-lost);
+}
+
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-border, currentColor);
+    outline-color: var(--color-ring);
+  }
+
+  html {
+    /* An internal tool is a fixed shell with scrolling panes, not a scrolling
+       document — this keeps the sidebar and header from drifting. */
+    height: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  body {
+    height: 100%;
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    /* 13px is the density these screens are designed at; the slight negative
+       tracking is what keeps Inter from looking loose at that size. */
+    font-size: 13px;
+    line-height: 1.5;
+    letter-spacing: -0.006em;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button {
+    cursor: pointer;
+  }
+
+  /* Numbers that sit in columns must not jitter as they change. */
+  .tabular,
+  table {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Thin, self-effacing scrollbars — the board has several at once. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklab, var(--color-foreground) 18%, transparent)
+      transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: color-mix(in oklab, var(--color-foreground) 16%, transparent);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in oklab, var(--color-foreground) 28%, transparent);
+  }
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* Only show focus rings for keyboard users; a mouse click shouldn't ring. */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
+  }
+}
+
+@layer components {
+  /* A hairline that reads at 1px on any DPR without the doubling you get from
+     a plain border on retina. */
+  .hairline {
+    box-shadow: inset 0 -1px 0 0 var(--color-border);
+  }
+}

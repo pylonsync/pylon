@@ -176,6 +176,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	invoices: {
+		blurb:
+			"Invoicing — clients, line items, and payments, with totals and ageing DERIVED rather than stored (integer cents throughout). Recording a payment flips the balance and status on every open tab. ⌘K search. Seeds a demo book, including an overdue and a part-paid invoice. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 	"ai-chat": {
 		blurb:
 			"Streaming AI chat — token streaming via the built-in /api/ai/stream (your key stays server-side), multi-conversation history that's owner-scoped + synced across tabs in realtime, guest or signed-in. Set PYLON_AI_API_KEY to enable. One SSR app.",
@@ -262,6 +268,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template directory    # searchable directory + facets + live upvotes
   npm create @pylonsync/pylon my-app --template crm          # sales CRM — live pipeline board, ⌘K, activity timeline
   npm create @pylonsync/pylon my-app --template helpdesk     # support inbox — SLA triage, shared threads, internal notes
+  npm create @pylonsync/pylon my-app --template invoices     # invoicing — line items, payments, derived ageing
   npm create @pylonsync/pylon my-app --template ai-chat      # streaming LLM chat + synced history
   npm create @pylonsync/pylon my-app --template ai-studio    # generative media studio + live gallery
 `);
