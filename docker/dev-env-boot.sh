@@ -15,8 +15,15 @@
 # Inputs (env):
 #   PYLON_DEV_WORKSPACE      workspace dir on the volume   (default /data/workspace)
 #   PYLON_PORT               HTTP port pylon dev binds     (default 8080)
-#   PYLON_DEV_SEED_URL       tarball to seed the workspace (http(s):// | file:// | path)
-#                            unset  = start from an empty workspace
+#   PYLON_DEV_TEMPLATE       create-pylon template to scaffold the workspace from
+#                            (default, todo, shop, chat, crm, …) — the SAME
+#                            templates `npm create @pylonsync/pylon` offers,
+#                            scaffolded by the same code, baked into the image
+#                            at /pylon/packages/create-pylon
+#   PYLON_DEV_SEED_URL       legacy: tarball to seed the workspace
+#                            (http(s):// | file:// | path). Only consulted when
+#                            PYLON_DEV_TEMPLATE is unset.
+#                            neither = start from an empty workspace
 #   PYLON_DEV_FILE_API_TOKEN bearer token gating the file-write API (set by the
 #                            control plane; unset = open, local dev only)
 #   PYLON_BIN                pylon binary to exec          (default `pylon` on PATH)
@@ -41,20 +48,40 @@ set -eu
 WORKSPACE="${PYLON_DEV_WORKSPACE:-/data/workspace}"
 PORT="${PYLON_PORT:-8080}"
 SEED_URL="${PYLON_DEV_SEED_URL:-}"
+TEMPLATE="${PYLON_DEV_TEMPLATE:-}"
 PYLON_BIN="${PYLON_BIN:-pylon}"
 MARKER="$WORKSPACE/.pylon-seeded"
+CREATE_PYLON="/pylon/packages/create-pylon/bin/create-pylon.js"
 
 if [ ! -f "$MARKER" ]; then
 	echo "[dev-boot] seeding workspace at $WORKSPACE"
 	mkdir -p "$WORKSPACE"
-	if [ -n "$SEED_URL" ]; then
+	if [ -n "$TEMPLATE" ] && [ -f "$CREATE_PYLON" ]; then
+		# Scaffold the SAME templates `npm create @pylonsync/pylon` offers, using
+		# the scaffolder itself — the image already ships packages/, so the
+		# templates and their substitution logic are right here. Previously the
+		# cloud carried its own base64'd copy of one template plus a generator
+		# that hand-wrote app code, which drifted from the real templates and
+		# never picked up their component kit.
+		#
+		# create-pylon refuses a non-empty target, and writes into ./<name>, so
+		# run it from the workspace's parent with the workspace as the name.
+		echo "[dev-boot] scaffolding template '$TEMPLATE'"
+		(
+			cd "$(dirname "$WORKSPACE")" &&
+				bun "$CREATE_PYLON" "$(basename "$WORKSPACE")" \
+					--template "$TEMPLATE" --skip-install --no-skill --bun </dev/null
+		) || echo "[dev-boot] scaffold failed — continuing with an empty workspace"
+	elif [ -n "$SEED_URL" ]; then
+		# Legacy tarball seed. Still honoured so an env provisioned before the
+		# template switch can restart, and for local one-off workspaces.
 		case "$SEED_URL" in
 		http://* | https://*) curl -fsSL "$SEED_URL" | tar -xz -C "$WORKSPACE" ;;
 		file://*) tar -xzf "${SEED_URL#file://}" -C "$WORKSPACE" ;;
 		*) tar -xzf "$SEED_URL" -C "$WORKSPACE" ;;
 		esac
 	else
-		echo "[dev-boot] no PYLON_DEV_SEED_URL — starting from an empty workspace"
+		echo "[dev-boot] no PYLON_DEV_TEMPLATE or PYLON_DEV_SEED_URL — starting from an empty workspace"
 	fi
 	# Deps come from npm, pinned to the image version by the template's
 	# package.json — same model as `npm create @pylonsync/pylon`. A hosted
@@ -119,6 +146,16 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	command -v opencode >/dev/null 2>&1; then
 	OC_PORT="${PYLON_DEV_OPENCODE_PORT:-4096}"
 	OC_CFG="${HOME:-/app}/.config/opencode"
+	# OpenCode keeps every session — prompts, messages, tool calls, per-message
+	# diffs — in a SQLite db under $XDG_DATA_HOME/opencode. That defaults to
+	# $HOME/.local/share, which on Fly is the EPHEMERAL rootfs: only the volume
+	# survives a stop/start. A dev env auto-sleeps when idle, so each wake came
+	# back with an empty db and the whole build history read as "agent activity
+	# is temporarily unavailable" — on a workspace whose builds had in fact
+	# landed. Keep the db beside the workspace, on the volume.
+	OC_DATA="${PYLON_DEV_AGENT_STATE:-$(dirname "$WORKSPACE")/opencode-state}"
+	mkdir -p "$OC_DATA"
+	export XDG_DATA_HOME="$OC_DATA"
 	mkdir -p "$OC_CFG"
 	# Split the allowed models across TWO providers, because OpenCode picks the
 	# wire protocol from the provider's npm package and that package can only be
