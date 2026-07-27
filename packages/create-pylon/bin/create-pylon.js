@@ -164,6 +164,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	crm: {
+		blurb:
+			"Sales CRM — companies, contacts, and deals on a LIVE pipeline board: drag a deal and it moves on every teammate's board instantly. ⌘K search, activity timeline, weighted forecast, dense keyboard-first UI. Seeds a demo pipeline on first sign-in. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 	"ai-chat": {
 		blurb:
 			"Streaming AI chat — token streaming via the built-in /api/ai/stream (your key stays server-side), multi-conversation history that's owner-scoped + synced across tabs in realtime, guest or signed-in. Set PYLON_AI_API_KEY to enable. One SSR app.",
@@ -248,6 +254,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template agency       # studio/agency + live project availability
   npm create @pylonsync/pylon my-app --template marketplace  # two-sided marketplace + realtime offers
   npm create @pylonsync/pylon my-app --template directory    # searchable directory + facets + live upvotes
+  npm create @pylonsync/pylon my-app --template crm          # sales CRM — live pipeline board, ⌘K, activity timeline
   npm create @pylonsync/pylon my-app --template ai-chat      # streaming LLM chat + synced history
   npm create @pylonsync/pylon my-app --template ai-studio    # generative media studio + live gallery
 `);
