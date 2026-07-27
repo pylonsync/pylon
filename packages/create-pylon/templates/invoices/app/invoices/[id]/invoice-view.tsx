@@ -13,20 +13,20 @@ import { TotalsPanel } from "@/components/totals-panel";
 import { PaymentDialog } from "@/components/payment-dialog";
 import { relativeTime } from "@/lib/format";
 import { STATUSES, displayStatus, money, totals } from "@/lib/billing";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "../../workspace";
 
 export function InvoiceView({
-  email,
   invoiceId,
 }: {
-  email: string;
   invoiceId: string;
 }) {
   const router = useRouter();
   const [payOpen, setPayOpen] = useState(false);
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Invoices" description="Your team shares one set of books. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const invoice = data.invoices.find((i) => i.id === invoiceId);
 
@@ -239,7 +239,8 @@ export function InvoiceView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }
 

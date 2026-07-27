@@ -7,6 +7,7 @@ import { DataTable, type ColumnDef } from "@/components/data-table";
 import { EmptyState } from "@/components/empty-state";
 import { relativeTime } from "@/lib/format";
 import { reasonById, signedQuantity } from "@/lib/stock";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type MovementRow } from "../workspace";
 
 /**
@@ -15,9 +16,10 @@ import { Workspace, type MovementRow } from "../workspace";
  * past valuation and make the current level unexplainable. Corrections are new
  * rows in the opposite direction.
  */
-export function MovementsView({ email }: { email: string }) {
+export function MovementsView() {
   return (
-    <Workspace email={email} pathname="/movements">
+    <RequireAuth title="Inventory" description="Your team shares one stock ledger. Anyone with an account sees it.">
+      <Workspace pathname="/movements">
       {(data) => {
         const columns: ColumnDef<MovementRow>[] = [
           {
@@ -98,6 +100,7 @@ export function MovementsView({ email }: { email: string }) {
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

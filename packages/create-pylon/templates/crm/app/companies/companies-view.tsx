@@ -10,13 +10,15 @@ import { EmptyState } from "@/components/empty-state";
 import { RecordDialog } from "@/components/record-dialog";
 import { Avatar } from "@/components/avatar";
 import { money, relativeTime } from "@/lib/pipeline";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type CompanyRow, type DealRow } from "../workspace";
 
-export function CompaniesView({ email }: { email: string }) {
+export function CompaniesView() {
   const [open, setOpen] = useState(false);
 
   return (
-    <Workspace email={email} pathname="/companies">
+    <RequireAuth title="CRM" description="Your team shares one pipeline. Anyone with an account sees it.">
+      <Workspace pathname="/companies">
       {(data) => {
         // Pipeline per company, computed here rather than stored — one less
         // thing to keep in sync when a deal moves.
@@ -124,6 +126,7 @@ export function CompaniesView({ email }: { email: string }) {
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

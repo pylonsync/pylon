@@ -11,14 +11,13 @@ import { EmptyState } from "@/components/empty-state";
 import { TicketList } from "@/components/ticket-list";
 import { NewTicketDialog } from "@/components/new-ticket-dialog";
 import { STATUSES, applyFilter, counts, type Filter } from "@/lib/tickets";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "./workspace";
 
 export function InboxView({
-  email,
   openNew,
   initialFilter,
 }: {
-  email: string;
   openNew?: boolean;
   initialFilter?: string;
 }) {
@@ -47,7 +46,8 @@ export function InboxView({
   }, []);
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Helpdesk" description="Your team shares one queue. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const filter: Filter = {
           ...(status === "all" ? {} : { status }),
@@ -142,6 +142,7 @@ export function InboxView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

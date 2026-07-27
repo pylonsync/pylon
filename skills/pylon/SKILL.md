@@ -60,7 +60,7 @@ my-app/
   components/            # your components (see the layering table below)
     ui/                  #   shadcn primitives — button, card, input, label,
                          #   select, badge, table, textarea
-  components.json        # shadcn config — `npx shadcn@latest add <name>` works
+  components.json        # shadcn config — `bunx shadcn@latest add <name>` works
   lib/utils.ts           # `cn` (clsx + tailwind-merge)
   public/                # static assets served verbatim at the root
   package.json           # deps: @pylonsync/sdk, @pylonsync/functions, @pylonsync/react, @pylonsync/client, react, react-dom
@@ -549,7 +549,7 @@ Pylon natively server-renders React from the same server that runs your backend 
   Need a primitive that isn't there (dialog, dropdown, tabs, popover, …)? Add it rather than hand-rolling:
 
   ```sh
-  npx shadcn@latest add dialog
+  bunx shadcn@latest add dialog     # npx if you're on Node
   ```
 
   `components.json` is preconfigured (new-york, zinc, `@/components/ui`), so the component lands with the right imports and tokens.

@@ -16,20 +16,20 @@ import {
   parseDuration,
   progress,
 } from "@/lib/work";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type ProjectRow } from "./workspace";
 
 export function ProjectsView({
-  email,
   openNew,
 }: {
-  email: string;
   openNew?: boolean;
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(Boolean(openNew));
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Projects" description="Your team shares one set of projects. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const columns: ColumnDef<ProjectRow>[] = [
           {
@@ -176,6 +176,7 @@ export function ProjectsView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

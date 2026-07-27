@@ -10,13 +10,15 @@ import { EmptyState } from "@/components/empty-state";
 import { RecordDialog } from "@/components/record-dialog";
 import { Avatar } from "@/components/avatar";
 import { relativeTime } from "@/lib/pipeline";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type ContactRow } from "../workspace";
 
-export function ContactsView({ email }: { email: string }) {
+export function ContactsView() {
   const [open, setOpen] = useState(false);
 
   return (
-    <Workspace email={email} pathname="/contacts">
+    <RequireAuth title="CRM" description="Your team shares one pipeline. Anyone with an account sees it.">
+      <Workspace pathname="/contacts">
       {(data) => {
         const columns: ColumnDef<ContactRow>[] = [
           {
@@ -134,6 +136,7 @@ export function ContactsView({ email }: { email: string }) {
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

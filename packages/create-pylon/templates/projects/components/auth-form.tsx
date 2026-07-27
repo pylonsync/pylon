@@ -16,9 +16,10 @@ import { Label } from "@/components/ui/label";
  * then `persistSession` writes the token so the sync engine and `callFn`
  * authenticate as this user on the next load.
  *
- * The navigation is a full `assign`, not a client route change, so the SSR
- * runtime re-resolves auth from the HttpOnly cookie and the first paint of the
- * workspace is already signed in.
+ * No navigation afterwards: `persistSession` notifies the sync engine and the
+ * client-side gate swaps the app in. Reloading would hand the decision to the
+ * SSR cookie, which browsers withhold inside the builder's cross-site preview
+ * iframe — that's the sign-in loop this avoids.
  */
 export function AuthForm() {
   const [mode, setMode] = useState<"login" | "signup">("login");
@@ -36,8 +37,10 @@ export function AuthForm() {
         mode === "login"
           ? await passwordLogin({ email, password })
           : await passwordRegister({ email, password });
+      // No navigation: persistSession notifies the sync engine, RequireAuth
+      // re-renders, and the app appears in place. A full page load here would
+      // depend on the SSR session cookie, which a cross-site iframe withholds.
       persistSession(session);
-      window.location.assign("/");
     } catch (err) {
       setError(messageFor(err));
       setPending(false);

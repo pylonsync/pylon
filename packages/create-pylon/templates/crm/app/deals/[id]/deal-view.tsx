@@ -11,13 +11,15 @@ import { ActivityTimeline } from "@/components/activity-timeline";
 import { StageBadge } from "@/components/stage-badge";
 import { Avatar } from "@/components/avatar";
 import { PIPELINE, daysUntil, money, relativeTime } from "@/lib/pipeline";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "../../workspace";
 
-export function DealView({ email, dealId }: { email: string; dealId: string }) {
+export function DealView({ dealId }: { dealId: string }) {
   const router = useRouter();
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="CRM" description="Your team shares one pipeline. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const deal = data.deals.find((d) => d.id === dealId);
 
@@ -169,7 +171,8 @@ export function DealView({ email, dealId }: { email: string; dealId: string }) {
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }
 

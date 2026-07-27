@@ -9,13 +9,13 @@ interface LayoutProps {
  * lives in `app/workspace.tsx` instead, because it needs the synced data; this
  * layer only sets up the page.
  *
- * `class="dark"` makes dark the default theme. The light tokens in globals.css
- * are complete and tested, so removing the class flips the whole app; swap it
- * for a stored preference when you want a toggle.
+ * Light by default. The dark tokens in globals.css are complete, so adding
+ * `className="dark"` here flips the whole app — or wire it to a stored
+ * preference, or to `prefers-color-scheme`, when you want a toggle.
  */
 export default function RootLayout({ children }: LayoutProps) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en">
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />

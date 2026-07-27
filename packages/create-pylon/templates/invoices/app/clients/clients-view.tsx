@@ -10,13 +10,15 @@ import { EmptyState } from "@/components/empty-state";
 import { RecordDialog } from "@/components/record-dialog";
 import { Avatar } from "@/components/avatar";
 import { money, totals } from "@/lib/billing";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type ClientRow } from "../workspace";
 
-export function ClientsView({ email }: { email: string }) {
+export function ClientsView() {
   const [open, setOpen] = useState(false);
 
   return (
-    <Workspace email={email} pathname="/clients">
+    <RequireAuth title="Invoices" description="Your team shares one set of books. Anyone with an account sees it.">
+      <Workspace pathname="/clients">
       {(data) => {
         // Outstanding per client, derived rather than stored — one less thing
         // to keep in sync when a payment lands.
@@ -125,6 +127,7 @@ export function ClientsView({ email }: { email: string }) {
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

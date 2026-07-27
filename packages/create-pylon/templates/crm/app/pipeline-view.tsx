@@ -10,13 +10,12 @@ import { MetricsBar } from "@/components/metrics-bar";
 import { PipelineBoard } from "@/components/pipeline-board";
 import { BoardSkeleton } from "@/components/board-skeleton";
 import { DealDialog } from "@/components/deal-dialog";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "./workspace";
 
 export function PipelineView({
-  email,
   openNew,
 }: {
-  email: string;
   openNew?: boolean;
 }) {
   const router = useRouter();
@@ -42,7 +41,8 @@ export function PipelineView({
   }, []);
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="CRM" description="Your team shares one pipeline. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => (
         <>
           <PageHeader title="Pipeline" count={data.deals.length}>
@@ -94,6 +94,7 @@ export function PipelineView({
           />
         </>
       )}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

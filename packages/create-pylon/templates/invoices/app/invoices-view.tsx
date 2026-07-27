@@ -16,13 +16,12 @@ import {
   money,
   totals,
 } from "@/lib/billing";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type InvoiceRow } from "./workspace";
 
 export function InvoicesView({
-  email,
   openNew,
 }: {
-  email: string;
   openNew?: boolean;
 }) {
   const router = useRouter();
@@ -67,7 +66,8 @@ export function InvoicesView({
   }, [creating]);
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Invoices" description="Your team shares one set of books. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const columns: ColumnDef<InvoiceRow>[] = [
           {
@@ -178,6 +178,7 @@ export function InvoicesView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

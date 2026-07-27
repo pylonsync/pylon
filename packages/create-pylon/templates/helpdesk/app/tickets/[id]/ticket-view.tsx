@@ -13,19 +13,19 @@ import { SlaIndicator } from "@/components/sla-indicator";
 import { Avatar } from "@/components/avatar";
 import { relativeTime } from "@/lib/format";
 import { PRIORITIES, STATUSES, ticketNumber } from "@/lib/tickets";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "../../workspace";
 
 export function TicketView({
-  email,
   ticketId,
 }: {
-  email: string;
   ticketId: string;
 }) {
   const router = useRouter();
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Helpdesk" description="Your team shares one queue. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const ticket = data.tickets.find((t) => t.id === ticketId);
 
@@ -159,6 +159,7 @@ export function TicketView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

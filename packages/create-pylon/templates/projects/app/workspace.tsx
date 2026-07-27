@@ -47,21 +47,28 @@ export interface WorkspaceData {
  * a standup doesn\'t start with reconciling two views of the work.
  */
 export function Workspace({
-  email,
   pathname,
   children,
 }: {
-  email: string;
   pathname: string;
   children: (data: WorkspaceData) => React.ReactNode;
 }) {
   const router = useRouter();
-  const { signOut } = useAuth();
+  // The signed-in identity comes from the CLIENT session, not from an SSR
+  // prop: the session cookie is SameSite=Lax and browsers withhold it inside
+  // the builder's cross-site preview iframe, so a server-resolved email would
+  // be empty exactly where this app is most often viewed.
+  const { signOut, userId } = useAuth();
   const { data: projects, loading } = db.useQuery<ProjectRow>("Project");
   const { data: clients } = db.useQuery<ClientRow>("Client");
   const { data: tasks } = db.useQuery<TaskRow>("Task");
   const { data: entries } = db.useQuery<TimeEntryRow>("TimeEntry");
   const { data: users } = db.useQuery<UserRow>("User");
+
+  // Whoever is signed in, named from the synced User row rather than an
+  // SSR prop — see the note on useAuth above.
+  const signedInEmail =
+    (users ?? []).find((user) => user.id === userId)?.email ?? "";
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const seeded = useRef(false);
@@ -153,17 +160,14 @@ export function Workspace({
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         workspace="Projects"
-        email={email}
+        email={signedInEmail}
         pathname={pathname}
         counts={{
           "/": projectList.filter((p) => p.status === "active").length,
           "/clients": clientList.length,
         }}
         onOpenCommand={() => setPaletteOpen(true)}
-        onSignOut={async () => {
-          await signOut();
-          window.location.assign("/login");
-        }}
+        onSignOut={() => void signOut()}
       />
       <main className="flex min-w-0 flex-1 flex-col">{children(data)}</main>
 

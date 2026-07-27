@@ -1,4 +1,4 @@
-import React, { use } from "react";
+import React from "react";
 import type { Metadata, PageProps } from "@pylonsync/react";
 import { DealView } from "./deal-view";
 
@@ -8,16 +8,6 @@ export const metadata: Metadata = {
 };
 
 /** `app/deals/[id]/page.tsx` → `/deals/:id`. */
-export default function DealPage({
-  auth,
-  response,
-  params,
-  serverData,
-}: PageProps<{ id: string }>) {
-  if (!auth.user_id || auth.user_id.startsWith("guest_")) {
-    response.redirect("/login");
-    return null;
-  }
-  const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
-  return <DealView email={me?.email ?? ""} dealId={params.id} />;
+export default function DealPage({ params }: PageProps<{ id: string }>) {
+  return <DealView dealId={params.id} />;
 }

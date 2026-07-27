@@ -11,14 +11,16 @@ import { RecordDialog } from "@/components/record-dialog";
 import { Avatar } from "@/components/avatar";
 import { relativeTime } from "@/lib/format";
 import { isOpen } from "@/lib/tickets";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type CustomerRow } from "../workspace";
 
-export function CustomersView({ email }: { email: string }) {
+export function CustomersView() {
   const router = useRouter();
   const [open, setOpen] = useState(false);
 
   return (
-    <Workspace email={email} pathname="/customers">
+    <RequireAuth title="Helpdesk" description="Your team shares one queue. Anyone with an account sees it.">
+      <Workspace pathname="/customers">
       {(data) => {
         // Ticket counts per customer, derived rather than stored — one less
         // thing to keep in sync when a ticket is opened or solved.
@@ -135,6 +137,7 @@ export function CustomersView({ email }: { email: string }) {
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

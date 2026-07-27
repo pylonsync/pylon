@@ -21,6 +21,10 @@
 #                            scaffolded by the same code, baked into the image
 #                            at /pylon/packages/create-pylon
 #                            unset = start from an empty workspace
+#   PYLON_DEV_APP_NAME       display name for the scaffolded app (defaults to
+#                            "app"). Becomes the package name, the page title,
+#                            and the session cookie name — the control plane
+#                            passes the project's name so it isn't "workspace"
 #   PYLON_DEV_FILE_API_TOKEN bearer token gating the file-write API (set by the
 #                            control plane; unset = open, local dev only)
 #   PYLON_BIN                pylon binary to exec          (default `pylon` on PATH)
@@ -57,14 +61,27 @@ if [ ! -f "$MARKER" ]; then
 		# the scaffolder itself — the image already ships packages/, so the
 		# templates and their substitution logic are right here.
 		#
-		# create-pylon refuses a non-empty target, and writes into ./<name>, so
-		# run it from the workspace's parent with the workspace as the name.
-		echo "[dev-boot] scaffolding template '$TEMPLATE'"
+		# create-pylon names the app after the directory it creates, so
+		# scaffolding straight into /data/workspace produced an app literally
+		# called "workspace" — visible in the page title, the manifest, and the
+		# session cookie (`workspace_session`). Build it under the real name in a
+		# temp dir, then move the contents into place.
+		APP_NAME="$(printf '%s' "${PYLON_DEV_APP_NAME:-app}" |
+			tr -c 'A-Za-z0-9 _-' '-' | sed 's/^[ -]*//;s/[ -]*$//')"
+		[ -n "$APP_NAME" ] || APP_NAME="app"
+		echo "[dev-boot] scaffolding template '$TEMPLATE' as '$APP_NAME'"
+		STAGE="$(mktemp -d)"
 		(
-			cd "$(dirname "$WORKSPACE")" &&
-				bun "$CREATE_PYLON" "$(basename "$WORKSPACE")" \
+			cd "$STAGE" &&
+				bun "$CREATE_PYLON" "$APP_NAME" \
 					--template "$TEMPLATE" --skip-install --no-skill --bun </dev/null
 		) || echo "[dev-boot] scaffold command failed"
+		# `.` copies dotfiles too (.gitignore, .env.example) — a plain glob drops them.
+		if [ -d "$STAGE/$APP_NAME" ]; then
+			cp -a "$STAGE/$APP_NAME/." "$WORKSPACE/" ||
+				echo "[dev-boot] could not move the scaffold into the workspace"
+		fi
+		rm -rf "$STAGE"
 	elif [ -n "$TEMPLATE" ]; then
 		# A template was asked for but this image can't scaffold it. Say so —
 		# the alternative is an empty workspace and a `pylon dev` that exits

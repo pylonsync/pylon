@@ -13,14 +13,13 @@ import { SummaryBar } from "@/components/summary-bar";
 import { StockLevel } from "@/components/stock-level";
 import { MovementDialog } from "@/components/movement-dialog";
 import { money, parseAmount, parseCount, stockState } from "@/lib/stock";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type ProductRow } from "./workspace";
 
 export function ProductsView({
-  email,
   openNew,
   initialFilter,
 }: {
-  email: string;
   openNew?: boolean;
   initialFilter?: string;
 }) {
@@ -53,7 +52,8 @@ export function ProductsView({
   }, []);
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Inventory" description="Your team shares one stock ledger. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const level = (id: string) => data.levels.get(id) ?? 0;
 
@@ -208,6 +208,7 @@ export function ProductsView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

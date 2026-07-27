@@ -13,13 +13,12 @@ import { BoardSkeleton } from "@/components/board-skeleton";
 import { BudgetBar } from "@/components/budget-bar";
 import { TimeDialog } from "@/components/time-dialog";
 import { PROJECT_STATUSES, duration, minutesForProject, progress } from "@/lib/work";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "../../workspace";
 
 export function ProjectView({
-  email,
   projectId,
 }: {
-  email: string;
   projectId: string;
 }) {
   const router = useRouter();
@@ -27,7 +26,8 @@ export function ProjectView({
   const [timeFor, setTimeFor] = useState<{ id: string; title: string } | null>(null);
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Projects" description="Your team shares one set of projects. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const project = data.projects.find((p) => p.id === projectId);
 
@@ -174,6 +174,7 @@ export function ProjectView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }

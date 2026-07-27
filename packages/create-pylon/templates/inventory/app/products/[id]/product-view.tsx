@@ -10,19 +10,19 @@ import { StockLevel } from "@/components/stock-level";
 import { MovementDialog } from "@/components/movement-dialog";
 import { relativeTime } from "@/lib/format";
 import { money, reasonById, signedQuantity } from "@/lib/stock";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "../../workspace";
 
 export function ProductView({
-  email,
   productId,
 }: {
-  email: string;
   productId: string;
 }) {
   const [moveOpen, setMoveOpen] = useState(false);
 
   return (
-    <Workspace email={email} pathname="/">
+    <RequireAuth title="Inventory" description="Your team shares one stock ledger. Anyone with an account sees it.">
+      <Workspace pathname="/">
       {(data) => {
         const product = data.products.find((p) => p.id === productId);
 
@@ -164,7 +164,8 @@ export function ProductView({
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }
 

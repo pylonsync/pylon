@@ -73,22 +73,29 @@ export interface WorkspaceData {
  * so there's one behaviour to reason about rather than two.
  */
 export function Workspace({
-  email,
   pathname,
   children,
 }: {
-  email: string;
   pathname: string;
   children: (data: WorkspaceData) => React.ReactNode;
 }) {
   const router = useRouter();
-  const { signOut } = useAuth();
+  // The signed-in identity comes from the CLIENT session, not from an SSR
+  // prop: the session cookie is SameSite=Lax and browsers withhold it inside
+  // the builder's cross-site preview iframe, so a server-resolved email would
+  // be empty exactly where this app is most often viewed.
+  const { signOut, userId } = useAuth();
   const { data: companies, loading: loadingCompanies } =
     db.useQuery<CompanyRow>("Company");
   const { data: contacts } = db.useQuery<ContactRow>("Contact");
   const { data: deals } = db.useQuery<DealRow>("Deal");
   const { data: activities } = db.useQuery<ActivityRow>("Activity");
   const { data: users } = db.useQuery<UserRow>("User");
+
+  // Whoever is signed in, named from the synced User row rather than an
+  // SSR prop — see the note on useAuth above.
+  const signedInEmail =
+    (users ?? []).find((user) => user.id === userId)?.email ?? "";
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const seeded = useRef(false);
@@ -187,19 +194,14 @@ export function Workspace({
     <div className="flex h-screen overflow-hidden">
       <Sidebar
         workspace="CRM"
-        email={email}
+        email={signedInEmail}
         pathname={pathname}
         counts={{
           "/companies": companyList.length,
           "/contacts": contactList.length,
         }}
         onOpenCommand={() => setPaletteOpen(true)}
-        onSignOut={async () => {
-          await signOut();
-          // Full navigation so the SSR runtime re-resolves auth from the
-          // cookie and the login page renders server-side.
-          window.location.assign("/login");
-        }}
+        onSignOut={() => void signOut()}
       />
       <main className="flex min-w-0 flex-1 flex-col">{children(data)}</main>
 

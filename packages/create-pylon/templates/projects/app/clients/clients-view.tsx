@@ -10,13 +10,15 @@ import { EmptyState } from "@/components/empty-state";
 import { RecordDialog } from "@/components/record-dialog";
 import { Avatar } from "@/components/avatar";
 import { billableCents, duration, minutesForProject, money } from "@/lib/work";
+import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type ClientRow } from "../workspace";
 
-export function ClientsView({ email }: { email: string }) {
+export function ClientsView() {
   const [open, setOpen] = useState(false);
 
   return (
-    <Workspace email={email} pathname="/clients">
+    <RequireAuth title="Projects" description="Your team shares one set of projects. Anyone with an account sees it.">
+      <Workspace pathname="/clients">
       {(data) => {
         const forClient = (clientId: string) =>
           data.projects.filter((p) => p.clientId === clientId);
@@ -121,6 +123,7 @@ export function ClientsView({ email }: { email: string }) {
           </>
         );
       }}
-    </Workspace>
+      </Workspace>
+    </RequireAuth>
   );
 }
