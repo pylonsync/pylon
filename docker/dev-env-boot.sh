@@ -64,7 +64,13 @@ if [ ! -f "$MARKER" ]; then
 			cd "$(dirname "$WORKSPACE")" &&
 				bun "$CREATE_PYLON" "$(basename "$WORKSPACE")" \
 					--template "$TEMPLATE" --skip-install --no-skill --bun </dev/null
-		) || echo "[dev-boot] scaffold failed — continuing with an empty workspace"
+		) || echo "[dev-boot] scaffold command failed"
+	elif [ -n "$TEMPLATE" ]; then
+		# A template was asked for but this image can't scaffold it. Say so —
+		# the alternative is an empty workspace and a `pylon dev` that exits
+		# DEV_NO_ENTRY, which reads as a hang rather than a version mismatch.
+		echo "[dev-boot] PYLON_DEV_TEMPLATE='$TEMPLATE' but $CREATE_PYLON is missing" >&2
+		echo "[dev-boot] this image is too old to scaffold templates" >&2
 	else
 		echo "[dev-boot] no PYLON_DEV_TEMPLATE — starting from an empty workspace"
 	fi
@@ -94,8 +100,23 @@ if [ ! -f "$MARKER" ]; then
 			git commit -qm "Starter workspace" 2>/dev/null
 		) || echo "[dev-boot] git init skipped (non-fatal)"
 	fi
-	touch "$MARKER"
-	echo "[dev-boot] seed complete"
+	# Only mark the workspace seeded if seeding actually produced an app.
+	#
+	# Touching this unconditionally turned a recoverable failure into a
+	# permanent one: a scaffold that produced nothing still marked the volume
+	# done, so every later boot skipped seeding, `pylon dev` exited
+	# DEV_NO_ENTRY, and the machine crash-looped to Fly's restart cap with no
+	# way back. Leaving the marker off means the next boot retries — which is
+	# all it takes when the cause was a bad image or a transient failure.
+	#
+	# An intentionally empty workspace (no template requested) is still marked,
+	# since empty is the asked-for result there and retrying would never end.
+	if [ -z "$TEMPLATE" ] || [ -f "$WORKSPACE/app.ts" ]; then
+		touch "$MARKER"
+		echo "[dev-boot] seed complete"
+	else
+		echo "[dev-boot] seeding produced no app.ts — NOT marking seeded, will retry on next boot" >&2
+	fi
 fi
 
 # Git refuses to touch a repository owned by another user ("detected dubious
