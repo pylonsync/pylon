@@ -188,6 +188,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	projects: {
+		blurb:
+			"Client project delivery — a LIVE task board (drag and it moves on every teammate's board), plus time logged as an APPEND-ONLY ledger so concurrent entries can't be lost and every billed hour traces to who logged it. Budget tracking, billable rollups. Seeds two demo projects. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
 	"ai-chat": {
 		blurb:
 			"Streaming AI chat — token streaming via the built-in /api/ai/stream (your key stays server-side), multi-conversation history that's owner-scoped + synced across tabs in realtime, guest or signed-in. Set PYLON_AI_API_KEY to enable. One SSR app.",
@@ -276,6 +282,7 @@ Examples:
   npm create @pylonsync/pylon my-app --template helpdesk     # support inbox — SLA triage, shared threads, internal notes
   npm create @pylonsync/pylon my-app --template invoices     # invoicing — line items, payments, derived ageing
   npm create @pylonsync/pylon my-app --template inventory    # stock control — append-only ledger, reorder flags
+  npm create @pylonsync/pylon my-app --template projects     # client delivery — task board, time tracking, budgets
   npm create @pylonsync/pylon my-app --template ai-chat      # streaming LLM chat + synced history
   npm create @pylonsync/pylon my-app --template ai-studio    # generative media studio + live gallery
 `);

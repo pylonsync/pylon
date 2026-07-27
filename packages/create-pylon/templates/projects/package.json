@@ -1,0 +1,39 @@
+{
+  "name": "__APP_NAME_KEBAB__",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pylon dev",
+    "deploy": "pylon deploy",
+    "check": "tsc --noEmit",
+    "test": "pylon test"
+  },
+  "dependencies": {
+    "@pylonsync/react": "^__PYLON_VERSION__",
+    "@pylonsync/sdk": "^__PYLON_VERSION__",
+    "@pylonsync/functions": "^__PYLON_VERSION__",
+    "@pylonsync/client": "^__PYLON_VERSION__",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.3.0",
+    "@tailwindcss/cli": "^4.3.0",
+    "tw-animate-css": "^1.2.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^2.5.0",
+    "lucide-react": "^0.460.0",
+    "@radix-ui/react-dialog": "^1.1.4",
+    "@radix-ui/react-slot": "^1.1.0"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "^20.10.0",
+    "@pylonsync/cli": "^__PYLON_VERSION__",
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "typescript": "^5.6.0"
+  }
+}
