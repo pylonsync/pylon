@@ -37,6 +37,120 @@ pub trait PolicyDataResolver: Send + Sync {
     fn entity_exists(&self, entity: &str, conditions: &[(Vec<String>, serde_json::Value)]) -> bool;
 }
 
+// ---------------------------------------------------------------------------
+// Per-scan `exists(...)` memoization
+// ---------------------------------------------------------------------------
+
+thread_local! {
+    /// Active only inside an [`ExistsMemo`] scope. `None` means "don't
+    /// memoize" — every other evaluation path (a single row read, a write
+    /// check) hits the store directly, exactly as before.
+    static EXISTS_MEMO: std::cell::RefCell<Option<HashMap<String, bool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Memoize `exists(...)` results for the duration of one row scan.
+///
+/// Read policies are evaluated PER ROW, and a tenant gate is typically the
+/// same question for every row of the scan — Revtrail's stat tables are gated
+/// on
+///
+/// ```text
+/// auth.tenantId == data.orgId && (
+///   exists(StripeSubscription where referenceId == data.orgId and status == "active") || …
+/// )
+/// ```
+///
+/// which, over a full snapshot, asked the store the same three questions once
+/// per row: thousands of identical subqueries per dashboard load, and the
+/// dominant cost of the request.
+///
+/// Scoped rather than global on purpose. The cache lives on the stack of one
+/// scan and is dropped with it, so a subscription that lapses is visible on
+/// the very next request — a global or TTL cache would make an authorization
+/// input stale for a window, which is not a trade worth making for a read
+/// gate.
+///
+/// Keyed on the entity plus the fully-resolved condition values, so two rows
+/// with different `orgId` do NOT share an answer. Correctness here is
+/// load-bearing: a key that collapsed distinct tenants would leak rows.
+pub struct ExistsMemo {
+    _private: (),
+}
+
+impl ExistsMemo {
+    /// Begin memoizing on this thread. Nested scopes are safe — the inner one
+    /// reuses the outer's map and leaves teardown to the outermost.
+    pub fn scope() -> Self {
+        EXISTS_MEMO.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.is_none() {
+                *m = Some(HashMap::new());
+            }
+        });
+        Self { _private: () }
+    }
+}
+
+impl Drop for ExistsMemo {
+    fn drop(&mut self) {
+        EXISTS_MEMO.with(|m| {
+            *m.borrow_mut() = None;
+        });
+    }
+}
+
+/// Cache key for one `exists(entity, conditions)` question.
+///
+/// Conditions arrive in AST order, which is stable for a given compiled
+/// expression, so no sorting is needed — and sorting would be wrong anyway if
+/// it ever collapsed two different orderings that the store treats
+/// differently.
+fn exists_memo_key(entity: &str, conditions: &[(Vec<String>, serde_json::Value)]) -> String {
+    let mut key = String::with_capacity(entity.len() + 16 * conditions.len());
+    key.push_str(entity);
+    for (path, value) in conditions {
+        key.push('\u{1f}');
+        key.push_str(&path.join("."));
+        key.push('=');
+        // Serialized rather than Display'd so a string "1" and a number 1
+        // can't collide into the same answer.
+        key.push_str(&value.to_string());
+    }
+    key
+}
+
+/// `exists(...)` through the memo when one is active, straight to the store
+/// otherwise.
+fn resolve_exists(
+    resolver: &dyn PolicyDataResolver,
+    entity: &str,
+    conditions: &[(Vec<String>, serde_json::Value)],
+) -> bool {
+    let key = EXISTS_MEMO.with(|m| {
+        m.borrow()
+            .as_ref()
+            .map(|_| exists_memo_key(entity, conditions))
+    });
+    let Some(key) = key else {
+        return resolver.entity_exists(entity, conditions);
+    };
+    if let Some(hit) = EXISTS_MEMO.with(|m| m.borrow().as_ref().and_then(|c| c.get(&key).copied()))
+    {
+        return hit;
+    }
+    // Resolved OUTSIDE the borrow: `entity_exists` reaches the row store,
+    // which can re-enter policy evaluation, and holding the RefCell across
+    // that would panic.
+    let answer = resolver.entity_exists(entity, conditions);
+    EXISTS_MEMO.with(|m| {
+        if let Some(c) = m.borrow_mut().as_mut() {
+            c.insert(key, answer);
+        }
+    });
+    answer
+}
+
 /// Result of a policy check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyResult {
@@ -1529,7 +1643,7 @@ impl<'a> EvalEnv<'a> {
                     };
                     packed.push((path.clone(), json));
                 }
-                if resolver.entity_exists(entity, &packed) {
+                if resolve_exists(resolver, entity, &packed) {
                     EvalResult::True
                 } else {
                     EvalResult::False(format!("exists({entity} ...) matched no rows"))
@@ -3008,5 +3122,154 @@ mod sync_scope_tests {
             engine.check_sync_scope("Room", &auth, Some(&row("anything"))),
             PolicyResult::Allowed
         ));
+    }
+}
+
+#[cfg(test)]
+mod exists_memo_tests {
+    //! `exists(...)` memoization. The win is per-row scans; the risk is a key
+    //! that collapses two tenants into one answer, so both are pinned here.
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingResolver {
+        calls: AtomicUsize,
+        /// Which `referenceId` values have an active row.
+        active: Vec<String>,
+    }
+
+    impl PolicyDataResolver for CountingResolver {
+        fn entity_exists(
+            &self,
+            _entity: &str,
+            conditions: &[(Vec<String>, serde_json::Value)],
+        ) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            conditions.iter().any(|(path, v)| {
+                path.join(".") == "referenceId"
+                    && v.as_str()
+                        .is_some_and(|s| self.active.contains(&s.to_string()))
+            })
+        }
+    }
+
+    fn engine(resolver: Arc<CountingResolver>) -> PolicyEngine {
+        let m = AppManifest {
+            entities: vec![pylon_kernel::ManifestEntity {
+                name: "Stat".into(),
+                ..Default::default()
+            }],
+            policies: vec![ManifestPolicy {
+                name: "stat".into(),
+                entity: Some("Stat".into()),
+                allow: "exists(Sub where referenceId == data.orgId)".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let e = PolicyEngine::from_manifest(&m);
+        e.set_resolver(resolver);
+        e
+    }
+
+    fn row(org: &str) -> serde_json::Value {
+        serde_json::json!({ "orgId": org })
+    }
+
+    #[test]
+    fn a_scan_asks_the_store_once_instead_of_once_per_row() {
+        // The Revtrail shape: one tenant gate, evaluated against every row of
+        // a stat table. Without the memo this is one subquery per row.
+        let resolver = Arc::new(CountingResolver {
+            calls: AtomicUsize::new(0),
+            active: vec!["org-1".into()],
+        });
+        let engine = engine(Arc::clone(&resolver));
+        let auth = AuthContext::authenticated("alice".into());
+
+        let _memo = ExistsMemo::scope();
+        for _ in 0..500 {
+            assert!(matches!(
+                engine.check_entity_read("Stat", &auth, Some(&row("org-1"))),
+                PolicyResult::Allowed
+            ));
+        }
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            1,
+            "500 rows should ask the store once"
+        );
+    }
+
+    #[test]
+    fn two_tenants_never_share_an_answer() {
+        // The thing that would make this a security bug rather than an
+        // optimization: org-2 has no subscription and must still be denied
+        // while org-1's cached `true` is live.
+        let resolver = Arc::new(CountingResolver {
+            calls: AtomicUsize::new(0),
+            active: vec!["org-1".into()],
+        });
+        let engine = engine(Arc::clone(&resolver));
+        let auth = AuthContext::authenticated("alice".into());
+
+        let _memo = ExistsMemo::scope();
+        assert!(matches!(
+            engine.check_entity_read("Stat", &auth, Some(&row("org-1"))),
+            PolicyResult::Allowed
+        ));
+        assert!(
+            !matches!(
+                engine.check_entity_read("Stat", &auth, Some(&row("org-2"))),
+                PolicyResult::Allowed
+            ),
+            "a different tenant reused another tenant's cached answer"
+        );
+        // Two distinct questions, two store hits.
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn nothing_is_cached_outside_a_scope() {
+        // Every other evaluation path — a single row read, a write check —
+        // must behave exactly as before.
+        let resolver = Arc::new(CountingResolver {
+            calls: AtomicUsize::new(0),
+            active: vec!["org-1".into()],
+        });
+        let engine = engine(Arc::clone(&resolver));
+        let auth = AuthContext::authenticated("alice".into());
+
+        for _ in 0..3 {
+            let _ = engine.check_entity_read("Stat", &auth, Some(&row("org-1")));
+        }
+        assert_eq!(resolver.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn the_cache_does_not_outlive_its_scope() {
+        // A subscription that lapses must be visible on the NEXT request, so
+        // the map has to die with the guard.
+        let resolver = Arc::new(CountingResolver {
+            calls: AtomicUsize::new(0),
+            active: vec!["org-1".into()],
+        });
+        let engine = engine(Arc::clone(&resolver));
+        let auth = AuthContext::authenticated("alice".into());
+
+        {
+            let _memo = ExistsMemo::scope();
+            let _ = engine.check_entity_read("Stat", &auth, Some(&row("org-1")));
+            let _ = engine.check_entity_read("Stat", &auth, Some(&row("org-1")));
+        }
+        {
+            let _memo = ExistsMemo::scope();
+            let _ = engine.check_entity_read("Stat", &auth, Some(&row("org-1")));
+        }
+        assert_eq!(
+            resolver.calls.load(Ordering::SeqCst),
+            2,
+            "the second scope reused the first scope's cache"
+        );
     }
 }

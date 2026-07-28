@@ -1056,6 +1056,35 @@ fn sync_limit_caps_rows_replicated_per_entity() {
 }
 
 #[test]
+fn sync_limit_keeps_the_NEWEST_rows() {
+    // The cap is aimed at time-series tables, and every other scan walks ids
+    // ASCENDING — so the first cut of this shipped the OLDEST rows, which for
+    // a dashboard showing "the last 30 days" is exactly the rows nobody
+    // wants. A capped entity must replicate the tail of the table.
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(3))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    for i in 0..10 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+
+    let (_, resp) = pull(port, &token, 0);
+    let titles: Vec<&str> = resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .map(|c| c["data"]["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        vec!["n7", "n8", "n9"],
+        "capped entity replicated the head of the table, not the tail: {resp}"
+    );
+}
+
+#[test]
 fn the_cursor_bootstrap_honours_the_scope_but_a_direct_read_does_not() {
     // `sync: false` promises direct reads are unchanged, and a scope makes the
     // same promise: only the sync engine's REPLICATION fetch (`sync=1`) is

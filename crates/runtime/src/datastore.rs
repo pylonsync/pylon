@@ -408,6 +408,16 @@ impl DataStore for Runtime {
         Runtime::list_after(self, entity, after, limit).map_err(into_data_error)
     }
 
+    fn list_last(
+        &self,
+        entity: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
+        Runtime::list_last(self, entity, limit)
+            .map(Some)
+            .map_err(into_data_error)
+    }
+
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         Runtime::update(self, entity, id, data).map_err(into_data_error)
     }

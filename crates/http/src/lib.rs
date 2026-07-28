@@ -114,6 +114,25 @@ pub trait DataStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, DataError>;
 
+    /// The NEWEST `limit` rows (highest ids), returned oldest-first so the
+    /// caller can emit them in the same order as an ascending scan.
+    ///
+    /// Exists for `sync_limit`. Replication ceilings are aimed squarely at
+    /// time-series tables, and every other scan here walks ids ASCENDING —
+    /// so truncating one gave you the oldest rows, which for a dashboard
+    /// showing the last 30 days is precisely the rows nobody wants.
+    ///
+    /// `Ok(None)` means "this store can't scan backwards"; the caller falls
+    /// back to the ascending path rather than failing. Default-implemented so
+    /// the many test stubs implementing `DataStore` don't all have to care.
+    fn list_last(
+        &self,
+        _entity: &str,
+        _limit: usize,
+    ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
+        Ok(None)
+    }
+
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError>;
 
     fn delete(&self, entity: &str, id: &str) -> Result<bool, DataError>;

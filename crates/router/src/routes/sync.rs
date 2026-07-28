@@ -172,6 +172,14 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         .filter(|&n| n > 0)
         .unwrap_or(50_000);
 
+    // Read policies are evaluated PER ROW below, and a tenant gate asks the
+    // same `exists(...)` question for every row of the scan — a real app
+    // gating its stat tables on an active-subscription check was running three
+    // identical subqueries per row, thousands per dashboard load, which
+    // dominated the request. Memoize for the length of this scan only; the
+    // guard drops with the request so nothing goes stale.
+    let _exists_memo = pylon_policy::ExistsMemo::scope();
+
     let manifest = ctx.store.manifest();
     let auth_user = &manifest.auth.user;
     let mut changes: Vec<ChangeEvent> = Vec::new();
@@ -246,6 +254,78 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         } else {
             0
         };
+
+        // A capped entity takes the tail of the table in ONE read instead of
+        // walking it from the beginning.
+        //
+        // Two things wrong with walking it: the cap is aimed at time-series
+        // tables and every scan here is id-ASCENDING, so truncating handed the
+        // replica the OLDEST rows — useless for a dashboard showing the last
+        // 30 days; and it read the whole table to throw most of it away.
+        //
+        // Caps are small by definition, so the tail fits in one page and this
+        // entity never needs snapshot pagination. Rows dropped by the policy
+        // below just mean fewer than `cap` arrive, which the contract allows —
+        // `sync_limit` is a ceiling, not a quota.
+        if let Some(cap) = entity.sync_limit {
+            let tail = match ctx.store.list_last(&entity.name, cap) {
+                Ok(Some(rows)) => Some(rows),
+                // Store can't scan backwards — fall through to the ascending
+                // walk rather than failing the snapshot.
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!(
+                        entity = %entity.name,
+                        error = ?e,
+                        "sync_limit tail read failed; falling back to an ascending scan"
+                    );
+                    None
+                }
+            };
+            if let Some(rows) = tail {
+                for row in rows {
+                    let Some(row_id) = row.get("id").and_then(|v| v.as_str()).map(str::to_string)
+                    else {
+                        continue;
+                    };
+                    scanned += 1;
+                    if !matches!(
+                        ctx.policy_engine
+                            .check_sync_scope(&entity.name, ctx.auth_ctx, Some(&row)),
+                        pylon_policy::PolicyResult::Allowed
+                    ) {
+                        continue;
+                    }
+                    if !matches!(
+                        ctx.policy_engine
+                            .check_entity_read(&entity.name, ctx.auth_ctx, Some(&row)),
+                        pylon_policy::PolicyResult::Allowed
+                    ) {
+                        continue;
+                    }
+                    changes.push(ChangeEvent {
+                        seq: snapshot_seq,
+                        entity: entity.name.clone(),
+                        row_id,
+                        kind: ChangeKind::Insert,
+                        data: Some(crate::project_row_for_wire(
+                            manifest,
+                            auth_user,
+                            &entity.name,
+                            row,
+                        )),
+                        prev_data: None,
+                        timestamp: String::new(),
+                    });
+                    if changes.len() >= SNAPSHOT_BATCH_LIMIT {
+                        next_after = Some((entity.name.clone(), entity_after.clone(), 0));
+                        break 'outer;
+                    }
+                }
+                continue;
+            }
+        }
+
         loop {
             let raw = match ctx.store.list_after(
                 &entity.name,

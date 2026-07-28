@@ -323,6 +323,33 @@ policy({
 });
 ```
 
+**Read policies run PER ROW. `exists(...)` in one is a query per row.**
+
+A tenant gate like
+
+```ts
+allowRead: `auth.tenantId == data.orgId && (
+  exists(Subscription where referenceId == data.orgId and status == "active") ||
+  exists(Subscription where referenceId == data.orgId and status == "trialing")
+)`
+```
+
+is evaluated against **every row** of a snapshot, a cursor page, and a list —
+so on a synced stat table it becomes thousands of identical subqueries per
+page load. The runtime memoizes `exists(...)` within a single scan, which
+collapses that to one query per distinct question, but the shape still costs
+more than it looks:
+
+- Put the cheap, data-independent test FIRST (`auth.userId != null &&
+  exists(...)`) — `&&` short-circuits, so a failing gate never runs the
+  subquery.
+- Gate on something already ON the row where you can. `data.orgId ==
+  auth.tenantId` needs no subquery at all.
+- A subscription/plan check is per-ORG, not per-row. Prefer denying the whole
+  entity via a function, or stamping the row, over re-asking per row.
+- Pair an expensive policy with `sync: false` or a `sync` scope, so the
+  expression isn't run across a whole growing table on every connect.
+
 **Gotcha: a policy that names a field the entity doesn't have denies
 everything, silently.** An unresolvable reference is null, and null fails
 closed — `exists(OrgMember where orgId == data.orgId ...)` on an entity keyed

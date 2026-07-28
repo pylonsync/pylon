@@ -26,6 +26,11 @@ pub(crate) fn handle(
         let rest_no_qs = rest.split('?').next().unwrap_or(rest);
         if let Some(entity_name) = rest_no_qs.strip_suffix("/cursor") {
             if method == HttpMethod::Get {
+                // Per-row read-policy evaluation below; a tenant gate asks the
+                // same `exists(...)` question of every row. Memoized for this
+                // page only — see ExistsMemo. Same reasoning as the snapshot
+                // path in routes/sync.rs.
+                let _exists_memo = pylon_policy::ExistsMemo::scope();
                 // Codex P1: same underscore-prefix gate as below —
                 // framework-managed entities are admin-only on the
                 // entity REST surface.

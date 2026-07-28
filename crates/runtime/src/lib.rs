@@ -2369,6 +2369,55 @@ impl Runtime {
         Ok(result)
     }
 
+    /// The newest `limit` rows by id, returned OLDEST-FIRST.
+    ///
+    /// Backs `sync_limit`. Ids are monotonic, so "highest ids" is "most
+    /// recent"; the result is reversed before returning so callers can emit it
+    /// in the same order an ascending scan would, and the replica ends up with
+    /// the tail of the table rather than its head.
+    pub fn list_last(
+        &self,
+        entity: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>, RuntimeError> {
+        if let Some(pg) = self.pg_backend() {
+            let mut rows = pylon_http::DataStore::list_last(&pg.store, entity, limit)
+                .map_err(data_err_to_runtime)?
+                .unwrap_or_default();
+            for r in rows.iter_mut() {
+                self.maybe_decrypt_row(entity, r);
+            }
+            return Ok(rows);
+        }
+        let ent = self.require_entity(entity)?;
+        let conn = self.lock_read_conn()?;
+        let fields = ent.fields.clone();
+        let table = quote_ident(entity);
+
+        let sql = format!("SELECT * FROM {} ORDER BY \"id\" DESC LIMIT ?1", table);
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("Failed to prepare query: {e}"),
+        })?;
+        let rows = stmt
+            .query_map([limit as i64], |row| Ok(row_to_json(row, &fields)))
+            .map_err(|e| RuntimeError {
+                code: "QUERY_FAILED".into(),
+                message: format!("Query failed: {e}"),
+            })?;
+
+        let mut result = Vec::new();
+        for row in rows {
+            if let Ok(mut val) = row {
+                self.maybe_decrypt_row(entity, &mut val);
+                result.push(val);
+            }
+        }
+        // Descending off the index, ascending on the wire.
+        result.reverse();
+        Ok(result)
+    }
+
     /// Update a row by ID. Returns true if a row was found and updated.
     ///
     /// For entities with `crdt: true` (the default) the LoroDoc receives
