@@ -409,34 +409,34 @@
     },
     "packages/cli": {
       "name": "@pylonsync/cli",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "bin": {
         "pylon": "./bin/pylon.js",
       },
       "optionalDependencies": {
-        "@pylonsync/cli-darwin-arm64": "0.3.349",
-        "@pylonsync/cli-linux-x64": "0.3.349",
+        "@pylonsync/cli-darwin-arm64": "0.3.350",
+        "@pylonsync/cli-linux-x64": "0.3.350",
       },
     },
     "packages/cli-darwin-arm64": {
       "name": "@pylonsync/cli-darwin-arm64",
-      "version": "0.3.349",
+      "version": "0.3.350",
     },
     "packages/cli-darwin-x64": {
       "name": "@pylonsync/cli-darwin-x64",
-      "version": "0.3.349",
+      "version": "0.3.350",
     },
     "packages/cli-linux-arm64": {
       "name": "@pylonsync/cli-linux-arm64",
-      "version": "0.3.349",
+      "version": "0.3.350",
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
-      "version": "0.3.349",
+      "version": "0.3.350",
     },
     "packages/client": {
       "name": "@pylonsync/client",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -451,14 +451,14 @@
     },
     "packages/create-pylon": {
       "name": "@pylonsync/create-pylon",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "bin": {
         "create-pylon": "./bin/create-pylon.js",
       },
     },
     "packages/functions": {
       "name": "@pylonsync/functions",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "bin": {
         "pylon-functions-runtime": "src/runtime.ts",
       },
@@ -483,7 +483,7 @@
     },
     "packages/loro": {
       "name": "@pylonsync/loro",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -499,7 +499,7 @@
     },
     "packages/next": {
       "name": "@pylonsync/next",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -519,7 +519,7 @@
     },
     "packages/plugins/feature-flags": {
       "name": "@pylonsync/feature-flags",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -533,7 +533,7 @@
     },
     "packages/plugins/stripe": {
       "name": "@pylonsync/stripe",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -547,7 +547,7 @@
     },
     "packages/plugins/webhooks": {
       "name": "@pylonsync/webhooks",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/functions": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -561,7 +561,7 @@
     },
     "packages/react": {
       "name": "@pylonsync/react",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
@@ -575,7 +575,7 @@
     },
     "packages/react-native": {
       "name": "@pylonsync/react-native",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "dependencies": {
         "@pylonsync/react": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
@@ -593,11 +593,11 @@
     },
     "packages/sdk": {
       "name": "@pylonsync/sdk",
-      "version": "0.3.349",
+      "version": "0.3.350",
     },
     "packages/sync": {
       "name": "@pylonsync/sync",
-      "version": "0.3.349",
+      "version": "0.3.350",
       "devDependencies": {
         "fake-indexeddb": "^6.2.5",
       },
@@ -1265,7 +1265,7 @@
 
     "ee-first": ["ee-first@1.1.1", "", {}, "sha512-WMwm9LhRUo+WUaRN+vRuETqG89IgZphVSNkdFgeb6sS/E4OrDIN7t48CAewSHXc6C8lefD8KKfr5vY61brQlow=="],
 
-    "electron-to-chromium": ["electron-to-chromium@1.5.397", "", {}, "sha512-khGTy9U9x02KEtsKM8vx5A62BsRmcOsIgDpWr1ImE32Ax8GxHGPHZf+Eu9H8zOOyHJnB0jTbseyTHbq2XCT8yw=="],
+    "electron-to-chromium": ["electron-to-chromium@1.5.398", "", {}, "sha512-AsvhAxopJGh6museTDMIjn6JpDYOfgu4RLlygomt87MUwBUqTfd/1EiPtx10/LZE8xpTvkP2E9Gafq7lkLtodQ=="],
 
     "emoji-regex": ["emoji-regex@8.0.0", "", {}, "sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A=="],
 
