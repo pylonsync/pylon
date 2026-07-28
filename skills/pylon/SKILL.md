@@ -173,6 +173,39 @@ Declare composite indexes in the options block. Live queries use indexed columns
 }
 ```
 
+### Replication — `sync: false` for append-only tables
+
+Entities default to **`sync: true`**: bulk-snapshotted and delta-streamed into
+every signed-in browser's local replica. That default is right for the working
+set a page renders from, and **wrong for anything that grows forever.**
+
+```ts
+const UsageWindow = entity(
+  "UsageWindow",
+  { projectId: field.id("Project"), periodStart: field.datetime(), requests: field.int() },
+  {
+    indexes: [{ name: "by_project_period", fields: ["projectId", "periodStart"], unique: true }],
+    sync: false,   // read it through a function, not the replica
+  },
+);
+```
+
+**Rule: if the table is append-only, or no component reads it via
+`db.useQuery`, set `sync: false`.** Typical: usage/metering rollups, audit and
+event logs, billing history, job runs, notifier cursors, anything server-only.
+
+`sync: false` keeps the entity out of the replica **only**. Policies, direct
+reads (`/api/entities/X`), `db.useSearch`, and `ctx.db.*` inside functions are
+all unchanged — so serve it with a query/action that returns the window the UI
+actually renders (`limit: 168`, not the whole table).
+
+Why it matters: the replica bootstrap walks a synced table **one cursor page at
+a time, sequentially** — page N+1 needs page N's last id, so cold-start latency
+is `rows / pageSize × round-trip`. A real app shipped a per-project-per-hour
+rollup with the default on; a page load became ~100 chained requests at ~95ms,
+about ten seconds of loading, for data no component read. It is invisible on
+day one and unbearable by month three, so decide when you declare the entity.
+
 ## Policies
 
 Policies are boolean string expressions. They guard direct `/api/entities/*` access (and sync). Server functions bypass policies — trust yourself to check inside handlers.
@@ -222,6 +255,7 @@ policy({
 });
 
 // Member-of-org — membership lives in a join entity, checked with exists()
+// NOTE: `Document` must actually HAVE an `orgId` field — see below.
 policy({
   name: "doc_members",
   entity: "Document",
@@ -259,6 +293,19 @@ policy({
   allowRead: "data.priority >= 3",
 });
 ```
+
+**Gotcha: a policy that names a field the entity doesn't have denies
+everything, silently.** An unresolvable reference is null, and null fails
+closed — `exists(OrgMember where orgId == data.orgId ...)` on an entity keyed
+`projectId` (no `orgId`) matches nothing, for everyone, forever. There is no
+error and no warning: it reads exactly like a working membership check, and the
+symptom is "the table looks empty" rather than "access denied".
+
+Failing closed is the right default — the alternative leaks reads on a typo —
+but it means **you must check the field exists on THAT entity** when you copy a
+policy between entities. This shipped in a real app and stayed unnoticed
+because the one page that displayed the data read it through a function
+(functions bypass policies), so nothing appeared broken.
 
 ## Functions (`functions/*.ts`)
 
