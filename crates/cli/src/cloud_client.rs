@@ -44,24 +44,49 @@ pub fn cloud_url() -> String {
     std::env::var("PYLON_CLOUD_URL").unwrap_or_else(|_| DEFAULT_CLOUD_URL.to_string())
 }
 
-/// Where the human-facing dashboard lives. Hosted Pylon Cloud is one
-/// unified app on www.pylonsync.com serving both the API and the
-/// dashboard, so this is normally the same origin the CLI talks to.
-/// Credentials minted against the retired `api.pylonsync.com` host (old
-/// logins) are still mapped to www so browser links resolve. Self-hosted
-/// / staging installs (PYLON_CLOUD_URL set) serve both from one origin,
-/// so that origin is returned as-is.
+/// Hosts that used to serve hosted Pylon Cloud and no longer do.
+///
+/// `api.pylonsync.com` was retired when the API and dashboard merged onto one
+/// origin. It is not merely a redirect — it has no certificate, so anything
+/// still pointed at it fails the TLS handshake and surfaces as a bare
+/// Cloudflare 525 with no hint that the host moved.
+const RETIRED_CLOUD_HOSTS: &[&str] = &["https://api.pylonsync.com"];
+
+/// Point a stored origin at wherever hosted Pylon Cloud actually lives now.
+///
+/// Credentials persist the origin they were minted against, and every request
+/// is built from that stored value — so a login predating the consolidation
+/// keeps addressing a host that stopped answering, and the operator sees an
+/// SSL error instead of anything actionable. Rewriting on load fixes the
+/// whole surface at once (deploy, logs, project list) rather than one call
+/// site at a time.
+///
+/// Only EXACT retired origins are rewritten. A self-hosted or staging install
+/// is returned untouched — silently redirecting somebody's own cloud to ours
+/// would be far worse than the error this replaces.
+pub fn normalize_cloud_url(url: &str) -> String {
+    let trimmed = url.trim().trim_end_matches('/');
+    if RETIRED_CLOUD_HOSTS.contains(&trimmed) {
+        return DEFAULT_CLOUD_URL.to_string();
+    }
+    trimmed.to_string()
+}
+
+/// Where the human-facing dashboard lives. Hosted Pylon Cloud is one unified
+/// app on www.pylonsync.com serving both the API and the dashboard, so this is
+/// normally the same origin the CLI talks to. Retired hosts are rewritten and
+/// self-hosted / staging origins (PYLON_CLOUD_URL) pass through untouched —
+/// both via [`normalize_cloud_url`], which the request path uses too.
 pub fn dashboard_url() -> String {
     dashboard_url_for(&cloud_url())
 }
 
 fn dashboard_url_for(api: &str) -> String {
-    let trimmed = api.trim_end_matches('/');
-    if trimmed == "https://www.pylonsync.com" || trimmed == "https://api.pylonsync.com" {
-        "https://www.pylonsync.com".to_string()
-    } else {
-        trimmed.to_string()
-    }
+    // One list of retired hosts, in `normalize_cloud_url`. This used to carry
+    // its own copy, which is how the API base and the dashboard link came to
+    // disagree about whether api.pylonsync.com still existed: browser links
+    // moved to www while every actual request kept going to the dead host.
+    normalize_cloud_url(api)
 }
 
 /// Path to the credentials file. Honors XDG_CONFIG_HOME; falls back
@@ -85,12 +110,18 @@ pub fn load_credentials() -> io::Result<Option<Credentials>> {
         return Ok(None);
     }
     let raw = fs::read_to_string(&path)?;
-    let creds: Credentials = serde_json::from_str(&raw).map_err(|e| {
+    let mut creds: Credentials = serde_json::from_str(&raw).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!("credentials.json is malformed ({e}). Delete it and re-run `pylon login`."),
         )
     })?;
+    // A token minted before the API and dashboard merged onto one origin
+    // stored the now-retired host, and every request below is built from this
+    // field. Normalizing here — rather than at each call site — means the
+    // whole CLI surface follows the move at once. The token itself is still
+    // valid; it is only the address that changed.
+    creds.cloud_url = normalize_cloud_url(&creds.cloud_url);
     Ok(Some(creds))
 }
 
@@ -327,8 +358,47 @@ mod tests {
     #[test]
     fn default_cloud_url_is_www() {
         // Hosted Pylon Cloud is one unified app on www; api.pylonsync.com
-        // is retired (kept alive only for back-compat with old CLIs).
+        // is retired — and not merely redirected. It has no certificate, so
+        // anything still addressing it dies in the TLS handshake.
         assert_eq!(DEFAULT_CLOUD_URL, "https://www.pylonsync.com");
+    }
+
+    #[test]
+    fn a_credential_minted_against_the_retired_host_follows_the_move() {
+        // The bug: credentials persist the origin they were minted against
+        // and every request is built from that stored value, so a login from
+        // before the consolidation kept addressing api.pylonsync.com — which
+        // answers with a bare Cloudflare 525, no hint that the host moved.
+        assert_eq!(
+            normalize_cloud_url("https://api.pylonsync.com"),
+            "https://www.pylonsync.com"
+        );
+        // Trailing slash is the shape `pylon login` actually wrote.
+        assert_eq!(
+            normalize_cloud_url("https://api.pylonsync.com/"),
+            "https://www.pylonsync.com"
+        );
+    }
+
+    #[test]
+    fn a_self_hosted_origin_is_never_rewritten() {
+        // The one thing this must not do. Silently redirecting somebody's own
+        // install to OUR cloud would send their token to a host they never
+        // chose — far worse than the error being fixed.
+        for url in [
+            "https://pylon.internal.example.com",
+            "http://localhost:4321",
+            "https://staging.pylonsync.com",
+        ] {
+            assert_eq!(normalize_cloud_url(url), url);
+        }
+    }
+
+    #[test]
+    fn normalization_is_idempotent_and_strips_a_trailing_slash() {
+        let once = normalize_cloud_url("https://www.pylonsync.com/");
+        assert_eq!(once, "https://www.pylonsync.com");
+        assert_eq!(normalize_cloud_url(&once), once);
     }
 
     #[test]
