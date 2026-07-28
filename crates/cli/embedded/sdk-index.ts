@@ -367,8 +367,45 @@ export interface EntityDefinition {
    * `db.useSearch` + by-id fetch instead of holding the whole table locally:
    * `sync: false` keeps it out of the replica entirely. Direct reads
    * (`/api/entities/X`, `/api/search/X`) and policies are unchanged.
+   *
+   * Pass an object to keep the entity live but bound WHICH rows replicate —
+   * see {@link SyncScope}. That's the middle setting between "every row you
+   * can read" and "nothing".
    */
-  sync?: boolean;
+  sync?: boolean | SyncScope;
+}
+
+/**
+ * Bounded replication for an entity that should stay live but shouldn't ship
+ * its whole history to every client.
+ *
+ * ```ts
+ * entity("Message", { … }, {
+ *   sync: { where: "data.roomId == auth.tenantId", limit: 5_000 },
+ * })
+ * ```
+ *
+ * `where` is the SAME expression language as policies (including
+ * `exists(...)`), evaluated per row per caller. It is applied ON TOP of the
+ * read policy, never instead of it — a scope can only remove rows from a
+ * replica, so getting one wrong is a missing-data bug, never a leak.
+ *
+ * Applies to REPLICATION only: the snapshot, the sync engine's bootstrap, and
+ * the change-log delta. Direct reads (`/api/entities/X`, `/api/search/X`) are
+ * unchanged, exactly as with `sync: false`.
+ *
+ * A row that leaves scope is pushed to clients as a DELETE, so replicas evict
+ * it rather than holding a copy that never updates again.
+ */
+export interface SyncScope {
+  /** Policy-DSL predicate. Omit to bound by `limit` alone. */
+  where?: string;
+  /**
+   * Hard ceiling on rows replicated per client for this entity. Belt to
+   * `where`'s braces — a predicate that turns out not to bound growth still
+   * can't flood a replica. Survives snapshot pagination.
+   */
+  limit?: number;
 }
 
 export function entity(
@@ -627,6 +664,15 @@ export interface ManifestEntity {
   /** Client replication; omitted when true (the default). `false` keeps the
    *  entity out of the client replica (snapshot + delta) — server-queried only. */
   sync?: boolean;
+  /**
+   * Replication scope, flattened out of {@link SyncScope}. Sibling keys
+   * rather than a nested object so `sync` keeps its boolean shape on the
+   * wire — an older binary reading this manifest still sees `sync: true`
+   * and replicates everything, which is the right way for a version skew
+   * to degrade.
+   */
+  sync_scope?: string;
+  sync_limit?: number;
 }
 
 export interface ManifestRoute {
@@ -916,6 +962,16 @@ export function entitiesToManifest(
     // Emit only when opted OUT — the runtime defaults sync to true.
     if (e.sync === false) {
       result.sync = false;
+    } else if (e.sync && typeof e.sync === "object") {
+      // A SCOPE. Flattened into sibling keys rather than nested under `sync`
+      // so the field keeps its boolean shape on the wire: an older binary
+      // reading this manifest still sees `sync: true` and replicates
+      // everything — more data than intended, which is the right way for
+      // this to degrade. Nesting would make `sync` fail to deserialize as a
+      // bool and take the whole app down on a version skew.
+      const scope = e.sync;
+      if (scope.where !== undefined) result.sync_scope = scope.where;
+      if (scope.limit !== undefined) result.sync_limit = scope.limit;
     }
     return result;
   });
