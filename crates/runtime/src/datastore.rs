@@ -411,9 +411,10 @@ impl DataStore for Runtime {
     fn list_last(
         &self,
         entity: &str,
+        before: Option<&str>,
         limit: usize,
     ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
-        Runtime::list_last(self, entity, limit)
+        Runtime::list_last(self, entity, before, limit)
             .map(Some)
             .map_err(into_data_error)
     }

@@ -1085,6 +1085,59 @@ fn sync_limit_keeps_the_NEWEST_rows() {
 }
 
 #[test]
+fn a_cap_counts_rows_THIS_CALLER_can_see() {
+    // The bug this nearly shipped with: `list_last(cap)` as a single fetch
+    // takes the newest `cap` rows across EVERY tenant and only then applies
+    // the read policy — so on a busy table a quiet tenant gets nothing. The
+    // cap has to count VISIBLE rows, which means paging backwards until it
+    // has them.
+    //
+    // Modeled with a scope standing in for the tenant fence: only "mine"
+    // rows are visible, and they are the OLDEST — so a single tail fetch of
+    // 2 would return two "theirs" rows and replicate zero of mine.
+    let rt =
+        Arc::new(Runtime::in_memory(scoped_manifest("data.body == \"mine\"", Some(2))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    for title in ["m0", "m1"] {
+        let (status, body) = http(
+            port,
+            "POST",
+            "/api/entities/Note",
+            Some(&token),
+            Some(&format!(r#"{{"title":"{title}","body":"mine"}}"#)),
+        );
+        assert!(status == 200 || status == 201, "insert failed: {body}");
+    }
+    // 50 newer rows belonging to somebody else.
+    for i in 0..50 {
+        let (status, body) = http(
+            port,
+            "POST",
+            "/api/entities/Note",
+            Some(&token),
+            Some(&format!(r#"{{"title":"t{i}","body":"theirs"}}"#)),
+        );
+        assert!(status == 200 || status == 201, "insert failed: {body}");
+    }
+
+    let (_, resp) = pull(port, &token, 0);
+    let titles: Vec<&str> = resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .map(|c| c["data"]["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        vec!["m0", "m1"],
+        "the cap counted rows the caller cannot see, starving them: {resp}"
+    );
+}
+
+#[test]
 fn the_cursor_bootstrap_honours_the_scope_but_a_direct_read_does_not() {
     // `sync: false` promises direct reads are unchanged, and a scope makes the
     // same promise: only the sync engine's REPLICATION fetch (`sync=1`) is

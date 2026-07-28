@@ -114,13 +114,19 @@ pub trait DataStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, DataError>;
 
-    /// The NEWEST `limit` rows (highest ids), returned oldest-first so the
-    /// caller can emit them in the same order as an ascending scan.
+    /// Rows in DESCENDING id order — newest first — starting strictly below
+    /// `before` when given. The mirror of [`DataStore::list_after`].
     ///
-    /// Exists for `sync_limit`. Replication ceilings are aimed squarely at
-    /// time-series tables, and every other scan here walks ids ASCENDING —
-    /// so truncating one gave you the oldest rows, which for a dashboard
-    /// showing the last 30 days is precisely the rows nobody wants.
+    /// Exists for `sync_limit`. Every other scan here walks ids ASCENDING, so
+    /// truncating one gave the replica the OLDEST rows; the cap is aimed at
+    /// time-series tables, where the head is precisely what nobody wants.
+    ///
+    /// It takes a cursor rather than just a count because the cap means "at
+    /// most N rows THIS CALLER can see", and visibility is decided per row by
+    /// the read policy. A single fixed-size fetch would take the newest N rows
+    /// across ALL tenants and then filter — so on a busy multi-tenant table a
+    /// small cap could hand a quiet tenant nothing at all. Paging backwards
+    /// lets the caller keep reading until it has N *visible* rows.
     ///
     /// `Ok(None)` means "this store can't scan backwards"; the caller falls
     /// back to the ascending path rather than failing. Default-implemented so
@@ -128,6 +134,7 @@ pub trait DataStore: Send + Sync {
     fn list_last(
         &self,
         _entity: &str,
+        _before: Option<&str>,
         _limit: usize,
     ) -> Result<Option<Vec<serde_json::Value>>, DataError> {
         Ok(None)

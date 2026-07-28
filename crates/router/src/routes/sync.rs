@@ -268,41 +268,84 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         // below just mean fewer than `cap` arrive, which the contract allows —
         // `sync_limit` is a ceiling, not a quota.
         if let Some(cap) = entity.sync_limit {
-            let tail = match ctx.store.list_last(&entity.name, cap) {
-                Ok(Some(rows)) => Some(rows),
-                // Store can't scan backwards — fall through to the ascending
-                // walk rather than failing the snapshot.
-                Ok(None) => None,
-                Err(e) => {
-                    tracing::error!(
-                        entity = %entity.name,
-                        error = ?e,
-                        "sync_limit tail read failed; falling back to an ascending scan"
-                    );
-                    None
+            // Walk BACKWARDS from the newest row until we have `cap` rows this
+            // caller can actually see, or the table / scan budget runs out.
+            //
+            // Paged rather than one `list_last(cap)` fetch: the cap counts
+            // VISIBLE rows, and visibility is decided per row by the read
+            // policy. A single fetch would take the newest `cap` rows across
+            // every tenant and then filter, so on a busy multi-tenant table a
+            // quiet tenant could receive nothing at all.
+            let mut visible: Vec<serde_json::Value> = Vec::new();
+            let mut before: Option<String> = None;
+            let mut supported = true;
+            while visible.len() < cap {
+                let page =
+                    match ctx
+                        .store
+                        .list_last(&entity.name, before.as_deref(), RAW_FETCH_CHUNK)
+                    {
+                        Ok(Some(rows)) => rows,
+                        // Store can't scan backwards — fall through to the
+                        // ascending walk rather than failing the snapshot.
+                        Ok(None) => {
+                            supported = false;
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                entity = %entity.name,
+                                error = ?e,
+                                "sync_limit tail read failed; falling back to an ascending scan"
+                            );
+                            supported = false;
+                            break;
+                        }
+                    };
+                if page.is_empty() {
+                    break;
                 }
-            };
-            if let Some(rows) = tail {
-                for row in rows {
-                    let Some(row_id) = row.get("id").and_then(|v| v.as_str()).map(str::to_string)
-                    else {
+                for row in page.iter() {
+                    let Some(row_id) = row.get("id").and_then(|v| v.as_str()) else {
                         continue;
                     };
+                    before = Some(row_id.to_string());
                     scanned += 1;
                     if !matches!(
                         ctx.policy_engine
-                            .check_sync_scope(&entity.name, ctx.auth_ctx, Some(&row)),
+                            .check_sync_scope(&entity.name, ctx.auth_ctx, Some(row)),
                         pylon_policy::PolicyResult::Allowed
                     ) {
                         continue;
                     }
                     if !matches!(
                         ctx.policy_engine
-                            .check_entity_read(&entity.name, ctx.auth_ctx, Some(&row)),
+                            .check_entity_read(&entity.name, ctx.auth_ctx, Some(row)),
                         pylon_policy::PolicyResult::Allowed
                     ) {
                         continue;
                     }
+                    visible.push(row.clone());
+                    if visible.len() >= cap {
+                        break;
+                    }
+                }
+                // Same budget the ascending path honours, so a sparse policy
+                // over a huge table can't walk it all in one request.
+                if scanned >= raw_scan_budget {
+                    break;
+                }
+            }
+            if supported {
+                // Collected newest-first; emit oldest-first like every other
+                // snapshot path so client-side ordering assumptions hold.
+                visible.reverse();
+                for row in visible {
+                    let row_id = row
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     changes.push(ChangeEvent {
                         seq: snapshot_seq,
                         entity: entity.name.clone(),

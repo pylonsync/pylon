@@ -2369,19 +2369,22 @@ impl Runtime {
         Ok(result)
     }
 
-    /// The newest `limit` rows by id, returned OLDEST-FIRST.
+    /// Rows in DESCENDING id order (newest first), starting strictly below
+    /// `before` when given. The mirror of [`Runtime::list_after`].
     ///
     /// Backs `sync_limit`. Ids are monotonic, so "highest ids" is "most
-    /// recent"; the result is reversed before returning so callers can emit it
-    /// in the same order an ascending scan would, and the replica ends up with
-    /// the tail of the table rather than its head.
+    /// recent". Paged rather than one fetch because the cap counts rows the
+    /// CALLER can see and visibility is decided per row — a single fetch would
+    /// take the newest N across all tenants and then filter, starving a quiet
+    /// tenant on a busy table.
     pub fn list_last(
         &self,
         entity: &str,
+        before: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, RuntimeError> {
         if let Some(pg) = self.pg_backend() {
-            let mut rows = pylon_http::DataStore::list_last(&pg.store, entity, limit)
+            let mut rows = pylon_http::DataStore::list_last(&pg.store, entity, before, limit)
                 .map_err(data_err_to_runtime)?
                 .unwrap_or_default();
             for r in rows.iter_mut() {
@@ -2394,13 +2397,28 @@ impl Runtime {
         let fields = ent.fields.clone();
         let table = quote_ident(entity);
 
-        let sql = format!("SELECT * FROM {} ORDER BY \"id\" DESC LIMIT ?1", table);
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match before {
+            Some(cursor) => (
+                format!(
+                    "SELECT * FROM {} WHERE \"id\" < ?1 ORDER BY \"id\" DESC LIMIT ?2",
+                    table
+                ),
+                vec![Box::new(cursor.to_string()), Box::new(limit as i64)],
+            ),
+            None => (
+                format!("SELECT * FROM {} ORDER BY \"id\" DESC LIMIT ?1", table),
+                vec![Box::new(limit as i64)],
+            ),
+        };
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|v| v.as_ref()).collect();
+
         let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
             code: "QUERY_FAILED".into(),
             message: format!("Failed to prepare query: {e}"),
         })?;
         let rows = stmt
-            .query_map([limit as i64], |row| Ok(row_to_json(row, &fields)))
+            .query_map(param_refs.as_slice(), |row| Ok(row_to_json(row, &fields)))
             .map_err(|e| RuntimeError {
                 code: "QUERY_FAILED".into(),
                 message: format!("Query failed: {e}"),
@@ -2413,8 +2431,6 @@ impl Runtime {
                 result.push(val);
             }
         }
-        // Descending off the index, ascending on the wire.
-        result.reverse();
         Ok(result)
     }
 
