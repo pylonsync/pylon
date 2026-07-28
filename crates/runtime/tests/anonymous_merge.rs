@@ -40,6 +40,7 @@ fn entity(name: &str, fields: Vec<ManifestField>) -> ManifestEntity {
         search: None,
         crdt: true,
         sync: true,
+        ..Default::default()
     }
 }
 

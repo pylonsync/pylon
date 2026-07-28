@@ -74,6 +74,7 @@ fn fresh_runtime(url: &str) -> Runtime {
             crdt: false,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -272,6 +273,7 @@ fn typed_columns_roundtrip_correctly() {
             crdt: false,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -459,6 +461,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
             crdt: false,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -493,6 +496,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
             crdt: false,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -553,6 +557,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
             crdt: false,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -582,6 +587,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
             crdt: false,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -658,6 +664,7 @@ fn timestamptz_binds_iso_string_correctly() {
             crdt: false,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -821,6 +828,7 @@ fn crdt_runtime(url: &str) -> Runtime {
             crdt: true,
             sync: true,
             search: None,
+            ..Default::default()
         }],
         ..empty_manifest()
     };
@@ -998,6 +1006,7 @@ fn fts_runtime(url: &str) -> Runtime {
                 sortable: vec![],
                 language: None,
             }),
+            ..Default::default()
         }],
         ..empty_manifest()
     };

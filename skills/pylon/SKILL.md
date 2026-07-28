@@ -194,6 +194,35 @@ const UsageWindow = entity(
 `db.useQuery`, set `sync: false`.** Typical: usage/metering rollups, audit and
 event logs, billing history, job runs, notifier cursors, anything server-only.
 
+**When you still want it live, scope it instead of disabling it.** `sync`
+takes an object — the middle setting between "every row you can read" and
+"nothing":
+
+```ts
+const Message = entity(
+  "Message",
+  { roomId: field.id("Room"), body: field.richtext(), sentAt: field.datetime() },
+  {
+    indexes: [{ name: "by_room_time", fields: ["roomId", "sentAt"], unique: false }],
+    sync: { where: "data.roomId == auth.tenantId", limit: 5_000 },
+  },
+);
+```
+
+- `where` is the SAME expression language as policies (`exists(...)` included),
+  evaluated per row per caller.
+- It is applied **on top of** the read policy, never instead of it. A scope
+  only ever REMOVES rows from a replica, so getting one wrong is a
+  missing-data bug, never a leak — and a malformed one denies rather than
+  falling back to replicating everything.
+- `limit` is a hard per-client ceiling that survives snapshot pagination.
+  Belt to `where`'s braces.
+- A row that **leaves** scope is pushed as a DELETE, so replicas evict it
+  instead of holding a copy that never updates again.
+- Replication only. Direct reads (`/api/entities/X`, `/api/search/X`) are
+  unscoped, same promise as `sync: false` — so an archive view or admin report
+  still sees everything its policy allows.
+
 `sync: false` keeps the entity out of the replica **only**. Policies, direct
 reads (`/api/entities/X`), `db.useSearch`, and `ctx.db.*` inside functions are
 all unchanged — so serve it with a query/action that returns the window the UI

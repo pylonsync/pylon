@@ -99,6 +99,9 @@ pub struct PolicyEngine {
     /// surface parse-error reason so a malformed expression still denies
     /// exactly as the uncached path did.
     compiled: HashMap<String, Result<Arc<Ast>, String>>,
+    /// Entity name → its `sync_scope` predicate, for entities that declare
+    /// one. Replication-only: see [`PolicyEngine::check_sync_scope`].
+    sync_scopes: HashMap<String, String>,
     /// Set by the runtime after the row store comes up. None during
     /// boot + in unit tests that don't need `exists(...)` evaluation.
     /// `OnceLock` so set-once semantics are enforced (engine is shared
@@ -141,12 +144,60 @@ impl PolicyEngine {
             }
         }
 
+        // Replication scopes ride the same compile cache as policies — they
+        // are evaluated per row on the snapshot/bootstrap path, which is the
+        // hottest per-row loop in the system.
+        let mut sync_scopes: HashMap<String, String> = HashMap::new();
+        for entity in &manifest.entities {
+            let Some(expr) = entity.sync_scope.as_deref() else {
+                continue;
+            };
+            let expr = expr.trim();
+            if expr.is_empty() {
+                continue;
+            }
+            if !compiled.contains_key(expr) {
+                compiled.insert(expr.to_string(), compile_expr(expr).map(Arc::new));
+            }
+            sync_scopes.insert(entity.name.clone(), expr.to_string());
+        }
+
         Self {
             entity_policies_by_name,
             action_policies,
             compiled,
+            sync_scopes,
             resolver: OnceLock::new(),
         }
+    }
+
+    /// Is this row inside the caller's replication scope for `entity_name`?
+    ///
+    /// `Allowed` when the entity declares no scope — the default stays
+    /// "replicate everything the caller may read". This is layered ON TOP of
+    /// the read policy by the sync paths, never instead of it: a scope is a
+    /// bandwidth decision, so narrowing one can only ever remove rows from a
+    /// replica, never add them.
+    ///
+    /// A row with no data (a delete tombstone carrying nothing to test)
+    /// evaluates the predicate against `None`, exactly as the read policy
+    /// does, so the two agree on how they treat an absent row.
+    pub fn check_sync_scope(
+        &self,
+        entity_name: &str,
+        auth: &AuthContext,
+        row: Option<&serde_json::Value>,
+    ) -> PolicyResult {
+        match self.sync_scopes.get(entity_name) {
+            None => PolicyResult::Allowed,
+            Some(expr) => self.eval_cached(expr, auth, row, None),
+        }
+    }
+
+    /// Does `entity_name` declare a replication scope at all? Lets a caller
+    /// skip per-row evaluation entirely on the common unscoped path.
+    pub fn has_sync_scope(&self, entity_name: &str) -> bool {
+        self.sync_scopes.contains_key(entity_name)
     }
 
     /// The policies registered for `entity_name` as a borrowed slice — O(1),
@@ -2831,5 +2882,131 @@ mod tests {
             None
         )
         .is_allowed());
+    }
+}
+
+#[cfg(test)]
+mod sync_scope_tests {
+    //! Replication scope: bounds WHICH rows of a synced entity reach a
+    //! client's replica, without touching what that client is allowed to read.
+    use super::*;
+    use pylon_kernel::{AppManifest, ManifestEntity, ManifestPolicy};
+
+    fn manifest_with(scope: Option<&str>, read: &str) -> AppManifest {
+        AppManifest {
+            entities: vec![ManifestEntity {
+                name: "Message".into(),
+                sync: true,
+                sync_scope: scope.map(str::to_string),
+                ..Default::default()
+            }],
+            policies: vec![ManifestPolicy {
+                name: "msg".into(),
+                entity: Some("Message".into()),
+                allow: read.into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn row(room: &str) -> serde_json::Value {
+        serde_json::json!({ "id": "m1", "roomId": room })
+    }
+
+    #[test]
+    fn no_scope_replicates_everything_readable() {
+        // The default must not change: an entity that declares no scope
+        // replicates every row its read policy allows.
+        let engine = PolicyEngine::from_manifest(&manifest_with(None, "true"));
+        let auth = AuthContext::authenticated("alice".into());
+        assert!(!engine.has_sync_scope("Message"));
+        assert!(matches!(
+            engine.check_sync_scope("Message", &auth, Some(&row("other"))),
+            PolicyResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn a_scope_keeps_rows_inside_it_and_drops_the_rest() {
+        let engine = PolicyEngine::from_manifest(&manifest_with(
+            Some("data.roomId == auth.tenantId"),
+            "true",
+        ));
+        let mut auth = AuthContext::authenticated("alice".into());
+        auth.tenant_id = Some("room-1".into());
+
+        assert!(matches!(
+            engine.check_sync_scope("Message", &auth, Some(&row("room-1"))),
+            PolicyResult::Allowed
+        ));
+        assert!(!matches!(
+            engine.check_sync_scope("Message", &auth, Some(&row("room-2"))),
+            PolicyResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn a_scope_can_never_widen_what_a_caller_reads() {
+        // The whole safety argument for scopes: they are a BANDWIDTH knob.
+        // Callers layer scope on top of the read policy, so a permissive
+        // scope over a denying policy still yields nothing. If this ever
+        // inverts, a scope becomes an access-control bypass.
+        let engine = PolicyEngine::from_manifest(&manifest_with(Some("true"), "false"));
+        let auth = AuthContext::authenticated("alice".into());
+        assert!(matches!(
+            engine.check_sync_scope("Message", &auth, Some(&row("room-1"))),
+            PolicyResult::Allowed
+        ));
+        // …and the read policy, which the sync paths check as well, denies.
+        assert!(!matches!(
+            engine.check_entity_read("Message", &auth, Some(&row("room-1"))),
+            PolicyResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn a_malformed_scope_denies_rather_than_replicating_everything() {
+        // Fail CLOSED. A scope that doesn't parse must not silently fall back
+        // to "replicate the whole table" — that is the exact flood it exists
+        // to prevent, and it would appear only in production volume.
+        let engine = PolicyEngine::from_manifest(&manifest_with(Some("data.roomId =="), "true"));
+        let auth = AuthContext::authenticated("alice".into());
+        assert!(!matches!(
+            engine.check_sync_scope("Message", &auth, Some(&row("room-1"))),
+            PolicyResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn an_empty_scope_string_is_treated_as_no_scope() {
+        // `sync: { limit: 5000 }` with no `where` emits an absent/blank
+        // predicate. Blank must mean "unscoped", not "deny everything" —
+        // otherwise a limit-only scope silently empties the replica.
+        let engine = PolicyEngine::from_manifest(&manifest_with(Some("   "), "true"));
+        let auth = AuthContext::authenticated("alice".into());
+        assert!(!engine.has_sync_scope("Message"));
+        assert!(matches!(
+            engine.check_sync_scope("Message", &auth, Some(&row("x"))),
+            PolicyResult::Allowed
+        ));
+    }
+
+    #[test]
+    fn an_unscoped_entity_is_unaffected_by_another_entitys_scope() {
+        let mut m = manifest_with(Some("data.roomId == auth.tenantId"), "true");
+        m.entities.push(ManifestEntity {
+            name: "Room".into(),
+            sync: true,
+            ..Default::default()
+        });
+        let engine = PolicyEngine::from_manifest(&m);
+        let auth = AuthContext::authenticated("alice".into());
+        assert!(engine.has_sync_scope("Message"));
+        assert!(!engine.has_sync_scope("Room"));
+        assert!(matches!(
+            engine.check_sync_scope("Room", &auth, Some(&row("anything"))),
+            PolicyResult::Allowed
+        ));
     }
 }

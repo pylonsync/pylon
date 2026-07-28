@@ -129,6 +129,7 @@ fn test_manifest() -> AppManifest {
             search: None,
             crdt: true,
             sync: true,
+            ..Default::default()
         }],
         routes: vec![],
         queries: vec![],

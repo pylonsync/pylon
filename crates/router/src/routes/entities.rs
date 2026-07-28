@@ -71,6 +71,21 @@ pub(crate) fn handle(
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(20)
                     .min(100);
+                // `?sync=1` marks this as a REPLICATION fetch — the sync
+                // engine filling a client's local replica, not an app reading
+                // the table. Only then does the entity's `sync_scope` apply.
+                //
+                // The distinction matters: `sync: false` documents that direct
+                // reads and policies are unchanged, and a scope is the same
+                // kind of promise. An app that deliberately reads outside the
+                // replicated window (an archive view, an admin report) must
+                // still get its rows, so scoping every caller would silently
+                // break reads that have nothing to do with replication.
+                let replication_fetch = url
+                    .split("sync=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .is_some_and(|v| v == "1" || v == "true");
 
                 // Scan raw pages until we accumulate enough visible rows
                 // after the read-policy filter or exhaust the source.
@@ -122,6 +137,21 @@ pub(crate) fn handle(
                             pylon_policy::PolicyResult::Allowed
                         );
                         if !allowed {
+                            continue;
+                        }
+                        // Replication scope, on top of the read policy and
+                        // only for a replication fetch. Same layering as the
+                        // snapshot path in routes/sync.rs.
+                        if replication_fetch
+                            && !matches!(
+                                ctx.policy_engine.check_sync_scope(
+                                    entity_name,
+                                    ctx.auth_ctx,
+                                    Some(&row)
+                                ),
+                                pylon_policy::PolicyResult::Allowed
+                            )
+                        {
                             continue;
                         }
                         // Apply both wire projections: User-entity

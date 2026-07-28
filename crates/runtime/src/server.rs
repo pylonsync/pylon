@@ -1542,6 +1542,7 @@ mod change_log_wiring_tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![],
             queries: vec![],

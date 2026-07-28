@@ -5413,6 +5413,7 @@ mod tests {
             search: None,
             crdt: false,
             sync: false,
+            ..Default::default()
         }];
         manifest.auth.user.entity = "User".into();
         manifest.auth.user.admin_field = Some("isAdmin".into());

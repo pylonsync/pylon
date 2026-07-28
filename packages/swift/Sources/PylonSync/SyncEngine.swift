@@ -436,7 +436,11 @@ public actor SyncEngine {
         var out: [Row] = []
         var after: String? = nil
         for _ in 0..<200 {
-            let page = try await client.listCursor(entity, after: after, limit: 100, as: Row.self)
+            // `replication: true` -> `sync=1`, which is what makes the entity's
+            // sync scope apply. These rows land in the replica; an app read
+            // through loadPage/InfiniteQuery deliberately stays unscoped.
+            let page = try await client.listCursor(
+                entity, after: after, limit: 100, replication: true, as: Row.self)
             out.append(contentsOf: page.data)
             guard page.has_more, let next = page.next_cursor else { break }
             after = next

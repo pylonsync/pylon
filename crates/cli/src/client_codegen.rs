@@ -443,6 +443,7 @@ mod tests {
                     search: None,
                     crdt: true,
                     sync: true,
+                    ..Default::default()
                 },
                 ManifestEntity {
                     name: "Todo".into(),
@@ -461,6 +462,7 @@ mod tests {
                     search: None,
                     crdt: true,
                     sync: true,
+                    ..Default::default()
                 },
             ],
             queries: vec![

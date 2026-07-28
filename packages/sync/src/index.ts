@@ -2124,9 +2124,13 @@ export class SyncEngine {
     // 200 pages × 100 per page = 20k rows. A `sync:true` entity larger than
     // this should switch to `sync: false` + search/by-id — see useInfiniteQuery.
     for (let page = 0; page < 200; page++) {
+      // `sync=1` marks this as a REPLICATION fetch, which is what makes an
+      // entity's `sync` scope apply. Without it the server treats the request
+      // as an ordinary app read and returns unscoped rows — correct for a
+      // direct read, wrong here, since these rows land in the replica.
       const qs: string = cursor
-        ? `?limit=100&after=${encodeURIComponent(cursor)}`
-        : `?limit=100`;
+        ? `?limit=100&sync=1&after=${encodeURIComponent(cursor)}`
+        : `?limit=100&sync=1`;
       const resp: {
         data: Row[];
         next_cursor: string | null;

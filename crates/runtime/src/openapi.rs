@@ -693,6 +693,7 @@ mod tests {
                     search: None,
                     crdt: true,
                     sync: true,
+                    ..Default::default()
                 },
                 ManifestEntity {
                     name: "Post".into(),
@@ -727,6 +728,7 @@ mod tests {
                     search: None,
                     crdt: true,
                     sync: true,
+                    ..Default::default()
                 },
             ],
             routes: vec![],

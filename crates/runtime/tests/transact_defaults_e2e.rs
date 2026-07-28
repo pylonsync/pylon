@@ -46,6 +46,7 @@ fn manifest() -> AppManifest {
             search: None,
             crdt: false,
             sync: true,
+            ..Default::default()
         }],
         routes: vec![],
         queries: vec![],

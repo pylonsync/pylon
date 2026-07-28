@@ -210,6 +210,7 @@ fn entity(name: &str, fields: &[&str]) -> ManifestEntity {
         // inserts are plain SQL and the test stays focused.
         crdt: false,
         sync: true,
+        ..Default::default()
     }
 }
 

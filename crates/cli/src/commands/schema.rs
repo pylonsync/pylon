@@ -1304,6 +1304,7 @@ mod tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![ManifestRoute {
                 path: "/".into(),
@@ -1340,6 +1341,7 @@ mod tests {
             search: None,
             crdt: true,
             sync: true,
+            ..Default::default()
         });
         let changes = compute_diff(&old, &new);
         assert!(changes

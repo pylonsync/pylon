@@ -5749,6 +5749,7 @@ pub(crate) fn cron_lease_entity() -> pylon_kernel::ManifestEntity {
         search: None,
         crdt: false,
         sync: true,
+        ..Default::default()
     }
 }
 
@@ -7746,6 +7747,7 @@ mod sqlite_transact_tx_safety_tests {
                 search: None,
                 crdt: false,
                 sync: true,
+                ..Default::default()
             }],
             ..Default::default()
         }

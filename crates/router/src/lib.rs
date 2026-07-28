@@ -2583,6 +2583,7 @@ mod field_gate_tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![],
             queries: vec![],
@@ -2634,6 +2635,7 @@ mod field_gate_tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![],
             queries: vec![],
@@ -2686,6 +2688,7 @@ mod field_gate_tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![],
             queries: vec![],
@@ -2776,6 +2779,7 @@ mod field_gate_tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![],
             queries: vec![],
@@ -3332,6 +3336,7 @@ mod auth_gate_tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![],
             queries: vec![],

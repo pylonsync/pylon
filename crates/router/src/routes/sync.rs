@@ -176,9 +176,18 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     let auth_user = &manifest.auth.user;
     let mut changes: Vec<ChangeEvent> = Vec::new();
     let mut scanned: usize = 0;
-    let mut next_after: Option<(String, Option<String>)> = None;
+    let mut next_after: Option<(String, Option<String>, usize)> = None;
     let resume_entity = snapshot_after.as_ref().map(|c| c.0.clone());
     let resume_after_id = snapshot_after.as_ref().and_then(|c| c.1.clone());
+    // Rows already emitted for the entity we're resuming INTO. `sync_limit` is
+    // a per-client-per-entity ceiling, and a snapshot spans however many
+    // requests SNAPSHOT_BATCH_LIMIT forces — so a counter that reset each
+    // request would let a big table emit `limit` rows per page and bound
+    // nothing at all.
+    let resume_emitted: usize = snapshot_after_parsed
+        .as_ref()
+        .and_then(|v| v.get("n").and_then(|n| n.as_u64()))
+        .unwrap_or(0) as usize;
     let mut started = resume_entity.is_none();
 
     'outer: for entity in &manifest.entities {
@@ -225,12 +234,18 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
         ) {
             continue;
         }
-        let initial_after = if Some(&entity.name) == resume_entity.as_ref() {
+        let resuming_this_entity = Some(&entity.name) == resume_entity.as_ref();
+        let initial_after = if resuming_this_entity {
             resume_after_id.clone()
         } else {
             None
         };
         let mut entity_after = initial_after;
+        let mut emitted_for_entity: usize = if resuming_this_entity {
+            resume_emitted
+        } else {
+            0
+        };
         loop {
             let raw = match ctx.store.list_after(
                 &entity.name,
@@ -293,6 +308,31 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                 }
                 entity_after = Some(row_id.clone());
                 scanned += 1;
+                // Replication scope, layered ON TOP of the read policy and
+                // checked first because it's the cheaper of the two on a
+                // scoped entity (a bare field comparison vs. a policy that may
+                // run an `exists(...)` subquery). It can only ever REMOVE rows
+                // from a replica — the read policy below still decides what
+                // the caller is allowed to see at all.
+                if !matches!(
+                    ctx.policy_engine
+                        .check_sync_scope(&entity.name, ctx.auth_ctx, Some(&row)),
+                    pylon_policy::PolicyResult::Allowed
+                ) {
+                    continue;
+                }
+                // Per-entity replication ceiling. Belt to the scope's braces:
+                // a predicate that turns out not to bound growth still can't
+                // flood the replica. Counted per entity, per request-chain,
+                // and enforced BEFORE the row is emitted.
+                if let Some(cap) = entity.sync_limit {
+                    if emitted_for_entity >= cap {
+                        // Stop this entity entirely — advancing the cursor
+                        // past it rather than paginating a table we have
+                        // already decided not to finish.
+                        break;
+                    }
+                }
                 if matches!(
                     ctx.policy_engine
                         .check_entity_read(&entity.name, ctx.auth_ctx, Some(&row)),
@@ -318,8 +358,13 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                         prev_data: None,
                         timestamp: String::new(),
                     });
+                    emitted_for_entity += 1;
                     if changes.len() >= SNAPSHOT_BATCH_LIMIT {
-                        next_after = Some((entity.name.clone(), entity_after.clone()));
+                        next_after = Some((
+                            entity.name.clone(),
+                            entity_after.clone(),
+                            emitted_for_entity,
+                        ));
                         break 'outer;
                     }
                 }
@@ -328,7 +373,11 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                 // skipped). A sparse data-dependent policy that drops most rows
                 // paginates by scan progress instead of walking the whole table.
                 if scanned >= raw_scan_budget {
-                    next_after = Some((entity.name.clone(), entity_after.clone()));
+                    next_after = Some((
+                        entity.name.clone(),
+                        entity_after.clone(),
+                        emitted_for_entity,
+                    ));
                     break 'outer;
                 }
             }
@@ -345,8 +394,10 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     // right "as of" point.
     let has_more = next_after.is_some();
     let cursor_seq = if has_more { 0 } else { snapshot_seq };
-    let next_after_str = next_after.map(|(e, a)| {
-        let payload = serde_json::json!({"e": e, "a": a, "s": snapshot_seq}).to_string();
+    let next_after_str = next_after.map(|(e, a, n)| {
+        // `n` carries per-entity emitted count so `sync_limit` survives
+        // pagination — see resume_emitted.
+        let payload = serde_json::json!({"e": e, "a": a, "s": snapshot_seq, "n": n}).to_string();
         url_encode(&payload)
     });
     let resp = serde_json::json!({
@@ -424,11 +475,24 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
 ///   - post denied otherwise → drop silently (callers can't tell a
 ///     row was filtered from a row that never existed)
 fn project_change_for_caller(ctx: &RouterContext, ev: ChangeEvent) -> Option<ChangeEvent> {
-    let post_allowed = matches!(
-        ctx.policy_engine
-            .check_entity_read(&ev.entity, ctx.auth_ctx, ev.data.as_ref()),
-        pylon_policy::PolicyResult::Allowed
-    );
+    // "Visible" on the replication path means readable AND inside the
+    // caller's sync scope. Folding the scope in here rather than filtering
+    // afterwards is what makes a row LEAVING scope behave correctly: the
+    // update/delete flip below already converts "was visible, now isn't"
+    // into a Delete, so a client evicts the row instead of holding a copy
+    // that will never be updated again.
+    let visible = |row: Option<&serde_json::Value>| {
+        matches!(
+            ctx.policy_engine
+                .check_entity_read(&ev.entity, ctx.auth_ctx, row),
+            pylon_policy::PolicyResult::Allowed
+        ) && matches!(
+            ctx.policy_engine
+                .check_sync_scope(&ev.entity, ctx.auth_ctx, row),
+            pylon_policy::PolicyResult::Allowed
+        )
+    };
+    let post_allowed = visible(ev.data.as_ref());
     if post_allowed {
         // Strip `prev_data` before shipping — it's a server-internal
         // field used only for the dual-check; leaving it on the wire
@@ -439,11 +503,7 @@ fn project_change_for_caller(ctx: &RouterContext, ev: ChangeEvent) -> Option<Cha
         });
     }
     if matches!(ev.kind, ChangeKind::Update) && ev.prev_data.is_some() {
-        let pre_allowed = matches!(
-            ctx.policy_engine
-                .check_entity_read(&ev.entity, ctx.auth_ctx, ev.prev_data.as_ref()),
-            pylon_policy::PolicyResult::Allowed
-        );
+        let pre_allowed = visible(ev.prev_data.as_ref());
         if pre_allowed {
             return Some(ChangeEvent {
                 seq: ev.seq,

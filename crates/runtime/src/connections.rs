@@ -809,6 +809,7 @@ pub fn connection_entity() -> pylon_kernel::ManifestEntity {
         search: None,
         crdt: false,
         sync: true,
+        ..Default::default()
     }
 }
 

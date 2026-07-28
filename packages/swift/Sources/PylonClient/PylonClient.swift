@@ -164,13 +164,22 @@ public actor PylonClient {
     }
 
     /// Page through an entity using cursor pagination.
+    /// - Parameter replication: marks the request as a REPLICATION fetch, so
+    ///   the entity's `sync` scope applies. Only the SyncEngine filling the
+    ///   local replica should set this — an app paginating the table wants the
+    ///   unscoped view, exactly as with `sync: false`. Mirrors the TS engine's
+    ///   `sync=1` marker in packages/sync.
     public func listCursor<T: Decodable>(
         _ entity: String,
         after: String? = nil,
         limit: Int = 50,
+        replication: Bool = false,
         as type: T.Type = T.self
     ) async throws -> CursorPage<T> {
         var path = "/api/entities/\(entity)/cursor?limit=\(limit)"
+        if replication {
+            path += "&sync=1"
+        }
         if let after, !after.isEmpty {
             path += "&after=\(percentEncode(after))"
         }

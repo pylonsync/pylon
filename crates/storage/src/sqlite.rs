@@ -1139,6 +1139,7 @@ mod tests {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             }],
             routes: vec![],
             queries: vec![],
@@ -1480,6 +1481,7 @@ mod tests {
                     search: None,
                     crdt: true,
                     sync: true,
+                    ..Default::default()
                 },
                 ManifestEntity {
                     name: "User".into(),
@@ -1500,6 +1502,7 @@ mod tests {
                     search: None,
                     crdt: true,
                     sync: true,
+                    ..Default::default()
                 },
             ],
             routes: vec![],

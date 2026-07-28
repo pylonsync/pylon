@@ -437,6 +437,7 @@ mod tests {
             search: None,
             crdt: true,
             sync: true,
+            ..Default::default()
         }
     }
 

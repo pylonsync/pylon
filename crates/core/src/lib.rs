@@ -488,6 +488,31 @@ pub struct ManifestEntity {
     /// `/api/search/X`) and policies are unchanged.
     #[serde(default = "default_sync_enabled")]
     pub sync: bool,
+    /// Replication SCOPE — a policy-DSL predicate that bounds WHICH rows of a
+    /// synced entity reach a given client's replica.
+    ///
+    /// `sync` is all-or-nothing: a client replicates every row it is allowed
+    /// to read. That is fine for a working set and wrong for a table that
+    /// grows without bound, where the only escape hatch was `sync: false` —
+    /// giving up live queries entirely. A scope keeps the entity live while
+    /// bounding the volume: `data.orgId == auth.tenantId`, or a retention
+    /// window like `data.createdAt >= now - 2592000000`.
+    ///
+    /// Evaluated per row, per caller, in the SAME expression language as
+    /// policies (including `exists(...)`), and applied ON TOP of the read
+    /// policy — never instead of it. A scope is a bandwidth decision, not an
+    /// access-control one; narrowing it can never widen what a caller sees.
+    ///
+    /// Applies to REPLICATION only — the snapshot, the cursor bootstrap, and
+    /// the change-log delta. Direct reads (`/api/entities/X`, `/api/search/X`)
+    /// are unchanged, matching `sync: false`'s contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_scope: Option<String>,
+    /// Hard ceiling on rows replicated per entity, per client. Belt to
+    /// `sync_scope`'s braces: a predicate that turns out not to bound growth
+    /// (or one an app forgot to narrow) still can't flood a replica.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_limit: Option<usize>,
 }
 
 fn default_crdt_enabled() -> bool {
@@ -508,6 +533,8 @@ impl Default for ManifestEntity {
             search: None,
             crdt: true,
             sync: true,
+            sync_scope: None,
+            sync_limit: None,
         }
     }
 }

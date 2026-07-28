@@ -60,6 +60,7 @@ fn manifest_with_encrypted_ssn() -> AppManifest {
             search: None,
             crdt: false,
             sync: true,
+            ..Default::default()
         }],
         routes: vec![],
         queries: vec![],

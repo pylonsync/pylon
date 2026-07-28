@@ -56,6 +56,7 @@ fn test_manifest() -> AppManifest {
                 search: None,
                 crdt: true,
                 sync: true,
+                ..Default::default()
             },
             secret_entity(),
         ],
@@ -111,6 +112,7 @@ fn secret_entity() -> ManifestEntity {
         search: None,
         crdt: false,
         sync: true,
+        ..Default::default()
     }
 }
 
@@ -528,6 +530,7 @@ fn sync_false_entity_excluded_from_snapshot_and_delta() {
         crdt: false,
         // The entity under test: public to read, but never bulk-replicated.
         sync: false,
+        ..Default::default()
     });
     manifest.policies.push(ManifestPolicy {
         name: "catalog_public".into(),
@@ -648,6 +651,7 @@ fn push_rejects_underscore_entities_for_non_admin() {
         search: None,
         crdt: false,
         sync: true,
+        ..Default::default()
     });
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     let port = start_server(rt);
@@ -731,6 +735,7 @@ fn push_update_cannot_flip_readonly_field_for_non_admin() {
         search: None,
         crdt: true,
         sync: true,
+        ..Default::default()
     });
     manifest.policies.push(ManifestPolicy {
         name: "owned_public".into(),
@@ -843,6 +848,7 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
         search: None,
         crdt: true,
         sync: true,
+        ..Default::default()
     });
     // Data-dependent per-row policy: not statically deniable, so the entity is
     // scanned and filtered row-by-row — the path that scanned unboundedly.
@@ -902,4 +908,189 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
         r2["has_more"], false,
         "snapshot must converge once the table is fully scanned: {b2}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Replication scope (`sync_scope` / `sync_limit`)
+// ---------------------------------------------------------------------------
+//
+// A scope bounds WHICH rows of a synced entity reach a replica, so an entity
+// that grows without bound can stay live instead of being forced to
+// `sync: false`. These drive the real HTTP surface — the engine-level
+// semantics are unit-tested in pylon-policy; what matters here is that the
+// snapshot, the cursor bootstrap and the delta tail all honour it, since a
+// gap in any one of them silently ships the whole table.
+
+/// `Note` scoped to rows whose `body` marks them as belonging to the caller's
+/// bucket. `body` is used as the scope key purely because the fixture entity
+/// already has it — the predicate shape is what's under test.
+fn scoped_manifest(scope: &str, limit: Option<usize>) -> AppManifest {
+    let mut m = test_manifest();
+    for e in m.entities.iter_mut() {
+        if e.name == "Note" {
+            e.sync_scope = Some(scope.to_string());
+            e.sync_limit = limit;
+        }
+    }
+    m
+}
+
+#[test]
+fn snapshot_replicates_only_rows_inside_the_scope() {
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("data.body == \"keep\"", None)).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    // Two rows in scope, one out.
+    for (title, body) in [("a", "keep"), ("b", "drop"), ("c", "keep")] {
+        let (status, resp) = http(
+            port,
+            "POST",
+            "/api/entities/Note",
+            Some(&token),
+            Some(&format!(r#"{{"title":"{title}","body":"{body}"}}"#)),
+        );
+        assert!(status == 200 || status == 201, "insert failed: {resp}");
+    }
+
+    let (status, resp) = pull(port, &token, 0);
+    assert_eq!(status, 200);
+    let titles: Vec<&str> = resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .map(|c| c["data"]["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, vec!["a", "c"], "snapshot ignored the scope: {resp}");
+}
+
+#[test]
+fn an_unscoped_entity_is_untouched_by_the_feature() {
+    // The default has to stay exactly as it was — this is the regression that
+    // would hit every existing app.
+    let rt = Arc::new(Runtime::in_memory(test_manifest()).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    insert_note(port, &token, "a");
+    insert_note(port, &token, "b");
+
+    let (_, resp) = pull(port, &token, 0);
+    let n = resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .count();
+    assert_eq!(n, 2, "unscoped entity lost rows: {resp}");
+}
+
+#[test]
+fn a_row_leaving_scope_is_pushed_as_a_delete() {
+    // The subtle one. If an update that moves a row OUT of scope were simply
+    // dropped, every replica would keep a stale copy forever — visible, never
+    // updated again. It has to arrive as a delete so the client evicts it.
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("data.body == \"keep\"", None)).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    let (status, body) = http(
+        port,
+        "POST",
+        "/api/entities/Note",
+        Some(&token),
+        Some(r#"{"title":"a","body":"keep"}"#),
+    );
+    assert!(status == 200 || status == 201, "insert failed: {body}");
+    let id = serde_json::from_str::<Value>(&body).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_, snap) = pull(port, &token, 0);
+    let since = snap["cursor"]["last_seq"].as_u64().unwrap();
+
+    // Move it out of scope.
+    let (status, body) = http(
+        port,
+        "PATCH",
+        &format!("/api/entities/Note/{id}"),
+        Some(&token),
+        Some(r#"{"body":"drop"}"#),
+    );
+    assert!(status == 200, "update failed status={status} body={body}");
+
+    let (_, resp) = pull(port, &token, since);
+    let ev = resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["row_id"] == id.as_str())
+        .unwrap_or_else(|| panic!("no event for the row that left scope: {resp}"));
+    assert_eq!(
+        ev["kind"].as_str().unwrap(),
+        "delete",
+        "row left scope but was not evicted: {resp}"
+    );
+}
+
+#[test]
+fn sync_limit_caps_rows_replicated_per_entity() {
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("true", Some(2))).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    for i in 0..6 {
+        insert_note(port, &token, &format!("n{i}"));
+    }
+
+    let (_, resp) = pull(port, &token, 0);
+    let n = resp["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .count();
+    assert_eq!(n, 2, "sync_limit did not cap the snapshot: {resp}");
+}
+
+#[test]
+fn the_cursor_bootstrap_honours_the_scope_but_a_direct_read_does_not() {
+    // `sync: false` promises direct reads are unchanged, and a scope makes the
+    // same promise: only the sync engine's REPLICATION fetch (`sync=1`) is
+    // scoped. An app paginating the table — an archive view, an admin report —
+    // must still see everything its policy allows.
+    let rt = Arc::new(Runtime::in_memory(scoped_manifest("data.body == \"keep\"", None)).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    for (title, body) in [("a", "keep"), ("b", "drop")] {
+        let (status, resp) = http(
+            port,
+            "POST",
+            "/api/entities/Note",
+            Some(&token),
+            Some(&format!(r#"{{"title":"{title}","body":"{body}"}}"#)),
+        );
+        assert!(status == 200 || status == 201, "insert failed: {resp}");
+    }
+
+    let count = |qs: &str| -> usize {
+        let (status, body) = http(
+            port,
+            "GET",
+            &format!("/api/entities/Note/cursor?limit=100{qs}"),
+            Some(&token),
+            None,
+        );
+        assert_eq!(status, 200, "cursor failed: {body}");
+        serde_json::from_str::<Value>(&body).unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+
+    assert_eq!(count("&sync=1"), 1, "replication fetch ignored the scope");
+    assert_eq!(count(""), 2, "a direct read was wrongly scoped");
 }

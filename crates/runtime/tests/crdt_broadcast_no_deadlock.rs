@@ -55,6 +55,7 @@ fn crdt_manifest() -> AppManifest {
             search: None,
             crdt: true,
             sync: true,
+            ..Default::default()
         }],
         ..Default::default()
     }
