@@ -99,13 +99,16 @@ fn available_port() -> u16 {
 fn start_server() -> (u16, Arc<Runtime>) {
     let port = available_port();
     let manifest = test_manifest();
-    // Server defaults to non-dev (production-safe), which requires
-    // PYLON_CORS_ORIGIN. Tests don't set one, so opt into dev mode.
-    // SAFETY: tests run single-threaded for env mutations like this;
-    // setting once before the server thread spawns is fine.
-    unsafe {
-        std::env::set_var("PYLON_DEV_MODE", "1");
-    }
+    // Once per BINARY, not once per server. `cargo test` runs a binary's tests
+    // on several threads by default, so a per-call `set_var` here is a data
+    // race against every other thread reading the environment — which is why
+    // set_var is unsafe. It surfaced as servers that never came up and tests
+    // failing on `connect: ConnectionRefused`, on CI only.
+    static DEV_MODE: std::sync::Once = std::sync::Once::new();
+    DEV_MODE.call_once(|| {
+        // SAFETY: exactly once, and before any server thread is spawned.
+        unsafe { std::env::set_var("PYLON_DEV_MODE", "1") };
+    });
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     let rt2 = Arc::clone(&rt);
     std::thread::spawn(move || {

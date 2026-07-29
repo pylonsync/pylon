@@ -133,10 +133,13 @@ fn start_stub_server(form_called: Arc<AtomicBool>) -> u16 {
     // is honored REGARDLESS of dev mode, so set an explicit allowlist that
     // excludes the "attacker" origin — dev's default `*` would trust everyone.
     // SAFETY: this test binary is a dedicated process; env is isolated.
-    unsafe {
+    // Once per binary — a per-call set_var races the other test threads
+    // reading the environment. See the note in e2e_smoke.rs.
+    static CSRF_ENV: std::sync::Once = std::sync::Once::new();
+    CSRF_ENV.call_once(|| unsafe {
         std::env::set_var("PYLON_DEV_MODE", "1");
         std::env::set_var("PYLON_CSRF_ORIGINS", "http://good.example");
-    }
+    });
     let rt = Arc::new(Runtime::in_memory(form_route_manifest()).unwrap());
     let fn_ops: Arc<dyn pylon_router::FnOps> = Arc::new(StubFnOps { form_called });
     std::thread::spawn(move || {

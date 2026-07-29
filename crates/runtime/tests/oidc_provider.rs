@@ -115,7 +115,16 @@ fn start_server() -> u16 {
             .unwrap()
             .as_nanos()
     ));
-    unsafe {
+    // SAFETY + correctness: exactly once per binary. `cargo test` runs a
+    // binary's tests on several threads, so mutating the environment per call
+    // races every other thread reading it — which is why set_var is unsafe. It
+    // surfaced as a server that never came up and
+    // `connect: ConnectionRefused`, on CI only.
+    //
+    // `key_path` is captured by the closure, so the first caller's temp path is
+    // the one every server in this binary uses — fine, they want the same key.
+    static OIDC_ENV: std::sync::Once = std::sync::Once::new();
+    OIDC_ENV.call_once(|| unsafe {
         std::env::set_var("PYLON_DEV_MODE", "1");
         std::env::set_var("PYLON_OIDC_ISSUER", "https://auth.example.com");
         std::env::set_var(
@@ -124,7 +133,7 @@ fn start_server() -> u16 {
         );
         std::env::set_var("PYLON_OIDC_KEY_PATH", &key_path);
         std::env::set_var("PYLON_LOGIN_URL", "/login");
-    }
+    });
 
     // Pre-generate the OIDC signing key before the server boots. The keystore
     // otherwise lazy-generates an RSA-2048 key inside the first `/oidc/jwks`
