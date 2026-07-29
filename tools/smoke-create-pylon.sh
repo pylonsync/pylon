@@ -44,6 +44,7 @@ node --check "$SCRIPT"
 # Combos to scaffold + verify. Add a row when you add a template or
 # platform — the loop body covers everything else.
 COMBOS=(
+	# The default you get with no --template, first.
 	"barebones|web"
 	"barebones|ios"
 	"barebones|mac"
@@ -64,6 +65,9 @@ COMBOS=(
 	"chat|mac"
 	"chat|expo"
 	"chat|web,ios,mac,expo"
+	# The starter people reach for to build a product — biggest template
+	# in the set, and until now the only one with no smoke coverage.
+	"saas|web"
 )
 
 NODE_VERSION="$(node -p 'process.versions.node')"

@@ -6,7 +6,7 @@
  * yarn/pnpm/bun create @pylonsync/pylon).
  *
  * Picks one or more platforms (web, mobile, expo) and a template
- * (barebones, todo, …). Each platform shares the same Pylon backend
+ * (barebones by default, saas to build a product, todo, …). Each platform shares the same Pylon backend
  * under apps/api so `bun run dev` brings the whole project up.
  *
  * Templates live as real files under ../templates/<scope>/<template>.
@@ -76,9 +76,9 @@ const PYLON_VERSION = JSON.parse(
 const PLATFORMS_AVAILABLE = ["web", "vite", "ios", "mac", "expo"];
 
 const TEMPLATE_REGISTRY = {
-	default: {
+	barebones: {
 		blurb:
-			"SaaS starter — server-rendered marketing landing + multi-tenant dashboard (orgs, members, tenant-scoped data). One app, one port, no Next.js.",
+			"Single entity, live list + optimistic create. The smallest SSR app, one port. THE DEFAULT.",
 		// `unified` templates are a single Pylon app (app.ts + app/ routes +
 		// functions/), NOT a monorepo of apps/api + apps/web. `pylon dev`
 		// serves the SSR frontend and the API from one port. They take no
@@ -86,9 +86,9 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
-	barebones: {
+	saas: {
 		blurb:
-			"Single entity, live list + optimistic create. The smallest SSR app, one port.",
+			"SaaS starter — server-rendered marketing landing + multi-tenant dashboard (orgs, members, tenant-scoped data), auth, billing. Reach for this to build a product.",
 		platforms: [],
 		unified: true,
 	},
@@ -119,12 +119,6 @@ const TEMPLATE_REGISTRY = {
 	"local-service": {
 		blurb:
 			"Appointment business — services + booking with LIVE slot availability (a slot greys out for everyone the instant it's booked) + owner dashboard. One SSR app.",
-		platforms: [],
-		unified: true,
-	},
-	saas: {
-		blurb:
-			"SaaS app — marketing landing + multi-tenant dashboard (orgs, members, tenant-scoped data). The 'saas' archetype; identical to the default template.",
 		platforms: [],
 		unified: true,
 	},
@@ -209,6 +203,32 @@ const TEMPLATE_REGISTRY = {
 };
 const TEMPLATES_AVAILABLE = Object.keys(TEMPLATE_REGISTRY);
 
+/**
+ * What you get when you don't choose.
+ *
+ * The smallest thing that runs, deliberately. Scaffolding somebody straight
+ * into a multi-tenant SaaS app — orgs, members, billing, a marketing site —
+ * means most of what they read on day one is scaffolding they didn't ask for
+ * and have to delete. Reach for `saas` when you're actually building a
+ * product; that's what it's for.
+ */
+const DEFAULT_TEMPLATE = "barebones";
+
+/**
+ * Retired template names, kept working so existing scripts and docs don't
+ * break. `ssr` was the original name of the full-stack starter; `default` was
+ * its name while it WAS the default — it isn't any more, and a template
+ * literally called "default" that you don't get by default is worse than a
+ * rename.
+ */
+const TEMPLATE_ALIASES = {
+	ssr: "saas",
+	default: "saas",
+};
+
+const resolveTemplate = (name) =>
+	TEMPLATE_ALIASES[name] ?? name;
+
 // ---------------------------------------------------------------------------
 // CLI args + interactive prompts
 // ---------------------------------------------------------------------------
@@ -267,7 +287,8 @@ ${tmplLines.join("\n")}
   --skip-install         scaffold only, don't run install
 
 Examples:
-  npm create @pylonsync/pylon my-app                        # default — SaaS landing + multi-tenant dashboard
+  npm create @pylonsync/pylon my-app                        # default — the smallest SSR app that runs
+  npm create @pylonsync/pylon my-app --template saas        # building a product? start here: landing + orgs + billing
   npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
   npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
   npm create @pylonsync/pylon my-app --template waitlist     # coming-soon landing + live signup counter
@@ -304,29 +325,26 @@ if (!projectName) {
 if (!flags.template) {
 	if (isInteractive) {
 		const lines = Object.entries(TEMPLATE_REGISTRY)
-			.map(([k, v]) => `  ${k.padEnd(10)} ${v.blurb}`)
+			.map(([k, v]) => `  ${k.padEnd(13)} ${v.blurb}`)
 			.join("\n");
 		process.stdout.write(`\n${lines}\n`);
 		const ans = (
 			await rl.question(
-				`Template (${TEMPLATES_AVAILABLE.join(", ")}) [default]: `,
+				`Template (${TEMPLATES_AVAILABLE.join(", ")}) [${DEFAULT_TEMPLATE}]: `,
 			)
 		)
 			.trim()
 			.toLowerCase();
-		flags.template = TEMPLATES_AVAILABLE.includes(ans) ? ans : "default";
+		const picked = resolveTemplate(ans);
+		flags.template = TEMPLATES_AVAILABLE.includes(picked)
+			? picked
+			: DEFAULT_TEMPLATE;
 	} else {
-		console.log("Non-interactive stdin — using --template default.");
-		flags.template = "default";
+		console.log(`Non-interactive stdin — using --template ${DEFAULT_TEMPLATE}.`);
+		flags.template = DEFAULT_TEMPLATE;
 	}
 }
-// `ssr` was the original name of the default template; keep it working as a
-// quiet alias so older `--template ssr` invocations don't break.
-if (flags.template === "ssr") flags.template = "default";
-// `saas` is the archetype NAME for the default template (a SaaS landing +
-// multi-tenant dashboard). It scaffolds the exact same app as `default`; we
-// alias rather than duplicate the whole tree so there's one source of truth.
-if (flags.template === "saas") flags.template = "default";
+flags.template = resolveTemplate(flags.template);
 // `unified` templates (default) are a single app, not a monorepo — they take
 // no platforms. Skip the platform prompt + validation for them entirely.
 const isUnified = TEMPLATE_REGISTRY[flags.template]?.unified === true;
