@@ -1561,12 +1561,27 @@ impl Default for OAuthRegistry {
 /// sent the browser to :3000, which either refuses the connection or lands on
 /// some unrelated app. `server::start` publishes the real bound port as `PORT`,
 /// so `pylon dev --port 4399` produces a callback on 4399 too.
+/// Port the HTTP server bound, published by `server::start`. 0 = not started
+/// (unit tests, wasm, a library embedding), in which case `PORT` then Pylon's
+/// own default answer for it.
+static SERVING_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// Record the port the server is listening on, for callback synthesis.
+pub fn set_serving_port(port: u16) {
+    SERVING_PORT.store(port, std::sync::atomic::Ordering::Relaxed);
+}
+
 fn dev_callback_origin() -> String {
-    let port = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.trim().parse::<u16>().ok())
-        // Pylon's own default, not 3000.
-        .unwrap_or(4321);
+    let bound = SERVING_PORT.load(std::sync::atomic::Ordering::Relaxed);
+    let port = if bound != 0 {
+        bound
+    } else {
+        std::env::var("PORT")
+            .ok()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            // Pylon's own default, not 3000.
+            .unwrap_or(4321)
+    };
     format!("http://localhost:{port}")
 }
 
@@ -3796,14 +3811,15 @@ mod tests {
         std::env::remove_var("PYLON_OAUTH_GOOGLE_REDIRECT");
         std::env::remove_var("PYLON_PUBLIC_URL");
 
-        std::env::set_var("PORT", "4399");
+        set_serving_port(4399);
         let reg = OAuthRegistry::from_env();
         assert_eq!(
             reg.get("google").expect("google registered").redirect_uri,
             "http://localhost:4399/api/auth/callback/google",
         );
 
-        // No PORT at all: Pylon's own default, NOT 3000.
+        // Nothing recorded and no PORT: Pylon's own default, NOT 3000.
+        set_serving_port(0);
         std::env::remove_var("PORT");
         let reg = OAuthRegistry::from_env();
         assert_eq!(

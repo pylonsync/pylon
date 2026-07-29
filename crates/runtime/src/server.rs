@@ -1608,23 +1608,18 @@ fn start_server(
     // if nothing was registered.
     pylon_observability::run_tracing_hook();
 
-    // Publish the port we're actually serving on so env-only config can reach
-    // it. The OAuth registry needs it: without an explicit redirect URI or
-    // PYLON_PUBLIC_URL it has to synthesize a localhost callback, and it is
-    // built lazily on the first OAuth request — long after this — so reading it
-    // back from the environment is enough.
+    // Tell the auth layer which port we're serving on. Without an explicit
+    // redirect URI or PYLON_PUBLIC_URL, the OAuth registry has to synthesize a
+    // localhost callback, and it can only name the right port if somebody
+    // tells it — `pylon dev --port 4399` reaches it no other way, and a
+    // callback on the wrong port fails at the IdP with `redirect_uri_mismatch`,
+    // which says nothing about ports.
     //
-    // Set, not defaulted: `pylon dev --port 4399` never reaches the auth code
-    // any other way, and a callback pointing at the wrong port fails at the
-    // IdP with `redirect_uri_mismatch`, which says nothing about ports.
-    // Existing PORT wins — a platform that set it (Fly, Heroku, Cloud Run) is
-    // describing the port the OUTSIDE world uses, which is the one a callback
-    // must name.
-    if std::env::var_os("PORT").is_none() {
-        // SAFETY: single-threaded startup, before any worker thread is
-        // spawned and before the first request can read it.
-        unsafe { std::env::set_var("PORT", port.to_string()) };
-    }
+    // An atomic and NOT `std::env::set_var`: a test binary starts several
+    // servers on several threads, and mutating the process environment while
+    // another thread reads it is a data race (which is why set_var is unsafe
+    // now). It showed up as a server that never came up.
+    pylon_auth::set_serving_port(port);
 
     // Optional Tinybird request-log shipper. No-op unless the env is
     // set (PYLON_TINYBIRD_TOKEN + PYLON_PROJECT_ID); on Pylon Cloud
