@@ -1553,6 +1553,23 @@ impl Default for OAuthRegistry {
     }
 }
 
+/// Origin to synthesize a localhost OAuth callback against when neither an
+/// explicit per-provider redirect nor `PYLON_PUBLIC_URL` is set.
+///
+/// This used to be hardcoded `http://localhost:3000` — a Next.js default that
+/// Pylon never listens on. Pylon's dev server is 4321, so a local Google login
+/// sent the browser to :3000, which either refuses the connection or lands on
+/// some unrelated app. `server::start` publishes the real bound port as `PORT`,
+/// so `pylon dev --port 4399` produces a callback on 4399 too.
+fn dev_callback_origin() -> String {
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.trim().parse::<u16>().ok())
+        // Pylon's own default, not 3000.
+        .unwrap_or(4321);
+    format!("http://localhost:{port}")
+}
+
 impl OAuthRegistry {
     pub fn new() -> Self {
         Self {
@@ -1615,7 +1632,9 @@ impl OAuthRegistry {
                         format!("{trimmed}/api/auth/callback/{}", spec.id)
                     })
                 })
-                .unwrap_or_else(|_| format!("http://localhost:3000/api/auth/callback/{}", spec.id));
+                .unwrap_or_else(|_| {
+                    format!("{}/api/auth/callback/{}", dev_callback_origin(), spec.id)
+                });
             let scopes_override = std::env::var(format!("{prefix}_SCOPES")).ok();
             let tenant = std::env::var(format!("{prefix}_TENANT")).ok();
 
@@ -1676,7 +1695,7 @@ impl OAuthRegistry {
                         format!("{trimmed}/api/auth/callback/{name}")
                     })
                 })
-                .unwrap_or_else(|_| format!("http://localhost:3000/api/auth/callback/{name}"));
+                .unwrap_or_else(|_| format!("{}/api/auth/callback/{name}", dev_callback_origin()));
             reg.register(OAuthConfig {
                 provider: name,
                 client_id: id,
@@ -3755,14 +3774,47 @@ mod tests {
         assert!(err.contains("token_endpoint"), "got: {err}");
     }
 
-    /// Regression: redirect URIs default to `http://localhost:3000/...`
-    /// only if neither `PYLON_OAUTH_<X>_REDIRECT` nor `PYLON_PUBLIC_URL`
-    /// is set. With `PYLON_PUBLIC_URL` configured (the typical
+    /// Regression: redirect URIs fall back to a localhost callback only if
+    /// neither `PYLON_OAUTH_<X>_REDIRECT` nor `PYLON_PUBLIC_URL` is set. With `PYLON_PUBLIC_URL` configured (the typical
     /// production case), the redirect derives from it. Without this
     /// fallback every Pylon Cloud customer who didn't manually set
     /// the per-provider redirect env shipped to Google with a
     /// localhost redirect_uri and got "redirect_uri_mismatch" at the
     /// IdP — found while debugging yapless's OAuth flow at launch.
+    /// The localhost fallback names the port Pylon actually serves on.
+    ///
+    /// It was hardcoded to 3000 — a Next.js default Pylon never listens on —
+    /// so a local Google login redirected the browser to :3000 while the dev
+    /// server sat on 4321. `server::start` publishes the bound port as `PORT`,
+    /// so `pylon dev --port 4399` gets a callback on 4399 as well.
+    #[test]
+    fn localhost_redirect_uses_the_port_we_serve_on() {
+        let key_id = "PYLON_OAUTH_GOOGLE_CLIENT_ID";
+        let key_secret = "PYLON_OAUTH_GOOGLE_CLIENT_SECRET";
+        std::env::set_var(key_id, "google-port-id");
+        std::env::set_var(key_secret, "google-port-secret");
+        std::env::remove_var("PYLON_OAUTH_GOOGLE_REDIRECT");
+        std::env::remove_var("PYLON_PUBLIC_URL");
+
+        std::env::set_var("PORT", "4399");
+        let reg = OAuthRegistry::from_env();
+        assert_eq!(
+            reg.get("google").expect("google registered").redirect_uri,
+            "http://localhost:4399/api/auth/callback/google",
+        );
+
+        // No PORT at all: Pylon's own default, NOT 3000.
+        std::env::remove_var("PORT");
+        let reg = OAuthRegistry::from_env();
+        assert_eq!(
+            reg.get("google").expect("google registered").redirect_uri,
+            "http://localhost:4321/api/auth/callback/google",
+        );
+
+        std::env::remove_var(key_id);
+        std::env::remove_var(key_secret);
+    }
+
     #[test]
     fn redirect_uri_falls_back_to_pylon_public_url() {
         let key_id = "PYLON_OAUTH_DISCORD_CLIENT_ID";
