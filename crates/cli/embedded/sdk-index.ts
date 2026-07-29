@@ -415,7 +415,10 @@ export function entity(
     indexes?: IndexDefinition[];
     relations?: RelationDefinition[];
     search?: SearchConfig;
-    sync?: boolean;
+    /** `false` to keep out of the replica, or a {@link SyncScope} to bound
+     *  which rows reach it. Mirrors {@link EntityDefinition.sync} — this is
+     *  the type callers actually hit, so the two must not drift. */
+    sync?: boolean | SyncScope;
   },
 ): EntityDefinition {
   return {
