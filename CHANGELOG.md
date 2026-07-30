@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.355](https://github.com/pylonsync/pylon/compare/v0.3.354...v0.3.355) (2026-07-30)
+
+
+### Bug Fixes
+
+* **cli:** stop printing DATABASE_URL — the boot banner leaked the DB password ([3b906a0](https://github.com/pylonsync/pylon/commit/3b906a0a9169648aa85d3fb562dfa55d24ee34d0))
+
 ## [0.3.96](https://github.com/pylonsync/pylon/compare/v0.3.95...v0.3.96) (2026-05-15)
 
 
