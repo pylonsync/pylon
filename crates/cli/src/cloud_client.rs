@@ -1,10 +1,10 @@
 //! Pylon Cloud client — credential storage + authenticated HTTP.
 //!
 //! Used by `pylon login`, `pylon logout`, and `pylon deploy --target
-//! cloud`. Talks to https://www.pylonsync.com by default (hosted Pylon
-//! Cloud is one unified app on www — it serves both the API and the
-//! dashboard); the cloud origin is overridable via `PYLON_CLOUD_URL`
-//! for staging / self-hosted Pylon Cloud installations.
+//! cloud`. Talks to https://www.usesmallware.com by default — hosted Pylon
+//! Cloud is Smallware, one unified app serving both the API and the
+//! dashboard. The cloud origin is overridable via `PYLON_CLOUD_URL` for
+//! staging / self-hosted installations.
 //!
 //! Credentials live in `$XDG_CONFIG_HOME/pylon/credentials.json` (or
 //! `~/.config/pylon/credentials.json` when XDG isn't set). The file
@@ -38,7 +38,11 @@ pub struct Credentials {
 
 /// Default cloud origin. Override with `PYLON_CLOUD_URL` for staging
 /// or self-hosted installs.
-pub const DEFAULT_CLOUD_URL: &str = "https://www.pylonsync.com";
+///
+/// Hosted Pylon Cloud is Smallware. `www.pylonsync.com` now serves the Pylon
+/// framework's marketing site and no longer answers `/api/*`, so a CLI pointed
+/// there gets HTML where it expects JSON.
+pub const DEFAULT_CLOUD_URL: &str = "https://www.usesmallware.com";
 
 pub fn cloud_url() -> String {
     std::env::var("PYLON_CLOUD_URL").unwrap_or_else(|_| DEFAULT_CLOUD_URL.to_string())
@@ -50,7 +54,18 @@ pub fn cloud_url() -> String {
 /// origin. It is not merely a redirect — it has no certificate, so anything
 /// still pointed at it fails the TLS handshake and surfaces as a bare
 /// Cloudflare 525 with no hint that the host moved.
-const RETIRED_CLOUD_HOSTS: &[&str] = &["https://api.pylonsync.com"];
+///
+/// `(www.)pylonsync.com` were retired when hosted Pylon Cloud became Smallware:
+/// those hosts now serve the framework's marketing site, so a stored credential
+/// pointing at them reaches a real, healthy server that simply has no `/api/*`
+/// — the failure is an HTML body parsed as JSON rather than a network error,
+/// which is even less legible than the 525. Both the bare and www forms are
+/// listed because credentials were minted against both.
+const RETIRED_CLOUD_HOSTS: &[&str] = &[
+    "https://api.pylonsync.com",
+    "https://pylonsync.com",
+    "https://www.pylonsync.com",
+];
 
 /// Point a stored origin at wherever hosted Pylon Cloud actually lives now.
 ///
@@ -73,8 +88,8 @@ pub fn normalize_cloud_url(url: &str) -> String {
 }
 
 /// Where the human-facing dashboard lives. Hosted Pylon Cloud is one unified
-/// app on www.pylonsync.com serving both the API and the dashboard, so this is
-/// normally the same origin the CLI talks to. Retired hosts are rewritten and
+/// app on www.usesmallware.com serving both the API and the dashboard, so this
+/// is normally the same origin the CLI talks to. Retired hosts are rewritten and
 /// self-hosted / staging origins (PYLON_CLOUD_URL) pass through untouched —
 /// both via [`normalize_cloud_url`], which the request path uses too.
 pub fn dashboard_url() -> String {
@@ -356,11 +371,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_cloud_url_is_www() {
-        // Hosted Pylon Cloud is one unified app on www; api.pylonsync.com
-        // is retired — and not merely redirected. It has no certificate, so
-        // anything still addressing it dies in the TLS handshake.
-        assert_eq!(DEFAULT_CLOUD_URL, "https://www.pylonsync.com");
+    fn default_cloud_url_is_the_smallware_host() {
+        // Hosted Pylon Cloud is Smallware. (www.)pylonsync.com now serves the
+        // framework's marketing site and has no /api/*, so a CLI pointed there
+        // parses HTML as JSON; api.pylonsync.com has no certificate at all and
+        // dies in the TLS handshake. All three are retired.
+        assert_eq!(DEFAULT_CLOUD_URL, "https://www.usesmallware.com");
     }
 
     #[test]
@@ -371,13 +387,30 @@ mod tests {
         // answers with a bare Cloudflare 525, no hint that the host moved.
         assert_eq!(
             normalize_cloud_url("https://api.pylonsync.com"),
-            "https://www.pylonsync.com"
+            "https://www.usesmallware.com"
         );
         // Trailing slash is the shape `pylon login` actually wrote.
         assert_eq!(
             normalize_cloud_url("https://api.pylonsync.com/"),
-            "https://www.pylonsync.com"
+            "https://www.usesmallware.com"
         );
+    }
+
+    #[test]
+    fn a_credential_minted_against_pylonsync_follows_the_rebrand() {
+        // Hosted Pylon Cloud became Smallware, and (www.)pylonsync.com was
+        // handed to the framework's marketing site. Those hosts still answer —
+        // with HTML — so an un-rewritten credential fails as a JSON parse error
+        // on a 200, which reads like a corrupt response rather than a moved
+        // host. Every stored form has to map across.
+        for stored in [
+            "https://www.pylonsync.com",
+            "https://www.pylonsync.com/",
+            "https://pylonsync.com",
+            "https://pylonsync.com/",
+        ] {
+            assert_eq!(normalize_cloud_url(stored), "https://www.usesmallware.com");
+        }
     }
 
     #[test]
@@ -397,26 +430,30 @@ mod tests {
     #[test]
     fn normalization_is_idempotent_and_strips_a_trailing_slash() {
         let once = normalize_cloud_url("https://www.pylonsync.com/");
-        assert_eq!(once, "https://www.pylonsync.com");
+        assert_eq!(once, "https://www.usesmallware.com");
         assert_eq!(normalize_cloud_url(&once), once);
     }
 
     #[test]
-    fn dashboard_url_maps_hosted_origins_to_www() {
-        // www is the canonical dashboard host. Old credentials minted
-        // against the retired api. host still map to www so browser links
-        // don't 404.
+    fn dashboard_url_maps_hosted_origins_to_the_smallware_host() {
+        // www.usesmallware.com is the canonical dashboard host. Credentials
+        // minted against any retired host still map to it so browser links
+        // don't land on the marketing site (or a dead one).
+        assert_eq!(
+            dashboard_url_for("https://www.usesmallware.com"),
+            "https://www.usesmallware.com"
+        );
         assert_eq!(
             dashboard_url_for("https://www.pylonsync.com"),
-            "https://www.pylonsync.com"
+            "https://www.usesmallware.com"
         );
         assert_eq!(
             dashboard_url_for("https://api.pylonsync.com"),
-            "https://www.pylonsync.com"
+            "https://www.usesmallware.com"
         );
         assert_eq!(
             dashboard_url_for("https://api.pylonsync.com/"),
-            "https://www.pylonsync.com"
+            "https://www.usesmallware.com"
         );
     }
 
