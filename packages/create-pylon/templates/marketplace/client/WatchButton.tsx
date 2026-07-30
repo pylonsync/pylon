@@ -3,7 +3,8 @@
 import React, { useEffect, useState } from "react";
 import { db } from "@pylonsync/react";
 import { Heart } from "lucide-react";
-import { cn } from "../ui/utils";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { bootClient, readIdentity, type Watch } from "./market";
 
 // Heart toggle that saves a listing to your private watchlist. Self-contained
@@ -47,8 +48,13 @@ function Inner({
 
   // Policy scopes reads to the caller, so this returns only MY watch (if any)
   // for this listing.
-  const { data } = db.useQuery<Watch>("Watch", { where: { listingId } });
-  const mine = identity ? data?.find((w) => w.userId === identity.userId) : undefined;
+  const { data } = db.useQuery<Watch>("Watch", {});
+  const mine = identity
+    ? data?.find(
+        (watch) =>
+          watch.userId === identity.userId && watch.listingId === listingId,
+      )
+    : undefined;
   const watched = !!mine;
 
   // No heart for signed-out visitors.
@@ -66,25 +72,28 @@ function Inner({
   }
 
   return (
-    <button
+    <Button
       type="button"
+      variant="outline"
+      size="icon"
       onClick={toggle}
       aria-pressed={watched}
       aria-label={watched ? "Remove from watchlist" : "Save to watchlist"}
       title={watched ? "Saved" : "Save to watchlist"}
       className={cn(
-        "grid size-10 place-items-center rounded-full bg-background/85 shadow-[var(--shadow-border)] backdrop-blur transition-[background-color,box-shadow,scale] duration-150 hover:bg-background hover:shadow-[var(--shadow-border-hover)] active:scale-[0.96]",
+        "rounded-full bg-background/85 backdrop-blur",
         className,
       )}
     >
       <Heart
+        aria-hidden="true"
         className={cn(
-          "size-[18px] transition-[color,fill,scale] duration-200",
+          "transition-[color,fill,scale] duration-200",
           watched
             ? "scale-100 fill-foreground text-foreground"
             : "scale-95 fill-transparent text-foreground/70",
         )}
       />
-    </button>
+    </Button>
   );
 }

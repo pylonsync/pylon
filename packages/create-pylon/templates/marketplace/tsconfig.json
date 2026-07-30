@@ -8,7 +8,18 @@
     "strict": true,
     "skipLibCheck": true,
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["react", "react-dom", "node"]
+    "types": ["react", "react-dom", "node"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./*"]
+    }
   },
-  "include": ["app.ts", "app/**/*", "client/**/*", "functions/**/*", "ui/**/*"]
+  "include": [
+    "app.ts",
+    "app/**/*",
+    "client/**/*",
+    "components/**/*",
+    "functions/**/*",
+    "lib/**/*"
+  ]
 }

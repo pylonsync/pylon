@@ -1,11 +1,31 @@
 "use client";
 
 import React, { useState } from "react";
-import { db } from "@pylonsync/react";
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Textarea } from "../ui/textarea";
-import { Badge } from "../ui/badge";
+import { callFn, db } from "@pylonsync/react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import {
+  Field,
+  FieldGroup,
+  FieldLabel,
+  FieldSeparator,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
 import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 import { money, timeAgo, type Offer } from "./market";
 
@@ -16,6 +36,7 @@ interface Props {
   title: string;
   price: number;
   status: "active" | "sold";
+  initialOffers?: Offer[];
 }
 
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline" | "success" | "warning";
@@ -30,16 +51,23 @@ function Panel(props: Props) {
   const { listingId, sellerId, price } = props;
   const identity = useIdentity();
   const isSeller = !!identity && identity.userId === sellerId;
-  const isSold = props.status === "sold";
 
   // The live query — every offer on this listing, newest first. Reads are
   // public, so this runs for signed-out visitors too; it just lights up the
   // moment a buyer in another tab makes an offer.
   const { data } = db.useQuery<Offer>("Offer", {
-    where: { listingId },
     orderBy: { createdAt: "desc" },
   });
-  const offers = data ?? [];
+  const offers = Array.from(
+    new Map(
+      [...(props.initialOffers ?? []), ...(data ?? [])].map((offer) => [
+        offer.id,
+        offer,
+      ]),
+    ).values(),
+  ).filter((offer) => offer.listingId === listingId);
+  const isSold =
+    props.status === "sold" || offers.some((offer) => offer.status === "accepted");
   const myOffer = identity
     ? offers.find((o) => o.buyerId === identity.userId)
     : undefined;
@@ -65,93 +93,112 @@ function Panel(props: Props) {
 
 function SellerView({ offers }: { offers: Offer[] }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const pending = offers.filter((o) => o.status === "pending");
-
-  // Optimistic accept/decline: flip the offer's status in the local store
-  // immediately so the seller's list updates the instant they click. The
-  // server (respondToOffer) reconciles the rest — marking the listing sold and
-  // declining the sibling offers — when its broadcast lands.
-  const respondMutation = db.useMutation<{ offerId: string; accept: boolean }>(
-    "respondToOffer",
-    {
-      optimistic: (args) => {
-        const o = offers.find((x) => x.id === args.offerId);
-        return o
-          ? [
-              {
-                entity: "Offer",
-                data: { ...o, status: args.accept ? "accepted" : "declined" },
-              },
-            ]
-          : [];
-      },
-    },
-  );
 
   async function respond(offerId: string, accept: boolean) {
     setBusy(offerId);
     setErr(null);
     try {
-      await respondMutation.mutate({ offerId, accept });
+      // Use the direct function transport for seller decisions. It remains
+      // reliable across dev-server reconnects, while the live query applies
+      // the atomic offer + listing updates as soon as the server broadcasts.
+      await callFn("respondToOffer", { offerId, accept });
     } catch (e) {
       setErr((e as Error).message ?? "Could not respond to offer.");
     } finally {
       setBusy(null);
+      setConfirming(null);
     }
   }
 
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <h2 className="font-semibold">Offers on your listing</h2>
         <Badge variant="outline">{pending.length} pending</Badge>
       </div>
-      {err ? <p className="text-sm text-destructive">{err}</p> : null}
+      <div aria-live="polite">
+        {err ? (
+          <Alert variant="destructive">
+            <AlertDescription>{err}</AlertDescription>
+          </Alert>
+        ) : null}
+      </div>
       {offers.length === 0 ? (
-        <p className="rounded-xl bg-muted p-6 text-center text-sm text-muted-foreground">
-          No offers yet. They will appear here as soon as a buyer sends one.
-        </p>
+        <Empty className="border-0 bg-muted py-6">
+          <EmptyHeader>
+            <EmptyTitle className="text-base">No offers yet</EmptyTitle>
+            <EmptyDescription>
+              They will appear here as soon as a buyer sends one.
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
       ) : (
-        <ul className="space-y-2">
+        <ul className="flex flex-col gap-2">
           {offers.map((o) => (
-            <li
-              key={o.id}
-              className="flex items-center justify-between gap-3 rounded-lg border bg-card p-3"
-            >
+            <li key={o.id}>
+            <Card className="flex items-center justify-between gap-3 rounded-lg p-3">
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <span className="text-lg font-semibold tabular-nums">
                     {money(o.amount)}
                   </span>
-                  <Badge variant={statusVariant[o.status] ?? "outline"}>
+                  <Badge
+                    variant={statusVariant[o.status] ?? "outline"}
+                    className="capitalize"
+                  >
                     {o.status}
                   </Badge>
                 </div>
                 <p className="truncate text-sm text-muted-foreground">
                   {o.buyerName} · {timeAgo(o.createdAt)}
-                  {o.message ? ` · "${o.message}"` : ""}
+                  {o.message ? ` · “${o.message}”` : ""}
                 </p>
               </div>
               {o.status === "pending" ? (
                 <div className="flex shrink-0 gap-2">
-                  <Button
-                    size="sm"
-                    disabled={busy === o.id}
-                    onClick={() => respond(o.id, true)}
-                  >
-                    Accept
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy === o.id}
-                    onClick={() => respond(o.id, false)}
-                  >
-                    Decline
-                  </Button>
+                  {confirming === o.id ? (
+                    <>
+                      <Button
+                        size="sm"
+                        disabled={busy === o.id}
+                        onClick={() => respond(o.id, true)}
+                      >
+                        Confirm
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        disabled={busy === o.id}
+                        onClick={() => setConfirming(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </>
+                  ) : (
+                    <Button
+                      size="sm"
+                      disabled={busy === o.id}
+                      onClick={() => setConfirming(o.id)}
+                    >
+                      Accept
+                    </Button>
+                  )}
+                  {confirming !== o.id ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy === o.id}
+                      onClick={() => respond(o.id, false)}
+                    >
+                      Decline
+                    </Button>
+                  ) : null}
                 </div>
               ) : null}
+            </Card>
             </li>
           ))}
         </ul>
@@ -175,6 +222,7 @@ function BuyerView({
   const name = identity?.name ?? "you";
   const [amount, setAmount] = useState(String(suggestedPrice));
   const [message, setMessage] = useState("");
+  const [confirmingBuy, setConfirmingBuy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   // Local-first optimism, baked in: db.useMutation paints the Offer into the
@@ -241,30 +289,42 @@ function BuyerView({
   // the offer is made.
   if (myOffer) {
     return (
-      <div className="space-y-2 rounded-xl bg-card p-4 shadow-[var(--shadow-border)]">
-        <h2 className="font-semibold">Your offer</h2>
-        <div className="flex items-center gap-2">
-          <span className="text-2xl font-semibold tabular-nums">{money(myOffer.amount)}</span>
-          <Badge variant={statusVariant[myOffer.status] ?? "outline"}>
-            {myOffer.status}
-          </Badge>
-        </div>
-        <p className="text-sm text-muted-foreground">
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle>Your offer</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <span className="text-2xl font-semibold tabular-nums">
+              {money(myOffer.amount)}
+            </span>
+            <Badge
+              variant={statusVariant[myOffer.status] ?? "outline"}
+              className="capitalize"
+            >
+              {myOffer.status}
+            </Badge>
+          </div>
+          <p className="text-sm text-muted-foreground">
           {myOffer.status === "pending"
             ? `Sent to ${sellerName}. Their answer will appear here live.`
             : myOffer.status === "accepted"
               ? "Accepted. Confirm payment and delivery with the seller."
               : "This offer was declined."}
-        </p>
-      </div>
+          </p>
+        </CardContent>
+      </Card>
     );
   }
 
   if (isSold) {
     return (
-      <div className="rounded-xl bg-card p-4 text-sm text-muted-foreground shadow-[var(--shadow-border)]">
-        This item has sold.
-      </div>
+      <Alert>
+        <AlertTitle>This item has sold</AlertTitle>
+        <AlertDescription>
+          Browse other finds to discover something similar.
+        </AlertDescription>
+      </Alert>
     );
   }
 
@@ -286,64 +346,102 @@ function BuyerView({
   }
 
   return (
-    <div className="space-y-4 rounded-xl bg-card p-5 shadow-[var(--shadow-border)]">
-      <div className="space-y-2">
-        <Button
-          type="button"
-          onClick={buy}
-          disabled={buyNow.loading}
-          className="w-full"
-        >
-          {buyNow.loading ? "Buying…" : `Buy now for ${money(suggestedPrice)}`}
-        </Button>
-        <p className="text-center text-xs text-muted-foreground">
-          Instant purchase at the asking price.
-        </p>
+    <Card>
+      <CardContent className="flex flex-col gap-4 p-5">
+      <div className="flex flex-col gap-2">
+        {confirmingBuy ? (
+          <Alert>
+            <AlertTitle>
+              Buy this item for {money(suggestedPrice)}?
+            </AlertTitle>
+            <AlertDescription>
+              This accepts the asking price and marks the listing sold.
+            </AlertDescription>
+            <div className="mt-3 flex gap-2">
+              <Button
+                type="button"
+                size="sm"
+                onClick={buy}
+                disabled={buyNow.loading}
+                className="flex-1"
+              >
+                {buyNow.loading ? <Spinner data-icon="inline-start" /> : null}
+                {buyNow.loading ? "Buying…" : "Confirm purchase"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setConfirmingBuy(false)}
+                disabled={buyNow.loading}
+              >
+                Cancel
+              </Button>
+            </div>
+          </Alert>
+        ) : (
+          <>
+            <Button
+              type="button"
+              onClick={() => setConfirmingBuy(true)}
+              className="w-full"
+            >
+              Buy now for {money(suggestedPrice)}
+            </Button>
+            <p className="text-center text-xs text-muted-foreground">
+              Instant purchase at the asking price.
+            </p>
+          </>
+        )}
       </div>
 
-      <div className="flex items-center gap-3 text-xs uppercase tracking-wide text-muted-foreground">
-        <span className="h-px flex-1 bg-border" />
-        or make an offer
-        <span className="h-px flex-1 bg-border" />
-      </div>
+      <FieldSeparator>or make an offer</FieldSeparator>
 
-      <form onSubmit={submit} className="space-y-3">
-        <div className="space-y-1.5">
-          <label htmlFor="offer-amount" className="text-sm font-medium">
-            Your offer
-          </label>
-          <div className="flex items-center gap-2">
-            <span className="text-muted-foreground">$</span>
+      <form onSubmit={submit}>
+        <FieldGroup className="gap-3">
+          <Field>
+            <FieldLabel htmlFor="offer-amount">Your offer ($)</FieldLabel>
             <Input
               id="offer-amount"
+              name="offerAmount"
               type="number"
+              inputMode="decimal"
+              autoComplete="off"
               min="1"
               step="1"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              className="w-32"
+              className="max-w-32"
             />
-          </div>
-        </div>
-        <div className="space-y-1.5">
-          <label htmlFor="offer-note" className="text-sm font-medium">
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="offer-note">
             Note <span className="font-normal text-muted-foreground">(optional)</span>
-          </label>
+            </FieldLabel>
           <Textarea
             id="offer-note"
-            placeholder="Share any useful details"
+            name="offerNote"
+            autoComplete="off"
+            placeholder="Share any useful details…"
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             rows={2}
           />
+          </Field>
+        <div aria-live="polite">
+          {err ? (
+            <Alert variant="destructive">
+              <AlertDescription>{err}</AlertDescription>
+            </Alert>
+          ) : null}
         </div>
-        {err ? <p className="text-sm text-destructive">{err}</p> : null}
         <Button
           type="submit"
           variant="outline"
           disabled={makeOffer.loading}
           className="w-full"
         >
+          {makeOffer.loading ? <Spinner data-icon="inline-start" /> : null}
           {makeOffer.loading
             ? "Sending…"
             : `Offer ${money(Number.parseFloat(amount) || 0)}`}
@@ -351,8 +449,10 @@ function BuyerView({
         <p className="text-center text-xs text-muted-foreground">
           You're bidding as <span className="font-medium">{name}</span>
         </p>
+        </FieldGroup>
       </form>
-    </div>
+      </CardContent>
+    </Card>
   );
 }
 

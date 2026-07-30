@@ -1,10 +1,13 @@
 @import "tailwindcss";
 @import "tw-animate-css";
-@import "../ui/tokens.css";
+@import "../components/ui/tokens.css";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
 
 /* Tailwind v4 scans these for class names (relative to this file). */
 @source "./";
 @source "../client";
+@source "../components";
 @source "../../_shared/src";
 
 @theme {
@@ -28,6 +31,10 @@
   --color-accent-foreground: oklch(0.21 0.004 85);
   --color-destructive: oklch(0.577 0.245 27.325);
   --color-destructive-foreground: oklch(0.985 0 0);
+  --color-success: oklch(0.62 0.14 153);
+  --color-success-foreground: oklch(0.38 0.1 153);
+  --color-warning: oklch(0.72 0.14 75);
+  --color-warning-foreground: oklch(0.42 0.1 65);
   --color-border: oklch(0.89 0.007 85);
   --color-input: oklch(0.86 0.008 85);
   --color-ring: oklch(0.53 0.015 85);
@@ -38,7 +45,7 @@
 }
 
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --shadow-border:
     0 0 0 1px rgb(0 0 0 / 0.06),
     0 1px 2px -1px rgb(0 0 0 / 0.06),
@@ -49,19 +56,62 @@
     0 16px 32px -18px rgb(41 37 33 / 0.24);
 }
 
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-background: oklch(0.15 0.004 85);
+  --color-foreground: oklch(0.94 0.004 85);
+  --color-card: oklch(0.19 0.005 85);
+  --color-card-foreground: oklch(0.94 0.004 85);
+  --color-popover: oklch(0.19 0.005 85);
+  --color-popover-foreground: oklch(0.94 0.004 85);
+  --color-primary: oklch(0.93 0.004 85);
+  --color-primary-foreground: oklch(0.17 0.004 85);
+  --color-secondary: oklch(0.24 0.006 85);
+  --color-secondary-foreground: oklch(0.94 0.004 85);
+  --color-muted: oklch(0.23 0.006 85);
+  --color-muted-foreground: oklch(0.7 0.007 85);
+  --color-accent: oklch(0.25 0.008 85);
+  --color-accent-foreground: oklch(0.94 0.004 85);
+  --color-border: oklch(0.3 0.007 85);
+  --color-input: oklch(0.34 0.008 85);
+  --color-ring: oklch(0.68 0.01 85);
+  --color-success-foreground: oklch(0.82 0.12 153);
+  --color-warning-foreground: oklch(0.84 0.12 75);
+  --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.08);
+  --shadow-border-hover: 0 0 0 1px rgb(255 255 255 / 0.14);
+}
+
 html,
 body {
   height: 100%;
 }
 
 html {
-  scroll-behavior: smooth;
+  -webkit-tap-highlight-color: rgb(23 23 23 / 0.08);
 }
 
 h1,
 h2,
 h3 {
+  scroll-margin-top: 6rem;
   text-wrap: balance;
+}
+
+button,
+a,
+input,
+select,
+textarea {
+  touch-action: manipulation;
+}
+
+:where(a, button, input, select, textarea):focus-visible {
+  outline: 2px solid var(--color-ring);
+  outline-offset: 2px;
 }
 
 p,
@@ -78,7 +128,8 @@ li {
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme]) {
+    color-scheme: dark;
     --color-background: oklch(0.15 0.004 85);
     --color-foreground: oklch(0.94 0.004 85);
     --color-card: oklch(0.19 0.005 85);
@@ -96,6 +147,8 @@ li {
     --color-border: oklch(0.3 0.007 85);
     --color-input: oklch(0.34 0.008 85);
     --color-ring: oklch(0.68 0.01 85);
+    --color-success-foreground: oklch(0.82 0.12 153);
+    --color-warning-foreground: oklch(0.84 0.12 75);
     --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.08);
     --shadow-border-hover: 0 0 0 1px rgb(255 255 255 / 0.14);
   }
@@ -118,10 +171,10 @@ li {
   animation-play-state: paused;
 }
 @media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
   .market-marquee {
+    animation: none;
+  }
+  .animate-pulse {
     animation: none;
   }
 }

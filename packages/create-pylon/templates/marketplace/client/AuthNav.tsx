@@ -2,7 +2,7 @@
 
 import React from "react";
 import { Link } from "@pylonsync/react";
-import { Button } from "../ui/button";
+import { Button } from "@/components/ui/button";
 import { MarketProvider, useAuth } from "./MarketProvider";
 
 // Compact sign-in state for the header. Signed out → a link to /sell (which
@@ -12,12 +12,9 @@ function Nav() {
   const { identity, signOut } = useAuth();
   if (!identity) {
     return (
-      <Link
-        href="/sell"
-        className="inline-flex min-h-10 items-center rounded-lg bg-card px-3 text-sm font-medium shadow-[var(--shadow-border)] transition-[background-color,box-shadow,scale] duration-150 hover:bg-muted hover:shadow-[var(--shadow-border-hover)] active:scale-[0.96]"
-      >
-        Sign in
-      </Link>
+      <Button asChild variant="outline" size="sm">
+        <Link href="/sell">Sign in</Link>
+      </Button>
     );
   }
   return (
@@ -28,7 +25,6 @@ function Nav() {
       <Button
         variant="ghost"
         size="sm"
-        className="text-muted-foreground"
         onClick={() => void signOut()}
       >
         Sign out

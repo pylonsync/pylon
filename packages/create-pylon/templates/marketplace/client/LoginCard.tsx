@@ -1,9 +1,22 @@
 "use client";
 
 import React, { useState } from "react";
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Label } from "../ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Spinner } from "@/components/ui/spinner";
 import { useAuth } from "./MarketProvider";
 import { DEMO } from "./market";
 
@@ -13,9 +26,11 @@ import { DEMO } from "./market";
 export function LoginCard({
   title = "Sign in to continue",
   blurb = "Use the ready demo account or create your own. No verification email is required.",
+  headingLevel = 2,
 }: {
   title?: string;
   blurb?: string;
+  headingLevel?: 1 | 2;
 }) {
   const { signIn, signUp } = useAuth();
   const [mode, setMode] = useState<"login" | "register">("login");
@@ -25,6 +40,7 @@ export function LoginCard({
   const [name, setName] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const Heading = headingLevel === 1 ? "h1" : "h2";
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -41,64 +57,90 @@ export function LoginCard({
   }
 
   return (
-    <div className="mx-auto max-w-sm space-y-5 rounded-2xl bg-card p-6 shadow-[var(--shadow-border)]">
-      <div>
-        <h2 className="text-xl font-semibold tracking-[-0.02em]">{title}</h2>
-        <p className="mt-1.5 text-pretty text-sm leading-5 text-muted-foreground">
+    <Card className="mx-auto max-w-sm">
+      <CardHeader>
+        <Heading className="text-xl font-semibold tracking-[-0.02em]">
+          {title}
+        </Heading>
+        <CardDescription className="text-pretty leading-5">
           {blurb}
-        </p>
-      </div>
-      <form onSubmit={submit} className="space-y-3">
-        {mode === "register" ? (
-          <div className="space-y-1.5">
-            <Label htmlFor="lc-name">Name</Label>
-            <Input
-              id="lc-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Pat Pylon"
-            />
-          </div>
-        ) : null}
-        <div className="space-y-1.5">
-          <Label htmlFor="lc-email">Email</Label>
-          <Input
-            id="lc-email"
-            type="email"
-            required
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="you@example.com"
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="lc-password">Password</Label>
-          <Input
-            id="lc-password"
-            type="password"
-            required
-            minLength={8}
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder={mode === "register" ? "8+ characters" : ""}
-          />
-        </div>
-        {err ? <p className="text-sm text-destructive">{err}</p> : null}
-        <Button type="submit" disabled={busy} className="w-full">
-          {busy
-            ? "…"
-            : mode === "login"
-              ? "Log in"
-              : "Create account"}
-        </Button>
-      </form>
-      <p className="text-center text-xs text-muted-foreground">
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={submit}>
+          <FieldGroup className="gap-4">
+            {mode === "register" ? (
+              <Field>
+                <FieldLabel htmlFor="lc-name">Name</FieldLabel>
+                <Input
+                  id="lc-name"
+                  name="name"
+                  autoComplete="name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Pat Pylon"
+                />
+              </Field>
+            ) : null}
+            <Field>
+              <FieldLabel htmlFor="lc-email">Email</FieldLabel>
+              <Input
+                id="lc-email"
+                name="email"
+                type="email"
+                required
+                autoComplete="email"
+                spellCheck={false}
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="you@example.com"
+              />
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="lc-password">Password</FieldLabel>
+              <Input
+                id="lc-password"
+                name="password"
+                type="password"
+                required
+                minLength={8}
+                autoComplete={
+                  mode === "login" ? "current-password" : "new-password"
+                }
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={mode === "register" ? "8+ characters" : ""}
+              />
+            </Field>
+            <div aria-live="polite">
+              {err ? (
+                <Alert variant="destructive">
+                  <AlertDescription>{err}</AlertDescription>
+                </Alert>
+              ) : null}
+            </div>
+            <Button type="submit" disabled={busy} className="w-full">
+              {busy ? <Spinner data-icon="inline-start" /> : null}
+              {busy
+                ? mode === "login"
+                  ? "Logging in…"
+                  : "Creating account…"
+                : mode === "login"
+                  ? "Log in"
+                  : "Create account"}
+            </Button>
+          </FieldGroup>
+        </form>
+      </CardContent>
+      <CardFooter className="justify-center text-xs text-muted-foreground">
         {mode === "login" ? (
           <>
             No account?{" "}
-            <button
+            <Button
               type="button"
-              className="relative min-h-10 font-medium text-foreground after:absolute after:inset-x-0 after:bottom-1 after:h-px after:bg-current after:opacity-0 after:transition-opacity hover:after:opacity-100"
+              variant="link"
+              size="sm"
+              className="px-1"
               onClick={() => {
                 setMode("register");
                 setEmail("");
@@ -107,14 +149,16 @@ export function LoginCard({
               }}
             >
               Sign up
-            </button>
+            </Button>
           </>
         ) : (
           <>
             Have an account?{" "}
-            <button
+            <Button
               type="button"
-              className="relative min-h-10 font-medium text-foreground after:absolute after:inset-x-0 after:bottom-1 after:h-px after:bg-current after:opacity-0 after:transition-opacity hover:after:opacity-100"
+              variant="link"
+              size="sm"
+              className="px-1"
               onClick={() => {
                 setMode("login");
                 setEmail(DEMO.email);
@@ -123,10 +167,10 @@ export function LoginCard({
               }}
             >
               Log in
-            </button>
+            </Button>
           </>
         )}
-      </p>
-    </div>
+      </CardFooter>
+    </Card>
   );
 }

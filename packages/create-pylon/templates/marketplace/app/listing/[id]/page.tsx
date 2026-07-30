@@ -1,20 +1,34 @@
 import React, { Suspense, use } from "react";
 import {
   Link,
+  useRouteData,
   type GenerateMetadata,
   type Metadata,
   type PageProps,
   type ServerData,
   type SsrResponse,
 } from "@pylonsync/react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
 import { OfferPanel } from "../../../client/OfferPanel";
 import { CategoryIcon } from "../../_components/CategoryIcon";
 import { WatchButton } from "../../../client/WatchButton";
+import { LiveListingStatus } from "../../../client/LiveListingStatus";
 import {
   gradient,
   money,
   conditionLabel,
   type Listing,
+  type Offer,
 } from "../../../client/market";
 
 // Resolve a listing from the URL segment, which is its slug
@@ -64,22 +78,40 @@ function Detail({
   response: SsrResponse;
   id: string;
 }) {
-  const listing = use(resolveListing(serverData, id));
+  // Listing cards seed this route with the row they already rendered.
+  // useRouteData paints that real content immediately, resets scroll at the
+  // start of navigation, then upgrades it to the authoritative server row in
+  // place. Direct loads still suspend for SSR as normal.
+  const listing = useRouteData<Listing | null>(
+    () => resolveListing(serverData, id),
+    [serverData, id],
+  );
 
   if (!listing) {
     response.setStatus(404);
     return (
-      <div className="rounded-xl border border-dashed p-12 text-center">
-        <p className="font-medium">This listing is gone.</p>
-        <Link href="/" className="mt-2 inline-block text-sm underline">
-          Back to the market
-        </Link>
-      </div>
+      <Empty className="mx-auto min-h-[60vh] max-w-xl border-0">
+        <EmptyHeader>
+          <p className="text-sm font-medium text-muted-foreground">Unavailable</p>
+          <EmptyTitle className="text-3xl tracking-[-0.03em]">
+            This listing is no longer available
+          </EmptyTitle>
+          <EmptyDescription className="max-w-md">
+            It may have sold or been removed by the seller. Browse the latest
+            finds to discover something similar.
+          </EmptyDescription>
+        </EmptyHeader>
+        <EmptyContent>
+          <Button asChild size="lg">
+            <Link href="/">Browse latest finds</Link>
+          </Button>
+        </EmptyContent>
+      </Empty>
     );
   }
 
   return (
-    <div className="space-y-6 pb-10">
+    <div className="flex flex-col gap-6 pb-10">
       <Link
         href="/"
         className="inline-flex min-h-10 items-center text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -93,9 +125,11 @@ function Detail({
             <img
               src={listing.imageUrl}
               alt={listing.title}
+              width="1200"
+              height="1500"
               fetchPriority="high"
               decoding="async"
-              className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
+              className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-border"
             />
           ) : (
             <div
@@ -110,11 +144,11 @@ function Detail({
             listingTitle={listing.title}
             className="absolute right-4 top-4"
           />
-          {listing.status === "sold" ? (
-            <span className="absolute inset-0 grid place-items-center bg-black/55 text-2xl font-semibold text-white">
-              Sold
-            </span>
-          ) : null}
+          <LiveListingStatus
+            listingId={listing.id}
+            initialStatus={listing.status}
+            mode="overlay"
+          />
         </div>
 
         <div className="flex min-w-0 flex-col">
@@ -134,7 +168,7 @@ function Detail({
             </p>
           </div>
 
-          <div className="my-6 h-px bg-border" />
+          <Separator className="my-6" />
 
           <section>
             <h2 className="text-sm font-medium">About this item</h2>
@@ -143,7 +177,7 @@ function Detail({
             </p>
           </section>
 
-          <div className="my-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-border shadow-[var(--shadow-border)]">
+          <Card className="my-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-border">
             <div className="bg-card p-4">
               <p className="text-xs text-muted-foreground">Condition</p>
               <p className="mt-1 text-sm font-medium">{conditionLabel(listing.condition)}</p>
@@ -151,20 +185,18 @@ function Detail({
             <div className="bg-card p-4">
               <p className="text-xs text-muted-foreground">Offer status</p>
               <p className="mt-1 text-sm font-medium">
-                {listing.status === "active" ? "Open to offers" : "Sold"}
+                <LiveListingStatus
+                  listingId={listing.id}
+                  initialStatus={listing.status}
+                />
               </p>
             </div>
-          </div>
+          </Card>
 
           <div className="mt-6">
-            <OfferPanel
-              listingId={listing.id}
-              sellerId={listing.sellerId}
-              sellerName={listing.sellerName}
-              title={listing.title}
-              price={listing.price}
-              status={listing.status}
-            />
+            <Suspense fallback={<ListingOffers listing={listing} />}>
+              <LoadedListingOffers serverData={serverData} listing={listing} />
+            </Suspense>
           </div>
 
           <p className="mt-4 text-pretty text-xs leading-5 text-muted-foreground">
@@ -177,6 +209,39 @@ function Detail({
   );
 }
 
+function ListingOffers({
+  listing,
+  initialOffers,
+}: {
+  listing: Listing;
+  initialOffers?: Offer[];
+}) {
+  return (
+    <OfferPanel
+      listingId={listing.id}
+      sellerId={listing.sellerId}
+      sellerName={listing.sellerName}
+      title={listing.title}
+      price={listing.price}
+      status={listing.status}
+      initialOffers={initialOffers}
+    />
+  );
+}
+
+function LoadedListingOffers({
+  serverData,
+  listing,
+}: {
+  serverData: ServerData;
+  listing: Listing;
+}) {
+  const initialOffers = use(
+    serverData.query<Offer>("Offer", { listingId: listing.id }),
+  );
+  return <ListingOffers listing={listing} initialOffers={initialOffers} />;
+}
+
 export default function ListingPage({
   params,
   serverData,
@@ -186,16 +251,21 @@ export default function ListingPage({
     <Suspense
       fallback={
         <div className="grid gap-8 md:grid-cols-2">
-          <div className="aspect-[4/5] animate-pulse rounded-[24px] bg-muted" />
-          <div className="space-y-3">
-            <div className="h-6 w-2/3 animate-pulse rounded bg-muted" />
-            <div className="h-8 w-1/3 animate-pulse rounded bg-muted" />
-            <div className="h-24 animate-pulse rounded bg-muted" />
+          <Skeleton className="aspect-[4/5] rounded-[24px]" />
+          <div className="flex flex-col gap-3">
+            <Skeleton className="h-6 w-2/3" />
+            <Skeleton className="h-8 w-1/3" />
+            <Skeleton className="h-24" />
           </div>
         </div>
       }
     >
-      <Detail serverData={serverData} response={response} id={params.id} />
+      <Detail
+        key={params.id}
+        serverData={serverData}
+        response={response}
+        id={params.id}
+      />
     </Suspense>
   );
 }

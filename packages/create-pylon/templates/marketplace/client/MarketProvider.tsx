@@ -19,6 +19,7 @@ import {
   type Identity,
 } from "./market";
 import { LoginCard } from "./LoginCard";
+import { Spinner } from "@/components/ui/spinner";
 
 // The sync engine (live queries, WebSocket) is browser-only, so every
 // interactive island mounts behind this provider. It boots the client, keeps
@@ -100,7 +101,10 @@ export function MarketProvider({
     return (
       <>
         {fallback ?? (
-          <span className="text-xs text-muted-foreground">connecting…</span>
+          <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Spinner />
+            Connecting…
+          </span>
         )}
       </>
     );
@@ -137,12 +141,22 @@ export function AuthGate({
   children,
   title,
   blurb,
+  headingLevel,
 }: {
   children: React.ReactNode;
   title?: string;
   blurb?: string;
+  headingLevel?: 1 | 2;
 }) {
   const { identity } = useAuth();
-  if (!identity) return <LoginCard title={title} blurb={blurb} />;
+  if (!identity) {
+    return (
+      <LoginCard
+        title={title}
+        blurb={blurb}
+        headingLevel={headingLevel}
+      />
+    );
+  }
   return <>{children}</>;
 }

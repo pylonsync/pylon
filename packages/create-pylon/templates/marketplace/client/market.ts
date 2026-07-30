@@ -264,7 +264,10 @@ export function readIdentity(): Identity | null {
 
 /** Cache the freshest displayName (from the live User query) for instant UI. */
 export function cacheDisplayName(name: string): void {
-  if (name) localStorage.setItem(DISPLAY_NAME, name);
+  if (name && localStorage.getItem(DISPLAY_NAME) !== name) {
+    localStorage.setItem(DISPLAY_NAME, name);
+    window.dispatchEvent(new Event("pylon-auth-changed"));
+  }
 }
 
 /** Register an account (or log in if it already exists). Returns its token,
@@ -314,10 +317,12 @@ async function ensureAccount(
 // and a premature reload could abort it mid-flight.
 let seedPromise: Promise<void> | null = null;
 
-export function ensureDemoSeed(): Promise<void> {
+export function ensureDemoSeed(options: { force?: boolean } = {}): Promise<void> {
   // Already seeded in a previous visit (accounts + catalog persist
   // server-side) — nothing to do.
-  if (localStorage.getItem("market:demo-seeded") === "1") return Promise.resolve();
+  if (!options.force && localStorage.getItem("market:demo-seeded") === "1") {
+    return Promise.resolve();
+  }
   if (seedPromise) return seedPromise;
 
   seedPromise = (async () => {

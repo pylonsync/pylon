@@ -9,8 +9,8 @@ export const metadata: Metadata = {
 
 export default function SellPage() {
   return (
-    <div className="mx-auto max-w-2xl space-y-8 py-2 sm:py-8">
-      <header className="space-y-2">
+    <div className="mx-auto flex max-w-2xl flex-col gap-8 py-2 sm:py-8">
+      <header className="flex flex-col gap-2">
         <h1 className="text-balance text-3xl font-semibold tracking-[-0.03em]">
           List something worth finding
         </h1>
@@ -22,9 +22,7 @@ export default function SellPage() {
           in real time.
         </p>
       </header>
-      <div className="rounded-2xl bg-card p-5 shadow-[var(--shadow-border)] sm:p-7">
-        <SellForm />
-      </div>
+      <SellForm />
     </div>
   );
 }

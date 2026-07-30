@@ -5,11 +5,32 @@ import {
   type PageProps,
   type ServerData,
 } from "@pylonsync/react";
-import { Badge } from "../ui/badge";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import {
+  Empty,
+  EmptyContent,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyTitle,
+} from "@/components/ui/empty";
+import {
+  Field,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "@/components/ui/native-select";
+import { Skeleton } from "@/components/ui/skeleton";
 import { LiveTicker } from "../client/LiveTicker";
 import { SeedOnEmpty } from "../client/SeedOnEmpty";
 import { CategoryIcon } from "./_components/CategoryIcon";
 import { WatchButton } from "../client/WatchButton";
+import { ScrollToListingsLink } from "../client/ScrollToListingsLink";
 import { gradient, money, conditionLabel, type Listing } from "../client/market";
 import { browseListings } from "../lib/catalog";
 
@@ -47,9 +68,11 @@ function ListingImage({ listing }: { listing: Listing }) {
       <img
         src={listing.imageUrl}
         alt={listing.title}
+        width="600"
+        height="750"
         loading="lazy"
         decoding="async"
-        className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
+        className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-border"
       />
     );
   }
@@ -81,24 +104,27 @@ function Grid({
   if (listings.length === 0) {
     return (
       <>
-        <div className="rounded-2xl bg-card px-6 py-16 text-center shadow-[var(--shadow-border)]">
-          <p className="font-medium">
-            {active.length === 0 ? "Adding sample finds..." : "No matching finds yet."}
-          </p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {active.length === 0
-              ? "The catalog will appear in a moment."
-              : "Try another category or a broader search."}
-          </p>
+        <Empty className="border-0 bg-card py-16 shadow-[var(--shadow-border)]">
+          <EmptyHeader>
+            <EmptyTitle>
+              {active.length === 0
+                ? "Adding sample finds…"
+                : "No matching finds yet"}
+            </EmptyTitle>
+            <EmptyDescription>
+              {active.length === 0
+                ? "The catalog will appear in a moment."
+                : "Try another category or a broader search."}
+            </EmptyDescription>
+          </EmptyHeader>
           {active.length > 0 ? (
-            <Link
-              href="/#listings"
-              className="mt-5 inline-flex min-h-10 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-primary/90 active:scale-[0.96]"
-            >
-              Clear filters
-            </Link>
+            <EmptyContent>
+              <Button asChild>
+                <a href="/#listings">Clear filters</a>
+              </Button>
+            </EmptyContent>
           ) : null}
-        </div>
+        </Empty>
         <SeedOnEmpty count={active.length} />
       </>
     );
@@ -107,17 +133,21 @@ function Grid({
   return (
     <div className="grid grid-cols-2 gap-x-3 gap-y-7 sm:gap-x-5 sm:gap-y-9 lg:grid-cols-4">
       {listings.map((listing) => (
-        <article
+        <Card
           key={listing.id}
-          className="group relative min-w-0 overflow-hidden rounded-2xl bg-card shadow-[var(--shadow-border)] transition-[box-shadow,transform] duration-200 ease-out hover:-translate-y-1 hover:shadow-[var(--shadow-border-hover)]"
+          className="group relative min-w-0 overflow-hidden transition-[box-shadow,transform] duration-200 ease-out hover:-translate-y-1 hover:shadow-[var(--shadow-border-hover)]"
         >
-          <Link href={`/listing/${listing.slug || listing.id}`} className="block">
+          <Link
+            href={`/listing/${listing.slug || listing.id}`}
+            seed={listing}
+            className="block"
+          >
             <div className="aspect-[4/5] overflow-hidden bg-muted">
               <div className="h-full w-full transition-transform duration-500 ease-out group-hover:scale-[1.025]">
                 <ListingImage listing={listing} />
               </div>
             </div>
-            <div className="space-y-2.5 p-3.5 sm:p-4">
+            <div className="flex flex-col gap-2.5 p-3.5 sm:p-4">
               <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
                 <span className="capitalize">{listing.category}</span>
                 <Badge variant="outline" className="shrink-0 text-[10px]">
@@ -137,7 +167,7 @@ function Grid({
             listingTitle={listing.title}
             className="absolute right-3 top-3"
           />
-        </article>
+        </Card>
       ))}
     </div>
   );
@@ -153,7 +183,7 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
   const sort = typeof searchParams.sort === "string" ? searchParams.sort : "latest";
 
   return (
-    <div className="space-y-12 pb-10">
+    <div className="flex flex-col gap-12 pb-10">
       <section className="relative min-h-[430px] overflow-hidden rounded-[28px] bg-[#d8d4ce] shadow-[var(--shadow-border)] sm:min-h-[470px]">
         <img
           src="/images/marketplace-hero.webp"
@@ -162,7 +192,7 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
           height="1024"
           fetchPriority="high"
           decoding="async"
-          className="absolute inset-0 h-full w-full object-cover object-[72%_center] outline outline-1 -outline-offset-1 outline-black/10 sm:object-center"
+          className="absolute inset-0 h-full w-full object-cover object-[72%_center] outline outline-1 -outline-offset-1 outline-border sm:object-center"
         />
         <div className="absolute inset-0 bg-[#ebe8e3]/80 sm:w-[76%] sm:bg-[linear-gradient(90deg,rgba(235,232,227,.98)_0%,rgba(235,232,227,.9)_40%,rgba(235,232,227,.16)_78%,rgba(235,232,227,0)_100%)]" />
         <div className="relative flex min-h-[430px] max-w-[620px] flex-col justify-center px-6 py-12 text-[#171717] sm:min-h-[470px] sm:px-10 lg:px-12">
@@ -173,23 +203,24 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
             Shop distinctive furniture, technology, fashion, and more. Make offers and follow every update live.
           </p>
           <div className="mt-7 flex flex-wrap gap-3">
-            <Link
-              href="/#listings"
+            <ScrollToListingsLink
               className="inline-flex min-h-11 items-center rounded-lg bg-[#171717] px-5 text-sm font-medium text-[#fafafa] transition-[background-color,scale] duration-150 hover:bg-[#2b2b2b] active:scale-[0.96]"
             >
               Browse finds
-            </Link>
-            <Link
-              href="/sell"
-              className="inline-flex min-h-11 items-center rounded-lg bg-white/75 px-5 text-sm font-medium text-[#171717] shadow-[0_0_0_1px_rgba(0,0,0,.1),0_1px_2px_rgba(0,0,0,.05)] backdrop-blur transition-[background-color,scale] duration-150 hover:bg-white active:scale-[0.96]"
+            </ScrollToListingsLink>
+            <Button
+              asChild
+              variant="outline"
+              size="lg"
+              className="bg-white/75 text-[#171717] backdrop-blur hover:bg-white hover:text-[#171717]"
             >
-              Sell
-            </Link>
+              <Link href="/sell">Sell</Link>
+            </Button>
           </div>
         </div>
       </section>
 
-      <section className="grid gap-px overflow-hidden rounded-2xl bg-border shadow-[var(--shadow-border)] sm:grid-cols-3">
+      <Card className="grid gap-px overflow-hidden bg-border sm:grid-cols-3">
         {[
           ["Realtime catalog", "New listings and sold status update without a refresh."],
           ["Flexible offers", "Buy at the list price or send the seller an offer."],
@@ -202,11 +233,11 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
             </p>
           </div>
         ))}
-      </section>
+      </Card>
 
       <LiveTicker />
 
-      <section id="listings" className="scroll-mt-24 space-y-6">
+      <section id="listings" className="flex scroll-mt-24 flex-col gap-6">
         <div>
           <h2 className="text-balance text-3xl font-semibold tracking-[-0.03em]">
             Fresh finds
@@ -220,41 +251,50 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
           method="get"
           action="/"
           role="search"
-          className="grid gap-3 rounded-2xl bg-card p-3 shadow-[var(--shadow-border)] sm:grid-cols-[1fr_180px_auto]"
         >
           {category !== "all" ? (
-            <input type="hidden" name="category" value={category} />
+            <Input type="hidden" name="category" value={category} />
           ) : null}
-          <label className="sr-only" htmlFor="catalog-search">
-            Search listings
-          </label>
-          <input
-            id="catalog-search"
-            name="q"
-            type="search"
-            defaultValue={query}
-            placeholder="Search furniture, cameras, sellers..."
-            className="min-h-11 rounded-lg bg-muted px-4 text-sm outline-none ring-0 placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
-          />
-          <label className="sr-only" htmlFor="catalog-sort">
-            Sort listings
-          </label>
-          <select
-            id="catalog-sort"
-            name="sort"
-            defaultValue={sort}
-            className="min-h-11 rounded-lg bg-muted px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-          >
-            <option value="latest">Newest first</option>
-            <option value="price-low">Price: low to high</option>
-            <option value="price-high">Price: high to low</option>
-          </select>
-          <button
-            type="submit"
-            className="min-h-11 rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-primary/90 active:scale-[0.96]"
-          >
-            Search
-          </button>
+          <Card className="p-3">
+          <FieldGroup className="gap-3 sm:grid sm:grid-cols-[1fr_180px_auto]">
+            <Field>
+              <FieldLabel className="sr-only" htmlFor="catalog-search">
+                Search listings
+              </FieldLabel>
+              <Input
+                id="catalog-search"
+                name="q"
+                type="search"
+                autoComplete="off"
+                defaultValue={query}
+                placeholder="Search furniture, cameras, sellers…"
+                className="border-0 bg-muted shadow-none"
+              />
+            </Field>
+            <Field>
+              <FieldLabel className="sr-only" htmlFor="catalog-sort">
+                Sort listings
+              </FieldLabel>
+              <NativeSelect
+                id="catalog-sort"
+                name="sort"
+                defaultValue={sort}
+                className="min-h-11 border-0 bg-muted shadow-none"
+              >
+                <NativeSelectOption value="latest">Newest first</NativeSelectOption>
+                <NativeSelectOption value="price-low">
+                  Price: low to high
+                </NativeSelectOption>
+                <NativeSelectOption value="price-high">
+                  Price: high to low
+                </NativeSelectOption>
+              </NativeSelect>
+            </Field>
+            <Button type="submit" size="lg">
+              Search
+            </Button>
+          </FieldGroup>
+          </Card>
         </form>
 
         <nav
@@ -263,18 +303,19 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
         >
           <div className="flex w-max gap-2">
             {CATEGORIES.map((item) => (
-              <Link
+              <Button
                 key={item}
-                href={browseHref(item, query, sort)}
-                aria-current={category === item ? "page" : undefined}
-                className={`inline-flex min-h-10 items-center rounded-full px-4 text-sm font-medium capitalize transition-[background-color,color,box-shadow,scale] duration-150 active:scale-[0.96] ${
-                  category === item
-                    ? "bg-foreground text-background"
-                    : "bg-card text-muted-foreground shadow-[var(--shadow-border)] hover:text-foreground hover:shadow-[var(--shadow-border-hover)]"
-                }`}
+                asChild
+                variant={category === item ? "default" : "outline"}
+                className="rounded-full capitalize"
               >
-                {item}
-              </Link>
+                <a
+                  href={browseHref(item, query, sort)}
+                  aria-current={category === item ? "page" : undefined}
+                >
+                  {item}
+                </a>
+              </Button>
             ))}
           </div>
         </nav>
@@ -283,14 +324,14 @@ export default function BrowsePage({ searchParams, serverData }: PageProps) {
           fallback={
             <div className="grid grid-cols-2 gap-x-3 gap-y-7 sm:gap-x-5 lg:grid-cols-4">
               {Array.from({ length: 8 }).map((_, index) => (
-                <div key={index} className="overflow-hidden rounded-2xl bg-card shadow-[var(--shadow-border)]">
-                  <div className="aspect-[4/5] animate-pulse bg-muted" />
-                  <div className="space-y-3 p-4">
-                    <div className="h-3 w-2/5 animate-pulse rounded bg-muted" />
-                    <div className="h-9 animate-pulse rounded bg-muted" />
-                    <div className="h-4 w-1/3 animate-pulse rounded bg-muted" />
+                <Card key={index} className="overflow-hidden">
+                  <Skeleton className="aspect-[4/5] rounded-none" />
+                  <div className="flex flex-col gap-3 p-4">
+                    <Skeleton className="h-3 w-2/5" />
+                    <Skeleton className="h-9" />
+                    <Skeleton className="h-4 w-1/3" />
                   </div>
-                </div>
+                </Card>
               ))}
             </div>
           }

@@ -3,10 +3,29 @@
 import React, { useState } from "react";
 import { db, useRouter } from "@pylonsync/react";
 import { ImagePlus } from "lucide-react";
-import { Button } from "../ui/button";
-import { Input } from "../ui/input";
-import { Textarea } from "../ui/textarea";
-import { Label } from "../ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+  FieldSeparator,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "@/components/ui/native-select";
+import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
 import { AuthGate, MarketProvider, useIdentity } from "./MarketProvider";
 import { conditionLabel, makeSlug } from "./market";
 
@@ -15,9 +34,6 @@ const CATEGORIES = [
   "instruments", "outdoor", "apparel", "other",
 ];
 const CONDITIONS = ["new", "like-new", "good", "fair"];
-
-const selectClass =
-  "flex min-h-11 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
 
 async function uploadListingPhoto(file: File) {
   const initResponse = await fetch("/api/files/init", {
@@ -135,28 +151,33 @@ function Form() {
   }
 
   return (
-    <form onSubmit={submit} className="space-y-5">
-      <div className="space-y-1.5">
-        <Label htmlFor="title">Title</Label>
+    <form onSubmit={submit}>
+      <FieldGroup className="gap-5">
+      <Field>
+        <FieldLabel htmlFor="title">Title</FieldLabel>
         <Input
           id="title"
+          name="title"
+          autoComplete="off"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           placeholder="e.g. Herman Miller Aeron, size B"
         />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="description">Description</Label>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor="description">Description</FieldLabel>
         <Textarea
           id="description"
+          name="description"
+          autoComplete="off"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="Condition details, dimensions, why you're selling…"
           rows={4}
         />
-      </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="listing-photo">Photo</Label>
+      </Field>
+      <Field>
+        <FieldLabel htmlFor="listing-photo">Photo</FieldLabel>
         <label
           htmlFor="listing-photo"
           className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-border bg-muted/40 px-5 py-6 text-center transition-colors hover:bg-muted/70 focus-within:ring-2 focus-within:ring-ring"
@@ -166,8 +187,9 @@ function Form() {
             {photoBusy ? "Uploading photo…" : imageUrl ? "Replace photo" : "Upload a photo"}
           </span>
           <span className="text-xs text-muted-foreground">JPG, PNG, or WebP up to 8 MB</span>
-          <input
+          <Input
             id="listing-photo"
+            name="photo"
             type="file"
             accept="image/jpeg,image/png,image/webp"
             onChange={selectPhoto}
@@ -175,85 +197,99 @@ function Form() {
             className="sr-only"
           />
         </label>
-        <div className="flex items-center gap-3 py-1" aria-hidden="true">
-          <span className="h-px flex-1 bg-border" />
-          <span className="text-[11px] uppercase tracking-[0.12em] text-muted-foreground">or use a link</span>
-          <span className="h-px flex-1 bg-border" />
-        </div>
-        <Label htmlFor="imageUrl" className="sr-only">Photo URL</Label>
+        <FieldSeparator>or use a link</FieldSeparator>
+        <FieldLabel htmlFor="imageUrl" className="sr-only">
+          Photo URL
+        </FieldLabel>
         <Input
           id="imageUrl"
+          name="imageUrl"
           type="url"
+          autoComplete="off"
+          spellCheck={false}
           value={imageUrl}
           onChange={(e) => setImageUrl(e.target.value)}
           placeholder="https://example.com/item.jpg"
           aria-describedby="image-help"
         />
-        <p id="image-help" className="text-xs leading-5 text-muted-foreground">
+        <FieldDescription id="image-help">
           Clear, well-lit photos get more interest.
-        </p>
+        </FieldDescription>
         {imageUrl ? (
           <div className="mt-3 aspect-[16/10] overflow-hidden rounded-xl bg-muted shadow-[var(--shadow-border)]">
             <img
               src={imageUrl}
               alt="Listing photo preview"
-              className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
+              width="1200"
+              height="750"
+              className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-border"
             />
           </div>
         ) : null}
-      </div>
+      </Field>
       <div className="grid grid-cols-2 gap-4">
-        <div className="space-y-1.5">
-          <Label htmlFor="price">Price ($)</Label>
+        <Field>
+          <FieldLabel htmlFor="price">Price ($)</FieldLabel>
           <Input
             id="price"
+            name="price"
             type="number"
+            inputMode="decimal"
+            autoComplete="off"
             min="0"
             step="1"
             value={price}
             onChange={(e) => setPrice(e.target.value)}
             placeholder="0"
           />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="condition">Condition</Label>
-          <select
+        </Field>
+        <Field>
+          <FieldLabel htmlFor="condition">Condition</FieldLabel>
+          <NativeSelect
             id="condition"
+            name="condition"
             value={condition}
             onChange={(e) => setCondition(e.target.value)}
-            className={selectClass}
           >
             {CONDITIONS.map((c) => (
-              <option key={c} value={c}>
+              <NativeSelectOption key={c} value={c}>
                 {conditionLabel(c)}
-              </option>
+              </NativeSelectOption>
             ))}
-          </select>
-        </div>
+          </NativeSelect>
+        </Field>
       </div>
-      <div className="space-y-1.5">
-        <Label htmlFor="category">Category</Label>
-        <select
+      <Field>
+        <FieldLabel htmlFor="category">Category</FieldLabel>
+        <NativeSelect
           id="category"
+          name="category"
           value={category}
           onChange={(e) => setCategory(e.target.value)}
-          className={selectClass}
         >
           {CATEGORIES.map((c) => (
-            <option key={c} value={c}>
+            <NativeSelectOption key={c} value={c}>
               {c[0]?.toUpperCase()}{c.slice(1)}
-            </option>
+            </NativeSelectOption>
           ))}
-        </select>
+        </NativeSelect>
+      </Field>
+      <div aria-live="polite">
+        {err ? (
+          <Alert variant="destructive">
+            <AlertDescription>{err}</AlertDescription>
+          </Alert>
+        ) : null}
       </div>
-      {err ? <p className="text-sm text-destructive">{err}</p> : null}
       <Button type="submit" disabled={busy || photoBusy} className="w-full">
+        {busy ? <Spinner data-icon="inline-start" /> : null}
         {busy ? "Posting…" : "Post listing"}
       </Button>
       <p className="text-center text-xs text-muted-foreground">
         Posting as <span className="font-medium">{name}</span>. Buyers'
         offers land in <a href="/me" className="underline">Dashboard</a>.
       </p>
+      </FieldGroup>
     </form>
   );
 }
@@ -265,7 +301,17 @@ export function SellForm() {
         title="Sign in to list an item"
         blurb="Selling needs an account so your listings stay tied to you. The demo account is ready; just select Log in."
       >
-        <Form />
+        <Card>
+          <CardHeader>
+            <CardTitle>Item details</CardTitle>
+            <CardDescription>
+              Add a clear photo and enough detail for buyers to decide quickly.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Form />
+          </CardContent>
+        </Card>
       </AuthGate>
     </MarketProvider>
   );

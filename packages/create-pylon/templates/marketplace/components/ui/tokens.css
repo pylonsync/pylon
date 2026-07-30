@@ -2,7 +2,7 @@
  * Design-token base layer (vendored from examples/_shared so the market is a
  * self-contained, standalone-deployable example — no unpublished workspace dep).
  *
- * globals.css includes this with `@import "../ui/tokens.css";` AFTER
+ * globals.css includes this with `@import "../components/ui/tokens.css";` AFTER
  * `@import "tailwindcss";` and AFTER its own `@theme` block.
  * The tokens reference semantic colors so any example's theme cascades
  * automatically.

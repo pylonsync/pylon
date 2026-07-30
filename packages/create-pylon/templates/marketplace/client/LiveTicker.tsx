@@ -3,6 +3,7 @@
 import React from "react";
 import { Link, db } from "@pylonsync/react";
 import { Tag, BadgeCheck } from "lucide-react";
+import { Card } from "@/components/ui/card";
 import { MarketProvider } from "./MarketProvider";
 import { money, timeAgo, type Listing, type Offer } from "./market";
 
@@ -18,13 +19,13 @@ type Activity = {
   href: string;
   amount?: number;
   at: string;
+  seed?: Listing;
 };
 
 function Ticker() {
   const { data: listingData } = db.useQuery<Listing>("Listing", {
-    where: { status: "active" },
     orderBy: { createdAt: "desc" },
-    limit: 8,
+    limit: 16,
   });
   const { data: saleData } = db.useQuery<Offer>("Offer", {
     where: { status: "accepted" },
@@ -32,13 +33,16 @@ function Ticker() {
     limit: 8,
   });
 
+  const listings = listingData ?? [];
+  const listingById = new Map(listings.map((listing) => [listing.id, listing]));
   const events: Activity[] = [
-    ...(listingData ?? []).map((l) => ({
+    ...listings.filter((l) => l.status === "active").map((l) => ({
       key: `l-${l.id}`,
       kind: "listed" as const,
       title: l.title,
       href: `/listing/${l.slug || l.id}`,
       at: l.createdAt,
+      seed: l,
     })),
     ...(saleData ?? []).map((o) => ({
       key: `s-${o.id}`,
@@ -47,6 +51,7 @@ function Ticker() {
       href: `/listing/${o.listingId}`,
       amount: o.amount,
       at: o.createdAt,
+      seed: listingById.get(o.listingId),
     })),
   ]
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
@@ -55,11 +60,11 @@ function Ticker() {
   if (events.length === 0) return null;
 
   return (
-    <div className="flex min-h-11 items-center gap-3 overflow-hidden rounded-2xl bg-card px-4 py-2 text-sm shadow-[var(--shadow-border)]">
-      <span className="flex shrink-0 items-center gap-1.5 font-medium text-emerald-600">
+    <Card className="flex min-h-11 items-center gap-3 overflow-hidden px-4 py-2 text-sm">
+      <span className="flex shrink-0 items-center gap-1.5 font-medium text-success-foreground">
         <span className="relative flex size-2">
-          <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-          <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-success opacity-75" />
+          <span className="relative inline-flex size-2 rounded-full bg-success" />
         </span>
         Live
       </span>
@@ -72,14 +77,21 @@ function Ticker() {
             <Link
               key={`${e.key}-${i}`}
               href={e.href}
+              seed={e.seed}
               className="flex shrink-0 items-center gap-1.5 whitespace-nowrap hover:underline"
               aria-hidden={i >= events.length}
               tabIndex={i >= events.length ? -1 : undefined}
             >
               {e.kind === "sold" ? (
-                <BadgeCheck className="size-3.5 text-emerald-600" />
+                <BadgeCheck
+                  className="size-3.5 text-success-foreground"
+                  aria-hidden="true"
+                />
               ) : (
-                <Tag className="size-3.5 text-muted-foreground" />
+                <Tag
+                  className="size-3.5 text-muted-foreground"
+                  aria-hidden="true"
+                />
               )}
               <span className="font-medium">{e.title}</span>
               <span className="text-muted-foreground">
@@ -91,7 +103,7 @@ function Ticker() {
           ))}
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
