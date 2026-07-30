@@ -32,7 +32,7 @@ export default function GlobalError({
 			>
 				<div style={{ maxWidth: 420, padding: "0 1.5rem", textAlign: "center" }}>
 					<h1 style={{ fontSize: 18, fontWeight: 600, margin: 0 }}>
-						Pylon Cloud crashed
+						Something went wrong
 					</h1>
 					<p
 						style={{

@@ -10,7 +10,7 @@ export const revalidate = 3600; // 1 hour
 export const metadata: Metadata = {
 	title: "Pylon pricing: free to self-host, $25 on Cloud",
 	description:
-		"The Pylon framework is open source and free to self-host. Pylon Cloud is free for hobby projects and $25 per org per month for production, with no per-seat fees.",
+		"The Pylon framework is open source and free to self-host. Smallware is free for hobby projects and $25 per org per month for production, with no per-seat fees.",
 	canonical: "/pricing",
 	openGraph: {
 		title: "Pylon pricing: free to self-host, $25 on Cloud",

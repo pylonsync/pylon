@@ -9,7 +9,7 @@ export const revalidate = 3600; // 1 hour
 export const metadata: Metadata = {
 	title: "Privacy Policy — Pylon",
 	description:
-		"How Pylon collects, uses, shares, and protects your information when you use pylonsync.com and Pylon Cloud.",
+		"How Pylon collects, uses, shares, and protects your information when you use pylonsync.com and Smallware.",
 	canonical: "/privacy",
 	robots: "index,follow",
 	openGraph: {
@@ -31,7 +31,7 @@ export default function PrivacyPage({
 			title="Privacy Policy"
 			lastUpdated="July 8, 2026"
 			intro={
-				'This Privacy Policy explains how Pylon ("Pylon", "we", "us") collects, uses, discloses, and protects information when you visit pylonsync.com or use Pylon Cloud (together, the "Service"). By using the Service you agree to this Policy.'
+				'This Privacy Policy explains how Pylon ("Pylon", "we", "us") collects, uses, discloses, and protects information when you visit pylonsync.com or use Smallware (together, the "Service"). By using the Service you agree to this Policy.'
 			}
 		>
 			<LegalSection heading="1. Information we collect">

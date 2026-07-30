@@ -38,7 +38,7 @@ export default function RootError({
 				<div className="space-y-1">
 					<h1 className="text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
 						{isUnreachable
-							? "Pylon Cloud is restarting"
+							? "pylonsync.com is restarting"
 							: "Something went wrong"}
 					</h1>
 					<p className="text-[13px] text-[var(--color-ink-3)] leading-relaxed">
