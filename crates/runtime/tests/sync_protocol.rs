@@ -439,9 +439,12 @@ fn deny_all_entity_excluded_from_snapshot() {
     // Inert for other tests; they never present this token. SAFETY: same
     // single-threaded-setup rationale as start_server's PYLON_DEV_MODE.
     const ADMIN_TOKEN: &str = "sync-proto-admin-token";
-    unsafe {
+    // Once per binary — see start_server. A per-call set_var races the other
+    // test threads reading the environment.
+    static ADMIN_ENV: std::sync::Once = std::sync::Once::new();
+    ADMIN_ENV.call_once(|| unsafe {
         std::env::set_var("PYLON_ADMIN_TOKEN", ADMIN_TOKEN);
-    }
+    });
 
     let rt = Arc::new(Runtime::in_memory(test_manifest()).unwrap());
     let port = start_server(Arc::clone(&rt));
@@ -864,10 +867,14 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
         ..Default::default()
     });
 
-    // Budget below the seeded row count forces the scan to paginate.
-    unsafe {
-        std::env::set_var("PYLON_SNAPSHOT_SCAN_BUDGET", "50");
-    }
+    // Budget below the seeded row count forces the scan to paginate. Set via
+    // the atomic override, NOT the environment: `set_var` from a test thread
+    // races every other thread reading the environment (hence unsafe), and on
+    // CI that aborted the whole binary — every remaining test in this file then
+    // failed on `connect: ConnectionRefused`.
+    pylon_router::set_snapshot_scan_budget(50);
+    // Restored below so a 50-row budget cannot leak into the test that seeds
+    // 1,500 rows and expects a full snapshot.
 
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     // 60 rows owned by someone else — the guest matches none of them.
@@ -913,6 +920,10 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
         r2["has_more"], false,
         "snapshot must converge once the table is fully scanned: {b2}"
     );
+
+    // Default restored: a leaked 50-row budget would truncate the snapshot in
+    // the test that seeds 1,500 rows.
+    pylon_router::set_snapshot_scan_budget(0);
 }
 
 // ---------------------------------------------------------------------------

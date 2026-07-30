@@ -61,6 +61,33 @@ fn url_encode(s: &str) -> String {
     out
 }
 
+/// Rows a single snapshot request may TOUCH before paginating.
+///
+/// Overridable without the environment. Tests need a small budget to force
+/// pagination, and `std::env::set_var` from a test thread races every other
+/// thread reading the environment — which is why it is unsafe, and which
+/// showed up as whole test binaries aborting and their remaining tests failing
+/// on `connect: ConnectionRefused`. An atomic is the same knob without the UB.
+static SNAPSHOT_SCAN_BUDGET: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Override the per-request scanned-row budget. 0 restores the default.
+pub fn set_snapshot_scan_budget(rows: usize) {
+    SNAPSHOT_SCAN_BUDGET.store(rows, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn snapshot_scan_budget() -> usize {
+    let overridden = SNAPSHOT_SCAN_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    if overridden > 0 {
+        return overridden;
+    }
+    std::env::var("PYLON_SNAPSHOT_SCAN_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(50_000)
+}
+
 pub(crate) fn handle(
     ctx: &RouterContext,
     method: HttpMethod,
@@ -166,11 +193,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     // then a never-converging since=0 re-snapshot). Bound rows TOUCHED, not just
     // rows passed: break with a `snapshot_after` continuation once the budget is
     // hit so pagination is bounded by scan progress. Env-tunable for ops.
-    let raw_scan_budget: usize = std::env::var("PYLON_SNAPSHOT_SCAN_BUDGET")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(50_000);
+    let raw_scan_budget: usize = snapshot_scan_budget();
 
     // Read policies are evaluated PER ROW below, and a tenant gate asks the
     // same `exists(...)` question for every row of the scan — a real app
