@@ -4,10 +4,16 @@
 # app resolves one canonical host, and a marketing copy edit should not redeploy
 # the control plane that provisions customer machines and runs billing.
 #
-# Provision:
-#   fly apps create pylonsync-site -o pylon
-#   fly certs create -a pylonsync-site pylonsync.com
-#   fly certs create -a pylonsync-site www.pylonsync.com
+# Provision (org slug is pylon-280, not "pylon" — `fly orgs list` to confirm):
+#   fly apps create pylonsync-site -o pylon-280
+#
+# Certs are deliberately NOT created yet. www.pylonsync.com is still the
+# control plane's API host — it is the CLI's compiled-in DEFAULT_CLOUD_URL and
+# carries the OAuth callbacks and the Stripe/auth-email webhooks — so moving
+# either hostname here breaks installed clients. That cutover comes after the
+# product surface moves to usesmallware.com and a CLI release repoints
+# DEFAULT_CLOUD_URL. Until then this app is reachable only at
+# pylonsync-site.fly.dev.
 #
 # First deploy (context is the REPO ROOT):
 #   fly deploy --config apps/pylonsync-site/fly.toml \
