@@ -38,8 +38,11 @@ export default mutation<
     }
     const src = (source ?? "footer").slice(0, MAX_SOURCE_LEN);
 
+    // The control plane owns EmailSignup and the Slack notifier, so the
+    // signup relays to wherever it lives — the Smallware host, not this
+    // marketing domain, even though the visitor typed their address here.
     const base = (
-      ctx.env.PYLON_CONTROL_PLANE_URL ?? "https://www.pylonsync.com"
+      ctx.env.PYLON_CONTROL_PLANE_URL ?? "https://www.usesmallware.com"
     ).replace(/\/$/, "");
 
     let res: Response;

@@ -7,13 +7,17 @@
 # Provision (org slug is pylon-280, not "pylon" — `fly orgs list` to confirm):
 #   fly apps create pylonsync-site -o pylon-280
 #
-# Certs are deliberately NOT created yet. www.pylonsync.com is still the
-# control plane's API host — it is the CLI's compiled-in DEFAULT_CLOUD_URL and
-# carries the OAuth callbacks and the Stripe/auth-email webhooks — so moving
-# either hostname here breaks installed clients. That cutover comes after the
-# product surface moves to usesmallware.com and a CLI release repoints
-# DEFAULT_CLOUD_URL. Until then this app is reachable only at
-# pylonsync-site.fly.dev.
+# Certs for pylonsync.com and www.pylonsync.com are issued here. Both hostnames
+# are proxied through Cloudflare, so each one needs its own
+# _fly-ownership.<host> TXT (app-qjg13nd) on top of the _acme-challenge CNAME —
+# a TXT name holds several values, so pylon-cloud's token can sit alongside
+# ours, but a name holds only ONE CNAME, which is why pylon-cloud gave up
+# renewal on these two when they moved here.
+#
+# NOTE the control plane still owns the /api surface these hostnames used to
+# serve. Anything that outlived the cutover — a CLI older than 0.3.357, a
+# webhook registered before the move — reaches this app and gets HTML where it
+# expected JSON.
 #
 # First deploy (context is the REPO ROOT):
 #   fly deploy --config apps/pylonsync-site/fly.toml \
@@ -22,7 +26,9 @@
 # NO SECRETS REQUIRED. The app declares zero entities, so there is no
 # DATABASE_URL, no SECRETS_MASTER_KEY, and no volume. Two optional overrides:
 #   PYLON_CONTROL_PLANE_URL  where functions/joinUpdates.ts relays the footer
-#                            signup (default https://www.pylonsync.com)
+#                            signup — the control plane stays the single owner
+#                            of EmailSignup + the Slack notifier
+#                            (default https://www.usesmallware.com)
 #   REVTRAIL_BASE_URL        analytics upstream (default https://revtrail.pyln.dev)
 
 app = "pylonsync-site"
@@ -42,6 +48,12 @@ primary_region = "iad"
 [env]
   PORT = "4321"
   PYLON_DEV_MODE = "false"
+  # www is canonical, so the runtime 308s the apex to it. This drives no other
+  # redirect: `canonical_redirect_target` (crates/runtime/src/server.rs) rewrites
+  # only the exact apex↔www sibling of this value. It ALSO feeds the trusted-host
+  # allowlist that keys the SSR/ISR cache, which is why it has to name the host
+  # visitors actually arrive on rather than the .fly.dev name.
+  PYLON_CANONICAL_HOST = "www.pylonsync.com"
 
 [http_service]
   internal_port = 4321
