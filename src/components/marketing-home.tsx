@@ -126,7 +126,7 @@ export function MarketingPage({
 			<MarketingNav signedIn={signedIn} />
 
 			{/* HERO — framework-first. The merged site leads with the framework
-			    story (open source, runs anywhere); Pylon Cloud is the managed
+			    story (open source, runs anywhere); Smallware is the managed
 			    way to ship it, covered further down + in the nav. */}
 			<header className="relative isolate overflow-hidden">
 				{/* Headline left, supporting copy in a right-hand column, CTAs beneath
@@ -268,7 +268,7 @@ const { data } = db.useQuery("Order");`}
 							Connect GitHub
 						</h3>
 						<p className="mt-2.5 text-[14.5px] leading-[1.6] text-[var(--color-ink-2)]">
-							Install the Pylon Cloud GitHub App once. Pushes to the default
+							Install the Smallware GitHub App once. Pushes to the default
 							branch deploy; pull requests get previews that disappear after
 							merge.
 						</p>
@@ -351,7 +351,7 @@ const { data } = db.useQuery("Order");`}
 						</div>
 						<Image
 							src="/marketing/pylon-cloud-dashboard.png"
-							alt="Pylon Cloud dashboard — project overview with deployments, machine status, and live metrics"
+							alt="Smallware dashboard — project overview with deployments, machine status, and live metrics"
 							width={3456}
 							height={2234}
 							sizes="(min-width: 1120px) 1120px, 100vw"
@@ -418,7 +418,7 @@ const { data } = db.useQuery("Order");`}
 							a: "SQLite by default — one file, nothing to provision. Set DATABASE_URL to a Postgres connection string and the same schema and application code target Postgres instead. On Cloud, bundled SQLite is the default and co-located managed Postgres is in private beta.",
 						},
 						{
-							q: "Do I have to use Pylon Cloud?",
+							q: "Do I have to use Smallware?",
 							a: "No. The runtime is a single open-source binary — run it on your own box or container platform with a volume for SQLite, or point it at your own Postgres. Cloud is the managed path, not a requirement, and it runs the same binary.",
 						},
 						{

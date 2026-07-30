@@ -8,7 +8,7 @@ import { PricingPlans } from "./pricing-plans";
 const FAQS: { q: string; a: string }[] = [
 	{
 		q: "Is the framework free?",
-		a: "Yes. Pylon is open source under MIT/Apache and free to self-host. It runs as one binary, so a small VPS is enough. Pylon Cloud is the optional managed service.",
+		a: "Yes. Pylon is open source under MIT/Apache and free to self-host. It runs as one binary, so a small VPS is enough. Smallware is the optional managed service.",
 	},
 	{
 		q: "What counts as a request?",
@@ -44,7 +44,7 @@ export function PricingView({ signedIn = false }: { signedIn?: boolean }) {
 						Start free. Scale when you do.
 					</h1>
 					<p className="mx-auto mt-6 max-w-[52ch] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-						The framework is open source and free to self-host. Pylon Cloud
+						The framework is open source and free to self-host. Smallware
 						adds managed hosting, scaling, and a dashboard. It is free for hobby
 						projects, $25 per org for production.
 					</p>

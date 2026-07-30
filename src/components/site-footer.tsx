@@ -123,8 +123,14 @@ export function SiteFooter() {
 							Terms
 						</Link>
 					</div>
+					{/*
+					  status.pylonsync.com was retired in the brand split and now
+					  answers nothing, so this footer link — which renders on every
+					  page of both sites — was dead. The status page itself lives
+					  with the product.
+					*/}
 					<a
-						href="https://status.pylonsync.com"
+						href="https://www.usesmallware.com/status"
 						className="inline-flex items-center gap-2 transition-colors hover:text-[var(--color-ink)]"
 					>
 						<span className="block h-1.5 w-1.5 rounded-full bg-[var(--color-status-live)] shadow-[0_0_0_3px_var(--color-status-live-soft)]" />

@@ -240,7 +240,7 @@ export const COMPARISONS: Comparison[] = [
 			"Functions for server-side logic",
 			"File storage with signed URLs",
 			"Web + mobile + native SDKs",
-			"Managed cloud (Firebase / Pylon Cloud)",
+			"Managed cloud (Firebase / Smallware)",
 		],
 		competitorBetter: [
 			{
@@ -279,7 +279,7 @@ export const COMPARISONS: Comparison[] = [
 			},
 			{
 				title: "Predictable pricing",
-				body: "Firebase prices reads, writes, deletes, egress, invocations, and GB-seconds separately. Pylon Cloud lists one price per dimension; self-hosted users pay their infrastructure bill.",
+				body: "Firebase prices reads, writes, deletes, egress, invocations, and GB-seconds separately. Smallware lists one price per dimension; self-hosted users pay their infrastructure bill.",
 			},
 		],
 		migration: [
@@ -359,7 +359,7 @@ export const COMPARISONS: Comparison[] = [
 			},
 			{
 				title: "Self-host as one binary",
-				body: "Run the whole stack on a VPS you control, or on Pylon Cloud. InstantDB is primarily a hosted product.",
+				body: "Run the whole stack on a VPS you control, or on Smallware. InstantDB is primarily a hosted product.",
 			},
 			{
 				title: "A first-class Swift engine",

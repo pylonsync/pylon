@@ -3,7 +3,7 @@ import { Link } from "@pylonsync/react";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
-// The three Pylon Cloud plans — shared by the homepage pricing section and the
+// The three Smallware plans — shared by the homepage pricing section and the
 // dedicated /pricing page so the numbers live in exactly one place. Plain
 // component (no client directive); rendered inside client trees on both pages.
 

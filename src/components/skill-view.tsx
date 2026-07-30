@@ -73,7 +73,7 @@ export function SkillView({ signedIn = false }: { signedIn?: boolean }) {
 							"Server functions: query / mutation / action with validators",
 							"The React client: db.useQuery, rooms, file uploads",
 							"Auth: magic-link, OAuth, OIDC, guest sessions",
-							"Deployment: pylon dev locally, Pylon Cloud in production",
+							"Deployment: pylon dev locally, Smallware in production",
 						].map((item) => (
 							<li key={item} className="flex items-start gap-3">
 								<span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-cobalt)]/12 text-[var(--color-cobalt)]">
