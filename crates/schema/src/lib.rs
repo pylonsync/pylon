@@ -89,13 +89,22 @@ fn is_valid_identifier(name: &str) -> bool {
 pub fn validate(schema: &Schema) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    if schema.entities.is_empty() {
+    // "Empty" means the app declares nothing to serve — not merely that it has
+    // no tables. A marketing site or docs site is a legitimate Pylon app: SSR
+    // routes, no entities, no database to migrate. Rejecting those forced such
+    // an app to invent a placeholder entity purely to get past this check.
+    if schema.entities.is_empty()
+        && schema.routes.is_empty()
+        && schema.queries.is_empty()
+        && schema.actions.is_empty()
+    {
         diagnostics.push(Diagnostic {
             severity: Severity::Error,
             code: "SCHEMA_EMPTY".into(),
-            message: "Schema has no entities".into(),
+            message: "App declares nothing to serve: no entities, routes, queries, or actions"
+                .into(),
             span: None,
-            hint: Some("Define at least one entity".into()),
+            hint: Some("Define an entity, or add routes for a pages-only app".into()),
         });
     }
 
@@ -855,6 +864,29 @@ mod tests {
         };
         let diags = validate(&schema);
         assert!(diags.iter().any(|d| d.code == "SCHEMA_EMPTY"));
+    }
+
+    #[test]
+    fn routes_only_app_is_not_empty() {
+        // A marketing/docs site: SSR pages, no entities, no database. This must
+        // validate — requiring a placeholder entity to boot a pages-only app is
+        // exactly the workaround this check used to force.
+        let schema = Schema {
+            entities: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![],
+            routes: vec![ManifestRoute {
+                path: "/".into(),
+                mode: "ssr".into(),
+                ..Default::default()
+            }],
+        };
+        let diags = validate(&schema);
+        assert!(
+            !diags.iter().any(|d| d.code == "SCHEMA_EMPTY"),
+            "a routes-only app must not be rejected as empty: {diags:?}"
+        );
     }
 
     #[test]
