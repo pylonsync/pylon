@@ -3,40 +3,25 @@ import { Link } from "@pylonsync/react";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
 
-// The three Smallware plans — shared by the homepage pricing section and the
+// The Smallware plans — shared by the homepage pricing section and the
 // dedicated /pricing page so the numbers live in exactly one place. Plain
 // component (no client directive); rendered inside client trees on both pages.
+//
+// No free tier: an org is created "unpaid" and can't deploy until a plan is
+// chosen, so there is nothing to advertise at $0. Keep these in step with
+// lib/plans.ts (limits) and the Stripe prices behind STRIPE_PRICE_PRO
+// (Starter) and STRIPE_PRICE_TEAM.
 
 export function PricingPlans({ signedIn = false }: { signedIn?: boolean }) {
 	return (
 		<>
 			<div className="grid gap-4 md:grid-cols-3">
 				<PlanCard
-					name="Hobby"
-					price="$0"
-					per="forever"
-					blurb="One project for weekend builds and your first users."
-					includes={[
-						"1 project, 1 organization",
-						"Shared 1 GB RAM · 3 GB volume",
-						"100k requests / month",
-						"Single region, autostop on idle",
-						"SQLite, magic-link auth",
-					]}
-					cta={
-						<Button asChild variant="default" size="full">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
-								{signedIn ? "Open dashboard" : "Start free"}
-							</Link>
-						</Button>
-					}
-				/>
-				<PlanCard
 					featured
-					name="Pro"
+					name="Starter"
 					price="$25"
 					per="org / month"
-					blurb="Production apps with room to grow. Resize machines, add replicas, expand regions."
+					blurb="For one person shipping real apps. Resize machines, add replicas, expand regions."
 					includes={[
 						"Unlimited projects per org",
 						"Resize up to 64 GB · 32 replicas / region · 500 GB volume",
@@ -46,7 +31,29 @@ export function PricingPlans({ signedIn = false }: { signedIn?: boolean }) {
 					]}
 					cta={
 						<Button asChild variant="primary" size="full">
-							<Link href="/signup?plan=pro">Start Pro</Link>
+							<Link href={signedIn ? "/dashboard" : "/signup?plan=starter"}>
+								{signedIn ? "Open dashboard" : "Start with Starter"}
+							</Link>
+						</Button>
+					}
+				/>
+				<PlanCard
+					name="Team"
+					price="$99"
+					per="org / month"
+					blurb="For a whole team building together, with headroom for real traffic."
+					includes={[
+						"50 projects per org",
+						"Machines up to 8 GB · 32 replicas / region",
+						"50M requests + 2 TB egress / month included",
+						"Everything in Starter",
+						"Priority support",
+					]}
+					cta={
+						<Button asChild variant="default" size="full">
+							<Link href={signedIn ? "/dashboard" : "/signup?plan=team"}>
+								{signedIn ? "Open dashboard" : "Start with Team"}
+							</Link>
 						</Button>
 					}
 				/>
@@ -63,7 +70,7 @@ export function PricingPlans({ signedIn = false }: { signedIn?: boolean }) {
 					]}
 					cta={
 						<Button asChild variant="default" size="full">
-							<a href="mailto:cloud@pylonsync.com?subject=Pylon%20Cloud%20Enterprise">
+							<a href="mailto:cloud@pylonsync.com?subject=Smallware%20Enterprise">
 								Talk to us
 							</a>
 						</Button>
@@ -72,9 +79,10 @@ export function PricingPlans({ signedIn = false }: { signedIn?: boolean }) {
 			</div>
 
 			<p className="mx-auto mt-10 max-w-[560px] text-center text-[13px] leading-[1.6] text-[var(--color-ink-3)]">
-				Pro is $25/org/month. Bigger machines, more replicas, and larger
-				volumes are billed at the underlying compute rate for what you run. Or
-				self-host the open-source framework anywhere as one Pylon binary.
+				Starter is $25/org/month and Team is $99. Bigger machines, more
+				replicas, and larger volumes are billed at the underlying compute rate
+				for what you run. Or self-host the open-source framework anywhere as
+				one Pylon binary.
 			</p>
 		</>
 	);

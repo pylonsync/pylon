@@ -84,7 +84,7 @@ export function ProductIndexView({ signedIn = false }: { signedIn?: boolean }) {
 					<div className="mt-8">
 						<Button asChild variant="primary" size="lg">
 							<Link href={signedIn ? "/dashboard" : "/signup"}>
-								{signedIn ? "Open dashboard →" : "Start free on Cloud →"}
+								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>
 					</div>

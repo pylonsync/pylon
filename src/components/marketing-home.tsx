@@ -155,7 +155,7 @@ export function MarketingPage({
 								</Button>
 								<Button asChild variant="ghost" size="lg">
 									<Link href={signedIn ? "/dashboard" : "/signup"}>
-										{signedIn ? "Open dashboard" : "Start free on Cloud"}
+										{signedIn ? "Open dashboard" : "Create your account"}
 									</Link>
 								</Button>
 							</div>
@@ -481,13 +481,13 @@ const { data } = db.useQuery("Order");`}
 						Create a Pylon app.
 					</h2>
 					<p className="mx-auto mt-5 max-w-[460px] text-[16px] leading-[1.55] text-[var(--color-ink-2)] sm:text-[17px]">
-						Hobby requires no card. Connect GitHub or deploy from the CLI when
-						you are ready.
+						The framework is free to self-host. Smallware runs it for you —
+						connect GitHub or deploy from the CLI.
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
 							<Link href={signedIn ? "/dashboard" : "/signup"}>
-								{signedIn ? "Open dashboard →" : "Start free →"}
+								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>
 						<Button asChild variant="ghost" size="lg">

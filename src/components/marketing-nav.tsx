@@ -143,7 +143,7 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 					<Link href="/login">Sign in</Link>
 				</Button>
 				<Button asChild variant="primary" size="sm">
-					<Link href="/signup">Start free →</Link>
+					<Link href="/signup">Create your account →</Link>
 				</Button>
 			</>
 		);

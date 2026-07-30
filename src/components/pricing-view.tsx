@@ -16,7 +16,7 @@ const FAQS: { q: string; a: string }[] = [
 	},
 	{
 		q: "What happens if I exceed my plan?",
-		a: "Hobby projects autostop when idle and resume on the next request. On Pro, bigger machines, extra replicas, and larger volumes are billed at the underlying compute rate for what you run. There are no per-seat fees.",
+		a: "Bigger machines, extra replicas, and larger volumes are billed at the underlying compute rate for what you run, on top of the plan fee. Idle machines can autostop and resume on the next request. There are no per-seat fees.",
 	},
 	{
 		q: "Can I move between self-hosted and Cloud?",
@@ -24,7 +24,7 @@ const FAQS: { q: string; a: string }[] = [
 	},
 	{
 		q: "Do you offer SSO and SAML?",
-		a: "On Pro and Enterprise. Configure OIDC or SAML SSO at the org level from the dashboard. Magic-link and 25+ OAuth providers are available on every plan.",
+		a: "On every paid plan. Configure OIDC or SAML SSO at the org level from the dashboard. Magic-link and 25+ OAuth providers are available throughout.",
 	},
 	{
 		q: "What's included in Enterprise?",
@@ -41,12 +41,12 @@ export function PricingView({ signedIn = false }: { signedIn?: boolean }) {
 						Pricing
 					</div>
 					<h1 className="mx-auto mt-4 max-w-[18ch] text-[clamp(34px,5vw,60px)] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--color-ink)]">
-						Start free. Scale when you do.
+						One price. Scale when you do.
 					</h1>
 					<p className="mx-auto mt-6 max-w-[52ch] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-						The framework is open source and free to self-host. Smallware
-						adds managed hosting, scaling, and a dashboard. It is free for hobby
-						projects, $25 per org for production.
+						The framework is open source and free to self-host. Smallware adds
+						managed hosting, scaling, and a dashboard — $25 per org for one
+						person, $99 for a team. No per-seat fees.
 					</p>
 				</div>
 			</header>
@@ -82,12 +82,12 @@ export function PricingView({ signedIn = false }: { signedIn?: boolean }) {
 			<section className="border-t border-[var(--color-rule)]">
 				<div className="mx-auto max-w-[760px] px-5 py-20 text-center sm:px-8 sm:py-24">
 					<h2 className="mx-auto max-w-[16ch] text-[clamp(28px,4vw,44px)] font-semibold leading-[1.08] tracking-[-0.035em] text-[var(--color-ink)]">
-						Ship your backend free.
+						Ship your backend today.
 					</h2>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
 							<Link href={signedIn ? "/dashboard" : "/signup"}>
-								{signedIn ? "Open dashboard →" : "Start free →"}
+								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>
 						<Button asChild variant="ghost" size="lg">

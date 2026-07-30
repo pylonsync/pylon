@@ -62,7 +62,7 @@ export function SolutionsIndexView({ signedIn = false }: { signedIn?: boolean })
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
 							<Link href={signedIn ? "/dashboard" : "/signup"}>
-								{signedIn ? "Open dashboard →" : "Start free →"}
+								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>
 						<Button asChild variant="ghost" size="lg">
