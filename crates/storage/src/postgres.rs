@@ -407,6 +407,83 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
 }
 
 // ---------------------------------------------------------------------------
+// Schema fingerprint — the reason a deploy is not a database event
+// ---------------------------------------------------------------------------
+
+/// Table holding the fingerprint of the manifest last applied to this database.
+pub const SCHEMA_STATE_DDL: &str = "\
+    CREATE TABLE IF NOT EXISTS _pylon_schema_state( \
+        id integer PRIMARY KEY, \
+        fingerprint text NOT NULL, \
+        pylon_version text NOT NULL, \
+        applied_at timestamptz NOT NULL DEFAULT now())";
+
+/// Fingerprint of everything about a manifest that can change the DATABASE.
+///
+/// `pylon start` reflects the live schema on every boot to diff it against the
+/// manifest, and that reflection is brutally expensive on Postgres: measured on
+/// a real deployment, `INTROSPECT_COLUMNS_SQL` read **8.2 million rows to
+/// return 16 thousand** (a correlated `information_schema.table_constraints`
+/// subquery per column, per table), and the index query another 930k. At 33
+/// tables that is one reflection per boot, and 48 boots in a day — sixteen of
+/// them ordinary deploys — pinned a small primary at 100% CPU until it stopped
+/// accepting connections and the app, which fails closed on a bad DATABASE_URL,
+/// could no longer boot at all. Deploying should not be able to do that.
+///
+/// So: hash the manifest's schema-relevant shape, store it after a successful
+/// apply, and on the next boot compare hashes instead of interrogating the
+/// catalog. Identical manifest → one indexed SELECT and no reflection.
+///
+/// Covers entity names, every field's name/type/optionality/uniqueness/default,
+/// and every index — the inputs the plan is derived from. NOT policies,
+/// functions or routes: those never emit DDL, and including them would re-
+/// reflect on deploys that cannot possibly have changed the schema, which is
+/// exactly the cost being removed.
+///
+/// The pylon version is mixed in deliberately. If a release changes how a field
+/// type maps to a column, the same manifest must be re-planned once on the new
+/// binary rather than skipped because its hash matches.
+pub fn schema_fingerprint(manifest: &AppManifest) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(env!("CARGO_PKG_VERSION").as_bytes());
+    h.update([0x1f]);
+    // Sort so map/vec ordering in the manifest can't produce a different hash
+    // for an identical schema — a spurious mismatch costs a full reflection.
+    let mut entities: Vec<_> = manifest.entities.iter().collect();
+    entities.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in entities {
+        h.update(e.name.as_bytes());
+        h.update([0x1e]);
+        let mut fields: Vec<_> = e.fields.iter().collect();
+        fields.sort_by(|a, b| a.name.cmp(&b.name));
+        for f in fields {
+            h.update(f.name.as_bytes());
+            h.update([0x1d]);
+            h.update(f.field_type.as_bytes());
+            h.update([
+                u8::from(f.optional),
+                u8::from(f.unique),
+                // A default changes the column definition.
+                u8::from(f.default.is_some()),
+            ]);
+            h.update([0x1d]);
+        }
+        let mut indexes: Vec<_> = e.indexes.iter().collect();
+        indexes.sort_by(|a, b| a.name.cmp(&b.name));
+        for i in indexes {
+            h.update(i.name.as_bytes());
+            h.update([u8::from(i.unique)]);
+            for c in &i.fields {
+                h.update(c.as_bytes());
+                h.update([0x1c]);
+            }
+        }
+    }
+    format!("{:x}", h.finalize())
+}
+
+// ---------------------------------------------------------------------------
 // Introspection SQL helpers
 //
 // These generate the SQL queries that a live Postgres connection would run
@@ -1183,6 +1260,56 @@ pub mod live {
                 message: format!("Failed to connect to Postgres: {e}"),
             })?;
             Ok(Self { client })
+        }
+
+        /// Fingerprint of the manifest last successfully applied here, if any.
+        ///
+        /// `None` means "no idea" — the table is missing, empty, or was written
+        /// by a different pylon version — and the caller must reflect. Failing
+        /// OPEN would be the wrong default: skipping a needed migration breaks
+        /// the app, while an unnecessary reflection only costs time.
+        pub fn read_schema_fingerprint(&mut self) -> Result<Option<String>, StorageError> {
+            // One statement, no round-trip wasted on a missing table.
+            self.client
+                .batch_execute(super::SCHEMA_STATE_DDL)
+                .map_err(pg_err)?;
+            let rows = self
+                .client
+                .query(
+                    "SELECT fingerprint, pylon_version FROM _pylon_schema_state WHERE id = 1",
+                    &[],
+                )
+                .map_err(pg_err)?;
+            let Some(row) = rows.first() else {
+                return Ok(None);
+            };
+            let fingerprint: String = row.get(0);
+            let version: String = row.get(1);
+            // The fingerprint already mixes in the version, but a mismatch here
+            // is a clearer signal and keeps the stored row self-describing.
+            if version != env!("CARGO_PKG_VERSION") {
+                return Ok(None);
+            }
+            Ok(Some(fingerprint))
+        }
+
+        /// Record the manifest fingerprint. Call ONLY after a successful apply —
+        /// storing it first would let a failed migration mark itself done and
+        /// every later boot skip the work.
+        pub fn write_schema_fingerprint(&mut self, fingerprint: &str) -> Result<(), StorageError> {
+            self.client
+                .batch_execute(super::SCHEMA_STATE_DDL)
+                .map_err(pg_err)?;
+            self.client
+                .execute(
+                    "INSERT INTO _pylon_schema_state(id, fingerprint, pylon_version, applied_at) \
+                     VALUES (1, $1, $2, now()) \
+                     ON CONFLICT (id) DO UPDATE SET fingerprint = excluded.fingerprint, \
+                       pylon_version = excluded.pylon_version, applied_at = excluded.applied_at",
+                    &[&fingerprint, &env!("CARGO_PKG_VERSION")],
+                )
+                .map_err(pg_err)?;
+            Ok(())
         }
 
         /// Read the current schema from the live database.
@@ -2586,6 +2713,105 @@ mod tests {
     }
 
     // -- Introspection SQL tests --
+
+    #[test]
+    fn schema_fingerprint_is_stable_for_the_same_manifest() {
+        // The whole feature: an unchanged manifest must hash identically, or a
+        // deploy reflects the catalog again and we are back to 8.2M rows read
+        // per boot.
+        assert_eq!(
+            schema_fingerprint(&test_manifest()),
+            schema_fingerprint(&test_manifest())
+        );
+    }
+
+    #[test]
+    fn schema_fingerprint_ignores_manifest_ordering() {
+        // Entity/field order is not schema. If it moved the hash, reordering an
+        // app.ts export list would trigger a full reflection for nothing.
+        let a = test_manifest();
+        let mut b = test_manifest();
+        b.entities.reverse();
+        for e in b.entities.iter_mut() {
+            e.fields.reverse();
+        }
+        assert_eq!(schema_fingerprint(&a), schema_fingerprint(&b));
+    }
+
+    #[test]
+    fn schema_fingerprint_changes_when_the_schema_does() {
+        // The other half: a real DDL-affecting change must NOT be skipped, or
+        // the app runs against a database missing its column.
+        let base = schema_fingerprint(&test_manifest());
+
+        let mut added_field = test_manifest();
+        added_field.entities[0]
+            .fields
+            .push(pylon_kernel::ManifestField {
+                name: "nickname".into(),
+                field_type: "string".into(),
+                optional: true,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+            });
+        assert_ne!(base, schema_fingerprint(&added_field), "new column");
+
+        let mut retyped = test_manifest();
+        retyped.entities[0].fields[0].field_type = "int".into();
+        assert_ne!(base, schema_fingerprint(&retyped), "column type");
+
+        let mut nullable = test_manifest();
+        nullable.entities[0].fields[0].optional = true;
+        assert_ne!(base, schema_fingerprint(&nullable), "nullability");
+
+        let mut uniq = test_manifest();
+        uniq.entities[0].fields[1].unique = true;
+        assert_ne!(base, schema_fingerprint(&uniq), "uniqueness");
+
+        let mut renamed = test_manifest();
+        renamed.entities[0].name = "Person".into();
+        assert_ne!(base, schema_fingerprint(&renamed), "entity name");
+
+        let mut indexed = test_manifest();
+        indexed.entities[0]
+            .indexes
+            .push(pylon_kernel::ManifestIndex {
+                name: "by_nickname".into(),
+                fields: vec!["nickname".into()],
+                unique: false,
+                where_clause: None,
+            });
+        assert_ne!(base, schema_fingerprint(&indexed), "new index");
+    }
+
+    #[test]
+    fn schema_fingerprint_ignores_things_that_emit_no_ddl() {
+        // Policies, functions and routes cannot change the database, and most
+        // deploys only touch those. Hashing them would re-reflect on exactly
+        // the deploys this is meant to make free.
+        let base = schema_fingerprint(&test_manifest());
+        let mut m = test_manifest();
+        m.version = "9.9.9".into();
+        m.policies.push(pylon_kernel::ManifestPolicy {
+            name: "p".into(),
+            entity: Some("User".into()),
+            allow: "true".into(),
+            ..Default::default()
+        });
+        assert_eq!(base, schema_fingerprint(&m));
+    }
+
+    #[test]
+    fn schema_state_ddl_is_idempotent_and_single_row() {
+        // Runs on every boot, including concurrent ones.
+        assert!(SCHEMA_STATE_DDL.contains("IF NOT EXISTS"));
+        assert!(SCHEMA_STATE_DDL.contains("id integer PRIMARY KEY"));
+    }
 
     #[test]
     fn introspect_sql_constants_are_valid() {

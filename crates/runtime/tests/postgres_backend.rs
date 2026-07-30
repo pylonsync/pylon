@@ -39,6 +39,34 @@ fn empty_manifest() -> AppManifest {
     }
 }
 
+/// A small manifest with one table that has a unique column and an index —
+/// enough shape for the fingerprint to have something to hash.
+fn fingerprint_manifest() -> AppManifest {
+    let field = |name: &str, ty: &str, uniq: bool| ManifestField {
+        name: name.into(),
+        field_type: ty.into(),
+        optional: false,
+        unique: uniq,
+        crdt: None,
+        server_only: false,
+        readonly: false,
+        default: None,
+        enum_values: None,
+        encrypted: false,
+    };
+    AppManifest {
+        entities: vec![ManifestEntity {
+            name: "FpProbe".into(),
+            fields: vec![
+                field("email", "string", true),
+                field("label", "string", false),
+            ],
+            ..Default::default()
+        }],
+        ..empty_manifest()
+    }
+}
+
 fn fresh_runtime(url: &str) -> Runtime {
     let manifest = AppManifest {
         entities: vec![ManifestEntity {
@@ -1337,4 +1365,81 @@ fn fts_search_returns_matched_rows_on_postgres() {
         .as_object()
         .expect("brand facets");
     assert_eq!(facets["Atlas"], 1);
+}
+
+/// The schema fingerprint round-trips, and only changes when the schema does.
+///
+/// This is the guard that stops a deploy from being a database event. `pylon
+/// start` used to reflect the catalog on EVERY boot, and on Postgres that
+/// reflection reads ~8.2M rows to return ~16k on a 33-table app — 48 boots in a
+/// day pinned a small primary at 100% CPU until it refused connections and the
+/// app could no longer start. Skipping the reflection is only safe if the
+/// fingerprint is exactly as conservative as the plan, so both halves are
+/// asserted here against a real database.
+#[test]
+fn schema_fingerprint_round_trips_and_tracks_real_changes() {
+    let Some(url) = pg_url() else {
+        eprintln!("skipping: set PYLON_TEST_PG_URL to run");
+        return;
+    };
+    use pylon_storage::postgres::{live::LivePostgresAdapter, schema_fingerprint};
+
+    let manifest = fingerprint_manifest();
+    let mut adapter = LivePostgresAdapter::connect(&url).expect("connect");
+
+    // A database that has never been fingerprinted must NOT be treated as
+    // up-to-date — failing open here would skip a needed migration.
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_schema_state");
+    assert_eq!(
+        adapter.read_schema_fingerprint().expect("read"),
+        None,
+        "an unfingerprinted database must report unknown, not match"
+    );
+
+    let plan = adapter.plan_from_live(&manifest).expect("plan");
+    adapter.apply_plan(&plan).expect("apply");
+
+    let fp = schema_fingerprint(&manifest);
+    adapter.write_schema_fingerprint(&fp).expect("write");
+
+    // Second boot: the stored fingerprint matches, so the caller skips the
+    // reflection entirely. This is the saved 8.2M rows.
+    assert_eq!(
+        adapter.read_schema_fingerprint().expect("reread"),
+        Some(fp.clone()),
+        "fingerprint did not survive a round trip"
+    );
+
+    // A real schema change must not match, or the app would run against a
+    // database missing the column.
+    let mut changed = fingerprint_manifest();
+    changed.entities[0]
+        .fields
+        .push(pylon_kernel::ManifestField {
+            name: "fingerprintProbe".into(),
+            field_type: "string".into(),
+            optional: true,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        });
+    assert_ne!(
+        schema_fingerprint(&changed),
+        fp,
+        "a new column must invalidate the fingerprint"
+    );
+
+    // And the plan for that change is genuinely non-empty — i.e. the
+    // fingerprint and the planner agree about what counts as a change.
+    let next = adapter.plan_from_live(&changed).expect("replan");
+    assert!(
+        !next.is_empty(),
+        "planner saw no work for a change the fingerprint flagged"
+    );
+
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_schema_state");
 }

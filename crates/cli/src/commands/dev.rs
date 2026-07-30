@@ -387,12 +387,34 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         if is_pg {
             match pylon_storage::postgres::live::LivePostgresAdapter::connect(&db_str) {
                 Ok(mut adapter) => {
-                    if let Ok(plan) = adapter.plan_from_live(&m) {
-                        if let Err(e) = adapter.apply_plan(&plan) {
+                    // Same fingerprint guard as `pylon start` — see
+                    // pylon_storage::postgres::schema_fingerprint. It matters in
+                    // dev too: a hot-reload loop against a shared Postgres
+                    // branch reflects on every restart.
+                    let fingerprint = pylon_storage::postgres::schema_fingerprint(&m);
+                    let forced = std::env::var("PYLON_SCHEMA_FORCE_REFLECT")
+                        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                    let unchanged = !forced
+                        && adapter
+                            .read_schema_fingerprint()
+                            .ok()
+                            .flatten()
+                            .is_some_and(|stored| stored == fingerprint);
+                    if unchanged {
+                        // Nothing to say — an unchanged schema is the normal case.
+                    } else if let Ok(plan) = adapter.plan_from_live(&m) {
+                        let applied = adapter.apply_plan(&plan);
+                        if let Err(e) = &applied {
                             if !json_mode {
                                 eprintln!("[dev] Postgres schema apply failed: {e}");
                             }
-                        } else if !json_mode && !plan.is_empty() {
+                        }
+                        // Recorded only on success, so a failed apply reflects
+                        // again next boot instead of marking itself done.
+                        if applied.is_ok() {
+                            let _ = adapter.write_schema_fingerprint(&fingerprint);
+                        }
+                        if applied.is_ok() && !json_mode && !plan.is_empty() {
                             // Redact the DSN password before printing.
                             println!(
                                 "  Database: {} (postgres, schema synced)",

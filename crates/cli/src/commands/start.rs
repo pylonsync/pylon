@@ -271,10 +271,46 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     if is_pg {
         match pylon_storage::postgres::live::LivePostgresAdapter::connect(&db_target) {
             Ok(mut adapter) => {
-                if let Ok(plan) = adapter.plan_from_live(&manifest) {
-                    if let Err(e) = adapter.apply_plan(&plan) {
-                        if !json_mode {
-                            eprintln!("[start] Postgres schema apply failed: {e}");
+                // Reflect ONLY when the manifest's schema shape actually
+                // changed. `plan_from_live` interrogates the catalog, and on
+                // Postgres that is the single most expensive thing this process
+                // does — 8.2M rows read to return 16k on a 33-table app. Paying
+                // it on every boot made ordinary deploy churn indistinguishable
+                // from an attack on the database: 48 boots in a day held a small
+                // primary at 100% CPU until it stopped accepting connections.
+                // See schema_fingerprint for the full account.
+                let fingerprint = pylon_storage::postgres::schema_fingerprint(&manifest);
+                let forced = std::env::var("PYLON_SCHEMA_FORCE_REFLECT")
+                    .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                let unchanged = !forced
+                    && adapter
+                        .read_schema_fingerprint()
+                        .ok()
+                        .flatten()
+                        .is_some_and(|stored| stored == fingerprint);
+                if unchanged {
+                    if !json_mode {
+                        println!("  Database: schema unchanged (fingerprint match)");
+                    }
+                } else if let Ok(plan) = adapter.plan_from_live(&manifest) {
+                    match adapter.apply_plan(&plan) {
+                        Ok(()) => {
+                            // Only after a SUCCESSFUL apply — recording it
+                            // first would let a failed migration mark itself
+                            // done and every later boot skip the work.
+                            if let Err(e) = adapter.write_schema_fingerprint(&fingerprint) {
+                                if !json_mode {
+                                    eprintln!(
+                                        "[start] could not record schema fingerprint ({e}); \
+                                         the next boot will reflect again"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if !json_mode {
+                                eprintln!("[start] Postgres schema apply failed: {e}");
+                            }
                         }
                     }
                 }
