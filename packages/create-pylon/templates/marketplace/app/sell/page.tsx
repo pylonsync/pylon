@@ -3,24 +3,28 @@ import { type Metadata } from "@pylonsync/react";
 import { SellForm } from "../../client/SellForm";
 
 export const metadata: Metadata = {
-  title: "Sell an item · Pylon Market",
-  description: "List something for sale in seconds — buyers' offers arrive live.",
+  title: "Sell an item | Reprise",
+  description: "Create a polished listing and receive buyer offers in real time.",
 };
 
 export default function SellPage() {
   return (
-    <div className="mx-auto max-w-xl space-y-6">
-      <header className="space-y-1">
-        <h1 className="text-2xl font-semibold tracking-tight">List an item</h1>
-        <p className="text-sm text-muted-foreground">
-          It goes live instantly. Offers land in your{" "}
+    <div className="mx-auto max-w-2xl space-y-8 py-2 sm:py-8">
+      <header className="space-y-2">
+        <h1 className="text-balance text-3xl font-semibold tracking-[-0.03em]">
+          List something worth finding
+        </h1>
+        <p className="max-w-xl text-pretty text-sm leading-6 text-muted-foreground">
+          Your listing goes live instantly. Offers arrive in your{" "}
           <a href="/me" className="underline">
-            My Market
+            dashboard
           </a>{" "}
-          inbox in realtime.
+          in real time.
         </p>
       </header>
-      <SellForm />
+      <div className="rounded-2xl bg-card p-5 shadow-[var(--shadow-border)] sm:p-7">
+        <SellForm />
+      </div>
     </div>
   );
 }

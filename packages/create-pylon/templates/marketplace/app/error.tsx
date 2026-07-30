@@ -17,7 +17,7 @@ export default function Error({ error, reset }: ErrorBoundaryProps) {
       <button
         type="button"
         onClick={reset}
-        className="mt-6 inline-flex h-10 items-center rounded-md bg-foreground px-5 text-sm font-medium text-background transition hover:opacity-90"
+        className="mt-6 inline-flex min-h-11 items-center rounded-lg bg-foreground px-5 text-sm font-medium text-background transition-[opacity,scale] duration-150 hover:opacity-90 active:scale-[0.96]"
       >
         Try again
       </button>

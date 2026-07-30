@@ -7,7 +7,6 @@ import {
   type ServerData,
   type SsrResponse,
 } from "@pylonsync/react";
-import { Badge } from "../../../ui/badge";
 import { OfferPanel } from "../../../client/OfferPanel";
 import { CategoryIcon } from "../../_components/CategoryIcon";
 import { WatchButton } from "../../../client/WatchButton";
@@ -47,12 +46,12 @@ export const generateMetadata: GenerateMetadata = async ({
   serverData,
 }): Promise<Metadata> => {
   const l = await resolveListing(serverData, params.id);
-  if (!l) return { title: "Listing not found · Pylon Market" };
+  if (!l) return { title: "Listing not found | Reprise" };
   return {
-    title: `${l.title} — ${money(l.price)} · Pylon Market`,
+    title: `${l.title} | ${money(l.price)} | Reprise`,
     description:
       l.description?.slice(0, 155) ||
-      `${l.title} for sale on Pylon Market (${conditionLabel(l.condition)}).`,
+      `${l.title} for sale on Reprise (${conditionLabel(l.condition)}).`,
   };
 };
 
@@ -80,58 +79,84 @@ function Detail({
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-10">
       <Link
         href="/"
-        className="text-sm text-muted-foreground hover:text-foreground"
+        className="inline-flex min-h-10 items-center text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
-        ← Back to the market
+        ← Back to browse
       </Link>
 
-      <div className="grid gap-8 md:grid-cols-2">
-        <div
-          className="relative flex aspect-square items-center justify-center rounded-2xl text-white/90"
-          style={{ background: gradient(listing.seed || listing.id) }}
-        >
-          <CategoryIcon category={listing.category} className="size-28" />
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,1.16fr)_minmax(360px,.84fr)] lg:gap-12">
+        <div className="relative aspect-[4/5] overflow-hidden rounded-[24px] bg-muted shadow-[var(--shadow-border)] sm:aspect-[6/5] lg:aspect-[4/5]">
+          {listing.imageUrl ? (
+            <img
+              src={listing.imageUrl}
+              alt={listing.title}
+              fetchPriority="high"
+              decoding="async"
+              className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
+            />
+          ) : (
+            <div
+              className="flex h-full w-full items-center justify-center text-white/90"
+              style={{ background: gradient(listing.seed || listing.id) }}
+            >
+              <CategoryIcon category={listing.category} className="size-28" />
+            </div>
+          )}
           <WatchButton
             listingId={listing.id}
             listingTitle={listing.title}
-            className="absolute right-3 top-3"
+            className="absolute right-4 top-4"
           />
           {listing.status === "sold" ? (
-            <span className="absolute inset-0 grid place-items-center rounded-2xl bg-black/55 text-2xl font-bold uppercase tracking-wide">
+            <span className="absolute inset-0 grid place-items-center bg-black/55 text-2xl font-semibold text-white">
               Sold
             </span>
           ) : null}
         </div>
 
-        <div className="flex flex-col gap-4">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-xs uppercase tracking-wider text-muted-foreground">
-              <span>{listing.category}</span>
-              <span>·</span>
-              <Badge variant="outline" className="text-[10px]">
-                {conditionLabel(listing.condition)}
-              </Badge>
-            </div>
-            <h1 className="text-2xl font-semibold tracking-tight">
+        <div className="flex min-w-0 flex-col">
+          <div>
+            <p className="text-sm capitalize text-muted-foreground">
+              {listing.category} / {conditionLabel(listing.condition)}
+            </p>
+            <h1 className="mt-2 text-balance text-3xl font-semibold leading-tight tracking-[-0.035em] sm:text-4xl">
               {listing.title}
             </h1>
-            <p className="text-3xl font-semibold tabular-nums">{money(listing.price)}</p>
-            <p className="text-sm text-muted-foreground">
-              Listed by <span className="font-medium">{listing.sellerName}</span>
+            <p className="mt-3 text-4xl font-semibold tracking-[-0.03em] tabular-nums">
+              {money(listing.price)}
+            </p>
+            <p className="mt-2 text-sm text-muted-foreground">
+              Listed by{" "}
+              <span className="font-medium text-foreground">{listing.sellerName}</span>
             </p>
           </div>
 
-          {listing.description ? (
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground/80">
-              {listing.description}
-            </p>
-          ) : null}
+          <div className="my-6 h-px bg-border" />
 
-          {/* Realtime client island: live offers, accept/decline. */}
-          <div className="mt-2">
+          <section>
+            <h2 className="text-sm font-medium">About this item</h2>
+            <p className="mt-2 whitespace-pre-wrap text-pretty text-sm leading-6 text-muted-foreground">
+              {listing.description || "The seller has not added a description yet."}
+            </p>
+          </section>
+
+          <div className="my-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-border shadow-[var(--shadow-border)]">
+            <div className="bg-card p-4">
+              <p className="text-xs text-muted-foreground">Condition</p>
+              <p className="mt-1 text-sm font-medium">{conditionLabel(listing.condition)}</p>
+            </div>
+            <div className="bg-card p-4">
+              <p className="text-xs text-muted-foreground">Offer status</p>
+              <p className="mt-1 text-sm font-medium">
+                {listing.status === "active" ? "Open to offers" : "Sold"}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-6">
             <OfferPanel
               listingId={listing.id}
               sellerId={listing.sellerId}
@@ -141,6 +166,11 @@ function Detail({
               status={listing.status}
             />
           </div>
+
+          <p className="mt-4 text-pretty text-xs leading-5 text-muted-foreground">
+            Reprise keeps offers and listing status in sync. Confirm payment and
+            delivery details with the seller before completing a transaction.
+          </p>
         </div>
       </div>
     </div>
@@ -156,7 +186,7 @@ export default function ListingPage({
     <Suspense
       fallback={
         <div className="grid gap-8 md:grid-cols-2">
-          <div className="aspect-square animate-pulse rounded-2xl bg-muted" />
+          <div className="aspect-[4/5] animate-pulse rounded-[24px] bg-muted" />
           <div className="space-y-3">
             <div className="h-6 w-2/3 animate-pulse rounded bg-muted" />
             <div className="h-8 w-1/3 animate-pulse rounded bg-muted" />

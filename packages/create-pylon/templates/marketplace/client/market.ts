@@ -38,6 +38,7 @@ export interface Listing {
   category: string;
   condition: string;
   status: "active" | "sold";
+  imageUrl?: string;
   seed: string;
   createdAt: string;
 }
@@ -81,7 +82,7 @@ function hash(s: string): number {
   return h >>> 0;
 }
 
-/** Deterministic gradient "photo" from a seed — no image hosting needed. */
+/** Deterministic visual fallback for listings whose remote image is unavailable. */
 export function gradient(seed: string): string {
   const h = hash(seed);
   const a = h % 360;

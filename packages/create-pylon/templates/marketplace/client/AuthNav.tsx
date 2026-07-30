@@ -14,7 +14,7 @@ function Nav() {
     return (
       <Link
         href="/sell"
-        className="rounded-md border px-3 py-1.5 text-sm font-medium transition hover:bg-muted"
+        className="inline-flex min-h-10 items-center rounded-lg bg-card px-3 text-sm font-medium shadow-[var(--shadow-border)] transition-[background-color,box-shadow,scale] duration-150 hover:bg-muted hover:shadow-[var(--shadow-border-hover)] active:scale-[0.96]"
       >
         Sign in
       </Link>

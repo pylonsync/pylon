@@ -1,5 +1,5 @@
 /**
- * Pylon Market — a live local marketplace.
+ * Reprise — a live resale marketplace.
  *
  * Anyone (a guest session) can list an item for sale; anyone else can make
  * an offer. Sellers watch offers arrive in realtime and accept/decline them.
@@ -40,9 +40,9 @@ const User = entity(
   },
 );
 
-// A thing for sale. `seed` drives a deterministic gradient "photo" so the
-// demo needs no image hosting. `status` flips active → sold when an offer
-// is accepted.
+// A thing for sale. `imageUrl` is optional so listings created before the
+// photo field was added still render with a deterministic fallback.
+// `status` flips active → sold when an offer is accepted.
 //
 // `sellerId: field.owner()` is what lets SellForm create a listing with a
 // plain, optimistic `db.insert` (it shows in the live ticker the instant
@@ -64,6 +64,7 @@ const Listing = entity(
     category: field.string(),
     condition: field.string(), // new | like-new | good | fair
     status: field.string().default("active"), // active | sold
+    imageUrl: field.string().optional(),
     seed: field.string(),
     createdAt: field.datetime().defaultNow(),
   },

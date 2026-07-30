@@ -5,56 +5,97 @@ import {
   type PageProps,
   type ServerData,
 } from "@pylonsync/react";
-import { Card } from "../ui/card";
 import { Badge } from "../ui/badge";
 import { LiveTicker } from "../client/LiveTicker";
 import { SeedOnEmpty } from "../client/SeedOnEmpty";
 import { CategoryIcon } from "./_components/CategoryIcon";
 import { WatchButton } from "../client/WatchButton";
 import { gradient, money, conditionLabel, type Listing } from "../client/market";
+import { browseListings } from "../lib/catalog";
 
 export const metadata: Metadata = {
-  title: "Pylon Market — buy & sell locally, live",
+  title: "Reprise | Distinctive secondhand finds",
   description:
-    "A live local marketplace. Server-rendered listings for SEO, realtime offers over the sync engine — one Pylon binary, one port.",
+    "Browse distinctive secondhand furniture, technology, fashion, and more. Save favorites, make offers, and follow every update live.",
 };
 
 const CATEGORIES = [
-  "all", "furniture", "electronics", "cameras", "bikes", "audio", "kitchen",
-  "instruments", "outdoor", "apparel",
+  "all",
+  "furniture",
+  "electronics",
+  "cameras",
+  "bikes",
+  "audio",
+  "kitchen",
+  "instruments",
+  "outdoor",
+  "apparel",
 ];
 
-// The grid suspends on the server-side read and streams in with real rows in
-// the HTML (good for SEO + LCP). `serverData.query` runs through the same
-// policy gate as a query function's ctx.db.
+function browseHref(category: string, query: string, sort: string): string {
+  const params = new URLSearchParams();
+  if (category !== "all") params.set("category", category);
+  if (query) params.set("q", query);
+  if (sort !== "latest") params.set("sort", sort);
+  const suffix = params.toString();
+  return suffix ? `/?${suffix}#listings` : "/#listings";
+}
+
+function ListingImage({ listing }: { listing: Listing }) {
+  if (listing.imageUrl) {
+    return (
+      <img
+        src={listing.imageUrl}
+        alt={listing.title}
+        loading="lazy"
+        decoding="async"
+        className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
+      />
+    );
+  }
+
+  return (
+    <div
+      className="flex h-full w-full items-center justify-center text-white/90"
+      style={{ background: gradient(listing.seed || listing.id) }}
+    >
+      <CategoryIcon category={listing.category} className="size-14" />
+    </div>
+  );
+}
+
 function Grid({
   serverData,
   category,
+  query,
+  sort,
 }: {
   serverData: ServerData;
   category: string;
+  query: string;
+  sort: string;
 }) {
   const active = use(serverData.query<Listing>("Listing", { status: "active" }));
-  const sorted = [...active].sort((a, b) =>
-    b.createdAt.localeCompare(a.createdAt),
-  );
-  const listings =
-    category === "all"
-      ? sorted
-      : sorted.filter((l) => l.category === category);
+  const listings = browseListings(active, { category, query, sort });
 
   if (listings.length === 0) {
     return (
       <>
-        <div className="rounded-xl border border-dashed p-12 text-center">
-          <p className="text-sm text-muted-foreground">
-            {active.length === 0
-              ? "Setting up a few sample listings…"
-              : "Nothing in this category yet."}
+        <div className="rounded-2xl bg-card px-6 py-16 text-center shadow-[var(--shadow-border)]">
+          <p className="font-medium">
+            {active.length === 0 ? "Adding sample finds..." : "No matching finds yet."}
           </p>
-          {category !== "all" ? (
-            <Link href="/" className="mt-2 inline-block text-sm underline">
-              See everything
+          <p className="mt-1 text-sm text-muted-foreground">
+            {active.length === 0
+              ? "The catalog will appear in a moment."
+              : "Try another category or a broader search."}
+          </p>
+          {active.length > 0 ? (
+            <Link
+              href="/#listings"
+              className="mt-5 inline-flex min-h-10 items-center rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-primary/90 active:scale-[0.96]"
+            >
+              Clear filters
             </Link>
           ) : null}
         </div>
@@ -64,42 +105,39 @@ function Grid({
   }
 
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-      {listings.map((l) => (
-        <Link key={l.id} href={`/listing/${l.slug || l.id}`} className="group">
-          <Card className="flex flex-col overflow-hidden p-0 transition group-hover:-translate-y-0.5 group-hover:shadow-md">
-            <div
-              className="relative flex aspect-square items-center justify-center text-white/90"
-              style={{ background: gradient(l.seed || l.id) }}
-            >
-              <CategoryIcon category={l.category} className="size-14" />
-              <WatchButton
-                listingId={l.id}
-                listingTitle={l.title}
-                className="absolute right-2 top-2 size-8"
-              />
-              {l.status === "sold" ? (
-                <span className="absolute inset-0 grid place-items-center bg-black/55 text-sm font-bold uppercase tracking-wide">
-                  Sold
-                </span>
-              ) : null}
-            </div>
-            <div className="flex flex-1 flex-col gap-1 p-3">
-              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                {l.category}
-              </span>
-              <span className="line-clamp-2 min-h-[34px] text-sm font-medium leading-snug">
-                {l.title}
-              </span>
-              <div className="mt-1 flex items-center justify-between">
-                <span className="font-semibold tabular-nums">{money(l.price)}</span>
-                <Badge variant="outline" className="text-[10px]">
-                  {conditionLabel(l.condition)}
-                </Badge>
+    <div className="grid grid-cols-2 gap-x-3 gap-y-7 sm:gap-x-5 sm:gap-y-9 lg:grid-cols-4">
+      {listings.map((listing) => (
+        <article
+          key={listing.id}
+          className="group relative min-w-0 overflow-hidden rounded-2xl bg-card shadow-[var(--shadow-border)] transition-[box-shadow,transform] duration-200 ease-out hover:-translate-y-1 hover:shadow-[var(--shadow-border-hover)]"
+        >
+          <Link href={`/listing/${listing.slug || listing.id}`} className="block">
+            <div className="aspect-[4/5] overflow-hidden bg-muted">
+              <div className="h-full w-full transition-transform duration-500 ease-out group-hover:scale-[1.025]">
+                <ListingImage listing={listing} />
               </div>
             </div>
-          </Card>
-        </Link>
+            <div className="space-y-2.5 p-3.5 sm:p-4">
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span className="capitalize">{listing.category}</span>
+                <Badge variant="outline" className="shrink-0 text-[10px]">
+                  {conditionLabel(listing.condition)}
+                </Badge>
+              </div>
+              <h2 className="line-clamp-2 min-h-10 text-sm font-medium leading-5 text-balance sm:text-[15px]">
+                {listing.title}
+              </h2>
+              <p className="text-base font-semibold tabular-nums">
+                {money(listing.price)}
+              </p>
+            </div>
+          </Link>
+          <WatchButton
+            listingId={listing.id}
+            listingTitle={listing.title}
+            className="absolute right-3 top-3"
+          />
+        </article>
       ))}
     </div>
   );
@@ -107,53 +145,164 @@ function Grid({
 
 export default function BrowsePage({ searchParams, serverData }: PageProps) {
   const category =
-    typeof searchParams.category === "string" ? searchParams.category : "all";
+    typeof searchParams.category === "string" &&
+    CATEGORIES.includes(searchParams.category)
+      ? searchParams.category
+      : "all";
+  const query = typeof searchParams.q === "string" ? searchParams.q.trim() : "";
+  const sort = typeof searchParams.sort === "string" ? searchParams.sort : "latest";
 
   return (
-    <div className="space-y-6">
-      <section className="space-y-1">
-        <h1 className="text-3xl font-semibold tracking-tight">
-          A local marketplace with live listings and offers
-        </h1>
-        <p className="text-muted-foreground">
-          Listings are server-rendered for search engines; offers are realtime.
-          Open two tabs, list an item in one, and watch it appear in the other.
-        </p>
+    <div className="space-y-12 pb-10">
+      <section className="relative min-h-[430px] overflow-hidden rounded-[28px] bg-[#d8d4ce] shadow-[var(--shadow-border)] sm:min-h-[470px]">
+        <img
+          src="/images/marketplace-hero.webp"
+          alt="A curated collection of secondhand furniture, clothing, audio, and camera gear"
+          width="1600"
+          height="1024"
+          fetchPriority="high"
+          decoding="async"
+          className="absolute inset-0 h-full w-full object-cover object-[72%_center] outline outline-1 -outline-offset-1 outline-black/10 sm:object-center"
+        />
+        <div className="absolute inset-0 bg-[#ebe8e3]/80 sm:w-[76%] sm:bg-[linear-gradient(90deg,rgba(235,232,227,.98)_0%,rgba(235,232,227,.9)_40%,rgba(235,232,227,.16)_78%,rgba(235,232,227,0)_100%)]" />
+        <div className="relative flex min-h-[430px] max-w-[620px] flex-col justify-center px-6 py-12 text-[#171717] sm:min-h-[470px] sm:px-10 lg:px-12">
+          <h1 className="max-w-[11ch] text-balance text-4xl font-semibold leading-[1.04] tracking-[-0.045em] sm:text-5xl lg:text-[3.5rem]">
+            Better things, ready for what comes next.
+          </h1>
+          <p className="mt-5 max-w-[38ch] text-pretty text-base leading-7 text-[#4f4c48] sm:text-lg">
+            Shop distinctive furniture, technology, fashion, and more. Make offers and follow every update live.
+          </p>
+          <div className="mt-7 flex flex-wrap gap-3">
+            <Link
+              href="/#listings"
+              className="inline-flex min-h-11 items-center rounded-lg bg-[#171717] px-5 text-sm font-medium text-[#fafafa] transition-[background-color,scale] duration-150 hover:bg-[#2b2b2b] active:scale-[0.96]"
+            >
+              Browse finds
+            </Link>
+            <Link
+              href="/sell"
+              className="inline-flex min-h-11 items-center rounded-lg bg-white/75 px-5 text-sm font-medium text-[#171717] shadow-[0_0_0_1px_rgba(0,0,0,.1),0_1px_2px_rgba(0,0,0,.05)] backdrop-blur transition-[background-color,scale] duration-150 hover:bg-white active:scale-[0.96]"
+            >
+              Sell
+            </Link>
+          </div>
+        </div>
       </section>
 
-      {/* Realtime client island */}
+      <section className="grid gap-px overflow-hidden rounded-2xl bg-border shadow-[var(--shadow-border)] sm:grid-cols-3">
+        {[
+          ["Realtime catalog", "New listings and sold status update without a refresh."],
+          ["Flexible offers", "Buy at the list price or send the seller an offer."],
+          ["Private saves", "Keep a personal watchlist that stays synced to your account."],
+        ].map(([title, body]) => (
+          <div key={title} className="bg-card px-5 py-4">
+            <h2 className="text-sm font-medium">{title}</h2>
+            <p className="mt-1 text-pretty text-sm leading-5 text-muted-foreground">
+              {body}
+            </p>
+          </div>
+        ))}
+      </section>
+
       <LiveTicker />
 
-      <nav className="flex flex-wrap gap-2">
-        {CATEGORIES.map((c) => (
-          <Link
-            key={c}
-            href={c === "all" ? "/" : `/?category=${c}`}
-            className={`rounded-full border px-3 py-1 text-sm transition hover:bg-muted ${
-              category === c
-                ? "border-foreground bg-foreground text-background hover:bg-foreground"
-                : "text-muted-foreground"
-            }`}
-          >
-            {c}
-          </Link>
-        ))}
-      </nav>
+      <section id="listings" className="scroll-mt-24 space-y-6">
+        <div>
+          <h2 className="text-balance text-3xl font-semibold tracking-[-0.03em]">
+            Fresh finds
+          </h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Thoughtful pieces from independent sellers.
+          </p>
+        </div>
 
-      <Suspense
-        fallback={
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-            {Array.from({ length: 8 }).map((_, i) => (
-              <div
-                key={i}
-                className="aspect-[3/4] animate-pulse rounded-xl bg-muted"
-              />
+        <form
+          method="get"
+          action="/"
+          role="search"
+          className="grid gap-3 rounded-2xl bg-card p-3 shadow-[var(--shadow-border)] sm:grid-cols-[1fr_180px_auto]"
+        >
+          {category !== "all" ? (
+            <input type="hidden" name="category" value={category} />
+          ) : null}
+          <label className="sr-only" htmlFor="catalog-search">
+            Search listings
+          </label>
+          <input
+            id="catalog-search"
+            name="q"
+            type="search"
+            defaultValue={query}
+            placeholder="Search furniture, cameras, sellers..."
+            className="min-h-11 rounded-lg bg-muted px-4 text-sm outline-none ring-0 placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <label className="sr-only" htmlFor="catalog-sort">
+            Sort listings
+          </label>
+          <select
+            id="catalog-sort"
+            name="sort"
+            defaultValue={sort}
+            className="min-h-11 rounded-lg bg-muted px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            <option value="latest">Newest first</option>
+            <option value="price-low">Price: low to high</option>
+            <option value="price-high">Price: high to low</option>
+          </select>
+          <button
+            type="submit"
+            className="min-h-11 rounded-lg bg-primary px-5 text-sm font-medium text-primary-foreground transition-[background-color,scale] duration-150 hover:bg-primary/90 active:scale-[0.96]"
+          >
+            Search
+          </button>
+        </form>
+
+        <nav
+          aria-label="Listing categories"
+          className="hide-scrollbar -mx-5 overflow-x-auto px-5 pb-1"
+        >
+          <div className="flex w-max gap-2">
+            {CATEGORIES.map((item) => (
+              <Link
+                key={item}
+                href={browseHref(item, query, sort)}
+                aria-current={category === item ? "page" : undefined}
+                className={`inline-flex min-h-10 items-center rounded-full px-4 text-sm font-medium capitalize transition-[background-color,color,box-shadow,scale] duration-150 active:scale-[0.96] ${
+                  category === item
+                    ? "bg-foreground text-background"
+                    : "bg-card text-muted-foreground shadow-[var(--shadow-border)] hover:text-foreground hover:shadow-[var(--shadow-border-hover)]"
+                }`}
+              >
+                {item}
+              </Link>
             ))}
           </div>
-        }
-      >
-        <Grid serverData={serverData} category={category} />
-      </Suspense>
+        </nav>
+
+        <Suspense
+          fallback={
+            <div className="grid grid-cols-2 gap-x-3 gap-y-7 sm:gap-x-5 lg:grid-cols-4">
+              {Array.from({ length: 8 }).map((_, index) => (
+                <div key={index} className="overflow-hidden rounded-2xl bg-card shadow-[var(--shadow-border)]">
+                  <div className="aspect-[4/5] animate-pulse bg-muted" />
+                  <div className="space-y-3 p-4">
+                    <div className="h-3 w-2/5 animate-pulse rounded bg-muted" />
+                    <div className="h-9 animate-pulse rounded bg-muted" />
+                    <div className="h-4 w-1/3 animate-pulse rounded bg-muted" />
+                  </div>
+                </div>
+              ))}
+            </div>
+          }
+        >
+          <Grid
+            serverData={serverData}
+            category={category}
+            query={query}
+            sort={sort}
+          />
+        </Suspense>
+      </section>
     </div>
   );
 }

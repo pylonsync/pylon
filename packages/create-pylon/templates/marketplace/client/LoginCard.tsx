@@ -12,7 +12,7 @@ import { DEMO } from "./market";
 // with the seeded demo account so it's one click to a working session.
 export function LoginCard({
   title = "Sign in to continue",
-  blurb = "Real email/password auth — no verification email. The demo account is prefilled; just hit Log in.",
+  blurb = "Use the ready demo account or create your own. No verification email is required.",
 }: {
   title?: string;
   blurb?: string;
@@ -41,10 +41,12 @@ export function LoginCard({
   }
 
   return (
-    <div className="mx-auto max-w-sm space-y-4 rounded-xl border bg-card p-6">
+    <div className="mx-auto max-w-sm space-y-5 rounded-2xl bg-card p-6 shadow-[var(--shadow-border)]">
       <div>
-        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
-        <p className="mt-1 text-sm text-muted-foreground">{blurb}</p>
+        <h2 className="text-xl font-semibold tracking-[-0.02em]">{title}</h2>
+        <p className="mt-1.5 text-pretty text-sm leading-5 text-muted-foreground">
+          {blurb}
+        </p>
       </div>
       <form onSubmit={submit} className="space-y-3">
         {mode === "register" ? (
@@ -96,7 +98,7 @@ export function LoginCard({
             No account?{" "}
             <button
               type="button"
-              className="font-medium text-foreground hover:underline"
+              className="relative min-h-10 font-medium text-foreground after:absolute after:inset-x-0 after:bottom-1 after:h-px after:bg-current after:opacity-0 after:transition-opacity hover:after:opacity-100"
               onClick={() => {
                 setMode("register");
                 setEmail("");
@@ -112,7 +114,7 @@ export function LoginCard({
             Have an account?{" "}
             <button
               type="button"
-              className="font-medium text-foreground hover:underline"
+              className="relative min-h-10 font-medium text-foreground after:absolute after:inset-x-0 after:bottom-1 after:h-px after:bg-current after:opacity-0 after:transition-opacity hover:after:opacity-100"
               onClick={() => {
                 setMode("login");
                 setEmail(DEMO.email);

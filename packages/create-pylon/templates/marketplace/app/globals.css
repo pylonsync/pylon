@@ -8,37 +8,97 @@
 @source "../../_shared/src";
 
 @theme {
-  --font-sans: "Inter", -apple-system, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 
-  --color-background: oklch(0.99 0 0);
-  --color-foreground: oklch(0.16 0 0);
-  --color-card: oklch(1 0 0);
-  --color-card-foreground: oklch(0.16 0 0);
-  --color-popover: oklch(1 0 0);
-  --color-popover-foreground: oklch(0.16 0 0);
-  --color-primary: oklch(0.21 0 0);
-  --color-primary-foreground: oklch(0.985 0 0);
-  --color-secondary: oklch(0.97 0 0);
-  --color-secondary-foreground: oklch(0.21 0 0);
-  --color-muted: oklch(0.97 0 0);
-  --color-muted-foreground: oklch(0.55 0 0);
-  --color-accent: oklch(0.97 0 0);
-  --color-accent-foreground: oklch(0.21 0 0);
+  --color-background: oklch(0.975 0.004 85);
+  --color-foreground: oklch(0.17 0.004 85);
+  --color-card: oklch(0.995 0.002 85);
+  --color-card-foreground: oklch(0.17 0.004 85);
+  --color-popover: oklch(0.995 0.002 85);
+  --color-popover-foreground: oklch(0.17 0.004 85);
+  --color-primary: oklch(0.19 0.004 85);
+  --color-primary-foreground: oklch(0.98 0.002 85);
+  --color-secondary: oklch(0.94 0.006 85);
+  --color-secondary-foreground: oklch(0.21 0.004 85);
+  --color-muted: oklch(0.945 0.006 85);
+  --color-muted-foreground: oklch(0.48 0.008 85);
+  --color-accent: oklch(0.93 0.009 85);
+  --color-accent-foreground: oklch(0.21 0.004 85);
   --color-destructive: oklch(0.577 0.245 27.325);
   --color-destructive-foreground: oklch(0.985 0 0);
-  --color-border: oklch(0.92 0 0);
-  --color-input: oklch(0.92 0 0);
-  --color-ring: oklch(0.71 0 0);
+  --color-border: oklch(0.89 0.007 85);
+  --color-input: oklch(0.86 0.008 85);
+  --color-ring: oklch(0.53 0.015 85);
 
-  --radius-lg: 0.625rem;
-  --radius-md: calc(0.625rem - 2px);
-  --radius-sm: calc(0.625rem - 4px);
+  --radius-lg: 1rem;
+  --radius-md: 0.625rem;
+  --radius-sm: 0.5rem;
+}
+
+:root {
+  color-scheme: light dark;
+  --shadow-border:
+    0 0 0 1px rgb(0 0 0 / 0.06),
+    0 1px 2px -1px rgb(0 0 0 / 0.06),
+    0 8px 24px -16px rgb(41 37 33 / 0.18);
+  --shadow-border-hover:
+    0 0 0 1px rgb(0 0 0 / 0.09),
+    0 2px 4px -2px rgb(0 0 0 / 0.08),
+    0 16px 32px -18px rgb(41 37 33 / 0.24);
 }
 
 html,
 body {
   height: 100%;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+p,
+li {
+  text-wrap: pretty;
+}
+
+.hide-scrollbar {
+  scrollbar-width: none;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-background: oklch(0.15 0.004 85);
+    --color-foreground: oklch(0.94 0.004 85);
+    --color-card: oklch(0.19 0.005 85);
+    --color-card-foreground: oklch(0.94 0.004 85);
+    --color-popover: oklch(0.19 0.005 85);
+    --color-popover-foreground: oklch(0.94 0.004 85);
+    --color-primary: oklch(0.93 0.004 85);
+    --color-primary-foreground: oklch(0.17 0.004 85);
+    --color-secondary: oklch(0.24 0.006 85);
+    --color-secondary-foreground: oklch(0.94 0.004 85);
+    --color-muted: oklch(0.23 0.006 85);
+    --color-muted-foreground: oklch(0.7 0.007 85);
+    --color-accent: oklch(0.25 0.008 85);
+    --color-accent-foreground: oklch(0.94 0.004 85);
+    --color-border: oklch(0.3 0.007 85);
+    --color-input: oklch(0.34 0.008 85);
+    --color-ring: oklch(0.68 0.01 85);
+    --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.08);
+    --shadow-border-hover: 0 0 0 1px rgb(255 255 255 / 0.14);
+  }
 }
 
 /* Live "just listed" ticker. Items are doubled in the markup, so translating
@@ -58,6 +118,9 @@ body {
   animation-play-state: paused;
 }
 @media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
   .market-marquee {
     animation: none;
   }

@@ -14,45 +14,48 @@ export default function RootLayout({
       <head>
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="preconnect" href="https://rsms.me/" />
-        <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
       </head>
       <body className="min-h-screen bg-background text-foreground antialiased">
-        <header className="sticky top-0 z-20 h-14 border-b bg-background/90 backdrop-blur">
-          <div className="mx-auto flex h-full max-w-5xl items-center justify-between gap-4 px-5">
-            <Link href="/" className="flex items-center gap-2 font-medium text-sm">
-              <span className="grid size-7 place-items-center rounded-md bg-foreground text-sm font-semibold text-background">
-                M
+        <header className="sticky top-0 z-20 h-16 border-b bg-background/85 backdrop-blur-xl">
+          <div className="mx-auto flex h-full max-w-6xl items-center justify-between gap-3 px-5">
+            <Link
+              href="/"
+              className="flex min-h-11 items-center gap-2.5 text-sm font-semibold tracking-[-0.01em]"
+            >
+              <span className="grid size-8 place-items-center rounded-lg bg-foreground text-sm font-semibold text-background shadow-sm">
+                R
               </span>
-              Pylon Market
+              Reprise
             </Link>
-            <nav className="flex items-center gap-1 text-sm">
+            <nav className="flex items-center gap-0.5 text-sm sm:gap-1">
               <Link
                 href="/"
-                className="rounded-md px-3 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                className="hidden min-h-10 items-center rounded-lg px-3 text-muted-foreground transition-[background-color,color,scale] duration-150 hover:bg-muted hover:text-foreground active:scale-[0.96] sm:inline-flex"
               >
                 Browse
               </Link>
               <Link
                 href="/sell"
-                className="rounded-md px-3 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                className="inline-flex min-h-10 items-center rounded-lg px-3 text-muted-foreground transition-[background-color,color,scale] duration-150 hover:bg-muted hover:text-foreground active:scale-[0.96]"
               >
                 Sell
               </Link>
               <Link
                 href="/me"
-                className="rounded-md px-3 py-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+                className="hidden min-h-10 items-center rounded-lg px-3 text-muted-foreground transition-[background-color,color,scale] duration-150 hover:bg-muted hover:text-foreground active:scale-[0.96] md:inline-flex"
               >
-                My Market
+                Dashboard
               </Link>
               <AuthNav />
             </nav>
           </div>
         </header>
-        <main className="mx-auto max-w-5xl px-5 py-6">{children}</main>
-        <footer className="border-t py-6 text-center text-xs text-muted-foreground">
-          Pylon Market · server-rendered listings + realtime offers from one
-          binary
+        <main className="mx-auto min-h-[calc(100dvh-8rem)] max-w-6xl px-5 py-6 sm:py-8">
+          {children}
+        </main>
+        <footer className="border-t px-5 py-7 text-center text-xs text-muted-foreground">
+          Reprise, built with Pylon. Server-rendered listings and realtime offers
+          from one binary.
         </footer>
       </body>
     </html>

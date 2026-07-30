@@ -51,7 +51,7 @@ function Panel(props: Props) {
   return (
     <AuthGate
       title="Sign in to make an offer"
-      blurb="Offers are tied to a real account so the seller knows who's bidding. The demo account is prefilled — just hit Log in."
+      blurb="Offers are tied to a real account so the seller knows who is bidding. The demo account is ready; just select Log in."
     >
       <BuyerView
         {...props}
@@ -109,9 +109,8 @@ function SellerView({ offers }: { offers: Offer[] }) {
       </div>
       {err ? <p className="text-sm text-destructive">{err}</p> : null}
       {offers.length === 0 ? (
-        <p className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-          No offers yet. They'll show up here the moment a buyer makes one —
-          live, no refresh.
+        <p className="rounded-xl bg-muted p-6 text-center text-sm text-muted-foreground">
+          No offers yet. They will appear here as soon as a buyer sends one.
         </p>
       ) : (
         <ul className="space-y-2">
@@ -242,7 +241,7 @@ function BuyerView({
   // the offer is made.
   if (myOffer) {
     return (
-      <div className="space-y-2 rounded-lg border bg-card p-4">
+      <div className="space-y-2 rounded-xl bg-card p-4 shadow-[var(--shadow-border)]">
         <h2 className="font-semibold">Your offer</h2>
         <div className="flex items-center gap-2">
           <span className="text-2xl font-semibold tabular-nums">{money(myOffer.amount)}</span>
@@ -252,9 +251,9 @@ function BuyerView({
         </div>
         <p className="text-sm text-muted-foreground">
           {myOffer.status === "pending"
-            ? `Sent to ${sellerName} — you'll see their answer here live.`
+            ? `Sent to ${sellerName}. Their answer will appear here live.`
             : myOffer.status === "accepted"
-              ? "🎉 Accepted! Arrange pickup with the seller."
+              ? "Accepted. Confirm payment and delivery with the seller."
               : "This offer was declined."}
         </p>
       </div>
@@ -263,7 +262,7 @@ function BuyerView({
 
   if (isSold) {
     return (
-      <div className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">
+      <div className="rounded-xl bg-card p-4 text-sm text-muted-foreground shadow-[var(--shadow-border)]">
         This item has sold.
       </div>
     );
@@ -287,7 +286,7 @@ function BuyerView({
   }
 
   return (
-    <div className="space-y-4 rounded-lg border bg-card p-4">
+    <div className="space-y-4 rounded-xl bg-card p-5 shadow-[var(--shadow-border)]">
       <div className="space-y-2">
         <Button
           type="button"
@@ -295,7 +294,7 @@ function BuyerView({
           disabled={buyNow.loading}
           className="w-full"
         >
-          {buyNow.loading ? "Buying…" : `Buy now — ${money(suggestedPrice)}`}
+          {buyNow.loading ? "Buying…" : `Buy now for ${money(suggestedPrice)}`}
         </Button>
         <p className="text-center text-xs text-muted-foreground">
           Instant purchase at the asking price.
@@ -309,24 +308,35 @@ function BuyerView({
       </div>
 
       <form onSubmit={submit} className="space-y-3">
-        <div className="flex items-center gap-2">
-          <span className="text-muted-foreground">$</span>
-          <Input
-            type="number"
-            min="1"
-            step="1"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            className="w-32"
-            aria-label="Offer amount"
+        <div className="space-y-1.5">
+          <label htmlFor="offer-amount" className="text-sm font-medium">
+            Your offer
+          </label>
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground">$</span>
+            <Input
+              id="offer-amount"
+              type="number"
+              min="1"
+              step="1"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              className="w-32"
+            />
+          </div>
+        </div>
+        <div className="space-y-1.5">
+          <label htmlFor="offer-note" className="text-sm font-medium">
+            Note <span className="font-normal text-muted-foreground">(optional)</span>
+          </label>
+          <Textarea
+            id="offer-note"
+            placeholder="Share any useful details"
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            rows={2}
           />
         </div>
-        <Textarea
-          placeholder="Add a note (optional)…"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          rows={2}
-        />
         {err ? <p className="text-sm text-destructive">{err}</p> : null}
         <Button
           type="submit"

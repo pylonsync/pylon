@@ -11,7 +11,7 @@ export default function NotFound(_props: NotFoundProps) {
       <p className="mt-2 text-muted-foreground">We couldn&apos;t find that listing.</p>
       <Link
         href="/"
-        className="mt-6 inline-flex h-10 items-center rounded-md bg-foreground px-5 text-sm font-medium text-background transition hover:opacity-90"
+        className="mt-6 inline-flex min-h-11 items-center rounded-lg bg-foreground px-5 text-sm font-medium text-background transition-[opacity,scale] duration-150 hover:opacity-90 active:scale-[0.96]"
       >
         Back to browse
       </Link>

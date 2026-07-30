@@ -73,14 +73,16 @@ function Inner({
       aria-label={watched ? "Remove from watchlist" : "Save to watchlist"}
       title={watched ? "Saved" : "Save to watchlist"}
       className={cn(
-        "grid size-9 place-items-center rounded-full bg-background/80 backdrop-blur transition hover:bg-background",
+        "grid size-10 place-items-center rounded-full bg-background/85 shadow-[var(--shadow-border)] backdrop-blur transition-[background-color,box-shadow,scale] duration-150 hover:bg-background hover:shadow-[var(--shadow-border-hover)] active:scale-[0.96]",
         className,
       )}
     >
       <Heart
         className={cn(
-          "size-5 transition",
-          watched ? "fill-rose-500 text-rose-500" : "text-foreground/70",
+          "size-[18px] transition-[color,fill,scale] duration-200",
+          watched
+            ? "scale-100 fill-foreground text-foreground"
+            : "scale-95 fill-transparent text-foreground/70",
         )}
       />
     </button>

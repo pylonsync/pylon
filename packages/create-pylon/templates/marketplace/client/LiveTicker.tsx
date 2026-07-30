@@ -55,7 +55,7 @@ function Ticker() {
   if (events.length === 0) return null;
 
   return (
-    <div className="flex items-center gap-3 overflow-hidden rounded-lg border bg-card px-3 py-2 text-sm">
+    <div className="flex min-h-11 items-center gap-3 overflow-hidden rounded-2xl bg-card px-4 py-2 text-sm shadow-[var(--shadow-border)]">
       <span className="flex shrink-0 items-center gap-1.5 font-medium text-emerald-600">
         <span className="relative flex size-2">
           <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400 opacity-75" />
