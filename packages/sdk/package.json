@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "0.3.353",
+  "version": "0.3.354",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./dist/index.d.ts",
