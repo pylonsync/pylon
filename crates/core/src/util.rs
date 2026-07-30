@@ -314,6 +314,26 @@ mod tests {
     }
 
     #[test]
+    /// The exact DSN shape that leaked into a production log stream: a
+    /// PlanetScale Postgres URL with a dotted user, a `pscale_pw_` secret, and
+    /// libpq TLS params after the database name. `pylon start`'s banner printed
+    /// DATABASE_URL verbatim, so every boot published the credential.
+    #[test]
+    fn redact_dsn_hides_a_planetscale_password() {
+        let redacted = redact_dsn(
+            "postgresql://pscale_api_abc123.def456:pscale_pw_SUPERSECRET\
+             @us-east-2.pg.psdb.cloud:5432/postgres?sslmode=verify-full&sslrootcert=system",
+        );
+        assert!(
+            !redacted.contains("pscale_pw_SUPERSECRET"),
+            "password survived redaction: {redacted}"
+        );
+        // Still useful for diagnosis — host, port and database remain.
+        assert!(redacted.contains("us-east-2.pg.psdb.cloud:5432"));
+        assert!(redacted.contains("/postgres"));
+    }
+
+    #[test]
     fn redact_dsn_no_password_or_malformed_unchanged() {
         // No password component.
         assert_eq!(

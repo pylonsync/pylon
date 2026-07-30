@@ -370,7 +370,12 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         println!("  App:      {} v{}", manifest.name, manifest.version);
         println!("  Server:   http://0.0.0.0:{port}");
         println!("  Backend:  {backend_label}");
-        println!("  Database: {db_target}");
+        // REDACTED. `db_target` is DATABASE_URL verbatim, and for a hosted
+        // Postgres that string carries the password — this line published a
+        // production PlanetScale credential straight into the platform's log
+        // stream on every boot. The error paths in this file already redact;
+        // the success path did not.
+        println!("  Database: {}", pylon_kernel::util::redact_dsn(&db_target));
         println!();
     }
 

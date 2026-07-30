@@ -439,7 +439,14 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 };
                 let _ = adapter.apply_with_history(&plan, &meta);
                 if !json_mode && !plan.is_empty() {
-                    println!("  Database: {db_str} (schema synced)");
+                    // Redacted defensively. This is the SQLite branch, so
+                    // `db_str` is a file path today — but redact_dsn is a no-op
+                    // on a string with no userinfo, and the alternative is
+                    // relying on nobody ever routing a DSN through here.
+                    println!(
+                        "  Database: {} (schema synced)",
+                        pylon_kernel::util::redact_dsn(&db_str)
+                    );
                     println!();
                 }
             }
