@@ -20,6 +20,13 @@ use crate::cloud_client::{post_json, require_credentials, set_default_project};
 use crate::output;
 use crate::project_context::{clear_context_file, write_context_file};
 
+/// System hostname suffix for projects on the hosted Smallware service.
+const HOSTED_APP_DOMAIN: &str = "smallware.run";
+
+fn hosted_project_url(slug: &str) -> String {
+    format!("https://{slug}.{HOSTED_APP_DOMAIN}")
+}
+
 #[derive(Deserialize)]
 struct ProjectRow {
     slug: String,
@@ -406,7 +413,7 @@ fn run_create(args: &[String], json_mode: bool) -> ExitCode {
         }
     }
 
-    let url = format!("https://{}.pyln.dev", created.slug);
+    let url = hosted_project_url(&created.slug);
     if !opts.wait {
         if json_mode {
             let out = serde_json::json!({
@@ -737,5 +744,10 @@ mod tests {
         assert!(!valid_slug("My-App"));
         assert!(!valid_slug("app_1"));
         assert!(!valid_slug(&"a".repeat(41)));
+    }
+
+    #[test]
+    fn hosted_project_url_uses_the_smallware_app_domain() {
+        assert_eq!(hosted_project_url("my-app"), "https://my-app.smallware.run");
     }
 }

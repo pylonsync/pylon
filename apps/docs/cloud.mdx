@@ -1,9 +1,9 @@
 ---
 title: Pylon Cloud
-description: "Hosted Pylon at www.pylonsync.com/dashboard."
+description: "Hosted Pylon on Smallware."
 ---
 
-Pylon is fully self-hostable, but if you'd rather not run it yourself, **Pylon Cloud** at [www.pylonsync.com](https://www.pylonsync.com) hosts the same app you'd run on a VPS. Connect a GitHub repo, push to your default branch, and the project is live at `https://your-app.pyln.dev`.
+Pylon is fully self-hostable, but if you'd rather not run it yourself, **Smallware** at [www.usesmallware.com](https://www.usesmallware.com) hosts the same app you'd run on a VPS. Connect a GitHub repo, push to your default branch, and the project is live at `https://your-app.smallware.run`.
 
 ## When to use it
 
@@ -18,8 +18,8 @@ Both targets run the same binary. You can start on Cloud and migrate to self-hos
 
 ## Sign up
 
-1. Visit [www.pylonsync.com/dashboard](https://www.pylonsync.com/dashboard) and create an account.
-2. Create a project. The project gets a stable URL like `https://your-app.pyln.dev`.
+1. Visit [www.usesmallware.com](https://www.usesmallware.com) and create an account.
+2. Create a project. The project gets a stable URL like `https://your-app.smallware.run`.
 3. Add a payment method (free Hobby tier covers small projects; see pricing below).
 
 ## Deploy
@@ -35,7 +35,7 @@ git push origin main
 # → Cloud's webhook fires
 # → build runs on the platform
 # → schema migrates, traffic cuts over
-# → live at https://your-app.pyln.dev
+# → live at https://your-app.smallware.run
 ```
 
 You can also trigger a manual deploy of any branch from the project's dashboard (useful for redeploying without a fresh push, or shipping a feature branch to the project's machine for testing).
@@ -46,7 +46,7 @@ Project page → **Deploy** → pick a branch. The control plane resolves the br
 
 ### Custom domains
 
-From the project's **Domains** tab, add `app.example.com`. Cloud provisions a TLS certificate (Let's Encrypt) automatically. Add the displayed `CNAME` record to your DNS, wait for verification, and you're live on the custom domain. Both the apex `*.pyln.dev` URL and your custom domain stay valid.
+From the project's **Domains** tab, add `app.example.com`. Cloud provisions a TLS certificate automatically. Add the displayed `CNAME` record to your DNS, wait for verification, and you're live on the custom domain. Both the platform `*.smallware.run` URL and your custom domain stay valid.
 
 ### Environment variables
 
@@ -60,7 +60,7 @@ Every org page in Pylon Cloud has a **Hand off to your coding agent** card. Clic
 
 The canonical Pylon production stack is **frontend on Vercel**, **backend on Pylon Cloud**. Vercel handles your Next.js / SvelteKit / etc. build + global edge; Pylon Cloud owns the realtime backend, database, and auth.
 
-Set `PYLON_TARGET=https://your-app.pyln.dev` (your project's Cloud URL) in Vercel's project env vars and the Next.js template's rewrite forwards `/api/*` to your Pylon backend — the browser talks same-origin, session cookies ride along, no CORS needed.
+Set `PYLON_TARGET=https://your-app.smallware.run` (your project's Cloud URL) in Vercel's project env vars and the Next.js template's rewrite forwards `/api/*` to your Pylon backend — the browser talks same-origin, session cookies ride along, no CORS needed.
 
 Full checklist: [Deploying to Vercel](/operations/vercel).
 
@@ -68,12 +68,12 @@ Full checklist: [Deploying to Vercel](/operations/vercel).
 
 - **Same binary as `pylon dev`** — no runtime hooks, no vendor proxies.
 - **Postgres or SQLite** — choose at project creation. SQLite ships on a Fly volume; Postgres is provisioned as a managed sibling service.
-- **TLS** — automatic Let's Encrypt certificates on `*.pyln.dev` and your custom domains.
+- **TLS** — automatic certificates on `*.smallware.run` and your custom domains.
 - **Magic-link email** — managed transactional sender; no SendGrid / Resend account required.
 - **OAuth** — bring your own Google / GitHub / etc. OAuth credentials.
 - **WebSocket + SSE + shard ports** — exposed automatically; clients connect to the public URL.
 - **File storage** — S3-backed, sized by plan.
-- **Studio** — every project has the inspector available at `https://your-app.pyln.dev/studio`.
+- **Studio** — every project has the inspector available at `https://your-app.smallware.run/studio`.
 - **Logs + metrics** — request logs, function traces, latency / error charts in the dashboard.
 - **On-demand backups** — Fly volume snapshots from the project's **Backups** tab. Pro and Team plans get more frequent retention.
 
@@ -164,7 +164,7 @@ Live pricing on the [pricing page](https://www.pylonsync.com/#pricing).
 # 1. Snapshot your local data
 pylon backup ./snapshot/
 
-# 2. Create the project in the dashboard at www.pylonsync.com/dashboard,
+# 2. Create the project in the dashboard at www.usesmallware.com,
 #    with the SAME schema you've been running locally.
 
 # 3. Connect your GitHub repo and push — Cloud builds + deploys the
@@ -174,7 +174,7 @@ pylon backup ./snapshot/
 #    project's Backups tab to upload ./snapshot/.
 ```
 
-Then point your clients at the new `baseUrl` (your project's `pyln.dev` URL or custom domain). Sessions are preserved — the session store is part of the snapshot — so users stay signed in.
+Then point your clients at the new `baseUrl` (your project's `smallware.run` URL or custom domain). Sessions are preserved — the session store is part of the snapshot — so users stay signed in.
 
 ## Migrating to self-hosted
 
@@ -192,7 +192,7 @@ No lock-in. The binary is the same; the data format is the same.
 
 **Push didn't trigger a deploy** — Confirm the Pylon Cloud GitHub App is installed on the repo (Project Settings → GitHub) and the push is to the configured default branch. The Deployments tab shows webhook receipt; if nothing arrived, the webhook never fired.
 
-**Custom domain stuck on "verifying"** — DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show your `*.pyln.dev` target.
+**Custom domain stuck on "verifying"** — DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show `customers.smallware.run`.
 
 **Magic-link emails not arriving** — Check the spam folder for the first send (Cloud uses a shared sender domain that warms up over time). For production, configure your own sender domain in **Settings → Email** to authenticate with SPF / DKIM / DMARC under your domain.
 

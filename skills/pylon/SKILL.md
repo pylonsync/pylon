@@ -857,7 +857,7 @@ pylon members list / invite EMAIL [role]
 
 Every command accepts `--json` for piping to `jq`. Project context resolves from `--project` flag → `$PYLON_PROJECT` → `.pylon/project` file → interactive picker. The `.pylon/project` file is what `pylon projects use` writes; subsequent commands in that directory tree auto-target.
 
-**Project creation** (pylon ≥ 0.3.317): `pylon projects create <slug> [--name <name>] [--org <org-slug>] [--region iad] [--db sqlite|postgres] [--no-wait]`. Creates the project, waits for the Fly machine to provision (~30–60s; Postgres adds a managed-DB provision), pins it as the local context, and prints the live `https://<slug>.pyln.dev` URL — so login → create → deploy runs end-to-end without the dashboard. `--org` is only needed when the account belongs to multiple orgs. On older CLI versions (or if the account has no org yet), create the project in the dashboard and run `pylon projects use <slug>` instead.
+**Project creation** (pylon ≥ 0.3.317): `pylon projects create <slug> [--name <name>] [--org <org-slug>] [--region iad] [--db sqlite|postgres] [--no-wait]`. Creates the project, waits for the Fly machine to provision (~30–60s; Postgres adds a managed-DB provision), pins it as the local context, and prints the live `https://<slug>.smallware.run` URL — so login → create → deploy runs end-to-end without the dashboard. `--org` is only needed when the account belongs to multiple orgs. On older CLI versions (or if the account has no org yet), create the project in the dashboard and run `pylon projects use <slug>` instead.
 
 ### Multi-machine (horizontal scaling)
 
@@ -927,7 +927,7 @@ Three commands exist specifically so you can check your own work:
 # fetches every referenced JS/CSS asset (catches "renders but ships no
 # hydration/styles"). Exit 0 only when nothing failed. --json for machine output.
 pylon verify
-pylon verify --url https://myapp.pyln.dev
+pylon verify --url https://myapp.smallware.run
 
 # Deploy and only report success when THIS build is live and passes the
 # same checks (waits for the flip; fails on failed/canceled builds):
