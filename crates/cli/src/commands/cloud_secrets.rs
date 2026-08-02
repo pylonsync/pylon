@@ -6,7 +6,8 @@
 //! but a fresh `set` writes through to the cloud which encrypts.
 //!
 //! `pylon secrets list` — show keys + last-rotated metadata.
-//! `pylon secrets set KEY=value` — upsert a single secret.
+//! `pylon secrets set KEY VALUE` — upsert a single secret.
+//! `pylon secrets set KEY=value` — compatibility form.
 //! `pylon secrets set KEY` — prompt for value on stdin (hidden).
 //! `pylon secrets rm KEY` — delete.
 //! `pylon secrets import .env` — bulk-import every KEY=value from a
@@ -69,14 +70,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     match positional.first().copied() {
         Some("list") | None => run_list(&creds, &project_id, json_mode),
-        Some("set") => run_set(
-            args,
-            &creds,
-            &project_slug,
-            &project_id,
-            positional.get(1).copied(),
-            json_mode,
-        ),
+        Some("set") => run_set(args, &creds, &project_slug, &project_id, json_mode),
         Some("rm") | Some("delete") | Some("unset") => run_rm(
             &creds,
             &project_slug,
@@ -94,7 +88,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         ),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
-            eprintln!("Usage: pylon secrets [list | set KEY=value | rm KEY | import .env]");
+            eprintln!("Usage: pylon secrets [list | set KEY VALUE | rm KEY | import .env]");
             ExitCode::Usage
         }
     }
@@ -169,20 +163,34 @@ fn run_list(creds: &Credentials, project_id: &str, json_mode: bool) -> ExitCode 
 // ---------------------------------------------------------------------------
 
 fn run_set(
-    _args: &[String],
+    args: &[String],
     creds: &Credentials,
     project_slug: &str,
     _project_id: &str,
-    arg: Option<&str>,
     json_mode: bool,
 ) -> ExitCode {
-    let Some(input) = arg else {
-        output::print_error("Usage: pylon secrets set KEY=value");
-        eprintln!("  Or: pylon secrets set KEY  (prompts for value on stdin)");
+    let (key_arg, value_arg) = match parse_set_operands(args) {
+        Ok(parsed) => parsed,
+        Err(e) => {
+            output::print_error(&e);
+            print_set_usage();
+            return ExitCode::Usage;
+        }
+    };
+    let Some(input) = key_arg else {
+        output::print_error("A secret key is required.");
+        print_set_usage();
         return ExitCode::Usage;
     };
-    let (key, value) = if let Some((k, v)) = input.split_once('=') {
-        (k.trim().to_string(), v.to_string())
+    let (key, value) = if let Some(value) = value_arg {
+        if input.contains('=') {
+            output::print_error("Use either `KEY VALUE` or `KEY=VALUE`, not both.");
+            print_set_usage();
+            return ExitCode::Usage;
+        }
+        (input.trim().to_string(), normalize_cli_value(value))
+    } else if let Some((k, v)) = input.split_once('=') {
+        (k.trim().to_string(), normalize_cli_value(v))
     } else {
         let k = input.trim().to_string();
         let v = match prompt_secret(&k) {
@@ -211,6 +219,62 @@ fn run_set(
         println!("  syncSecretsToFly fires immediately — the running machine sees the new value within ~10s.");
     }
     ExitCode::Ok
+}
+
+fn print_set_usage() {
+    eprintln!("Usage: pylon secrets set KEY VALUE");
+    eprintln!("  Or: pylon secrets set KEY=VALUE  (compatibility)");
+    eprintln!("  Or: pylon secrets set KEY        (prompts for value on stdin)");
+}
+
+/// Shells normally remove quotes before invoking the CLI. Normalize matching
+/// quotes as well for programmatic argv construction and values pasted with
+/// typographic quotes.
+fn normalize_cli_value(value: &str) -> String {
+    for (open, close) in [("\"", "\""), ("'", "'"), ("“", "”"), ("‘", "’")] {
+        if let Some(inner) = value
+            .strip_prefix(open)
+            .and_then(|rest| rest.strip_suffix(close))
+        {
+            return inner.to_string();
+        }
+    }
+    value.to_string()
+}
+
+/// Return only the operands belonging to `secrets set`. Global flags may
+/// appear before or after them, and `--project` consumes its following value.
+fn parse_set_operands(args: &[String]) -> Result<(Option<&str>, Option<&str>), String> {
+    let Some(set_index) = args.iter().position(|arg| arg == "set") else {
+        return Err("Missing `set` subcommand.".into());
+    };
+    let mut operands = Vec::new();
+    let mut index = set_index + 1;
+    let mut options_ended = false;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        if !options_ended {
+            if arg == "--" {
+                options_ended = true;
+                index += 1;
+                continue;
+            }
+            if arg == "--project" {
+                index += 2;
+                continue;
+            }
+            if arg.starts_with("--project=") || arg == "--json" {
+                index += 1;
+                continue;
+            }
+        }
+        operands.push(arg);
+        index += 1;
+    }
+    if operands.len() > 2 {
+        return Err("Too many values. Quote secret values that contain spaces.".into());
+    }
+    Ok((operands.first().copied(), operands.get(1).copied()))
 }
 
 fn upsert_one(
@@ -446,4 +510,86 @@ fn parse_dotenv(text: &str) -> Vec<(String, String)> {
         out.push((key, value));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|arg| (*arg).to_string()).collect()
+    }
+
+    #[test]
+    fn parses_key_and_value_as_separate_operands() {
+        let args = argv(&["secrets", "set", "API_KEY", "value"]);
+        assert_eq!(
+            parse_set_operands(&args),
+            Ok((Some("API_KEY"), Some("value")))
+        );
+    }
+
+    #[test]
+    fn preserves_shell_punctuation_and_spaces_in_value() {
+        let args = argv(&[
+            "secrets",
+            "set",
+            "PROPOSAL_PASSWORD",
+            "onco everything 2026!",
+        ]);
+        assert_eq!(
+            parse_set_operands(&args),
+            Ok((Some("PROPOSAL_PASSWORD"), Some("onco everything 2026!")))
+        );
+    }
+
+    #[test]
+    fn keeps_key_equals_value_compatibility_form() {
+        let args = argv(&["secrets", "set", "API_KEY=value"]);
+        assert_eq!(parse_set_operands(&args), Ok((Some("API_KEY=value"), None)));
+    }
+
+    #[test]
+    fn normalizes_quotes_for_both_cli_forms() {
+        assert_eq!(normalize_cli_value("\"value\""), "value");
+        assert_eq!(normalize_cli_value("'value'"), "value");
+        assert_eq!(normalize_cli_value("“value”"), "value");
+        assert_eq!(normalize_cli_value("‘value’"), "value");
+        assert_eq!(normalize_cli_value("value"), "value");
+    }
+
+    #[test]
+    fn skips_project_flags_without_treating_slug_as_value() {
+        let args = argv(&[
+            "secrets",
+            "set",
+            "API_KEY",
+            "value",
+            "--project",
+            "demo",
+            "--json",
+        ]);
+        assert_eq!(
+            parse_set_operands(&args),
+            Ok((Some("API_KEY"), Some("value")))
+        );
+    }
+
+    #[test]
+    fn accepts_value_beginning_with_hyphen_after_option_separator() {
+        let args = argv(&["secrets", "set", "API_KEY", "--", "-secret"]);
+        assert_eq!(
+            parse_set_operands(&args),
+            Ok((Some("API_KEY"), Some("-secret")))
+        );
+    }
+
+    #[test]
+    fn rejects_unquoted_multi_word_value() {
+        let args = argv(&["secrets", "set", "API_KEY", "two", "words"]);
+        assert_eq!(
+            parse_set_operands(&args),
+            Err("Too many values. Quote secret values that contain spaces.".into())
+        );
+    }
 }

@@ -321,6 +321,29 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  -h, --help           Show this help");
             true
         }
+        "secrets" => {
+            println!("pylon secrets — manage project secrets");
+            println!();
+            println!("Usage:");
+            println!("  pylon secrets list");
+            println!("  pylon secrets set KEY VALUE");
+            println!("  pylon secrets set KEY");
+            println!("  pylon secrets rm KEY [--yes]");
+            println!("  pylon secrets import [.env] [--replace]");
+            println!();
+            println!("`set KEY` prompts for the value. `set KEY=VALUE` remains supported");
+            println!("for compatibility. Quote values containing spaces or shell punctuation.");
+            println!();
+            println!("Examples:");
+            println!("  pylon secrets set API_KEY \"value with spaces\"");
+            println!("  pylon secrets set API_KEY=\"value with spaces\"");
+            println!();
+            println!("Options:");
+            println!("  --project <slug>   Target project");
+            println!("  --json             Emit machine-readable output");
+            println!("  -h, --help         Show this help");
+            true
+        }
         "deploy" => {
             println!("pylon deploy — deploy your app");
             println!();
