@@ -698,6 +698,11 @@ function PostList({ promise }: { promise: Promise<Post[]> }) {
 ### Navigation, images, metadata
 
 - `import { Link, Image } from "@pylonsync/react"` — `<Link href>` = client-side nav; `<Image src width height>` = a built-in optimizer (emits `srcset`; pass `priority` for LCP).
+- **`<Image>` `quality` and `w` are allowlists, not ranges.** An off-list value snaps to the nearest allowed one and the server logs it (`pylon dev` prints to the console) — the image renders, but NOT at the value you asked for. Bounding the set is what stops anyone minting unlimited cache entries.
+  - `quality`: **50, 75, 90** (default 75). `quality={80}` is the usual mistake — it silently becomes 75.
+  - `w`: `16,32,48,64,96,128,256,384` + `640,750,828,1080,1200,1920,2048,3840`.
+  - `format`: `avif`, `webp`, `jpeg` — not snapped (no meaningful "nearest" codec); anything else falls back to `Accept` negotiation. Never SVG: rejected as input and output, it can carry script.
+  - Need other values? Set `PYLON_IMAGE_QUALITIES` / `PYLON_IMAGE_DEVICE_SIZES` / `PYLON_IMAGE_IMAGE_SIZES` / `PYLON_IMAGE_FORMATS` (comma-separated). Prefer picking an allowed value over widening the list.
 - SEO: `export const metadata: Metadata = {…}` (static) or `export async function generateMetadata(props)` (dynamic — keep it cheap, e.g. params→title). Fields: `title`, `description`, `canonical`, `robots`, `openGraph`, `twitter`, `icons`. Colocate `opengraph-image.png` / `icon.png` / `favicon.ico` next to a route and they're auto-wired.
 
 ### File conventions (all optional, walked up from the page dir)

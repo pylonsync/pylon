@@ -26,6 +26,15 @@
 
 import React from "react";
 
+/**
+ * The three qualities `PYLON_IMAGE_QUALITIES` allows out of the box, kept as
+ * literals so editors and coding agents autocomplete a value the server will
+ * actually render. `(number & {})` keeps the union open for apps that have
+ * configured a different set — it accepts any number without collapsing the
+ * literals out of the completion list.
+ */
+export type PylonImageQuality = 50 | 75 | 90 | (number & {});
+
 export interface ImageProps
   extends Omit<
     React.ImgHTMLAttributes<HTMLImageElement>,
@@ -40,10 +49,20 @@ export interface ImageProps
   /** Required alt text. Pass `""` for purely decorative images. */
   alt: string;
   /**
-   * JPEG/WebP quality 1..=100. Default 75 — matches Next.js.
-   * PNG ignores it (lossless).
+   * JPEG/WebP quality. Default 75. PNG ignores it (lossless).
+   *
+   * This is an ALLOWLIST, not a range: the server renders the values in
+   * `PYLON_IMAGE_QUALITIES`, which defaults to **50, 75, 90**. Anything else
+   * — `quality={80}` being the usual one — snaps to the nearest of them, so
+   * the image still renders, and the server logs which value it actually
+   * served. `pylon dev` prints that to your console; don't ignore it, you are
+   * not getting the quality you asked for.
+   *
+   * Bounding the set is what keeps a caller from minting unlimited distinct
+   * cache entries. Pick one of the allowed values, or set
+   * `PYLON_IMAGE_QUALITIES` to the ones your app actually uses.
    */
-  quality?: number;
+  quality?: PylonImageQuality;
   /**
    * Override the candidate widths used in `srcset`. By default we
    * emit 1x and 2x of `width`, capped at 3840px.

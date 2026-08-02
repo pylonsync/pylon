@@ -11,11 +11,13 @@
 //!     + prefix-checked (no path traversal).
 //!   - Remote sources: must match a `PYLON_IMAGE_REMOTE_ALLOWLIST`
 //!     entry. Supports `host` and `host/pathPrefix` patterns.
-//!   - Width must be in the `deviceSizes ∪ imageSizes` set
-//!     (configurable; Next-style defaults). Prevents cache-fill DoS
-//!     where an attacker requests N variations.
-//!   - Quality must be in the `qualities` set (default 50/75/90).
-//!   - Format must be in the `formats` set (default webp/jpeg).
+//!   - Width snaps to the nearest `deviceSizes ∪ imageSizes` entry
+//!     (configurable; Next-style defaults). Bounding the set prevents
+//!     cache-fill DoS: arbitrary values collapse onto the allowlist,
+//!     and the RESOLVED value is what the cache key hashes.
+//!   - Quality snaps to the nearest `qualities` entry (default 50/75/90).
+//!   - Format must be in the `formats` set (default webp/jpeg); an
+//!     unknown one falls back to Accept negotiation.
 //!   - Source bytes capped at `maxBytes` (default 25MB).
 //!   - Decoded pixel count capped at `maxPixels` (default 40M) —
 //!     bounds decode memory. Prevents image-bomb DoS (tiny file,
@@ -246,6 +248,7 @@ impl OutFormat {
 }
 
 /// Parameters parsed off the request URL.
+#[derive(Debug)]
 struct ImageRequest {
     /// Raw `src` query param — either an absolute http(s) URL or a
     /// site-relative path (`/foo/bar.jpg`).
@@ -259,33 +262,103 @@ struct ImageRequest {
     format: Option<OutFormat>,
 }
 
-/// Reason a request was rejected before processing started. We
-/// surface these as `400 Bad Request` with the variant name in the
-/// body so an operator can tell why their `<Image>` configuration
-/// isn't lining up with the allowlists.
+/// Reason a request was rejected before processing started. We surface these
+/// as `400 Bad Request` with the reason in the body.
+///
+/// Only two remain, and both are genuinely unanswerable rather than merely
+/// off-list. Width, quality and format used to reject too; a near-miss now
+/// snaps or falls back, because returning an error body in place of an image
+/// broke the page over a value we could have resolved.
 #[derive(Debug)]
 enum RejectReason {
     MissingSrc,
-    DisallowedWidth(u32),
-    DisallowedQuality(u8),
-    DisallowedFormat(String),
     SvgRejected,
+}
+
+/// Render an allowlist for a message: `50, 75, 90`.
+fn join_values<T: std::fmt::Display>(values: &[T]) -> String {
+    values
+        .iter()
+        .map(|v| v.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Nearest allowed value to `want`. Ties break UPWARD — a tie means the
+/// request sat exactly between two options, and the larger one is the
+/// better default for both axes: more pixels rather than a soft upscale,
+/// more quality rather than visible artifacts. Falls back to `want`
+/// unchanged when the allowlist is empty, which `parse_csv` prevents.
+fn snap_to<T>(want: T, allowed: &[T]) -> T
+where
+    T: Copy + Ord + Into<i64>,
+{
+    let want_i: i64 = want.into();
+    allowed
+        .iter()
+        .copied()
+        .min_by_key(|candidate| {
+            let c: i64 = (*candidate).into();
+            // (distance, -value) — smallest distance first, then largest value.
+            ((c - want_i).abs(), -c)
+        })
+        .unwrap_or(want)
+}
+
+fn snap_u32(want: u32, allowed: &[u32]) -> u32 {
+    snap_to(want, allowed)
+}
+
+fn snap_u8(want: u8, allowed: &[u8]) -> u8 {
+    snap_to(want, allowed)
+}
+
+/// Warn once per distinct (param, requested, resolved) triple.
+///
+/// Snapping keeps the page working, but silently rendering something other
+/// than what the code asked for is its own trap — the developer would never
+/// learn that `quality={80}` isn't a real value. So it is always reported, and
+/// `pylon dev` says how to fix it.
+///
+/// Deduped because a gallery would otherwise emit one line per image per
+/// request; the set is tiny and bounded by the allowlist sizes.
+fn warn_snapped(param: &str, env_var: &str, requested: i64, resolved: i64, allowed: &str) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static SEEN: OnceLock<Mutex<HashSet<(String, i64, i64)>>> = OnceLock::new();
+    let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    let key = (param.to_string(), requested, resolved);
+    // Already reported, or the lock is poisoned — either way, stay quiet.
+    let first_time = match seen.lock() {
+        Ok(mut set) => set.insert(key),
+        Err(_) => false,
+    };
+    if !first_time {
+        return;
+    }
+
+    if crate::frontend::is_dev_mode() {
+        eprintln!(
+            "[pylon] <Image> {param}={requested} is not an allowed value — served {param}={resolved} instead.\n\
+             [pylon]   Allowed: {allowed}. These are an allowlist, not a range.\n\
+             [pylon]   Use one of them, or set {env_var} to include {requested}."
+        );
+    } else {
+        tracing::warn!(
+            param = param,
+            requested = requested,
+            resolved = resolved,
+            allowed = allowed,
+            "image param snapped to nearest allowed value"
+        );
+    }
 }
 
 impl std::fmt::Display for RejectReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RejectReason::MissingSrc => write!(f, "missing `src` param"),
-            RejectReason::DisallowedWidth(w) => write!(
-                f,
-                "width {w} not in PYLON_IMAGE_DEVICE_SIZES / PYLON_IMAGE_IMAGE_SIZES"
-            ),
-            RejectReason::DisallowedQuality(q) => {
-                write!(f, "quality {q} not in PYLON_IMAGE_QUALITIES")
-            }
-            RejectReason::DisallowedFormat(s) => {
-                write!(f, "format `{s}` not in PYLON_IMAGE_FORMATS")
-            }
             RejectReason::SvgRejected => write!(
                 f,
                 "SVG sources are not supported (security: SVG can contain scripts)"
@@ -328,24 +401,49 @@ fn parse_query(url: &str, cfg: &ImageConfig) -> Result<ImageRequest, RejectReaso
         return Err(RejectReason::SvgRejected);
     }
 
-    let width = width.unwrap_or(0);
-    if !cfg.allowed_widths.contains(&width) {
-        return Err(RejectReason::DisallowedWidth(width));
-    }
-    let quality = quality.unwrap_or(75);
-    if !cfg.allowed_qualities.contains(&quality) {
-        return Err(RejectReason::DisallowedQuality(quality));
+    // Width and quality SNAP to the nearest allowed value rather than being
+    // rejected. A near-miss — `quality={80}` is the classic — used to return an
+    // error body in place of the image, so a single wrong prop broke the
+    // picture in production with nothing but a comment to explain it.
+    //
+    // Snapping keeps the anti-enumeration property intact, which is why the
+    // allowlist existed. The resolved value is what reaches `cache_path`, so
+    // arbitrary `q=1..100` still collapses onto the same handful of cache
+    // entries; the allowlist bounds the cache either way. Rejecting only ever
+    // bought a worse failure mode.
+    let want_width = width.unwrap_or(0);
+    let width = snap_u32(want_width, &cfg.allowed_widths);
+    // Only an explicit `w=` that missed is worth reporting. An absent one
+    // defaults to 0 and snaps to the smallest size — that's the caller not
+    // asking, not the caller being wrong.
+    if width != want_width && want_width != 0 {
+        warn_snapped(
+            "w",
+            "PYLON_IMAGE_DEVICE_SIZES / PYLON_IMAGE_IMAGE_SIZES",
+            want_width as i64,
+            width as i64,
+            &join_values(&cfg.allowed_widths),
+        );
     }
 
+    let want_quality = quality.unwrap_or(75);
+    let quality = snap_u8(want_quality, &cfg.allowed_qualities);
+    if quality != want_quality {
+        warn_snapped(
+            "quality",
+            "PYLON_IMAGE_QUALITIES",
+            want_quality as i64,
+            quality as i64,
+            &join_values(&cfg.allowed_qualities),
+        );
+    }
+
+    // Format is NOT snapped: "nearest" is meaningless across codecs, and
+    // silently answering a `format=avif` request with JPEG bytes would be a
+    // correctness bug, not a courtesy. An unknown or disallowed format falls
+    // back to Accept negotiation — the same path as omitting it entirely.
     let format = match format_raw {
-        Some(raw) => {
-            let fmt = OutFormat::from_str(&raw)
-                .ok_or_else(|| RejectReason::DisallowedFormat(raw.clone()))?;
-            if !cfg.allowed_formats.contains(&fmt) {
-                return Err(RejectReason::DisallowedFormat(raw));
-            }
-            Some(fmt)
-        }
+        Some(raw) => OutFormat::from_str(&raw).filter(|f| cfg.allowed_formats.contains(f)),
         None => None,
     };
 
@@ -902,6 +1000,90 @@ mod tests {
 
     fn accept_header(v: &str) -> Vec<Header> {
         vec![Header::from_bytes("Accept", v).unwrap()]
+    }
+
+    #[test]
+    fn near_miss_quality_snaps_instead_of_breaking_the_image() {
+        // The bug this replaces: quality=80 returned an error body in place of
+        // the image, so one wrong prop broke the picture in production. 80 is
+        // the value everyone reaches for, because it reads like a range.
+        let cfg = test_cfg();
+        let req = parse_query("/_pylon/image?src=/a.jpg&w=640&q=80", &cfg)
+            .expect("a near-miss quality must still render");
+        assert_eq!(req.quality, 75, "80 is nearer 75 than 90");
+        assert_eq!(req.width, 640);
+    }
+
+    #[test]
+    fn snapping_keeps_the_cache_bounded_to_the_allowlist() {
+        // Why rejecting was ever justified: unbounded values would mean
+        // unbounded cache entries. Snapping preserves that — every quality in
+        // 1..=100 collapses onto the configured set, and the RESOLVED value is
+        // what cache_path hashes, so an attacker sweeping q= gains nothing.
+        let cfg = test_cfg();
+        let mut seen = std::collections::BTreeSet::new();
+        for q in 1u8..=100 {
+            let url = format!("/_pylon/image?src=/a.jpg&w=640&q={q}");
+            seen.insert(parse_query(&url, &cfg).unwrap().quality);
+        }
+        assert_eq!(
+            seen.into_iter().collect::<Vec<_>>(),
+            cfg.allowed_qualities,
+            "every requested quality must land on the allowlist"
+        );
+    }
+
+    #[test]
+    fn widths_snap_to_the_nearest_configured_size() {
+        let cfg = test_cfg();
+        let q = |w: u32| {
+            parse_query(&format!("/_pylon/image?src=/a.jpg&w={w}&q=75"), &cfg)
+                .unwrap()
+                .width
+        };
+        assert_eq!(q(641), 640, "just above a size stays there");
+        assert_eq!(q(700), 750, "700 is nearer 750 than 640");
+        assert_eq!(q(99_999), 3840, "oversized clamps to the largest");
+        assert_eq!(q(1), 16, "undersized clamps to the smallest");
+    }
+
+    #[test]
+    fn ties_break_upward() {
+        // EXACTLY equidistant: prefer the larger. More pixels beats a soft
+        // upscale; more quality beats visible artifacts. (62 against 50/75 is
+        // not a tie — it is 12 from 50 and 13 from 75, so it snaps down.)
+        assert_eq!(snap_u8(70, &[60, 80]), 80, "70 is a true tie");
+        assert_eq!(snap_u32(695, &[640, 750]), 750, "695 is a true tie");
+        assert_eq!(snap_u8(62, &[50, 75, 90]), 50, "nearer 50, not a tie");
+    }
+
+    #[test]
+    fn unknown_format_falls_back_to_negotiation_rather_than_failing() {
+        // No meaningful "nearest" across codecs, and answering an avif request
+        // with jpeg bytes would be a correctness bug — so it defers to Accept,
+        // exactly as omitting `format=` does.
+        let cfg = test_cfg();
+        let req = parse_query("/_pylon/image?src=/a.jpg&w=640&q=75&format=gif", &cfg)
+            .expect("an unknown format must not break the image");
+        assert!(req.format.is_none());
+    }
+
+    #[test]
+    fn allowed_values_pass_through_untouched() {
+        let cfg = test_cfg();
+        for q in [50u8, 75, 90] {
+            let url = format!("/_pylon/image?src=/a.jpg&w=640&q={q}");
+            assert_eq!(parse_query(&url, &cfg).unwrap().quality, q);
+        }
+    }
+
+    #[test]
+    fn svg_and_missing_src_are_still_refused() {
+        // Snapping is for near-misses. These two have no safe answer: SVG can
+        // carry script, and there is nothing to render without a src.
+        let cfg = test_cfg();
+        assert!(parse_query("/_pylon/image?src=/a.svg&w=640&q=75", &cfg).is_err());
+        assert!(parse_query("/_pylon/image?w=640&q=75", &cfg).is_err());
     }
 
     #[test]
