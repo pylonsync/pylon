@@ -934,8 +934,13 @@ Three commands exist specifically so you can check your own work:
 pylon verify
 pylon verify --url https://myapp.smallware.run
 
-# Deploy and only report success when THIS build is live and passes the
-# same checks (waits for the flip; fails on failed/canceled builds):
+# Deploy. WAITS for the build by default, prints status transitions, and dumps
+# the build log if it fails — so a non-zero exit means the deploy really failed,
+# not just that queuing worked. Ctrl-C is safe; the build keeps running.
+pylon deploy
+pylon deploy --no-wait          # fire-and-forget (CI that tracks status elsewhere)
+
+# Same, plus walk the live URL with the `pylon verify` checks once it flips:
 pylon deploy --verify
 
 # Dry-run a policy expression with the PRODUCTION evaluator before you

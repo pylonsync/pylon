@@ -20,8 +20,9 @@
 //!    `multipart/form-data; boundary=...` carrying `projectSlug` +
 //!    the tarball bytes. (See pylon-cloud function for the exact
 //!    accepted shape.)
-//! 5. Print the deployment id + URL. The upload QUEUES the deploy;
-//!    `pylon deployments logs` follows the build server-side.
+//! 5. Print the deployment id + URL, then WAIT for the build to reach a
+//!    terminal status, printing the build log if it fails. `--no-wait`
+//!    returns at "queued" instead.
 
 use std::fs::File;
 use std::io::{self, BufRead, Write};
@@ -279,29 +280,67 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         if let Some(url) = &resp.url {
             println!("  URL:        {url}");
         }
-        println!("  Build log:  pylon deployments logs");
         println!(
             "  Dashboard:  {}/dashboard → project → Deployments",
             crate::cloud_client::dashboard_url(),
         );
     }
 
-    // `--verify`: don't stop at "queued" — wait for THIS deployment to
-    // flip live (the old build keeps serving during the bake, so
-    // verifying immediately would pass against stale code), then walk
-    // the live URL with the same checks as `pylon verify --url`.
-    if args.iter().any(|a| a == "--verify") {
+    let wants_verify = args.iter().any(|a| a == "--verify");
+    // Waiting is the DEFAULT. Returning at "queued" meant the command exited
+    // successfully while the build could still fail a minute later, so the
+    // only way to learn the outcome was to remember to run another command —
+    // and an agent scripting this would report success for a broken deploy.
+    // `--no-wait` restores fire-and-forget for CI that tracks it elsewhere;
+    // --json keeps its single-shot contract so existing parsers don't hang.
+    let wait = !json_mode && !args.iter().any(|a| a == "--no-wait");
+
+    if wait || wants_verify {
+        if !json_mode {
+            println!();
+            println!("→ Waiting for the build (Ctrl-C is safe — it keeps going)...");
+        }
+        let (project_id, outcome) =
+            match wait_for_flip(&creds, &project_slug, &resp.deployment_id, json_mode) {
+                Ok(v) => v,
+                Err(e) => {
+                    output::print_error(&e);
+                    return ExitCode::Error;
+                }
+            };
+        match outcome {
+            FlipOutcome::Live => {
+                if !json_mode {
+                    println!("✓ Live");
+                }
+            }
+            FlipOutcome::Ended { status } => {
+                output::print_error(&format!("Deployment {status}."));
+                // Print the log right here. Failing and then telling someone
+                // to go run `pylon deployments logs` is the one moment a
+                // detour is least welcome.
+                print_build_log(&creds, &project_id, &resp.deployment_id);
+                return ExitCode::Error;
+            }
+            FlipOutcome::TimedOut { status } => {
+                output::print_error(&format!(
+                    "Still {status} after 15m — the build is still running. \
+                     Follow it with: pylon deployments logs"
+                ));
+                return ExitCode::Error;
+            }
+        }
+    }
+
+    // `--verify`: having waited for THIS deployment to flip live (the old
+    // build keeps serving during the bake, so verifying immediately would pass
+    // against stale code), walk the live URL with the same checks as
+    // `pylon verify --url`.
+    if wants_verify {
         let Some(url) = resp.url.as_deref() else {
             output::print_error("--verify: the cloud response carried no URL to verify");
             return ExitCode::Error;
         };
-        match wait_for_flip(&creds, &project_slug, &resp.deployment_id, json_mode) {
-            Ok(()) => {}
-            Err(e) => {
-                output::print_error(&e);
-                return ExitCode::Error;
-            }
-        }
         let route_paths: Vec<String> = match crate::manifest::load_manifest("pylon.manifest.json") {
             Ok(m) => m.routes.iter().map(|r| r.path.clone()).collect(),
             // No local manifest (rare — deploy just validated one, but
@@ -317,17 +356,89 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     ExitCode::Ok
 }
 
+/// Fetch and print a finished deployment's build log.
+///
+/// There is no incremental log endpoint — `getDeploymentBuildLog` attaches the
+/// whole thing at the terminal transition — so this is a one-shot print after
+/// the wait, not a live tail. Called automatically when a deploy fails, since
+/// "it failed, go run another command" is the moment you least want a detour.
+fn print_build_log(
+    creds: &crate::cloud_client::Credentials,
+    project_id: &str,
+    deployment_id: &str,
+) {
+    #[derive(Serialize)]
+    struct Args<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+        #[serde(rename = "deploymentId")]
+        deployment_id: &'a str,
+    }
+    #[derive(Deserialize)]
+    struct LogOut {
+        error: Option<String>,
+        #[serde(rename = "buildLog")]
+        build_log: Option<String>,
+    }
+    let out: LogOut = match post_json(
+        creds,
+        "/api/fn/getDeploymentBuildLog",
+        &Args {
+            project_id,
+            deployment_id,
+        },
+    ) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("  (could not fetch build log: {e})");
+            return;
+        }
+    };
+    if let Some(err) = out.error.as_deref().filter(|e| !e.is_empty()) {
+        println!("  Error: {err}");
+    }
+    match out.build_log.as_deref().filter(|l| !l.is_empty()) {
+        Some(log) => {
+            println!("{}", "─".repeat(60));
+            println!("{log}");
+            println!("{}", "─".repeat(60));
+        }
+        None => println!("  (no build log captured)"),
+    }
+}
+
+/// How a watched deployment ended. Distinct from `Err`, which means we could
+/// not talk to the control plane at all.
+enum FlipOutcome {
+    Live,
+    /// Reached a terminal non-live status (failed / error / canceled).
+    Ended {
+        status: String,
+    },
+    /// Still building when the ceiling elapsed — not a failure, just unwatched
+    /// from here on.
+    TimedOut {
+        status: String,
+    },
+}
+
 /// Poll the deployments list until `deployment_id` reaches a terminal
 /// status. "live" returns Ok; failed/error/canceled return Err. The
 /// build path (workspace tarballs especially) legitimately takes many
 /// minutes, so the ceiling is generous; progress prints every poll so
 /// an agent tailing this knows it isn't hung.
+///
+/// Returns the resolved project id alongside the outcome so the caller can
+/// fetch the build log without resolving the slug a second time. `Err` is
+/// reserved for transport failures — a deployment that legitimately ends
+/// "failed" is an `Ok(Ended)`, because the caller still wants to print its
+/// build log rather than treat it as an unreachable server.
 fn wait_for_flip(
     creds: &crate::cloud_client::Credentials,
     project_slug: &str,
     deployment_id: &str,
     json_mode: bool,
-) -> Result<(), String> {
+) -> Result<(String, FlipOutcome), String> {
     #[derive(Serialize)]
     struct SlugArgs<'a> {
         slug: &'a str,
@@ -353,7 +464,7 @@ fn wait_for_flip(
         "/api/fn/getProjectForCli",
         &SlugArgs { slug: project_slug },
     )
-    .map_err(|e| format!("--verify: could not resolve project id: {e}"))?;
+    .map_err(|e| format!("could not resolve project id: {e}"))?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
     let mut last_status = String::new();
@@ -366,7 +477,7 @@ fn wait_for_flip(
                 limit: 20,
             },
         )
-        .map_err(|e| format!("--verify: could not poll deployments: {e}"))?;
+        .map_err(|e| format!("could not poll deployments: {e}"))?;
         let status = rows
             .iter()
             .find(|d| d.id == deployment_id)
@@ -379,18 +490,14 @@ fn wait_for_flip(
             last_status = status.clone();
         }
         match status.as_str() {
-            "live" => return Ok(()),
+            "live" => return Ok((project.id, FlipOutcome::Live)),
             "failed" | "error" | "canceled" => {
-                return Err(format!(
-                    "deployment {deployment_id} ended {status} — see: pylon deployments logs"
-                ));
+                return Ok((project.id, FlipOutcome::Ended { status }));
             }
             _ => {}
         }
         if std::time::Instant::now() > deadline {
-            return Err(format!(
-                "--verify: deployment {deployment_id} still {status} after 15m — check: pylon deployments logs"
-            ));
+            return Ok((project.id, FlipOutcome::TimedOut { status }));
         }
         std::thread::sleep(std::time::Duration::from_secs(10));
     }

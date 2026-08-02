@@ -358,7 +358,12 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  --target <t>         Deploy target (default: cloud)");
             println!("  --project <slug>     Cloud project to deploy to");
             println!("  --out <dir>          Output directory (file-emitting targets)");
+            println!("  --no-wait            Return once queued instead of waiting for the build");
+            println!("  --verify             After it goes live, walk the URL like `pylon verify`");
             println!("  -h, --help           Show this help");
+            println!();
+            println!("Cloud deploys wait for the build by default and print the build");
+            println!("log if it fails. Ctrl-C is safe — the build keeps running.");
             true
         }
         _ => false,
