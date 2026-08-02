@@ -69,6 +69,12 @@ const EXCLUDE_DIRS: &[&str] = &[
     ".cache",
 ];
 
+/// Upload attempts before giving up. Smallware's ephemeral Fly builder can
+/// fail to start transiently, and the control plane itself redeploys — both
+/// resolve on their own, so the backoff (3s/8s/15s ≈ 26s) is sized to outlast
+/// a restart rather than to be merely polite.
+const MAX_UPLOAD_ATTEMPTS: u32 = 4;
+
 /// Files we never include — credential stores, OS clutter.
 const EXCLUDE_FILES: &[&str] = &[".env", ".env.local", ".DS_Store", "Thumbs.db"];
 
@@ -226,24 +232,33 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             match post_json(&creds, "/api/fn/deployProjectFromCliUpload", &body) {
                 Ok(r) => break r,
                 Err(e) => {
-                    let transient = e.contains("BUILD_START_FAILED")
-                        || e.contains("502")
-                        || e.contains("503")
-                        || e.contains("504")
-                        || e.contains("timed out")
-                        || e.contains("connection");
-                    if transient && attempt < 3 {
-                        let wait = std::time::Duration::from_millis(1500 * attempt as u64);
+                    // Classification lives next to the formatter that produces
+                    // these strings, so the two stay in step. The old inline
+                    // version substring-matched "502"/"503"/"504" and missed
+                    // Cloudflare's 520-527 family entirely — which is exactly
+                    // what a control plane mid-redeploy returns.
+                    let transient = crate::cloud_client::is_transient_cloud_error(&e);
+                    if transient && attempt < MAX_UPLOAD_ATTEMPTS {
+                        // Backoff has to outlast a control-plane redeploy. The
+                        // old 1.5s/3s pair gave up ~4.5s in, long before the
+                        // origin came back, so deploying while the cloud itself
+                        // was deploying always failed.
+                        let wait = std::time::Duration::from_secs(match attempt {
+                            1 => 3,
+                            2 => 8,
+                            3 => 15,
+                            _ => 30,
+                        });
                         if !json_mode {
                             println!(
-                                "  transient build-start error (attempt {attempt}/3) — retrying in {}s…",
+                                "  Smallware didn't accept the upload (attempt {attempt}/{MAX_UPLOAD_ATTEMPTS}) — retrying in {}s…",
                                 wait.as_secs()
                             );
                         }
                         std::thread::sleep(wait);
                         continue;
                     }
-                    output::print_error(&format!("Cloud deploy failed: {e}"));
+                    output::print_error(&format!("Deploy failed: {e}"));
                     if e.contains("PAYLOAD_TOO_LARGE") || e.contains("413") {
                         eprintln!(
                             "  The upload ({:.1} MB source, ~{:.1} MB on the wire as base64 JSON) \

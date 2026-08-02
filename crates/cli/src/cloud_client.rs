@@ -266,6 +266,99 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
+/// Turn a non-2xx response into one readable line.
+///
+/// The body is NOT the message. When the control plane is restarting, the
+/// request never reaches it and Cloudflare answers with a full HTML error page
+/// — interpolating that into an error dumped several hundred lines of markup
+/// into the terminal and buried the one fact that mattered (a 525 means the
+/// edge could not reach the origin). So: JSON errors surface their message,
+/// HTML is reduced to its `<title>`, and anything else is truncated.
+pub fn describe_http_error(code: u16, body: &str) -> String {
+    let trimmed = body.trim();
+
+    // Our own API errors are JSON — `{"error":{"code":…,"message":…}}` or a
+    // flat `{"message":…}`. Prefer the message; it is written for a human.
+    if trimmed.starts_with('{') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let msg = v
+                .pointer("/error/message")
+                .or_else(|| v.pointer("/message"))
+                .or_else(|| v.pointer("/error"))
+                .and_then(|m| m.as_str());
+            if let Some(msg) = msg {
+                let code_str = v
+                    .pointer("/error/code")
+                    .and_then(|c| c.as_str())
+                    .map(|c| format!(" [{c}]"))
+                    .unwrap_or_default();
+                return format!("Cloud returned {code}{code_str}: {msg}");
+            }
+        }
+    }
+
+    let looks_html = trimmed.starts_with("<!DOCTYPE")
+        || trimmed.starts_with("<!doctype")
+        || trimmed.starts_with("<html")
+        || trimmed.contains("<title>");
+    if looks_html {
+        let title = trimmed
+            .split_once("<title>")
+            .and_then(|(_, rest)| rest.split_once("</title>"))
+            .map(|(t, _)| t.trim())
+            .filter(|t| !t.is_empty())
+            .unwrap_or("HTML error page");
+        let hint = edge_error_hint(code);
+        return format!("Cloud returned {code}: {title}{hint}");
+    }
+
+    let mut oneline = trimmed.replace('\n', " ");
+    if oneline.chars().count() > 300 {
+        oneline = oneline.chars().take(300).collect::<String>() + "…";
+    }
+    if oneline.is_empty() {
+        return format!("Cloud returned {code}{}", edge_error_hint(code));
+    }
+    format!("Cloud returned {code}: {oneline}{}", edge_error_hint(code))
+}
+
+/// Plain-English gloss for the gateway codes that mean "the control plane is
+/// not answering right now", which is almost always a deploy in progress
+/// rather than anything wrong with the caller's request.
+fn edge_error_hint(code: u16) -> &'static str {
+    match code {
+        502 | 503 | 504 => {
+            "\n  Smallware isn't responding — it may be redeploying. Try again shortly."
+        }
+        // Cloudflare origin-reachability family. 525/526 are TLS between the
+        // edge and the origin; 521/523 are the origin being down or unroutable.
+        520..=527 => {
+            "\n  Cloudflare couldn't reach the Smallware origin — it's likely mid-deploy. \
+             Try again shortly."
+        }
+        _ => "",
+    }
+}
+
+/// True when a failed request is worth retrying: the request never reached the
+/// control plane, so nothing was half-applied.
+///
+/// Matches on the shape `describe_http_error` produces, so the formatter and
+/// this classifier stay in step. Deliberately narrow — a 4xx means the request
+/// itself was wrong and retrying only repeats it.
+pub fn is_transient_cloud_error(msg: &str) -> bool {
+    let gateway_code = msg
+        .strip_prefix("Cloud returned ")
+        .and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .and_then(|c| c.parse::<u16>().ok())
+        .is_some_and(|code| matches!(code, 502 | 503 | 504 | 520..=527));
+
+    gateway_code
+        || msg.contains("BUILD_START_FAILED")
+        || msg.contains("timed out")
+        || msg.contains("Cloud request failed")
+}
+
 /// One JSON POST against the cloud, bearer-authed with the loaded
 /// token. Returns parsed JSON or a structured error.
 pub fn post_json<I, O>(creds: &Credentials, path: &str, body: &I) -> Result<O, String>
@@ -296,7 +389,7 @@ where
             .map_err(|e| format!("Cloud returned 200 but the body wasn't the expected shape: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            Err(format!("Cloud returned {code}: {body}"))
+            Err(describe_http_error(code, &body))
         }
         Err(e) => Err(format!("Cloud request failed: {e}")),
     }
@@ -326,7 +419,7 @@ where
             .map_err(|e| format!("Cloud returned 200 but the body wasn't the expected shape: {e}")),
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            Err(format!("Cloud returned {code}: {body}"))
+            Err(describe_http_error(code, &body))
         }
         Err(e) => Err(format!("Cloud request failed: {e}")),
     }
@@ -360,7 +453,7 @@ pub fn validate_token(cloud_url: &str, token: &str) -> Result<String, String> {
         }
         Err(ureq::Error::Status(code, resp)) => {
             let body = resp.into_string().unwrap_or_default();
-            Err(format!("Cloud returned {code}: {body}"))
+            Err(describe_http_error(code, &body))
         }
         Err(e) => Err(format!("Cloud request failed: {e}")),
     }
@@ -467,5 +560,64 @@ mod tests {
             dashboard_url_for("http://localhost:8080/"),
             "http://localhost:8080"
         );
+    }
+}
+
+#[cfg(test)]
+mod error_format_tests {
+    use super::*;
+
+    #[test]
+    fn html_error_pages_are_reduced_to_one_line() {
+        // The bug: a Cloudflare 525 page was interpolated whole into the error,
+        // dumping hundreds of lines of markup over the one fact that mattered.
+        let body = "<!DOCTYPE html>\n<html>\n<head>\n<title>usesmallware.com | 525: SSL handshake failed</title>\n</head>\n<body><div>lots of markup</div></body></html>";
+        let msg = describe_http_error(525, body);
+        assert!(!msg.contains("<div"), "markup leaked: {msg}");
+        assert!(!msg.contains("<!DOCTYPE"), "markup leaked: {msg}");
+        assert!(msg.contains("525: SSL handshake failed"), "{msg}");
+        assert!(
+            msg.contains("mid-deploy"),
+            "must explain what 525 means: {msg}"
+        );
+        assert!(msg.lines().count() <= 2, "should stay short: {msg}");
+    }
+
+    #[test]
+    fn json_api_errors_surface_their_message() {
+        let msg = describe_http_error(
+            400,
+            r#"{"error":{"code":"PAYLOAD_TOO_LARGE","message":"upload exceeds the cap"}}"#,
+        );
+        assert!(msg.contains("upload exceeds the cap"), "{msg}");
+        assert!(msg.contains("PAYLOAD_TOO_LARGE"), "{msg}");
+    }
+
+    #[test]
+    fn long_plain_bodies_are_truncated() {
+        let body = "x".repeat(5000);
+        let msg = describe_http_error(500, &body);
+        assert!(
+            msg.chars().count() < 400,
+            "not truncated: {} chars",
+            msg.chars().count()
+        );
+    }
+
+    #[test]
+    fn gateway_codes_retry_but_client_errors_do_not() {
+        // 520-527 is the family a control plane mid-redeploy returns; the old
+        // inline classifier only knew 502/503/504 and gave up on a 525.
+        for code in [502u16, 503, 504, 520, 521, 523, 525, 526] {
+            let msg = describe_http_error(code, "<html><title>oops</title></html>");
+            assert!(is_transient_cloud_error(&msg), "{code} should retry: {msg}");
+        }
+        for code in [400u16, 401, 403, 404, 413, 422] {
+            let msg = describe_http_error(code, r#"{"message":"nope"}"#);
+            assert!(
+                !is_transient_cloud_error(&msg),
+                "{code} must not retry: {msg}"
+            );
+        }
     }
 }
