@@ -368,11 +368,11 @@ const { data } = db.useQuery("Order");`}
 					{[
 						["Global edge network", "Cloudflare's edge provides CDN caching, TLS, and DDoS protection worldwide with no extra configuration."],
 						["Resize on demand", "Add RAM up to 64 GB, choose performance CPUs, and expand the volume without redeploying."],
-						["Replicas", "Run up to 32 load-balanced replicas per region on Pro."],
+						["Replicas", "Run up to 32 load-balanced replicas per region."],
 						["Global regions", "Deploy in US, EU, APAC, and South America regions."],
 						["Up to 500 GB volume", "Grow storage live when the app needs room."],
 						["Managed Postgres — private beta", "Bundled SQLite by default; co-located managed Postgres is in private beta."],
-						["Autostop on idle", "Free tier sleeps when idle. Paid projects stay warm."],
+						["Autostop on idle", "Scale to zero when idle, or keep a project always warm."],
 						["Custom domains + TLS", "Bring your domain; Pylon handles TLS."],
 						["SSO — OIDC + SAML", "Configure org-level SSO from the dashboard."],
 						["Audit log + snapshots", "Activity log, one-click volume restore."],
