@@ -286,7 +286,7 @@ const { data } = db.useQuery("Order");`}
 							<li>
 								<span>3.</span>
 								<span>
-									Live at <InlineCode>your-app.pyln.dev</InlineCode>.
+									Live at <InlineCode>your-app.smallware.run</InlineCode>.
 								</span>
 							</li>
 						</ol>
@@ -315,7 +315,7 @@ const { data } = db.useQuery("Order");`}
 								<div className="text-[var(--color-status-live)]">  ✓ Build · 12s</div>
 								<div className="text-[var(--color-status-live)]">  ✓ Schema synced</div>
 								<div className="text-[var(--color-status-live)]">  ✓ Cutover · 0 errors</div>
-								<div className="text-[var(--color-ink-3)]">  → https://acme.pyln.dev</div>
+								<div className="text-[var(--color-ink-3)]">  → https://acme.smallware.run</div>
 							</div>
 						</div>
 					</Card>

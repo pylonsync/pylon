@@ -50,7 +50,7 @@ export const LIVE_DEMOS: Example[] = [
 		blurb:
 			"A collaborative markdown editor in one entity, two pages, and about 400 lines. Open a doc in two windows and watch edits merge through a text CRDT.",
 		shows: ["Text CRDT", "Live collaboration", "~400 lines"],
-		live: "https://pad.pyln.dev",
+		live: "https://pad.smallware.run",
 	},
 ];
 

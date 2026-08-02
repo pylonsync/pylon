@@ -592,7 +592,7 @@ export default function ProductPage({ params }) {
   ✓ Build · 12s
   ✓ Schema synced
   ✓ Cutover · 0 errors
-  → https://acme.pyln.dev`,
+  → https://acme.smallware.run`,
 		},
 		sections: [
 			{
