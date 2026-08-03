@@ -50,6 +50,13 @@ export interface UseQueryOneReturn<T> {
 // stable reference.
 const EMPTY_SNAPSHOT: readonly unknown[] = [];
 
+// Server snapshot for the settled signal. On the server there is no engine to
+// have settled, and rendering "not settled" is what makes SSR emit the skeleton
+// the client then replaces — matching what a cold client sees, so hydration
+// doesn't swap the tree. Hoisted for the same reason as EMPTY_SNAPSHOT: a
+// stable identity, though a bare boolean would compare fine.
+const FALSE_SNAPSHOT = (): boolean => false;
+
 // useQuery — high-level hook returning {data, loading, error}
 // ---------------------------------------------------------------------------
 
@@ -80,19 +87,12 @@ export function useQuery<T = Row>(
   entity: string,
   options?: QueryOptions
 ): UseQueryReturn<T> {
-  // `loading` is true only while we genuinely don't know yet — i.e., the
-  // engine doesn't yet have a SERVER-confirmed view. It gates on
-  // `isInitialSyncSettled()`, NOT `isHydrated()`: the latter flips true the
-  // instant IndexedDB loads, which on a cold/empty cache (first visit, or
-  // right after an org switch wipes the replica) is immediate and EMPTY — so
-  // gating on it drops `loading` while the rows are still en route from the
-  // server, flashing the empty state for the seconds until the snapshot lands.
-  // `isInitialSyncSettled()` stays pending until the first pull settles (or
-  // the cache already had rows), so callers render a skeleton instead.
-  const loading = useRef<boolean>(
-    !sync.isInitialSyncSettled() && sync.store.list(entity).length === 0,
-  );
-  const error = useRef<Error | null>(null);
+  // Both are state, not refs. A ref mutated inside an async callback changes
+  // nothing React can see: the old `error` ref was assigned in `pull()`'s catch
+  // and never re-rendered, so a failed refetch surfaced no error until some
+  // unrelated update happened to re-render the component.
+  const [error, setError] = useState<Error | null>(null);
+  const [refetching, setRefetching] = useState(false);
   const optionsKey = JSON.stringify(options || {});
 
   // Subscribe function stable across the lifetime of this entity/options combo.
@@ -121,21 +121,43 @@ export function useQuery<T = Row>(
     if (sig !== snapshotCache.current.sig) {
       snapshotCache.current = { rows: filtered as T[], sig };
     }
-    // Drop loading when rows arrive OR the initial sync settles (first server
-    // pull done / cache had rows / fallback deadline). Gating on the settled
-    // signal — not bare hydration — is what stops the empty-state flash: a
-    // cold cache keeps loading=true until the pull confirms, then an empty
-    // result is a real "no rows" and the empty state renders. No flash, and
-    // (thanks to the fallback) no infinite spinner either.
-    if (loading.current && (rows.length > 0 || sync.isInitialSyncSettled())) {
-      loading.current = false;
-    }
     return snapshotCache.current.rows;
   }, [sync, entity, optionsKey, options]);
 
   const getServerSnapshot = useCallback((): T[] => EMPTY_SNAPSHOT as T[], []);
 
   const data = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+
+  // The settled signal gets its OWN subscription, with a boolean snapshot.
+  //
+  // It used to be a `useRef` flipped inside getSnapshot above, which never
+  // reached the render for an entity with no rows. useSyncExternalStore
+  // re-renders only when getSnapshot returns a value that isn't Object.is-equal
+  // to the last one — and the row snapshot for an empty entity is the same
+  // cached array before and after the pull settles. So markInitialSyncSettled()
+  // notified, getSnapshot ran, the ref flipped to false, React compared the
+  // identical array and bailed out, and the component kept rendering the stale
+  // `loading: true` forever. Every empty list — a new account's first dashboard,
+  // a fresh entity, an org whose rows all soft-deleted — sat on its skeleton
+  // and never reached its empty state.
+  //
+  // Booleans compare by value, so this snapshot genuinely changes when the
+  // engine settles and React re-renders.
+  const settled = useSyncExternalStore(
+    subscribe,
+    useCallback(() => sync.isInitialSyncSettled(), [sync]),
+    FALSE_SNAPSHOT,
+  );
+
+  // Derived, not latched. Loading means "we don't know yet": no server-confirmed
+  // view AND nothing local to show. Gating on the settled signal rather than
+  // bare hydration is what stops the empty-state flash — a cold cache keeps
+  // this true until the pull confirms, and only then is an empty result a real
+  // "no rows". The engine's fallback deadline settles it even offline, so this
+  // can't pin. Deriving it also means a replica wipe (org switch, token flip)
+  // resets the engine's signal and correctly returns callers to a skeleton
+  // instead of flashing "nothing here" over data that is on its way back.
+  const loading = refetching || (!settled && data.length === 0);
 
   // Register interest so the reconcile safety net sweeps this entity
   // even when the local replica has zero rows for it. Without this, a
@@ -148,19 +170,21 @@ export function useQuery<T = Row>(
   }, [sync, entity]);
 
   const refetch = useCallback(() => {
-    loading.current = true;
-    error.current = null;
-    sync.pull().catch((e: unknown) => {
-      error.current = e instanceof Error ? e : new Error(String(e));
-    });
+    setRefetching(true);
+    setError(null);
+    sync
+      .pull()
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e : new Error(String(e)));
+      })
+      // Clear on settle, success or failure. The old ref-based version set
+      // loading true and left it to getSnapshot to clear, which never ran on a
+      // pull that returned no new rows — a refetch over an empty entity pinned
+      // loading permanently.
+      .finally(() => setRefetching(false));
   }, [sync]);
 
-  return {
-    data,
-    loading: loading.current,
-    error: error.current,
-    refetch,
-  };
+  return { data, loading, error, refetch };
 }
 
 /**
@@ -175,14 +199,14 @@ export function useQueryOne<T = Row>(
   entity: string,
   id: string
 ): UseQueryOneReturn<T> {
-  // Same initial-sync-aware loading semantics as useQuery — see the comment
-  // there. Gates on isInitialSyncSettled() (server-confirmed) so a cold load
-  // shows a skeleton rather than flashing "not found" before the pull lands,
-  // and a refreshed page doesn't flash "Loading…" when the row is cached.
-  const loading = useRef<boolean>(
-    !sync.isInitialSyncSettled() && sync.store.get(entity, id) === null,
-  );
-  const error = useRef<Error | null>(null);
+  // Same initial-sync-aware loading semantics as useQuery — see the long
+  // comment there for why the settled signal needs its own boolean-valued
+  // subscription. This hook had the identical defect and it bit harder: a row
+  // that does not exist yields the same `null` snapshot before and after the
+  // pull, so React bailed out of the re-render and the caller was pinned in
+  // loading instead of ever reaching "not found".
+  const [error, setError] = useState<Error | null>(null);
+  const [refetching, setRefetching] = useState(false);
 
   const subscribe = useMemo(
     () => (onChange: () => void) => {
@@ -206,19 +230,23 @@ export function useQueryOne<T = Row>(
     if (sig !== snapshotCache.current.sig) {
       snapshotCache.current = { row: (row as T) ?? null, sig };
     }
-    // Mirror useQuery: loading flips false once the row arrives OR the initial
-    // sync settles (server-confirmed). Gating on isInitialSyncSettled() — not
-    // bare hydration — keeps a cold load in the skeleton state until the pull
-    // confirms, so a row that exists server-side doesn't flash "not found".
-    if (loading.current && (row !== null || sync.isInitialSyncSettled())) {
-      loading.current = false;
-    }
     return snapshotCache.current.row;
   }, [sync, entity, id]);
 
   const getServerSnapshot = useCallback((): T | null => null, []);
 
   const data = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+
+  const settled = useSyncExternalStore(
+    subscribe,
+    useCallback(() => sync.isInitialSyncSettled(), [sync]),
+    FALSE_SNAPSHOT,
+  );
+
+  // Loading until the row arrives OR the pull confirms it isn't there. Keeping
+  // a cold load in the loading state is what stops a row that DOES exist
+  // server-side from flashing "not found" while it is still in flight.
+  const loading = refetching || (!settled && data === null);
 
   // Register interest so reconcile sweeps this entity even with zero
   // local rows. See SyncEngine.observeEntity.
@@ -227,14 +255,17 @@ export function useQueryOne<T = Row>(
   }, [sync, entity]);
 
   const refetch = useCallback(() => {
-    loading.current = true;
-    error.current = null;
-    sync.pull().catch((e: unknown) => {
-      error.current = e instanceof Error ? e : new Error(String(e));
-    });
+    setRefetching(true);
+    setError(null);
+    sync
+      .pull()
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e : new Error(String(e)));
+      })
+      .finally(() => setRefetching(false));
   }, [sync]);
 
-  return { data, loading: loading.current, error: error.current, refetch };
+  return { data, loading, error, refetch };
 }
 
 // ---------------------------------------------------------------------------

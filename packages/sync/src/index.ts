@@ -1524,14 +1524,21 @@ export class SyncEngine {
   ): Promise<void> {
     const wipeMutations = opts.wipeMutations === true;
     this.cursor = { last_seq: 0 };
-    this.store.clearAll();
-    // The replica was just wiped and will re-pull from 0 (org switch, identity
-    // flip, or a 410 cursor reset). Re-enter "loading" until that re-pull lands
-    // rows — otherwise switching to another org flashes an empty list for the
-    // seconds the snapshot takes. Re-arm the fallback so it can't pin; the
-    // arriving rows (populated org) or the deadline (empty org) re-settle it.
+    // The replica is about to be wiped and will re-pull from 0 (org switch,
+    // identity flip, or a 410 cursor reset). Re-enter "loading" until that
+    // re-pull lands rows — otherwise switching to another org flashes an empty
+    // list for the seconds the snapshot takes. Re-arm the fallback so it can't
+    // pin; the arriving rows (populated org) or the deadline (empty org)
+    // re-settle it.
+    //
+    // ORDER MATTERS: this must precede `clearAll()`. `clearAll()` is the only
+    // notify on this path, and it used to run FIRST — so every subscriber
+    // re-read the signal while it was still `true`, and the flip to `false` on
+    // the next line reached nobody. The documented protection above silently
+    // did nothing: an org switch dropped straight to the new org's empty list.
     this._initialSyncSettled = false;
     this.armInitialSyncFallback();
+    this.store.clearAll();
     // Disk is about to be wiped + re-pulled from 0, so any prior
     // persist degradation is moot — start the durability invariant
     // fresh. (If the fresh snapshot also fails to persist, enqueueApply

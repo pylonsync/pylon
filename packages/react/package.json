@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test",
     "prepack": "bun run build"
   },
   "dependencies": {
@@ -20,7 +21,11 @@
     "react": ">=19.0.0"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0"
+    "@happy-dom/global-registrator": "^20.10.0",
+    "@testing-library/react": "^16.3.0",
+    "@types/react": "^19.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   },
   "files": [
     "src",

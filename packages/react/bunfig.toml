@@ -1,0 +1,4 @@
+[test]
+# Register a DOM (happy-dom) before any test runs so hook/component tests can
+# mount under `bun test`.
+preload = ["./tests/setup.ts"]

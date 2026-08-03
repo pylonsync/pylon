@@ -241,6 +241,15 @@ jobs:
           bun-version: "1.3.14"
       - run: bun install --frozen-lockfile
       - run: bun run check
+      # The TS package tests ran nowhere until now — `check` is typecheck only,
+      # so packages/sync's 200 sync tests and packages/react's mounted hook
+      # tests were local-only and could rot unnoticed. Scoped to the two
+      # packages that have suites rather than a repo-wide `bun test`, which
+      # would sweep in templates' node_modules and examples.
+      - run: bun test
+        working-directory: packages/sync
+      - run: bun test
+        working-directory: packages/react
 
   # End-to-end gate for @pylonsync/create-pylon. Catches the regression
   # that shipped 0.3.50 broken: real tabs in bin/create-pylon.js were
