@@ -31,8 +31,9 @@ pub mod email;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod oidc_provider;
 #[cfg(not(target_arch = "wasm32"))]
-pub mod org_sso;
+pub mod operator;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod org_sso;
 pub mod password;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod phone;

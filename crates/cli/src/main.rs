@@ -84,6 +84,7 @@ fn run() -> ExitCode {
     }
 
     match positional.first().copied() {
+        Some("admin") => commands::admin::run(&args, json_mode),
         Some("build") => commands::build::run(&args, json_mode),
         Some("cache") => commands::cache::run(&args, json_mode),
         Some("deploy") => commands::deploy::run(&args, json_mode),
@@ -382,6 +383,7 @@ fn print_usage() {
         "  deploy                    Deploy to Pylon Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
     );
     println!("  cache                     Run standalone cache server");
+    println!("  admin <create|list|passwd|rm>  Manage Studio operator accounts");
     println!("  test [filter]             Run *.test.ts files against an in-memory Pylon");
     println!("  test:security             Adversarial security probe against a running app");
     println!();

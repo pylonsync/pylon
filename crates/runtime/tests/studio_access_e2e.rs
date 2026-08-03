@@ -180,17 +180,16 @@ fn anonymous_gets_no_studio_and_no_schema() {
     let (status, body) = http(port, "GET", "/studio", None, None);
     assert_ne!(status, 200, "anonymous must not receive Studio");
     assert_eq!(
-        status, 401,
-        "expected the sign-in-required page, got {status}"
+        status, 303,
+        "anonymous should be sent to sign in, got {status}"
     );
     assert!(
         !is_studio_bundle(&body),
         "the bundle inlines the whole manifest — it must not reach an anonymous caller"
     );
-    // The replacement page must not leak the schema either.
     assert!(
         !body.contains("isAdmin"),
-        "sign-in page leaked an entity field name: {body}"
+        "the redirect leaked an entity field name: {body}"
     );
 }
 
@@ -303,25 +302,222 @@ fn app_routes_that_merely_start_with_studio_are_untouched() {
     }
 }
 
+/// POST a urlencoded form, returning `(status, Location, Set-Cookie)`.
+fn post_form(port: u16, path: &str, body: &str) -> (u16, String, String) {
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\n\
+         Content-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\n\
+         Connection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut s = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    s.write_all(req.as_bytes()).unwrap();
+    let mut buf = Vec::new();
+    let _ = s.read_to_end(&mut buf);
+    let text = String::from_utf8_lossy(&buf).to_string();
+    let status = text
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(0);
+    let header = |name: &str| {
+        text.lines()
+            .find(|l| l.to_ascii_lowercase().starts_with(&format!("{name}:")))
+            .map(|l| l[name.len() + 1..].trim().to_string())
+            .unwrap_or_default()
+    };
+    (status, header("location"), header("set-cookie"))
+}
+
 #[test]
-fn the_admin_token_login_form_is_gone() {
-    // It prompted operators to paste the production superuser secret into a
-    // browser form, which then parked it in localStorage. Both endpoints that
-    // served it are removed; nothing should answer there.
+fn an_operator_can_be_bootstrapped_with_the_admin_token_and_then_sign_in() {
+    // The whole point: a Pylon with no users at all still has a way in, and the
+    // bootstrap credential is the admin token the operator already holds rather
+    // than a new global secret.
     let rt = test_runtime();
     let port = start_server(Arc::clone(&rt));
 
-    for (method, path) in [("GET", "/studio/login"), ("POST", "/studio/login")] {
-        let (status, body) = http(port, method, path, None, None);
-        assert_ne!(
-            status, 200,
-            "{method} {path} still answers — the token form must be gone"
-        );
-        assert!(
-            !body.contains("Admin token"),
-            "{method} {path} still renders the token form"
-        );
-    }
+    // Anonymous cannot mint an operator.
+    let (anon, _) = http(
+        port,
+        "POST",
+        "/admin/operators",
+        None,
+        Some(&json!({"username": "eric", "password": "correct-horse-battery"}).to_string()),
+    );
+    assert_ne!(
+        anon, 201,
+        "anonymous must not be able to create an operator"
+    );
+
+    let (created, body) = http(
+        port,
+        "POST",
+        "/admin/operators",
+        Some(ADMIN_TOKEN),
+        Some(&json!({"username": "eric", "password": "correct-horse-battery"}).to_string()),
+    );
+    assert_eq!(created, 201, "operator create failed: {body}");
+
+    // Sign in through the form and get a session cookie.
+    let (status, location, cookie) = post_form(
+        port,
+        "/studio/login",
+        "username=eric&password=correct-horse-battery",
+    );
+    assert_eq!(status, 303, "operator sign-in should redirect");
+    assert_eq!(location, "/studio");
+    assert!(!cookie.is_empty(), "sign-in set no session cookie");
+
+    // A wrong password does not.
+    let (bad, _, bad_cookie) = post_form(port, "/studio/login", "username=eric&password=wrong-one");
+    assert_eq!(bad, 401);
+    assert!(bad_cookie.is_empty(), "a failed sign-in set a cookie");
+}
+
+#[test]
+fn an_operator_session_opens_studio_and_can_read_data() {
+    // A Studio that loads but whose every panel 403s is not access. The
+    // operator has no row in the app's User entity, so `is_admin` has to be
+    // lifted for the policy layer too.
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    let (created, body) = http(
+        port,
+        "POST",
+        "/admin/operators",
+        Some(ADMIN_TOKEN),
+        Some(&json!({"username": "ops", "password": "correct-horse-battery"}).to_string()),
+    );
+    assert_eq!(created, 201, "{body}");
+
+    let (_, _, cookie) = post_form(
+        port,
+        "/studio/login",
+        "username=ops&password=correct-horse-battery",
+    );
+    let token = cookie
+        .split(';')
+        .next()
+        .and_then(|kv| kv.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("session token in Set-Cookie");
+
+    let (studio, page) = http(port, "GET", "/studio", Some(&token), None);
+    assert_eq!(studio, 200, "operator was refused Studio");
+    assert!(is_studio_bundle(&page));
+
+    let (me, me_body) = http(port, "GET", "/api/auth/session", Some(&token), None);
+    assert_eq!(me, 200);
+    let v: Value = serde_json::from_str(&me_body).unwrap();
+    assert_eq!(
+        v["session"]["is_admin"], true,
+        "operator session must resolve as admin for the API layer: {me_body}"
+    );
+
+    let (entities, _) = http(port, "GET", "/admin/entities", Some(&token), None);
+    assert_eq!(entities, 200, "operator could not read /admin/entities");
+}
+
+#[test]
+fn deleting_an_operator_kills_its_live_sessions() {
+    // Removing the credential while a cookie keeps working is not removing
+    // access. This is the difference between `pylon admin rm` meaning something
+    // and meaning something in 30 days.
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    http(
+        port,
+        "POST",
+        "/admin/operators",
+        Some(ADMIN_TOKEN),
+        Some(&json!({"username": "temp", "password": "correct-horse-battery"}).to_string()),
+    );
+    let (_, _, cookie) = post_form(
+        port,
+        "/studio/login",
+        "username=temp&password=correct-horse-battery",
+    );
+    let token = cookie
+        .split(';')
+        .next()
+        .and_then(|kv| kv.split_once('='))
+        .map(|(_, v)| v.to_string())
+        .expect("session token");
+    assert_eq!(http(port, "GET", "/studio", Some(&token), None).0, 200);
+
+    let (deleted, _) = http(
+        port,
+        "DELETE",
+        "/admin/operators/temp",
+        Some(ADMIN_TOKEN),
+        None,
+    );
+    assert_eq!(deleted, 200);
+
+    let (after, after_body) = http(port, "GET", "/studio", Some(&token), None);
+    assert_ne!(
+        after, 200,
+        "a deleted operator's session still opens Studio"
+    );
+    assert!(!is_studio_bundle(&after_body));
+}
+
+#[test]
+fn the_login_page_says_how_to_bootstrap_when_there_are_no_operators() {
+    // A bare form on a Pylon with no operators is a dead end. The page has to
+    // tell you the one command that gets you out of it.
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+
+    let (status, body) = http(port, "GET", "/studio/login", None, None);
+    assert_eq!(status, 200, "the login page must be reachable anonymously");
+    assert!(
+        body.contains("pylon admin create"),
+        "empty-store login page should name the bootstrap command"
+    );
+    assert!(
+        !body.contains("PYLON_ADMIN_TOKEN=") && !body.contains("name=\"password\""),
+        "should not render a sign-in form when no operator exists"
+    );
+}
+
+#[test]
+fn the_admin_token_login_form_is_gone() {
+    // /studio/login still exists, but it now takes an operator's own password.
+    // What must not come back is the box that asked for PYLON_ADMIN_TOKEN —
+    // it put the deployment's superuser secret in localStorage.
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    http(
+        port,
+        "POST",
+        "/admin/operators",
+        Some(ADMIN_TOKEN),
+        Some(&json!({"username": "eric", "password": "correct-horse-battery"}).to_string()),
+    );
+
+    let (status, body) = http(port, "GET", "/studio/login", None, None);
+    assert_eq!(status, 200, "the operator sign-in page should be reachable");
+    assert!(
+        !body.contains("Admin token") && !body.contains("PYLON_ADMIN_TOKEN"),
+        "the admin-token form is back: {body}"
+    );
+    assert!(
+        body.contains(r#"name="username""#) && body.contains(r#"name="password""#),
+        "expected a username/password form"
+    );
+
+    // Submitting the admin token as a password must not work.
+    let (denied, _, cookie) = post_form(
+        port,
+        "/studio/login",
+        &format!("username=eric&password={ADMIN_TOKEN}"),
+    );
+    assert_eq!(denied, 401, "the admin token was accepted as a password");
+    assert!(cookie.is_empty());
 }
 
 #[test]

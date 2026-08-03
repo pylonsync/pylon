@@ -3092,6 +3092,7 @@ fn start_server(
                     admin_token.as_deref(),
                     &cookie_config,
                     &session_store,
+                    &account_store,
                     runtime.as_ref(),
                 )
             {
@@ -3214,6 +3215,7 @@ fn start_server(
                     admin_token.as_deref(),
                     &cookie_config,
                     &session_store,
+                    &account_store,
                     runtime.as_ref(),
                 )
             {
@@ -3282,6 +3284,151 @@ fn start_server(
             return;
         }
 
+        // --- /admin/operators: manage the Studio operator accounts that
+        // `pylon admin ...` drives.
+        //
+        // Authorized by the same gate as every other /admin/* route, which
+        // means `PYLON_ADMIN_TOKEN` or an already-admin session. That is the
+        // whole bootstrap story and it deliberately introduces no new
+        // credential: anyone holding the admin token can already read and
+        // write every row through these endpoints, so letting them mint an
+        // operator grants no authority they lacked.
+        //
+        // What it changes is what happens afterwards. The token stops being
+        // something a human carries into a browser, each operator is a
+        // separate revocable credential, and actions get a name attached.
+        if url == "/admin/operators" || url.starts_with("/admin/operators/") {
+            if !dev_admin_open
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    &account_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/admin/operators requires PYLON_ADMIN_TOKEN or an admin session",
+                );
+                let response = with_security_headers(
+                    Response::from_string(body)
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request(method.as_str(), 401);
+                return;
+            }
+
+            let read_json = |request: &mut tiny_http::Request| -> serde_json::Value {
+                let mut buf = Vec::new();
+                let _ = request.as_reader().read_to_end(&mut buf);
+                serde_json::from_slice(&buf).unwrap_or(serde_json::Value::Null)
+            };
+            let op_json = |o: &pylon_auth::operator::Operator| {
+                serde_json::json!({
+                    "username": o.username,
+                    "userId": o.user_id,
+                    "createdAt": o.created_at,
+                })
+            };
+
+            let (status, body) = match (url.as_str(), &method) {
+                ("/admin/operators", Method::Get) => (
+                    200u16,
+                    serde_json::json!({
+                        "operators": pylon_auth::operator::list(&account_store)
+                            .iter()
+                            .map(op_json)
+                            .collect::<Vec<_>>()
+                    })
+                    .to_string(),
+                ),
+                ("/admin/operators", Method::Post) => {
+                    let v = read_json(&mut request);
+                    let username = v["username"].as_str().unwrap_or_default().to_string();
+                    let password = v["password"].as_str().unwrap_or_default().to_string();
+                    match pylon_auth::operator::create(&account_store, &username, &password) {
+                        Ok(op) => {
+                            tracing::info!(
+                                target: "pylon::auth",
+                                "[studio] operator {username} created"
+                            );
+                            (201, op_json(&op).to_string())
+                        }
+                        Err(e) => (
+                            match e {
+                                pylon_auth::operator::OperatorError::UsernameTaken => 409,
+                                _ => 400,
+                            },
+                            json_error("OPERATOR_INVALID", &e.to_string()),
+                        ),
+                    }
+                }
+                (u, Method::Post) if u.ends_with("/password") => {
+                    let username = u
+                        .trim_start_matches("/admin/operators/")
+                        .trim_end_matches("/password")
+                        .to_string();
+                    let v = read_json(&mut request);
+                    let password = v["password"].as_str().unwrap_or_default().to_string();
+                    match pylon_auth::operator::set_password(&account_store, &username, &password) {
+                        Ok(()) => {
+                            // Existing sessions keep working on purpose: this is
+                            // "I changed my password", not "I was breached". A
+                            // caller who wants them gone deletes the operator.
+                            tracing::info!(
+                                target: "pylon::auth",
+                                "[studio] operator {username} password changed"
+                            );
+                            (200, serde_json::json!({"ok": true}).to_string())
+                        }
+                        Err(e) => (
+                            match e {
+                                pylon_auth::operator::OperatorError::NotFound => 404,
+                                _ => 400,
+                            },
+                            json_error("OPERATOR_INVALID", &e.to_string()),
+                        ),
+                    }
+                }
+                (u, Method::Delete) => {
+                    let username = u.trim_start_matches("/admin/operators/").to_string();
+                    match pylon_auth::operator::delete(&account_store, &username) {
+                        Ok(op) => {
+                            // Revoke every live session for the deleted operator.
+                            // Removing the credential alone would leave a working
+                            // cookie until it expired, which is not what anyone
+                            // means by "remove this person's access".
+                            let revoked = session_store.revoke_all_for_user(&op.user_id);
+                            tracing::info!(
+                                target: "pylon::auth",
+                                "[studio] operator {username} deleted, {revoked} session(s) revoked"
+                            );
+                            (200, serde_json::json!({"deleted": true}).to_string())
+                        }
+                        Err(e) => (404, json_error("OPERATOR_NOT_FOUND", &e.to_string())),
+                    }
+                }
+                _ => (
+                    405,
+                    json_error("METHOD_NOT_ALLOWED", "unsupported /admin/operators call"),
+                ),
+            };
+            let response = with_security_headers(
+                Response::from_string(body)
+                    .with_status_code(status)
+                    .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+            );
+            let _ = request.respond(response);
+            mt.record_request(method.as_str(), status);
+            return;
+        }
+
         // --- /admin/entities: list every entity declared in the
         // manifest, so the dashboard's data browser can render
         // a left-nav of tables without having to scrape the
@@ -3294,6 +3441,7 @@ fn start_server(
                     admin_token.as_deref(),
                     &cookie_config,
                     &session_store,
+                    &account_store,
                     runtime.as_ref(),
                 )
             {
@@ -3370,6 +3518,7 @@ fn start_server(
                         admin_token.as_deref(),
                         &cookie_config,
                         &session_store,
+                        &account_store,
                         runtime.as_ref(),
                     )
                 {
@@ -3471,6 +3620,7 @@ fn start_server(
                     admin_token.as_deref(),
                     &cookie_config,
                     &session_store,
+                    &account_store,
                     runtime.as_ref(),
                 )
             {
@@ -3546,6 +3696,7 @@ fn start_server(
                     admin_token.as_deref(),
                     &cookie_config,
                     &session_store,
+                    &account_store,
                     runtime.as_ref(),
                 )
             {
@@ -3638,6 +3789,7 @@ fn start_server(
                     admin_token.as_deref(),
                     &cookie_config,
                     &session_store,
+                    &account_store,
                     runtime.as_ref(),
                 )
             {
@@ -4035,6 +4187,9 @@ fn start_server(
         // paths resolve `is_admin` identically — see the helper's doc for the
         // two designation paths + the API-key exclusion.
         lift_admin(&runtime, &mut auth_ctx);
+        // Operators own no row in the app's User entity, so lift_admin can't
+        // see them. Same ordering rationale: before org-role enrichment.
+        lift_operator(&account_store, &mut auth_ctx);
 
         // Multi-tenant role resolution. Surface the caller's role in their
         // active org as `auth_ctx.roles` (see the helper's doc comment for why
@@ -6309,6 +6464,125 @@ fn start_server(
         // sign-out does — revoke the token server-side, clear the cookie —
         // so "sign out and try a different account" from the access-denied
         // page can't leave a live session behind on a shared machine.
+        // Operator sign-in. This is a username/password form against the
+        // framework-internal operator credentials (`pylon admin create`), NOT
+        // the token paste it replaced — the thing typed here is the operator's
+        // own password, never a shared secret.
+        //
+        // Ungated by design: it is the page an anonymous caller is *supposed*
+        // to reach. It renders no app data, so there is nothing to leak.
+        //
+        // Apps that point `studio.config.ts -> loginUrl` at their own sign-in
+        // never send anyone here; this is for deployments whose operators
+        // aren't app users, which includes every API-only backend.
+        if url == "/studio/login" && method == Method::Get {
+            // Already an admin? Nothing to do here.
+            if studio_access(&rt, &account_store, &auth_ctx) == StudioAccess::Granted {
+                let response = with_security_headers(
+                    Response::from_string("")
+                        .with_status_code(303u16)
+                        .with_header(Header::from_bytes("Location", "/studio").unwrap()),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", 303);
+                return;
+            }
+            // Empty store means the form would be a dead end; the page says
+            // how to create the first operator instead.
+            let any_operators = !pylon_auth::operator::list(&account_store).is_empty();
+            let response = with_security_headers(
+                Response::from_string(studio_login_html(None, any_operators))
+                    .with_status_code(200u16)
+                    .with_header(
+                        Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                    ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("GET", 200);
+            return;
+        }
+        if url == "/studio/login" && method == Method::Post {
+            // `body` was already read by the central dispatch loop above — it
+            // drains the reader for every non-GET method, so re-reading here
+            // yields an empty string and every sign-in fails as "wrong
+            // password". (The admin-token form this replaced sat below the same
+            // line and had the same bug.)
+            let field = |key: &str| -> String {
+                body.split('&')
+                    .filter_map(|p| p.split_once('='))
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| percent_decode_str(&v.replace('+', " ")))
+                    .unwrap_or_default()
+            };
+            let username = field("username");
+            let password = field("password");
+
+            // Rate limit before touching the store. Argon2 is ~50ms by design,
+            // so an unthrottled form is both a credential-guessing oracle and a
+            // cheap way to saturate the thread pool.
+            let decision = pylon_auth::rate_limit::AuthRateLimiter::shared().check(
+                pylon_auth::rate_limit::AuthBucket::Login,
+                &dispatch_peer_ip_str,
+                Some(&username),
+            );
+            if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = decision {
+                let response = with_security_headers(
+                    Response::from_string(studio_login_html(
+                        Some("Too many sign-in attempts. Wait a minute and try again."),
+                        true,
+                    ))
+                    .with_status_code(429u16)
+                    .with_header(
+                        Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                    )
+                    .with_header(
+                        Header::from_bytes("Retry-After", retry_after_secs.to_string()).unwrap(),
+                    ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 429);
+                return;
+            }
+
+            match pylon_auth::operator::verify(&account_store, &username, &password) {
+                Some(op) => {
+                    let session = session_store.create(op.user_id.clone());
+                    tracing::info!(
+                        target: "pylon::auth",
+                        "[studio] operator {} signed in", op.username
+                    );
+                    let response = with_security_headers(
+                        Response::from_string("")
+                            .with_status_code(303u16)
+                            .with_header(Header::from_bytes("Location", "/studio").unwrap())
+                            .with_header(
+                                Header::from_bytes(
+                                    "Set-Cookie",
+                                    cookie_config.set_value(&session.token),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 303);
+                }
+                None => {
+                    // One message for both "no such operator" and "wrong
+                    // password" — `verify` already equalizes the timing, and a
+                    // distinct message would hand back what the timing doesn't.
+                    let response = with_security_headers(
+                        Response::from_string(studio_login_html(Some("Incorrect username or password."), true))
+                        .with_status_code(401u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
+                        ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 401);
+                }
+            }
+            return;
+        }
         if url == "/studio/logout" && (method == Method::Get || method == Method::Post) {
             let session_cookie_value = request
                 .headers()
@@ -6378,7 +6652,7 @@ fn start_server(
             //               `auth.user.adminField`. Otherwise explain how to
             //               designate an admin — there is no built-in login
             //               page to fall back to.
-            match studio_access(&rt, &auth_ctx) {
+            match studio_access(&rt, &account_store, &auth_ctx) {
                 StudioAccess::Granted => {}
                 StudioAccess::NotAdmin => {
                     let html = studio_no_access_html();
@@ -6407,27 +6681,17 @@ fn start_server(
                             let sep = if s.contains('?') { '&' } else { '?' };
                             format!("{s}{sep}next=/studio")
                         });
-                    let response = match target {
-                        Some(target) => with_security_headers(
-                            Response::from_string("")
-                                .with_status_code(303u16)
-                                .with_header(
-                                    Header::from_bytes("Location", target.as_bytes().to_vec())
-                                        .unwrap(),
-                                ),
-                        ),
-                        None => with_security_headers(
-                            Response::from_string(studio_signin_required_html())
-                                .with_status_code(401u16)
-                                .with_header(
-                                    Header::from_bytes(
-                                        "Content-Type",
-                                        "text/html; charset=utf-8",
-                                    )
-                                    .unwrap(),
-                                ),
-                        ),
-                    };
+                    // No app login page configured? Send them to the operator
+                    // form, which is the path that works on a deployment whose
+                    // operators aren't app users.
+                    let target = target.unwrap_or_else(|| "/studio/login".to_string());
+                    let response = with_security_headers(
+                        Response::from_string("")
+                            .with_status_code(303u16)
+                            .with_header(
+                                Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap(),
+                            ),
+                    );
                     let status = response.status_code().0;
                     let _ = request.respond(response);
                     mt.record_request("GET", status);
@@ -6483,7 +6747,7 @@ fn start_server(
             // carries custom React components that introspect the live API
             // surface, so it is admin-only, and it is pointless to anyone the
             // shell was refused to anyway.
-            if studio_access(&rt, &auth_ctx) != StudioAccess::Granted {
+            if studio_access(&rt, &account_store, &auth_ctx) != StudioAccess::Granted {
                 let body = json_error(
                     "AUTH_REQUIRED",
                     "/studio/extensions.js requires a signed-in admin user",
@@ -6992,6 +7256,7 @@ fn verify_admin_or_metrics_auth(
     admin_token: Option<&str>,
     cookie_config: &pylon_auth::CookieConfig,
     session_store: &pylon_auth::SessionStore,
+    accounts: &pylon_auth::AccountStore,
     runtime: &Runtime,
 ) -> bool {
     let admin_bytes = admin_token.unwrap_or("").as_bytes();
@@ -7027,13 +7292,33 @@ fn verify_admin_or_metrics_auth(
         .iter()
         .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
         .and_then(|h| pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name));
+    // Also accept a session presented as a bearer token. The main dispatcher
+    // resolves both, and a caller holding a session shouldn't be admin on one
+    // transport and anonymous on the other.
+    let bearer_session = request
+        .headers()
+        .iter()
+        .find(|h| {
+            h.field
+                .as_str()
+                .as_str()
+                .eq_ignore_ascii_case("Authorization")
+        })
+        .and_then(|h| h.value.as_str().strip_prefix("Bearer ").map(str::to_string));
     let session_user_id = cookie_token
         .as_deref()
+        .or(bearer_session.as_deref())
         .and_then(|t| session_store.get(t))
         .map(|s| s.user_id);
     let Some(uid) = session_user_id.as_deref() else {
         return false;
     };
+    // Studio operators are admins of the deployment by definition, and own no
+    // row in the app's User entity for the checks below to find. Without this,
+    // an operator loads Studio and every /admin/* panel in it 401s.
+    if pylon_auth::operator::find_by_user_id(accounts, uid).is_some() {
+        return true;
+    }
     let user_entity = runtime.manifest().auth.user.entity.as_str();
     use pylon_http::DataStore as _;
     let row = runtime.get_by_id(user_entity, uid).ok().flatten();
@@ -7090,51 +7375,90 @@ fn verify_admin_or_metrics_auth(
     verified && email.map(|e| allow.contains(&e)).unwrap_or(false)
 }
 
-/// "Studio needs a signed-in admin" page. Served on an anonymous hit when the
-/// app hasn't told us where its login page is (`studio.config.ts -> loginUrl`).
+/// The operator sign-in form.
 ///
-/// It replaced a form that took `PYLON_ADMIN_TOKEN`. There is deliberately
-/// nothing to type here: Studio authenticates people through the app's own
-/// sign-in, and the only thing a visitor could usefully do at this point is
-/// find out how to get an account designated as admin. Redirecting instead
-/// would mean inventing a login path this app may not serve.
+/// This is what replaced the `PYLON_ADMIN_TOKEN` paste box. The field is an
+/// operator's own password, so a compromised form yields one revocable
+/// credential rather than the deployment's superuser secret.
 ///
-/// Plain HTML with no framework and no JS — the Studio bundle is exactly what
-/// we're refusing to serve. Styling is inline and conservative because Pylon's
-/// design tokens aren't reachable from a static string.
-fn studio_signin_required_html() -> String {
-    r##"<!doctype html>
+/// `any_operators` adapts the page for a Pylon that has none yet: a bare form
+/// would be a dead end, since there is nothing to sign in as and no way to
+/// create one from a browser. Creating the first operator is deliberately an
+/// act of local or token-holding authority, not something a web form offers.
+///
+/// Plain HTML, no framework, no JS — the Studio bundle is exactly what we are
+/// refusing to serve until this succeeds.
+fn studio_login_html(error: Option<&str>, any_operators: bool) -> String {
+    let err_html = error
+        .map(|e| format!(r#"<div class="err">{}</div>"#, html_escape(e),))
+        .unwrap_or_default();
+    let body = if any_operators {
+        r##"<form class="card" method="POST" action="/studio/login" autocomplete="off">
+  <h1>Studio</h1>
+  <p class="lead">Sign in with your operator account.</p>
+  __ERR__
+  <label for="username">Username</label>
+  <input id="username" name="username" type="text" autocomplete="username" autofocus required>
+  <label for="password">Password</label>
+  <input id="password" name="password" type="password" autocomplete="current-password" required>
+  <button type="submit">Sign in</button>
+  <div class="hint">Forgotten it? An operator with shell access can reset it with <code>pylon admin passwd &lt;username&gt;</code>.</div>
+</form>"##
+    } else {
+        r##"<div class="card">
+  <h1>No operators yet</h1>
+  <p class="lead">Studio needs an operator account, and this Pylon has none. Create the first one where the deployment lives:</p>
+  <pre><code>pylon admin create &lt;username&gt;</code></pre>
+  <p class="lead">Then reload this page and sign in.</p>
+  __ERR__
+  <div class="hint">Creating an operator requires access to the deployment itself &mdash; the project directory, or <code>PYLON_ADMIN_TOKEN</code> for a remote one. Anyone who already has either can do anything to this Pylon, so no new authority is being handed out. Apps whose admins are ordinary users can instead set <code>PYLON_ADMIN_EMAILS</code> or <code>auth.user.adminField</code> and sign in through the app.</div>
+</div>"##
+    };
+    format!(
+        r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pylon Studio · sign in required</title>
+<title>Pylon Studio &middot; sign in</title>
 <style>
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
-  .card { width: 460px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-  h1 { margin: 0 0 6px; font-size: 18px; letter-spacing: -0.01em; }
-  p { margin: 0 0 14px; color: #555; font-size: 13px; }
-  h2 { margin: 18px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #666; }
-  ol { margin: 0; padding-left: 18px; color: #555; font-size: 13px; }
-  li { margin-bottom: 6px; }
-  code { font-family: ui-monospace, monospace; font-size: 11.5px; background: #f4f3f0; padding: 1px 4px; border-radius: 3px; }
-  .muted { margin-top: 18px; padding-top: 14px; border-top: 1px solid #f0efec; color: #888; font-size: 11.5px; }
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }}
+  .card {{ width: 420px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
+  h1 {{ margin: 0 0 4px; font-size: 18px; letter-spacing: -0.01em; }}
+  p.lead {{ margin: 0 0 16px; color: #666; font-size: 13px; }}
+  label {{ display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #666; margin: 12px 0 6px; }}
+  input {{ width: 100%; box-sizing: border-box; padding: 8px 10px; font-size: 13px; border: 1px solid #d4d2cd; border-radius: 6px; background: #fafafa; }}
+  input:focus {{ outline: none; border-color: #2a5fdf; background: #fff; }}
+  button {{ margin-top: 16px; width: 100%; padding: 9px 12px; background: #2a5fdf; color: #fff; border: 0; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; }}
+  button:hover {{ background: #1f4cb8; }}
+  pre {{ margin: 0 0 16px; padding: 10px 12px; background: #f4f3f0; border-radius: 6px; overflow-x: auto; }}
+  code {{ font-family: ui-monospace, monospace; font-size: 12px; }}
+  .hint {{ margin-top: 16px; padding-top: 14px; border-top: 1px solid #f0efec; font-size: 11.5px; color: #888; }}
+  .err {{ margin: 12px 0; padding: 10px 12px; border: 1px solid #f4a4a4; background: #fff5f5; border-radius: 6px; color: #a40000; font-size: 13px; }}
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>Studio needs a signed-in admin</h1>
-  <p>Studio shows this app's live data and schema, so it requires an account this app treats as an admin. Sign in to the app first, then reload this page.</p>
-  <h2>Designating an admin</h2>
-  <ol>
-    <li>Set <code>PYLON_ADMIN_EMAILS</code> to a comma-separated list of emails. A matching account with a <em>verified</em> email becomes an admin on its next request.</li>
-    <li>Or configure <code>auth.user.adminField</code> in your manifest and set that field to true on the user's row.</li>
-  </ol>
-  <div class="muted">Set <code>loginUrl</code> in <code>studio.config.ts</code> to send visitors straight to your app's sign-in page instead of this one. <code>PYLON_ADMIN_TOKEN</code> still authorizes the <code>/admin/*</code> API endpoints, but no longer opens Studio — it identifies no one.</div>
-</div>
+{body}
 </body>
-</html>"##
-        .to_string()
+</html>"##,
+        body = body.replace("__ERR__", &err_html),
+    )
+}
+
+/// HTML-escape for values interpolated into the pages above.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Does this URL want the Studio shell HTML?
@@ -7162,7 +7486,10 @@ fn is_studio_shell_path(url: &str) -> bool {
     let Some(rest) = path.strip_prefix("/studio/") else {
         return false;
     };
-    !matches!(rest.trim_end_matches('/'), "logout" | "extensions.js")
+    !matches!(
+        rest.trim_end_matches('/'),
+        "login" | "logout" | "extensions.js"
+    )
 }
 
 #[cfg(test)]
@@ -7187,7 +7514,7 @@ mod studio_shell_path_tests {
 
     #[test]
     fn does_not_shadow_the_frameworks_own_studio_endpoints() {
-        for p in ["/studio/logout", "/studio/extensions.js"] {
+        for p in ["/studio/login", "/studio/logout", "/studio/extensions.js"] {
             assert!(!is_studio_shell_path(p), "{p} must keep its own handler");
         }
     }
@@ -7250,46 +7577,95 @@ pub(crate) enum StudioAccess {
 
 /// Resolve [`StudioAccess`] for a request whose `auth_ctx` has already been
 /// through [`lift_admin`].
-pub(crate) fn studio_access(runtime: &Runtime, auth_ctx: &pylon_auth::AuthContext) -> StudioAccess {
+pub(crate) fn studio_access(
+    runtime: &Runtime,
+    accounts: &pylon_auth::AccountStore,
+    auth_ctx: &pylon_auth::AuthContext,
+) -> StudioAccess {
     // `is_authenticated()` is already "real user id AND not a guest".
     let authenticated = auth_ctx.is_authenticated();
-    let user_row_exists = if authenticated {
-        auth_ctx
-            .user_id
-            .as_deref()
-            .and_then(|uid| {
-                runtime
-                    .get_by_id(runtime.manifest().auth.user.entity.as_str(), uid)
-                    .ok()
-                    .flatten()
-            })
-            .is_some()
-    } else {
-        false
-    };
+    let uid = auth_ctx.user_id.clone().unwrap_or_default();
+    let is_operator =
+        authenticated && pylon_auth::operator::find_by_user_id(accounts, &uid).is_some();
+    let user_row_exists = authenticated
+        && !is_operator
+        && runtime
+            .get_by_id(runtime.manifest().auth.user.entity.as_str(), &uid)
+            .ok()
+            .flatten()
+            .is_some();
     studio_access_for(
         auth_ctx.is_api_key_auth(),
         authenticated,
         user_row_exists,
+        is_operator,
         auth_ctx.is_admin,
     )
 }
 
-/// Pure core of [`studio_access`]. Split out from the row lookup so the table
-/// below can drive every combination without standing up a Runtime.
+/// Pure core of [`studio_access`]. Split out from the store lookups so the
+/// table below can drive every combination without standing up a Runtime.
+///
+/// An operator needs no `is_admin` check: being an operator is the grant.
+/// [`lift_operator`] sets `is_admin` on the context for the API calls Studio
+/// then makes, but this gate must not depend on that having run — a Studio
+/// that opens only because a second, separate function did its job is one
+/// refactor away from opening when it didn't.
 fn studio_access_for(
     is_api_key: bool,
     is_authenticated: bool,
     user_row_exists: bool,
+    is_operator: bool,
     is_admin: bool,
 ) -> StudioAccess {
-    if is_api_key || !is_authenticated || !user_row_exists {
+    if is_api_key || !is_authenticated {
+        return StudioAccess::Anonymous;
+    }
+    if is_operator {
+        return StudioAccess::Granted;
+    }
+    if !user_row_exists {
         return StudioAccess::Anonymous;
     }
     if is_admin {
         StudioAccess::Granted
     } else {
         StudioAccess::NotAdmin
+    }
+}
+
+/// Lift `is_admin` for a Studio operator's session.
+///
+/// Runs alongside [`lift_admin`], which can't do this job: it resolves the
+/// app's User entity, and an operator deliberately owns no row there. Without
+/// it an operator would pass the Studio gate and then watch every panel fail —
+/// `/api/entities/*` is policy-gated and `/admin/*` needs admin, so a Studio
+/// that loads but reads nothing is not access.
+///
+/// Scoped to the API dispatcher on purpose. SSR auth
+/// (`frontend::resolve_request_auth`) does not lift operators, so ops staff
+/// don't silently become admins of the app's own pages. An operator credential
+/// exists to run the deployment, not to browse the product as a superuser.
+pub(crate) fn lift_operator(
+    accounts: &pylon_auth::AccountStore,
+    auth_ctx: &mut pylon_auth::AuthContext,
+) {
+    if auth_ctx.is_admin || auth_ctx.is_api_key_auth() || !auth_ctx.is_authenticated() {
+        return;
+    }
+    let Some(uid) = auth_ctx.user_id.clone() else {
+        return;
+    };
+    // Cheap prefix check first: almost every session is an app user, and none
+    // of them should pay a store lookup for a branch that cannot apply.
+    if !pylon_auth::operator::is_operator_user_id(&uid) {
+        return;
+    }
+    if pylon_auth::operator::find_by_user_id(accounts, &uid).is_some() {
+        auth_ctx.is_admin = true;
+        if !auth_ctx.roles.iter().any(|r| r == "admin") {
+            auth_ctx.roles.push("admin".into());
+        }
     }
 }
 
@@ -7305,7 +7681,24 @@ mod studio_access_tests {
         user_row_exists: bool,
         is_admin: bool,
     ) -> StudioAccess {
-        studio_access_for(is_api_key, is_authenticated, user_row_exists, is_admin)
+        studio_access_for(
+            is_api_key,
+            is_authenticated,
+            user_row_exists,
+            /* is_operator */ false,
+            is_admin,
+        )
+    }
+
+    /// Same, for a session that resolved to a Studio operator.
+    fn operator_access(is_api_key: bool, is_authenticated: bool) -> StudioAccess {
+        studio_access_for(
+            is_api_key,
+            is_authenticated,
+            /* user_row_exists */ false,
+            /* is_operator */ true,
+            /* is_admin */ false,
+        )
     }
 
     #[test]
@@ -7355,6 +7748,48 @@ mod studio_access_tests {
         // Distinct from Anonymous on purpose: bouncing a signed-in user to a
         // login they already passed is a loop, not a fix.
         assert_eq!(access(false, true, true, false), StudioAccess::NotAdmin);
+    }
+
+    #[test]
+    fn an_operator_gets_in_without_an_app_user_row() {
+        // The whole point of operators: a Pylon with no users at all — an
+        // API-only backend, a brand-new project — still has a way in.
+        assert_eq!(
+            operator_access(/* is_api_key */ false, /* is_authenticated */ true),
+            StudioAccess::Granted
+        );
+    }
+
+    #[test]
+    fn an_operator_grant_does_not_depend_on_is_admin_having_been_lifted() {
+        // `lift_operator` sets is_admin for the API calls Studio makes, but the
+        // gate resolves the operator itself. If this ever starts requiring
+        // is_admin, an ordering change elsewhere silently locks operators out.
+        assert_eq!(
+            studio_access_for(false, true, false, true, /* is_admin */ false),
+            StudioAccess::Granted
+        );
+    }
+
+    #[test]
+    fn an_operator_presenting_an_api_key_is_still_refused() {
+        // Operators are a login, not a scope. A `pk.*` token must not inherit
+        // Studio just because it resolved to an operator's id.
+        assert_eq!(
+            operator_access(/* is_api_key */ true, true),
+            StudioAccess::Anonymous
+        );
+    }
+
+    #[test]
+    fn a_deleted_operator_loses_access_even_with_a_live_session() {
+        // `pylon admin rm` deletes the credential; the cookie can outlive it.
+        // Once the operator no longer resolves, `is_operator` is false and
+        // there's no app User row to fall back on.
+        assert_eq!(
+            studio_access_for(false, true, false, /* is_operator */ false, false),
+            StudioAccess::Anonymous
+        );
     }
 
     #[test]
