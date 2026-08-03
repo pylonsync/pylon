@@ -13,9 +13,9 @@
   },
   "dependencies": {
     "@pylon-cloud/ui": "workspace:*",
-    "@pylonsync/functions": "^0.3.358",
-    "@pylonsync/react": "^0.3.358",
-    "@pylonsync/sdk": "^0.3.358",
+    "@pylonsync/functions": "^0.3.359",
+    "@pylonsync/react": "^0.3.359",
+    "@pylonsync/sdk": "^0.3.359",
     "@radix-ui/react-dropdown-menu": "^2.1.4",
     "@radix-ui/react-slot": "^1.2.3",
     "class-variance-authority": "^0.7.1",
@@ -28,7 +28,7 @@
     "tw-animate-css": "^1.2.0"
   },
   "devDependencies": {
-    "@pylonsync/cli": "^0.3.358",
+    "@pylonsync/cli": "^0.3.359",
     "@tailwindcss/cli": "^4.1.0",
     "@types/bun": "^1.2.0",
     "@types/node": "^22.0.0",
