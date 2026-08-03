@@ -30,11 +30,62 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed=web/dist/index.html");
-    // Watch the source so a `cargo build` after a JS change picks up
-    // the stale-bundle warning (the `include_str!` will use the old
-    // dist, but Cargo will at least re-run this script and reprint
-    // the rerun-if-changed list — useful in IDEs).
+    // Watch the source so a `cargo build` after a JS change re-runs this
+    // script and re-checks staleness below.
     println!("cargo:rerun-if-changed=web/src");
     println!("cargo:rerun-if-changed=web/index.html");
     println!("cargo:rerun-if-changed=web/vite.config.ts");
+
+    warn_if_stale(dist);
+}
+
+/// Warn when `web/src` is newer than the bundle we're about to embed.
+///
+/// `include_str!` happily embeds whatever is on disk, and nothing else notices:
+/// CI, the Dockerfile and release.yml all run `bun run build` first, so the
+/// published binary is always current, while a local `cargo build` silently
+/// ships whatever bundle was last built there. That gap has been months wide.
+///
+/// It stopped being cosmetic when Studio moved to session auth: a stale bundle
+/// still renders the old "paste your PYLON_ADMIN_TOKEN" dialog and posts it to
+/// a `/studio/login` route the server no longer serves.
+///
+/// A warning rather than a hard failure, because mtimes aren't reliable
+/// everywhere this builds — a fresh `git clone` and a `cargo publish` verify
+/// (which unpacks the tarball, dist included) can both produce source newer
+/// than dist through no fault of the operator. A missing bundle still panics;
+/// that check is unambiguous.
+fn warn_if_stale(dist: &Path) {
+    let newest_src = ["web/src", "web/index.html", "web/vite.config.ts"]
+        .iter()
+        .filter_map(|p| newest_mtime(Path::new(p)))
+        .max();
+    let (Some(src), Some(built)) = (newest_src, mtime(dist)) else {
+        return;
+    };
+    if src > built {
+        println!(
+            "cargo:warning=pylon-studio-api: web/dist/index.html is OLDER than web/src — \
+             the embedded Studio bundle does not include your latest UI changes. \
+             Run `(cd crates/studio_api/web && bun run build)` and rebuild."
+        );
+    }
+}
+
+fn mtime(p: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(p).ok()?.modified().ok()
+}
+
+/// Newest mtime in a file or directory tree. `None` if the path is missing.
+fn newest_mtime(p: &Path) -> Option<std::time::SystemTime> {
+    if p.is_file() {
+        return mtime(p);
+    }
+    let mut newest = mtime(p);
+    for entry in std::fs::read_dir(p).ok()?.flatten() {
+        if let Some(t) = newest_mtime(&entry.path()) {
+            newest = Some(newest.map_or(t, |cur| cur.max(t)));
+        }
+    }
+    newest
 }

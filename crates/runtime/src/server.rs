@@ -3909,17 +3909,6 @@ fn start_server(
                     pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name)
                 })
         };
-        // Studio admin cookie — set by POST /studio/login when the
-        // user submits the right PYLON_ADMIN_TOKEN. Stored under
-        // `${app_name}_admin` so it doesn't collide with the regular
-        // session cookie. When present + matches admin_token, the
-        // dispatcher returns AuthContext::admin() (handled below).
-        let admin_cookie_name = format!("{}_admin", &runtime.manifest().name);
-        let admin_cookie_token: Option<String> = request
-            .headers()
-            .iter()
-            .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
-            .and_then(|h| pylon_auth::extract_session_cookie(h.value.as_str(), &admin_cookie_name));
         let auth_token: Option<String> = bearer_token.or(cookie_token);
         // Token dispatcher (in priority order):
         //   1. Admin token → AuthContext::admin
@@ -3931,16 +3920,6 @@ fn start_server(
         // be misrouted.
         let auth_ctx_result: Result<pylon_auth::AuthContext, &'static str> = if admin_token
             .is_some()
-            && admin_cookie_token.is_some()
-            && pylon_auth::constant_time_eq(
-                admin_cookie_token.as_deref().unwrap_or("").as_bytes(),
-                admin_token.as_deref().unwrap_or("").as_bytes(),
-            ) {
-            // Studio admin cookie matched. Same auth as Bearer admin —
-            // we just got here via the /studio/login form instead of an
-            // Authorization header.
-            Ok(pylon_auth::AuthContext::admin())
-        } else if admin_token.is_some()
             && auth_token.is_some()
             && pylon_auth::constant_time_eq(
                 auth_token.as_deref().unwrap_or("").as_bytes(),
@@ -6320,115 +6299,42 @@ fn start_server(
 
         // Studio route (returns HTML, not JSON).
         //
-        // Privileged admin UI. It renders the full schema and lets the
-        // operator run mutations against the data browser. In production we
-        // require an admin token; in dev mode we leave it open so
-        // `pylon dev` remains friction-free for the single-user case.
+        // Privileged admin UI: it renders the full schema and runs mutations
+        // against the data browser. Access is a signed-in admin *user* — see
+        // [`studio_access`]. There is no Studio-specific credential and no
+        // Studio-specific login form; whoever the app already signed in is
+        // who Studio sees.
         //
-        // Serving a WWW-Authenticate Basic realm isn't useful here because
-        // admin auth is bearer-token based. Callers get a 401 and should
-        // retry with `Authorization: Bearer <PYLON_ADMIN_TOKEN>`.
-        // Studio login form. Browsers can't easily set Authorization
-        // headers, so this is the path users hit when they visit
-        // /studio without admin auth — the 401 below redirects here.
-        // POST takes the token, sets the admin cookie, redirects to
-        // /studio. GET renders the form.
-        if url == "/studio/login" && method == Method::Get {
-            let html = studio_login_html(None);
-            let response = with_security_headers(
-                Response::from_string(html)
-                    .with_status_code(200u16)
-                    .with_header(
-                        Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
-                    ),
-            );
-            let _ = request.respond(response);
-            mt.record_request("GET", 200);
-            return;
-        }
-        if url == "/studio/login" && method == Method::Post {
-            let mut body_bytes = Vec::new();
-            let _ = request.as_reader().read_to_end(&mut body_bytes);
-            let body_str = String::from_utf8_lossy(&body_bytes);
-            // form is `token=<value>` URL-encoded
-            let submitted = body_str
-                .split('&')
-                .filter_map(|p| p.split_once('='))
-                .find(|(k, _)| *k == "token")
-                .map(|(_, v)| {
-                    // URL-decode the basic case (+ and %xx). The token
-                    // is base64url-ish so + isn't really expected, but
-                    // safe to handle.
-                    let decoded = v.replace('+', " ");
-                    percent_decode_str(&decoded)
-                })
-                .unwrap_or_default();
-            let admin = admin_token.as_deref().unwrap_or("");
-            if admin.is_empty() {
-                let html = studio_login_html(Some(
-                    "Studio is not configured for admin auth (PYLON_ADMIN_TOKEN unset on this Pylon).",
-                ));
-                let response = with_security_headers(
-                    Response::from_string(html)
-                        .with_status_code(503u16)
-                        .with_header(
-                            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
-                        ),
-                );
-                let _ = request.respond(response);
-                mt.record_request("POST", 503);
-                return;
-            }
-            if !pylon_auth::constant_time_eq(submitted.as_bytes(), admin.as_bytes()) {
-                let html = studio_login_html(Some("Invalid admin token."));
-                let response = with_security_headers(
-                    Response::from_string(html)
-                        .with_status_code(401u16)
-                        .with_header(
-                            Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap(),
-                        ),
-                );
-                let _ = request.respond(response);
-                mt.record_request("POST", 401);
-                return;
-            }
-            // Token verified. Set the admin cookie + redirect.
-            let admin_cookie = format!(
-                "{}={}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=28800",
-                admin_cookie_name, submitted,
-            );
-            let response = with_security_headers(
-                Response::from_string("")
-                    .with_status_code(303u16)
-                    .with_header(Header::from_bytes("Location", "/studio").unwrap())
-                    .with_header(Header::from_bytes("Set-Cookie", admin_cookie).unwrap()),
-            );
-            let _ = request.respond(response);
-            mt.record_request("POST", 303);
-            return;
-        }
+        // `/studio/logout` ends that session the same way the app's own
+        // sign-out does — revoke the token server-side, clear the cookie —
+        // so "sign out and try a different account" from the access-denied
+        // page can't leave a live session behind on a shared machine.
         if url == "/studio/logout" && (method == Method::Get || method == Method::Post) {
-            let cleared = format!(
-                "{}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
-                admin_cookie_name,
-            );
-            // Send the user back to wherever they'd go to sign in.
-            // For cookie-authed cloud users this is the host's
-            // /login page — they need to sign in as a different
-            // (admin) account, not paste an admin token.
+            let session_cookie_value = request
+                .headers()
+                .iter()
+                .find(|h| h.field.as_str() == "Cookie" || h.field.as_str() == "cookie")
+                .and_then(|h| {
+                    pylon_auth::extract_session_cookie(h.value.as_str(), &cookie_config.name)
+                });
+            if let Some(token) = session_cookie_value.as_deref() {
+                session_store.revoke(token);
+            }
             let target = rt
                 .studio_config()
                 .login_url
                 .clone()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "/studio/login".to_string());
+                .unwrap_or_else(|| "/studio".to_string());
             let response = with_security_headers(
                 Response::from_string("")
                     .with_status_code(303u16)
                     .with_header(
                         Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap(),
                     )
-                    .with_header(Header::from_bytes("Set-Cookie", cleared).unwrap()),
+                    .with_header(
+                        Header::from_bytes("Set-Cookie", cookie_config.clear_value()).unwrap(),
+                    ),
             );
             let _ = request.respond(response);
             mt.record_request("GET", 303);
@@ -6458,36 +6364,23 @@ fn start_server(
             || url == "/studio/")
             && method == Method::Get
         {
-            // Three-state Studio gate. The React bundle ships the full
-            // manifest (entity names, function names, policy names) at
-            // build time; serving it to anyone but admins leaks the
-            // entire data-model shape, AND drops the user into a dead
-            // "paste your admin token" dialog that doesn't match how
-            // most production apps actually authenticate operators.
+            // Studio gate — see [`studio_access`] for what qualifies. The
+            // bundle ships the full manifest (every entity, field, function
+            // and policy name) at build time, so serving it to anyone but an
+            // admin leaks the whole data-model shape before a single API call.
             //
-            // Cases:
-            //   1. is_admin: serve the studio HTML (bundle loads
-            //      normally; React calls /api/auth/me and renders
-            //      admin tabs).
-            //   2. authed-but-not-admin: serve a small "access denied"
-            //      HTML page with a logout link. No point sending them
-            //      back to a login they're already past.
-            //   3. anonymous: 303 redirect. Prefer the app's
-            //      `studio.config.ts -> loginUrl` (e.g. Pylon Cloud's
-            //      `/login` dashboard page) so users land on the real
-            //      email/password form and the existing session cookie
-            //      lifts them via `auth.user.adminField` on the way
-            //      back. Falls back to `/studio/login` (the built-in
-            //      admin-token form) for stand-alone Pylon apps.
-            //
-            // Dev mode is exempt — `pylon dev` is single-user local and
-            // pre-gating here is just friction.
-            if !is_dev && !auth_ctx.is_admin {
-                let studio_cfg = rt.studio_config();
-                if auth_ctx.user_id.is_some() {
-                    // Authed but not admin. Render a static page so the
-                    // user understands they can't escalate by reloading
-                    // — they need a different account.
+            //   Granted   → serve the HTML.
+            //   NotAdmin  → a static "access denied" page. They already have a
+            //               working session; bouncing them to login is a loop.
+            //   Anonymous → send them to the app's own login page when
+            //               `studio.config.ts -> loginUrl` names one, so the
+            //               session cookie they come back with lifts them via
+            //               `auth.user.adminField`. Otherwise explain how to
+            //               designate an admin — there is no built-in login
+            //               page to fall back to.
+            match studio_access(&rt, &auth_ctx) {
+                StudioAccess::Granted => {}
+                StudioAccess::NotAdmin => {
                     let html = studio_no_access_html();
                     let response = with_security_headers(
                         Response::from_string(html)
@@ -6501,29 +6394,45 @@ fn start_server(
                     mt.record_request("GET", 403);
                     return;
                 }
-                let target = studio_cfg
-                    .login_url
-                    .as_deref()
-                    .filter(|s| !s.is_empty())
-                    .map(|s| {
-                        // Append ?next=/studio so the host app can
-                        // bounce back. Keep it dumb — no query parsing
-                        // because most app login URLs don't already
-                        // carry a query.
-                        let sep = if s.contains('?') { '&' } else { '?' };
-                        format!("{s}{sep}next=/studio")
-                    })
-                    .unwrap_or_else(|| "/studio/login".to_string());
-                let response = with_security_headers(
-                    Response::from_string("")
-                        .with_status_code(303u16)
-                        .with_header(
-                            Header::from_bytes("Location", target.as_bytes().to_vec()).unwrap(),
+                StudioAccess::Anonymous => {
+                    let target = rt
+                        .studio_config()
+                        .login_url
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| {
+                            // Append ?next=/studio so the host app can bounce
+                            // back. Keep it dumb — no query parsing, because
+                            // most app login URLs don't already carry a query.
+                            let sep = if s.contains('?') { '&' } else { '?' };
+                            format!("{s}{sep}next=/studio")
+                        });
+                    let response = match target {
+                        Some(target) => with_security_headers(
+                            Response::from_string("")
+                                .with_status_code(303u16)
+                                .with_header(
+                                    Header::from_bytes("Location", target.as_bytes().to_vec())
+                                        .unwrap(),
+                                ),
                         ),
-                );
-                let _ = request.respond(response);
-                mt.record_request("GET", 303);
-                return;
+                        None => with_security_headers(
+                            Response::from_string(studio_signin_required_html())
+                                .with_status_code(401u16)
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Content-Type",
+                                        "text/html; charset=utf-8",
+                                    )
+                                    .unwrap(),
+                                ),
+                        ),
+                    };
+                    let status = response.status_code().0;
+                    let _ = request.respond(response);
+                    mt.record_request("GET", status);
+                    return;
+                }
             }
 
             // Derive the public base URL from the request's headers.
@@ -6570,13 +6479,14 @@ fn start_server(
             )
         } else if url == "/studio/extensions.js" && method == Method::Get {
             // Bundled `studio.entry.tsx` — produced by the CLI's
-            // `bun build` pass. Same admin gate as /studio in
-            // production (the bundle can carry custom React components
-            // that introspect the live API surface — admin-only).
-            if !is_dev && !auth_ctx.is_admin {
+            // `bun build` pass. Same gate as /studio itself: the bundle
+            // carries custom React components that introspect the live API
+            // surface, so it is admin-only, and it is pointless to anyone the
+            // shell was refused to anyway.
+            if studio_access(&rt, &auth_ctx) != StudioAccess::Granted {
                 let body = json_error(
                     "AUTH_REQUIRED",
-                    "/studio/extensions.js requires admin auth in production",
+                    "/studio/extensions.js requires a signed-in admin user",
                 );
                 let response = with_security_headers(
                     Response::from_string(&body)
@@ -6829,14 +6739,21 @@ fn start_server(
         //
         // `ws:` + `wss:` cover localhost dev + TLS deploys without
         // hard-coding ports. Same-origin `'self'` keeps HTTP fetches
-        // allowed. Inline + eval stay for the Tailwind/Babel CDN scripts
-        // the current Studio HTML includes.
+        // allowed. `'unsafe-inline'` is required because the bundle is a
+        // single self-contained HTML with its script and style inlined
+        // (vite-plugin-singlefile).
+        //
+        // No CDN hosts and no `'unsafe-eval'`: those were here for
+        // Tailwind/Babel CDN scripts an older Studio HTML pulled at runtime.
+        // The bundle references neither, so the allowance was widening the
+        // policy on the admin surface for nothing.
         if is_studio {
             response = response.with_header(
                 Header::from_bytes(
                     "Content-Security-Policy",
-                    "default-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://unpkg.com ws: wss:",
-                ).unwrap(),
+                    "default-src 'self' 'unsafe-inline' ws: wss:",
+                )
+                .unwrap(),
             );
         }
 
@@ -7173,57 +7090,208 @@ fn verify_admin_or_metrics_auth(
     verified && email.map(|e| allow.contains(&e)).unwrap_or(false)
 }
 
-/// Render the Studio login HTML form. Plain HTML (no framework) so it
-/// renders without any JS dependency — important because /studio's
-/// own JS runs only AFTER admin auth is established. The form POSTs
-/// `token=<value>` to /studio/login.
+/// "Studio needs a signed-in admin" page. Served on an anonymous hit when the
+/// app hasn't told us where its login page is (`studio.config.ts -> loginUrl`).
 ///
-/// Style is intentionally minimal: a single centered card. Pylon's
-/// design tokens aren't reachable from a static HTML string, so the
-/// styling is inline and conservative.
-fn studio_login_html(error: Option<&str>) -> String {
-    let err_html = error
-        .map(|e| {
-            format!(
-                r#"<div style="margin:12px 0;padding:10px 12px;border:1px solid #f4a4a4;background:#fff5f5;border-radius:6px;color:#a40000;font:14px/1.4 ui-sans-serif,system-ui;">{}</div>"#,
-                escape_html(e),
-            )
-        })
-        .unwrap_or_default();
-    format!(
-        r#"<!doctype html>
+/// It replaced a form that took `PYLON_ADMIN_TOKEN`. There is deliberately
+/// nothing to type here: Studio authenticates people through the app's own
+/// sign-in, and the only thing a visitor could usefully do at this point is
+/// find out how to get an account designated as admin. Redirecting instead
+/// would mean inventing a login path this app may not serve.
+///
+/// Plain HTML with no framework and no JS — the Studio bundle is exactly what
+/// we're refusing to serve. Styling is inline and conservative because Pylon's
+/// design tokens aren't reachable from a static string.
+fn studio_signin_required_html() -> String {
+    r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Pylon Studio · sign in</title>
+<title>Pylon Studio · sign in required</title>
 <style>
-  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }}
-  .card {{ width: 360px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }}
-  h1 {{ margin: 0 0 4px; font-size: 18px; letter-spacing: -0.01em; }}
-  p.lead {{ margin: 0 0 16px; color: #666; font-size: 13px; }}
-  label {{ display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #666; margin: 12px 0 6px; }}
-  input[type=password] {{ width: 100%; box-sizing: border-box; padding: 8px 10px; font-family: ui-monospace, monospace; font-size: 13px; border: 1px solid #d4d2cd; border-radius: 6px; background: #fafafa; }}
-  input[type=password]:focus {{ outline: none; border-color: #2a5fdf; background: #fff; }}
-  button {{ margin-top: 16px; width: 100%; padding: 9px 12px; background: #2a5fdf; color: #fff; border: 0; border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer; }}
-  button:hover {{ background: #1f4cb8; }}
-  .hint {{ margin-top: 16px; font-size: 11.5px; color: #888; }}
-  code {{ font-family: ui-monospace, monospace; font-size: 11.5px; background: #f4f3f0; padding: 1px 4px; border-radius: 3px; }}
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #fafaf9; color: #1a1a1a; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+  .card { width: 460px; max-width: 90vw; padding: 24px; background: #fff; border: 1px solid #e7e5e0; border-radius: 8px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  h1 { margin: 0 0 6px; font-size: 18px; letter-spacing: -0.01em; }
+  p { margin: 0 0 14px; color: #555; font-size: 13px; }
+  h2 { margin: 18px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #666; }
+  ol { margin: 0; padding-left: 18px; color: #555; font-size: 13px; }
+  li { margin-bottom: 6px; }
+  code { font-family: ui-monospace, monospace; font-size: 11.5px; background: #f4f3f0; padding: 1px 4px; border-radius: 3px; }
+  .muted { margin-top: 18px; padding-top: 14px; border-top: 1px solid #f0efec; color: #888; font-size: 11.5px; }
 </style>
 </head>
 <body>
-<form class="card" method="POST" action="/studio/login" autocomplete="off">
-  <h1>Studio</h1>
-  <p class="lead">Sign in with your Pylon admin token.</p>
-  {err_html}
-  <label for="token">Admin token</label>
-  <input id="token" name="token" type="password" autofocus required>
-  <button type="submit">Sign in</button>
-  <div class="hint">Set on the server as <code>PYLON_ADMIN_TOKEN</code>.</div>
-</form>
+<div class="card">
+  <h1>Studio needs a signed-in admin</h1>
+  <p>Studio shows this app's live data and schema, so it requires an account this app treats as an admin. Sign in to the app first, then reload this page.</p>
+  <h2>Designating an admin</h2>
+  <ol>
+    <li>Set <code>PYLON_ADMIN_EMAILS</code> to a comma-separated list of emails. A matching account with a <em>verified</em> email becomes an admin on its next request.</li>
+    <li>Or configure <code>auth.user.adminField</code> in your manifest and set that field to true on the user's row.</li>
+  </ol>
+  <div class="muted">Set <code>loginUrl</code> in <code>studio.config.ts</code> to send visitors straight to your app's sign-in page instead of this one. <code>PYLON_ADMIN_TOKEN</code> still authorizes the <code>/admin/*</code> API endpoints, but no longer opens Studio — it identifies no one.</div>
+</div>
 </body>
-</html>"#,
+</html>"##
+        .to_string()
+}
+
+/// Who may load Studio.
+///
+/// Studio renders live rows, the whole schema, and operational controls, so it
+/// requires a *person*: a signed-in user that this app's own admin designation
+/// — `auth.user.adminField` or `PYLON_ADMIN_EMAILS`, both applied by
+/// [`lift_admin`] — considers an admin.
+///
+/// Deliberately NOT sufficient:
+///
+/// - **`PYLON_ADMIN_TOKEN`.** A shared secret is not an identity. It has no
+///   user row, no email, and nothing to attribute a destructive row edit to,
+///   and reaching Studio with it meant pasting the production superuser secret
+///   into a browser form that parked it in `localStorage`, readable by any XSS
+///   on the origin. The token stays valid for the machine-facing `/admin/*`
+///   endpoints, whose callers are deploy scripts with no session to speak of.
+///   [`pylon_auth::AuthContext::admin`] fabricates the user id `__admin__`,
+///   which owns no row in the User entity — that is what the row check rejects.
+/// - **Guests.** A guest id exists so a cart can outlive a page load, not to
+///   identify anyone.
+/// - **API keys.** A `pk.*` token carries the scope its issuer chose;
+///   `lift_admin` already refuses to promote one, and Studio is not a scope.
+/// - **Dev mode.** The previous gate skipped every check whenever
+///   `PYLON_DEV_MODE` was set, so `pylon dev` served the entire data model —
+///   every entity, field, function and policy name — to any unauthenticated
+///   caller that could reach the port. A LAN peer, an ngrok tunnel and a
+///   forwarded Codespace port all qualify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StudioAccess {
+    /// Signed-in admin user. Serve Studio.
+    Granted,
+    /// A real user, but not an admin of this app. Say so rather than bouncing
+    /// them back through a login they already passed.
+    NotAdmin,
+    /// No usable identity. Send them to the app's login page.
+    Anonymous,
+}
+
+/// Resolve [`StudioAccess`] for a request whose `auth_ctx` has already been
+/// through [`lift_admin`].
+pub(crate) fn studio_access(runtime: &Runtime, auth_ctx: &pylon_auth::AuthContext) -> StudioAccess {
+    // `is_authenticated()` is already "real user id AND not a guest".
+    let authenticated = auth_ctx.is_authenticated();
+    let user_row_exists = if authenticated {
+        auth_ctx
+            .user_id
+            .as_deref()
+            .and_then(|uid| {
+                runtime
+                    .get_by_id(runtime.manifest().auth.user.entity.as_str(), uid)
+                    .ok()
+                    .flatten()
+            })
+            .is_some()
+    } else {
+        false
+    };
+    studio_access_for(
+        auth_ctx.is_api_key_auth(),
+        authenticated,
+        user_row_exists,
+        auth_ctx.is_admin,
     )
+}
+
+/// Pure core of [`studio_access`]. Split out from the row lookup so the table
+/// below can drive every combination without standing up a Runtime.
+fn studio_access_for(
+    is_api_key: bool,
+    is_authenticated: bool,
+    user_row_exists: bool,
+    is_admin: bool,
+) -> StudioAccess {
+    if is_api_key || !is_authenticated || !user_row_exists {
+        return StudioAccess::Anonymous;
+    }
+    if is_admin {
+        StudioAccess::Granted
+    } else {
+        StudioAccess::NotAdmin
+    }
+}
+
+#[cfg(test)]
+mod studio_access_tests {
+    use super::{studio_access_for, StudioAccess};
+
+    /// Named args — a bare `studio_access_for(false, true, true, true)` at each
+    /// call site is unreadable and easy to transpose.
+    fn access(
+        is_api_key: bool,
+        is_authenticated: bool,
+        user_row_exists: bool,
+        is_admin: bool,
+    ) -> StudioAccess {
+        studio_access_for(is_api_key, is_authenticated, user_row_exists, is_admin)
+    }
+
+    #[test]
+    fn signed_in_admin_user_is_the_only_way_in() {
+        assert_eq!(access(false, true, true, true), StudioAccess::Granted);
+    }
+
+    #[test]
+    fn admin_token_alone_never_opens_studio() {
+        // `AuthContext::admin()` — what PYLON_ADMIN_TOKEN produces — is
+        // authenticated and is_admin, but its `__admin__` user id owns no row
+        // in the User entity. Studio is for people; the token keeps working on
+        // /admin/* where the caller is a script.
+        assert_eq!(
+            access(false, true, /* user_row_exists */ false, true),
+            StudioAccess::Anonymous
+        );
+    }
+
+    #[test]
+    fn anonymous_is_refused() {
+        assert_eq!(access(false, false, false, false), StudioAccess::Anonymous);
+    }
+
+    #[test]
+    fn guest_is_refused() {
+        // `is_authenticated()` is already false for a guest, so a guest looks
+        // identical to anonymous here. Pinned so a future change that starts
+        // treating guests as authenticated has to confront this line.
+        assert_eq!(access(false, false, true, false), StudioAccess::Anonymous);
+    }
+
+    #[test]
+    fn api_key_is_refused_even_for_an_admin_user() {
+        // A scoped `pk.*` token minted for an admin's account must not inherit
+        // Studio. Belt and braces: `lift_admin` also refuses to promote an
+        // API-key context, so `is_admin` should already be false — this pins
+        // the outcome even if that ever regresses.
+        assert_eq!(
+            access(/* is_api_key */ true, true, true, true),
+            StudioAccess::Anonymous
+        );
+    }
+
+    #[test]
+    fn signed_in_non_admin_is_told_so_not_redirected() {
+        // Distinct from Anonymous on purpose: bouncing a signed-in user to a
+        // login they already passed is a loop, not a fix.
+        assert_eq!(access(false, true, true, false), StudioAccess::NotAdmin);
+    }
+
+    #[test]
+    fn a_session_whose_user_row_was_deleted_is_refused() {
+        // Deleting the User row is how an operator revokes a person. The
+        // session cookie can outlive it; access must not.
+        assert_eq!(
+            access(false, true, /* user_row_exists */ false, true),
+            StudioAccess::Anonymous
+        );
+    }
 }
 
 /// "You're signed in but not an admin" page. Rendered when the /studio
@@ -7260,15 +7328,7 @@ fn studio_no_access_html() -> String {
 </html>"##.to_string()
 }
 
-fn escape_html(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
-}
-
-/// Tiny URL-decoder for the studio login form's `token=…` field.
+/// Tiny URL-decoder for form-encoded field values.
 /// Handles `%xx` escapes; `+` → space conversion happens at the
 /// caller. Doesn't allocate when there's nothing to decode.
 fn percent_decode_str(s: &str) -> String {

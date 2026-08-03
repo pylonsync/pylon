@@ -6,40 +6,57 @@ import {
 	useMemo,
 	useState,
 } from "react";
-import { type AuthMe, api, getStoredToken, setStoredToken } from "@/lib/pylon";
+import { type AuthMe, type StudioUser, api } from "@/lib/pylon";
 
-// Studio uses bearer-token auth (the operator pastes their PYLON_ADMIN_TOKEN
-// into the login dialog). Cookie auth would also work for non-admin users
-// but Studio is operator-facing — admin token is the primary path.
+// Studio authenticates as a person, using whatever session the app itself
+// issued — the same cookie the rest of the app runs on. There is no Studio
+// credential to obtain, paste, or store.
 //
-// `me` is the resolved AuthContext from /api/auth/me. `null` while
-// resolving, then either the resolved user (admin or not) or an
-// anonymous shape. UI tabs that need admin show a locked state when
-// `me?.is_admin` is false.
+// The server already refused to serve this bundle to anyone who isn't a
+// signed-in admin (see `studio_access` in crates/runtime/src/server.rs), so by
+// the time this provider runs the answer is known to be "an admin". We still
+// resolve it client-side, for two reasons: the UI shows *who* you are, and a
+// session that expires while the tab is open should surface as a locked state
+// rather than a page of failing fetches.
+//
+// `/api/auth/session` returns the auth context AND the User row in one
+// round-trip, so the sidebar can show an email without a second request.
 
 type AuthState = {
+	/** Resolved auth context. `null` while the first request is in flight. */
 	me: AuthMe | null;
+	/** The signed-in User row, minus server-only fields. `null` if anonymous. */
+	user: StudioUser | null;
 	loading: boolean;
-	hasToken: boolean;
-	signIn: (token: string) => Promise<void>;
-	signOut: () => void;
 	refresh: () => Promise<void>;
 };
+
+type SessionResponse = {
+	session?: AuthMe | null;
+	user?: StudioUser | null;
+};
+
+const ANONYMOUS: AuthMe = { user_id: null, is_admin: false, roles: [] };
 
 const AuthCtx = createContext<AuthState | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
 	const [me, setMe] = useState<AuthMe | null>(null);
+	const [user, setUser] = useState<StudioUser | null>(null);
 	const [loading, setLoading] = useState(true);
-	const [token, setTokenState] = useState<string | null>(() => getStoredToken());
 
 	const refresh = useCallback(async () => {
 		setLoading(true);
 		try {
-			const resp = await api<AuthMe>("/api/auth/me");
-			setMe(resp);
+			const resp = await api<SessionResponse>("/api/auth/session");
+			setMe(resp?.session ?? ANONYMOUS);
+			setUser(resp?.user ?? null);
 		} catch {
-			setMe({ user_id: null, is_admin: false, roles: [] });
+			// A failure here means the session went away underneath us (or the
+			// network did). Either way the honest answer is "not signed in" —
+			// claiming otherwise just produces a UI whose every panel errors.
+			setMe(ANONYMOUS);
+			setUser(null);
 		} finally {
 			setLoading(false);
 		}
@@ -47,34 +64,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
 	useEffect(() => {
 		void refresh();
-		// `token` triggers re-resolve on sign-in/sign-out. The actual
-		// token value is read via getStoredToken inside api().
-	}, [refresh, token]);
-
-	const signIn = useCallback(
-		async (newToken: string) => {
-			// Validate the token by hitting /api/auth/me with it. If it
-			// resolves to is_admin=true we trust the operator and persist.
-			// A user-token with is_admin=false is also accepted (Studio
-			// is useful in read-only mode for non-admins; admin-gated
-			// tabs will indicate they need elevation).
-			const resp = await api<AuthMe>("/api/auth/me", { token: newToken });
-			setStoredToken(newToken);
-			setTokenState(newToken);
-			setMe(resp);
-		},
-		[],
-	);
-
-	const signOut = useCallback(() => {
-		setStoredToken(null);
-		setTokenState(null);
-		setMe({ user_id: null, is_admin: false, roles: [] });
-	}, []);
+	}, [refresh]);
 
 	const value = useMemo<AuthState>(
-		() => ({ me, loading, hasToken: !!token, signIn, signOut, refresh }),
-		[me, loading, token, signIn, signOut, refresh],
+		() => ({ me, user, loading, refresh }),
+		[me, user, loading, refresh],
 	);
 
 	return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
@@ -84,4 +78,15 @@ export function useAuth(): AuthState {
 	const ctx = useContext(AuthCtx);
 	if (!ctx) throw new Error("useAuth must be used inside <AuthProvider>");
 	return ctx;
+}
+
+/** Display name for the signed-in admin. Falls back through the usual fields. */
+export function displayName(user: StudioUser | null, me: AuthMe | null): string {
+	if (user) {
+		for (const key of ["name", "email", "username"] as const) {
+			const v = user[key];
+			if (typeof v === "string" && v.trim()) return v.trim();
+		}
+	}
+	return me?.user_id ?? "Signed in";
 }

@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { ExternalLink, LayoutDashboard, Lock, LogIn, LogOut, Settings } from "lucide-react";
+import { useMemo } from "react";
+import { ExternalLink, LayoutDashboard, Lock, LogOut, Settings } from "lucide-react";
 import {
 	Sidebar,
 	SidebarContent,
@@ -14,7 +14,6 @@ import {
 	SidebarMenuItem,
 	SidebarProvider,
 } from "@/components/ui/sidebar";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
 	DropdownMenu,
@@ -24,8 +23,7 @@ import {
 	DropdownMenuSeparator,
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { useAuth } from "@/auth/AuthContext";
-import { SignInDialog } from "@/auth/SignInDialog";
+import { displayName, useAuth } from "@/auth/AuthContext";
 import { LockedPage } from "@/pages/Locked";
 import { MANIFEST } from "@/lib/pylon";
 import type { StudioConfig } from "@/lib/studio-config";
@@ -61,20 +59,18 @@ export function StudioLayout({
 	onRouteChange: (r: StudioRoute) => void;
 	children: React.ReactNode;
 }) {
-	const { me, hasToken, loading, signOut } = useAuth();
-	const [signInOpen, setSignInOpen] = useState(false);
+	const { me, user, loading } = useAuth();
 	const isAdmin = !!me?.is_admin;
-	// Cookie-authed users don't have a Bearer token in localStorage but
-	// /api/auth/me resolves their session and sets `me.user_id`. Treat
-	// "has a resolved session" as authed. hasToken is OR'd in for the
-	// Bearer path so legacy admin-token signins still register.
-	const isAuthed = !!me?.user_id || hasToken;
+	const account = displayName(user, me);
 
 	const sections = useMemo(() => resolveNav(config, MANIFEST), [config]);
 	const footer = useMemo(() => defaultFooter(config.sidebar), [config.sidebar]);
 
-	// Block the main content area for unauthenticated callers.
-	const requireAuth = !loading && !isAuthed;
+	// The server refuses to serve this bundle to anyone but a signed-in admin,
+	// so reaching an un-admin state here means the session ended while the tab
+	// was open. Say so and offer the way back rather than leaving every panel
+	// to fail its own fetch with a 401.
+	const sessionLost = !loading && !isAdmin;
 
 	const crumbs = useMemo<BreadcrumbCrumb[]>(() => {
 		const head: BreadcrumbCrumb = {
@@ -123,54 +119,50 @@ export function StudioLayout({
 						)}
 						<SidebarMenu className="px-2 pb-2">
 							<SidebarMenuItem>
-								{isAuthed ? (
-									<DropdownMenu>
-										<DropdownMenuTrigger asChild>
-											<SidebarMenuButton tooltip="Account">
-												<div className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-													{isAdmin
-														? "A"
-														: me?.user_id?.slice(0, 1).toUpperCase() ?? "U"}
-												</div>
-												<div className="flex flex-col items-start leading-tight">
-													<span className="text-xs font-medium">
-														{isAdmin ? "Admin" : me?.user_id ?? "Signed in"}
-													</span>
-													<span className="text-[10px] text-muted-foreground">
-														{isAdmin ? "Full access" : "Limited"}
-													</span>
-												</div>
-											</SidebarMenuButton>
-										</DropdownMenuTrigger>
-										<DropdownMenuContent
-											side="right"
-											align="end"
-											className="min-w-44"
+								<DropdownMenu>
+									<DropdownMenuTrigger asChild>
+										<SidebarMenuButton tooltip="Account">
+											<div className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+												{account.slice(0, 1).toUpperCase()}
+											</div>
+											<div className="flex flex-col items-start leading-tight">
+												<span className="max-w-[10rem] truncate text-xs font-medium">
+													{account}
+												</span>
+												<span className="text-[10px] text-muted-foreground">
+													{isAdmin ? "Admin" : "Session ended"}
+												</span>
+											</div>
+										</SidebarMenuButton>
+									</DropdownMenuTrigger>
+									<DropdownMenuContent
+										side="right"
+										align="end"
+										className="min-w-44"
+									>
+										<DropdownMenuLabel className="text-xs font-normal">
+											{account}
+										</DropdownMenuLabel>
+										<DropdownMenuSeparator />
+										<DropdownMenuItem
+											onClick={() =>
+												onRouteChange({ kind: "page", id: "settings" })
+											}
 										>
-											<DropdownMenuLabel className="text-xs font-normal">
-												{me?.user_id ?? "anonymous"}
-											</DropdownMenuLabel>
-											<DropdownMenuSeparator />
-											<DropdownMenuItem
-												onClick={() =>
-													onRouteChange({ kind: "page", id: "settings" })
-												}
-											>
-												<Settings className="size-4" />
-												Settings
-											</DropdownMenuItem>
-											<DropdownMenuItem onClick={signOut}>
+											<Settings className="size-4" />
+											Settings
+										</DropdownMenuItem>
+										{/* A full navigation, not a fetch: /studio/logout revokes the
+										    session server-side and redirects to the app's login page,
+										    so there's nothing left for this tab to render. */}
+										<DropdownMenuItem asChild>
+											<a href="/studio/logout">
 												<LogOut className="size-4" />
 												Sign out
-											</DropdownMenuItem>
-										</DropdownMenuContent>
-									</DropdownMenu>
-								) : (
-									<SidebarMenuButton onClick={() => setSignInOpen(true)}>
-										<LogIn />
-										<span>Sign in</span>
-									</SidebarMenuButton>
-								)}
+											</a>
+										</DropdownMenuItem>
+									</DropdownMenuContent>
+								</DropdownMenu>
 							</SidebarMenuItem>
 						</SidebarMenu>
 					</SidebarFooter>
@@ -179,34 +171,25 @@ export function StudioLayout({
 					<header className="flex h-14 shrink-0 items-center gap-3 border-b px-6">
 						<Breadcrumbs crumbs={crumbs} />
 						<div className="ml-auto flex items-center gap-2">
-							{!isAuthed && (
-								<Button
-									size="sm"
-									variant="outline"
-									onClick={() => setSignInOpen(true)}
-								>
-									<LogIn className="size-3.5" /> Sign in
-								</Button>
-							)}
-							{isAuthed && (
-								<Badge variant={isAdmin ? "default" : "secondary"}>
-									{isAdmin ? "Admin" : "Signed in"}
+							{!loading && (
+								<Badge variant={isAdmin ? "default" : "destructive"}>
+									{isAdmin ? "Admin" : "Session ended"}
 								</Badge>
 							)}
 						</div>
 					</header>
 					<div className="px-6 py-6">
-						{requireAuth ? (
+						{sessionLost ? (
 							<LockedPage
-								title="Sign in to Pylon Studio"
-								description="Studio surfaces your live data, schema, and operations. Sign in with PYLON_ADMIN_TOKEN (or your user token) to continue."
+								title="Your session ended"
+								description="Studio follows your account on this app. Sign in again as an admin to continue."
+								action={{ label: "Sign in", href: "/studio/logout" }}
 							/>
 						) : (
 							children
 						)}
 					</div>
 				</SidebarInset>
-				<SignInDialog open={signInOpen} onOpenChange={setSignInOpen} />
 			</SidebarProvider>
 		</ThemeProvider>
 	);

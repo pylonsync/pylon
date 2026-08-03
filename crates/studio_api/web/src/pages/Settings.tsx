@@ -1,11 +1,12 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { useAuth } from "@/auth/AuthContext";
+import { displayName, useAuth } from "@/auth/AuthContext";
 import { API_BASE, MANIFEST } from "@/lib/pylon";
 
 export function SettingsPage() {
-	const { me, hasToken, signOut } = useAuth();
+	const { me, user } = useAuth();
+	const account = displayName(user, me);
 	return (
 		<div className="grid gap-4 md:grid-cols-2">
 			<Card>
@@ -13,9 +14,9 @@ export function SettingsPage() {
 					<CardTitle>Session</CardTitle>
 				</CardHeader>
 				<CardContent className="space-y-3 text-sm">
-					<Row label="Signed in" value={hasToken ? "Yes" : "No"} />
+					<Row label="Signed in as" value={account} />
 					<Row
-						label="Identity"
+						label="User id"
 						value={<code className="text-xs">{me?.user_id ?? "anonymous"}</code>}
 					/>
 					<Row
@@ -32,13 +33,11 @@ export function SettingsPage() {
 							value={<code className="text-xs">{me.tenant_id}</code>}
 						/>
 					)}
-					{hasToken && (
-						<div className="pt-2">
-							<Button variant="outline" size="sm" onClick={signOut}>
-								Sign out
-							</Button>
-						</div>
-					)}
+					<div className="pt-2">
+						<Button variant="outline" size="sm" asChild>
+							<a href="/studio/logout">Sign out</a>
+						</Button>
+					</div>
 				</CardContent>
 			</Card>
 

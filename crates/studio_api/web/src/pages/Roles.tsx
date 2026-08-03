@@ -14,9 +14,10 @@ export function RolesPage() {
 				<CardHeader>
 					<CardTitle className="text-base">Role primitives</CardTitle>
 					<CardDescription>
-						`is_admin` is the only built-in role. Custom roles attach through
-						the `roles` claim on the auth context — set them in your auth
-						provider or via `PYLON_ADMIN_TOKEN` for the bootstrap admin.
+						`is_admin` is the only built-in role. It is granted per user, by
+						`auth.user.adminField` on the User row or the `PYLON_ADMIN_EMAILS`
+						allowlist. Custom roles attach through the `roles` claim on the
+						auth context — set them in your auth provider.
 					</CardDescription>
 				</CardHeader>
 				<CardContent className="text-sm text-muted-foreground space-y-2">

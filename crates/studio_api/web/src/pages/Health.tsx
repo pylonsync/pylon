@@ -72,7 +72,7 @@ export function HealthPage() {
 		return (
 			<LockedPage
 				title="Health requires admin"
-				description="Sign in with PYLON_ADMIN_TOKEN to view server health and metrics."
+				description="Server health and metrics are admin-only. Sign in with an admin account to view them."
 			/>
 		);
 	}

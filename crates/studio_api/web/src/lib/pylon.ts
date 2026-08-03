@@ -67,24 +67,12 @@ export const MANIFEST: Manifest =
 		routes: [],
 	} as Manifest);
 
-const ADMIN_TOKEN_KEY = "pylon-studio-admin-token";
-
-export function getStoredToken(): string | null {
-	try {
-		return window.localStorage.getItem(ADMIN_TOKEN_KEY);
-	} catch {
-		return null;
-	}
-}
-
-export function setStoredToken(token: string | null): void {
-	try {
-		if (token) window.localStorage.setItem(ADMIN_TOKEN_KEY, token);
-		else window.localStorage.removeItem(ADMIN_TOKEN_KEY);
-	} catch {
-		// localStorage blocked — fine, session won't persist.
-	}
-}
+/**
+ * The signed-in User row as returned by `/api/auth/session`, with
+ * `passwordHash`, `_`-prefixed columns and `serverOnly` fields already
+ * stripped server-side. Shape is app-defined, so it stays open.
+ */
+export type StudioUser = Record<string, unknown>;
 
 export class ApiError extends Error {
 	constructor(
@@ -96,13 +84,16 @@ export class ApiError extends Error {
 	}
 }
 
-export type ApiOptions = RequestInit & { token?: string | null };
+export type ApiOptions = RequestInit;
 
 /**
- * Fetch wrapper that forwards the configured admin token (or whatever
- * was passed in `opts.token`) and parses the standard Pylon error
- * envelope into an ApiError. Returns the parsed JSON body, or `null`
- * for empty 2xx responses.
+ * Fetch wrapper that parses the standard Pylon error envelope into an
+ * ApiError. Returns the parsed JSON body, or `null` for empty 2xx responses.
+ *
+ * Auth rides entirely on the app's session cookie (`credentials: "include"`).
+ * Studio holds no credential of its own: it used to keep a `PYLON_ADMIN_TOKEN`
+ * in localStorage and send it as a Bearer header, which put a long-lived
+ * shared superuser secret somewhere any XSS on this origin could read it.
  */
 export async function api<T = unknown>(
 	path: string,
@@ -112,8 +103,6 @@ export async function api<T = unknown>(
 		"Content-Type": "application/json",
 		...((opts.headers as Record<string, string>) ?? {}),
 	};
-	const token = opts.token ?? getStoredToken();
-	if (token) headers.Authorization = `Bearer ${token}`;
 
 	const res = await fetch(`${API_BASE}${path}`, {
 		credentials: "include",

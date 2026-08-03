@@ -81,7 +81,7 @@ export function FunctionsPage() {
 		return (
 			<LockedPage
 				title="Functions require admin"
-				description="Sign in with PYLON_ADMIN_TOKEN to enumerate registered functions and view traces."
+				description="Registered functions and traces are admin-only. Sign in with an admin account to view them."
 			/>
 		);
 	}
