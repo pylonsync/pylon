@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Toaster } from "@/components/ui/sonner";
 import { AuthProvider, useAuth } from "@/auth/AuthContext";
 import { StudioLayout, type StudioRoute } from "@/layout/StudioLayout";
+import { DEFAULT_PAGE, parseRoute, routeToPath, sameRoute } from "@/lib/route";
 import { resolveConfig } from "@/lib/studio-config";
 import { loadExtensions, getExtensionPage } from "@/lib/extensions";
 import { api, MANIFEST } from "@/lib/pylon";
@@ -20,25 +21,49 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 const config = resolveConfig();
 
+/**
+ * Where a bare `/studio` lands. The operational dashboard, not whatever entity
+ * happens to sort first in the sidebar — unless the app's `studio.config.ts`
+ * declares its own first page, in which case that was an explicit choice.
+ */
+function defaultRoute(): StudioRoute {
+	const explicitFirstPage = config.sidebar?.sections
+		?.flatMap((s) => s.items)
+		.find((i) => i.type === "page");
+	if (explicitFirstPage && explicitFirstPage.type === "page") {
+		return { kind: "page", id: explicitFirstPage.id };
+	}
+	return { kind: "page", id: DEFAULT_PAGE };
+}
+
 export default function App() {
-	// Default route: the Overview page. The dashboard's first hit
-	// should land on the operational dashboard (live requests sparkline,
-	// jobs/workflows panels) — not on whatever entity happens to be
-	// first in the sidebar. Customers can pick a different default by
-	// configuring sidebar.sections in studio.config.ts; if explicit,
-	// honor that. Otherwise overview wins.
-	const initial = useMemo<StudioRoute>(() => {
-		const explicitFirstPage = config.sidebar?.sections
-			?.flatMap((s) => s.items)
-			.find((i) => i.type === "page");
-		if (explicitFirstPage && explicitFirstPage.type === "page") {
-			return { kind: "page", id: explicitFirstPage.id };
-		}
-		return { kind: "page", id: "overview" };
+	// The URL is the source of truth, not component state. Deep links work,
+	// refresh keeps your place, and the back button moves within Studio
+	// instead of leaving it.
+	const [route, setRoute] = useState<StudioRoute>(
+		() => parseRoute(window.location.pathname) ?? defaultRoute(),
+	);
+	const [extReady, setExtReady] = useState(!config.hasExtensions);
+
+	// Back/forward. The browser has already changed the URL by the time this
+	// fires, so read it rather than trusting popstate's state object — which
+	// is null for entries we didn't push (the initial load, most notably).
+	useEffect(() => {
+		const onPop = () =>
+			setRoute(parseRoute(window.location.pathname) ?? defaultRoute());
+		window.addEventListener("popstate", onPop);
+		return () => window.removeEventListener("popstate", onPop);
 	}, []);
 
-	const [route, setRoute] = useState<StudioRoute>(initial);
-	const [extReady, setExtReady] = useState(!config.hasExtensions);
+	const navigate = useCallback((next: StudioRoute) => {
+		setRoute((current) => {
+			// Re-clicking the current item shouldn't stack history entries that
+			// do nothing when you press back.
+			if (sameRoute(current, next)) return current;
+			window.history.pushState(null, "", routeToPath(next));
+			return next;
+		});
+	}, []);
 
 	useEffect(() => {
 		if (!config.hasExtensions) return;
@@ -47,7 +72,7 @@ export default function App() {
 
 	return (
 		<AuthProvider>
-			<StudioLayout config={config} route={route} onRouteChange={setRoute}>
+			<StudioLayout config={config} route={route} onRouteChange={navigate}>
 				<RouteContent route={route} extReady={extReady} />
 			</StudioLayout>
 			<Toaster richColors position="bottom-right" />

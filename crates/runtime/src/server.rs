@@ -6360,9 +6360,9 @@ fn start_server(
             return;
         }
 
-        let (status, response_body, content_type, is_studio, extra_headers) = if (url == "/studio"
-            || url == "/studio/")
-            && method == Method::Get
+        let (status, response_body, content_type, is_studio, extra_headers) = if is_studio_shell_path(
+            &url,
+        ) && method == Method::Get
         {
             // Studio gate — see [`studio_access`] for what qualifies. The
             // bundle ships the full manifest (every entity, field, function
@@ -7135,6 +7135,80 @@ fn studio_signin_required_html() -> String {
 </body>
 </html>"##
         .to_string()
+}
+
+/// Does this URL want the Studio shell HTML?
+///
+/// Studio routes client-side but writes real URLs (`/studio/health`,
+/// `/studio/e/User`), so every path under `/studio/` that isn't one of the
+/// framework's own endpoints has to return the shell — otherwise a refresh or
+/// a pasted deep link 404s, which is exactly what the URL scheme was added to
+/// fix.
+///
+/// Endpoints carved out here serve their own thing and must not be shadowed:
+/// `logout` redirects, `extensions.js` is JavaScript. They're matched exactly,
+/// because a `starts_with` would also swallow a page id that merely begins
+/// with the same letters.
+///
+/// Note the deliberate absence of a `starts_with("/studio")` anywhere: that
+/// exact bug once made the runtime swallow app routes like `/studios` and
+/// `/studio-tour`. The prefix must be `/studio/` with the slash, or the whole
+/// string `/studio`.
+fn is_studio_shell_path(url: &str) -> bool {
+    let path = url.split('?').next().unwrap_or(url);
+    if path == "/studio" || path == "/studio/" {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix("/studio/") else {
+        return false;
+    };
+    !matches!(rest.trim_end_matches('/'), "logout" | "extensions.js")
+}
+
+#[cfg(test)]
+mod studio_shell_path_tests {
+    use super::is_studio_shell_path;
+
+    #[test]
+    fn serves_the_shell_for_client_routes() {
+        for p in [
+            "/studio",
+            "/studio/",
+            "/studio/overview",
+            "/studio/health",
+            "/studio/e/User",
+            "/studio/e/User/",
+            "/studio/custom-extension-page",
+            "/studio/health?tab=1",
+        ] {
+            assert!(is_studio_shell_path(p), "{p} should render the shell");
+        }
+    }
+
+    #[test]
+    fn does_not_shadow_the_frameworks_own_studio_endpoints() {
+        for p in ["/studio/logout", "/studio/extensions.js"] {
+            assert!(!is_studio_shell_path(p), "{p} must keep its own handler");
+        }
+    }
+
+    #[test]
+    fn does_not_swallow_app_routes_that_merely_start_with_studio() {
+        // The prefix trap this file has hit before: a bare
+        // `starts_with("/studio")` 404'd legitimate app pages.
+        for p in ["/studios", "/studio-tour", "/studiox/y", "/", "/api/studio"] {
+            assert!(!is_studio_shell_path(p), "{p} belongs to the app");
+        }
+    }
+
+    #[test]
+    fn a_page_id_beginning_like_a_reserved_endpoint_still_routes() {
+        // `logout-history` starts with "logout"; exact matching is what keeps
+        // it a page rather than a redirect.
+        for p in ["/studio/logout-history", "/studio/extensions.json"] {
+            assert!(is_studio_shell_path(p), "{p} should render the shell");
+        }
+    }
 }
 
 /// Who may load Studio.

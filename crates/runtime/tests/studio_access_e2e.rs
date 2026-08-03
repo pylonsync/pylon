@@ -258,6 +258,52 @@ fn signed_in_admin_user_gets_studio() {
 }
 
 #[test]
+fn deep_links_render_the_shell_and_stay_gated() {
+    // Studio writes real URLs now, so a refresh or a pasted link on an inner
+    // page has to return the shell rather than 404. The gate has to hold on
+    // every one of those paths too — an admin-only surface that is only
+    // checked at its index is not gated.
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    let token = signed_in_user(
+        port,
+        &rt,
+        json!({"isAdmin": true, "email": "admin@x.test", "emailVerified": true}),
+    );
+
+    for path in ["/studio/health", "/studio/e/User", "/studio/e/User?page=2"] {
+        let (status, body) = http(port, "GET", path, Some(&token), None);
+        assert_eq!(status, 200, "{path} should render the shell");
+        assert!(is_studio_bundle(&body), "{path} did not return the bundle");
+
+        let (anon_status, anon_body) = http(port, "GET", path, None, None);
+        assert_ne!(anon_status, 200, "{path} must stay gated for anonymous");
+        assert!(!is_studio_bundle(&anon_body), "{path} leaked the bundle");
+    }
+}
+
+#[test]
+fn app_routes_that_merely_start_with_studio_are_untouched() {
+    // `starts_with("/studio")` once 404'd legitimate app pages. Studio owning
+    // a URL scheme makes that trap easier to fall into, not harder.
+    let rt = test_runtime();
+    let port = start_server(Arc::clone(&rt));
+    let token = signed_in_user(
+        port,
+        &rt,
+        json!({"isAdmin": true, "email": "admin2@x.test", "emailVerified": true}),
+    );
+
+    for path in ["/studios", "/studio-tour"] {
+        let (_, body) = http(port, "GET", path, Some(&token), None);
+        assert!(
+            !is_studio_bundle(&body),
+            "{path} belongs to the app, but Studio answered it"
+        );
+    }
+}
+
+#[test]
 fn the_admin_token_login_form_is_gone() {
     // It prompted operators to paste the production superuser secret into a
     // browser form, which then parked it in localStorage. Both endpoints that
