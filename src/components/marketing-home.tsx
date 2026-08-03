@@ -46,6 +46,7 @@ import {
 	UploadBento,
 	useMotionTick,
 } from "./bento-visuals";
+import { ctaUrl } from "../lib/account-urls";
 
 // Concrete affordances that let a coding agent build, verify, and ship on Pylon.
 // Each one ships with the artifact it describes (`visual`) — the claim and the
@@ -154,7 +155,7 @@ export function MarketingPage({
 									<a href="https://docs.pylonsync.com">Read the docs →</a>
 								</Button>
 								<Button asChild variant="ghost" size="lg">
-									<Link href={signedIn ? "/dashboard" : "/signup"}>
+									<Link href={ctaUrl(signedIn)}>
 										{signedIn ? "Open dashboard" : "Create your account"}
 									</Link>
 								</Button>
@@ -486,7 +487,7 @@ const { data } = db.useQuery("Order");`}
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
+							<Link href={ctaUrl(signedIn)}>
 								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>

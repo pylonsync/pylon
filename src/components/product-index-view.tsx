@@ -6,6 +6,7 @@ import { Button } from "./ui/button";
 import { MarketingShell } from "./marketing-shell";
 import { PRODUCT_GROUPS } from "../lib/site-nav";
 import { getProduct } from "../lib/product-content";
+import { ctaUrl } from "../lib/account-urls";
 
 // /product index — every primitive as a card, grouped Build / Ship / Clients
 // (the same grouping as the nav mega-menu). Card copy comes from the product
@@ -83,7 +84,7 @@ export function ProductIndexView({ signedIn = false }: { signedIn?: boolean }) {
 					</div>
 					<div className="mt-8">
 						<Button asChild variant="primary" size="lg">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
+							<Link href={ctaUrl(signedIn)}>
 								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>

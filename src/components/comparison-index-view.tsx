@@ -4,6 +4,7 @@ import { Link } from "@pylonsync/react";
 import { Button } from "./ui/button";
 import { MarketingShell } from "./marketing-shell";
 import { COMPARISONS } from "../lib/comparison-content";
+import { ctaUrl } from "../lib/account-urls";
 
 // /vs index — one card per competitor comparison.
 export function ComparisonIndexView({
@@ -58,7 +59,7 @@ export function ComparisonIndexView({
 					</h2>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
+							<Link href={ctaUrl(signedIn)}>
 								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>

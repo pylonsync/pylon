@@ -5,6 +5,7 @@ import { Check } from "lucide-react";
 import { Button } from "./ui/button";
 import { MarketingShell } from "./marketing-shell";
 import { getComparison, type Comparison } from "../lib/comparison-content";
+import { ctaUrl } from "../lib/account-urls";
 
 // Render of a single /vs/<slug> comparison, with the cloud design system. The
 // structured data (FAQPage + BreadcrumbList) renders inline so crawlers and AI
@@ -63,7 +64,7 @@ export function ComparisonView({
 					</p>
 					<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
+							<Link href={ctaUrl(signedIn)}>
 								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>

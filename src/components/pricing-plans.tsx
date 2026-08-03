@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { Link } from "@pylonsync/react";
 import { Button } from "./ui/button";
 import { cn } from "../lib/utils";
+import { ctaUrl } from "../lib/account-urls";
 
 // The Smallware plans — shared by the homepage pricing section and the
 // dedicated /pricing page so the numbers live in exactly one place. Plain
@@ -31,7 +32,7 @@ export function PricingPlans({ signedIn = false }: { signedIn?: boolean }) {
 					]}
 					cta={
 						<Button asChild variant="primary" size="full">
-							<Link href={signedIn ? "/dashboard" : "/signup?plan=starter"}>
+							<Link href={ctaUrl(signedIn, "/signup?plan=starter")}>
 								{signedIn ? "Open dashboard" : "Start with Starter"}
 							</Link>
 						</Button>
@@ -51,7 +52,7 @@ export function PricingPlans({ signedIn = false }: { signedIn?: boolean }) {
 					]}
 					cta={
 						<Button asChild variant="default" size="full">
-							<Link href={signedIn ? "/dashboard" : "/signup?plan=team"}>
+							<Link href={ctaUrl(signedIn, "/signup?plan=team")}>
 								{signedIn ? "Open dashboard" : "Start with Team"}
 							</Link>
 						</Button>

@@ -4,6 +4,7 @@ import { Link } from "@pylonsync/react";
 import { Button } from "./ui/button";
 import { MarketingShell } from "./marketing-shell";
 import { PricingPlans } from "./pricing-plans";
+import { ctaUrl } from "../lib/account-urls";
 
 const FAQS: { q: string; a: string }[] = [
 	{
@@ -86,7 +87,7 @@ export function PricingView({ signedIn = false }: { signedIn?: boolean }) {
 					</h2>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
+							<Link href={ctaUrl(signedIn)}>
 								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>

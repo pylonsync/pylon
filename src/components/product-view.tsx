@@ -10,6 +10,7 @@ import { LiveVisual, PRIMITIVE_VISUALS } from "./bento-visuals";
 import { ProductSubNav } from "./product-sub-nav";
 import { examplesFor } from "../lib/examples-content";
 import { getProduct } from "../lib/product-content";
+import { ctaUrl } from "../lib/account-urls";
 
 // Detail view for a single /product/<slug> page. Thin client wrapper (so the
 // MarketingShell nav island hydrates) over the static content in
@@ -75,7 +76,7 @@ export function ProductView({
 							</p>
 							<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 								<Button asChild variant="primary" size="lg">
-									<Link href={signedIn ? "/dashboard" : "/signup"}>
+									<Link href={ctaUrl(signedIn)}>
 										{signedIn ? "Open dashboard →" : "Create your account →"}
 									</Link>
 								</Button>
@@ -279,7 +280,7 @@ export function ProductView({
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
+							<Link href={ctaUrl(signedIn)}>
 								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>

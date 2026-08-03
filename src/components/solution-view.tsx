@@ -5,6 +5,7 @@ import { Button } from "./ui/button";
 import { MarketingShell } from "./marketing-shell";
 import { getSolution } from "../lib/solutions-content";
 import { getProduct } from "../lib/product-content";
+import { ctaUrl } from "../lib/account-urls";
 
 // Detail view for a single /solutions/<slug> use-case page. Use-case framing:
 // the problem, the capabilities that solve it, the primitives that power each.
@@ -57,7 +58,7 @@ export function SolutionView({
 						</p>
 						<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 							<Button asChild variant="primary" size="lg">
-								<Link href={signedIn ? "/dashboard" : "/signup"}>
+								<Link href={ctaUrl(signedIn)}>
 									{signedIn ? "Open dashboard →" : "Create your account →"}
 								</Link>
 							</Button>
@@ -172,7 +173,7 @@ export function SolutionView({
 					</p>
 					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
 						<Button asChild variant="primary" size="lg">
-							<Link href={signedIn ? "/dashboard" : "/signup"}>
+							<Link href={ctaUrl(signedIn)}>
 								{signedIn ? "Open dashboard →" : "Create your account →"}
 							</Link>
 						</Button>

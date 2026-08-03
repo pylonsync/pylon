@@ -21,6 +21,7 @@ import {
 	SOLUTIONS,
 	type NavLink,
 } from "../lib/site-nav";
+import { accountUrl } from "../lib/account-urls";
 
 // Marketing-site top nav with Supabase-style mega-menus. Shared across every
 // public page so the structure (Product / Solutions / Developers / Compare /
@@ -130,7 +131,7 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 	const cta =
 		signedIn === true ? (
 			<Button asChild variant="primary" size="sm">
-				<Link href="/dashboard">Dashboard →</Link>
+				<Link href={accountUrl("/dashboard")}>Dashboard →</Link>
 			</Button>
 		) : (
 			<>
@@ -140,10 +141,10 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 					size="sm"
 					className="hidden sm:inline-flex"
 				>
-					<Link href="/login">Sign in</Link>
+					<Link href={accountUrl("/login")}>Sign in</Link>
 				</Button>
 				<Button asChild variant="primary" size="sm">
-					<Link href="/signup">Create your account →</Link>
+					<Link href={accountUrl("/signup")}>Create your account →</Link>
 				</Button>
 			</>
 		);
