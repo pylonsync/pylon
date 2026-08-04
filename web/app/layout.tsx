@@ -22,7 +22,7 @@ interface LayoutProps {
 // <title> in the document. With the fallback present, every page would show
 // the same generic title in the tab and in search results.
 const ROUTE_OWNS_TITLE =
-	/^\/(?:$|pricing(?:\/|$)|product(?:\/|$)|solutions(?:\/|$)|vs(?:\/|$)|skill(?:\/|$)|developers(?:\/|$))/;
+	/^\/(?:$|product(?:\/|$)|solutions(?:\/|$)|vs(?:\/|$)|skill(?:\/|$)|developers(?:\/|$))/;
 
 function pathnameOf(url?: string): string {
 	if (!url) return "/";

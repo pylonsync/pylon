@@ -1,36 +1,29 @@
 import type { Metadata } from "@pylonsync/react";
-import { PricingView } from "@pylon-cloud/ui/components/pricing-view";
+import type { PageProps } from "@pylonsync/react";
 
-// Two cached shells keyed on the signed-in bit — see app/page.tsx for the
-// full auth-bucketed rationale. Only ever read `session.exists` here; full
-// `props.auth` would make the render uncacheable.
-export const cache = "auth-bucketed";
-export const revalidate = 3600; // 1 hour
+// The framework has no price — it's open source and free to self-host. What
+// used to live here was Smallware's plan table, which put the hosting
+// product's pricing on the framework's domain and read as though Pylon
+// itself cost $25.
+//
+// The URL isn't just deleted: it shipped in this site's sitemap and is
+// indexed, and "pylon pricing" is a real query. A 301 sends it to the page
+// that actually answers it. usesmallware.com is named in PYLON_TRUSTED_HOSTS
+// (fly.toml) — the runtime's open-redirect guard refuses an off-site
+// Location otherwise, and it should.
+const PRICING = "https://www.usesmallware.com/pricing";
 
-export const metadata: Metadata = {
-	title: "Pylon pricing: free to self-host, $25 on Cloud",
-	description:
-		"The Pylon framework is open source and free to self-host. Smallware is free for hobby projects and $25 per org per month for production, with no per-seat fees.",
-	canonical: "/pricing",
-	openGraph: {
-		title: "Pylon pricing: free to self-host, $25 on Cloud",
-		description:
-			"Open-source framework, free to self-host. Cloud is free for hobby, $25 per org for production.",
-		url: "https://pylonsync.com/pricing",
-		type: "website",
-	},
-	twitter: {
-		card: "summary_large_image",
-		title: "Pylon pricing",
-		description:
-			"Free to self-host. Cloud free for hobby, $25 per org for production.",
-	},
-};
+export const metadata: Metadata = { title: "Pricing", robots: "noindex" };
 
+// `response.redirect`, not the `redirect()` from @pylonsync/react — that one
+// is client-only and a silent no-op during a server render.
 export default function PricingPage({
-	session,
+	response,
 }: {
-	session?: { exists: boolean };
+	response: PageProps["response"];
 }) {
-	return <PricingView signedIn={Boolean(session?.exists)} />;
+	// 301, not the default 307: the move is permanent, and search engines
+	// should transfer the URL rather than keep re-crawling this one.
+	response.redirect(PRICING, 301);
+	return null;
 }

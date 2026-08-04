@@ -25,7 +25,8 @@ const SITE = "https://pylonsync.com";
 export default function sitemap(): Sitemap {
   const entries: Sitemap = [
     { url: `${SITE}/`, changeFrequency: "weekly", priority: 1 },
-    { url: `${SITE}/pricing`, changeFrequency: "monthly", priority: 0.9 },
+    // No /pricing — the framework is free, and Smallware's plans live on
+    // usesmallware.com. The route still exists here only to 301 there.
     { url: `${SITE}/product`, changeFrequency: "weekly", priority: 0.9 },
     { url: `${SITE}/solutions`, changeFrequency: "monthly", priority: 0.8 },
     ...(COMPARISONS_ENABLED

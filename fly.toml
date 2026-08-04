@@ -54,6 +54,11 @@ primary_region = "iad"
   # allowlist that keys the SSR/ISR cache, which is why it has to name the host
   # visitors actually arrive on rather than the .fly.dev name.
   PYLON_CANONICAL_HOST = "www.pylonsync.com"
+  # /pricing 301s to Smallware, which is a different origin. The runtime's
+  # open-redirect guard refuses an off-site Location unless the host is named
+  # here — so name exactly the one sibling property we redirect to, and
+  # nothing wildcard.
+  PYLON_TRUSTED_HOSTS = "www.usesmallware.com"
 
 [http_service]
   internal_port = 4321
