@@ -920,6 +920,13 @@ async function handleCall(msg: CallMessage): Promise<void> {
         db: reader,
         auth,
         env,
+        // No transaction to roll back here — this is purely so a query
+        // can fail with a code the caller can branch on.
+        error(code, message) {
+          const err = new Error(message);
+          (err as any).code = code;
+          return err;
+        },
         requireMember: makeRequireMember(auth.userId, (entity, filter) =>
           reader.query(entity, { ...filter, $limit: 1 }),
         ),

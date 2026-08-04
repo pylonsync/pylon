@@ -542,6 +542,13 @@ export interface QueryCtx<R extends AuthRequirement = "optional"> {
   auth: AuthInfo<R>;
   /** Environment variables / secrets. */
   env: Record<string, string>;
+  /**
+   * Create a typed error. Unlike the mutation version there's no
+   * transaction to roll back — this exists so a query can answer with a
+   * code the caller can branch on (`AUCTION_NOT_FOUND`) instead of a bare
+   * `throw new Error(...)`, which reaches the client as `UNKNOWN`.
+   */
+  error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */
   requireMember: RequireMember;
 }
