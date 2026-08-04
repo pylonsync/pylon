@@ -144,6 +144,53 @@ Each column has an optional `renderer`. Built-ins:
 | `json`     | Compact preview, full value in `title`.                                     |
 | `custom`   | Resolved against the extensions registry — see below.                       |
 
+## Row actions
+
+`list.rowActions` attaches controls to every row. `kind: "action"` runs
+one of your server functions against the row that was clicked, which is
+how an operator does a one-off job — generate a share link, resend an
+invite, re-run an import — without leaving Studio for a page you had to
+build yourself.
+
+```ts
+rowActions: [
+  {
+    id: "shareLink",
+    label: "Copy link",
+    icon: "link",
+    kind: "action",
+    display: "button",            // in the row; omit for the ⋯ menu
+    action: "auctionShareLink",   // POST /api/fn/auctionShareLink
+    input: { auctionId: "{row.id}" },
+    result: "copy",
+    resultField: "url",
+    refresh: false,
+  },
+  { id: "view", label: "Open", kind: "view" },
+  { id: "delete", label: "Delete", kind: "delete", confirm: "Delete this?" },
+]
+```
+
+| Field         | Notes                                                                        |
+| ------------- | ---------------------------------------------------------------------------- |
+| `kind`        | `delete` / `edit` / `view` are built in. `action` calls a function. `custom` resolves against extensions. |
+| `display`     | `button` renders inline in the row; `menu` (default) puts it behind `⋯`.     |
+| `action`      | Function name. Defaults to `id`.                                             |
+| `input`       | Args. Strings interpolate `{row.<field>}`. Defaults to `{ id: <row id> }`.   |
+| `result`      | `toast` (default) / `copy` / `dialog` / `none`.                              |
+| `resultField` | Dot path into the return value, for `copy` and `toast`.                      |
+| `refresh`     | Reload the table after success. Defaults to true.                            |
+| `variant`     | Button styling: `default` / `outline` (default) / `ghost` / `secondary` / `destructive`. |
+| `confirm`     | Shows a confirmation dialog before running.                                  |
+
+A value that is *exactly* one placeholder keeps the row value's JSON
+type — `"{row.count}"` sends the number `3`, not `"3"`. Embedded in a
+longer string it stringifies, and a missing field collapses to empty.
+
+Studio calls these as the signed-in admin. Operator accounts (`pylon
+admin create`) aren't app `User` rows, so a function they need to reach
+can't require anything stricter than `auth: "guest"`.
+
 ## studio.entry.tsx — custom React components
 
 If you need anything beyond the built-in renderers (a pricing chart in a

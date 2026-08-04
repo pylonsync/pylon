@@ -50,7 +50,15 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { RowEditor } from "@/components/RowEditor";
 import { CellRenderer } from "@/components/renderers";
+import { resolveIcon } from "@/layout/icons";
 import { ApiError, MANIFEST, type ManifestEntity, api } from "@/lib/pylon";
+import {
+	buildActionInput,
+	copyToClipboard,
+	getRowField,
+	pickResultValue,
+	resultToText,
+} from "@/lib/row-action";
 import type {
 	BulkAction,
 	ColumnConfig,
@@ -252,6 +260,96 @@ export function ResourceListPage({
 		}
 		toast.info(`Custom action "${action.id}" — wire via studio.entry.tsx`);
 	};
+
+	// --- Row actions ---------------------------------------------------
+	//
+	// `kind: "action"` POSTs the row through a server function. That's the
+	// whole point of the feature: without it the only way to run one
+	// against a specific row was to link out of Studio to a page you wrote
+	// yourself.
+	const [pendingRowAction, setPendingRowAction] = useState<{
+		action: RowAction;
+		row: Row;
+	} | null>(null);
+	const [runningAction, setRunningAction] = useState<string | null>(null);
+	const [resultDialog, setResultDialog] = useState<{
+		title: string;
+		text: string;
+	} | null>(null);
+
+	const presentResult = async (action: RowAction, value: unknown) => {
+		const mode = action.result ?? "toast";
+		if (mode === "none") {
+			toast.success(action.label);
+			return;
+		}
+		const text = resultToText(pickResultValue(value, action.resultField));
+		if (mode === "dialog") {
+			setResultDialog({ title: action.label, text: text || "(no output)" });
+			return;
+		}
+		if (mode === "copy") {
+			if (!text) {
+				toast.info(`${action.label}: nothing to copy`);
+				return;
+			}
+			if (await copyToClipboard(text)) {
+				toast.success("Copied to clipboard", { description: clip(text, 120) });
+			} else {
+				// No clipboard access (Studio over plain http on a LAN
+				// address). Show it instead of failing silently.
+				setResultDialog({ title: `${action.label} — copy manually`, text });
+			}
+			return;
+		}
+		toast.success(action.label, {
+			description: text ? clip(text, 200) : undefined,
+		});
+	};
+
+	const runRowAction = async (action: RowAction, row: Row) => {
+		if (action.kind === "delete" || action.id === "delete") {
+			await onDelete(row);
+			return;
+		}
+		if (action.kind === "view" || action.kind === "edit") {
+			setInspectRow(row);
+			return;
+		}
+		if (action.kind !== "action") {
+			toast.info(`"${action.label}" — wire a custom handler in studio.entry.tsx`);
+			return;
+		}
+		// `action` names the function; falling back to `id` lets the common
+		// case stay a single name instead of repeating it twice.
+		const fnName = action.action ?? action.id;
+		setRunningAction(runKey(action, row));
+		try {
+			const value = await api<unknown>(
+				`/api/fn/${encodeURIComponent(fnName)}`,
+				{ method: "POST", body: JSON.stringify(buildActionInput(action, row)) },
+			);
+			await presentResult(action, value);
+			if (action.refresh !== false) void load();
+		} catch (err) {
+			if (err instanceof ApiError) toast.error(`${err.code}: ${err.message}`);
+			else toast.error(err instanceof Error ? err.message : String(err));
+		} finally {
+			setRunningAction(null);
+		}
+	};
+
+	const onRowAction = (action: RowAction, row: Row) => {
+		if (action.confirm) {
+			setPendingRowAction({ action, row });
+			return;
+		}
+		void runRowAction(action, row);
+	};
+
+	const rowActions = listCfg?.rowActions ?? [];
+	const buttonActions = rowActions.filter((a) => a.display === "button");
+	const menuActions = rowActions.filter((a) => a.display !== "button");
 
 	const totalPages = total !== null ? Math.max(1, Math.ceil(total / pageSize)) : 1;
 	const recordsLabel = useMemo(() => {
@@ -513,11 +611,10 @@ export function ResourceListPage({
 											</TableHead>
 										);
 									})}
-									{listCfg?.rowActions?.length ? (
-										<TableHead className="w-10" />
-									) : (
-										<TableHead className="w-10" />
-									)}
+									{/* Trailing controls. `w-px` so the column shrinks to
+									    its content — inline action buttons are wider
+									    than the old fixed `…` slot. */}
+									<TableHead className="w-px" />
 								</TableRow>
 							</TableHeader>
 							<TableBody>
@@ -569,14 +666,34 @@ export function ResourceListPage({
 												</TableCell>
 											))}
 											<TableCell
-												className="text-right"
+												className="whitespace-nowrap text-right"
 												onClick={(e) => e.stopPropagation()}
 											>
-												<RowActionsMenu
-													row={row}
-													actions={listCfg?.rowActions}
-													onDelete={() => onDelete(row)}
-												/>
+												<div className="flex items-center justify-end gap-1">
+													{buttonActions.map((a) => (
+														<RowActionButton
+															key={a.id}
+															action={a}
+															running={runningAction === runKey(a, row)}
+															disabled={runningAction !== null}
+															onRun={() => onRowAction(a, row)}
+														/>
+													))}
+													{rowActions.length === 0 ? (
+														<Button
+															variant="ghost"
+															size="sm"
+															onClick={() => void onDelete(row)}
+														>
+															<Trash2 className="size-3.5" />
+														</Button>
+													) : menuActions.length > 0 ? (
+														<RowActionsMenu
+															actions={menuActions}
+															onRun={(a) => onRowAction(a, row)}
+														/>
+													) : null}
+												</div>
 											</TableCell>
 										</TableRow>
 									);
@@ -713,6 +830,77 @@ export function ResourceListPage({
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
+
+			<Dialog
+				open={pendingRowAction !== null}
+				onOpenChange={(o) => !o && setPendingRowAction(null)}
+			>
+				<DialogContent className="sm:max-w-[480px]">
+					<DialogHeader>
+						<DialogTitle>{pendingRowAction?.action.label}</DialogTitle>
+						<DialogDescription>
+							{pendingRowAction?.action.confirm}
+						</DialogDescription>
+					</DialogHeader>
+					<DialogFooter>
+						<Button variant="ghost" onClick={() => setPendingRowAction(null)}>
+							Cancel
+						</Button>
+						<Button
+							variant={
+								// A delete is destructive whether or not the config
+								// bothered to say so.
+								pendingRowAction &&
+								(pendingRowAction.action.variant === "destructive" ||
+									pendingRowAction.action.kind === "delete" ||
+									pendingRowAction.action.id === "delete")
+									? "destructive"
+									: "default"
+							}
+							onClick={() => {
+								const pending = pendingRowAction;
+								setPendingRowAction(null);
+								if (pending) void runRowAction(pending.action, pending.row);
+							}}
+						>
+							{pendingRowAction?.action.label}
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+
+			<Dialog
+				open={resultDialog !== null}
+				onOpenChange={(o) => !o && setResultDialog(null)}
+			>
+				<DialogContent className="sm:max-w-[600px]">
+					<DialogHeader>
+						<DialogTitle>{resultDialog?.title}</DialogTitle>
+					</DialogHeader>
+					<Textarea
+						readOnly
+						rows={8}
+						className="font-mono text-xs"
+						value={resultDialog?.text ?? ""}
+						onFocus={(e) => e.currentTarget.select()}
+					/>
+					<DialogFooter>
+						<Button
+							variant="outline"
+							onClick={() => {
+								const text = resultDialog?.text ?? "";
+								void copyToClipboard(text).then((ok) => {
+									if (ok) toast.success("Copied to clipboard");
+									else toast.error("Clipboard unavailable — select and copy");
+								});
+							}}
+						>
+							Copy
+						</Button>
+						<Button onClick={() => setResultDialog(null)}>Close</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }
@@ -721,21 +909,53 @@ export function ResourceListPage({
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** Unique key for "this action, on this row" — drives the running spinner. */
+function runKey(action: RowAction, row: Row): string {
+	return `${action.id} ${String(row.id ?? "")}`;
+}
+
+function clip(s: string, max: number): string {
+	return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/** An action rendered inline in the row rather than behind the `…` menu. */
+function RowActionButton({
+	action,
+	running,
+	disabled,
+	onRun,
+}: {
+	action: RowAction;
+	running: boolean;
+	disabled: boolean;
+	onRun: () => void;
+}) {
+	const Icon = action.icon ? resolveIcon(action.icon) : null;
+	return (
+		<Button
+			size="sm"
+			variant={action.variant ?? "outline"}
+			className="h-7"
+			disabled={disabled}
+			onClick={onRun}
+		>
+			{running ? (
+				<Loader2 className="size-3.5 animate-spin" />
+			) : Icon ? (
+				<Icon className="size-3.5" />
+			) : null}
+			{action.label}
+		</Button>
+	);
+}
+
 function RowActionsMenu({
 	actions,
-	onDelete,
+	onRun,
 }: {
-	row: Row;
-	actions: RowAction[] | undefined;
-	onDelete: () => void;
+	actions: RowAction[];
+	onRun: (action: RowAction) => void;
 }) {
-	if (!actions || actions.length === 0) {
-		return (
-			<Button variant="ghost" size="sm" onClick={onDelete}>
-				<Trash2 className="size-3.5" />
-			</Button>
-		);
-	}
 	return (
 		<DropdownMenu>
 			<DropdownMenuTrigger asChild>
@@ -747,13 +967,12 @@ function RowActionsMenu({
 				{actions.map((a) => (
 					<DropdownMenuItem
 						key={a.id}
-						onClick={() => {
-							if (a.kind === "delete" || a.id === "delete") onDelete();
-							else
-								toast.info(
-									`"${a.label}" — wire a custom handler in studio.entry.tsx`,
-								);
-						}}
+						onClick={() => onRun(a)}
+						className={
+							a.kind === "delete" || a.id === "delete"
+								? "text-destructive focus:text-destructive"
+								: undefined
+						}
 					>
 						{a.label}
 					</DropdownMenuItem>
@@ -823,16 +1042,7 @@ function humanize(s: string): string {
 	return out.charAt(0).toUpperCase() + out.slice(1);
 }
 
-function getField(row: Row, field: string): unknown {
-	if (!field.includes(".")) return row[field];
-	let v: unknown = row;
-	for (const seg of field.split(".")) {
-		if (v && typeof v === "object" && seg in (v as Record<string, unknown>)) {
-			v = (v as Record<string, unknown>)[seg];
-		} else return undefined;
-	}
-	return v;
-}
+const getField = getRowField;
 
 function clientFilter(
 	rows: Row[],

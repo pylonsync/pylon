@@ -94,7 +94,16 @@ export interface RowAction {
 	id: string;
 	label: string;
 	icon?: string;
-	kind?: "delete" | "edit" | "view" | "custom";
+	kind?: "delete" | "edit" | "view" | "action" | "custom";
+	display?: "menu" | "button";
+	/** Function name for `kind: "action"`. */
+	action?: string;
+	/** Args, with `{row.<field>}` placeholders. Defaults to `{ id }`. */
+	input?: Record<string, unknown>;
+	result?: "toast" | "copy" | "dialog" | "none";
+	resultField?: string;
+	refresh?: boolean;
+	variant?: "default" | "outline" | "ghost" | "secondary" | "destructive";
 	confirm?: string;
 	requiresAdmin?: boolean;
 }

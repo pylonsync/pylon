@@ -9,6 +9,8 @@
  *   - Per-resource column overrides with avatar / badge / date /
  *     currency / link renderers
  *   - Sample bulk + row actions (delete + export)
+ *   - A `kind: "action"` row button that calls a server function against
+ *     the clicked row and copies the result ("Copy link" on Auctions)
  *   - Custom column renderer ("paddle") that lives in studio.entry.tsx
  *   - Custom dashboard page ("liveBids") also from studio.entry.tsx
  *   - Used-space style footer card
@@ -214,6 +216,21 @@ const config = defineStudioConfig({
           },
         ],
         rowActions: [
+          // A server function run against one row, rendered as a button
+          // in the row itself. `{row.id}` is substituted from the row
+          // that was clicked; the returned `url` goes to the clipboard.
+          {
+            id: "shareLink",
+            label: "Copy link",
+            icon: "link",
+            kind: "action",
+            display: "button",
+            action: "auctionShareLink",
+            input: { auctionId: "{row.id}" },
+            result: "copy",
+            resultField: "url",
+            refresh: false,
+          },
           { id: "view", label: "Open", kind: "view" },
           {
             id: "delete",

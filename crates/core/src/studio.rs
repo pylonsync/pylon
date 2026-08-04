@@ -489,6 +489,30 @@ pub struct RowAction {
     pub icon: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<RowActionKind>,
+    /// Where the control renders. Defaults to the trailing `…` menu.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<RowActionDisplay>,
+    /// Function name for `kind: "action"`, POSTed to `/api/fn/<action>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Argument object for `kind: "action"`. String values interpolate
+    /// `{row.<field>}`; a value that is exactly one placeholder keeps the
+    /// row value's JSON type. Defaults to `{ "id": <row id> }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input: Option<serde_json::Map<String, serde_json::Value>>,
+    /// What Studio does with the function's return value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<RowActionResult>,
+    /// Dot path into the return value, for `result: "copy"` / `"toast"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_field: Option<String>,
+    /// Reload the table after the action succeeds. Defaults to true —
+    /// an action that touched the row should not leave a stale display.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refresh: Option<bool>,
+    /// Button styling for `display: "button"`. Defaults to `outline`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variant: Option<RowActionVariant>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -501,7 +525,35 @@ pub enum RowActionKind {
     Delete,
     Edit,
     View,
+    /// Call a server function. See [`RowAction::action`].
+    Action,
     Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowActionDisplay {
+    Menu,
+    Button,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowActionResult {
+    Toast,
+    Copy,
+    Dialog,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RowActionVariant {
+    Default,
+    Outline,
+    Ghost,
+    Secondary,
+    Destructive,
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +632,85 @@ mod tests {
             }
             _ => panic!("expected Badge renderer"),
         }
+    }
+
+    /// The whole point of this struct is that it's the *only* path a
+    /// `studio.config.ts` takes into the browser: the CLI parses the
+    /// bun-emitted JSON into `StudioConfig` and re-serializes it. A field
+    /// the SDK declares but this file doesn't is dropped on the floor —
+    /// it typechecks, it ships, and it does nothing. So parse a full
+    /// action row-button config and assert every field survives.
+    #[test]
+    fn row_action_button_round_trips() {
+        let json = r#"{
+            "resources": {
+                "Proposal": {
+                    "list": {
+                        "rowActions": [
+                            {
+                                "id": "generateLink",
+                                "label": "Generate link",
+                                "icon": "link",
+                                "kind": "action",
+                                "display": "button",
+                                "action": "generateProposalLink",
+                                "input": { "proposalId": "{row.id}", "expiresDays": 30 },
+                                "result": "copy",
+                                "resultField": "url",
+                                "refresh": false,
+                                "variant": "outline",
+                                "confirm": "Mint a new public link?",
+                                "requiresAdmin": true
+                            }
+                        ]
+                    }
+                }
+            }
+        }"#;
+        let cfg: StudioConfig = serde_json::from_str(json).unwrap();
+        let a = &cfg.resources["Proposal"].list.as_ref().unwrap().row_actions[0];
+        assert_eq!(a.id, "generateLink");
+        assert_eq!(a.icon.as_deref(), Some("link"));
+        assert_eq!(a.kind, Some(RowActionKind::Action));
+        assert_eq!(a.display, Some(RowActionDisplay::Button));
+        assert_eq!(a.action.as_deref(), Some("generateProposalLink"));
+        let input = a.input.as_ref().unwrap();
+        assert_eq!(input["proposalId"], serde_json::json!("{row.id}"));
+        assert_eq!(input["expiresDays"], serde_json::json!(30));
+        assert_eq!(a.result, Some(RowActionResult::Copy));
+        assert_eq!(a.result_field.as_deref(), Some("url"));
+        assert_eq!(a.refresh, Some(false));
+        assert_eq!(a.variant, Some(RowActionVariant::Outline));
+        assert_eq!(a.confirm.as_deref(), Some("Mint a new public link?"));
+        assert!(a.requires_admin);
+
+        // Re-serialize and read it back: this is the leg the browser
+        // actually receives.
+        let back: StudioConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back, cfg);
+    }
+
+    /// A row action with nothing but the two required fields is valid —
+    /// the client falls back to the `…` menu and `{ id: <row id> }`.
+    #[test]
+    fn minimal_row_action_parses() {
+        let json = r#"{"resources":{"X":{"list":{"rowActions":[{"id":"ping","label":"Ping"}]}}}}"#;
+        let cfg: StudioConfig = serde_json::from_str(json).unwrap();
+        let a = &cfg.resources["X"].list.as_ref().unwrap().row_actions[0];
+        assert_eq!(a.kind, None);
+        assert_eq!(a.display, None);
+        assert_eq!(a.input, None);
+        assert!(!a.requires_admin);
+    }
+
+    /// Unknown enum values fail loudly at build time (the CLI surfaces a
+    /// STUDIO_CONFIG_PARSE diagnostic) rather than silently disabling the
+    /// action at runtime.
+    #[test]
+    fn unknown_row_action_kind_is_a_parse_error() {
+        let json = r#"{"resources":{"X":{"list":{"rowActions":[{"id":"a","label":"A","kind":"teleport"}]}}}}"#;
+        assert!(serde_json::from_str::<StudioConfig>(json).is_err());
     }
 
     #[test]

@@ -283,12 +283,69 @@ export interface BulkAction {
   requiresAdmin?: boolean;
 }
 
+/**
+ * A control attached to every row.
+ *
+ * `kind: "action"` is the one that calls back into your app: Studio POSTs
+ * `/api/fn/<action>` with `input`, then shows the result. Pair it with
+ * `display: "button"` for a control that sits in the row instead of behind
+ * the `…` menu.
+ *
+ * @example Generate a share link for a proposal and copy it
+ * ```ts
+ * rowActions: [
+ *   {
+ *     id: "generateLink",
+ *     label: "Generate link",
+ *     icon: "link",
+ *     kind: "action",
+ *     display: "button",
+ *     action: "generateProposalLink",
+ *     input: { proposalId: "{row.id}" },
+ *     result: "copy",
+ *     resultField: "url",
+ *   },
+ * ]
+ * ```
+ */
 export interface RowAction {
   id: string;
   label: string;
   icon?: IconName;
-  kind?: "delete" | "edit" | "view" | "custom";
+  /**
+   * `delete` / `edit` / `view` are built in. `action` calls a server
+   * function. `custom` is resolved against `studio.entry.tsx`.
+   */
+  kind?: "delete" | "edit" | "view" | "action" | "custom";
+  /**
+   * Where the control renders. `"button"` puts it in the row; `"menu"`
+   * (the default) puts it behind the trailing `…` menu.
+   */
+  display?: "menu" | "button";
+  /** Function name for `kind: "action"`. POSTed to `/api/fn/<action>`. */
+  action?: string;
+  /**
+   * Argument object for `kind: "action"`. String values interpolate
+   * `{row.<field>}` — a value that is exactly one placeholder keeps the
+   * row value's type, so `"{row.count}"` sends a number. Defaults to
+   * `{ id: <row id> }`.
+   */
+  input?: Record<string, unknown>;
+  /**
+   * What to do with the return value. `"toast"` (default) shows it,
+   * `"copy"` writes it to the clipboard, `"dialog"` opens it as JSON,
+   * `"none"` discards it.
+   */
+  result?: "toast" | "copy" | "dialog" | "none";
+  /** Dot path into the return value, for `result: "copy"` / `"toast"`. */
+  resultField?: string;
+  /** Reload the table after the action succeeds. Defaults to true. */
+  refresh?: boolean;
+  /** Button styling for `display: "button"`. Defaults to `"outline"`. */
+  variant?: "default" | "outline" | "ghost" | "secondary" | "destructive";
+  /** Confirmation dialog message. Shown before the action runs. */
   confirm?: string;
+  /** Hide unless viewer is_admin. */
   requiresAdmin?: boolean;
 }
 
