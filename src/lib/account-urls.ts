@@ -7,10 +7,9 @@
 //   apps/pylonsync-site  → www.pylonsync.com      (the framework; no auth at all)
 //
 // Every auth link was a relative path, which is only correct in the first one.
-// On pylonsync.com the header's "Create your account →", the two pricing
-// buttons, and every in-page CTA pointed at /signup and /login on a host that
-// serves neither — four dead 404s on the primary conversion path, plus more
-// down the page.
+// On pylonsync.com the header's "Create your account →" and every in-page CTA
+// pointed at /signup and /login on a host that serves neither — dead 404s all
+// down the primary conversion path.
 //
 // So the account host is named absolutely. From pylonsync.com that crosses to
 // the product; from usesmallware.com it resolves to the same origin the visitor

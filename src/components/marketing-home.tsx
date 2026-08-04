@@ -27,7 +27,6 @@ import {
 import { Button } from "./ui/button";
 import { MarketingNav } from "./marketing-nav";
 import { SiteFooter } from "./site-footer";
-import { PricingPlans } from "./pricing-plans";
 import { CodePanel } from "./code-panel";
 import {
 	AuthBento,
@@ -459,19 +458,6 @@ const { data } = db.useQuery("Order");`}
 							</p>
 						</div>
 					))}
-				</div>
-			</Section>
-
-			{/* PRICING */}
-			<Section id="pricing">
-				<H2>Pricing you can start with.</H2>
-				<p className="mt-5 max-w-[560px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-					Start with one free project. Pro is $25 per org per month; heavier
-					compute, replicas, and storage bill as usage.
-				</p>
-
-				<div className="mt-14">
-					<PricingPlans signedIn={signedIn} />
 				</div>
 			</Section>
 

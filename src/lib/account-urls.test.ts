@@ -6,8 +6,8 @@ import { ACCOUNT_ORIGIN, accountUrl, ctaUrl } from "./account-urls";
 //   apps/pylonsync-site  -> www.pylonsync.com     (has no auth at all)
 //
 // Every auth link used to be a relative path, correct only in the first. On
-// pylonsync.com the header CTA, both pricing buttons and every in-page
-// "Create your account" pointed at /signup on a host that 404s it.
+// pylonsync.com the header CTA and every in-page "Create your account" pointed
+// at /signup on a host that 404s it.
 //
 // A relative href reintroduced anywhere here breaks silently — it keeps working
 // on usesmallware.com, which is where it would be tested.
@@ -23,8 +23,8 @@ describe("account URLs are absolute", () => {
 	});
 
 	test("query strings survive, so plan preselect still works", () => {
-		// The pricing buttons carry ?plan=; dropping it would land every visitor
-		// on the default plan regardless of which card they clicked.
+		// Smallware's plan cards link across with ?plan=; dropping the query
+		// would land every visitor on the default plan regardless of choice.
 		expect(accountUrl("/signup?plan=team")).toBe(
 			"https://www.usesmallware.com/signup?plan=team",
 		);

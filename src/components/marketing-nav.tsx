@@ -174,12 +174,6 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 						{COMPARISONS_ENABLED && (
 							<NavTrigger k="compare" label="Compare" open={open} setOpen={setOpen} />
 						)}
-						<Link
-							href="/pricing"
-							className="rounded-[var(--radius-sm)] px-3 py-1.5 text-[13.5px] text-[var(--color-ink-2)] transition-colors hover:bg-[var(--color-paper-1)] hover:text-[var(--color-ink)]"
-						>
-							Pricing
-						</Link>
 						<a
 							href="https://docs.pylonsync.com"
 							className="rounded-[var(--radius-sm)] px-3 py-1.5 text-[13.5px] text-[var(--color-ink-2)] transition-colors hover:bg-[var(--color-paper-1)] hover:text-[var(--color-ink)]"
@@ -304,14 +298,6 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 							>
 								Docs
 							</a>
-							<span className="text-[var(--color-rule)]">·</span>
-							<Link
-								href="/pricing"
-								onClick={() => setMobileOpen(false)}
-								className="text-[14px] text-[var(--color-ink-2)]"
-							>
-								Pricing
-							</Link>
 						</div>
 					</div>
 				</div>

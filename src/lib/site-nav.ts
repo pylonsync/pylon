@@ -231,6 +231,5 @@ export const TOP_NAV = [
 	{ label: "Solutions", key: "solutions" },
 	{ label: "Developers", key: "developers" },
 	{ label: "Compare", key: "compare" },
-	{ label: "Pricing", href: "/pricing" },
 	{ label: "Docs", href: "https://docs.pylonsync.com", external: true },
 ] as const;
