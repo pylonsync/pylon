@@ -392,6 +392,89 @@ describe("opengraph-image file convention", () => {
   });
 });
 
+/**
+ * Relative social URLs. Facebook and Slack resolve them; Twitter drops
+ * the image and ships a grey box, so a card looks fine everywhere the
+ * author checked and broken where it mattered.
+ */
+describe("absolutizing author-supplied social URLs", () => {
+  const withOrigin = <T,>(fn: () => T): T => {
+    const prev = process.env.PYLON_PUBLIC_URL;
+    process.env.PYLON_PUBLIC_URL = "https://www.example.com";
+    try {
+      return fn();
+    } finally {
+      if (prev === undefined) delete process.env.PYLON_PUBLIC_URL;
+      else process.env.PYLON_PUBLIC_URL = prev;
+    }
+  };
+  const apply = (md: any, url = "/") =>
+    withOrigin(() =>
+      applyAutoSocialImages("app/page", { host: "www.example.com" }, md, url),
+    );
+
+  test("a root-relative og:image becomes absolute", () => {
+    const md = apply({
+      openGraph: { image: "/marketing/og.png" },
+      twitter: { card: "summary_large_image", image: "/marketing/og.png" },
+    });
+    expect(md?.openGraph?.image).toBe("https://www.example.com/marketing/og.png");
+    expect(md?.twitter?.image).toBe("https://www.example.com/marketing/og.png");
+  });
+
+  test("an https origin also fills og:image:secure_url", () => {
+    const md = apply({ openGraph: { image: "/og.png" } });
+    expect(md?.openGraph?.imageSecureUrl).toBe("https://www.example.com/og.png");
+  });
+
+  test("an absolute URL is left exactly as authored", () => {
+    const md = apply({
+      openGraph: { image: "https://cdn.other.test/a.png" },
+      twitter: { image: "https://cdn.other.test/a.png" },
+    });
+    expect(md?.openGraph?.image).toBe("https://cdn.other.test/a.png");
+    expect(md?.twitter?.image).toBe("https://cdn.other.test/a.png");
+  });
+
+  test("a data: URL is left alone", () => {
+    const md = apply({ openGraph: { image: "data:image/png;base64,iVBOR" } });
+    expect(md?.openGraph?.image).toBe("data:image/png;base64,iVBOR");
+  });
+
+  test("a protocol-relative URL picks up the origin's scheme", () => {
+    const md = apply({ openGraph: { image: "//cdn.other.test/a.png" } });
+    expect(md?.openGraph?.image).toBe("https://cdn.other.test/a.png");
+  });
+
+  test("a path-relative URL resolves against the request path", () => {
+    const md = apply({ openGraph: { image: "og.png" } }, "/blog/post-1");
+    expect(md?.openGraph?.image).toBe("https://www.example.com/blog/og.png");
+  });
+
+  test("og:url and canonical are absolutized too", () => {
+    const md = apply({
+      canonical: "/pricing",
+      openGraph: { image: "/og.png", url: "/pricing" },
+    });
+    expect(md?.canonical).toBe("https://www.example.com/pricing");
+    expect(md?.openGraph?.url).toBe("https://www.example.com/pricing");
+  });
+
+  test("every entry in an images list is absolutized", () => {
+    const md = apply({
+      openGraph: { images: [{ url: "/a.png" }, { url: "https://x.test/b.png" }] },
+    });
+    expect(md?.openGraph?.images?.[0]?.url).toBe("https://www.example.com/a.png");
+    expect(md?.openGraph?.images?.[1]?.url).toBe("https://x.test/b.png");
+  });
+
+  test("metadata with no social URLs is untouched", () => {
+    const md = apply({ title: "Hi" });
+    expect(md?.title).toBe("Hi");
+    expect(md?.openGraph).toBeUndefined();
+  });
+});
+
 describe("icon / apple-icon / favicon file convention", () => {
   test("auto-wires <link rel=icon> + apple-touch-icon (relative URL + sizes)", () => {
     const dir = makeApp();

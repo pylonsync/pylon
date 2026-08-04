@@ -496,6 +496,9 @@ export interface SsrMetadata {
   openGraph?: {
     title?: string;
     description?: string;
+    /** `og:image`. A root-relative path (`/og.png`) is resolved against
+     *  the request origin before it's emitted — crawlers require an
+     *  absolute URL and Twitter drops the card without one. */
     image?: string;
     /** `og:image:secure_url` — set automatically to the https image URL. */
     imageSecureUrl?: string;
@@ -506,7 +509,7 @@ export interface SsrMetadata {
     imageHeight?: number;
     imageAlt?: string;
     /** Additional images beyond the primary `image` (each emits its own
-     *  `og:image` + dimensions). Provide absolute URLs. */
+     *  `og:image` + dimensions). Relative URLs are absolutized. */
     images?: OgImage[];
     url?: string;
     type?: string;
@@ -1134,12 +1137,103 @@ export function applyAutoIcons(
   return out;
 }
 
+/**
+ * Resolve a possibly-relative URL against the request's absolute origin.
+ *
+ * Returns the input unchanged when it's already absolute (`https:`,
+ * `data:`, …), when there's no trustworthy origin to resolve against, or
+ * when it doesn't parse. A protocol-relative `//cdn/x.png` picks up the
+ * origin's scheme, which is what makes it valid to a crawler.
+ */
+function absolutizeUrl(
+  value: string,
+  origin: string,
+  requestPath: string,
+): string {
+  if (!value || !origin) return value;
+  // Already absolute — an explicit CDN or a fully-qualified URL.
+  if (/^[a-z][a-z0-9+.-]*:/i.test(value)) return value;
+  try {
+    const base = requestPath ? new URL(requestPath, origin).href : origin;
+    return new URL(value, base).href;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * Make every crawler-facing URL in a page's metadata absolute.
+ *
+ * Covers `og:image` (single + list), `og:url`, `twitter:image`, and the
+ * canonical link — the tags where a relative value is accepted by some
+ * consumers and silently dropped by others.
+ */
+function absolutizeMetadataUrls(
+  metadata: SsrMetadata | undefined,
+  headers: Record<string, string> | undefined,
+  requestUrl?: string,
+): SsrMetadata | undefined {
+  if (!metadata) return metadata;
+  const origin = resolveRequestOrigin(headers);
+  if (!origin) return metadata;
+  const path = (requestUrl ?? "/").split("?")[0] || "/";
+  const abs = (v: string | undefined): string | undefined =>
+    v == null ? v : absolutizeUrl(v, origin, path);
+
+  const out: SsrMetadata = { ...metadata };
+  const og = out.openGraph;
+  if (og) {
+    const nextOg = { ...og };
+    if (nextOg.image) {
+      nextOg.image = abs(nextOg.image);
+      // og:image:secure_url must be the https form. If the author gave a
+      // relative path and the origin is https, the absolute URL *is* it.
+      if (!nextOg.imageSecureUrl && nextOg.image?.startsWith("https:")) {
+        nextOg.imageSecureUrl = nextOg.image;
+      } else if (nextOg.imageSecureUrl) {
+        nextOg.imageSecureUrl = abs(nextOg.imageSecureUrl);
+      }
+    }
+    if (Array.isArray(nextOg.images)) {
+      nextOg.images = nextOg.images.map((img) =>
+        img?.url
+          ? {
+              ...img,
+              url: abs(img.url) as string,
+              ...(img.secureUrl ? { secureUrl: abs(img.secureUrl) } : {}),
+            }
+          : img,
+      );
+    }
+    if (nextOg.url) nextOg.url = abs(nextOg.url);
+    out.openGraph = nextOg;
+  }
+  if (out.twitter?.image) {
+    out.twitter = { ...out.twitter, image: abs(out.twitter.image) };
+  }
+  if (out.canonical) out.canonical = abs(out.canonical);
+  if (out.alternates?.canonical) {
+    out.alternates = {
+      ...out.alternates,
+      canonical: abs(out.alternates.canonical),
+    };
+  }
+  return out;
+}
+
 export function applyAutoSocialImages(
   component: string,
   headers: Record<string, string> | undefined,
   metadata: SsrMetadata | undefined,
   requestUrl?: string,
 ): SsrMetadata | undefined {
+  // A relative image is the single most common way a share card breaks:
+  // the page ships `og:image="/og.png"`, Facebook and Slack resolve it,
+  // Twitter does not, and the post goes out with an empty grey box. The
+  // origin is already resolved here for the auto-injected images, so
+  // resolve the author's URLs against it too.
+  metadata = absolutizeMetadataUrls(metadata, headers, requestUrl);
+
   const hasOg = !!metadata?.openGraph?.image;
   const hasTw = !!metadata?.twitter?.image;
   if (hasOg && hasTw) return metadata;
