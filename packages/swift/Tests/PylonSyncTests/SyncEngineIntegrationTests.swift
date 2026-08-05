@@ -35,6 +35,15 @@ final class SyncEngineIntegrationTests: XCTestCase {
         var rows: [String: [String: Row]] = [:]
         var seq: Int64 = 0
         var changes: [ChangeEvent] = []
+        /// When set, delta pulls page to this many events per request
+        /// with a real per-page cursor + has_more — models the
+        /// production DELTA_BATCH_LIMIT so the catch-up loop is
+        /// exercised across pages.
+        var pageSize: Int? = nil
+        /// Every `since` value the engine requested, in order.
+        var pullSinces: [Int64] = []
+
+        func setPageSize(_ n: Int?) { pageSize = n }
 
         func handle(_ req: URLRequest) throws -> (Int, Data) {
             let path = req.url?.path ?? ""
@@ -47,8 +56,18 @@ final class SyncEngineIntegrationTests: XCTestCase {
                 return (200, try JSONSerialization.data(withJSONObject: body))
 
             case ("GET", "/api/sync/pull"):
+                let comps = URLComponents(url: req.url!, resolvingAgainstBaseURL: false)
+                let since = Int64(comps?.queryItems?.first(where: { $0.name == "since" })?.value ?? "0") ?? 0
+                pullSinces.append(since)
+                var visible = changes.filter { $0.seq > since }
+                var hasMore = false
+                if let ps = pageSize, visible.count > ps {
+                    visible = Array(visible.prefix(ps))
+                    hasMore = true
+                }
+                let cursorSeq: Int64 = hasMore ? (visible.last?.seq ?? seq) : seq
                 let resp: [String: Any] = [
-                    "changes": changes.map { c -> [String: Any] in
+                    "changes": visible.map { c -> [String: Any] in
                         var d: [String: Any] = [
                             "seq": c.seq,
                             "entity": c.entity,
@@ -61,8 +80,8 @@ final class SyncEngineIntegrationTests: XCTestCase {
                         }
                         return d
                     },
-                    "cursor": ["last_seq": seq],
-                    "has_more": false
+                    "cursor": ["last_seq": cursorSeq],
+                    "has_more": hasMore
                 ]
                 return (200, try JSONSerialization.data(withJSONObject: resp))
 
@@ -142,6 +161,47 @@ final class SyncEngineIntegrationTests: XCTestCase {
         XCTAssertEqual(cursor.last_seq, 5)
         let store = await engine.store
         XCTAssertEqual(store.get("Todo", id: "t1")?["title"]?.stringValue, "preexisting")
+    }
+
+    // Parity with the TS engine's pipelined catch-up: a multi-page delta
+    // (has_more) drains COMPLETELY in one pull() call, in order, with the
+    // next `since` derived from each response's cursor — and lands the
+    // final cursor even though applies run concurrently with fetches.
+    func testMultiPageDeltaCatchUpDrainsCompletely() async throws {
+        let server = FakeServer()
+        // Establish a non-zero cursor first (seq 1), then fall 30 behind.
+        await server.seedChange(ChangeEvent(seq: 1, entity: "Todo", row_id: "t0", kind: .insert, data: ["title": "anchor"]))
+
+        let transport = MockTransport()
+        transport.setHandler { [server] req in try await server.handle(req) }
+        let client = PylonClient(
+            config: PylonClientConfig(baseURL: URL(string: "http://test.invalid")!),
+            storage: MemoryStorage(),
+            transport: transport
+        )
+        let engine = await SyncEngine(config: SyncEngineConfig(baseURL: URL(string: "http://test.invalid")!, transport: .poll), client: client)
+        await engine.pull()
+        let bootCursor = await engine.currentCursor()
+        XCTAssertEqual(bootCursor.last_seq, 1)
+
+        for i in 2...31 {
+            await server.seedChange(ChangeEvent(seq: Int64(i), entity: "Todo", row_id: "t\(i)", kind: .insert, data: ["title": .string("row \(i)")]))
+        }
+        await server.setPageSize(10)
+
+        await engine.pull()
+
+        let cursor = await engine.currentCursor()
+        XCTAssertEqual(cursor.last_seq, 31, "catch-up must land at the tip")
+        let store = await engine.store
+        XCTAssertEqual(store.list("Todo").count, 31, "every page must be applied")
+        XCTAssertNotNil(store.get("Todo", id: "t31"), "last page landed")
+        // It really paginated: the second pull() alone issued >= 3 delta
+        // requests with a strictly increasing `since` derived from each
+        // response's cursor (1 → 11 → 21 → ...).
+        let sinces = await server.pullSinces.filter { $0 >= 1 }
+        XCTAssertGreaterThanOrEqual(sinces.count, 3)
+        XCTAssertEqual(sinces, sinces.sorted(), "since must be monotonic across pages")
     }
 }
 

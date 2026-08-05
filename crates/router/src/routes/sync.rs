@@ -555,60 +555,250 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
     (200, resp.to_string())
 }
 
+/// Events per delta-pull response. Matches SNAPSHOT_BATCH_LIMIT — a
+/// catching-up client pays one round trip per page, so the page size
+/// directly divides catch-up latency (100/page made a 15k-event
+/// catch-up ~150 sequential round trips ≈ 10s of pure RTT).
+const DELTA_BATCH_LIMIT: usize = 1000;
+
+/// Test override for [`delta_scan_budget`] — same atomic-not-env
+/// pattern (and rationale) as [`SNAPSHOT_SCAN_BUDGET`]. 0 = default.
+static DELTA_SCAN_BUDGET: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Override the per-request raw-event scan budget for delta pulls.
+/// 0 restores the default.
+pub fn set_delta_scan_budget(events: usize) {
+    DELTA_SCAN_BUDGET.store(events, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Raw change-log events one delta request may SCAN while refilling a
+/// page (see the refill loop below). Bounds request time when the
+/// policy fence drops most events for this caller.
+fn delta_scan_budget() -> usize {
+    let overridden = DELTA_SCAN_BUDGET.load(std::sync::atomic::Ordering::Relaxed);
+    if overridden > 0 {
+        return overridden;
+    }
+    std::env::var("PYLON_DELTA_SCAN_BUDGET")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(10_000)
+}
+
+/// Test override for [`delta_resync_threshold`]. 0 = no override.
+static DELTA_RESYNC_THRESHOLD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Override the far-behind cutover threshold. 0 restores the default.
+pub fn set_delta_resync_threshold(gap: u64) {
+    DELTA_RESYNC_THRESHOLD.store(gap, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Minimum cursor gap (in change-log events) before the far-behind
+/// cutover even considers forcing a snapshot resync. 0 disables the
+/// cutover entirely.
+fn delta_resync_threshold() -> u64 {
+    let overridden = DELTA_RESYNC_THRESHOLD.load(std::sync::atomic::Ordering::Relaxed);
+    if overridden > 0 {
+        return overridden;
+    }
+    match std::env::var("PYLON_DELTA_RESYNC_THRESHOLD") {
+        Ok(v) => v.parse().unwrap_or(10_000),
+        Err(_) => 10_000,
+    }
+}
+
+/// Total rows across synced entities, cached process-wide for 60s.
+/// Feeds the far-behind cutover: COUNT(*) per entity is not free on a
+/// large table, and a fleet of stale clients reconnecting at once must
+/// not turn the cheap "should we snapshot instead?" question into its
+/// own COUNT storm. Best-effort: `None` when any count fails (backend
+/// without aggregate support) — the caller then skips the cutover and
+/// serves the delta as before.
+fn total_synced_rows(ctx: &RouterContext) -> Option<u64> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    // Single-slot cache keyed by store identity: one process normally
+    // serves one store, but test binaries (and any future multi-app
+    // host) run several — a count cached for one store must never
+    // answer for another.
+    static CACHE: Mutex<Option<(usize, Instant, Option<u64>)>> = Mutex::new(None);
+    let store_key = ctx.store as *const dyn crate::DataStore as *const () as usize;
+    if let Ok(guard) = CACHE.lock() {
+        if let Some((key, at, total)) = *guard {
+            if key == store_key && at.elapsed() < Duration::from_secs(60) {
+                return total;
+            }
+        }
+    }
+    let manifest = ctx.store.manifest();
+    let mut total: u64 = 0;
+    let mut ok = true;
+    for entity in &manifest.entities {
+        if !entity.sync || entity.name.starts_with('_') {
+            continue;
+        }
+        match ctx
+            .store
+            .aggregate(&entity.name, &serde_json::json!({ "count": "*" }))
+        {
+            Ok(res) => {
+                let count = res
+                    .get("rows")
+                    .and_then(|r| r.get(0))
+                    .and_then(|row| row.get("count"))
+                    .and_then(|c| c.as_u64())
+                    .unwrap_or(0);
+                total = total.saturating_add(count);
+            }
+            Err(_) => {
+                ok = false;
+                break;
+            }
+        }
+    }
+    let result = if ok { Some(total) } else { None };
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((store_key, Instant::now(), result));
+    }
+    result
+}
+
+fn resync_required_body(since: u64, oldest_seq: u64) -> String {
+    serde_json::json!({
+        "error": {
+            "code": "RESYNC_REQUIRED",
+            "message": format!(
+                "cursor last_seq={since} is older than the oldest retained seq={oldest_seq}; client must re-sync"
+            ),
+            "oldest_seq": oldest_seq,
+        }
+    })
+    .to_string()
+}
+
 /// Catching-up client (since>0): replay the change-log tail since the
 /// caller's cursor, with the read-policy fence applied to each event.
 fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
-    match ctx.change_log.pull(&SyncCursor { last_seq: since }, 100) {
-        Ok(mut resp) => {
-            let manifest = ctx.store.manifest();
-            // Non-synced entities (`sync: false`) are never in the client replica
-            // (snapshot skips them), so don't stream their deltas either —
-            // otherwise the change-log tail would re-flood them post-snapshot.
-            let non_synced: std::collections::HashSet<&str> = manifest
-                .entities
-                .iter()
-                .filter(|e| !e.sync)
-                .map(|e| e.name.as_str())
-                .collect();
-            resp.changes = resp
-                .changes
-                .into_iter()
-                .filter(|ev| !non_synced.contains(ev.entity.as_str()))
-                .filter_map(|ev| project_change_for_caller(ctx, ev))
-                .collect();
-            // Wire-level projection on every kept event (data +
-            // prev_data) so server-only fields don't leak via the
-            // visibility-flip path either.
-            let auth_user = &manifest.auth.user;
-            for ev in resp.changes.iter_mut() {
-                if let Some(data) = ev.data.take() {
-                    ev.data =
-                        Some(crate::project_row_for_wire(manifest, auth_user, &ev.entity, data));
-                }
-                if let Some(prev) = ev.prev_data.take() {
-                    ev.prev_data =
-                        Some(crate::project_row_for_wire(manifest, auth_user, &ev.entity, prev));
+    // Far-behind cutover. Replaying a delta costs one event per CHANGE
+    // since the cursor; a snapshot costs one event per CURRENT visible
+    // row, with every intermediate update coalesced and deleted rows
+    // absent. When the gap clearly exceeds what a full snapshot would
+    // send, force the snapshot path via the same 410 the retention
+    // window uses — the client already handles it (reset replica, keep
+    // pending mutations, re-pull from 0).
+    //
+    // Deliberately conservative: total rows OVERSTATES the per-caller
+    // snapshot (policies filter rows out), so the cutover only fires
+    // when the delta is worse than even a whole-table snapshot. Gap ≥
+    // threshold gates the row count, so routine catch-ups never pay
+    // the COUNT.
+    let threshold = delta_resync_threshold();
+    if threshold > 0 {
+        let current = ctx.change_log.current_seq();
+        let gap = current.saturating_sub(since);
+        if gap >= threshold {
+            if let Some(total) = total_synced_rows(ctx) {
+                if gap > total.saturating_mul(2) {
+                    return (410, resync_required_body(since, current.saturating_add(1)));
                 }
             }
-            (
-                200,
-                serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into()),
-            )
         }
-        Err(pylon_sync::PullError::ResyncRequired { oldest_seq, .. }) => (
-            410,
-            serde_json::json!({
-                "error": {
-                    "code": "RESYNC_REQUIRED",
-                    "message": format!(
-                        "cursor last_seq={since} is older than the oldest retained seq={oldest_seq}; client must re-sync"
-                    ),
-                    "oldest_seq": oldest_seq,
-                }
-            })
-            .to_string(),
-        ),
     }
+
+    let manifest = ctx.store.manifest();
+    // Non-synced entities (`sync: false`) are never in the client replica
+    // (snapshot skips them), so don't stream their deltas either —
+    // otherwise the change-log tail would re-flood them post-snapshot.
+    let non_synced: std::collections::HashSet<&str> = manifest
+        .entities
+        .iter()
+        .filter(|e| !e.sync)
+        .map(|e| e.name.as_str())
+        .collect();
+    // Data-dependent policies ask the same `exists(...)` question for
+    // every event of the page; memoize for this request only, same as
+    // the snapshot path.
+    let _exists_memo = pylon_policy::ExistsMemo::scope();
+
+    // Refill loop. `change_log.pull` pages RAW events, but the policy
+    // fence below can drop most of them for this caller (other tenants'
+    // writes, non-synced entities) — and the client pays a full round
+    // trip per response regardless of how many events survive. So keep
+    // scanning the log until a real page accumulates, the log is
+    // exhausted, or the scan budget is hit. The response cursor always
+    // advances to the last RAW event scanned, so filtered-out spans are
+    // never re-scanned on the next request.
+    let scan_budget = delta_scan_budget();
+    let mut changes: Vec<ChangeEvent> = Vec::new();
+    let mut cursor_seq = since;
+    let mut has_more;
+    let mut scanned: usize = 0;
+    loop {
+        let page = match ctx.change_log.pull(
+            &SyncCursor {
+                last_seq: cursor_seq,
+            },
+            DELTA_BATCH_LIMIT,
+        ) {
+            Ok(page) => page,
+            Err(pylon_sync::PullError::ResyncRequired { oldest_seq, .. }) => {
+                if changes.is_empty() && cursor_seq == since {
+                    return (410, resync_required_body(since, oldest_seq));
+                }
+                // Mid-refill resync signal with a valid partial page
+                // already accumulated: return the page (contiguous from
+                // `since`) with has_more so the NEXT request surfaces
+                // the 410 cleanly on its own.
+                has_more = true;
+                break;
+            }
+        };
+        scanned += page.changes.len();
+        let advanced = page.cursor.last_seq > cursor_seq;
+        cursor_seq = page.cursor.last_seq;
+        // No forward progress (store-error no-progress page, or any
+        // future path that returns an empty page with has_more): break
+        // rather than spin the refill loop against the same cursor.
+        has_more = page.has_more && advanced;
+        changes.extend(
+            page.changes
+                .into_iter()
+                .filter(|ev| !non_synced.contains(ev.entity.as_str()))
+                .filter_map(|ev| project_change_for_caller(ctx, ev)),
+        );
+        if !has_more || changes.len() >= DELTA_BATCH_LIMIT || scanned >= scan_budget {
+            break;
+        }
+    }
+
+    // Wire-level projection on every kept event (data +
+    // prev_data) so server-only fields don't leak via the
+    // visibility-flip path either.
+    let auth_user = &manifest.auth.user;
+    for ev in changes.iter_mut() {
+        if let Some(data) = ev.data.take() {
+            ev.data = Some(crate::project_row_for_wire(
+                manifest, auth_user, &ev.entity, data,
+            ));
+        }
+        if let Some(prev) = ev.prev_data.take() {
+            ev.prev_data = Some(crate::project_row_for_wire(
+                manifest, auth_user, &ev.entity, prev,
+            ));
+        }
+    }
+    let resp = pylon_sync::PullResponse {
+        changes,
+        cursor: SyncCursor {
+            last_seq: cursor_seq,
+        },
+        has_more,
+    };
+    (
+        200,
+        serde_json::to_string(&resp).unwrap_or_else(|_| "{}".into()),
+    )
 }
 
 /// Apply the read-policy fence to a single change event. Returns the

@@ -1090,6 +1090,14 @@ enum Ast {
     Str(String),
     /// A numeric literal.
     Num(f64),
+    /// `ago("30d")` — the instant that many seconds before `now`, as an
+    /// ISO-8601 string. The duration is validated and converted to
+    /// seconds at parse time; evaluation subtracts it from the same
+    /// per-evaluation `now` instant every other `now` in the expression
+    /// sees. This is what makes ROLLING time windows expressible
+    /// (`data.createdAt >= ago("30d")`) — `now` alone can only compare
+    /// against timestamps already stored in the row.
+    Ago(i64),
     /// `null` literal.
     Null,
     /// Degenerate: bare `auth.isAdmin` etc. resolves to a boolean.
@@ -1332,6 +1340,13 @@ impl<'a> Parser<'a> {
                 }
                 Ok(Ast::HasAnyRole(args))
             }
+            "ago" => {
+                if args.len() != 1 {
+                    return Err("ago takes exactly one duration argument, e.g. ago(\"30d\")".into());
+                }
+                let secs = parse_duration_secs(&args[0])?;
+                Ok(Ast::Ago(secs))
+            }
             other => Err(format!("unknown function \"{other}(...)\"")),
         }
     }
@@ -1471,12 +1486,77 @@ impl<'a> Parser<'a> {
             }
             Some(Token::Ident(name)) => {
                 self.bump();
+                // Builtin calls are valid comparison operands too —
+                // without this, `data.createdAt >= ago("30d")` parsed
+                // `ago` as a bare path and left `("30d")` as trailing
+                // tokens. `exists(...)` stays out: it has its own body
+                // grammar and yields a boolean, not a comparable value.
+                if matches!(self.peek(), Some(Token::LParen)) {
+                    if name == "exists" {
+                        return Err("exists(...) cannot be used as a comparison operand".into());
+                    }
+                    self.bump();
+                    let args = self.parse_string_args()?;
+                    match self.peek() {
+                        Some(Token::RParen) => {
+                            self.bump();
+                        }
+                        _ => return Err("expected `)` after function args".into()),
+                    }
+                    return self.build_call(&name, args);
+                }
                 Ok(Ast::Path(split_path(&name)))
             }
             Some(other) => Err(format!("expected atom, got {other:?}")),
             None => Err("unexpected end of expression in atom".into()),
         }
     }
+}
+
+/// Parse a duration literal like `"30d"`, `"12h"`, `"90m"`, `"45s"`,
+/// `"2w"` — or compound segments (`"1d12h"`) — into whole seconds.
+/// Validated at policy PARSE time so a typo'd manifest fails at boot,
+/// not silently at evaluation (where an error would have to become a
+/// deny and read as a mystery 403).
+fn parse_duration_secs(src: &str) -> Result<i64, String> {
+    let bytes = src.as_bytes();
+    if bytes.is_empty() {
+        return Err("empty duration — expected e.g. \"30d\", \"12h\", \"90m\"".into());
+    }
+    let mut total: i64 = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if start == i {
+            return Err(format!(
+                "invalid duration \"{src}\" — expected <number><unit> segments with unit one of s/m/h/d/w"
+            ));
+        }
+        let n: i64 = src[start..i]
+            .parse()
+            .map_err(|_| format!("duration number out of range in \"{src}\""))?;
+        let unit_secs: i64 = match bytes.get(i) {
+            Some(b's') => 1,
+            Some(b'm') => 60,
+            Some(b'h') => 3600,
+            Some(b'd') => 86_400,
+            Some(b'w') => 604_800,
+            _ => {
+                return Err(format!(
+                    "invalid duration \"{src}\" — unit must be one of s/m/h/d/w"
+                ));
+            }
+        };
+        i += 1;
+        total = n
+            .checked_mul(unit_secs)
+            .and_then(|s| total.checked_add(s))
+            .ok_or_else(|| format!("duration \"{src}\" overflows"))?;
+    }
+    Ok(total)
 }
 
 /// Walk an Ast and return true iff any node is `Ast::Exists`. Used
@@ -1502,6 +1582,7 @@ fn ast_contains_exists(ast: &Ast) -> bool {
         | Ast::Path(_)
         | Ast::Str(_)
         | Ast::Num(_)
+        | Ast::Ago(_)
         | Ast::Null
         | Ast::Bool(_) => false,
     }
@@ -1649,7 +1730,7 @@ impl<'a> EvalEnv<'a> {
                     EvalResult::False(format!("exists({entity} ...) matched no rows"))
                 }
             }
-            Ast::Path(_) | Ast::Str(_) | Ast::Num(_) | Ast::Null | Ast::Bool(_) => {
+            Ast::Path(_) | Ast::Str(_) | Ast::Num(_) | Ast::Ago(_) | Ast::Null | Ast::Bool(_) => {
                 // Bare value as boolean expression.
                 match self.value_of(ast) {
                     Value::Bool(true) => EvalResult::True,
@@ -1682,6 +1763,20 @@ impl<'a> EvalEnv<'a> {
             Ast::Str(s) => Value::Str(s.clone()),
             Ast::Num(n) => Value::Num(*n),
             Ast::Bool(b) => Value::Bool(*b),
+            // `now` minus the parsed offset, in the same second-precision
+            // ISO-8601 shape `now` itself uses so chronological string
+            // comparison stays consistent. An unparseable `now` (cannot
+            // happen with the kernel formatter) resolves to Null, which
+            // every comparison treats as deny-safe false.
+            Ast::Ago(secs) => match chrono::DateTime::parse_from_rfc3339(&self.now) {
+                Ok(t) => Value::Str(
+                    (t - chrono::Duration::seconds(*secs))
+                        .with_timezone(&chrono::Utc)
+                        .format("%Y-%m-%dT%H:%M:%SZ")
+                        .to_string(),
+                ),
+                Err(_) => Value::Null,
+            },
             Ast::Path(parts) => self.resolve_path(parts),
             // Nested boolean ops evaluate to Bool.
             other => match self.eval(other) {
@@ -2919,6 +3014,56 @@ mod tests {
         let expired = serde_json::json!({ "expiresAt": "2000-01-01T00:00:00.000Z" });
         assert!(evaluate_allow("data.expiresAt > now", &auth, Some(&live), None).is_allowed());
         assert!(!evaluate_allow("data.expiresAt > now", &auth, Some(&expired), None).is_allowed());
+    }
+
+    // -----------------------------------------------------------------------
+    // `ago(...)` — ROLLING time windows (the sync-window primitive)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ago_enables_rolling_window() {
+        let auth = AuthContext::anonymous();
+        let yesterday = (chrono::Utc::now() - chrono::Duration::days(1))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let recent = serde_json::json!({ "createdAt": yesterday });
+        let ancient = serde_json::json!({ "createdAt": "2000-01-01T00:00:00Z" });
+        let expr = "data.createdAt >= ago(\"30d\")";
+        assert!(evaluate_allow(expr, &auth, Some(&recent), None).is_allowed());
+        assert!(!evaluate_allow(expr, &auth, Some(&ancient), None).is_allowed());
+        // Missing field → null vs timestamp is not orderable → deny-safe.
+        let bare = serde_json::json!({});
+        assert!(!evaluate_allow(expr, &auth, Some(&bare), None).is_allowed());
+    }
+
+    #[test]
+    fn ago_duration_units_and_compound_segments() {
+        assert_eq!(parse_duration_secs("45s").unwrap(), 45);
+        assert_eq!(parse_duration_secs("90m").unwrap(), 5_400);
+        assert_eq!(parse_duration_secs("12h").unwrap(), 43_200);
+        assert_eq!(parse_duration_secs("30d").unwrap(), 2_592_000);
+        assert_eq!(parse_duration_secs("2w").unwrap(), 1_209_600);
+        assert_eq!(parse_duration_secs("1d12h").unwrap(), 129_600);
+    }
+
+    #[test]
+    fn ago_invalid_durations_fail_closed_at_parse() {
+        // Bad unit / shape errors at PARSE time so a typo'd manifest fails
+        // loudly instead of silently denying at evaluation.
+        assert!(parse_duration_secs("30x").is_err());
+        assert!(parse_duration_secs("").is_err());
+        assert!(parse_duration_secs("d30").is_err());
+        // And an expression carrying one is denied, never allowed.
+        let auth = AuthContext::anonymous();
+        let data = serde_json::json!({ "createdAt": "2999-01-01T00:00:00Z" });
+        assert!(
+            !evaluate_allow("data.createdAt >= ago(\"30x\")", &auth, Some(&data), None)
+                .is_allowed()
+        );
+        // Non-string argument is rejected by the arg grammar.
+        assert!(
+            !evaluate_allow("data.createdAt >= ago(30)", &auth, Some(&data), None).is_allowed()
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -1714,16 +1714,40 @@ export class SyncEngine {
     // has_more, 410 recursion) run at a non-zero cursor → they don't touch
     // this, and their applies pass `isPull` so they're never held.
     if (startedFromZero) this.snapshotHold = [];
+    // Declared outside the try: on a mid-loop fetch error the previous
+    // page's apply may still be in flight, and the catch (410 reset →
+    // re-pull) MUST let it settle first — otherwise the orphaned apply
+    // races the replica wipe and re-writes stale rows into the fresh
+    // store (and drags the cursor forward under the recursive pull).
+    let pendingApply: Promise<void> | null = null;
     try {
       // Snapshot pagination: when the cursor is 0 and the server's
       // table is larger than a single batch, the response carries
-      // `snapshot_after` for the next page. Loop until exhausted
-      // BEFORE returning so a fresh client always observes a
-      // consistent full snapshot, not a 1k-row prefix it mistakes
-      // for the whole replica.
+      // `snapshot_after` for the next page. The change-log tail
+      // paginates via `has_more`. Both loop until exhausted BEFORE
+      // returning so a fresh client always observes a consistent full
+      // snapshot (not a 1k-row prefix it mistakes for the whole
+      // replica) and a catching-up client drains the whole tail.
+      //
+      // Fetch/apply pipelining: applying a page (IndexedDB writes) and
+      // fetching the next one are independent, so page N's apply runs
+      // WHILE page N+1 is in flight — catch-up latency is
+      // max(network, apply) per page instead of their sum. Ordering is
+      // safe because enqueueApply chains every batch onto the same
+      // applyQueue in call order; page N+1 is only ENQUEUED after page
+      // N's apply resolved, so a failed apply aborts the loop instead
+      // of letting later pages advance the cursor over a hole.
+      //
+      // The next `since` comes from each RESPONSE's cursor, not
+      // `this.cursor` — the apply is what advances `this.cursor`, and
+      // waiting on it is exactly what pipelining removes. Mid-snapshot
+      // the server pins the response cursor at 0, which keeps routing
+      // to the snapshot path.
       let snapshotAfter: string | undefined;
+      let hasMore = false;
       let firstPass = true;
-      while (firstPass || snapshotAfter) {
+      let nextSince = this.cursor.last_seq;
+      while (firstPass || snapshotAfter || hasMore) {
         firstPass = false;
         // `snapshot_after` is an OPAQUE cursor the server already URL-encoded
         // (it `url_encode`s the JSON payload). It MUST be appended raw — running
@@ -1733,33 +1757,28 @@ export class SyncEngine {
         // restart the snapshot from row 0 — an infinite re-snapshot loop for any
         // table larger than one page (SNAPSHOT_BATCH_LIMIT rows). `since` is a
         // plain integer, so it's safe to inline.
-        let query = `since=${this.cursor.last_seq}`;
+        let query = `since=${nextSince}`;
         if (snapshotAfter) {
           query += `&snapshot_after=${snapshotAfter}`;
         }
         const resp = await this.request<
           PullResponse & { snapshot_after?: string | null }
         >("GET", `/api/sync/pull?${query}`);
-        await this.enqueueApply(resp.changes, resp.cursor, { isPull: true });
+        if (pendingApply) await pendingApply;
+        pendingApply = this.enqueueApply(resp.changes, resp.cursor, {
+          isPull: true,
+        });
+        // Guard against a server that reports more pages without
+        // advancing the cursor (a transient no-progress page): break
+        // rather than refetch the same page forever. The next poll /
+        // change event re-drives the pull.
+        const advanced = resp.cursor.last_seq > nextSince;
+        nextSince = resp.cursor.last_seq;
         // `snapshot_after` is only set when the server is mid-snapshot.
-        // Continue paginating in the same loop iteration so we don't
-        // leave a fresh client with a partial replica.
         snapshotAfter = resp.snapshot_after ?? undefined;
-        // The change-log tail also paginates via `has_more` — drain it
-        // by recursing into `pullInner` directly. We are INSIDE the
-        // `pull` op-queue slot right now; calling the public `pull()`
-        // would re-enqueue under the same "pull" key, which coalesces
-        // to the promise we're currently running inside (op-queue.ts
-        // deletes the key only after `fn` resolves) and `await` it →
-        // permanent self-deadlock that bricks the entire pull path for
-        // the session. This is the exact hazard the 410 handler avoids;
-        // `pullInner` re-reads `this.cursor.last_seq` (already advanced
-        // by enqueueApply) so the recursion resumes at the right cursor.
-        if (!snapshotAfter && resp.has_more) {
-          await this.pullInner();
-          break;
-        }
+        hasMore = !snapshotAfter && resp.has_more && advanced;
       }
+      if (pendingApply) await pendingApply;
       // Clear the resync circuit breaker ONLY on a successful DELTA
       // pull — one that started from a real, non-zero cursor the server
       // honored. A snapshot pull from cursor=0 succeeding does NOT prove
@@ -1795,6 +1814,12 @@ export class SyncEngine {
         if (held.length > 0) await this.enqueueApply(held);
       }
     } catch (err) {
+      // Settle any in-flight page apply before acting on the error —
+      // the 410 path below wipes the replica, and an apply landing
+      // after the wipe would resurrect stale rows and advance the
+      // cursor under the recursive re-pull. Failures are already
+      // handled batch-locally; only settlement matters here.
+      if (pendingApply) await pendingApply.catch(() => {});
       // Swallow network + transient errors so the poll/reconnect loop
       // keeps trying — but on 429 bump the backoff counter so the next
       // reconnect waits noticeably longer. Without this, a rate-limited

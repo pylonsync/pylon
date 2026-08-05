@@ -555,6 +555,74 @@ describe("sync scenarios", () => {
     expect(env.engine.store.get("Note", "n2")).not.toBeNull();
   });
 
+  // CATCH-UP PIPELINING (pins the pullInner fetch/apply overlap). A
+  // multi-page delta catch-up used to serialize fetch page N → apply
+  // page N → fetch page N+1, paying network + apply per page in SUM.
+  // The pipelined loop derives the next `since` from each RESPONSE's
+  // cursor and starts the next fetch while the previous page is still
+  // applying, so per-page cost is max(network, apply). This test slows
+  // applies down and asserts (a) a later page's fetch arrives at the
+  // server WHILE an apply is still in flight, and (b) every page still
+  // lands, in order, with nothing skipped.
+  test("multi-page delta catch-up overlaps fetch with apply and drains completely", async () => {
+    let deltaFetches = 0;
+    let applyEnds = 0;
+    let overlapped = false;
+    env = createTestEnv({
+      transport: "poll",
+      beforePull: (_auth, since) => {
+        if (since > 0) {
+          deltaFetches++;
+          // The serialized loop finishes apply k-1 BEFORE issuing
+          // fetch k, so it always arrives with applyEnds == k-1. A
+          // fetch arriving with fewer applies completed is the
+          // pipeline overlap.
+          if (deltaFetches >= 2 && applyEnds < deltaFetches - 1) {
+            overlapped = true;
+          }
+        }
+      },
+    });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n0", title: "seed" }]);
+    await env.start();
+    await env.flush();
+
+    // 30 changes behind, served 10 per page → a 3-page catch-up.
+    for (let i = 1; i <= 30; i++) {
+      env.server.insert("Note", { id: `n${i}`, title: `t${i}` });
+    }
+    env.server.deltaPageSize = 10;
+
+    // Make applies observably slow so the overlap window is real.
+    const store = env.engine.store as unknown as {
+      applyChangesAsync: (c: unknown[]) => Promise<boolean>;
+    };
+    const realApply = store.applyChangesAsync.bind(store);
+    store.applyChangesAsync = async (changes) => {
+      await new Promise((r) => setTimeout(r, 25));
+      const out = await realApply(changes);
+      applyEnds++;
+      return out;
+    };
+
+    await env.engine.pull();
+    await env.flush();
+
+    // Every page landed — first, middle, and last row all present.
+    expect(env.engine.store.get("Note", "n1")).not.toBeNull();
+    expect(env.engine.store.get("Note", "n15")).not.toBeNull();
+    expect(env.engine.store.get("Note", "n30")).not.toBeNull();
+    // It really paginated (≥3 delta pages), and at least one later
+    // fetch overlapped an in-flight apply. A serialized loop never
+    // trips `overlapped` because each fetch waits for the apply.
+    const deltaPulls = env.server.pullUrls.filter(
+      (u) => !u.includes("since=0"),
+    ).length;
+    expect(deltaPulls).toBeGreaterThanOrEqual(3);
+    expect(overlapped).toBe(true);
+  });
+
   // OFFLINE WRITES (pins the transient/permanent split in pushInner).
   // A push that fails with a NETWORK error (offline — fetch rejects, no
   // HTTP status) must keep the mutation `pending` and the optimistic

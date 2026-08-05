@@ -1192,3 +1192,236 @@ fn the_cursor_bootstrap_honours_the_scope_but_a_direct_read_does_not() {
     assert_eq!(count("&sync=1"), 1, "replication fetch ignored the scope");
     assert_eq!(count(""), 2, "a direct read was wrongly scoped");
 }
+
+// ---------------------------------------------------------------------------
+// Delta pull: page refill + far-behind cutover
+// ---------------------------------------------------------------------------
+
+/// A delta page must be refilled AFTER the policy fence. The change log
+/// pages raw events, and a caller behind a span of events it can't see
+/// (another tenant's writes, a deny-all audit table) used to get a
+/// near-empty page per round trip — 1100 invisible events cost 11 full
+/// round trips to deliver 3 visible ones. The refill loop keeps
+/// scanning until a real page accumulates, so this converges in ONE
+/// request.
+#[test]
+fn delta_pull_refills_pages_dropped_by_the_policy_fence() {
+    fn plain(name: &str) -> ManifestField {
+        ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }
+    }
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "Shared".into(),
+        fields: vec![plain("ownerId"), plain("data")],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: false,
+        sync: true,
+        ..Default::default()
+    });
+    // Writable by anyone, readable only by the row's owner — so the
+    // caller's own change feed can carry a long span of events the
+    // policy fence drops.
+    manifest.policies.push(ManifestPolicy {
+        name: "shared_write_open".into(),
+        entity: Some("Shared".into()),
+        allow: "true".into(),
+        allow_read: Some("auth.userId == data.ownerId".into()),
+        ..Default::default()
+    });
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    let port = start_server(Arc::clone(&rt));
+    let token = mint_guest(port);
+
+    // Anchor write BEFORE the bootstrap pull: over an empty log the
+    // snapshot hands back cursor=0, and a since=0 "delta" would route
+    // straight back to the snapshot path instead of the code under test.
+    insert_note(port, &token, "anchor");
+    let (s0, r0) = pull(port, &token, 0);
+    assert_eq!(s0, 200);
+    let cursor = r0["cursor"]["last_seq"].as_u64().unwrap();
+    assert!(
+        cursor > 0,
+        "anchor write must move the snapshot cursor off 0"
+    );
+
+    // 1100 events the puller can never see (owned by someone else) —
+    // more than one raw change-log page — pushed as one batch through
+    // the real wire path (only the mutation pipeline appends to the
+    // change log), then 3 visible notes.
+    let ops: Vec<String> = (0..1100)
+        .map(|i| {
+            format!(
+                r#"{{"op_id":"op{i}","entity":"Shared","row_id":"s{i}","kind":"insert","data":{{"ownerId":"someone-else","data":"d{i}"}}}}"#
+            )
+        })
+        .collect();
+    let body = format!(r#"{{"changes":[{}]}}"#, ops.join(","));
+    let (sp, bp) = http(port, "POST", "/api/sync/push", Some(&token), Some(&body));
+    assert_eq!(sp, 200, "batch push failed: {bp}");
+    for title in ["v1", "v2", "v3"] {
+        insert_note(port, &token, title);
+    }
+
+    let (s1, r1) = pull(port, &token, cursor);
+    assert_eq!(s1, 200, "delta pull failed: {r1}");
+    let changes = r1["changes"].as_array().unwrap();
+    assert_eq!(
+        changes.len(),
+        3,
+        "one refilled request must deliver every visible event across the invisible span: {r1}"
+    );
+    assert!(
+        changes.iter().all(|c| c["entity"] == "Note"),
+        "no Secret event may survive the fence: {r1}"
+    );
+    assert_eq!(
+        r1["has_more"], false,
+        "the refilled page covered the whole tail, so has_more must be false: {r1}"
+    );
+    assert!(
+        r1["cursor"]["last_seq"].as_u64().unwrap() > cursor + 1100,
+        "cursor must advance past the filtered span so it is never re-scanned: {r1}"
+    );
+}
+
+/// Far-behind cutover: when the cursor gap dwarfs what a snapshot would
+/// send (every intermediate change coalesced, deleted rows absent), the
+/// server forces the snapshot path with the same 410 the retention
+/// window uses, instead of replaying an arbitrarily long delta.
+#[test]
+fn delta_pull_far_behind_cuts_over_to_snapshot_resync() {
+    // Atomic override, not env — set_var races other test threads.
+    pylon_router::set_delta_resync_threshold(50);
+
+    let rt = Arc::new(Runtime::in_memory(test_manifest()).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    // Anchor write so the bootstrap cursor is non-zero (a since=0 pull
+    // routes to the snapshot path, not the delta path under test).
+    insert_note(port, &token, "anchor");
+    let (s0, r0) = pull(port, &token, 0);
+    assert_eq!(s0, 200);
+    let cursor = r0["cursor"]["last_seq"].as_u64().unwrap();
+    assert!(
+        cursor > 0,
+        "anchor write must move the snapshot cursor off 0"
+    );
+
+    // 30 inserts + 30 deletes = a 60-event gap over a table that ends
+    // EMPTY: the delta replays 60 events, the snapshot sends none.
+    let mut ids = Vec::new();
+    for i in 0..30 {
+        ids.push(insert_note(port, &token, &format!("churn{i}")));
+    }
+    for id in &ids {
+        let (status, resp) = http(
+            port,
+            "DELETE",
+            &format!("/api/entities/Note/{id}"),
+            Some(&token),
+            None,
+        );
+        assert!(status == 200 || status == 204, "delete failed: {resp}");
+    }
+
+    let (s1, r1) = pull(port, &token, cursor);
+    assert_eq!(
+        s1, 410,
+        "a gap of 60 events over 0 surviving rows must cut over to a snapshot resync: {r1}"
+    );
+    assert_eq!(r1["error"]["code"], "RESYNC_REQUIRED", "{r1}");
+
+    // The client's 410 recovery path: reset to since=0 and re-snapshot.
+    // It must land at the tip with no Note rows.
+    let (s2, r2) = pull(port, &token, 0);
+    assert_eq!(s2, 200, "recovery snapshot failed: {r2}");
+    let notes = r2["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .count();
+    assert_eq!(
+        notes, 1,
+        "recovery snapshot must hold only the surviving anchor note — deleted churn rows must not reappear: {r2}"
+    );
+    assert_eq!(r2["has_more"], false, "{r2}");
+
+    pylon_router::set_delta_resync_threshold(0);
+}
+
+/// Rolling time window via `sync: { where: 'data.<ts> >= ago("30d")' }`.
+/// The window is what keeps an append-only table's replica (and its
+/// catch-up cost) bounded as the table grows: the snapshot ships only
+/// in-window rows, and the reconcile sweep (`?sync=1`) evicts rows as
+/// they age out. `body` doubles as the timestamp field because the
+/// fixture entity already has it — the predicate shape is under test.
+#[test]
+fn snapshot_honors_a_rolling_time_window_scope() {
+    let rt =
+        Arc::new(Runtime::in_memory(scoped_manifest("data.body >= ago(\"30d\")", None)).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let yesterday = pylon_kernel::util::epoch_to_iso(now_secs - 86_400);
+    let last_year = pylon_kernel::util::epoch_to_iso(now_secs - 365 * 86_400);
+
+    for (title, ts) in [("recent", &yesterday), ("stale", &last_year)] {
+        let (status, resp) = http(
+            port,
+            "POST",
+            "/api/entities/Note",
+            Some(&token),
+            Some(&format!(r#"{{"title":"{title}","body":"{ts}"}}"#)),
+        );
+        assert!(status == 200 || status == 201, "insert failed: {resp}");
+    }
+
+    let (s, r) = pull(port, &token, 0);
+    assert_eq!(s, 200, "snapshot failed: {r}");
+    let notes: Vec<&Value> = r["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|c| c["entity"] == "Note")
+        .collect();
+    assert_eq!(notes.len(), 1, "only the in-window row may replicate: {r}");
+    assert_eq!(notes[0]["data"]["title"], "recent", "{r}");
+
+    // The replication cursor fetch (`?sync=1`) — the reconcile path that
+    // evicts aged-out rows — honors the same window; a direct read does not.
+    let count = |qs: &str| -> usize {
+        let (status, body) = http(
+            port,
+            "GET",
+            &format!("/api/entities/Note/cursor?limit=100{qs}"),
+            Some(&token),
+            None,
+        );
+        assert_eq!(status, 200, "cursor failed: {body}");
+        serde_json::from_str::<Value>(&body).unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(count("&sync=1"), 1, "replication fetch ignored the window");
+    assert_eq!(count(""), 2, "a direct read was wrongly windowed");
+}

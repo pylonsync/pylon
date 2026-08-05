@@ -278,6 +278,23 @@ async function handle(
       // terminating snapshot (no snapshot_after → client exits the loop).
     }
     const resp = await server.pull(token, since);
+    // Delta paging sim: slice to `deltaPageSize` events with a real
+    // per-page cursor + has_more, like the production DELTA_BATCH_LIMIT.
+    if (
+      since > 0 &&
+      server.deltaPageSize != null &&
+      resp.changes.length > server.deltaPageSize
+    ) {
+      const page = resp.changes.slice(0, server.deltaPageSize);
+      return {
+        status: 200,
+        body: {
+          changes: page,
+          cursor: { last_seq: page[page.length - 1]!.seq },
+          has_more: true,
+        },
+      };
+    }
     // One-shot has_more on a delta pull → drives the tail-pull recursion.
     if (since > 0 && server.consumeNextPullHasMore()) {
       return { status: 200, body: { ...resp, has_more: true } };

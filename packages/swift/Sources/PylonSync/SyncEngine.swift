@@ -280,40 +280,76 @@ public actor SyncEngine {
         // entry cursor during snapshot pages; for the delta tail it advances.
         let startedFromZero = cursor.last_seq == 0
         let sinceParam = cursor.last_seq
+        // Fetch/apply pipelining (parity with the TS engine): page N's
+        // apply runs while page N+1 is in flight, so a multi-page
+        // catch-up costs max(network, apply) per page instead of their
+        // sum. Ordering holds because the next apply only STARTS after
+        // the previous one finished, and the cursor only advances
+        // inside the apply task, after its rows landed. The next
+        // `since` comes from each RESPONSE's cursor (`nextSince`), not
+        // the engine cursor — the apply is what advances the engine
+        // cursor, and waiting on it is exactly what pipelining removes.
+        //
+        // Declared outside the do: on a mid-loop fetch error the
+        // previous page's apply may still be in flight, and the catch
+        // (410 reset → re-pull) MUST let it settle first — otherwise
+        // the orphaned apply races the replica wipe and re-writes
+        // stale rows into the fresh store.
+        var pendingApply: Task<Void, Never>? = nil
         do {
             var snapshotAfter: String? = nil
+            var nextSince = sinceParam
             var pages = 0
             while pages < 10_000 {
                 pages += 1
-                let since = snapshotAfter != nil ? sinceParam : cursor.last_seq
+                let since = snapshotAfter != nil ? sinceParam : nextSince
                 let resp = try await client.syncPull(since: since, snapshotAfter: snapshotAfter)
                 // Reset the 410 circuit breaker ONLY on a successful DELTA
                 // pull — a snapshot success leaving the counter intact means
                 // repeated resyncs escalate backoff instead of melting egress.
                 if !startedFromZero { consecutive410s = 0 }
-                if !resp.changes.isEmpty {
-                    await store.applyChangesAsync(resp.changes)
-                }
-                if resp.cursor.last_seq > cursor.last_seq {
-                    cursor = resp.cursor
-                    if let persistence {
-                        try? await persistence.saveCursor(cursor)
+                if let pending = pendingApply { await pending.value }
+                let changes = resp.changes
+                let respCursor = resp.cursor
+                // Task {} inherits the actor's isolation, so touching
+                // `cursor` / `persistence` here is safe; the pull loop
+                // and this task interleave only at suspension points
+                // (the network await vs. the store await).
+                pendingApply = Task {
+                    if !changes.isEmpty {
+                        await self.store.applyChangesAsync(changes)
+                    }
+                    if respCursor.last_seq > self.cursor.last_seq {
+                        self.cursor = respCursor
+                        if let persistence = self.persistence {
+                            try? await persistence.saveCursor(respCursor)
+                        }
                     }
                 }
+                // No-progress guard: a page that reports more but does
+                // not advance the cursor would refetch itself forever.
+                let advanced = respCursor.last_seq > nextSince
+                nextSince = max(nextSince, respCursor.last_seq)
                 if let sa = resp.snapshot_after {
                     snapshotAfter = sa // more snapshot pages — keep `since` fixed
-                } else if resp.has_more {
-                    snapshotAfter = nil // delta tail — `since` advances with cursor
+                } else if resp.has_more && advanced {
+                    snapshotAfter = nil // delta tail — `since` advances per response
                 } else {
                     break
                 }
             }
+            if let pending = pendingApply { await pending.value }
             lastPullStartedFromZero = startedFromZero
             // First successful pull settled — drop query `loading`. Idempotent:
             // a no-op on every pull after the first (until the next resetReplica
             // flips the signal back to false).
             markInitialSyncSettled()
         } catch let error as PylonError {
+            // Settle any in-flight page apply before acting on the
+            // error — the 410 path wipes the replica, and an apply
+            // landing after the wipe would resurrect stale rows and
+            // advance the cursor under the recursive re-pull.
+            if let pending = pendingApply { await pending.value }
             switch error.httpStatus {
             case 429:
                 reconnectAttempts += 3
@@ -334,7 +370,10 @@ public actor SyncEngine {
                 break
             }
         } catch {
-            // Other transport errors swallow — caller will retry on next tick.
+            // Other transport errors swallow — caller will retry on next
+            // tick. Still settle an in-flight apply so its rows and
+            // cursor advance land before the next pull reads the cursor.
+            if let pending = pendingApply { await pending.value }
         }
     }
 

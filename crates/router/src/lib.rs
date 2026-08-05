@@ -18,7 +18,9 @@ mod routes;
 /// Test-only knob for the snapshot scan budget. Re-exported so integration
 /// tests can force pagination WITHOUT `std::env::set_var`, which races every
 /// other thread reading the environment and aborted whole test binaries on CI.
-pub use routes::sync::set_snapshot_scan_budget;
+pub use routes::sync::{
+    set_delta_resync_threshold, set_delta_scan_budget, set_snapshot_scan_budget,
+};
 
 // ---------------------------------------------------------------------------
 // ChangeNotifier — abstraction over WS/SSE broadcast

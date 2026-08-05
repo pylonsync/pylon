@@ -102,6 +102,11 @@ export class TestServer {
   /** Count of snapshot pulls served (since = 0). The egress storm was a
    *  runaway count here; the regression test bounds it. */
   snapshotPullCount = 0;
+  /** When set, delta pulls (since > 0) page their response to this many
+   *  events per request with a real per-page cursor + has_more — models
+   *  the production DELTA_BATCH_LIMIT so catch-up pagination and
+   *  fetch/apply pipelining can be exercised. */
+  deltaPageSize: number | null = null;
   /** Count of /api/sync/push requests received. Lets a test assert the
    *  engine actually shipped a batch (e.g. hydrated offline writes that
    *  must drain once leader-elected), independent of the no-op push

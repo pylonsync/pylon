@@ -28,6 +28,7 @@ const noteOwner = policy({
 | `data.*` | `object` | The row: incoming payload on insert; the **current stored row** on read/update/delete |
 | `existing.*` | `object` | Synonym for the current row (same as `data.*` on read/update/delete) |
 | `now` | `string` | Current UTC time as an ISO-8601 string, for time windows |
+| `ago("30d")` | `string` | The instant that long before `now`, for rolling windows. Units `s`/`m`/`h`/`d`/`w`, compound allowed (`"1d12h"`). A malformed duration fails at boot, not silently at evaluation |
 
 Roles are checked with the `auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` **functions** (below) — there is no `auth.roles` array and no `auth.email` binding in policy expressions. (Email/roles live on the session and the SSR page `auth` prop, just not in the policy evaluator.)
 
@@ -58,6 +59,7 @@ Plus three built-in forms:
 ```
 auth.hasRole("admin")               // role check
 auth.hasAnyRole("admin", "owner")   // any-of role check
+ago("30d")                          // timestamp that duration before now (s/m/h/d/w)
 exists(Entity where field == <expr> [and field == <expr>]*)   // correlated subquery
 ```
 
@@ -115,6 +117,20 @@ policy({
   entity: "Post",
   allowRead: "data.publishAt <= now || auth.userId == data.authorId",
 });
+```
+
+### Rolling time window
+
+`ago(...)` compares against a moving cutoff instead of a stored timestamp. As a read policy it hides old rows everywhere; more commonly it belongs in a **sync scope** (`sync: { where: ... }` on the entity), where it bounds the client replica of an append-only table — recent rows stay live, old rows stay reachable through direct reads and queries:
+
+```ts
+const Event = entity(
+  "Event",
+  { name: field.string(), createdAt: field.datetime() },
+  // Replicate only the last 30 days into browsers; the table itself
+  // grows forever without growing every client's replica or catch-up.
+  { sync: { where: 'data.createdAt >= ago("30d")', limit: 20_000 } },
+);
 ```
 
 ## Policy composition

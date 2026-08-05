@@ -211,6 +211,13 @@ const Message = entity(
 
 - `where` is the SAME expression language as policies (`exists(...)` included),
   evaluated per row per caller.
+- **Rolling time window** — the right scope for append-only, timestamp-shaped
+  data that must stay live (analytics events, activity feeds):
+  `sync: { where: 'data.sentAt >= ago("30d")' }`. The replica and every
+  catch-up stay bounded no matter how big the table grows; the periodic
+  reconcile sweep evicts rows as they age out of the window. Older rows stay
+  reachable through direct reads and queries. Combine with `limit` as the
+  hard ceiling.
 - It is applied **on top of** the read policy, never instead of it. A scope
   only ever REMOVES rows from a replica, so getting one wrong is a
   missing-data bug, never a leak — and a malformed one denies rather than
@@ -248,6 +255,7 @@ Policies are boolean string expressions. They guard direct `/api/entities/*` acc
 - `data.*` — the row: incoming payload on insert; the **current stored row** on read/update/delete
 - `existing.*` — synonym for the current row (same as `data.*` on read/update/delete); use whichever reads clearer
 - `now` — current UTC time as an ISO-8601 string, for time windows
+- `ago("30d")` — the instant that long before `now`, for ROLLING windows (`data.createdAt >= ago("30d")`). Units `s/m/h/d/w`, compound allowed (`"1d12h"`); a bad duration fails at boot, not silently at eval
 
 Roles are checked with the **`auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` functions** — there is **no `auth.roles` array and no `auth.email`** binding in policy expressions. (The SSR page `auth` prop and the session DO expose roles/email; the policy evaluator does not.)
 
@@ -266,6 +274,7 @@ true  false  null                  // literals
 "string"  'string'                 // string literals (either quote)
 auth.hasRole("admin")              // role check
 auth.hasAnyRole("admin", "owner")  // any-of role check
+ago("30d")                         // timestamp <duration> before now (s/m/h/d/w)
 exists(Entity where field == <expr> [and field == <expr>]*)   // correlated subquery
 ```
 Ordering is **deny-safe**: comparing null, booleans, or a number against a non-numeric string is always false (so an unresolvable `data.publishAt <= now` denies). Still **no `in`, no `ends_with`/`starts_with`, no arithmetic (`+ - * /`).** Membership ("is the user in this org?") is `exists(...)`, not `in`. String prefix/suffix matching still belongs in a function.
