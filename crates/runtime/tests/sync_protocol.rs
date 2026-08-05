@@ -1425,3 +1425,130 @@ fn snapshot_honors_a_rolling_time_window_scope() {
     assert_eq!(count("&sync=1"), 1, "replication fetch ignored the window");
     assert_eq!(count(""), 2, "a direct read was wrongly windowed");
 }
+
+// ---------------------------------------------------------------------------
+// No-op update suppression
+// ---------------------------------------------------------------------------
+
+/// An update that leaves the row byte-identical must NOT append a change
+/// event or advance the log — cron-style snapshot rewrites ("recompute
+/// this stat table every minute") otherwise flood the change log with
+/// events describing a table that never changed, and every returning
+/// client replays them. CRDT entities are exempt: identical row JSON
+/// can still carry a Loro version-vector advance peers need.
+#[test]
+fn noop_update_appends_no_change_event() {
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "Plain".into(),
+        fields: vec![ManifestField {
+            name: "title".into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+        }],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: false,
+        sync: true,
+        ..Default::default()
+    });
+    manifest.policies.push(ManifestPolicy {
+        name: "plain_public".into(),
+        entity: Some("Plain".into()),
+        allow: "true".into(),
+        ..Default::default()
+    });
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    let (s, b) = http(
+        port,
+        "POST",
+        "/api/entities/Plain",
+        Some(&token),
+        Some(r#"{"title":"same"}"#),
+    );
+    assert!(s == 200 || s == 201, "insert failed: {b}");
+    let plain_id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let note_id = insert_note(port, &token, "note");
+
+    let (s0, r0) = pull(port, &token, 0);
+    assert_eq!(s0, 200);
+    let cursor = r0["cursor"]["last_seq"].as_u64().unwrap();
+    assert!(cursor > 0);
+
+    // Identical update on the plain entity → suppressed: the caller
+    // still gets a 200 with the row, but no event is logged.
+    let (s1, b1) = http(
+        port,
+        "PATCH",
+        &format!("/api/entities/Plain/{plain_id}"),
+        Some(&token),
+        Some(r#"{"title":"same"}"#),
+    );
+    assert_eq!(s1, 200, "noop update must still succeed: {b1}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&b1).unwrap()["updated"],
+        true,
+        "noop update must still report success: {b1}"
+    );
+    let (s2, r2) = pull(port, &token, cursor);
+    assert_eq!(s2, 200);
+    assert_eq!(
+        r2["changes"].as_array().unwrap().len(),
+        0,
+        "an identical update must not produce a change event: {r2}"
+    );
+    assert_eq!(
+        r2["cursor"]["last_seq"].as_u64().unwrap(),
+        cursor,
+        "the log must not advance for a noop: {r2}"
+    );
+
+    // A REAL update still replicates.
+    let (s3, _) = http(
+        port,
+        "PATCH",
+        &format!("/api/entities/Plain/{plain_id}"),
+        Some(&token),
+        Some(r#"{"title":"different"}"#),
+    );
+    assert_eq!(s3, 200);
+    let (s4, r4) = pull(port, &token, cursor);
+    assert_eq!(s4, 200);
+    let changes = r4["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "a real update must replicate: {r4}");
+    assert_eq!(changes[0]["data"]["title"], "different");
+
+    // CRDT exemption: an identical update on a crdt entity (Note) must
+    // STILL produce an event — its Loro state may have advanced even
+    // when the materialized JSON did not.
+    let cursor2 = r4["cursor"]["last_seq"].as_u64().unwrap();
+    let (s5, _) = http(
+        port,
+        "PATCH",
+        &format!("/api/entities/Note/{note_id}"),
+        Some(&token),
+        Some(r#"{"title":"note"}"#),
+    );
+    assert_eq!(s5, 200);
+    let (s6, r6) = pull(port, &token, cursor2);
+    assert_eq!(s6, 200);
+    assert_eq!(
+        r6["changes"].as_array().unwrap().len(),
+        1,
+        "a crdt entity must not be noop-suppressed: {r6}"
+    );
+}

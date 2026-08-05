@@ -69,13 +69,6 @@ pub(crate) fn handle(
                     .nth(1)
                     .and_then(|s| s.split('&').next())
                     .filter(|s| !s.is_empty());
-                let limit: usize = url
-                    .split("limit=")
-                    .nth(1)
-                    .and_then(|s| s.split('&').next())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(20)
-                    .min(100);
                 // `?sync=1` marks this as a REPLICATION fetch — the sync
                 // engine filling a client's local replica, not an app reading
                 // the table. Only then does the entity's `sync_scope` apply.
@@ -91,6 +84,19 @@ pub(crate) fn handle(
                     .nth(1)
                     .and_then(|s| s.split('&').next())
                     .is_some_and(|v| v == "1" || v == "true");
+                // Replication fetches page at 1000 (matching the sync pull
+                // batch limits) — a reconcile sweep pays one round trip per
+                // page, so the cap directly divides sweep latency. Total scan
+                // work is the same either way; only the slicing changes. App
+                // reads keep the 100 cap.
+                let limit_cap: usize = if replication_fetch { 1000 } else { 100 };
+                let limit: usize = url
+                    .split("limit=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20)
+                    .min(limit_cap);
 
                 // Scan raw pages until we accumulate enough visible rows
                 // after the read-policy filter or exhaust the source.

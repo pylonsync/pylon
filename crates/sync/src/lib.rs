@@ -753,7 +753,15 @@ impl ChangeLog {
                                 }
                                 let last_seq =
                                     changes.last().map(|e| e.seq).unwrap_or(cursor.last_seq);
-                                let has_more = changes.len() >= limit;
+                                // "More" means the caller is not at the TIP —
+                                // not "this page was full". The store bounds a
+                                // page by `limit` AND by what has been durably
+                                // persisted, so a short page (persist lag, or
+                                // the store's window ending before the ring
+                                // begins) used to return has_more=false and
+                                // strand the client mid-catch-up until the next
+                                // poll or live event happened to nudge it.
+                                let has_more = last_seq < current_seq;
                                 return Ok(PullResponse {
                                     changes,
                                     cursor: SyncCursor { last_seq },
@@ -1494,6 +1502,67 @@ mod tests {
         assert_eq!(resp.changes.len(), 4);
         assert_eq!(resp.changes[0].seq, 2);
         assert_eq!(resp.changes[3].seq, 5);
+    }
+
+    /// A store whose pages are capped below the caller's `limit` —
+    /// models a persisted log serving short pages (bounded reads,
+    /// persist lag). Delegates to `MemStore` and truncates.
+    #[derive(Debug)]
+    struct LaggedStore {
+        inner: MemStore,
+        max_page: usize,
+    }
+    impl ChangeLogStore for LaggedStore {
+        fn append(&self, event: &ChangeEvent) {
+            self.inner.append(event);
+        }
+        fn load_recent(&self, limit: usize) -> Vec<ChangeEvent> {
+            self.inner.load_recent(limit)
+        }
+        fn pull_range(&self, since: u64, limit: usize) -> Option<Vec<ChangeEvent>> {
+            self.inner.pull_range(since, limit.min(self.max_page))
+        }
+    }
+
+    /// A store page that ends short of the tip must report `has_more`.
+    /// "More" means the caller is not at the TIP — not "the page was
+    /// full". Pre-fix, a short page (a store serving fewer events than
+    /// the caller's limit while the client is still behind) returned
+    /// has_more=false and stranded the client mid-catch-up until an
+    /// unrelated poll or live event nudged it forward.
+    #[test]
+    fn store_fallback_short_page_still_reports_more() {
+        let store = std::sync::Arc::new(LaggedStore {
+            inner: MemStore::default(),
+            max_page: 2,
+        });
+        let log = ChangeLog::with_capacity(2).with_store(store.clone());
+        for i in 1..=6 {
+            log.append(
+                "Message",
+                &format!("m{}", i),
+                ChangeKind::Insert,
+                Some(serde_json::json!({"i": i})),
+            );
+        }
+        // Ring holds [5, 6]; store has all 6 but serves ≤2 per page.
+
+        // limit=10 from cursor=1 → store serves only 2..=3: a SHORT page
+        // (2 < 10) with the client still 3 events behind. Pre-fix this
+        // reported has_more=false and the catch-up stalled here.
+        let page1 = log.pull(&SyncCursor { last_seq: 1 }, 10).expect("page 1");
+        assert_eq!(page1.changes.len(), 2);
+        assert_eq!(page1.cursor.last_seq, 3);
+        assert!(page1.has_more, "short mid-catch-up page must report more");
+
+        // Following has_more drains the rest: 4..=5 from the store, then
+        // 6 from the ring, which reports no-more at the tip.
+        let page2 = log.pull(&SyncCursor { last_seq: 3 }, 10).expect("page 2");
+        assert_eq!(page2.cursor.last_seq, 5);
+        assert!(page2.has_more);
+        let page3 = log.pull(&SyncCursor { last_seq: 5 }, 10).expect("page 3");
+        assert_eq!(page3.cursor.last_seq, 6);
+        assert!(!page3.has_more, "at tip there is nothing more");
     }
 
     /// A "pruned" store that holds nothing — models the persisted log

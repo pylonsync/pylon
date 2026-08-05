@@ -1918,6 +1918,38 @@ pub(crate) fn broadcast_change_event(
     notifier.notify(&event);
 }
 
+/// True when an update left the row byte-identical: nothing for any
+/// replica, WS subscriber, or catch-up pull to learn, so callers skip
+/// the change-log append and the broadcast entirely.
+///
+/// Why this matters: cron-driven snapshot rewrites (the "recompute a
+/// stat table every minute" pattern) re-write rows whose values rarely
+/// change. Every such write used to append a change event and fan out
+/// to every connected client — a client away for a day replayed
+/// thousands of events describing a table that never changed. Skipping
+/// the no-ops kills that churn at the source.
+///
+/// CRDT-carrying entities are exempt: their materialized row JSON can
+/// be identical while the underlying Loro doc still advanced (a
+/// same-value write moves the version vector), and peers need those
+/// frames to converge. The SQL write itself is never skipped — only
+/// the replication side effects.
+pub fn update_is_noop(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    pre: Option<&serde_json::Value>,
+    post: &serde_json::Value,
+) -> bool {
+    let carries_crdt = manifest
+        .entities
+        .iter()
+        .any(|e| e.name == entity && (e.crdt || e.fields.iter().any(|f| f.crdt.is_some())));
+    if carries_crdt {
+        return false;
+    }
+    pre == Some(post)
+}
+
 /// Convenience: emit BOTH the JSON change event AND the binary CRDT
 /// snapshot frame after a successful insert/update on a CRDT-mode
 /// entity. The CRDT snapshot is fetched via [`DataStore::crdt_snapshot`];

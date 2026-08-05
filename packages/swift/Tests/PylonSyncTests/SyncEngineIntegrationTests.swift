@@ -203,6 +203,56 @@ final class SyncEngineIntegrationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(sinces.count, 3)
         XCTAssertEqual(sinces, sinces.sorted(), "since must be monotonic across pages")
     }
+
+    // WS LEAPFROG (parity with the TS engine's pullHold). A live frame
+    // landing mid-catch-up used to apply immediately and jump the cursor;
+    // worse, later pull pages then re-applied OLDER versions of the same
+    // row over the fresher live one (pull applies have no per-event seq
+    // gate). The hold buffers live frames for the pull's duration and
+    // replays them seq-gated afterwards, so the newest write wins.
+    func testLiveFrameMidCatchUpIsHeldAndReplaysAfterThePull() async throws {
+        let server = FakeServer()
+        await server.seedChange(ChangeEvent(seq: 1, entity: "Todo", row_id: "t0", kind: .insert, data: ["title": "anchor"]))
+
+        let transport = MockTransport()
+        let client = PylonClient(
+            config: PylonClientConfig(baseURL: URL(string: "http://test.invalid")!),
+            storage: MemoryStorage(),
+            transport: transport
+        )
+        let engine = await SyncEngine(config: SyncEngineConfig(baseURL: URL(string: "http://test.invalid")!, transport: .poll), client: client)
+        transport.setHandler { [server] req in try await server.handle(req) }
+        await engine.pull()
+        let boot = await engine.currentCursor()
+        XCTAssertEqual(boot.last_seq, 1)
+
+        for i in 2...31 {
+            await server.seedChange(ChangeEvent(seq: Int64(i), entity: "Todo", row_id: "t\(i)", kind: .insert, data: ["title": .string("row \(i)")]))
+        }
+        await server.setPageSize(10)
+
+        // Mid-catch-up injection: when the engine fetches page 2
+        // (since=11), deliver a live frame carrying a FRESHER version of
+        // row t20 — a row page 2 is about to deliver in its stale form.
+        let liveFrame = #"{"type":"change","seq":10000,"entity":"Todo","row_id":"t20","kind":"update","data":{"id":"t20","title":"newer-live"}}"#
+        transport.setHandler { [server] req in
+            let resp = try await server.handle(req)
+            if req.url?.query?.contains("since=11") == true {
+                await engine.handleTextFrame(liveFrame)
+            }
+            return resp
+        }
+
+        await engine.pull()
+
+        let store = await engine.store
+        // Every page landed AND the live frame replayed AFTER them, so the
+        // fresher t20 survives. Pre-fix the page-2 apply clobbered it.
+        XCTAssertEqual(store.list("Todo").count, 31)
+        XCTAssertEqual(store.get("Todo", id: "t20")?["title"]?.stringValue, "newer-live")
+        let cursor = await engine.currentCursor()
+        XCTAssertEqual(cursor.last_seq, 10_000, "replayed live frame advances the cursor")
+    }
 }
 
 extension SyncEngineIntegrationTests.FakeServer {

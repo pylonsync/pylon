@@ -301,8 +301,9 @@ describe("SyncEngine.reconcile", () => {
 
     await engine.reconcile(["Event"]);
 
-    // The fetch hit the 200-page safety cap — proof the set was truncated.
-    expect(pages).toBe(200);
+    // The fetch hit the 20-page safety cap (20 × 1000/page = the same 20k
+    // row ceiling) — proof the set was truncated.
+    expect(pages).toBe(20);
     // The un-fetched local rows are NOT deleted (the bug would drop them).
     expect(engine.store.get("Event", "beyond_1")).not.toBeNull();
     expect(engine.store.get("Event", "beyond_2")).not.toBeNull();

@@ -2546,6 +2546,11 @@ impl<'a> DataStore for TxStore<'a> {
                     return Ok(updated);
                 }
             };
+            // No-op suppression — an identical row has nothing to
+            // replicate (see pylon_router::update_is_noop).
+            if pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
+                return Ok(updated);
+            }
             self.record_with_prev(
                 entity,
                 id,
@@ -3239,6 +3244,11 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                     return Ok(updated);
                 }
             };
+            // No-op suppression — an identical row has nothing to
+            // replicate (see pylon_router::update_is_noop).
+            if pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
+                return Ok(updated);
+            }
             self.record_with_prev(
                 entity,
                 id,
@@ -3541,6 +3551,10 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
+        // Pre-read for no-op suppression. This path serves server-side
+        // writes — crons rewriting stat tables every run are exactly the
+        // no-op-heavy workload the suppression exists for.
+        let pre_row = self.inner.get_by_id(entity, id).ok().flatten();
         let updated = self.inner.update(entity, id, data)?;
         if updated {
             // Same three-outcome handling as `insert` above. `Ok(None)`
@@ -3563,6 +3577,11 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                     return Ok(updated);
                 }
             };
+            // No-op suppression — an identical row has nothing to
+            // replicate (see pylon_router::update_is_noop).
+            if pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
+                return Ok(updated);
+            }
             self.emit(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
         }
         Ok(updated)
@@ -3746,6 +3765,19 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
                             } else {
                                 None
                             };
+                            // No-op suppression — an identical row has
+                            // nothing to replicate (see
+                            // pylon_router::update_is_noop).
+                            if matches!(kind, pylon_sync::ChangeKind::Update)
+                                && pylon_router::update_is_noop(
+                                    self.manifest(),
+                                    entity,
+                                    prev.as_ref(),
+                                    &full,
+                                )
+                            {
+                                continue;
+                            }
                             self.emit_with_prev(entity, id, kind, Some(&full), prev.as_ref());
                         }
                         Ok(None) => {

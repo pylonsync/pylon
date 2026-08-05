@@ -623,6 +623,67 @@ describe("sync scenarios", () => {
     expect(overlapped).toBe(true);
   });
 
+  // WS LEAPFROG (pins the pullHold extension to delta pulls). A live WS
+  // frame landing MID-catch-up used to apply immediately and advance the
+  // cursor past the not-yet-pulled gap; when the pull then delivered the
+  // gap events, the monotonic seq filter dropped them — silently missing
+  // rows until a reconcile happened to sweep them. The hold buffers live
+  // frames for the pull's duration and replays them (seq-filtered) after
+  // it lands, so BOTH the gap rows and the live frame's row survive.
+  test("a live event mid-catch-up cannot leapfrog the cursor past unapplied pages", async () => {
+    let deltaFetches = 0;
+    let engineRef: SyncEngine | null = null;
+    env = createTestEnv({
+      transport: "poll",
+      beforePull: (_auth, since) => {
+        if (since > 0) {
+          deltaFetches += 1;
+          // Mid-catch-up (page 2 of 3), a "live WS frame" with a far
+          // newer seq arrives — exactly what onChangeEvent feeds into
+          // enqueueApply. Pre-fix this applied instantly, advanced the
+          // cursor to 10000, and pages 2–3 were filtered out on apply.
+          if (deltaFetches === 2 && engineRef) {
+            void (
+              engineRef as unknown as {
+                enqueueApply(c: unknown[]): Promise<void>;
+              }
+            ).enqueueApply([
+              {
+                seq: 10_000,
+                entity: "Note",
+                row_id: "live_1",
+                kind: "insert",
+                data: { id: "live_1", title: "live frame" },
+                timestamp: "",
+              },
+            ]);
+          }
+        }
+      },
+    });
+    env.signIn({ userId: "u1" });
+    env.server.seed("Note", [{ id: "n0", title: "seed" }]);
+    await env.start();
+    await env.flush();
+    engineRef = env.engine;
+
+    for (let i = 1; i <= 30; i++) {
+      env.server.insert("Note", { id: `n${i}`, title: `t${i}` });
+    }
+    env.server.deltaPageSize = 10;
+
+    await env.engine.pull();
+    await env.flush();
+
+    // Every gap page landed — including rows from the pages AFTER the
+    // live frame arrived (pre-fix these were silently dropped).
+    expect(env.engine.store.get("Note", "n15")).not.toBeNull();
+    expect(env.engine.store.get("Note", "n25")).not.toBeNull();
+    expect(env.engine.store.get("Note", "n30")).not.toBeNull();
+    // And the held live frame itself replayed after the pull.
+    expect(env.engine.store.get("Note", "live_1")).not.toBeNull();
+  });
+
   // OFFLINE WRITES (pins the transient/permanent split in pushInner).
   // A push that fails with a NETWORK error (offline — fetch rejects, no
   // HTTP status) must keep the mutation `pending` and the optimistic

@@ -375,20 +375,29 @@ export class SyncEngine {
   private applyQueue: Promise<void> = Promise.resolve();
 
   /**
-   * Live-event hold buffer, active ONLY while a from-zero snapshot pull is in
-   * flight. A snapshot is full state as-of `snapshot_seq` S; its rows arrive
-   * tagged `seq = S`. If a live WS frame (or a tab broadcast) at `seq = S+k`
-   * applies FIRST — during the snapshot's (possibly multi-page) HTTP fetch — it
-   * advances the cursor past S, and then EVERY snapshot row (seq ≤ S) is
-   * dropped by the monotonic filter in enqueueApply, leaving a near-empty
-   * replica with the cursor persisted ahead (no 410, no heal until a reconcile
-   * happens to fire). The store has no per-row seq guard, so we can't just
-   * apply the snapshot unconditionally — an older snapshot row would clobber a
-   * newer live update. So we instead ORDER them: hold live/broadcast applies
-   * here while snapshotting, then replay them (seq-filtered) AFTER the snapshot
-   * lands. null = not snapshotting → normal apply.
+   * Live-event hold buffer, active while ANY pull is in flight.
+   *
+   * From-zero snapshot: a snapshot is full state as-of `snapshot_seq` S; its
+   * rows arrive tagged `seq = S`. If a live WS frame (or a tab broadcast) at
+   * `seq = S+k` applies FIRST — during the snapshot's (possibly multi-page)
+   * HTTP fetch — it advances the cursor past S, and then EVERY snapshot row
+   * (seq ≤ S) is dropped by the monotonic filter in enqueueApply, leaving a
+   * near-empty replica with the cursor persisted ahead (no 410, no heal until
+   * a reconcile happens to fire).
+   *
+   * Delta catch-up has the SAME leapfrog: a live frame at seq S+k landing
+   * mid-catch-up advances the cursor past the not-yet-pulled gap (cursor, S+k),
+   * and when the pull then delivers those gap events the monotonic filter
+   * drops them — silently missing rows until the next reconcile sweeps them.
+   *
+   * The store has no per-row seq guard, so we can't just apply out-of-order —
+   * an older row would clobber a newer live update. So we ORDER them: hold
+   * live/broadcast applies here while pulling, then replay them (seq-filtered)
+   * AFTER the pull lands. On a failed pull the buffer is DISCARDED — the
+   * cursor didn't reach the held seqs, so the next pull re-fetches those
+   * events from the log. null = no pull in flight → normal apply.
    */
-  private snapshotHold: ChangeEvent[] | null = null;
+  private pullHold: ChangeEvent[] | null = null;
 
   /**
    * Serialized channel for outbound network ops (pull, push, reconcile,
@@ -1305,14 +1314,15 @@ export class SyncEngine {
     targetCursor?: SyncCursor,
     opts: { fromBroadcast?: boolean; isPull?: boolean } = {},
   ): Promise<void> {
-    // Snapshot fence: while a from-zero snapshot is in flight, hold live WS
-    // frames + tab broadcasts so they can't advance the cursor past the
-    // snapshot's rows and filter them out (see `snapshotHold`). The pull's own
-    // apply (`isPull`) is exempt — it IS the snapshot. Held events are replayed
-    // in arrival (≈seq) order once the snapshot lands. Synchronous + before the
-    // queue chain so held events never interleave into the applyQueue.
-    if (this.snapshotHold !== null && !opts.isPull) {
-      this.snapshotHold.push(...changes);
+    // Pull fence: while any pull is in flight, hold live WS frames + tab
+    // broadcasts so they can't advance the cursor past rows the pull hasn't
+    // delivered yet and get them filtered out (see `pullHold`). The pull's
+    // own applies (`isPull`) are exempt — they ARE the pull. Held events are
+    // replayed in arrival (≈seq) order once the pull lands. Synchronous +
+    // before the queue chain so held events never interleave into the
+    // applyQueue.
+    if (this.pullHold !== null && !opts.isPull) {
+      this.pullHold.push(...changes);
       return Promise.resolve();
     }
     const prev = this.applyQueue;
@@ -1708,12 +1718,14 @@ export class SyncEngine {
     // bootstrap reconcile (the snapshot path already returned every
     // policy-visible row, per-entity refetch right after is waste).
     const startedFromZero = this.cursor.last_seq === 0;
-    // A from-zero pull is a SNAPSHOT — open the live-event hold for its whole
-    // (possibly multi-page) duration so a racing WS frame can't leapfrog the
-    // cursor and filter the snapshot rows out. Nested pulls (delta tail /
-    // has_more, 410 recursion) run at a non-zero cursor → they don't touch
-    // this, and their applies pass `isPull` so they're never held.
-    if (startedFromZero) this.snapshotHold = [];
+    // Open the live-event hold for the pull's whole (possibly multi-page)
+    // duration so a racing WS frame can't leapfrog the cursor — past the
+    // snapshot's rows on a from-zero pull, or past the not-yet-pulled gap
+    // on a delta catch-up (see `pullHold`). The pull's own applies pass
+    // `isPull` so they're never held. The 410 handler discards this
+    // buffer before recursing, so the nested pull always opens (and owns)
+    // a fresh hold.
+    this.pullHold = [];
     // Declared outside the try: on a mid-loop fetch error the previous
     // page's apply may still be in flight, and the catch (410 reset →
     // re-pull) MUST let it settle first — otherwise the orphaned apply
@@ -1803,14 +1815,14 @@ export class SyncEngine {
       // truth. Record it so onConnected skips the reconcile that would
       // otherwise re-fetch every entity via cursor pagination.
       this.lastPullStartedFromZero = startedFromZero;
-      // Snapshot landed cleanly → replay the live events we held during it, in
-      // arrival (≈seq) order. They filter against the now-correct cursor
-      // (snapshot_seq), so events newer than the snapshot apply and older ones
-      // (already in the snapshot) are deduped. Clearing `snapshotHold` first
-      // means this replay applies normally (it isn't re-held).
-      if (startedFromZero && this.snapshotHold) {
-        const held = this.snapshotHold;
-        this.snapshotHold = null;
+      // Pull landed cleanly → replay the live events we held during it, in
+      // arrival (≈seq) order. They filter against the now-advanced cursor,
+      // so events newer than what the pull delivered apply and older ones
+      // (already delivered by the pull) are deduped. Clearing `pullHold`
+      // first means this replay applies normally (it isn't re-held).
+      if (this.pullHold) {
+        const held = this.pullHold;
+        this.pullHold = null;
         if (held.length > 0) await this.enqueueApply(held);
       }
     } catch (err) {
@@ -1856,6 +1868,10 @@ export class SyncEngine {
           // First resync of the episode — snapshot now. Bypass the queue
           // (we ARE the pull op holding the slot; the public pull()
           // would re-enqueue and share our own promise back → deadlock).
+          // Discard this failed episode's held events first so the
+          // nested pull opens (and owns) a fresh hold; the from-zero
+          // snapshot it runs covers everything the buffer held.
+          this.pullHold = null;
           await this.resetReplicaInner();
           await this.pullInner();
         } else {
@@ -1874,14 +1890,14 @@ export class SyncEngine {
         }
       }
     } finally {
-      // Snapshot pull failed (network error / 410 mid-fetch): DISCARD any
-      // still-held live events rather than applying them. The cursor stays at 0
-      // so the retry resnapshots and re-covers them; applying them here would
-      // advance the cursor and turn the retry into a gappy delta. On success
-      // the try already drained + nulled the hold, so this is a no-op there.
-      // Nested non-zero pulls never set `snapshotHold`, so this only fires for
-      // the from-zero snapshot that owns it.
-      if (startedFromZero && this.snapshotHold !== null) this.snapshotHold = null;
+      // Pull failed (network error / 410 mid-fetch): DISCARD any still-held
+      // live events rather than applying them. The cursor never reached the
+      // held seqs, so the next pull re-fetches those events from the log;
+      // applying them here would advance the cursor over the un-pulled gap
+      // (the exact leapfrog the hold exists to prevent). On success the try
+      // already drained + nulled the hold, so this is a no-op there — and
+      // the 410 recursion drained or re-owned it before we got here.
+      if (this.pullHold !== null) this.pullHold = null;
     }
   }
 
@@ -2153,16 +2169,20 @@ export class SyncEngine {
   ): Promise<{ rows: Row[]; truncated: boolean }> {
     const out: Row[] = [];
     let cursor: string | null = null;
-    // 200 pages × 100 per page = 20k rows. A `sync:true` entity larger than
+    // 20 pages × 1000 per page = 20k rows. A `sync:true` entity larger than
     // this should switch to `sync: false` + search/by-id — see useInfiniteQuery.
-    for (let page = 0; page < 200; page++) {
+    // 1000/page matches the sync-pull batch limits; the server only honors it
+    // on replication fetches (`sync=1`), and each page costs a full round
+    // trip, so the page size directly divides sweep latency (a 20k-row
+    // entity was 200 sequential requests; now 20).
+    for (let page = 0; page < 20; page++) {
       // `sync=1` marks this as a REPLICATION fetch, which is what makes an
       // entity's `sync` scope apply. Without it the server treats the request
       // as an ordinary app read and returns unscoped rows — correct for a
       // direct read, wrong here, since these rows land in the replica.
       const qs: string = cursor
-        ? `?limit=100&sync=1&after=${encodeURIComponent(cursor)}`
-        : `?limit=100&sync=1`;
+        ? `?limit=1000&sync=1&after=${encodeURIComponent(cursor)}`
+        : `?limit=1000&sync=1`;
       const resp: {
         data: Row[];
         next_cursor: string | null;

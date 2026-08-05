@@ -69,6 +69,15 @@ public actor SyncEngine {
     private var ws: PylonWebSocket?
     private var reconnectAttempts = 0
     private var consecutive410s = 0
+    /// Live-event hold buffer, non-nil while a pull is in flight (parity
+    /// with the TS engine's `pullHold`). A live WS/SSE frame landing
+    /// mid-pull used to apply immediately and jump the cursor past the
+    /// not-yet-pulled gap, so the pull's own events were then dropped by
+    /// the seq gate — silently missing rows until a reconcile swept them.
+    /// Held frames replay (seq-gated) after the pull lands; on a failed
+    /// pull they're discarded — the cursor never reached their seqs, so
+    /// the next pull re-fetches them from the log.
+    private var pullHold: [ChangeEvent]? = nil
     private var lastSeenToken: String? = nil
     private var lastSeenTokenObserved = false
     private var lastSeenTenant: String? = nil
@@ -280,6 +289,13 @@ public actor SyncEngine {
         // entry cursor during snapshot pages; for the delta tail it advances.
         let startedFromZero = cursor.last_seq == 0
         let sinceParam = cursor.last_seq
+        // Open the live-event hold for the pull's whole duration so a
+        // racing WS/SSE frame can't leapfrog the cursor past rows this
+        // pull hasn't delivered yet (see `pullHold`). The success path
+        // drains + replays it; this backstop discards whatever remains
+        // on a failed pull (the next pull re-fetches those events).
+        pullHold = []
+        defer { pullHold = nil }
         // Fetch/apply pipelining (parity with the TS engine): page N's
         // apply runs while page N+1 is in flight, so a multi-page
         // catch-up costs max(network, apply) per page instead of their
@@ -339,6 +355,17 @@ public actor SyncEngine {
                 }
             }
             if let pending = pendingApply { await pending.value }
+            // Pull landed cleanly → replay the frames held during it, in
+            // arrival order. Each one re-checks the seq gate against the
+            // now-advanced cursor, so frames the pull already delivered
+            // dedupe and genuinely newer ones apply. Nil FIRST so the
+            // replay isn't re-held.
+            if let held = pullHold {
+                pullHold = nil
+                for change in held {
+                    await applyLiveEvent(change)
+                }
+            }
             lastPullStartedFromZero = startedFromZero
             // First successful pull settled — drop query `loading`. Idempotent:
             // a no-op on every pull after the first (until the next resetReplica
@@ -357,6 +384,10 @@ public actor SyncEngine {
                 let attempt = consecutive410s
                 consecutive410s += 1
                 if attempt == 0 {
+                    // Discard this failed episode's held frames before the
+                    // recursive pull opens its own hold — the from-zero
+                    // snapshot it runs covers everything the buffer held.
+                    pullHold = nil
                     await resetReplica()
                     await pull()
                 } else {
@@ -469,17 +500,21 @@ public actor SyncEngine {
         }
     }
 
-    /// Fetch every row for an entity via cursor pagination (cap 200 pages =
+    /// Fetch every row for an entity via cursor pagination (cap 20 pages =
     /// 20k rows; larger tables shouldn't be fully mirrored client-side).
+    /// 1000/page matches the sync-pull batch limits — the server honors it
+    /// only on replication fetches, and each page is a full round trip, so
+    /// the page size directly divides sweep latency (parity with the TS
+    /// engine's fetchEntityRows).
     private func fetchEntityRows(_ entity: String) async throws -> [Row] {
         var out: [Row] = []
         var after: String? = nil
-        for _ in 0..<200 {
+        for _ in 0..<20 {
             // `replication: true` -> `sync=1`, which is what makes the entity's
             // sync scope apply. These rows land in the replica; an app read
             // through loadPage/InfiniteQuery deliberately stays unscoped.
             let page = try await client.listCursor(
-                entity, after: after, limit: 100, replication: true, as: Row.self)
+                entity, after: after, limit: 1000, replication: true, as: Row.self)
             out.append(contentsOf: page.data)
             guard page.has_more, let next = page.next_cursor else { break }
             after = next
@@ -767,21 +802,37 @@ public actor SyncEngine {
         }
     }
 
-    private func handleTextFrame(_ text: String) async {
+    // Internal (not private) so tests can inject a live frame mid-pull —
+    // the leapfrog regression drives this exact entry point.
+    func handleTextFrame(_ text: String) async {
         guard let data = text.data(using: .utf8),
               let parsed = try? JSONDecoder().decode(WSEnvelope.self, from: data) else {
             return
         }
         if let change = parsed.toChangeEvent() {
-            if change.seq > cursor.last_seq {
-                await store.applyChangesAsync([change])
-                cursor = SyncCursor(last_seq: change.seq)
-                if let persistence {
-                    try? await persistence.saveCursor(cursor)
-                }
+            // Pull fence: while a pull is in flight, hold live frames so
+            // they can't advance the cursor past rows the pull hasn't
+            // delivered yet (see `pullHold`). Replayed after the pull.
+            if pullHold != nil {
+                pullHold?.append(change)
+                return
             }
+            await applyLiveEvent(change)
         } else if parsed.type == "presence" {
             store.notify()
+        }
+    }
+
+    /// Apply one live change event through the seq gate: already-seen
+    /// seqs are dropped, newer ones apply and advance (+persist) the
+    /// cursor. Shared by the direct WS path and the post-pull replay.
+    private func applyLiveEvent(_ change: ChangeEvent) async {
+        if change.seq > cursor.last_seq {
+            await store.applyChangesAsync([change])
+            cursor = SyncCursor(last_seq: change.seq)
+            if let persistence {
+                try? await persistence.saveCursor(cursor)
+            }
         }
     }
 

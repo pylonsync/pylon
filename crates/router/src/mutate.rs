@@ -433,6 +433,29 @@ pub fn apply_mutation(ctx: &MutationCtx, op: MutationOp) -> Result<MutationOutco
     // ownership transferred away). Without this, those subscribers
     // would silently lose visibility of the update and keep the
     // stale row in their local replica.
+    // No-op suppression: an update that left the row identical has
+    // nothing to replicate — skip the change-log append and the
+    // broadcast (see `update_is_noop`). The write itself succeeded, so
+    // the after_update hook still fires and the caller still gets the
+    // row back; `seq: 0` matches the concurrent-delete path's "no event
+    // was logged" convention (a 0 seq never advances client cursors).
+    if matches!(kind, ChangeKind::Update) {
+        if let Some(post) = post_row.as_ref() {
+            if crate::update_is_noop(ctx.store.manifest(), &entity, pre_row.as_ref(), post) {
+                if let Some(row) = post_row.as_ref().or(after_fallback.as_ref()) {
+                    ctx.plugin_hooks
+                        .after_update(&entity, &row_id, row, ctx.auth);
+                }
+                return Ok(MutationOutcome {
+                    seq: 0,
+                    row_id,
+                    row: post_row,
+                    kind,
+                });
+            }
+        }
+    }
+
     let record: Option<ChangeRecord> = match kind {
         ChangeKind::Insert => post_row
             .as_ref()
