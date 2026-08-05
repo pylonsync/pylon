@@ -185,9 +185,33 @@ fn http(
         .and_then(|l| l.split_whitespace().nth(1))
         .and_then(|s| s.parse::<u16>().ok())
         .unwrap_or(0);
-    let body = match text.find("\r\n\r\n") {
-        Some(i) => text[i + 4..].to_string(),
-        None => String::new(),
+    let (headers, raw_body) = match text.find("\r\n\r\n") {
+        Some(i) => (text[..i].to_string(), text[i + 4..].to_string()),
+        None => (String::new(), String::new()),
+    };
+    // De-chunk when the server used chunked transfer encoding — large
+    // bodies (1000-row snapshot pages) arrive framed, and parsing the
+    // raw text as JSON sees chunk-size lines interleaved with content.
+    let body = if headers
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        let mut out = String::new();
+        let mut rest = raw_body.as_str();
+        loop {
+            let Some(nl) = rest.find("\r\n") else { break };
+            let size = usize::from_str_radix(rest[..nl].trim(), 16).unwrap_or(0);
+            if size == 0 {
+                break;
+            }
+            let start = nl + 2;
+            let end = (start + size).min(rest.len());
+            out.push_str(&rest[start..end]);
+            rest = rest.get(end + 2..).unwrap_or("");
+        }
+        out
+    } else {
+        raw_body
     };
     (status, body)
 }
@@ -1696,5 +1720,106 @@ fn sync_omit_strips_replication_but_not_direct_reads() {
         serde_json::from_str::<Value>(&b5).unwrap()["data"][0]["renderPlan"],
         "HEAVY-BLOB",
         "a plain cursor read must keep the field: {b5}"
+    );
+}
+
+/// A `sync_limit` capped entity whose visible TAIL is wider than one
+/// snapshot batch must PAGE, not loop. Pre-fix, the overflow
+/// continuation was rebuilt from the original resume marker with n=0 —
+/// byte-identical to the token the client just sent — so the client
+/// re-requested the same page forever and bootstrap never converged
+/// (found live on reelbear.app).
+#[test]
+fn capped_tail_wider_than_a_batch_pages_instead_of_looping() {
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "Feed".into(),
+        fields: vec![ManifestField {
+            name: "title".into(),
+            field_type: "string".into(),
+            ..Default::default()
+        }],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: false,
+        sync: true,
+        sync_limit: Some(1500),
+        ..Default::default()
+    });
+    manifest.policies.push(ManifestPolicy {
+        name: "feed_public".into(),
+        entity: Some("Feed".into()),
+        allow: "true".into(),
+        ..Default::default()
+    });
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    // 1200 visible rows — a tail wider than SNAPSHOT_BATCH_LIMIT (1000)
+    // but under the 1500 cap, via the real wire path in two batches.
+    for batch in 0..2 {
+        let ops: Vec<String> = (0..600)
+            .map(|i| {
+                let n = batch * 600 + i;
+                format!(
+                    r#"{{"op_id":"f{n}","entity":"Feed","row_id":"f{n}","kind":"insert","data":{{"title":"t{n}"}}}}"#
+                )
+            })
+            .collect();
+        let body = format!(r#"{{"changes":[{}]}}"#, ops.join(","));
+        let (s, b) = http(port, "POST", "/api/sync/push", Some(&token), Some(&body));
+        assert_eq!(s, 200, "batch push failed: {b}");
+    }
+
+    // Drain the snapshot, following snapshot_after. Pre-fix this loop
+    // never terminates (every page returns the same token), so cap it
+    // and fail loudly instead of hanging the suite.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut token_prev: Option<String> = None;
+    let mut query = "since=0".to_string();
+    let mut pages = 0;
+    loop {
+        pages += 1;
+        assert!(
+            pages <= 10,
+            "snapshot did not converge in 10 pages — continuation token is looping"
+        );
+        let (s, body) = http(
+            port,
+            "GET",
+            &format!("/api/sync/pull?{query}"),
+            Some(&token),
+            None,
+        );
+        assert_eq!(s, 200, "page {pages}: {body}");
+        // Large pages arrive with trailing transfer framing the bare-TCP
+        // helper doesn't strip — parse the first JSON value and ignore it.
+        let mut de = serde_json::Deserializer::from_str(&body);
+        let r: Value = serde::Deserialize::deserialize(&mut de).unwrap();
+        for c in r["changes"].as_array().unwrap() {
+            if c["entity"] == "Feed" {
+                seen.insert(c["row_id"].as_str().unwrap().to_string());
+            }
+        }
+        match r["snapshot_after"].as_str() {
+            Some(next) => {
+                assert_ne!(
+                    Some(next.to_string()),
+                    token_prev,
+                    "page {pages} returned the SAME continuation token — the pre-fix infinite loop"
+                );
+                token_prev = Some(next.to_string());
+                query = format!("since=0&snapshot_after={next}");
+            }
+            None => break,
+        }
+    }
+    assert!(pages >= 2, "1200-row tail must span multiple pages");
+    assert_eq!(
+        seen.len(),
+        1200,
+        "every capped-tail row must arrive exactly once across pages"
     );
 }

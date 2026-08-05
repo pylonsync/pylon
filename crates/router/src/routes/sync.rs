@@ -363,7 +363,21 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                 // Collected newest-first; emit oldest-first like every other
                 // snapshot path so client-side ordering assumptions hold.
                 visible.reverse();
-                for row in visible {
+                // Resume support: a capped tail wider than one batch spans
+                // multiple requests. Prior pages already emitted
+                // `resume_emitted` rows of this tail — skip them here, and
+                // carry the RUNNING count forward in the continuation.
+                //
+                // Pre-fix, the overflow token was rebuilt from the original
+                // resume marker with `n: 0`, i.e. byte-identical to the token
+                // the client had just sent — so any capped entity whose
+                // visible tail exceeded SNAPSHOT_BATCH_LIMIT re-served page 1
+                // forever. The client re-requested the same snapshot_after in
+                // a tight loop, bootstrap never converged, and every pull()
+                // awaiting the snapshot hung (found live on reelbear.app once
+                // membership-scoped reads pushed a capped tail past 1000
+                // visible rows).
+                for row in visible.into_iter().skip(emitted_for_entity) {
                     let row_id = row
                         .get("id")
                         .and_then(|v| v.as_str())
@@ -383,8 +397,9 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                         prev_data: None,
                         timestamp: String::new(),
                     });
+                    emitted_for_entity += 1;
                     if changes.len() >= SNAPSHOT_BATCH_LIMIT {
-                        next_after = Some((entity.name.clone(), entity_after.clone(), 0));
+                        next_after = Some((entity.name.clone(), None, emitted_for_entity));
                         break 'outer;
                     }
                 }
