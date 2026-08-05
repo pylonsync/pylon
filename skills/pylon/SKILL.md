@@ -149,6 +149,7 @@ field.id("OtherEntity") // FK to another entity's id column
 - `.defaultNow()` — datetime defaults to insert time (e.g. `createdAt: field.datetime().defaultNow()`)
 - `.owner()` — stamps the field with `auth.userId` on insert and **rejects a forged value** (403 `OWNER_MISMATCH`); also locked on update. Use for `authorId`/`buyerId`/`createdBy` so optimistic `db.insert` stays secure. Guests count (their stable guest id is stamped).
 - `.serverOnly()` — never serialized in HTTP responses (secrets, `passwordHash`, `stripeCustomerId`). Still readable inside functions via `ctx.db.*`.
+- `.syncOmit()` — stripped from REPLICATION only (snapshots, delta events, WS fanout, reconcile fetches); direct reads (`db.get`, lists, queries, SSR `serverData`) keep it. For heavy-but-not-secret columns — multi-KB JSON blobs, render plans, generated markdown — that would otherwise stream into every browser's replica on every sync. The replica row simply lacks the column; fetch by id when a detail view needs it. Declare such fields `.optional()` so the replica-row type is honest.
 - `.readonly()` — settable on insert, rejected on client update (closes IDOR-via-PATCH).
 - `.encrypted()` — AEAD-encrypted at rest (needs `PYLON_ENCRYPTION_KEY`).
 - `.crdt("text")` — upgrade string/richtext to LoroText for collaborative merge

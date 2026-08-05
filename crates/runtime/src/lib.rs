@@ -4344,6 +4344,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -4356,6 +4357,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -4419,6 +4421,7 @@ mod tests {
             default: Some(owner_sentinel),
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         });
         ent.fields.push(ManifestField {
             name: "status".into(),
@@ -4431,6 +4434,7 @@ mod tests {
             default: Some(serde_json::json!("active")),
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         });
 
         let row = serde_json::json!({ "email": "a@b.com", "displayName": "A" });
@@ -4627,6 +4631,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
             ManifestField {
                 name: "displayName".into(),
@@ -4639,6 +4644,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
             ManifestField {
                 name: "avatarColor".into(),
@@ -4651,6 +4657,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
             ManifestField {
                 name: "createdAt".into(),
@@ -4663,6 +4670,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
         ];
         // Important: turn off CRDT mode for this test — CRDT mode writes
@@ -4772,6 +4780,7 @@ mod tests {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         });
         let rt = Runtime::open(db, manifest).unwrap();
 
@@ -4820,6 +4829,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
             ManifestField {
                 name: "isWarmup".into(),
@@ -4832,6 +4842,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
             ManifestField {
                 name: "isCompleted".into(),
@@ -4844,6 +4855,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
             ManifestField {
                 name: "reps".into(),
@@ -4856,6 +4868,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             },
         ];
         manifest.entities[0].crdt = false;
@@ -5274,6 +5287,7 @@ mod tests {
             default: None,
             enum_values: None,
             encrypted,
+            sync_omit: false,
         };
         let manifest = AppManifest {
             manifest_version: 1,
@@ -5384,6 +5398,7 @@ mod tests {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         };
         let ent = |name: &str, fields: Vec<ManifestField>, relations: Vec<ManifestRelation>| {
             ManifestEntity {

@@ -871,6 +871,7 @@ mod tests {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 }],
                 indexes: vec![],
                 relations: vec![],
@@ -978,6 +979,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -1026,6 +1028,7 @@ mod tests {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         });
 
         let adapter = DiffAdapter { from: old };
@@ -1263,6 +1266,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "name".into(),
@@ -1275,6 +1279,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 indexes: vec![],
@@ -1339,6 +1344,7 @@ mod tests {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 }],
                 indexes: vec![ManifestIndex {
                     name: "by_email".into(),
@@ -1436,6 +1442,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "plan".into(),
@@ -1448,6 +1455,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -1548,6 +1556,7 @@ mod tests {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 }],
                 // Manifest dropped the old_idx entry.
                 indexes: vec![],
@@ -1688,6 +1697,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],

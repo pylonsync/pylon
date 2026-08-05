@@ -498,6 +498,7 @@ mod tests {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }
     }
 

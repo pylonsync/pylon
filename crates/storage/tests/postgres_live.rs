@@ -110,6 +110,7 @@ fn test_manifest() -> AppManifest {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "done".into(),
@@ -122,6 +123,7 @@ fn test_manifest() -> AppManifest {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
             ],
             indexes: vec![],

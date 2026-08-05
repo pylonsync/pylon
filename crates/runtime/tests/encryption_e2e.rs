@@ -41,6 +41,7 @@ fn manifest_with_encrypted_ssn() -> AppManifest {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "ssn".into(),
@@ -53,6 +54,7 @@ fn manifest_with_encrypted_ssn() -> AppManifest {
                     default: None,
                     enum_values: None,
                     encrypted: true,
+                    sync_omit: false,
                 },
             ],
             indexes: vec![],

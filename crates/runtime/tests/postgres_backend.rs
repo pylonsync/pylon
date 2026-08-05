@@ -53,6 +53,7 @@ fn fingerprint_manifest() -> AppManifest {
         default: None,
         enum_values: None,
         encrypted: false,
+        sync_omit: false,
     };
     AppManifest {
         entities: vec![ManifestEntity {
@@ -83,6 +84,7 @@ fn fresh_runtime(url: &str) -> Runtime {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "name".into(),
@@ -95,6 +97,7 @@ fn fresh_runtime(url: &str) -> Runtime {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
             ],
             indexes: vec![],
@@ -258,6 +261,7 @@ fn typed_columns_roundtrip_correctly() {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "active".into(),
@@ -270,6 +274,7 @@ fn typed_columns_roundtrip_correctly() {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "score".into(),
@@ -282,6 +287,7 @@ fn typed_columns_roundtrip_correctly() {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "ownerId".into(),
@@ -294,6 +300,7 @@ fn typed_columns_roundtrip_correctly() {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
             ],
             indexes: vec![],
@@ -483,6 +490,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -518,6 +526,7 @@ fn alter_field_drops_not_null_when_manifest_makes_field_optional() {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -579,6 +588,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -609,6 +619,7 @@ fn alter_field_set_not_null_succeeds_when_data_compatible() {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -661,6 +672,7 @@ fn timestamptz_binds_iso_string_correctly() {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "createdAt".into(),
@@ -673,6 +685,7 @@ fn timestamptz_binds_iso_string_correctly() {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "verifiedAt".into(),
@@ -685,6 +698,7 @@ fn timestamptz_binds_iso_string_correctly() {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
             ],
             indexes: vec![],
@@ -835,6 +849,7 @@ fn crdt_runtime(url: &str) -> Runtime {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "body".into(),
@@ -847,6 +862,7 @@ fn crdt_runtime(url: &str) -> Runtime {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
             ],
             indexes: vec![],
@@ -998,6 +1014,7 @@ fn fts_runtime(url: &str) -> Runtime {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "description".into(),
@@ -1010,6 +1027,7 @@ fn fts_runtime(url: &str) -> Runtime {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
                 ManifestField {
                     name: "brand".into(),
@@ -1022,6 +1040,7 @@ fn fts_runtime(url: &str) -> Runtime {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 },
             ],
             indexes: vec![],
@@ -1426,6 +1445,7 @@ fn schema_fingerprint_round_trips_and_tracks_real_changes() {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         });
     assert_ne!(
         schema_fingerprint(&changed),

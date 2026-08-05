@@ -49,6 +49,7 @@ fn crdt_manifest() -> AppManifest {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],

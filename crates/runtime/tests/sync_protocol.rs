@@ -37,6 +37,7 @@ fn test_manifest() -> AppManifest {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "body".into(),
@@ -49,6 +50,7 @@ fn test_manifest() -> AppManifest {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 indexes: vec![],
@@ -106,6 +108,7 @@ fn secret_entity() -> ManifestEntity {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }],
         indexes: vec![],
         relations: vec![],
@@ -531,6 +534,7 @@ fn sync_false_entity_excluded_from_snapshot_and_delta() {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }],
         indexes: vec![],
         relations: vec![],
@@ -653,6 +657,7 @@ fn push_rejects_underscore_entities_for_non_admin() {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }],
         indexes: vec![],
         relations: vec![],
@@ -730,6 +735,7 @@ fn push_update_cannot_flip_readonly_field_for_non_admin() {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }
     }
     let mut manifest = test_manifest();
@@ -845,6 +851,7 @@ fn snapshot_pull_bounds_rows_scanned_for_sparse_policy() {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }
     }
     let mut manifest = test_manifest();
@@ -1218,6 +1225,7 @@ fn delta_pull_refills_pages_dropped_by_the_policy_fence() {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }
     }
     let mut manifest = test_manifest();
@@ -1452,6 +1460,7 @@ fn noop_update_appends_no_change_event() {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }],
         indexes: vec![],
         relations: vec![],
@@ -1550,5 +1559,142 @@ fn noop_update_appends_no_change_event() {
         r6["changes"].as_array().unwrap().len(),
         1,
         "a crdt entity must not be noop-suppressed: {r6}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `syncOmit` — replicate the row, not the heavy column
+// ---------------------------------------------------------------------------
+
+/// A `syncOmit` field must be stripped from every REPLICATION surface
+/// (snapshot pull, delta pull, `?sync=1` cursor fetch) while staying on
+/// direct reads (entity get, plain cursor). This is the "heavy but not
+/// secret" modifier — contrast `serverOnly`, which hides a field from
+/// ALL client surfaces.
+#[test]
+fn sync_omit_strips_replication_but_not_direct_reads() {
+    let mut manifest = test_manifest();
+    manifest.entities.push(ManifestEntity {
+        name: "Doc".into(),
+        fields: vec![
+            ManifestField {
+                name: "title".into(),
+                field_type: "string".into(),
+                ..Default::default()
+            },
+            ManifestField {
+                name: "renderPlan".into(),
+                field_type: "string".into(),
+                optional: true,
+                sync_omit: true,
+                ..Default::default()
+            },
+        ],
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: false,
+        sync: true,
+        ..Default::default()
+    });
+    manifest.policies.push(ManifestPolicy {
+        name: "doc_public".into(),
+        entity: Some("Doc".into()),
+        allow: "true".into(),
+        ..Default::default()
+    });
+    let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
+    let port = start_server(rt);
+    let token = mint_guest(port);
+
+    // Anchor so the later pull is a real delta.
+    insert_note(port, &token, "anchor");
+    let (s0, r0) = pull(port, &token, 0);
+    assert_eq!(s0, 200);
+    let cursor = r0["cursor"]["last_seq"].as_u64().unwrap();
+
+    let (s, b) = http(
+        port,
+        "POST",
+        "/api/entities/Doc",
+        Some(&token),
+        Some(r#"{"title":"t1","renderPlan":"HEAVY-BLOB"}"#),
+    );
+    assert!(s == 200 || s == 201, "insert failed: {b}");
+    let id = serde_json::from_str::<Value>(&b).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Delta pull: the insert event ships WITHOUT the heavy column.
+    let (s1, r1) = pull(port, &token, cursor);
+    assert_eq!(s1, 200);
+    let ev = r1["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["entity"] == "Doc")
+        .expect("Doc event in delta");
+    assert_eq!(ev["data"]["title"], "t1", "{r1}");
+    assert!(
+        ev["data"].get("renderPlan").is_none(),
+        "syncOmit field must not ride the delta feed: {r1}"
+    );
+
+    // Snapshot pull (fresh client): same strip.
+    let (s2, r2) = pull(port, &token, 0);
+    assert_eq!(s2, 200);
+    let snap = r2["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["entity"] == "Doc")
+        .expect("Doc row in snapshot");
+    assert!(
+        snap["data"].get("renderPlan").is_none(),
+        "syncOmit field must not ride the snapshot: {r2}"
+    );
+
+    // Replication cursor fetch (`?sync=1`, the reconcile path): stripped.
+    let (s3, b3) = http(
+        port,
+        "GET",
+        "/api/entities/Doc/cursor?limit=100&sync=1",
+        Some(&token),
+        None,
+    );
+    assert_eq!(s3, 200);
+    let sync_rows: Value = serde_json::from_str(&b3).unwrap();
+    assert!(
+        sync_rows["data"][0].get("renderPlan").is_none(),
+        "syncOmit field must not ride a replication fetch: {b3}"
+    );
+
+    // Direct reads KEEP the field — by-id get and the plain cursor.
+    let (s4, b4) = http(
+        port,
+        "GET",
+        &format!("/api/entities/Doc/{id}"),
+        Some(&token),
+        None,
+    );
+    assert_eq!(s4, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&b4).unwrap()["renderPlan"],
+        "HEAVY-BLOB",
+        "direct by-id read must keep the field: {b4}"
+    );
+    let (s5, b5) = http(
+        port,
+        "GET",
+        "/api/entities/Doc/cursor?limit=100",
+        Some(&token),
+        None,
+    );
+    assert_eq!(s5, 200);
+    assert_eq!(
+        serde_json::from_str::<Value>(&b5).unwrap()["data"][0]["renderPlan"],
+        "HEAVY-BLOB",
+        "a plain cursor read must keep the field: {b5}"
     );
 }

@@ -1103,6 +1103,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -1115,6 +1116,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "age".into(),
@@ -1127,6 +1129,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -1475,6 +1478,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     }],
                     indexes: vec![],
                     relations: vec![],
@@ -1496,6 +1500,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     }],
                     indexes: vec![],
                     relations: vec![],

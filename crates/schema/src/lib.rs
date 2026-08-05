@@ -1447,6 +1447,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
         }];
         s.routes = vec![make_route("/x/:xId", Some("getX"), None)];
@@ -1648,6 +1649,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
         }];
         let diags = validate(&s);
@@ -1672,6 +1674,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
         }];
         let diags = validate(&s);
@@ -1707,6 +1710,7 @@ mod tests {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 }],
             }],
             actions: vec![],
@@ -1751,6 +1755,7 @@ mod tests {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }
     }
 

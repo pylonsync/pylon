@@ -5774,6 +5774,7 @@ pub(crate) fn cron_lease_entity() -> pylon_kernel::ManifestEntity {
         default: None,
         enum_values: None,
         encrypted: false,
+        sync_omit: false,
     };
     pylon_kernel::ManifestEntity {
         name: "_CronLease".into(),
@@ -6516,6 +6517,7 @@ mod hook_enforcing_tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "tenantId".into(),
@@ -6528,6 +6530,7 @@ mod hook_enforcing_tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 ..Default::default()
@@ -7014,6 +7017,7 @@ mod auto_broadcast_tests {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 }],
                 ..Default::default()
             }],
@@ -7488,6 +7492,7 @@ mod user_projection_broadcast_tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "email".into(),
@@ -7500,6 +7505,7 @@ mod user_projection_broadcast_tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "passwordHash".into(),
@@ -7512,6 +7518,7 @@ mod user_projection_broadcast_tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 ..Default::default()
@@ -7766,6 +7773,7 @@ mod sqlite_transact_tx_safety_tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "displayName".into(),
@@ -7778,6 +7786,7 @@ mod sqlite_transact_tx_safety_tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 indexes: vec![ManifestIndex {
@@ -7959,6 +7968,7 @@ mod ssr_client_read_fence_tests {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }
     }
 

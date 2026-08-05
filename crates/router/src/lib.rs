@@ -2297,6 +2297,57 @@ pub fn project_row_for_wire(
     strip_server_only_fields(manifest, entity, projected)
 }
 
+/// Replication projection: [`project_row_for_wire`] PLUS the `syncOmit`
+/// strip. Applied by every surface that fills a client REPLICA —
+/// snapshot pull, delta pull, WS/SSE change fanout, `?sync=1` cursor
+/// fetches. Direct reads (entity get/list, plain cursor, queries, SSR
+/// serverData) use `project_row_for_wire` and keep the field: `syncOmit`
+/// means "too heavy to stream into every replica", not "secret" — that
+/// is `serverOnly`.
+pub fn project_row_for_replication(
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    entity: &str,
+    row: serde_json::Value,
+) -> serde_json::Value {
+    let projected = project_row_for_wire(manifest, auth_user, entity, row);
+    strip_sync_omit_fields(manifest, entity, projected)
+}
+
+/// Option-variant of [`project_row_for_replication`], for
+/// `event.data` / `event.prev_data` callers.
+pub fn project_row_for_replication_opt(
+    manifest: &pylon_kernel::AppManifest,
+    auth_user: &pylon_kernel::ManifestAuthUserConfig,
+    entity: &str,
+    row: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    row.map(|r| project_row_for_replication(manifest, auth_user, entity, r))
+}
+
+/// Strip `syncOmit`-annotated fields from a row. Mirrors
+/// [`strip_server_only_fields`] but only replication surfaces call it.
+pub fn strip_sync_omit_fields(
+    manifest: &pylon_kernel::AppManifest,
+    entity: &str,
+    row: serde_json::Value,
+) -> serde_json::Value {
+    let entity_def = match manifest.entities.iter().find(|e| e.name == entity) {
+        Some(e) => e,
+        None => return row,
+    };
+    if !entity_def.fields.iter().any(|f| f.sync_omit) {
+        return row;
+    }
+    let mut row = row;
+    if let Some(obj) = row.as_object_mut() {
+        for field in entity_def.fields.iter().filter(|f| f.sync_omit) {
+            obj.remove(&field.name);
+        }
+    }
+    row
+}
+
 /// Variant that operates on an `Option`, for the common case where
 /// the caller has `event.data` / `event.prev_data` in hand.
 pub fn project_row_for_wire_opt(

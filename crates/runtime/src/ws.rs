@@ -1057,7 +1057,7 @@ impl WsHub {
         // JSON: User-entity allowlist + serverOnly field strip +
         // prev_data stripped (since prev_data is server-internal
         // only).
-        let projected_data = pylon_router::project_row_for_wire_opt(
+        let projected_data = pylon_router::project_row_for_replication_opt(
             self.manifest.as_ref(),
             &self.auth_user,
             &event.entity,
@@ -1081,7 +1081,7 @@ impl WsHub {
         // fields on the pre-row don't leak via the tombstone path.
         let synth_delete_arc: Option<Arc<str>> =
             if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
-                let projected_prev = pylon_router::project_row_for_wire_opt(
+                let projected_prev = pylon_router::project_row_for_replication_opt(
                     self.manifest.as_ref(),
                     &self.auth_user,
                     &event.entity,
@@ -2824,6 +2824,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "tenantId".into(),
@@ -2836,6 +2837,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
                 ..Default::default()

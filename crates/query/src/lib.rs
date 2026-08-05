@@ -101,6 +101,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }
         }
         AppManifest {
@@ -181,6 +182,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
         };
         let desc = QueryDescriptor::from_manifest(&mq);

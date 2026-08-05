@@ -232,6 +232,7 @@ mod tests {
                 default: Some(json!({ "$auth": "userId" })),
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             }],
             indexes: vec![],
             relations: vec![],
@@ -270,6 +271,7 @@ mod tests {
             default: Some(json!("active")),
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         });
         m.entities[0].fields.push(pylon_kernel::ManifestField {
             name: "createdAt".into(),
@@ -282,6 +284,7 @@ mod tests {
             default: Some(json!("now")),
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         });
         let p = OwnerStampPlugin::from_manifest(&m);
         assert_eq!(

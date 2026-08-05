@@ -25,6 +25,7 @@ fn field(name: &str, ft: &str, default: Option<serde_json::Value>) -> ManifestFi
         default,
         enum_values: None,
         encrypted: false,
+        sync_omit: false,
     }
 }
 

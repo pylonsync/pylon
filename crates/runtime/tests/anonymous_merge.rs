@@ -28,6 +28,7 @@ fn field(name: &str, ty: &str) -> ManifestField {
         default: None,
         enum_values: None,
         encrypted: false,
+        sync_omit: false,
     }
 }
 

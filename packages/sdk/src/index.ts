@@ -86,6 +86,19 @@ export interface FieldDefinition {
    */
   serverOnly?: boolean;
   /**
+   * When true, the field is stripped from every REPLICATION surface —
+   * snapshot pull, delta pull, WS change fanout, `sync=1` cursor
+   * fetches — but stays on direct reads (entity get/list, queries,
+   * SSR serverData) and inside server functions.
+   *
+   * This is the "heavy but not secret" modifier: a large JSON/blob
+   * column (render plans, slide decks, generated markdown) should not
+   * ride into every browser's replica on every sync, but the detail
+   * view that needs it can still fetch it by id. Contrast
+   * `serverOnly`, which hides a field from ALL client surfaces.
+   */
+  syncOmit?: boolean;
+  /**
    * When true, the field is **set on insert but cannot be changed
    * by client updates**. The framework rejects any `PATCH`/`PUT`
    * payload that mentions the field with a `READONLY_FIELD` error,
@@ -166,6 +179,15 @@ interface FieldBuilder {
    */
   serverOnly(): FieldBuilder;
   /**
+   * Keep the field out of client REPLICAS while leaving direct reads
+   * intact. See [`FieldDefinition.syncOmit`] for the full semantics.
+   *
+   * Example: `slidesJson: field.string().syncOmit()` stops a multi-KB
+   * render plan from streaming into every browser on every sync; the
+   * editor still gets it via `db.get("Variant", id)`.
+   */
+  syncOmit(): FieldBuilder;
+  /**
    * Mark the field as set-on-insert-only. See [`FieldDefinition.readonly`]
    * for the full semantics.
    *
@@ -244,6 +266,9 @@ function buildField(def: FieldDefinition): FieldBuilder {
     },
     serverOnly() {
       return buildField({ ...def, serverOnly: true });
+    },
+    syncOmit() {
+      return buildField({ ...def, syncOmit: true });
     },
     readonly() {
       return buildField({ ...def, readonly: true });
@@ -611,6 +636,9 @@ export interface ManifestField {
    *  [`FieldDefinition.serverOnly`]. Omitted by default so JSON
    *  manifests stay compact for unannotated apps. */
   serverOnly?: boolean;
+  /** Set when the field is `field.X().syncOmit()` — see
+   *  [`FieldDefinition.syncOmit`]. Omitted by default. */
+  syncOmit?: boolean;
   /** Set when the field is `field.X().readonly()` — see
    *  [`FieldDefinition.readonly`]. Omitted by default. */
   readonly?: boolean;
@@ -902,6 +930,9 @@ export function entitiesToManifest(
         }
         if (fb._def.serverOnly) {
           f.serverOnly = true;
+        }
+        if (fb._def.syncOmit) {
+          f.syncOmit = true;
         }
         if (fb._def.readonly) {
           f.readonly = true;

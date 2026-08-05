@@ -374,7 +374,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                         entity: entity.name.clone(),
                         row_id,
                         kind: ChangeKind::Insert,
-                        data: Some(crate::project_row_for_wire(
+                        data: Some(crate::project_row_for_replication(
                             manifest,
                             auth_user,
                             &entity.name,
@@ -489,7 +489,7 @@ fn handle_snapshot_pull(ctx: &RouterContext, url: &str) -> (u16, String) {
                     // second, fields like `Org.stripeCustomerId.serverOnly()`
                     // leak through the snapshot path even though
                     // `/api/entities` enforces them.
-                    let projected_data = Some(crate::project_row_for_wire(
+                    let projected_data = Some(crate::project_row_for_replication(
                         manifest,
                         auth_user,
                         &entity.name,
@@ -778,12 +778,12 @@ fn handle_delta_pull(ctx: &RouterContext, since: u64) -> (u16, String) {
     let auth_user = &manifest.auth.user;
     for ev in changes.iter_mut() {
         if let Some(data) = ev.data.take() {
-            ev.data = Some(crate::project_row_for_wire(
+            ev.data = Some(crate::project_row_for_replication(
                 manifest, auth_user, &ev.entity, data,
             ));
         }
         if let Some(prev) = ev.prev_data.take() {
-            ev.prev_data = Some(crate::project_row_for_wire(
+            ev.prev_data = Some(crate::project_row_for_replication(
                 manifest, auth_user, &ev.entity, prev,
             ));
         }

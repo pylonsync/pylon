@@ -621,6 +621,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                         ManifestField {
                             name: "age".into(),
@@ -633,6 +634,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                         ManifestField {
                             name: "score".into(),
@@ -645,6 +647,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                         ManifestField {
                             name: "active".into(),
@@ -657,6 +660,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                         ManifestField {
                             name: "createdAt".into(),
@@ -669,6 +673,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                         ManifestField {
                             name: "bio".into(),
@@ -681,6 +686,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                     ],
                     indexes: vec![ManifestIndex {
@@ -709,6 +715,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                         ManifestField {
                             name: "authorId".into(),
@@ -721,6 +728,7 @@ mod tests {
                             default: None,
                             enum_values: None,
                             encrypted: false,
+                            sync_omit: false,
                         },
                     ],
                     indexes: vec![],
@@ -747,6 +755,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                     ManifestField {
                         name: "notify".into(),
@@ -759,6 +768,7 @@ mod tests {
                         default: None,
                         enum_values: None,
                         encrypted: false,
+                        sync_omit: false,
                     },
                 ],
             }],

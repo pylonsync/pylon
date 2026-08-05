@@ -99,6 +99,18 @@ const Org = entity("Org", {
 
 **`.serverOnly()`** — the field is stripped from every public response shape: `GET /api/entities/<entity>`, `GET /api/entities/<entity>/<id>`, the session-projection `/api/auth/session`, and sync push deltas. It stays readable from inside server functions via `ctx.db.*` so your handler can do internal work with it (e.g. webhook receivers look up `stripeCustomerId` from the Stripe customer id without leaking the value to clients).
 
+**`.syncOmit()`** — the field is stripped from **replication only**: snapshot pulls, delta change events, WS fanout, and the reconcile's `sync=1` fetches. Direct reads — `db.get`, entity lists, queries, SSR `serverData` — keep it. Use it for heavy-but-not-secret columns (multi-KB JSON blobs, render plans, generated markdown) that would otherwise ride into every browser's replica on every sync:
+
+```ts
+const Variant = entity("Variant", {
+  title: field.string(),
+  // Streams to nobody; the editor fetches it by id when it opens.
+  slidesJson: field.string().syncOmit().optional(),
+});
+```
+
+Replica rows simply never hold the column, so declare such fields `.optional()` and fetch by id in the detail view that needs them. Contrast `serverOnly`, which hides a field from *all* client surfaces — `syncOmit` is about weight, `serverOnly` is about secrecy.
+
 If you want the field exposed to a specific client, re-serialize it inside a function return — `ctx.db.unsafe.get` (post v0.3.160) skips the strip; the default `ctx.db.get` honors it.
 
 **`.readonly()`** — the field is settable on insert but rejected on update. Any `PATCH /api/entities/<entity>/<id>` payload that mentions the field returns `400 READONLY_FIELD` before the policy even runs. Closes the canonical IDOR-via-update-payload shape:

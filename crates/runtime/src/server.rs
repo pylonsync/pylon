@@ -1536,6 +1536,7 @@ mod change_log_wiring_tests {
                     default: None,
                     enum_values: None,
                     encrypted: false,
+                    sync_omit: false,
                 }],
                 indexes: vec![],
                 relations: vec![],

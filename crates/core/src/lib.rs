@@ -657,6 +657,23 @@ pub struct ManifestField {
     /// rejected at manifest validation.
     #[serde(default, rename = "encrypted", skip_serializing_if = "is_false_ref")]
     pub encrypted: bool,
+    /// `true` when the TS def used `field.X().syncOmit()`. The field is
+    /// stripped from every REPLICATION surface — snapshot pull, delta
+    /// pull, WS change fanout, `?sync=1` cursor fetches — but stays on
+    /// direct reads (entity get/list, plain cursor, queries, SSR
+    /// serverData) and inside server functions.
+    ///
+    /// This is the "heavy but not secret" modifier: a large JSON/blob
+    /// column (render plans, slide decks, generated markdown) shouldn't
+    /// ride into every browser's replica on every sync, but the detail
+    /// view that needs it can still fetch it by id. Contrast
+    /// `serverOnly`, which hides a field from ALL client surfaces.
+    ///
+    /// Client replicas simply never hold the column; reconcile compares
+    /// replicated rows against replication fetches, so the omission is
+    /// symmetric and never reads as drift.
+    #[serde(default, rename = "syncOmit", skip_serializing_if = "is_false_ref")]
+    pub sync_omit: bool,
 }
 
 fn is_false_ref(b: &bool) -> bool {
@@ -680,6 +697,7 @@ impl Default for ManifestField {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         }
     }
 }

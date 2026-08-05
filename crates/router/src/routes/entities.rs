@@ -170,12 +170,19 @@ pub(crate) fn handle(
                         // Pre-fix only the User-entity allowlist
                         // ran here so server-only fields on non-User
                         // entities leaked through cursor pagination.
-                        visible.push(crate::project_row_for_wire(
-                            manifest,
-                            auth_user,
-                            entity_name,
-                            row,
-                        ));
+                        // Replication fetches additionally shed
+                        // `syncOmit` columns — these rows land in the
+                        // client replica; a direct read keeps them.
+                        visible.push(if replication_fetch {
+                            crate::project_row_for_replication(
+                                manifest,
+                                auth_user,
+                                entity_name,
+                                row,
+                            )
+                        } else {
+                            crate::project_row_for_wire(manifest, auth_user, entity_name, row)
+                        });
                         if visible.len() > limit {
                             break;
                         }

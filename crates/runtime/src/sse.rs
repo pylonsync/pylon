@@ -331,7 +331,7 @@ impl SseHub {
         // policies referencing `serverOnly` fields evaluate
         // against the unprojected row. `prev_data` is stripped
         // from the wire — server-internal only.
-        let projected_data = pylon_router::project_row_for_wire_opt(
+        let projected_data = pylon_router::project_row_for_replication_opt(
             self.manifest.as_ref(),
             &self.auth_user,
             &event.entity,
@@ -353,7 +353,7 @@ impl SseHub {
         // leak via the tombstone path.
         let synth_delete_sse: Option<Arc<str>> =
             if matches!(event.kind, ChangeKind::Update) && event.prev_data.is_some() {
-                let projected_prev = pylon_router::project_row_for_wire_opt(
+                let projected_prev = pylon_router::project_row_for_replication_opt(
                     self.manifest.as_ref(),
                     &self.auth_user,
                     &event.entity,

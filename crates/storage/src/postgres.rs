@@ -2367,6 +2367,7 @@ mod tests {
             default: None,
             enum_values: None,
             encrypted: false,
+            sync_omit: false,
         };
         AppManifest {
             manifest_version: 1,
@@ -2758,6 +2759,7 @@ mod tests {
                 default: None,
                 enum_values: None,
                 encrypted: false,
+                sync_omit: false,
             });
         assert_ne!(base, schema_fingerprint(&added_field), "new column");
 
