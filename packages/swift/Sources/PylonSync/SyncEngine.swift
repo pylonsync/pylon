@@ -20,6 +20,16 @@ public struct SyncEngineConfig: Sendable {
     /// Base delay for the exponential backoff, in seconds. Default 1s.
     public var reconnectBaseDelay: TimeInterval
     public var appName: String
+    /// Keep the local replica across ORG switches (same user). Default
+    /// `true`: a tenant flip wipes the replica and re-bootstraps, because
+    /// tenant-scoped read policies mean the visible set genuinely changed.
+    /// Set `false` ONLY when every synced entity's read policy is
+    /// MEMBERSHIP-scoped (`exists(OrgMember ...)`): then the replica is
+    /// valid across all the user's orgs, and an org switch keeps every
+    /// row and reconciles in the background instead of wiping. USER flips
+    /// (login/logout) always wipe regardless. Parity with the TS engine's
+    /// `resetOnTenantFlip`.
+    public var resetOnTenantFlip: Bool
 
     public enum TransportType: String, Sendable {
         case websocket
@@ -34,7 +44,8 @@ public struct SyncEngineConfig: Sendable {
         transport: TransportType = .websocket,
         pollInterval: TimeInterval = 1.0,
         reconnectBaseDelay: TimeInterval = 1.0,
-        appName: String = "default"
+        appName: String = "default",
+        resetOnTenantFlip: Bool = true
     ) {
         self.baseURL = baseURL
         self.wsURL = wsURL
@@ -43,6 +54,7 @@ public struct SyncEngineConfig: Sendable {
         self.pollInterval = pollInterval
         self.reconnectBaseDelay = reconnectBaseDelay
         self.appName = appName
+        self.resetOnTenantFlip = resetOnTenantFlip
     }
 }
 
@@ -873,8 +885,25 @@ public actor SyncEngine {
             let next = try await client.me()
             let tenantNow = next.tenantId
             if lastSeenTenantObserved && lastSeenTenant != tenantNow {
-                // Tenant flip is an identity change → wipe rows + queued writes.
-                await resetReplica(wipeMutations: true)
+                if config.resetOnTenantFlip {
+                    // Tenant flip is an identity change → wipe rows + queued writes.
+                    await resetReplica(wipeMutations: true)
+                } else {
+                    // Membership-scoped reads: the replica is valid across all
+                    // the user's orgs — keep every row, and reconcile to pick
+                    // up rows of an org the user only just joined (their
+                    // change events predate membership). Parity with the TS
+                    // engine's resetOnTenantFlip: false path.
+                    lastSeenTenant = tenantNow
+                    lastSeenTenantObserved = true
+                    if next != resolvedSession {
+                        resolvedSession = next
+                        store.notify()
+                    }
+                    await pull()
+                    await reconcile()
+                    return
+                }
             }
             lastSeenTenant = tenantNow
             lastSeenTenantObserved = true

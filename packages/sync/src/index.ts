@@ -148,6 +148,25 @@ export interface SyncEngineConfig {
    */
   reconcileOnVisibility?: boolean;
   /**
+   * Keep the local replica across ORG switches (same user). Default
+   * `true`: a tenant flip wipes the replica and re-bootstraps, because
+   * tenant-scoped read policies (`auth.tenantId == data.orgId`) mean
+   * the visible set genuinely changed.
+   *
+   * Set `false` ONLY when every synced entity's read policy is
+   * MEMBERSHIP-scoped (`exists(OrgMember where orgId == data.orgId and
+   * userId == auth.userId)`) — then the replica is valid across all the
+   * user's orgs at once, the wipe is pure waste, and an org switch
+   * becomes instant: components filter by the live `tenantId` while the
+   * engine runs a pull + reconcile in the background (which is what
+   * brings in rows of an org the user only just joined). With
+   * tenant-scoped policies this flag KEEPS STALE ROWS across switches —
+   * don't set it unless the policies match.
+   *
+   * USER flips (login/logout/account switch) always wipe regardless.
+   */
+  resetOnTenantFlip?: boolean;
+  /**
    * Client → server keepalive interval (ms). The Pylon dev server's
    * dedicated :port+1 WS listener uses a dual-thread design where the
    * writer thread wakes on every broadcast — pings are pure liveness,
@@ -2369,7 +2388,14 @@ export class SyncEngine {
       // new tenant while useQuery still has the old tenant's rows.
       const verdict = this.session.inspectSession(next);
       if (verdict.tenantChanged) {
-        if (verdict.replicaInvalidated) {
+        // `resetOnTenantFlip: false` — the app has declared its read
+        // policies MEMBERSHIP-scoped, so the replica is already valid
+        // for every org the user belongs to and the wipe would be pure
+        // waste (the "switch orgs → blank dashboard for seconds" cost).
+        // Only the TENANT verdict honors the flag; user flips (token
+        // change, guardReplicaIdentity) always wipe.
+        const skipReset = this.config.resetOnTenantFlip === false;
+        if (verdict.replicaInvalidated && !skipReset) {
           // Route reset through the public (queued) method so the
           // wipe serializes against in-flight pulls / WS-event
           // applies / pushes. sessionChain serializes session
@@ -2384,6 +2410,13 @@ export class SyncEngine {
           // Only the leader pulls — followers receive subsequent
           // applied broadcasts that close the catch-up window.
           await this.pull();
+          if (skipReset) {
+            // No wipe happened, so rows of an org the user only just
+            // JOINED aren't in the replica and no change event will
+            // re-deliver them (their events predate membership). The
+            // membership-scoped reconcile sweep upserts them.
+            void this.reconcile();
+          }
         }
       }
       this.session.commitObservation(next);

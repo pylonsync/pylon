@@ -11,6 +11,7 @@
 
 import { afterEach, describe, expect, test } from "bun:test";
 
+import type { SyncEngine } from "./index";
 import { createTestEnv, type TestEnv } from "./test-harness";
 
 const tenantScopedVisibility = (
@@ -270,6 +271,39 @@ describe("sync scenarios", () => {
 
     expect(env.engine.store.get("Recording", "a1")).toBeNull();
     expect(env.engine.store.get("Recording", "b1")).not.toBeNull();
+  });
+
+  // MEMBER-SCOPED ORG SWITCH (pins resetOnTenantFlip: false). When every
+  // read policy is membership-scoped, the replica is valid across ALL the
+  // user's orgs at once — the tenant-flip wipe + from-zero re-bootstrap is
+  // pure waste (the "switch orgs → blank dashboard for seconds" cost). With
+  // the flag, a switch keeps every row and does NOT re-snapshot; the UI
+  // just filters by the live tenantId.
+  test("resetOnTenantFlip:false keeps the replica and skips the re-snapshot on org switch", async () => {
+    // Default visibility (no tenant filter) models membership-scoped reads:
+    // the caller sees every org's rows regardless of the active tenant.
+    env = createTestEnv({ transport: "poll", resetOnTenantFlip: false });
+    env.server.seed("Recording", [
+      { id: "a1", orgId: "org-a", title: "alice" },
+      { id: "b1", orgId: "org-b", title: "bob" },
+    ]);
+    env.signIn({ userId: "u1", tenantId: "org-a" });
+    await env.start();
+    await env.flush();
+    expect(env.engine.store.get("Recording", "a1")).not.toBeNull();
+    expect(env.engine.store.get("Recording", "b1")).not.toBeNull();
+
+    const snapshotsBefore = env.server.snapshotPullCount;
+    env.selectOrg("org-b");
+    await env.engine.notifySessionChanged();
+    await env.flush(100);
+
+    // No wipe: every org's rows survived the switch.
+    expect(env.engine.store.get("Recording", "a1")).not.toBeNull();
+    expect(env.engine.store.get("Recording", "b1")).not.toBeNull();
+    // No re-bootstrap: zero additional since=0 snapshot pulls. (The
+    // default-path test above proves the flag's absence still wipes.)
+    expect(env.server.snapshotPullCount - snapshotsBefore).toBe(0);
   });
 
   // Reactive query subscription delivers a result over WS AND emits

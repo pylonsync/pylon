@@ -317,6 +317,22 @@ policy({
   allowRead: "auth.tenantId == existing.orgId",
   allowInsert: "auth.tenantId == data.orgId",
 });
+```
+
+**Tenant-scoped reads make org switching SLOW.** `auth.tenantId == data.orgId`
+means the visible set changes on every org switch, so the sync engine must
+wipe the replica and re-bootstrap from zero (blank dashboard for seconds).
+For apps where users belong to multiple orgs, prefer MEMBERSHIP-scoped reads
+— `allowRead: "exists(OrgMember where orgId == data.orgId and userId ==
+auth.userId)"` — then the replica is valid across all the user's orgs at
+once, and passing `resetOnTenantFlip: false` in the engine/provider config
+makes an org switch instant: no wipe, no re-pull, the UI just filters by the
+live `tenantId` (a background reconcile picks up rows of orgs joined since
+the last snapshot). Do NOT set that flag with tenant-scoped reads — it would
+keep stale rows across switches. Writes and functions may keep using
+`auth.tenantId` either way.
+
+```ts
 
 // Time window: published posts are public; scheduled ones stay hidden until their time
 policy({

@@ -62,6 +62,10 @@ export interface CreateTestEnvOptions {
    *  "poll" to disable the WS-onopen reconcile race in scenarios
    *  that only want to pin the in-start pipeline. */
   transport?: "websocket" | "poll" | "sse";
+  /** Passed through to the engine config — see SyncEngineConfig.
+   *  resetOnTenantFlip. Scenarios covering the member-scoped
+   *  no-wipe org switch set false. */
+  resetOnTenantFlip?: boolean;
   /** Base delay (ms) for WS reconnect backoff. The default value used
    *  inside the harness (`undefined` → 1000) introduces seconds of
    *  wall-clock waiting on every reconnect scenario; pass a small
@@ -122,6 +126,7 @@ export function createTestEnv(opts: CreateTestEnvOptions = {}): TestEnv {
     storage,
     transport: opts.transport ?? "websocket",
     reconnectDelay: opts.reconnectDelay,
+    resetOnTenantFlip: opts.resetOnTenantFlip,
     // Tight timings so scenarios don't have to sleep seconds. The
     // engine's reconcile debounce is also relaxed so back-to-back
     // visibility-change triggers don't get coalesced away in tests.
