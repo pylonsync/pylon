@@ -22,16 +22,16 @@
     "tailwind-merge": "^3.3.0"
   },
   "peerDependencies": {
-    "@pylonsync/functions": ">=0.3.359",
-    "@pylonsync/react": ">=0.3.359",
-    "@pylonsync/sdk": ">=0.3.359",
+    "@pylonsync/functions": ">=0.3.364",
+    "@pylonsync/react": ">=0.3.364",
+    "@pylonsync/sdk": ">=0.3.364",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@pylonsync/functions": "^0.3.359",
-    "@pylonsync/react": "^0.3.359",
-    "@pylonsync/sdk": "^0.3.359",
+    "@pylonsync/functions": "^0.3.364",
+    "@pylonsync/react": "^0.3.364",
+    "@pylonsync/sdk": "^0.3.364",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "react": "^19.2.0",
