@@ -223,7 +223,7 @@ export function EntitiesPage() {
 		<div className="space-y-4">
 			<div className="flex flex-wrap items-center gap-2">
 				<Select value={selected} onValueChange={setSelected}>
-					<SelectTrigger className="w-[260px]">
+					<SelectTrigger className="w-full sm:w-[260px]">
 						<SelectValue>{selectedLabel}</SelectValue>
 					</SelectTrigger>
 					<SelectContent>

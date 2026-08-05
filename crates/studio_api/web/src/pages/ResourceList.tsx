@@ -441,13 +441,16 @@ export function ResourceListPage({
 				</DropdownMenu>
 
 				{showSearch && (
-					<div className="relative">
+					// Full width on a phone, fixed once there's room: a hard w-72
+					// is wider than half a 390px screen and pushed the toolbar
+					// into a horizontal scroll.
+					<div className="relative w-full sm:w-72">
 						<Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
 						<Input
 							value={search}
 							onChange={(e) => setSearch(e.target.value)}
 							placeholder={`Search ${pluralLabel.toLowerCase()}...`}
-							className="h-9 w-72 pl-8"
+							className="h-9 w-full pl-8"
 						/>
 					</div>
 				)}
@@ -516,7 +519,10 @@ export function ResourceListPage({
 					</DropdownMenu>
 				)}
 
-				<div className="ml-auto flex items-center gap-2">
+				{/* `ml-auto` only once the toolbar is on one line — when it wraps,
+				    an auto margin would strand these two buttons on the right of
+				    their own row instead of aligning them under the search. */}
+				<div className="flex items-center gap-2 sm:ml-auto">
 					<Button variant="outline" size="sm" onClick={load} disabled={loading}>
 						{loading ? (
 							<Loader2 className="size-3.5 animate-spin" />
@@ -911,7 +917,10 @@ export function ResourceListPage({
 
 /** Unique key for "this action, on this row" — drives the running spinner. */
 function runKey(action: RowAction, row: Row): string {
-	return `${action.id} ${String(row.id ?? "")}`;
+	// NUL as the separator, written as an escape: an action id or a row
+	// id could contain any printable character, and this key is compared
+	// for equality, so the join must not be ambiguous.
+	return `${action.id}\u0000${String(row.id ?? "")}`;
 }
 
 function clip(s: string, max: number): string {

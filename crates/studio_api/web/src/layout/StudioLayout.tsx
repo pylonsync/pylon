@@ -13,6 +13,8 @@ import {
 	SidebarMenuButton,
 	SidebarMenuItem,
 	SidebarProvider,
+	SidebarTrigger,
+	useSidebar,
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -105,9 +107,15 @@ export function StudioLayout({
 								)}
 								<SidebarGroupContent>
 									<SidebarMenu>
-										{section.items.map((item, j) =>
-											renderItem(item, j, route, onRouteChange, isAdmin),
-										)}
+										{section.items.map((item, j) => (
+											<NavItem
+												key={`${item.kind}-${j}`}
+												item={item}
+												route={route}
+												onRouteChange={onRouteChange}
+												isAdmin={isAdmin}
+											/>
+										))}
 									</SidebarMenu>
 								</SidebarGroupContent>
 							</SidebarGroup>
@@ -117,60 +125,22 @@ export function StudioLayout({
 						{footer && footer.type === "card" && (
 							<SidebarFooterCard footer={footer} />
 						)}
-						<SidebarMenu className="px-2 pb-2">
-							<SidebarMenuItem>
-								<DropdownMenu>
-									<DropdownMenuTrigger asChild>
-										<SidebarMenuButton tooltip="Account">
-											<div className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
-												{account.slice(0, 1).toUpperCase()}
-											</div>
-											<div className="flex flex-col items-start leading-tight">
-												<span className="max-w-[10rem] truncate text-xs font-medium">
-													{account}
-												</span>
-												<span className="text-[10px] text-muted-foreground">
-													{isAdmin ? "Admin" : "Session ended"}
-												</span>
-											</div>
-										</SidebarMenuButton>
-									</DropdownMenuTrigger>
-									<DropdownMenuContent
-										side="right"
-										align="end"
-										className="min-w-44"
-									>
-										<DropdownMenuLabel className="text-xs font-normal">
-											{account}
-										</DropdownMenuLabel>
-										<DropdownMenuSeparator />
-										<DropdownMenuItem
-											onClick={() =>
-												onRouteChange({ kind: "page", id: "settings" })
-											}
-										>
-											<Settings className="size-4" />
-											Settings
-										</DropdownMenuItem>
-										{/* A full navigation, not a fetch: /studio/logout revokes the
-										    session server-side and redirects to the app's login page,
-										    so there's nothing left for this tab to render. */}
-										<DropdownMenuItem asChild>
-											<a href="/studio/logout">
-												<LogOut className="size-4" />
-												Sign out
-											</a>
-										</DropdownMenuItem>
-									</DropdownMenuContent>
-								</DropdownMenu>
-							</SidebarMenuItem>
-						</SidebarMenu>
+						<AccountMenu
+							account={account}
+							isAdmin={isAdmin}
+							onRouteChange={onRouteChange}
+						/>
 					</SidebarFooter>
 				</Sidebar>
-				<SidebarInset>
-					<header className="flex h-14 shrink-0 items-center gap-3 border-b px-6">
+				<SidebarInset className="min-w-0">
+					<header className="flex h-14 shrink-0 items-center gap-2 border-b px-4 sm:gap-3 sm:px-6">
+						{/* Below `md` the sidebar is a closed sheet, and the only other
+						    toggle lives inside it (Brand's collapse button) — so without
+						    this the nav is unreachable on a phone. `md:hidden` matches
+						    the 768px breakpoint `useIsMobile` switches on. */}
+						<SidebarTrigger className="-ml-1 size-8 md:hidden" />
 						<Breadcrumbs crumbs={crumbs} />
-						<div className="ml-auto flex items-center gap-2">
+						<div className="ml-auto flex shrink-0 items-center gap-2">
 							{!loading && (
 								<Badge variant={isAdmin ? "default" : "destructive"}>
 									{isAdmin ? "Admin" : "Session ended"}
@@ -178,7 +148,7 @@ export function StudioLayout({
 							)}
 						</div>
 					</header>
-					<div className="px-6 py-6">
+					<div className="min-w-0 px-4 py-6 sm:px-6">
 						{sessionLost ? (
 							<LockedPage
 								title="Your session ended"
@@ -195,19 +165,101 @@ export function StudioLayout({
 	);
 }
 
-function renderItem(
-	item: ResolvedNavItem,
-	key: number,
-	route: StudioRoute,
-	onRouteChange: (r: StudioRoute) => void,
-	isAdmin: boolean,
-): React.ReactNode {
+/// The signed-in account row at the foot of the nav, with its menu.
+///
+/// Its own component for the same reason as [`NavItem`]: `useSidebar()` is
+/// only reachable below `SidebarProvider`, and "Settings" has to dismiss the
+/// mobile sheet or it navigates behind an open menu.
+function AccountMenu({
+	account,
+	isAdmin,
+	onRouteChange,
+}: {
+	account: string;
+	isAdmin: boolean;
+	onRouteChange: (r: StudioRoute) => void;
+}) {
+	const { isMobile, setOpenMobile } = useSidebar();
+	return (
+		<SidebarMenu className="px-2 pb-2">
+			<SidebarMenuItem>
+				<DropdownMenu>
+					<DropdownMenuTrigger asChild>
+						<SidebarMenuButton tooltip="Account">
+							<div className="flex size-6 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+								{account.slice(0, 1).toUpperCase()}
+							</div>
+							<div className="flex min-w-0 flex-col items-start leading-tight">
+								<span className="max-w-[10rem] truncate text-xs font-medium">
+									{account}
+								</span>
+								<span className="text-[10px] text-muted-foreground">
+									{isAdmin ? "Admin" : "Session ended"}
+								</span>
+							</div>
+						</SidebarMenuButton>
+					</DropdownMenuTrigger>
+					{/* `side="right"` would open off-screen inside a 288px mobile
+					    sheet; above the trigger is the only direction with room. */}
+					<DropdownMenuContent
+						side={isMobile ? "top" : "right"}
+						align="end"
+						className="min-w-44"
+					>
+						<DropdownMenuLabel className="text-xs font-normal">
+							{account}
+						</DropdownMenuLabel>
+						<DropdownMenuSeparator />
+						<DropdownMenuItem
+							onClick={() => {
+								onRouteChange({ kind: "page", id: "settings" });
+								if (isMobile) setOpenMobile(false);
+							}}
+						>
+							<Settings className="size-4" />
+							Settings
+						</DropdownMenuItem>
+						{/* A full navigation, not a fetch: /studio/logout revokes the
+						    session server-side and redirects to the app's login page,
+						    so there's nothing left for this tab to render. */}
+						<DropdownMenuItem asChild>
+							<a href="/studio/logout">
+								<LogOut className="size-4" />
+								Sign out
+							</a>
+						</DropdownMenuItem>
+					</DropdownMenuContent>
+				</DropdownMenu>
+			</SidebarMenuItem>
+		</SidebarMenu>
+	);
+}
+
+/// One sidebar entry.
+///
+/// A component rather than a render function so it can reach `useSidebar()`:
+/// on mobile the nav is a sheet overlaying the page, and tapping an item has
+/// to dismiss it. Without that the route changes behind a menu that stays
+/// open on top of the thing you just navigated to.
+function NavItem({
+	item,
+	route,
+	onRouteChange,
+	isAdmin,
+}: {
+	item: ResolvedNavItem;
+	route: StudioRoute;
+	onRouteChange: (r: StudioRoute) => void;
+	isAdmin: boolean;
+}): React.ReactNode {
+	const { isMobile, setOpenMobile } = useSidebar();
+	const dismissOnMobile = () => {
+		if (isMobile) setOpenMobile(false);
+	};
+
 	if (item.kind === "heading") {
 		return (
-			<div
-				key={`h-${key}`}
-				className="px-2 pt-3 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/80"
-			>
+			<div className="px-2 pt-3 pb-1 text-[10px] uppercase tracking-wider text-muted-foreground/80">
 				{item.label}
 			</div>
 		);
@@ -216,12 +268,16 @@ function renderItem(
 	if (item.kind === "link") {
 		const Icon = resolveIcon(item.icon, ExternalLink);
 		return (
-			<SidebarMenuItem key={`l-${key}`}>
+			<SidebarMenuItem>
 				<SidebarMenuButton asChild tooltip={item.label}>
 					<a
 						href={item.href}
 						target={item.external ? "_blank" : undefined}
 						rel={item.external ? "noreferrer" : undefined}
+						// An external link opens a new tab and leaves the sheet
+						// covering this one; a same-tab link navigates away and the
+						// sheet would flash over the new page. Close either way.
+						onClick={dismissOnMobile}
 					>
 						<Icon />
 						<span>{item.label}</span>
@@ -244,14 +300,14 @@ function renderItem(
 	const tooltip = locked ? `${item.label} — admin required` : item.label;
 
 	return (
-		<SidebarMenuItem key={`i-${key}`}>
+		<SidebarMenuItem>
 			<SidebarMenuButton
 				isActive={isActive}
 				tooltip={tooltip}
 				onClick={() => {
 					if (item.kind === "page") onRouteChange({ kind: "page", id: item.id });
-					else
-						onRouteChange({ kind: "resource", entity: item.entity });
+					else onRouteChange({ kind: "resource", entity: item.entity });
+					dismissOnMobile();
 				}}
 			>
 				<Icon />
