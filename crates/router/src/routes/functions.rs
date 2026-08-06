@@ -124,7 +124,7 @@ mod gate_tests {
 /// the full RouterContext / TCP harness — the route handler
 /// translates `GateOutcome` into `(status, body)` after.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FnAuthGate {
+pub enum FnAuthGate {
     /// Caller satisfies the declared auth mode; proceed to invoke.
     Allowed,
     /// Caller is anonymous; function requires a real signed-in user.
@@ -143,7 +143,7 @@ pub(crate) enum FnAuthGate {
 /// (matches the policy-engine convention — admin bypasses
 /// policies too, so ops scripts work everywhere without
 /// wildcard rules).
-pub(crate) fn check_fn_auth(mode: FnAuthMode, auth_ctx: &AuthContext) -> FnAuthGate {
+pub fn check_fn_auth(mode: FnAuthMode, auth_ctx: &AuthContext) -> FnAuthGate {
     if auth_ctx.is_admin {
         return FnAuthGate::Allowed;
     }

@@ -22,6 +22,11 @@ pub use routes::sync::{
     set_delta_resync_threshold, set_delta_scan_budget, set_snapshot_scan_budget,
 };
 
+/// The declarative function auth gate, re-exported for the runtime's SSE
+/// fast path — `/api/fn/:name` with `Accept: text/event-stream` bypasses
+/// the router dispatch, so it must run the exact same gate itself.
+pub use routes::functions::{check_fn_auth, FnAuthGate};
+
 // ---------------------------------------------------------------------------
 // ChangeNotifier — abstraction over WS/SSE broadcast
 // ---------------------------------------------------------------------------

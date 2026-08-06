@@ -2090,6 +2090,18 @@ fn start_server(
         );
     }
 
+    // Trait-typed view of FnOps for request-loop paths that only need the
+    // trait (the `/api/fn/:name` SSE fast path). Merges the test override —
+    // which skips the Bun pool entirely — so integration tests can drive
+    // those paths through the real request loop without a live Bun process.
+    // Paths needing concrete `FnOpsImpl` members (pool health probes, cron
+    // registration) keep using `fn_ops_maybe` directly.
+    let fn_ops_dyn: Option<Arc<dyn pylon_router::FnOps>> = fn_ops_override.clone().or_else(|| {
+        fn_ops_maybe
+            .as_ref()
+            .map(|f| Arc::clone(f) as Arc<dyn pylon_router::FnOps>)
+    });
+
     // Reactive registry needs FnOps to invoke handlers for initial
     // run + re-run. Wire it now that fn_ops is built, then spawn the
     // re-runner thread. If functions aren't available (no functions/
@@ -2711,6 +2723,7 @@ fn start_server(
         let scheduler = Arc::clone(&scheduler);
         let workflow_engine = Arc::clone(&workflow_engine);
         let fn_ops_maybe = fn_ops_maybe.clone();
+        let fn_ops_dyn = fn_ops_dyn.clone();
         let shard_registry = shard_registry.clone();
         let cors_allowlist = cors_allowlist.clone();
         let cookie_config = Arc::clone(&cookie_config);
@@ -5481,7 +5494,7 @@ fn start_server(
                 .unwrap_or("")
                 .to_string();
 
-            if let Some(fn_ops) = &fn_ops_maybe {
+            if let Some(fn_ops) = &fn_ops_dyn {
                 // Mirror the router's gates so the streaming fast path doesn't
                 // become a way to bypass function auth / rate limits.
                 // 1. Function must exist (otherwise 404, not a hung SSE).
@@ -5545,6 +5558,60 @@ fn start_server(
                         );
                         let _ = request.respond(response);
                         mt.record_request("POST", 404);
+                        return;
+                    }
+                }
+                // 1c. Declarative auth-mode gate (`auth: "user"` is the
+                // default on every def). The router path enforces this in
+                // routes/functions.rs before invoking; without the same
+                // check here, adding `Accept: text/event-stream` let an
+                // anonymous caller invoke any non-internal function.
+                // Response shapes match the router exactly.
+                if let Some(def) = fn_def.as_ref() {
+                    let gate = pylon_router::check_fn_auth(def.auth, &auth_ctx);
+                    let denial = match gate {
+                        pylon_router::FnAuthGate::Allowed => None,
+                        pylon_router::FnAuthGate::NeedsAuth => Some((
+                            401u16,
+                            json_error(
+                                "AUTH_REQUIRED",
+                                &format!("Function \"{fn_name}\" requires a signed-in user"),
+                            ),
+                        )),
+                        pylon_router::FnAuthGate::NeedsGuest => Some((
+                            401u16,
+                            json_error(
+                                "AUTH_REQUIRED",
+                                &format!(
+                                    "Function \"{fn_name}\" requires a session — sign in or POST /api/auth/guest first"
+                                ),
+                            ),
+                        )),
+                        pylon_router::FnAuthGate::NeedsAdmin => Some((
+                            403u16,
+                            json_error(
+                                "FORBIDDEN",
+                                &format!("Function \"{fn_name}\" requires admin authentication"),
+                            ),
+                        )),
+                    };
+                    if let Some((status, err)) = denial {
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(status)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", status);
                         return;
                     }
                 }
