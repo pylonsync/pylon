@@ -95,8 +95,16 @@ fn start_server() -> (u16, Arc<Runtime>) {
     let manifest = test_manifest();
     let rt = Arc::new(Runtime::in_memory(manifest).unwrap());
     let rt2 = Arc::clone(&rt);
+    // The server's own error is the only explanation for a bind
+    // failure; dropping it leaves "never bound" with no cause.
+    let boot_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let boot_err_thread = std::sync::Arc::clone(&boot_err);
     std::thread::spawn(move || {
-        let _ = pylon_runtime::server::start(rt2, port);
+        let r = pylon_runtime::server::start(rt2, port);
+        if let Err(e) = r {
+            *boot_err_thread.lock().unwrap() = Some(e.to_string());
+        }
     });
 
     // Wait for HTTP port.
@@ -115,8 +123,9 @@ fn start_server() -> (u16, Arc<Runtime>) {
         }
         assert!(
             ready,
-            "test server never bound {} within 15s",
-            format!("127.0.0.1:{port}")
+            "test server never bound {} within 15s (server error: {:?})",
+            format!("127.0.0.1:{port}"),
+            boot_err.lock().unwrap()
         );
     }
     // Wait for WS port (HTTP server uses port; dedicated WS is port+1).
