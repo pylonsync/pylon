@@ -532,7 +532,7 @@ ctx.db.lookup(entity, field, value)    // => row | null
 ctx.db.search(entity, spec)            // => { hits, facetCounts, total }  (needs the `search` plugin)
 ctx.db.paginate(entity, { cursor, numItems })
 
-// ---- mutation ctx — ctx.db ALSO has writes (transactional); + error, scheduler, llm, connections ----
+// ---- mutation ctx — ctx.db ALSO has writes (transactional); + error, scheduler, llm, rooms, stream, connections ----
 ctx.db.insert(entity, data)            // => id (string)
 ctx.db.update(entity, id, patch)       // => boolean (true if the row existed)
 ctx.db.delete(entity, id)              // => boolean
@@ -542,15 +542,63 @@ throw ctx.error("CODE", "message")     // typed error → rolls the tx back
 ctx.scheduler.runAfter(delayMs, "fnName", args)   // enqueue delayed call
 ctx.scheduler.runAt(unixMs, "fnName", args)       // enqueue at a wall-clock time (Unix ms, e.g. new Date(iso).getTime())
 
-// ---- action ctx — NO ctx.db. Read/write via runQuery/runMutation; + email, error, scheduler ----
+// ---- action ctx — NO ctx.db. Read/write via runQuery/runMutation; + email, error, scheduler, llm, rooms, stream ----
 ctx.runQuery("fnName", args)           // read by invoking a registered query
 ctx.runMutation("fnName", args)        // write by invoking a registered mutation (own tx)
 ctx.email.send(to, subject, body)      // transactional email via PYLON_EMAIL_* provider
 throw ctx.error("CODE", "message")
 ctx.request?.rawBody / ctx.request?.headers   // raw HTTP request (verify Stripe/GitHub webhook sigs)
+
+// ---- mutation + action: LLM, streaming, server push ----
+await ctx.llm.complete(request)         // request: { messages, system?, tools?, model?, max_tokens?, temperature? }
+await ctx.llm.stream(request, onEvent)  // same request; onEvent fires per delta, resolves with the SAME assembled response
+ctx.stream.write(text)                  // SSE chunk → ONLY the client holding this HTTP response (reads it via db.streamFn)
+await ctx.rooms.broadcast(room, topic, data)    // → EVERY subscriber of a presence room; => { delivered: boolean }
 ```
 
-`ctx.llm` (provider-abstracted completions) and `ctx.connections` (per-user OAuth tokens) are on **mutation + action** ctx only — never on `query` (reactive purity: a subscribed query must be a pure function of its `ctx.db` reads).
+`ctx.llm` (provider-abstracted completions), `ctx.rooms` (server-originated push), and `ctx.connections` (per-user OAuth tokens) are on **mutation + action** ctx only — never on `query` (reactive purity: a subscribed query must be a pure function of its `ctx.db` reads, and a reactive re-run would re-bill the LLM / re-broadcast the event).
+
+**Streaming LLM output.** `ctx.llm.stream` calls `onEvent` for each event as the provider emits it, then resolves with the same response `complete` returns — so you stream text out AND still branch on `stop_reason`:
+
+```ts
+// functions/agent.ts
+const tools = [{
+  name: "get_order",
+  description: "Look up an order by id.",
+  input_schema: { type: "object", properties: { orderId: { type: "string" } }, required: ["orderId"] },
+}];
+
+export default action({
+  args: { question: v.string() },
+  timeout: 300,   // REQUIRED for long runs: streaming does NOT extend the call
+                  // deadline (PYLON_FN_CALL_TIMEOUT, 30s default — absolute wall
+                  // clock from invocation).
+  async handler(ctx, args) {
+    const messages: { role: "user" | "assistant"; content: string | any[] }[] = [
+      { role: "user", content: args.question },
+    ];
+    for (let turn = 0; turn < 10; turn++) {   // ALWAYS bound the loop
+      const res = await ctx.llm.stream({ messages, tools }, (e) => {
+        if (e.type === "text_delta") ctx.stream.write(e.text);
+      });
+      messages.push({ role: "assistant", content: res.content });  // keep tool_use blocks verbatim
+      if (res.stop_reason !== "tool_use") return { turns: turn + 1 };
+      const results = [];
+      for (const b of res.content) {
+        if (b.type !== "tool_use") continue;
+        const out = await ctx.runQuery("getOrder", { id: (b.input as any).orderId });
+        results.push({ type: "tool_result", tool_use_id: b.id, content: JSON.stringify(out) });
+      }
+      messages.push({ role: "user", content: results });
+    }
+    throw ctx.error("AGENT_LOOP_LIMIT", "tool loop did not converge");
+  },
+});
+```
+
+Events: `text_delta {text}` | `tool_use_start {id, name}` | `tool_input_delta {partial_json}` | `done {stop_reason, usage}`. Tool arguments arrive as raw JSON fragments — concatenate, parse ONCE at the end (a single fragment is not valid JSON). Same auth gate and model allowlist as `complete`.
+
+**`ctx.stream.write` vs `ctx.rooms.broadcast`.** `ctx.stream.write` reaches only the one client holding the HTTP response (it reads back with `db.streamFn(fn, args)`) — close the tab and the output is gone. `ctx.rooms.broadcast(room, topic, data)` reaches every subscriber of the presence room, so agent output survives a reload, reaches a second device, or ships from a job with no HTTP caller at all. `{ delivered: false }` means the room had no members — a no-op, not an error. Doing both in one handler is normal. Clients join with `useRoom(roomId, userId)` and read pushes via `getSync().subscribeRoomMessages(roomId, (m) => ...)`; server broadcasts arrive with an empty `m.from`.
 
 **Functions bypass policies** — a `mutation`/`action` that reads or writes another tenant's
 rows without re-checking membership is an IDOR. Use `ctx.requireMember(orgId, { role })` (it
@@ -612,7 +660,9 @@ async function onSend(roomId: string, body: string) {
 | Live count / sum / avg / groupBy | `db.useAggregate(...)` | |
 | Live full-text + faceted search | `db.useSearch("E", { query, filters, facets, sort, pageSize })` | re-runs on every keystroke AND every matching write; needs the `search` plugin + `search:` on the entity |
 | Optimistic write with a "ghost" row | `db.useMutation("fnName")` / `db.useEntity` | inserts locally instantly; server broadcast reconciles in place |
-| Presence / cursors / typing / broadcast | `useRoom(roomId, userId, { initialPresence })` | ephemeral — `peers`, `setPresence(data)`, `broadcast(topic, data)`. NOT persisted. |
+| Presence / cursors / typing / broadcast | `useRoom(roomId, userId, { initialPresence })` | ephemeral — `peers`, `setPresence(data)`, `broadcast(topic, data)`. NOT persisted. Receive relayed messages via `getSync().subscribeRoomMessages(roomId, cb)`. |
+| Server-generated output (agent tokens, job progress) pushed to everyone watching | server side: `ctx.rooms.broadcast(room, topic, data)` | ephemeral; client joins with `useRoom` + `subscribeRoomMessages`. Survives a closed tab, reaches a second device. |
+| Server-generated output streamed back to the ONE client that called | server side: `ctx.stream.write(text)` | client reads with `db.streamFn(fn, args)`. Dies with the request. |
 | Authoritative multiplayer sim (game/MMO tick loop) | `useShard(shardId, { subscriberId, token })` | `{ snapshot, tick, send, connected }`. The server-side sim (`SimState` tick loop) is defined in Rust (`crates/realtime`); `useShard`/`connectShard` are the TS client. |
 | Connection/sync state for a status indicator | `useSyncStatus()` / `useSession()` | |
 
@@ -939,6 +989,8 @@ Keeping a project current: `pylon update` bumps every @pylonsync/* dependency (w
 | A server-side join / computed value, live | `db.useReactiveQuery("fnName", args)` (leader-view; see footgun) |
 | Live full-text search | `db.useSearch("Entity", { query, facets })` + `search` plugin |
 | Presence / cursors / typing | `useRoom(roomId, userId)` — ephemeral, not persisted |
+| An AI chat / agent that streams its answer | `action()` with `ctx.llm.stream(req, (e) => ctx.stream.write(e.text))` + `db.streamFn` on the client; set `timeout:` — streaming does NOT extend the 30s call deadline |
+| Agent output that must reach every watcher (reload, second device, no HTTP caller) | `ctx.rooms.broadcast(room, topic, data)` from the mutation/action; client joins with `useRoom` + `getSync().subscribeRoomMessages` |
 | Multiplayer game / tick sim | `useShard(shardId, { subscriberId })` |
 | A form submission / write | A `mutation()` in `functions/X.ts` + `await callFn("X", args)` in the component (or `db.useMutation` for optimistic UI) |
 | Auth-gated functions | `auth: "user"` is the default on every `query` / `mutation` / `action`. Anon AND guest callers get `401 AUTH_REQUIRED` before the handler runs. `auth: "guest"` for pre-login callers (carts, public demos), `auth: "public"` for webhooks/healthchecks, `auth: "admin"` for ops. CRITICAL on actions — policies don't gate them. |
@@ -1012,11 +1064,13 @@ This skill focused on the React/TS happy path. Pylon has more — fetch the docs
 - **API keys** — via the `api_keys` plugin, scoped + rotatable + Argon2-hashed.
 
 ### Plugins (`/plugins/*` in the docs)
-32 built-ins, declared in `manifest.plugins`:
+Built-ins, declared in `manifest.plugins`:
 - **Security**: `rate_limit`, `cors`, `csrf`, `net_guard` (SSRF defense), `totp`, `jwt`, `api_keys`, `session_expiry`, `password_auth`
 - **Data hygiene**: `validation`, `slugify`, `timestamps`, `computed`, `cascade`, `versioning`, `soft_delete`, `tenant_scope`, `organizations`
-- **Search & AI**: `search` (FTS5 + facets), `vector_search`, `ai_proxy`, `mcp` (Model Context Protocol server)
+- **Search & AI**: `search` (FTS5 + facets — configured on the entity via `.search({...})`, not the plugin list), `ai_proxy`
 - **Integrations**: `file_storage` (S3/R2/Stack0), `cache`, `cache_client` (Redis), `email`, `webhooks`, `stripe`, `feature_flags`, `audit_log`
+
+**Not implemented — do NOT declare these.** `vector_search` and `mcp` appear in the roadmap catalog (`pylon plugins list`) but have no implementation behind them; putting them in `manifest.plugins` does nothing. For embeddings/RAG today, compute them in a server function and store/query them yourself. For MCP, use the CLI's `pylon mcp` (see above) — it is not a manifest plugin.
 
 ### Clients (`/clients/*` in the docs)
 - `@pylonsync/sdk` — schema DSL + manifest builder

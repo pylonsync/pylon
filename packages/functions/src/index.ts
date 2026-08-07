@@ -54,4 +54,15 @@ export type {
   RequireMember,
   RequireMemberOptions,
   MemberRow,
+  // LLM + realtime surfaces. A handler writing an agent tool loop
+  // builds its own message array and branches on stream events, so
+  // these have to be nameable from app code.
+  Llm,
+  LlmMessage,
+  LlmContentBlock,
+  LlmTool,
+  LlmCompleteRequest,
+  LlmCompleteResponse,
+  LlmStreamEvent,
+  Rooms,
 } from "./types";

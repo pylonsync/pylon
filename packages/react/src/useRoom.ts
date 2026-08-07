@@ -1,7 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { pylonFetch, type RoomMember, type SyncEngine } from '@pylonsync/sync';
+import {
+  pylonFetch,
+  type RoomMember,
+  type RoomMessage,
+  type SyncEngine,
+} from '@pylonsync/sync';
 import { getBaseUrl, getReactStorage, storageKey } from './index';
 import { getSync } from './db';
 
@@ -678,4 +683,46 @@ export function useRoom(
   }, [roomId, userId, baseUrl, token]);
 
   return { peers, isConnected, setPresence, broadcast, leave, error };
+}
+
+/**
+ * Subscribe to broadcasts on a room — both from other members
+ * (`useRoom(...).broadcast`) and from the server
+ * (`ctx.rooms.broadcast` in a mutation or action).
+ *
+ * `useRoom` is send-only; this is the receive half. Streaming agent
+ * output is the motivating case: the handler broadcasts each delta,
+ * and every device watching the room renders it, including tabs that
+ * weren't the one that started the run.
+ *
+ * ```tsx
+ * const [text, setText] = useState("");
+ * useRoomMessages(`chat-${chatId}`, (msg) => {
+ *   if (msg.topic === "agent.delta") {
+ *     setText((t) => t + (msg.payload as { text: string }).text);
+ *   }
+ * });
+ * ```
+ *
+ * `from` is the sending user's id, or `""` for a server broadcast.
+ *
+ * The callback is held in a ref, so an inline arrow function doesn't
+ * resubscribe on every render — only a changed `roomId` does. Requires
+ * `init()`; without an engine (SSR, tests) this is a no-op.
+ */
+export function useRoomMessages(
+  roomId: string,
+  onMessage: (message: RoomMessage) => void,
+): void {
+  const handlerRef = useRef(onMessage);
+  handlerRef.current = onMessage;
+
+  useEffect(() => {
+    if (!roomId) return;
+    const engine = tryGetSync();
+    if (!engine) return;
+    return engine.subscribeRoomMessages(roomId, (msg) => {
+      handlerRef.current(msg);
+    });
+  }, [roomId]);
 }

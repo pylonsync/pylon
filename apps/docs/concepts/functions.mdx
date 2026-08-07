@@ -66,13 +66,17 @@ ctx.db.unlink(entity, id, relation)
 // Mutations + actions only (not queries):
 ctx.error(code, message)              // throw typed error → mutation rolls back
 ctx.scheduler.runAfter(delayMs, ...)  // schedule (deferred until COMMIT)
+ctx.llm.complete(request)             // LLM completion, returns when the model finishes
+ctx.llm.stream(request, onEvent)      // LLM completion, event per delta
+ctx.stream.write(text)                // SSE chunk → the one client holding this request
+ctx.rooms.broadcast(room, topic, data) // push → every subscriber of a presence room
 ```
 
 The three flavors expose different context surfaces:
 
 - **Query** — `ctx.db` (read-only), `ctx.auth`, `ctx.env`, `ctx.requireMember`.
-- **Mutation** — the above plus writes on `ctx.db`, `ctx.scheduler`, `ctx.error`, `ctx.llm`, `ctx.connections`, `ctx.stream`.
-- **Action** — **no `ctx.db`.** Reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` (each runs as its own transaction). Actions also get `ctx.scheduler`, `ctx.error`, `ctx.email`, `ctx.llm`, `ctx.connections`, and `ctx.request` (raw HTTP request — the only ctx that has it, so webhook signature checks live in actions).
+- **Mutation** — the above plus writes on `ctx.db`, `ctx.scheduler`, `ctx.error`, `ctx.llm`, `ctx.connections`, `ctx.stream`, `ctx.rooms`.
+- **Action** — **no `ctx.db`.** Reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` (each runs as its own transaction). Actions also get `ctx.scheduler`, `ctx.error`, `ctx.email`, `ctx.llm`, `ctx.stream`, `ctx.rooms`, `ctx.connections`, and `ctx.request` (raw HTTP request — the only ctx that has it, so webhook signature checks live in actions).
 
 > A mutation handler IS the transaction — every `ctx.db.*` call inside the handler shares one BEGIN/COMMIT, and a thrown error rolls everything back atomically. There's no `ctx.db.transact([...])` because the handler already wraps your writes; if you need batch atomicity from outside a mutation, use the HTTP `/api/transact` endpoint or call `runMutation` from an action.
 
@@ -225,6 +229,173 @@ export default action({
 ```
 
 Actions have no `ctx.db`. They reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` — each of those runs as its own transaction, but the action as a whole is **not** atomic. If a sequence of writes must commit or roll back together, do them inside a single mutation and have the action call it once.
+
+## Streaming LLM output
+
+`ctx.llm.complete(request)` sends a completion and resolves once the model has finished generating. `ctx.llm.stream(request, onEvent)` sends the same request but calls `onEvent` for each event as the provider emits it, then resolves with the **same assembled response** `complete` would have returned — so a handler can push text to the client as it arrives and still inspect `stop_reason` afterwards.
+
+Both live on **mutation + action** ctx. Neither is on query ctx: a subscribed query re-runs whenever its `ctx.db` reads change, and a paid, non-deterministic call has no business re-running on every dep invalidation.
+
+```ts
+// functions/ask.ts
+import { action, v } from "@pylonsync/functions";
+
+export default action({
+  args: { question: v.string() },
+  async handler(ctx, args) {
+    const res = await ctx.llm.stream(
+      { messages: [{ role: "user", content: args.question }] },
+      (e) => {
+        // Push each token to the caller as the model produces it.
+        if (e.type === "text_delta") ctx.stream.write(e.text);
+      },
+    );
+    return { stopReason: res.stop_reason, usage: res.usage };
+  },
+});
+```
+
+The client reads the chunks with `db.streamFn`:
+
+```tsx
+for await (const chunk of db.streamFn("ask", { question: "why is the sky blue?" })) {
+  setAnswer((prev) => prev + chunk);
+}
+```
+
+### Stream events
+
+`onEvent` receives one of four shapes:
+
+| Event | Fields | What to do with it |
+| --- | --- | --- |
+| `text_delta` | `text` | Append it — this is the model's prose, one fragment at a time. |
+| `tool_use_start` | `id`, `name` | A tool call is opening. Start a buffer for its arguments. |
+| `tool_input_delta` | `partial_json` | A raw JSON fragment of the open tool's arguments. Concatenate; parse **once**, at the end. Individual fragments are not valid JSON. |
+| `done` | `stop_reason`, `usage` | Always fires last, including on a partial failure. |
+
+Everything else matches `complete`: same auth gating, same model allowlist (`PYLON_AI_MODELS_ALLOWED` / the manifest `llm()` helper), same thrown errors carrying `err.code` (`LLM_NOT_CONFIGURED`, `MODEL_NOT_ALLOWED`, `PROVIDER_HTTP_429`, …). Streaming can't reach a model `complete` would refuse.
+
+### Streaming does not extend the deadline
+
+The call deadline is absolute wall clock from invocation — `PYLON_FN_CALL_TIMEOUT`, 30 seconds by default. Emitting events does not reset it. A multi-turn agent that runs tools will blow through 30s, so declare a timeout on the function:
+
+```ts
+export default action({
+  timeout: 300,   // seconds of wall clock for the whole handler
+  args: { ... },
+  async handler(ctx, args) { ... },
+});
+```
+
+### Agent tool loop
+
+Stream the text out as it's generated, run tools when the model asks, feed the results back, repeat until the model stops asking:
+
+```ts
+// functions/agent.ts
+import { action, v } from "@pylonsync/functions";
+
+// Anthropic Messages shape: content is prose, or content blocks —
+// tool_use coming back from the model, tool_result going the other way.
+type Turn = { role: "user" | "assistant"; content: string | any[] };
+
+const tools = [
+  {
+    name: "get_order",
+    description: "Look up an order by id.",
+    input_schema: {
+      type: "object",
+      properties: { orderId: { type: "string" } },
+      required: ["orderId"],
+    },
+  },
+];
+
+export default action({
+  args: { question: v.string() },
+  timeout: 300,   // streaming does NOT extend the 30s default
+  async handler(ctx, args) {
+    const messages: Turn[] = [{ role: "user", content: args.question }];
+
+    for (let turn = 0; turn < 10; turn++) {
+      const res = await ctx.llm.stream({ messages, tools }, (e) => {
+        if (e.type === "text_delta") ctx.stream.write(e.text);
+      });
+
+      // Keep the assistant turn verbatim — it carries the tool_use
+      // blocks the next turn's tool_result blocks refer to by id.
+      messages.push({ role: "assistant", content: res.content });
+
+      if (res.stop_reason !== "tool_use") return { turns: turn + 1 };
+
+      const results = [];
+      for (const block of res.content) {
+        if (block.type !== "tool_use") continue;
+        const order = await ctx.runQuery("getOrder", {
+          id: (block.input as { orderId: string }).orderId,
+        });
+        results.push({
+          type: "tool_result" as const,
+          tool_use_id: block.id,
+          content: JSON.stringify(order ?? { error: "not found" }),
+        });
+      }
+      messages.push({ role: "user", content: results });
+    }
+
+    throw ctx.error("AGENT_LOOP_LIMIT", "tool loop did not converge");
+  },
+});
+```
+
+The loop bound matters: a model can keep requesting tools indefinitely, and without a cap the only thing that stops it is the call deadline killing the worker mid-turn.
+
+## Server push to a room
+
+`ctx.stream.write` writes to the HTTP response of the call in flight. It reaches exactly one client — the one that made the request. Close the tab and the output is gone; a second device never sees it.
+
+`ctx.rooms.broadcast(room, topic, data)` pushes to **every subscriber of a presence room** over the WebSocket, independent of who made the call. Same rooms clients join with `useRoom`, same delivery path a member's own `broadcast()` uses.
+
+```ts
+await ctx.rooms.broadcast("chat-42", "agent.delta", { text: "hi" });
+// => { delivered: true }
+```
+
+It resolves `{ delivered: false }` when the room has no members. Broadcasting into an empty room is a no-op, not an error — an agent doesn't have to know whether anyone is watching.
+
+Available on **mutation + action** ctx, not on queries: a reactive query re-runs on every dep change, which would re-broadcast each time.
+
+Pick based on who needs the output:
+
+- **One caller, one screen** (a chat box waiting on its own response) — `ctx.stream.write`, read with `db.streamFn`.
+- **Everyone watching, including tabs that weren't the caller** (agent output that must survive a reload, a shared session on a second device, a job with no HTTP caller at all) — `ctx.rooms.broadcast`.
+
+Doing both in one handler is normal — write to the caller for the low-latency path, broadcast so every other watcher stays in sync:
+
+```ts
+await ctx.llm.stream({ messages }, (e) => {
+  if (e.type !== "text_delta") return;
+  ctx.stream.write(e.text);                                  // the caller
+  void ctx.rooms.broadcast(room, "agent.delta", { text: e.text }); // everyone else
+});
+```
+
+On the client, join the room with `useRoom` and read the pushed messages off the sync engine:
+
+```tsx
+import { useRoom, getSync } from "@pylonsync/react";
+
+useRoom("chat-42", userId);   // joins the room — required to receive pushes
+
+useEffect(() => {
+  return getSync().subscribeRoomMessages("chat-42", (m) => {
+    if (m.topic === "agent.delta") append((m.payload as { text: string }).text);
+  });
+}, []);
+```
+
+Server broadcasts arrive with an empty `from` (no sender user id) — a member's own broadcasts carry theirs, so `m.from === userId` is how you filter your own echoes.
 
 ## Calling functions from the client
 

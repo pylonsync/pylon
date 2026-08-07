@@ -17,6 +17,8 @@ map; each primitive has its own deep-dive.
 | Live full-text + faceted search | [`db.useSearch`](/concepts/search) | ✅ | [Search](/concepts/search) |
 | An instant write that reconciles with the server | [`db.useMutation`](/concepts/optimistic-updates) | ✅ | [Optimistic updates](/concepts/optimistic-updates) |
 | Presence — cursors, typing, "who's here", broadcast | `useRoom` | ❌ ephemeral | [React client](/clients/react#presence--rooms) |
+| Server-generated output streamed to everyone watching (agent tokens, job progress) | `ctx.rooms.broadcast` — server side | ❌ ephemeral | [Functions](/concepts/functions#server-push-to-a-room) |
+| Server-generated output streamed back to the one client that called | `ctx.stream.write` — server side | ❌ ephemeral | [Functions](/concepts/functions#streaming-llm-output) |
 | Authoritative multiplayer sim (game / MMO tick loop) | `useShard` | ❌ in-memory sim | [React client](/clients/react#multiplayer-shards) |
 | A connection / sync status indicator | `useSyncStatus` | — | [React client](/clients/react) |
 
@@ -26,10 +28,47 @@ The first four rows above are **synced data** — they flow through the entity s
 respect [policies](/concepts/policies), and land in the local replica so they survive
 reload and work offline.
 
-The last rows — `useRoom` (presence/broadcast) and `useShard` (simulation) — are
-**ephemeral signals**. A cursor position or a game tick has no business in your
-database; it's broadcast to the room's current members and forgotten. Don't model
-presence as an entity, and don't try to drive a 60fps game loop through `db.useQuery`.
+The remaining rows — `useRoom` (presence/broadcast), the two server-push primitives,
+and `useShard` (simulation) — are **ephemeral signals**. A cursor position or a game
+tick has no business in your database; it's broadcast to the room's current members
+and forgotten. Don't model presence as an entity, and don't try to drive a 60fps game
+loop through `db.useQuery`.
+
+## Streaming server output: one client, or all of them
+
+Both server-push rows above run inside a mutation or action (neither exists on query
+ctx). They differ in who receives the output:
+
+- **`ctx.stream.write(text)`** writes to the HTTP response of the call in flight. It
+  reaches exactly one client — whoever made the request, reading it back with
+  `db.streamFn(fn, args)`. Close the tab and the output is gone.
+- **`ctx.rooms.broadcast(room, topic, data)`** pushes over the WebSocket to every
+  subscriber of a presence room, whether or not they made the call. It resolves
+  `{ delivered: false }` when the room has no members — an empty room is a no-op, not
+  an error.
+
+Use `ctx.stream.write` for a chat box waiting on its own answer. Use
+`ctx.rooms.broadcast` when the output has to reach more than the caller: an agent whose
+tokens must survive a reload, a second device following the same session, or a
+scheduled job that has no HTTP caller at all. Handlers commonly do both — write to the
+caller for the lowest-latency path, broadcast so every other watcher stays in sync.
+
+Clients join with `useRoom(roomId, userId)` and read pushed messages off the sync
+engine:
+
+```tsx
+import { useRoom, getSync } from "@pylonsync/react";
+
+useRoom("chat-42", userId);   // joins the room — required to receive pushes
+
+useEffect(() => {
+  return getSync().subscribeRoomMessages("chat-42", (m) => {
+    if (m.topic === "agent.delta") append((m.payload as { text: string }).text);
+  });
+}, []);
+```
+
+See [Functions → Server push to a room](/concepts/functions#server-push-to-a-room).
 
 ## Best practice: cross-tab live state goes through `db.useQuery`
 

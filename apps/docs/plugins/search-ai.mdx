@@ -54,12 +54,32 @@ Two endpoints, both requiring an authenticated session:
 - `POST /api/llm/complete` — non-streaming completion.
 - `POST /api/ai/stream` — SSE streaming completion.
 
-And, inside a server **action**, `ctx.llm.complete(...)` (server-only — the key never reaches the client; not available in queries).
+And, inside a **mutation** or **action**, `ctx.llm.complete(...)` / `ctx.llm.stream(...)` (server-only — the key never reaches the client; neither is available in queries).
+
+### `ctx.llm.stream`
+
+`complete` resolves when the model finishes. `stream` calls your handler for each event as the provider emits it, then resolves with the same assembled response — so you can push text to the client while it's generating and still branch on `stop_reason` afterwards:
+
+```ts
+const res = await ctx.llm.stream(
+  { messages, tools },
+  (e) => {
+    if (e.type === "text_delta") ctx.stream.write(e.text);
+  },
+);
+if (res.stop_reason === "tool_use") { /* run the tools, loop */ }
+```
+
+Events are `text_delta {text}`, `tool_use_start {id, name}`, `tool_input_delta {partial_json}`, and `done {stop_reason, usage}`. Tool arguments arrive as raw JSON fragments — concatenate them and parse once at the end.
+
+Same auth gate and same model allowlist as `complete`: streaming can't reach a model `complete` would refuse. Streaming does **not** extend the call deadline (`PYLON_FN_CALL_TIMEOUT`, 30s default), so a long agent run has to declare `timeout: <seconds>` on the function.
+
+To reach every client watching rather than only the caller, push the same deltas through [`ctx.rooms.broadcast`](/concepts/functions#server-push-to-a-room). Full walkthrough, including an agent tool loop: [Functions → Streaming LLM output](/concepts/functions#streaming-llm-output).
 
 ### Env
 
 ```bash
-# /api/llm/complete and ctx.llm.complete
+# /api/llm/complete, ctx.llm.complete, ctx.llm.stream
 PYLON_LLM_PROVIDER=anthropic          # anthropic | openai
 ANTHROPIC_API_KEY=sk-ant-...          # or OPENAI_API_KEY for openai
 

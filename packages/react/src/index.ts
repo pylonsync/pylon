@@ -105,13 +105,14 @@ export type {
 } from "./hooks";
 
 // Room hook
-export { useRoom } from "./useRoom";
+export { useRoom, useRoomMessages } from "./useRoom";
 export type {
   RoomPeer,
   RoomSnapshot,
   UseRoomOptions,
   UseRoomReturn,
 } from "./useRoom";
+export type { RoomMessage } from "@pylonsync/sync";
 
 // Shard hook for real-time sims (games, MMO, live docs, etc.)
 export { useShard, connectShard } from "./useShard";
