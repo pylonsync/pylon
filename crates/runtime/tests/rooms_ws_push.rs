@@ -100,18 +100,44 @@ fn start_server() -> (u16, Arc<Runtime>) {
     });
 
     // Wait for HTTP port.
-    for _ in 0..100 {
-        if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
-            break;
+    // 300 x 50ms = 15s. The old budget was 5s AND fell through
+    // silently when it ran out, so a slow CI runner walked into a
+    // bare `.expect("connect")` panic further down that looked like a
+    // product bug. Fail here instead, naming the port.
+    {
+        let mut ready = false;
+        for _ in 0..300 {
+            if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            ready,
+            "test server never bound {} within 15s",
+            format!("127.0.0.1:{port}")
+        );
     }
     // Wait for WS port (HTTP server uses port; dedicated WS is port+1).
-    for _ in 0..100 {
-        if TcpStream::connect(format!("127.0.0.1:{}", port + 1)).is_ok() {
-            break;
+    // 300 x 50ms = 15s. The old budget was 5s AND fell through
+    // silently when it ran out, so a slow CI runner walked into a
+    // bare `.expect("connect")` panic further down that looked like a
+    // product bug. Fail here instead, naming the port.
+    {
+        let mut ready = false;
+        for _ in 0..300 {
+            if TcpStream::connect(format!("127.0.0.1:{}", port + 1)).is_ok() {
+                ready = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        assert!(
+            ready,
+            "test server never bound {} within 15s",
+            format!("127.0.0.1:{}", port + 1)
+        );
     }
     (port, rt)
 }
