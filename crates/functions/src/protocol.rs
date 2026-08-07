@@ -284,6 +284,34 @@ impl DbResultMessage {
     }
 }
 
+/// One event from an in-flight `ctx.llm.stream(...)` call. Fire-and-
+/// forget: the TS side routes it to the caller's `onEvent` callback by
+/// `op_id` and does NOT resolve the pending promise — the terminal
+/// `result` message does that.
+///
+/// `event` is the serialized `pylon_runtime::llm::StreamEvent`
+/// (`text_delta` / `tool_use_start` / `tool_input_delta` / `done`).
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmEventMessage {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str, // always "llm_event"
+    pub call_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub op_id: Option<String>,
+    pub event: serde_json::Value,
+}
+
+impl LlmEventMessage {
+    pub fn new(call_id: String, op_id: Option<String>, event: serde_json::Value) -> Self {
+        Self {
+            msg_type: "llm_event",
+            call_id,
+            op_id,
+            event,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TypeScript → Rust messages
 // ---------------------------------------------------------------------------
@@ -337,6 +365,20 @@ pub enum TsMessage {
     /// commonly run tool-use loops out of queries.
     #[serde(rename = "llm_complete")]
     LlmComplete(LlmCompleteMessage),
+
+    /// Streaming variant of [`TsMessage::LlmComplete`]. The host pumps
+    /// `llm_event` messages back as the provider emits them, then
+    /// replies with the assembled final response — same shape
+    /// `llm_complete` returns, so a tool-use loop can inspect
+    /// `stop_reason` after streaming the text out.
+    #[serde(rename = "llm_stream")]
+    LlmStream(LlmStreamMessage),
+
+    /// `ctx.rooms.broadcast(room, topic, data)` — push an arbitrary
+    /// event to every subscriber of a presence room, originating from
+    /// the server rather than a member client.
+    #[serde(rename = "room_broadcast")]
+    RoomBroadcast(RoomBroadcastMessage),
 
     /// `ctx.connections.*` op. Wired to the runtime's
     /// ConnectionManager.
@@ -407,6 +449,8 @@ impl TsMessage {
             TsMessage::RunFn(m) => Some(&m.call_id),
             TsMessage::SendEmail(m) => Some(&m.call_id),
             TsMessage::LlmComplete(m) => Some(&m.call_id),
+            TsMessage::LlmStream(m) => Some(&m.call_id),
+            TsMessage::RoomBroadcast(m) => Some(&m.call_id),
             TsMessage::Connection(m) => Some(&m.call_id),
             TsMessage::Return(m) => Some(&m.call_id),
             TsMessage::Error(m) => Some(&m.call_id),
@@ -609,6 +653,36 @@ pub struct LlmCompleteMessage {
     pub request: serde_json::Value,
 }
 
+/// Streaming LLM request. Same `request` shape as
+/// [`LlmCompleteMessage`]; the host forwards to
+/// `pylon_runtime::llm::LlmClient::stream` and emits an
+/// [`LlmEventMessage`] per provider event before the final result.
+///
+/// Carries `op_id` (unlike `llm_complete`) so the events and the
+/// terminal result route back to the right in-flight stream when a
+/// handler runs more than one concurrently.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmStreamMessage {
+    pub call_id: String,
+    #[serde(default)]
+    pub op_id: Option<String>,
+    pub request: serde_json::Value,
+}
+
+/// Server-originated room broadcast. `data` is arbitrary app JSON —
+/// the framework doesn't interpret it, it just fans out to every
+/// subscriber of `room`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoomBroadcastMessage {
+    pub call_id: String,
+    #[serde(default)]
+    pub op_id: Option<String>,
+    pub room: String,
+    pub topic: String,
+    #[serde(default)]
+    pub data: serde_json::Value,
+}
+
 /// `ctx.connections.<op>(name, ...)` request. `op` is one of:
 /// - `"authorize_url"` — returns `{url}`. Optional
 ///   `post_redirect` in body for post-callback browser destination.
@@ -775,6 +849,78 @@ pub struct ErrorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The streaming LLM + room surfaces are wire-format contracts with
+    /// the TS runtime. A rename on either side silently breaks
+    /// `ctx.llm.stream` / `ctx.rooms.broadcast` at runtime — nothing
+    /// else type-checks across the pipe.
+    #[test]
+    fn llm_stream_and_room_broadcast_parse_from_ts() {
+        let stream: TsMessage = serde_json::from_str(
+            r#"{"type":"llm_stream","call_id":"c1","op_id":"c1#3","request":{"messages":[]}}"#,
+        )
+        .expect("llm_stream must deserialize");
+        match stream {
+            TsMessage::LlmStream(m) => {
+                assert_eq!(m.call_id, "c1");
+                assert_eq!(m.op_id.as_deref(), Some("c1#3"));
+                assert!(m.request.get("messages").is_some());
+            }
+            other => panic!("expected LlmStream, got {other:?}"),
+        }
+
+        // op_id is optional on the wire so an older TS runtime that
+        // doesn't mint one still parses (it just can't multiplex).
+        let no_op: TsMessage =
+            serde_json::from_str(r#"{"type":"llm_stream","call_id":"c1","request":{}}"#)
+                .expect("llm_stream without op_id must deserialize");
+        assert!(matches!(no_op, TsMessage::LlmStream(m) if m.op_id.is_none()));
+
+        let bcast: TsMessage = serde_json::from_str(
+            r#"{"type":"room_broadcast","call_id":"c2","op_id":"c2#1","room":"r1","topic":"agent.delta","data":{"text":"hi"}}"#,
+        )
+        .expect("room_broadcast must deserialize");
+        match bcast {
+            TsMessage::RoomBroadcast(m) => {
+                assert_eq!(m.room, "r1");
+                assert_eq!(m.topic, "agent.delta");
+                assert_eq!(m.data.get("text").and_then(|t| t.as_str()), Some("hi"));
+            }
+            other => panic!("expected RoomBroadcast, got {other:?}"),
+        }
+
+        // `data` defaults — a broadcast with no payload is legal.
+        let bare: TsMessage = serde_json::from_str(
+            r#"{"type":"room_broadcast","call_id":"c2","room":"r1","topic":"ping"}"#,
+        )
+        .expect("room_broadcast without data must deserialize");
+        assert!(matches!(bare, TsMessage::RoomBroadcast(m) if m.data.is_null()));
+
+        // Both route by call_id like every other message.
+        let m: TsMessage =
+            serde_json::from_str(r#"{"type":"llm_stream","call_id":"cX","request":{}}"#).unwrap();
+        assert_eq!(m.call_id(), Some("cX"));
+    }
+
+    /// `llm_event` is fire-and-forget: the TS dispatcher keys it by
+    /// op_id and must NOT mistake it for the terminal `result`.
+    #[test]
+    fn llm_event_serializes_with_op_id() {
+        let msg = LlmEventMessage::new(
+            "c1".into(),
+            Some("c1#2".into()),
+            serde_json::json!({"type": "text_delta", "text": "hi"}),
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"type\":\"llm_event\""), "got {json}");
+        assert!(json.contains("\"op_id\":\"c1#2\""), "got {json}");
+        assert!(json.contains("\"text_delta\""), "got {json}");
+
+        // No op_id → the field is omitted rather than sent as null, so
+        // the TS side's `op_id ?? call_id` fallback engages.
+        let bare = LlmEventMessage::new("c1".into(), None, serde_json::json!({}));
+        assert!(!serde_json::to_string(&bare).unwrap().contains("op_id"));
+    }
 
     #[test]
     fn call_message_serializes() {

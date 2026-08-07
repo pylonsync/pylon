@@ -353,6 +353,83 @@ export interface Llm {
    * `PROVIDER_UNREACHABLE`, `INVALID_REQUEST`.
    */
   complete(request: LlmCompleteRequest): Promise<LlmCompleteResponse>;
+
+  /**
+   * Streaming completion. `onEvent` fires for each event as the
+   * provider emits it; the promise resolves with the same assembled
+   * response `complete` returns, so a tool-use loop can inspect
+   * `stop_reason` after the text has already been streamed out.
+   *
+   * The typical agent shape pumps deltas straight to the client:
+   *
+   * ```ts
+   * const res = await ctx.llm.stream(
+   *   { messages, tools },
+   *   (e) => { if (e.type === "text_delta") ctx.stream.write(e.text); },
+   * );
+   * if (res.stop_reason === "tool_use") { ...run tools, loop... }
+   * ```
+   *
+   * Streaming does NOT extend the function's call deadline — it is an
+   * absolute wall clock from invocation (PYLON_FN_CALL_TIMEOUT, 30s
+   * default). A long agent run must declare its own `timeout` on the
+   * function def.
+   *
+   * Same errors and same gating as {@link Llm.complete} — including
+   * the model allowlist, so streaming can't be used to reach a model
+   * `complete` would refuse.
+   */
+  stream(
+    request: LlmCompleteRequest,
+    onEvent: (event: LlmStreamEvent) => void,
+  ): Promise<LlmCompleteResponse>;
+}
+
+/**
+ * One event from an in-flight {@link Llm.stream} call.
+ *
+ * `tool_use_start` opens a tool call; the `tool_input_delta` events
+ * that follow carry its arguments as raw JSON fragments — concatenate
+ * them and parse once, rather than parsing each fragment. `done`
+ * always fires last, including on a partial failure.
+ */
+export type LlmStreamEvent =
+  | { type: "text_delta"; text: string }
+  | { type: "tool_use_start"; id: string; name: string }
+  | { type: "tool_input_delta"; partial_json: string }
+  | {
+      type: "done";
+      stop_reason: string;
+      usage: { input_tokens: number; output_tokens: number };
+    };
+
+/**
+ * Server-originated realtime push. Broadcasts an event to every
+ * subscriber of a presence room — the same rooms clients join with
+ * `useRoom(roomId, userId)`, and the same delivery path a member's
+ * `broadcast()` uses.
+ *
+ * This is the surface for streaming agent output that must survive a
+ * closed tab or reach a second device: write tokens to the room, and
+ * every watcher gets them, not just the caller holding the HTTP
+ * response. `ctx.stream.write` reaches only the one client that made
+ * the call.
+ *
+ * Not available in queries — a reactive handler re-runs on every dep
+ * change, which would re-broadcast each time.
+ */
+export interface Rooms {
+  /**
+   * Push `data` to every subscriber of `room` under `topic`.
+   * Resolves `{ delivered: false }` when the room has no members —
+   * broadcasting into an empty room is a no-op, not an error, so an
+   * agent doesn't need to know whether anyone is watching.
+   */
+  broadcast(
+    room: string,
+    topic: string,
+    data?: unknown,
+  ): Promise<{ delivered: boolean }>;
 }
 
 export interface LlmMessage {
@@ -563,6 +640,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   env: Record<string, string>;
   /** Provider-abstracted LLM client. */
   llm: Llm;
+  /** Server-originated realtime push — see {@link Rooms}. */
+  rooms: Rooms;
   /** Per-user OAuth connection registry. */
   connections: Connections;
   /** Create a typed error that triggers rollback. */
@@ -580,6 +659,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   email: EmailSender;
   /** Provider-abstracted LLM client. */
   llm: Llm;
+  /** Server-originated realtime push — see {@link Rooms}. */
+  rooms: Rooms;
   /** Per-user OAuth connection registry. */
   connections: Connections;
   /** Environment variables / secrets. */

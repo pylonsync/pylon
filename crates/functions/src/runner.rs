@@ -161,6 +161,29 @@ pub type LlmHook = Box<
         + Sync,
 >;
 
+/// Callback for `ctx.llm.stream(...)`. Same contract as [`LlmHook`],
+/// plus an `on_event` sink the host calls for each provider event as
+/// it arrives. The hook blocks until the stream completes and returns
+/// the assembled final response.
+///
+/// `on_event` receives the serialized `StreamEvent`. It must not be
+/// retained past the call.
+pub type LlmStreamHook = Box<
+    dyn Fn(
+            &serde_json::Value,
+            &AuthInfo,
+            &mut dyn FnMut(serde_json::Value),
+        ) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
+/// Callback for `ctx.rooms.broadcast(room, topic, data)`. Returns
+/// whether the event reached a live room — `false` means the room had
+/// no members, which is informational, not an error.
+pub type RoomBroadcastHook =
+    Box<dyn Fn(&str, &str, serde_json::Value) -> Result<bool, (String, String)> + Send + Sync>;
+
 /// Callback for `ctx.connections.{authorizeUrl,get,disconnect}`.
 ///
 /// Args: op name (`"authorize_url"` | `"get"` | `"disconnect"` |
@@ -293,6 +316,12 @@ pub struct FnRunner {
     /// hook returns an explicit "LLM_NOT_CONFIGURED" error so authors
     /// see the gap instead of getting a silent no-op.
     llm_hook: Mutex<Option<LlmHook>>,
+    /// Optional handler for `ctx.llm.stream(...)`. Unset behaves like
+    /// `llm_hook` — an explicit LLM_NOT_CONFIGURED error.
+    llm_stream_hook: Mutex<Option<LlmStreamHook>>,
+    /// Hook for `ctx.rooms.broadcast(...)`. Wires server-originated
+    /// room events to the runtime's RoomManager + presence notifier.
+    room_broadcast_hook: Mutex<Option<RoomBroadcastHook>>,
     /// Hook for `ctx.connections.*`. Wires authorize-url / get /
     /// list / disconnect calls to the runtime's ConnectionManager.
     connection_hook: Mutex<Option<ConnectionHook>>,
@@ -331,6 +360,8 @@ impl FnRunner {
             nested_call_hook: Mutex::new(None),
             email_hook: Mutex::new(None),
             llm_hook: Mutex::new(None),
+            llm_stream_hook: Mutex::new(None),
+            room_broadcast_hook: Mutex::new(None),
             connection_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
@@ -424,6 +455,19 @@ impl FnRunner {
     /// When unset, `ctx.llm.complete` rejects with `LLM_NOT_CONFIGURED`.
     pub fn set_llm_hook(&self, hook: LlmHook) {
         *self.llm_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install a callback for `ctx.llm.stream(...)`. Same gating as
+    /// [`Self::set_llm_hook`]; the hook additionally pumps provider
+    /// events back to the handler as they arrive.
+    pub fn set_llm_stream_hook(&self, hook: LlmStreamHook) {
+        *self.llm_stream_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install a callback for `ctx.rooms.broadcast(room, topic, data)`.
+    /// When unset, the call rejects with `ROOMS_NOT_CONFIGURED`.
+    pub fn set_room_broadcast_hook(&self, hook: RoomBroadcastHook) {
+        *self.room_broadcast_hook.lock().unwrap() = Some(hook);
     }
 
     /// Install the `ctx.connections.*` hook. Without it, calls
@@ -1432,6 +1476,90 @@ impl FnRunner {
                     let reply = match result {
                         Ok(value) => DbResultMessage::ok(call_id.clone(), value),
                         Err((code, msg)) => DbResultMessage::err(call_id.clone(), &code, &msg),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::LlmStream(req) if req.call_id == call_id => {
+                    // Same reactive-purity refusal as LlmComplete:
+                    // a query re-runs on every dep change, which
+                    // would re-bill the provider each time.
+                    if matches!(fn_type, crate::protocol::FnType::Query) {
+                        let reply = DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            req.op_id.clone(),
+                            "LLM_NOT_AVAILABLE_IN_QUERY",
+                            "ctx.llm.stream is not available in query handlers (queries are reactive — LLM calls belong in mutations or actions).",
+                        );
+                        self.send(&reply)?;
+                        continue;
+                    }
+                    let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
+                    // Provider events are forwarded as they arrive, so
+                    // the handler can pump them into ctx.stream.write
+                    // while the model is still generating. Send errors
+                    // are swallowed inside the sink (its signature has
+                    // no failure channel); a dead pipe surfaces on the
+                    // terminal reply's `self.send(&reply)?` below.
+                    let stream_call_id = call_id.clone();
+                    let stream_op_id = req.op_id.clone();
+                    let result: Result<serde_json::Value, (String, String)> = {
+                        let hook = self.llm_stream_hook.lock().unwrap();
+                        match *hook {
+                            Some(ref cb) => {
+                                let mut on_event = |event: serde_json::Value| {
+                                    let msg = crate::protocol::LlmEventMessage::new(
+                                        stream_call_id.clone(),
+                                        stream_op_id.clone(),
+                                        event,
+                                    );
+                                    let _ = self.send(&msg);
+                                };
+                                cb(&req.request, &auth_snapshot, &mut on_event)
+                            }
+                            None => Err((
+                                "LLM_NOT_CONFIGURED".into(),
+                                "ctx.llm.stream: no LLM provider configured (set PYLON_LLM_PROVIDER + API key)".into(),
+                            )),
+                        }
+                    };
+                    let reply = match result {
+                        Ok(value) => {
+                            DbResultMessage::ok_with_op(call_id.clone(), req.op_id.clone(), value)
+                        }
+                        Err((code, msg)) => DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            req.op_id.clone(),
+                            &code,
+                            &msg,
+                        ),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::RoomBroadcast(req) if req.call_id == call_id => {
+                    let result: Result<bool, (String, String)> = {
+                        let hook = self.room_broadcast_hook.lock().unwrap();
+                        match *hook {
+                            Some(ref cb) => cb(&req.room, &req.topic, req.data.clone()),
+                            None => Err((
+                                "ROOMS_NOT_CONFIGURED".into(),
+                                "ctx.rooms.broadcast: the runtime exposed no room manager".into(),
+                            )),
+                        }
+                    };
+                    let reply = match result {
+                        Ok(delivered) => DbResultMessage::ok_with_op(
+                            call_id.clone(),
+                            req.op_id.clone(),
+                            serde_json::json!({ "delivered": delivered }),
+                        ),
+                        Err((code, msg)) => DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            req.op_id.clone(),
+                            &code,
+                            &msg,
+                        ),
                     };
                     self.send(&reply)?;
                 }

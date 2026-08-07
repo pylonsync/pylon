@@ -4632,6 +4632,7 @@ pub fn try_spawn_functions(
     email_adapter: Arc<EmailAdapter>,
     plugins: Arc<pylon_plugin::PluginRegistry>,
     policy_engine: Arc<pylon_policy::PolicyEngine>,
+    rooms: Arc<crate::rooms::RoomManager>,
 ) -> Option<Arc<FnOpsImpl>> {
     let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
     let fn_dir_exists = std::path::Path::new(&fn_dir).exists();
@@ -4775,6 +4776,8 @@ pub fn try_spawn_functions(
         install_schedule_hook(runner, &registry, Arc::clone(&job_queue));
         install_email_hook(runner, Arc::clone(&email_adapter));
         install_llm_hook(runner, llm_client.clone());
+        install_llm_stream_hook(runner, llm_client.clone());
+        install_room_broadcast_hook(runner, Arc::clone(&rooms), Arc::clone(&notifier));
         install_connection_hook(runner, connection_mgr.clone(), Arc::clone(&runtime));
         runner.set_policy_gate(Arc::clone(&policy_gate));
         if let Some(t) = call_timeout_override {
@@ -4927,61 +4930,13 @@ fn install_email_hook(runner: &Arc<FnRunner>, email_adapter: Arc<EmailAdapter>) 
 fn install_llm_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::LlmClient>) {
     use pylon_functions::protocol::AuthInfo;
     runner.set_llm_hook(Box::new(
-        move |req: &serde_json::Value, auth: &AuthInfo| -> Result<serde_json::Value, (String, String)> {
-            // Codex P1-7: ctx.llm.complete is reachable from query +
-            // mutation + action handlers. A public query that calls
-            // ctx.llm.complete becomes an unauthenticated LLM proxy
-            // burning the framework's API budget. Require a real
-            // (non-anonymous) caller — public functions that
-            // legitimately need LLM access MUST elevate via
-            // ctx.auth.elevate({ admin: true, reason: "..." }) after
-            // running their own auth (webhook HMAC, JWT, etc.).
-            if auth.user_id.is_none() && !auth.is_admin {
-                return Err((
-                    "LLM_REQUIRES_AUTH".to_string(),
-                    "ctx.llm.complete requires an authenticated caller. Public functions must elevate auth (ctx.auth.elevate) before calling ctx.llm.".to_string(),
-                ));
-            }
+        move |req: &serde_json::Value,
+              auth: &AuthInfo|
+              -> Result<serde_json::Value, (String, String)> {
+            let client = llm_preflight(req, auth, &client, "ctx.llm.complete")?;
 
-            let client = client.as_ref().ok_or_else(|| {
-                (
-                    "LLM_NOT_CONFIGURED".to_string(),
-                    "ctx.llm.complete: no LLM provider configured. Set PYLON_LLM_PROVIDER + ANTHROPIC_API_KEY (or OPENAI_API_KEY)."
-                        .to_string(),
-                )
-            })?;
-
-            // Codex P1-6+P1-1: enforce model allowlist by MERGING
-            // env (PYLON_AI_MODELS_ALLOWED) and manifest
-            // (llm.allowed_models). Admin callers skip the gate.
-            if let Some(req_model) = req.get("model").and_then(|m| m.as_str()) {
-                if !req_model.is_empty() && !auth.is_admin {
-                    let env_allowed = std::env::var("PYLON_AI_MODELS_ALLOWED").unwrap_or_default();
-                    let mut allowed_set: std::collections::HashSet<String> = env_allowed
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    for m in client.manifest_allowed_models() {
-                        allowed_set.insert(m.clone());
-                    }
-                    if allowed_set.is_empty() {
-                        return Err((
-                            "MODEL_OVERRIDE_FORBIDDEN".to_string(),
-                            "Client model override requires PYLON_AI_MODELS_ALLOWED env or llm({ allowedModels: [...] }) in the manifest.".to_string(),
-                        ));
-                    }
-                    if !allowed_set.contains(req_model) {
-                        return Err((
-                            "MODEL_NOT_ALLOWED".to_string(),
-                            format!("Model \"{req_model}\" is not in the allowlist."),
-                        ));
-                    }
-                }
-            }
-
-            let parsed: crate::llm::LlmCompleteRequest =
-                serde_json::from_value(req.clone()).map_err(|e| {
+            let parsed: crate::llm::LlmCompleteRequest = serde_json::from_value(req.clone())
+                .map_err(|e| {
                     (
                         "INVALID_REQUEST".to_string(),
                         format!("Failed to parse LLM request: {e}"),
@@ -5007,6 +4962,145 @@ fn install_llm_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::LlmClient
                     format!("Failed to serialize LLM response: {e}"),
                 )
             })
+        },
+    ));
+}
+
+/// Shared pre-flight for both LLM hooks: require a real caller, require
+/// a configured provider, and enforce the merged env + manifest model
+/// allowlist. Factored out so `ctx.llm.stream` can never drift from
+/// `ctx.llm.complete` on the gating — a streaming bypass of the
+/// allowlist would be the same budget hole with a different message
+/// name. `surface` names the API in error text.
+fn llm_preflight<'a>(
+    req: &serde_json::Value,
+    auth: &pylon_functions::protocol::AuthInfo,
+    client: &'a Option<crate::llm::LlmClient>,
+    surface: &str,
+) -> Result<&'a crate::llm::LlmClient, (String, String)> {
+    if auth.user_id.is_none() && !auth.is_admin {
+        return Err((
+            "LLM_REQUIRES_AUTH".to_string(),
+            format!(
+                "{surface} requires an authenticated caller. Public functions must elevate auth (ctx.auth.elevate) before calling ctx.llm."
+            ),
+        ));
+    }
+
+    let client = client.as_ref().ok_or_else(|| {
+        (
+            "LLM_NOT_CONFIGURED".to_string(),
+            format!(
+                "{surface}: no LLM provider configured. Set PYLON_LLM_PROVIDER + ANTHROPIC_API_KEY (or OPENAI_API_KEY)."
+            ),
+        )
+    })?;
+
+    if let Some(req_model) = req.get("model").and_then(|m| m.as_str()) {
+        if !req_model.is_empty() && !auth.is_admin {
+            let env_allowed = std::env::var("PYLON_AI_MODELS_ALLOWED").unwrap_or_default();
+            let mut allowed_set: std::collections::HashSet<String> = env_allowed
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            for m in client.manifest_allowed_models() {
+                allowed_set.insert(m.clone());
+            }
+            if allowed_set.is_empty() {
+                return Err((
+                    "MODEL_OVERRIDE_FORBIDDEN".to_string(),
+                    "Client model override requires PYLON_AI_MODELS_ALLOWED env or llm({ allowedModels: [...] }) in the manifest.".to_string(),
+                ));
+            }
+            if !allowed_set.contains(req_model) {
+                return Err((
+                    "MODEL_NOT_ALLOWED".to_string(),
+                    format!("Model \"{req_model}\" is not in the allowlist."),
+                ));
+            }
+        }
+    }
+    Ok(client)
+}
+
+/// Wire `ctx.llm.stream` → `LlmClient::stream` on a single runner.
+/// Same gating as `install_llm_hook` (see [`llm_preflight`]); the
+/// difference is that provider events are pumped to `on_event` as they
+/// arrive so the handler can forward tokens to `ctx.stream.write`
+/// while the model is still generating.
+fn install_llm_stream_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::LlmClient>) {
+    use pylon_functions::protocol::AuthInfo;
+    runner.set_llm_stream_hook(Box::new(
+        move |req: &serde_json::Value,
+              auth: &AuthInfo,
+              on_event: &mut dyn FnMut(serde_json::Value)|
+              -> Result<serde_json::Value, (String, String)> {
+            let client = llm_preflight(req, auth, &client, "ctx.llm.stream")?;
+
+            let parsed: crate::llm::LlmCompleteRequest = serde_json::from_value(req.clone())
+                .map_err(|e| {
+                    (
+                        "INVALID_REQUEST".to_string(),
+                        format!("Failed to parse LLM request: {e}"),
+                    )
+                })?;
+
+            let mut forward = |event: crate::llm::StreamEvent| {
+                if let Ok(value) = serde_json::to_value(&event) {
+                    on_event(value);
+                }
+            };
+            let resp = client.stream(parsed, &mut forward).map_err(|e| {
+                // Same containment as the non-streaming hook: the typed
+                // code reaches the handler, the provider body stays in
+                // the server log (it can echo prompt fragments).
+                tracing::warn!(
+                    "[llm] hook stream failed code={} detail={}",
+                    e.code,
+                    e.message
+                );
+                (e.code, sanitized_llm_caller_message(&e.message))
+            })?;
+            serde_json::to_value(&resp).map_err(|e| {
+                (
+                    "SERIALIZE_FAILED".to_string(),
+                    format!("Failed to serialize LLM response: {e}"),
+                )
+            })
+        },
+    ));
+}
+
+/// Wire `ctx.rooms.broadcast` → the runtime's RoomManager on a single
+/// runner. Server-originated broadcasts pass `sender = None`, which
+/// RoomManager treats as a trusted system event (no membership check —
+/// there's no member to check, and the caller already passed the
+/// function's own auth gate).
+///
+/// Returns `delivered: false` when the room has no members. That's not
+/// an error: an agent streaming into a room nobody is watching should
+/// keep working, not throw.
+fn install_room_broadcast_hook(
+    runner: &Arc<FnRunner>,
+    rooms: Arc<crate::rooms::RoomManager>,
+    notifier: Arc<dyn pylon_router::ChangeNotifier>,
+) {
+    runner.set_room_broadcast_hook(Box::new(
+        move |room: &str, topic: &str, data: serde_json::Value| -> Result<bool, (String, String)> {
+            match rooms.broadcast(room, None, topic, data) {
+                Some(event) => {
+                    let json = serde_json::to_string(&event).map_err(|e| {
+                        (
+                            "SERIALIZE_FAILED".to_string(),
+                            format!("Failed to serialize room event: {e}"),
+                        )
+                    })?;
+                    notifier.notify_presence(&json);
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
         },
     ));
 }

@@ -279,7 +279,12 @@ const tmpDirs: string[] = [];
 function makeApp(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pylon-og-"));
   tmpDirs.push(dir);
-  prevCwd = process.cwd();
+  // Only the FIRST call records the restore target. A second makeApp()
+  // in the same test would otherwise capture the previous temp dir,
+  // and afterEach would chdir back into it right before deleting it —
+  // leaving the whole process on a deleted cwd, which breaks every
+  // later test file that spawns a subprocess.
+  if (prevCwd === null) prevCwd = process.cwd();
   process.chdir(dir);
   return dir;
 }

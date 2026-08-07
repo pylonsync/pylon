@@ -2081,6 +2081,10 @@ fn start_server(
             // passing the engine here so the gate is reachable when
             // operators flip the env.
             Arc::clone(&policy_engine),
+            // Backs ctx.rooms.broadcast — the same RoomManager the
+            // /api/rooms routes and the WS push path use, so a
+            // server-originated event reaches the identical subscribers.
+            Arc::clone(&room_mgr),
         )
     };
     if std::env::var("PYLON_DEV_TIMING").is_ok() {

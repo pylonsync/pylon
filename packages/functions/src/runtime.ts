@@ -24,6 +24,8 @@ import type {
   Llm,
   LlmCompleteRequest,
   LlmCompleteResponse,
+  LlmStreamEvent,
+  Rooms,
   Connections,
   QueryCtx,
   MutationCtx,
@@ -175,6 +177,13 @@ const pendingRpcs = new Map<
   }
 >();
 
+/**
+ * Event sinks for in-flight streaming RPCs, keyed by op_id. Separate
+ * from `pendingRpcs` because these fire many times and never settle
+ * the promise — the terminal `result` message does that.
+ */
+const streamSinks = new Map<string, (event: unknown) => void>();
+
 let opSeq = 0;
 function nextOpId(callId: string): string {
   opSeq += 1;
@@ -307,6 +316,14 @@ function dispatch(line: string): void {
           error: err?.message || String(err),
         });
       });
+  } else if (msg.type === "llm_event") {
+    const ev = msg as unknown as {
+      call_id: string;
+      op_id?: string;
+      event: unknown;
+    };
+    const sink = streamSinks.get(ev.op_id ?? ev.call_id);
+    if (sink) sink(ev.event);
   } else if (msg.type === "result") {
     const res = msg as unknown as ResultMessage & { op_id?: string };
     // Prefer op_id when the host sent it. Fall back to call_id for replies
@@ -349,6 +366,63 @@ function rpcDb(
       }
     }, RPC_TIMEOUT_MS);
     pendingRpcs.set(opId, { resolve, reject, timeout });
+    send({ ...msg, call_id: callId, op_id: opId });
+  });
+}
+
+/**
+ * RPC that receives interim events before its terminal reply
+ * (`ctx.llm.stream`). Mints an op_id like {@link rpcDb}, and also
+ * registers an event sink the dispatcher routes `llm_event` messages
+ * to. The promise resolves only on the final `result`.
+ *
+ * Each event RESTARTS the idle timeout: a stream that keeps producing
+ * is alive, however long it runs in total, while one whose provider
+ * goes silent still trips the safety net. The host's own call deadline
+ * remains the real upper bound.
+ */
+function rpcStreaming(
+  callId: string,
+  msg: Record<string, unknown>,
+  onEvent: (event: unknown) => void,
+): Promise<unknown> {
+  const opId = nextOpId(callId);
+  return new Promise((resolve, reject) => {
+    const fail = () => {
+      if (pendingRpcs.has(opId)) {
+        pendingRpcs.delete(opId);
+        streamSinks.delete(opId);
+        reject(
+          new Error(
+            `RPC timed out after ${RPC_TIMEOUT_MS}ms with no stream activity (call_id=${callId} op_id=${opId})`,
+          ),
+        );
+      }
+    };
+    const entry = {
+      resolve: (data: unknown) => {
+        streamSinks.delete(opId);
+        resolve(data);
+      },
+      reject: (err: Error) => {
+        streamSinks.delete(opId);
+        reject(err);
+      },
+      timeout: setTimeout(fail, RPC_TIMEOUT_MS),
+    };
+    pendingRpcs.set(opId, entry);
+    streamSinks.set(opId, (event) => {
+      clearTimeout(entry.timeout);
+      entry.timeout = setTimeout(fail, RPC_TIMEOUT_MS);
+      // A throwing sink must not abandon the pending RPC — the host is
+      // still going to send a terminal result, and swallowing here
+      // keeps the handler's own error the one that surfaces.
+      try {
+        onEvent(event);
+      } catch {
+        /* handler-side callback error; the stream continues */
+      }
+    });
     send({ ...msg, call_id: callId, op_id: opId });
   });
 }
@@ -657,13 +731,43 @@ function buildEmail(callId: string): EmailSender {
  * vs `PROVIDER_HTTP_429` vs `MODEL_NOT_ALLOWED` without parsing message
  * strings.
  */
-function buildLlm(callId: string): Llm {
+export function buildLlm(callId: string): Llm {
   return {
     async complete(request: LlmCompleteRequest): Promise<LlmCompleteResponse> {
       return (await rpc(callId, {
         type: "llm_complete",
         request,
       })) as LlmCompleteResponse;
+    },
+
+    async stream(
+      request: LlmCompleteRequest,
+      onEvent: (event: LlmStreamEvent) => void,
+    ): Promise<LlmCompleteResponse> {
+      return (await rpcStreaming(
+        callId,
+        { type: "llm_stream", request },
+        (event) => onEvent(event as LlmStreamEvent),
+      )) as LlmCompleteResponse;
+    },
+  };
+}
+
+/**
+ * Build the room broadcaster. One `room_broadcast` message per call;
+ * the host fans the event out through the same RoomManager the
+ * `/api/rooms/*` routes use, so a server push and a member push land
+ * on subscribers identically.
+ */
+export function buildRooms(callId: string): Rooms {
+  return {
+    async broadcast(room: string, topic: string, data?: unknown) {
+      return (await rpcDb(callId, {
+        type: "room_broadcast",
+        room,
+        topic,
+        data: data ?? {},
+      })) as { delivered: boolean };
     },
   };
 }
@@ -740,6 +844,7 @@ function buildActionCtx(
   scheduler: Scheduler,
   email: EmailSender,
   llm: Llm,
+  rooms: Rooms,
   connections: Connections,
   request?: unknown
 ): ActionCtx {
@@ -762,6 +867,7 @@ function buildActionCtx(
     scheduler,
     email,
     llm,
+    rooms,
     connections,
     env: process.env as Record<string, string>,
     async runQuery(fnName, args) {
@@ -866,6 +972,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
   const scheduler = buildScheduler(msg.call_id);
   const email = buildEmail(msg.call_id);
   const llm = buildLlm(msg.call_id);
+  const rooms = buildRooms(msg.call_id);
   const connections = buildConnections(msg.call_id);
 
   // Normalize the Rust-side auth envelope (snake_case) to the camelCase
@@ -942,6 +1049,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
         scheduler,
         env,
         llm,
+        rooms,
         connections,
         error(code, message) {
           const err = new Error(message);
@@ -962,6 +1070,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
         scheduler,
         email,
         llm,
+        rooms,
         connections,
         (msg as unknown as { request?: unknown }).request,
       );

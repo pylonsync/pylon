@@ -1,0 +1,1 @@
+export default function OG() { throw new Error("boom"); }

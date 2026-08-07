@@ -45,15 +45,27 @@ export interface ChatBotProps {
  * chunks are also accepted so this works with apps that just yield
  * `event.delta` directly.
  *
- * Server-side authoring (5 lines):
+ * Server-side authoring:
  * ```ts
  * export default action({
  *   args: { messages: v.array(v.object({ role: v.string(), content: v.string() })) },
+ *   // Streaming does NOT extend the call deadline (PYLON_FN_CALL_TIMEOUT,
+ *   // 30s default) — raise it here for long answers.
+ *   timeout: 120,
  *   async handler(ctx, { messages }) {
- *     return ctx.llm.streamMessage({ model: "claude-haiku", messages });
+ *     await ctx.llm.stream({ messages }, (e) => {
+ *       if (e.type === "text_delta") ctx.stream.write(e.text);
+ *     });
  *   },
  * });
  * ```
+ *
+ * `ctx.llm.stream` resolves with the same assembled response
+ * `ctx.llm.complete` returns, so a handler that runs tools can inspect
+ * `res.stop_reason` and loop while still streaming text to this
+ * component. `ctx.stream.write` reaches only the client holding this
+ * request — to fan the same output out to every device watching, also
+ * push it with `ctx.rooms.broadcast(room, topic, data)`.
  */
 export function ChatBot({
 	fn,
