@@ -33,7 +33,28 @@ Pylon serves the API, auth, sync, WebSocket, SSE, and native React 19 SSR from o
 - **Dynamic + catch-all routes follow Next conventions.** `app/blog/[slug]/page.tsx` → `params.slug`. `app/docs/[...path]/page.tsx` is a catch-all (matches `/docs/a/b/c`; `params.path === "a/b/c"`; `.split("/")` for segments). `app/shop/[[...filters]]/page.tsx` is an optional catch-all (also matches the bare `/shop`, with `params.filters === ""`). A catch-all must be the last segment; static beats dynamic beats catch-all on overlap.
 - **`serverData` (SSR) is READ-ONLY.** No write methods; the runtime rejects write frames (`SSR_WRITE_FORBIDDEN`). Mutations belong in actions/functions, never in a page render.
 - **`response.*` / `response.redirect()` / `response.notFound()` must fire in the synchronous shell render**, before any `await` / `<Suspense>`. The HTTP head commits when the shell is ready; status/headers/cookies set from a suspended subtree are lost, and `redirect`/`notFound` thrown below a Suspense boundary are swallowed.
-- **`ctx.llm` and `ctx.connections` are on mutation + action only, NOT query** (reactive purity). `action` has no direct `ctx.db`; use `ctx.runQuery` / `ctx.runMutation`.
+- **`ctx.llm`, `ctx.rooms`, and `ctx.connections` are on mutation + action only, NOT query** (reactive purity). `action` has no direct `ctx.db`; use `ctx.runQuery` / `ctx.runMutation`.
+- **`ctx.llm.stream(request, onEvent)` streams tokens as they generate** and still resolves with the full response, so `stop_reason === "tool_use"` drives an agent tool loop. Events are `text_delta` / `tool_use_start` / `tool_input_delta` / `done`. Same auth + model-allowlist gating as `ctx.llm.complete`. Streaming does NOT extend the call deadline (`PYLON_FN_CALL_TIMEOUT`, 30s default) — set `timeout: <secs>` on the def for a long run.
+- **`ctx.stream.write(text)` reaches only the one client holding the HTTP response; `ctx.rooms.broadcast(room, topic, data)` reaches every subscriber of the room.** Broadcast is what makes agent output survive a closed tab or reach a second device. It resolves `{ delivered: false }` when the room has no members — a no-op, not an error. Clients receive with `useRoomMessages(room, cb)` from `@pylonsync/react`; `useRoom` is the send side.
+
+Streaming agent turn — tokens to the caller, and to every device watching:
+
+```ts
+export default action({
+  args: { chatId: v.string(), messages: v.array(v.any()) },
+  timeout: 120, // streaming does not extend the deadline
+  async handler(ctx, { chatId, messages }) {
+    const res = await ctx.llm.stream({ messages }, (e) => {
+      if (e.type === "text_delta") {
+        ctx.stream.write(e.text);
+        void ctx.rooms.broadcast(`chat-${chatId}`, "agent.delta", { text: e.text });
+      }
+    });
+    return res.stop_reason; // "tool_use" → run the tools and call again
+  },
+});
+```
+
 - **It's `db.useQueryOne`, not `useOne`.** Validators and field types have aliases: `v.bool`/`v.boolean`, `v.float`/`v.number`.
 - **Use the supported file and scheduling APIs.** Files go through `<FileUpload>` and `/api/files/*`; there is no `ctx.files`. One-shot work uses `ctx.scheduler.runAfter`, `runAt`, or `cancel`; there is no `defineWorkflow` or `defineJob`. Recurring work uses `cron("0 * * * *", "fnName")` in `buildManifest({ crons: [...] })`, imported from `@pylonsync/sdk`. Make the target function `internal: true`. It runs with anonymous auth, but its own `ctx.db.*` calls are server-side and bypass policies. Use `ctx.auth.elevate({ admin: true, reason: "..." })`, with a mandatory reason, only when chaining another internal function through `ctx.scheduler`.
 

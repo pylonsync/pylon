@@ -529,7 +529,7 @@ ctx.db.get(entity, id)                 // => row | null
 ctx.db.list(entity)                    // => row[]
 ctx.db.query(entity, filter)           // => row[]   filter: { field: value, $gt, $lt, $in, $like, $order, $limit }
 ctx.db.lookup(entity, field, value)    // => row | null
-ctx.db.search(entity, spec)            // => { hits, facetCounts, total }  (needs the `search` plugin)
+ctx.db.search(entity, spec)            // => { hits, facetCounts, total }  (needs `.search({...})` on the entity)
 ctx.db.paginate(entity, { cursor, numItems })
 
 // ---- mutation ctx — ctx.db ALSO has writes (transactional); + error, scheduler, llm, rooms, stream, connections ----
@@ -658,7 +658,7 @@ async function onSend(roomId: string, body: string) {
 | Live pagination | `db.useInfiniteQuery("E", { pageSize })` | each page is its own subscription |
 | Server-side join / computed / aggregate value, live | `db.useReactiveQuery("fnName", args)` | Convex-style: a `query()` handler that auto-re-runs when its dep set changes. **See the footgun below.** |
 | Live count / sum / avg / groupBy | `db.useAggregate(...)` | |
-| Live full-text + faceted search | `db.useSearch("E", { query, filters, facets, sort, pageSize })` | re-runs on every keystroke AND every matching write; needs the `search` plugin + `search:` on the entity |
+| Live full-text + faceted search | `db.useSearch("E", { query, filters, facets, sort, pageSize })` | re-runs on every keystroke AND every matching write; needs `.search({...})` on the entity |
 | Optimistic write with a "ghost" row | `db.useMutation("fnName")` / `db.useEntity` | inserts locally instantly; server broadcast reconciles in place |
 | Presence / cursors / typing / broadcast | `useRoom(roomId, userId, { initialPresence })` | ephemeral — `peers`, `setPresence(data)`, `broadcast(topic, data)`. NOT persisted. Receive relayed messages via `getSync().subscribeRoomMessages(roomId, cb)`. |
 | Server-generated output (agent tokens, job progress) pushed to everyone watching | server side: `ctx.rooms.broadcast(room, topic, data)` | ephemeral; client joins with `useRoom` + `subscribeRoomMessages`. Survives a closed tab, reaches a second device. |
@@ -987,7 +987,7 @@ Keeping a project current: `pylon update` bumps every @pylonsync/* dependency (w
 | A list in the UI | `db.useQuery("Entity", { where: {...} })` — make sure the `where` keys are indexed |
 | A live counter / availability across tabs | `db.useQuery` over a public-read projection entity the mutation maintains — NOT `useReactiveQuery` |
 | A server-side join / computed value, live | `db.useReactiveQuery("fnName", args)` (leader-view; see footgun) |
-| Live full-text search | `db.useSearch("Entity", { query, facets })` + `search` plugin |
+| Live full-text search | `db.useSearch("Entity", { query, facets })` + `.search({...})` on the entity |
 | Presence / cursors / typing | `useRoom(roomId, userId)` — ephemeral, not persisted |
 | An AI chat / agent that streams its answer | `action()` with `ctx.llm.stream(req, (e) => ctx.stream.write(e.text))` + `db.streamFn` on the client; set `timeout:` — streaming does NOT extend the 30s call deadline |
 | Agent output that must reach every watcher (reload, second device, no HTTP caller) | `ctx.rooms.broadcast(room, topic, data)` from the mutation/action; client joins with `useRoom` + `getSync().subscribeRoomMessages` |
