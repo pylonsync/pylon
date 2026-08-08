@@ -253,6 +253,12 @@ impl HttpEmailTransport {
                     body["html"] = serde_json::Value::String(html.clone());
                 }
                 if !msg.attachments.is_empty() {
+                    // Verified against Stack0's sendEmailSchema
+                    // (products/mail/src/validators/emails.ts): the key is
+                    // camelCase `contentType` — snake_case would be stripped
+                    // by the zod schema and the attachment would lose its
+                    // MIME type (breaking text/calendar RSVP rendering).
+                    // Stack0 caps 10 attachments / 10MB base64 each.
                     body["attachments"] = msg
                         .attachments
                         .iter()
@@ -260,7 +266,7 @@ impl HttpEmailTransport {
                             serde_json::json!({
                                 "filename": a.filename,
                                 "content": a.content,
-                                "content_type": a.content_type
+                                "contentType": a.content_type
                             })
                         })
                         .collect();
@@ -467,10 +473,14 @@ mod tests {
         let p: serde_json::Value =
             serde_json::from_str(&t.build_body(&with_extras(Some("<p>hi</p>"), true))).unwrap();
         assert_eq!(p["html"], "<p>hi</p>");
+        // Stack0's sendEmailSchema uses camelCase `contentType` — its zod
+        // parser strips unknown keys, so snake_case here would silently
+        // drop the MIME type and break text/calendar RSVP rendering.
         assert_eq!(
-            p["attachments"][0]["content_type"],
+            p["attachments"][0]["contentType"],
             "text/calendar; method=REQUEST"
         );
+        assert!(p["attachments"][0].get("content_type").is_none());
     }
 
     #[test]
