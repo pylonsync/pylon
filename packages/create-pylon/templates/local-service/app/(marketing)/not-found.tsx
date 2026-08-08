@@ -1,8 +1,12 @@
 import React from "react";
 import { Link, type NotFoundProps } from "@pylonsync/react";
 
-// `app/not-found.tsx` → rendered at HTTP 404 for any unmatched URL (and when a
-// page calls `response.notFound()`). Hydrated, so the link is a client nav.
+// `(marketing)/not-found.tsx` → rendered at HTTP 404 for any unmatched URL
+// (and when a page calls `response.notFound()`). It lives inside the
+// `(marketing)` group on purpose: a group segment adds no URL prefix, so this
+// is still the root 404 boundary, but it wraps in the marketing layout — a
+// missing URL gets the site nav + footer instead of a bare page. Hydrated, so
+// the link is a client nav.
 export default function NotFound(_props: NotFoundProps) {
   return (
     <div className="mx-auto flex min-h-[60vh] max-w-3xl flex-col items-center justify-center px-6 text-center">

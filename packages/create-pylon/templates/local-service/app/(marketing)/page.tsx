@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   },
 };
 
-// `app/page.tsx` → `/`. Server-rendered single-page site for an appointment
+// `app/(marketing)/page.tsx` → `/` (the group segment adds no URL prefix). Server-rendered single-page site for an appointment
 // business. Hero, services, reviews, location, and FAQ are static server HTML
 // (SEO + first paint); the booking section (#book) is a client island
 // (<BookingWidget>) with live slot availability. All copy comes from siteConfig.
@@ -69,7 +69,7 @@ export default function LandingPage() {
             <ImagePlaceholder
               shape="portrait"
               title="A photo of your shop"
-              hint="Swap for an <img> in app/page.tsx"
+              hint="Swap for an <img> in app/(marketing)/page.tsx"
             />
             <div className="absolute left-4 top-4">
               <LiveBadge>Availability updates live</LiveBadge>

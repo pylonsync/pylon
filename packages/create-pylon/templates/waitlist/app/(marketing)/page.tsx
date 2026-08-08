@@ -17,7 +17,7 @@ export const metadata: Metadata = {
   },
 };
 
-// `app/page.tsx` → `/`. A server-rendered, single-page coming-soon landing.
+// `app/(marketing)/page.tsx` → `/` (the group segment adds no URL prefix). A server-rendered, single-page coming-soon landing.
 // The headline, value props, proof, and FAQ are static server HTML (great for
 // SEO + first paint); the email form and live counter are a client island
 // (<WaitlistHero>) that hydrates in the browser. Every string is sourced from

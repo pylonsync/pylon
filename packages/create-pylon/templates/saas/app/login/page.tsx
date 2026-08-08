@@ -9,7 +9,8 @@ export const metadata: Metadata = {
 };
 
 // `app/login/page.tsx` → `/login`. Split-screen auth (form left, brand right).
-// The layout renders auth routes with no marketing nav or footer.
+// Auth routes sit outside the `(marketing)` route group, so they render bare —
+// no marketing nav or footer.
 export default function LoginPage({ auth, response }: PageProps) {
   // Already signed in? Skip the form. `response.redirect` runs in the
   // synchronous shell render, so it's a real 307 before any HTML is sent.

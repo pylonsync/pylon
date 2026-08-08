@@ -2,16 +2,18 @@ import React from "react";
 import { type ErrorBoundaryProps } from "@pylonsync/react";
 import { Button } from "@/components/ui/button";
 
-// `app/error.tsx` → the error boundary for this segment. It catches a throw
-// in any page/layout below it and renders at HTTP 500. It's HYDRATED, so
-// this is a real interactive client component: `reset()` re-attempts the
-// route, and useState/onClick work. The thrown error reaches the client as
+// `app/error.tsx` → the GLOBAL error boundary. Sitting at the app root
+// (outside the `(marketing)` group), it catches a throw from any section —
+// marketing, auth, or dashboard — and renders at HTTP 500 in the bare root
+// shell, so it brings its own centered container. It's HYDRATED, so this is
+// a real interactive client component: `reset()` re-attempts the route, and
+// useState/onClick work. The thrown error reaches the client as
 // `{ message, digest }` only — the stack stays in the dev overlay
 // (PYLON_DEV_MODE) and the server logs, never in the page.
 export default function Error({ error, reset }: ErrorBoundaryProps) {
   const [tries, setTries] = React.useState(0);
   return (
-    <div className="space-y-6">
+    <div className="mx-auto w-full max-w-xl space-y-6 px-6 py-24">
       <section>
         <h1 className="text-2xl font-semibold tracking-tight">
           Something went wrong

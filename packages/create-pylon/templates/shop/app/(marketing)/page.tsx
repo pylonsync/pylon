@@ -10,7 +10,7 @@ export const metadata: Metadata = {
   openGraph: { title: siteConfig.seo.title, description: siteConfig.seo.description, type: "website" },
 };
 
-// `app/page.tsx` → `/`. Server-rendered storefront. Hero, value props, reviews,
+// `app/(marketing)/page.tsx` → `/` (the group segment adds no URL prefix). Server-rendered storefront. Hero, value props, reviews,
 // and policies are static server HTML (SEO + first paint); the product grid
 // (#shop) is a client island with live stock. All copy comes from siteConfig;
 // the product list seeds the DB on first visit. Doesn't read `auth`, so the

@@ -9,7 +9,8 @@ export const metadata: Metadata = {
 };
 
 // `app/login/page.tsx` → `/login`. Sign-in is required to use the chat (chats
-// are tied to your account). Rendered bare. Already signed in? Skip back to the
+// are tied to your account). It sits outside the `(chat)` route group, so it
+// renders bare — no app top bar. Already signed in? Skip back to the
 // chat — `response.redirect` in the synchronous shell render is a real 307
 // before any HTML is sent.
 export default function LoginPage({ auth, response }: PageProps) {

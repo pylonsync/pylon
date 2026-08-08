@@ -1,24 +1,15 @@
 import React from "react";
-import { Link, type PageAuth } from "@pylonsync/react";
 import { siteConfig } from "@/lib/site.config";
 
-// App shell: a slim top bar over a full-height chat. `auth.user_id` is resolved
-// server-side from the session cookie before any HTML is sent, so the bar shows
-// the account / "Sign in" with no flash. The chat page fills the rest of the
-// viewport (h-[calc(100vh-3.5rem)] in chat-client.tsx — keep the header at h-14).
+// The root layout is only the document shell: <html>, <head>, <body>, and the
+// theme variables. The app shell (top bar) lives in the `(chat)` route-group
+// layout, so /login — outside the group — renders bare with its own chrome.
 interface LayoutProps {
   children: React.ReactNode;
-  url: string;
-  auth: PageAuth;
 }
 
-export default function RootLayout({ children, url, auth }: LayoutProps) {
-  const signedIn = Boolean(auth?.user_id);
-  const { brand, colors } = siteConfig;
-
-  // The auth screen brings its own chrome → render it bare.
-  const path = (url ?? "").split("?")[0];
-  const isBare = path === "/login" || path.startsWith("/login/");
+export default function RootLayout({ children }: LayoutProps) {
+  const { colors } = siteConfig;
 
   return (
     <html
@@ -40,31 +31,7 @@ export default function RootLayout({ children, url, auth }: LayoutProps) {
             no layout shift; change the family in app.ts. */}
       </head>
       <body className="bg-background text-foreground antialiased">
-        {isBare ? (
-          children
-        ) : (
-          <>
-            <header className="flex h-14 items-center justify-between border-b border-zinc-200 bg-white px-4">
-              <Link href="/" className="flex items-center gap-2">
-                <span className="flex size-6 items-center justify-center rounded-[7px] bg-brand text-[13px] font-bold text-white">
-                  {brand.letter}
-                </span>
-                <span className="text-[15px] font-semibold tracking-tight text-zinc-900">{brand.name}</span>
-              </Link>
-              {signedIn ? (
-                <span className="text-[13px] text-zinc-400">Signed in</span>
-              ) : (
-                <Link
-                  href="/login"
-                  className="rounded-full border border-zinc-300 px-3.5 py-1.5 text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50"
-                >
-                  Sign in
-                </Link>
-              )}
-            </header>
-            {children}
-          </>
-        )}
+        {children}
       </body>
     </html>
   );

@@ -9,7 +9,8 @@ export const metadata: Metadata = {
 };
 
 // `app/login/page.tsx` → `/login`. Sign-in is required to use the studio
-// (generations are tied to your account). Rendered bare. Already signed in? Skip
+// (generations are tied to your account). It sits outside the `(studio)` route
+// group, so it renders bare — no app top bar. Already signed in? Skip
 // back to the studio — `response.redirect` in the synchronous shell render is a
 // real 307 before any HTML is sent.
 export default function LoginPage({ auth, response }: PageProps) {

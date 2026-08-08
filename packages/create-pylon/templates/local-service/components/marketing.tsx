@@ -100,7 +100,7 @@ export function initials(name: string) {
 //
 //   shape  — "landscape" | "portrait" | "square" | "circle"
 //   title  — what photo belongs here ("A photo of your shop")
-//   hint   — how to replace it ("Swap for an <img> in app/page.tsx")
+//   hint   — how to replace it ("Swap for an <img> in app/(marketing)/page.tsx")
 export function ImagePlaceholder({
   shape = "landscape",
   title,

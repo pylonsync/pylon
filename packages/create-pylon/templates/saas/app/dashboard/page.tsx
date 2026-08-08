@@ -18,8 +18,9 @@ export const metadata: Metadata = {
 // active org (`auth.tenant_id`) + this org's rows are read during the render
 // via `serverData` + React 19 `use()` — resolved server-side and replayed on
 // hydration, so the dashboard paints with real data on the first byte (no
-// client fetch, no empty-state flash). The marketing nav/footer are suppressed
-// for /dashboard in the root layout; the shell is the only chrome here.
+// client fetch, no empty-state flash). /dashboard sits outside the
+// `(marketing)` route group, so the marketing nav/footer never render here;
+// the shell is the only chrome.
 export default function DashboardPage({
   auth,
   response,

@@ -17,7 +17,7 @@ export const metadata: Metadata = {
   openGraph: { title: siteConfig.seo.title, description: siteConfig.seo.description, type: "website" },
 };
 
-// `app/page.tsx` → `/`. Server-rendered single-page restaurant site. Hero, menu,
+// `app/(marketing)/page.tsx` → `/` (the group segment adds no URL prefix). Server-rendered single-page restaurant site. Hero, menu,
 // reviews, location, and FAQ are static server HTML (SEO + first paint); the
 // reservation section (#reserve) is a client island with live table
 // availability. All copy comes from siteConfig. Doesn't read `auth`, so the
@@ -54,7 +54,7 @@ export default function LandingPage() {
             <ImagePlaceholder
               shape="portrait"
               title="A photo of your dining room"
-              hint="Swap for an <img> in app/page.tsx"
+              hint="Swap for an <img> in app/(marketing)/page.tsx"
             />
             <div className="absolute left-4 top-4">
               <LiveBadge>Tables update live</LiveBadge>

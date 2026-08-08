@@ -712,6 +712,7 @@ Pylon natively server-renders React from the same server that runs your backend 
 
 - `app/page.tsx` → `/`, `app/blog/page.tsx` → `/blog`, `app/blog/[slug]/page.tsx` → `/blog/:slug`, `app/docs/[...slug]/page.tsx` → catch-all, `[[...slug]]` → optional catch-all.
 - `app/layout.tsx` wraps every page (nest `layout.tsx` per segment for sub-layouts).
+- Route groups: a `(group)` directory is stripped from the URL — `app/(marketing)/pricing/page.tsx` still serves `/pricing`. A `layout.tsx` inside the group wraps only that group's pages, so one section gets its chrome (marketing nav + footer) while routes outside it (`/login`, `/dashboard`) render bare. Prefer this over URL-sniffing in the root layout.
 - **A page is a server component by default** (runs only on the server — no JS shipped). Add `"use client"` at the top of a file to make it (and its tree) an interactive island that hydrates in the browser. Proven pattern: a thin server `page.tsx` (for metadata + auth) that renders one `"use client"` view containing the interactive UI.
 - **Compose small components; don't grow one giant page.** A page that fetches, formats, and renders in one file can't be tested without standing up the whole app, and an agent extending it has one huge file to edit. Split along the data boundary:
 

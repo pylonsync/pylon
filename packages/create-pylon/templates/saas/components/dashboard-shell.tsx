@@ -25,8 +25,8 @@ const NAV: { key: NavKey; label: string; href: string; Icon: LucideIcon }[] = [
 ];
 
 // Dashboard chrome: a fixed sidebar (logo, workspace switcher, nav) plus a top
-// bar with a user menu. The marketing nav/footer are suppressed for /dashboard
-// in the root layout, so this shell is the only chrome here. `userEmail` is
+// bar with a user menu. /dashboard sits outside the `(marketing)` route group,
+// so this shell is the only chrome here. `userEmail` is
 // resolved on the server (serverData.get("User", …)) and passed in, so the menu
 // shows a real email instead of a raw id.
 export function DashboardShell({

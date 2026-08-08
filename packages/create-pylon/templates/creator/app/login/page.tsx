@@ -8,8 +8,9 @@ export const metadata: Metadata = {
   robots: "noindex",
 };
 
-// `app/login/page.tsx` → `/login`. The owner's sign-in. Rendered bare (the
-// layout suppresses the marketing nav/footer for /login). Already signed in?
+// `app/login/page.tsx` → `/login`. The owner's sign-in. It sits outside the
+// `(marketing)` route group, so it renders bare — no marketing nav/footer.
+// Already signed in?
 // Skip straight to the dashboard — `response.redirect` in the synchronous shell
 // render is a real 307 before any HTML is sent.
 export default function LoginPage({ auth, response }: PageProps) {
