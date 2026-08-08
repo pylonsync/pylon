@@ -387,6 +387,9 @@ fn sql_type(field_type: &str, dialect: Dialect) -> &'static str {
         ("bool", Dialect::Sqlite) => "INTEGER",
         ("bool", Dialect::Postgres) => "BOOLEAN",
         ("datetime", Dialect::Postgres) => "TIMESTAMPTZ",
+        // Serialized JSON — TEXT in both dialects, parsed back at the
+        // read boundary.
+        ("json", _) => "TEXT",
         _ => "TEXT",
     }
 }

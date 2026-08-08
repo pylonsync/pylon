@@ -591,4 +591,58 @@ describe("SyncEngine cookie auth", () => {
       restore();
     }
   });
+
+  // field.json() rows carry nested objects/arrays. rowsDiffer must
+  // recurse into them (drift at depth is real drift) while staying
+  // key-order-insensitive (same content, different key order, is NOT
+  // drift — an order-sensitive compare would re-upsert every json row
+  // on every reconcile pass).
+  test("nested json drift updates; key-order difference does not thrash", async () => {
+    const restoreFetch = installFetch(async (url) => {
+      if (url.includes("/api/entities/Doc/cursor")) {
+        return {
+          status: 200,
+          body: {
+            data: [
+              // drifted at depth vs the seeded row
+              { id: "doc_1", config: { theme: "dark", panes: [{ w: 2 }] } },
+              // identical content to the seed, different key order
+              { id: "doc_2", config: { b: 2, a: 1 } },
+            ],
+            next_cursor: null,
+            has_more: false,
+          },
+        };
+      }
+      return { status: 404, body: {} };
+    });
+
+    const engine = makeEngine();
+    seedStore(engine, "Doc", [
+      { id: "doc_1", config: { theme: "light", panes: [{ w: 2 }] } },
+      { id: "doc_2", config: { a: 1, b: 2 } },
+    ]);
+
+    let notifications = 0;
+    const unsub = engine.store.subscribe(() => {
+      notifications += 1;
+    });
+    try {
+      await engine.reconcile(["Doc"]);
+    } finally {
+      unsub();
+      restoreFetch();
+    }
+
+    const drifted = engine.store.get("Doc", "doc_1") as {
+      config: { theme: string };
+    } | null;
+    expect(drifted!.config.theme).toBe("dark");
+    const stable = engine.store.get("Doc", "doc_2") as {
+      config: Record<string, number>;
+    } | null;
+    expect(stable!.config).toEqual({ a: 1, b: 2 });
+    // Exactly one row changed → exactly one store notification.
+    expect(notifications).toBe(1);
+  });
 });

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Loader2, Plus, RefreshCw, Save, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { JsonFieldEditor } from "@/components/RowEditor";
 import {
 	Card,
 	CardContent,
@@ -659,6 +660,17 @@ function FieldEditor({
 					}}
 				/>
 			</div>
+		);
+	}
+
+	if (type === "json") {
+		return (
+			<JsonFieldEditor
+				name={name}
+				value={value}
+				onChange={onChange}
+				labelEl={labelEl}
+			/>
 		);
 	}
 

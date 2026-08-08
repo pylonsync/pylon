@@ -9,6 +9,9 @@ fn swift_type(field_type: &str) -> &str {
         "bool" => "Bool",
         "datetime" => "String",
         "richtext" => "String",
+        // Arbitrary JSON — JSONValue is Codable + Hashable + Sendable,
+        // so it works as a stored property on the generated structs.
+        "json" => "JSONValue",
         _ if field_type.starts_with("id(") => "String",
         _ => "JSONValue",
     }
@@ -390,6 +393,7 @@ mod tests {
         assert_eq!(swift_type("bool"), "Bool");
         assert_eq!(swift_type("datetime"), "String");
         assert_eq!(swift_type("id(User)"), "String");
+        assert_eq!(swift_type("json"), "JSONValue");
         assert_eq!(swift_type("unknown_type"), "JSONValue");
     }
 }

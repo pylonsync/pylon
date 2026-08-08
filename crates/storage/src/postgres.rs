@@ -21,6 +21,12 @@ fn pg_column_type(field_type: &str) -> &'static str {
         "bool" => "BOOLEAN",
         "datetime" => "TIMESTAMPTZ",
         "richtext" => "TEXT",
+        // Serialized JSON as TEXT, symmetric with SQLite — parse-back
+        // happens at the read boundary keyed off the manifest. (JSONB
+        // would also need a JsonParam variant + binary encoding; a
+        // later migration can move the column type without changing
+        // the wire shape.)
+        "json" => "TEXT",
         _ if field_type.starts_with("id(") => "TEXT",
         _ => "TEXT",
     }
@@ -169,6 +175,8 @@ fn pg_add_column_null_default(field: &FieldSpec) -> String {
         "float" => Some("0"),
         "bool" => Some("FALSE"),
         "datetime" => Some("'1970-01-01T00:00:00Z'::TIMESTAMPTZ"),
+        // `''` is not valid serialized JSON; the JSON literal `null` is.
+        "json" => Some("'null'"),
         ref t if t.starts_with("id(") => None,
         _ => Some("''"),
     };
@@ -2429,6 +2437,7 @@ mod tests {
         assert_eq!(pg_column_type("bool"), "BOOLEAN");
         assert_eq!(pg_column_type("datetime"), "TIMESTAMPTZ");
         assert_eq!(pg_column_type("richtext"), "TEXT");
+        assert_eq!(pg_column_type("json"), "TEXT");
         assert_eq!(pg_column_type("id(User)"), "TEXT");
     }
 

@@ -143,7 +143,17 @@ pub type NestedCallHook = Box<
 /// about PYLON_EMAIL_PROVIDER + credentials). Without this hook installed,
 /// `ctx.email.send` returns a "transport not configured" error instead
 /// of silently no-op'ing — apps shouldn't think email sent when it didn't.
-pub type EmailHook = Box<dyn Fn(&str, &str, &str) -> Result<(), String> + Send + Sync>;
+pub type EmailHook =
+    Box<dyn Fn(&pylon_kernel::EmailMessage) -> Result<(), String> + Send + Sync>;
+
+/// Hard cap on the total base64 attachment payload of one email (bytes of
+/// base64 text, ≈ 11MB of raw file data after the 4/3 inflation). Enforced
+/// on both sides of the pipe — the TS runtime rejects before framing, and
+/// this guard catches anything that slips through — because an unbounded
+/// attachment rides a single NDJSON line into an unbounded allocation.
+pub const EMAIL_MAX_ATTACHMENT_B64_BYTES: usize = 15 * 1024 * 1024;
+/// Cap on attachment COUNT per email, matched in the TS runtime.
+pub const EMAIL_MAX_ATTACHMENTS: usize = 20;
 
 /// Callback invoked when a function calls `ctx.llm.complete({...})`.
 ///
@@ -1596,14 +1606,42 @@ impl FnRunner {
                 }
 
                 TsMessage::SendEmail(req) if req.call_id == call_id => {
+                    // Size guard mirrors the TS-side check: attachments ride
+                    // one NDJSON line, so an oversized payload is an
+                    // unbounded allocation on both sides of the pipe.
+                    let b64_total: usize = req.attachments.iter().map(|a| a.content.len()).sum();
+                    if req.attachments.len() > EMAIL_MAX_ATTACHMENTS
+                        || b64_total > EMAIL_MAX_ATTACHMENT_B64_BYTES
+                    {
+                        let reply = DbResultMessage::err(
+                            call_id.clone(),
+                            "EMAIL_TOO_LARGE",
+                            &format!(
+                                "email exceeds limits: {} attachments ({} base64 bytes); max {} attachments, {} bytes total",
+                                req.attachments.len(),
+                                b64_total,
+                                EMAIL_MAX_ATTACHMENTS,
+                                EMAIL_MAX_ATTACHMENT_B64_BYTES
+                            ),
+                        );
+                        self.send(&reply)?;
+                        continue;
+                    }
                     // Hand off to the runtime's email transport (configured
                     // via PYLON_EMAIL_PROVIDER). Without a hook installed
                     // we surface the missing-config gap explicitly so
                     // operators don't think their invite emails sent.
+                    let message = pylon_kernel::EmailMessage {
+                        to: req.to.clone(),
+                        subject: req.subject.clone(),
+                        text: req.body.clone(),
+                        html: req.html.clone(),
+                        attachments: req.attachments.clone(),
+                    };
                     let result: Result<(), String> = {
                         let hook = self.email_hook.lock().unwrap();
                         match *hook {
-                            Some(ref cb) => cb(&req.to, &req.subject, &req.body),
+                            Some(ref cb) => cb(&message),
                             None => Err(
                                 "ctx.email.send: no email transport configured (set PYLON_EMAIL_PROVIDER)".into(),
                             ),

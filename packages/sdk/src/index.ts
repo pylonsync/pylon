@@ -15,6 +15,7 @@ export type FieldType =
   | "bool"
   | "datetime"
   | "richtext"
+  | "json"
   | `id(${string})`;
 
 // ---------------------------------------------------------------------------
@@ -306,6 +307,16 @@ export const field = {
   boolean: () => createFieldBuilder("bool"),
   datetime: () => createFieldBuilder("datetime"),
   richtext: () => createFieldBuilder("richtext"),
+  /**
+   * Arbitrary JSON value (object, array, or scalar), stored as a real
+   * column. Parsed-on-read everywhere: the entity API, `serverData`,
+   * `ctx.db`, and sync change events all carry the parsed value — never
+   * a string to `JSON.parse` yourself. On CRDT entities the whole value
+   * is one LWW register (concurrent writers converge on one writer's
+   * value; use `crdt: "list"`/`"tree"` or separate entities for
+   * mergeable structure). Not searchable and not encryptable.
+   */
+  json: () => createFieldBuilder("json"),
   id: (target: string) => createFieldBuilder(`id(${target})`),
   /**
    * `field.enum(["pending", "paid", "failed"])` — stored as a string with

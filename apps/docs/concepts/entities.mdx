@@ -33,6 +33,7 @@ Every entity gets an auto-generated `id` — a 40-char lowercase-hex, lexicograp
 | `field.bool()` | `INTEGER` (0/1) | Boolean (`field.boolean()` is an alias) |
 | `field.datetime()` | `TEXT` (ISO-8601) | Store with `new Date().toISOString()` |
 | `field.richtext()` | `TEXT` | For prose; the client SDK has editors ready |
+| `field.json()` | `TEXT` (serialized) | Arbitrary JSON value — objects, arrays, or scalars. Parsed-on-read: the entity API, `serverData`, `ctx.db`, and sync events all hand back the real value, never a string. On CRDT entities the whole value is one last-writer-wins register. Not searchable, not encryptable. Arg validator twin: `v.json()` |
 | `field.id(entity)` | `TEXT` | Foreign key to another entity's `id` |
 
 ### Modifiers

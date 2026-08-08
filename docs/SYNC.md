@@ -80,6 +80,7 @@ Pylon defaults are intentionally mixed:
 | `int` / `float` | LWW number register | Last writer wins |
 | `bool` | LWW bool register | Last writer wins |
 | `richtext` | `LoroText` | Concurrent text edits converge |
+| `json` | LWW JSON register | Whole value replaces; last writer wins |
 | `field.string().crdt("text")` | `LoroText` | Concurrent text edits converge |
 
 Reserved annotations exist for future containers:

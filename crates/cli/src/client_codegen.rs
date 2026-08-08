@@ -9,6 +9,9 @@ fn ts_type(field_type: &str) -> &str {
         "bool" => "boolean",
         "datetime" => "string",
         "richtext" => "string",
+        // Arbitrary JSON — `unknown` forces callers to narrow before
+        // use instead of lying with `any`.
+        "json" => "unknown",
         _ if field_type.starts_with("id(") => "string",
         _ => "unknown",
     }
@@ -614,6 +617,7 @@ mod tests {
         assert_eq!(ts_type("datetime"), "string");
         assert_eq!(ts_type("richtext"), "string");
         assert_eq!(ts_type("id(User)"), "string");
+        assert_eq!(ts_type("json"), "unknown");
         assert_eq!(ts_type("nonsense"), "unknown");
     }
 }

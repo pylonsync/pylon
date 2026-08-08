@@ -89,10 +89,13 @@ Transactional email is a **built-in subsystem** selected by `PYLON_EMAIL_PROVIDE
 
 ```bash
 PYLON_EMAIL_PROVIDER=sendgrid   # sendgrid | resend | stack0 | webhook
-# + the provider's key/config, e.g. SENDGRID_API_KEY / RESEND_API_KEY / PYLON_STACK0_API_KEY
+PYLON_EMAIL_API_KEY=...         # the provider's API key
+PYLON_EMAIL_FROM="Acme <noreply@acme.com>"   # optional; webhook also needs PYLON_EMAIL_ENDPOINT
 ```
 
-Send from an action via `ctx.email`:
+Send from an action via `ctx.email`. Both forms work — positional
+`send(to, subject, body)` for plain text, or an options object for HTML
+and attachments:
 
 ```ts
 import { action, v } from "@pylonsync/functions";
@@ -103,11 +106,23 @@ export default action({
     await ctx.email.send({
       to: args.to,
       subject: "Welcome",
-      html: "<p>Thanks for signing up.</p>",
+      text: "Thanks for signing up.",        // always required — the text/plain part
+      html: "<p>Thanks for signing up.</p>", // optional HTML body
+      attachments: [{                        // optional, base64 content
+        filename: "invite.ics",
+        // Passed through verbatim — `method=REQUEST` is what makes
+        // Gmail/Outlook render an RSVP-able calendar invite.
+        contentType: "text/calendar; method=REQUEST",
+        content: icsBase64,
+      }],
     });
   },
 });
 ```
+
+Limits: one recipient per send, at most 20 attachments and 15MB of
+base64 attachment data (≈11MB raw) per email — larger sends throw
+`EMAIL_TOO_LARGE` before any network I/O.
 
 Auth-flow email (magic codes, verification, invites) uses a separate channel read from `PYLON_AUTH_EMAIL_*`, falling back to `PYLON_EMAIL_*`. This keeps a shared platform auth key out of reach of app code. See [Auth → Email verification](/auth/email-verification).
 

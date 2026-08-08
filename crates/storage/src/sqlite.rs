@@ -29,6 +29,9 @@ fn sqlite_column_type(field_type: &str) -> &'static str {
         "bool" => "INTEGER",
         "datetime" => "TEXT",
         "richtext" => "TEXT",
+        // Serialized JSON. TEXT (not a JSON1 column) — parse-back to the
+        // real value happens at the read boundary, keyed off the manifest.
+        "json" => "TEXT",
         _ if field_type.starts_with("id(") => "TEXT",
         _ => "TEXT",
     }
@@ -113,6 +116,8 @@ fn sqlite_add_column_null_default(field: &FieldSpec) -> String {
         "string" | "richtext" | "datetime" => Some("''"),
         "int" | "bool" => Some("0"),
         "float" => Some("0"),
+        // `''` is not valid serialized JSON; the JSON literal `null` is.
+        "json" => Some("'null'"),
         ref t if t.starts_with("id(") => None,
         _ => Some("''"),
     };
@@ -1412,6 +1417,7 @@ mod tests {
         assert_eq!(sqlite_column_type("bool"), "INTEGER");
         assert_eq!(sqlite_column_type("datetime"), "TEXT");
         assert_eq!(sqlite_column_type("richtext"), "TEXT");
+        assert_eq!(sqlite_column_type("json"), "TEXT");
         assert_eq!(sqlite_column_type("id(User)"), "TEXT");
     }
 

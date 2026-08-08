@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { ChevronDown, ChevronRight, Loader2, Save } from "lucide-react";
 import { toast } from "sonner";
 
@@ -258,6 +258,17 @@ function FieldEditor({
 		);
 	}
 
+	if (type === "json") {
+		return (
+			<JsonFieldEditor
+				name={name}
+				value={value}
+				onChange={onChange}
+				labelEl={labelEl}
+			/>
+		);
+	}
+
 	// string, richtext, id(X), or anything unknown.
 	return (
 		<div className="space-y-1.5">
@@ -282,6 +293,60 @@ function FieldEditor({
 				}}
 				placeholder={isNullable ? "(null)" : ""}
 			/>
+		</div>
+	);
+}
+
+// JSON field editor: a monospace textarea over the pretty-printed value.
+// Local raw-text state lets the operator type through invalid
+// intermediate states; only a successful parse propagates via onChange,
+// so the row payload always carries a real JSON value (never a string
+// of JSON). Exported for Entities.tsx, which mirrors this editor set.
+export function JsonFieldEditor({
+	name,
+	value,
+	onChange,
+	labelEl,
+}: {
+	name: string;
+	value: unknown;
+	onChange: (v: unknown) => void;
+	labelEl: ReactNode;
+}) {
+	const [raw, setRaw] = useState<string>(() =>
+		value === undefined ? "" : JSON.stringify(value, null, 2),
+	);
+	const [invalid, setInvalid] = useState(false);
+	return (
+		<div className="space-y-1.5">
+			{labelEl}
+			<textarea
+				id={`field-${name}`}
+				value={raw}
+				rows={4}
+				spellCheck={false}
+				className="w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-xs shadow-sm outline-none focus-visible:ring-1 focus-visible:ring-ring"
+				onChange={(e) => {
+					const t = e.target.value;
+					setRaw(t);
+					if (t.trim() === "") {
+						setInvalid(false);
+						onChange(null);
+						return;
+					}
+					try {
+						onChange(JSON.parse(t));
+						setInvalid(false);
+					} catch {
+						setInvalid(true);
+					}
+				}}
+			/>
+			{invalid ? (
+				<p className="text-[11px] text-destructive">
+					Invalid JSON — the last valid value is what saves.
+				</p>
+			) : null}
 		</div>
 	);
 }

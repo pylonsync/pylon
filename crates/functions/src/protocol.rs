@@ -637,6 +637,14 @@ pub struct SendEmailMessage {
     pub to: String,
     pub subject: String,
     pub body: String,
+    /// Optional HTML body (options-form `ctx.email.send({html})`).
+    /// `default` keeps frames from older TS runtimes deserializing.
+    #[serde(default)]
+    pub html: Option<String>,
+    /// Base64 attachments (options-form). Wire fields are snake_case
+    /// (`content_type`); the TS runtime maps from its camelCase surface.
+    #[serde(default)]
+    pub attachments: Vec<pylon_kernel::EmailAttachment>,
 }
 
 /// Call the configured LLM provider. The `request` field is forwarded
@@ -1008,5 +1016,38 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"error\""));
         assert!(!json.contains("\"data\""));
+    }
+
+    #[test]
+    fn send_email_old_frame_still_deserializes() {
+        // Frames from TS runtimes predating html/attachments carry only
+        // to/subject/body — `#[serde(default)]` must keep them parsing.
+        let json = r#"{"type":"send_email","call_id":"c1","to":"u@t.com","subject":"s","body":"b"}"#;
+        let msg: TsMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            TsMessage::SendEmail(m) => {
+                assert_eq!(m.to, "u@t.com");
+                assert_eq!(m.html, None);
+                assert!(m.attachments.is_empty());
+            }
+            _ => panic!("expected SendEmail message"),
+        }
+    }
+
+    #[test]
+    fn send_email_options_frame_deserializes_with_verbatim_content_type() {
+        let json = r#"{"type":"send_email","call_id":"c1","to":"u@t.com","subject":"s","body":"b","html":"<p>x</p>","attachments":[{"filename":"invite.ics","content_type":"text/calendar; method=REQUEST","content":"QUJD"}]}"#;
+        let msg: TsMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            TsMessage::SendEmail(m) => {
+                assert_eq!(m.html.as_deref(), Some("<p>x</p>"));
+                assert_eq!(m.attachments.len(), 1);
+                assert_eq!(
+                    m.attachments[0].content_type,
+                    "text/calendar; method=REQUEST"
+                );
+            }
+            _ => panic!("expected SendEmail message"),
+        }
     }
 }

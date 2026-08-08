@@ -1,4 +1,7 @@
-//! Pluggable email transport for auth flows (magic codes, invitations, etc.).
+//! Pluggable email transport for auth flows (magic codes, invitations, etc.)
+//! and the app-facing `ctx.email.send` channel.
+
+use pylon_kernel::EmailMessage;
 
 // ---------------------------------------------------------------------------
 // Email transport trait
@@ -6,10 +9,12 @@
 
 /// Pluggable email delivery backend.
 ///
-/// Implemented for SMTP, SendGrid, SES, Resend, Stack0, etc.
-/// The `ConsoleTransport` prints to stderr for local development.
+/// Implemented for SendGrid, Resend, Stack0, and a generic webhook
+/// endpoint. The `ConsoleTransport` prints to stderr for local
+/// development. Messages carry optional HTML and base64 attachments;
+/// plain-text senders build one with [`EmailMessage::plain`].
 pub trait EmailTransport: Send + Sync {
-    fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), EmailError>;
+    fn send(&self, msg: &EmailMessage) -> Result<(), EmailError>;
 }
 
 #[derive(Debug, Clone)]
@@ -33,10 +38,21 @@ impl std::error::Error for EmailError {}
 pub struct ConsoleTransport;
 
 impl EmailTransport for ConsoleTransport {
-    fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), EmailError> {
-        eprintln!("[email] To: {to}");
-        eprintln!("[email] Subject: {subject}");
-        eprintln!("[email] Body: {body}");
+    fn send(&self, msg: &EmailMessage) -> Result<(), EmailError> {
+        eprintln!("[email] To: {}", msg.to);
+        eprintln!("[email] Subject: {}", msg.subject);
+        eprintln!("[email] Body: {}", msg.text);
+        if msg.html.is_some() {
+            eprintln!("[email] (html body present)");
+        }
+        for a in &msg.attachments {
+            eprintln!(
+                "[email] Attachment: {} ({}, {} base64 bytes)",
+                a.filename,
+                a.content_type,
+                a.content.len()
+            );
+        }
         eprintln!("[email] ---");
         Ok(())
     }
@@ -147,7 +163,12 @@ impl HttpEmailTransport {
     }
 
     /// Build the JSON body for the provider's API.
-    pub fn build_body(&self, to: &str, subject: &str, body: &str) -> String {
+    ///
+    /// Attachment `content_type` values pass through VERBATIM in every
+    /// arm — parameterized types like `text/calendar; method=REQUEST`
+    /// are what make Gmail/Outlook render an RSVP-able invite instead
+    /// of a plain file download, so no normalization is allowed here.
+    pub fn build_body(&self, msg: &EmailMessage) -> String {
         let (from_name, from_email) = self.from_parts();
         match self.provider {
             HttpEmailProvider::SendGrid => {
@@ -155,63 +176,141 @@ impl HttpEmailTransport {
                 if let Some(name) = from_name {
                     from["name"] = serde_json::Value::String(name.to_string());
                 }
-                serde_json::json!({
-                    "personalizations": [{"to": [{"email": to}]}],
+                // SendGrid requires content parts ordered text/plain
+                // first, then text/html.
+                let mut content = vec![serde_json::json!({
+                    "type": "text/plain", "value": msg.text
+                })];
+                if let Some(html) = &msg.html {
+                    content.push(serde_json::json!({
+                        "type": "text/html", "value": html
+                    }));
+                }
+                let mut body = serde_json::json!({
+                    "personalizations": [{"to": [{"email": msg.to}]}],
                     "from": from,
-                    "subject": subject,
-                    "content": [{"type": "text/plain", "value": body}]
-                })
-                .to_string()
+                    "subject": msg.subject,
+                    "content": content
+                });
+                if !msg.attachments.is_empty() {
+                    body["attachments"] = msg
+                        .attachments
+                        .iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "content": a.content,
+                                "filename": a.filename,
+                                "type": a.content_type,
+                                "disposition": "attachment"
+                            })
+                        })
+                        .collect();
+                }
+                body.to_string()
             }
             // Resend accepts the `Name <email>` string form directly.
-            HttpEmailProvider::Resend => serde_json::json!({
-                "from": self.from,
-                "to": [to],
-                "subject": subject,
-                "text": body
-            })
-            .to_string(),
+            HttpEmailProvider::Resend => {
+                let mut body = serde_json::json!({
+                    "from": self.from,
+                    "to": [msg.to],
+                    "subject": msg.subject,
+                    "text": msg.text
+                });
+                if let Some(html) = &msg.html {
+                    body["html"] = serde_json::Value::String(html.clone());
+                }
+                if !msg.attachments.is_empty() {
+                    body["attachments"] = msg
+                        .attachments
+                        .iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "filename": a.filename,
+                                "content": a.content,
+                                "content_type": a.content_type
+                            })
+                        })
+                        .collect();
+                }
+                body.to_string()
+            }
             // Stack0's mail/send validates `from` as a bare email string and
             // rejects `Name <email>`; a display name must go through the
-            // structured `{email, name}` form.
+            // structured `{email, name}` form. The html/attachments shape
+            // mirrors Resend's.
             HttpEmailProvider::Stack0 => {
                 let from = match from_name {
                     Some(name) => serde_json::json!({ "email": from_email, "name": name }),
                     None => serde_json::json!(from_email),
                 };
-                serde_json::json!({
+                let mut body = serde_json::json!({
                     "from": from,
-                    "to": [to],
-                    "subject": subject,
-                    "text": body
-                })
-                .to_string()
+                    "to": [msg.to],
+                    "subject": msg.subject,
+                    "text": msg.text
+                });
+                if let Some(html) = &msg.html {
+                    body["html"] = serde_json::Value::String(html.clone());
+                }
+                if !msg.attachments.is_empty() {
+                    body["attachments"] = msg
+                        .attachments
+                        .iter()
+                        .map(|a| {
+                            serde_json::json!({
+                                "filename": a.filename,
+                                "content": a.content,
+                                "content_type": a.content_type
+                            })
+                        })
+                        .collect();
+                }
+                body.to_string()
             }
-            HttpEmailProvider::Webhook => serde_json::json!({
-                "to": to,
-                "from": self.from,
-                "subject": subject,
-                "body": body
-            })
-            .to_string(),
+            HttpEmailProvider::Webhook => {
+                // `body` (the legacy key) stays so existing receiver
+                // endpoints keep working; `text`/`html`/`attachments`
+                // are additive.
+                let mut body = serde_json::json!({
+                    "to": msg.to,
+                    "from": self.from,
+                    "subject": msg.subject,
+                    "body": msg.text,
+                    "text": msg.text
+                });
+                if let Some(html) = &msg.html {
+                    body["html"] = serde_json::Value::String(html.clone());
+                }
+                if !msg.attachments.is_empty() {
+                    body["attachments"] = serde_json::to_value(&msg.attachments)
+                        .unwrap_or(serde_json::Value::Null);
+                }
+                body.to_string()
+            }
         }
     }
 }
 
 impl EmailTransport for HttpEmailTransport {
-    fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), EmailError> {
-        let body_json = self.build_body(to, subject, body);
-        post_json(&self.endpoint, &self.api_key, &body_json)
+    fn send(&self, msg: &EmailMessage) -> Result<(), EmailError> {
+        let body_json = self.build_body(msg);
+        // A multi-megabyte base64 attachment can't finish inside the
+        // default 10s write window; scale the HTTP timeouts when
+        // attachments are present. The TS-side call deadline (60s)
+        // remains the upper bound.
+        let timeout_secs = if msg.attachments.is_empty() { 10 } else { 60 };
+        post_json(&self.endpoint, &self.api_key, &body_json, timeout_secs)
             .map_err(|message| EmailError { message })
     }
 }
 
-/// POST a JSON body with a Bearer token, using ureq with a 10s timeout.
-fn post_json(url: &str, api_key: &str, body: &str) -> Result<(), String> {
+/// POST a JSON body with a Bearer token, using ureq. `timeout_secs`
+/// bounds read + write (connect stays at 10s).
+fn post_json(url: &str, api_key: &str, body: &str, timeout_secs: u64) -> Result<(), String> {
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout_read(std::time::Duration::from_secs(10))
-        .timeout_write(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(timeout_secs))
+        .timeout_write(std::time::Duration::from_secs(timeout_secs))
         .user_agent("pylon/0.1")
         .build();
 
@@ -234,10 +333,14 @@ fn post_json(url: &str, api_key: &str, body: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn plain(to: &str, subject: &str, body: &str) -> EmailMessage {
+        EmailMessage::plain(to, subject, body)
+    }
+
     #[test]
     fn console_transport_succeeds() {
         let t = ConsoleTransport;
-        assert!(t.send("test@example.com", "Code", "123456").is_ok());
+        assert!(t.send(&plain("test@example.com", "Code", "123456")).is_ok());
     }
 
     #[test]
@@ -248,7 +351,7 @@ mod tests {
             from: "noreply@test.com".into(),
             provider: HttpEmailProvider::SendGrid,
         };
-        let body = t.build_body("user@test.com", "Your code", "123456");
+        let body = t.build_body(&plain("user@test.com", "Your code", "123456"));
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(parsed["personalizations"][0]["to"][0]["email"] == "user@test.com");
         assert!(parsed["from"]["email"] == "noreply@test.com");
@@ -262,7 +365,7 @@ mod tests {
             from: "noreply@test.com".into(),
             provider: HttpEmailProvider::Resend,
         };
-        let body = t.build_body("user@test.com", "Your code", "123456");
+        let body = t.build_body(&plain("user@test.com", "Your code", "123456"));
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert!(parsed["to"][0] == "user@test.com");
         assert!(parsed["text"] == "123456");
@@ -276,12 +379,129 @@ mod tests {
             from: "noreply@test.com".into(),
             provider: HttpEmailProvider::Stack0,
         };
-        let body = t.build_body("user@test.com", "Your code", "123456");
+        let body = t.build_body(&plain("user@test.com", "Your code", "123456"));
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["from"], "noreply@test.com");
         assert_eq!(parsed["to"][0], "user@test.com");
         assert_eq!(parsed["subject"], "Your code");
         assert_eq!(parsed["text"], "123456");
+    }
+
+    fn with_extras(html: Option<&str>, ics: bool) -> EmailMessage {
+        let mut m = plain("user@test.com", "Invite", "You're invited");
+        m.html = html.map(String::from);
+        if ics {
+            m.attachments.push(pylon_kernel::EmailAttachment {
+                filename: "invite.ics".into(),
+                content_type: "text/calendar; method=REQUEST".into(),
+                content: "QkVHSU46VkNBTEVOREFS".into(),
+            });
+        }
+        m
+    }
+
+    #[test]
+    fn sendgrid_html_and_attachments() {
+        let t = HttpEmailTransport {
+            endpoint: "https://api.sendgrid.com/v3/mail/send".into(),
+            api_key: "key".into(),
+            from: "noreply@test.com".into(),
+            provider: HttpEmailProvider::SendGrid,
+        };
+        // html-only: text/plain part FIRST, text/html second (SendGrid
+        // rejects other orderings), no attachments key.
+        let p: serde_json::Value = serde_json::from_str(
+            &t.build_body(&with_extras(Some("<p>hi</p>"), false)),
+        )
+        .unwrap();
+        assert_eq!(p["content"][0]["type"], "text/plain");
+        assert_eq!(p["content"][1]["type"], "text/html");
+        assert_eq!(p["content"][1]["value"], "<p>hi</p>");
+        assert!(p.get("attachments").is_none());
+
+        // attachments-only: the parameterized calendar content type must
+        // survive VERBATIM — it's what makes the invite RSVP-able.
+        let p: serde_json::Value =
+            serde_json::from_str(&t.build_body(&with_extras(None, true))).unwrap();
+        assert_eq!(p["content"].as_array().unwrap().len(), 1);
+        assert_eq!(p["attachments"][0]["type"], "text/calendar; method=REQUEST");
+        assert_eq!(p["attachments"][0]["filename"], "invite.ics");
+        assert_eq!(p["attachments"][0]["disposition"], "attachment");
+
+        // both together
+        let p: serde_json::Value = serde_json::from_str(
+            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
+        )
+        .unwrap();
+        assert_eq!(p["content"][1]["type"], "text/html");
+        assert_eq!(p["attachments"][0]["content"], "QkVHSU46VkNBTEVOREFS");
+    }
+
+    #[test]
+    fn resend_html_and_attachments() {
+        let t = HttpEmailTransport {
+            endpoint: "https://api.resend.com/emails".into(),
+            api_key: "key".into(),
+            from: "noreply@test.com".into(),
+            provider: HttpEmailProvider::Resend,
+        };
+        let p: serde_json::Value = serde_json::from_str(
+            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
+        )
+        .unwrap();
+        assert_eq!(p["html"], "<p>hi</p>");
+        assert_eq!(p["text"], "You're invited");
+        assert_eq!(
+            p["attachments"][0]["content_type"],
+            "text/calendar; method=REQUEST"
+        );
+        // Plain send omits the optional keys entirely.
+        let p: serde_json::Value =
+            serde_json::from_str(&t.build_body(&plain("u@t.com", "s", "b"))).unwrap();
+        assert!(p.get("html").is_none());
+        assert!(p.get("attachments").is_none());
+    }
+
+    #[test]
+    fn stack0_html_and_attachments() {
+        let t = HttpEmailTransport {
+            endpoint: "https://api.stack0.dev/v1/mail/send".into(),
+            api_key: "key".into(),
+            from: "noreply@test.com".into(),
+            provider: HttpEmailProvider::Stack0,
+        };
+        let p: serde_json::Value = serde_json::from_str(
+            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
+        )
+        .unwrap();
+        assert_eq!(p["html"], "<p>hi</p>");
+        assert_eq!(
+            p["attachments"][0]["content_type"],
+            "text/calendar; method=REQUEST"
+        );
+    }
+
+    #[test]
+    fn webhook_keeps_legacy_body_key() {
+        let t = HttpEmailTransport {
+            endpoint: "https://hooks.example.com/mail".into(),
+            api_key: "key".into(),
+            from: "noreply@test.com".into(),
+            provider: HttpEmailProvider::Webhook,
+        };
+        let p: serde_json::Value = serde_json::from_str(
+            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
+        )
+        .unwrap();
+        // `body` is the legacy key existing receiver endpoints parse;
+        // text/html/attachments are additive.
+        assert_eq!(p["body"], "You're invited");
+        assert_eq!(p["text"], "You're invited");
+        assert_eq!(p["html"], "<p>hi</p>");
+        assert_eq!(
+            p["attachments"][0]["content_type"],
+            "text/calendar; method=REQUEST"
+        );
     }
 
     #[test]
@@ -296,7 +516,7 @@ mod tests {
             provider: HttpEmailProvider::Stack0,
         };
         let p: serde_json::Value =
-            serde_json::from_str(&stack0.build_body("u@test.com", "s", "b")).unwrap();
+            serde_json::from_str(&stack0.build_body(&plain("u@test.com", "s", "b"))).unwrap();
         assert_eq!(p["from"]["email"], "noreply@mail.pylonsync.com");
         assert_eq!(p["from"]["name"], "Pylon Cloud");
 
@@ -307,7 +527,7 @@ mod tests {
             provider: HttpEmailProvider::SendGrid,
         };
         let ps: serde_json::Value =
-            serde_json::from_str(&sendgrid.build_body("u@test.com", "s", "b")).unwrap();
+            serde_json::from_str(&sendgrid.build_body(&plain("u@test.com", "s", "b"))).unwrap();
         assert_eq!(ps["from"]["email"], "noreply@mail.pylonsync.com");
         assert_eq!(ps["from"]["name"], "Pylon Cloud");
     }

@@ -1036,6 +1036,7 @@ function defaultRendererFor(type: string): ColumnConfig["renderer"] {
 	if (type === "bool") return { kind: "boolean" };
 	if (type === "int" || type === "float") return { kind: "number" };
 	if (type === "richtext") return { kind: "text", truncate: 80 };
+	if (type === "json") return { kind: "json", truncate: 80 };
 	return { kind: "text" };
 }
 

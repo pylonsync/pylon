@@ -219,6 +219,11 @@ impl Runtime {
                 let result = match op {
                     Op::Insert { entity, data } => {
                         let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                        // json fields: serialized for the SQL row, parsed
+                        // for the CRDT patch — same split as Runtime::insert.
+                        let ser = ent
+                            .and_then(|e| crate::serialize_json_fields_for_storage(e, data));
+                        let sql_data: &serde_json::Value = ser.as_ref().unwrap_or(data);
                         let id = if ent.map(|e| e.crdt).unwrap_or(false) {
                             let crdt_fields = self.crdt_fields_for(ent.unwrap()).map_err(|e| {
                                 DataError { code: e.code, message: e.message }
@@ -230,7 +235,7 @@ impl Runtime {
                                     code: "CRDT_APPLY_FAILED".into(),
                                     message: format!("crdt write {entity}/{id}: {e}"),
                                 })?;
-                            let mut row = (*data).clone();
+                            let mut row = sql_data.clone();
                             if let Some(obj) = row.as_object_mut() {
                                 obj.insert("id".into(), serde_json::Value::String(id.clone()));
                             }
@@ -238,12 +243,15 @@ impl Runtime {
                             crdt_touched.push((entity.to_string(), id.clone()));
                             id
                         } else {
-                            tx_insert(tx, &manifest, entity, data)?
+                            tx_insert(tx, &manifest, entity, sql_data)?
                         };
                         serde_json::json!({ "op": "insert", "id": id })
                     }
                     Op::Update { entity, id, data } => {
                         let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                        let ser = ent
+                            .and_then(|e| crate::serialize_json_fields_for_storage(e, data));
+                        let sql_data: &serde_json::Value = ser.as_ref().unwrap_or(data);
                         let updated = if ent.map(|e| e.crdt).unwrap_or(false) {
                             let crdt_fields = self.crdt_fields_for(ent.unwrap()).map_err(|e| {
                                 DataError { code: e.code, message: e.message }
@@ -254,7 +262,7 @@ impl Runtime {
                                     code: "CRDT_APPLY_FAILED".into(),
                                     message: format!("crdt update {entity}/{id}: {e}"),
                                 })?;
-                            let updated = tx_update(tx, &manifest, entity, id, data)?;
+                            let updated = tx_update(tx, &manifest, entity, id, sql_data)?;
                             if !updated {
                                 return Err(DataError {
                                     code: "ENTITY_NOT_FOUND".into(),
@@ -267,7 +275,7 @@ impl Runtime {
                             crdt_touched.push((entity.to_string(), id.to_string()));
                             updated
                         } else {
-                            tx_update(tx, &manifest, entity, id, data)?
+                            tx_update(tx, &manifest, entity, id, sql_data)?
                         };
                         serde_json::json!({ "op": "update", "id": id, "updated": updated })
                     }
@@ -2165,10 +2173,8 @@ impl EmailAdapter {
 }
 
 impl pylon_router::EmailSender for EmailAdapter {
-    fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
-        self.transport
-            .send(to, subject, body)
-            .map_err(|e| e.message)
+    fn send(&self, msg: &pylon_kernel::EmailMessage) -> Result<(), String> {
+        self.transport.send(msg).map_err(|e| e.message)
     }
 }
 
@@ -3171,6 +3177,22 @@ impl<'a> PgBufferedTxStore<'a> {
     fn take_pending(self) -> Vec<pylon_sync::ChangeEvent> {
         self.pending.into_inner().unwrap_or_default()
     }
+
+    /// The inner `PgTxStore` reads straight off PG TEXT columns, so
+    /// `json`-typed fields come back as serialized strings. Parse them
+    /// here — this wrapper is the read surface mutations see, and the
+    /// buffered change events must carry the parsed value too.
+    fn normalize(&self, entity: &str, row: &mut serde_json::Value) {
+        if let Some(ent) = self
+            .inner
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+        {
+            crate::parse_json_fields_in_row(ent, row);
+        }
+    }
 }
 
 impl<'a> DataStore for PgBufferedTxStore<'a> {
@@ -3184,7 +3206,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         // full materialized row (server-stamped fields included). See
         // the equivalent comment on TxStore::insert. Re-read errors
         // don't bubble — same rollback-avoidance rationale.
-        let payload = match self.inner.get_by_id(entity, &id) {
+        let mut payload = match self.inner.get_by_id(entity, &id) {
             Ok(Some(full)) => full,
             Ok(None) => {
                 tracing::warn!(
@@ -3200,16 +3222,25 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                 return Ok(id);
             }
         };
+        self.normalize(entity, &mut payload);
         self.record(entity, &id, pylon_sync::ChangeKind::Insert, Some(&payload));
         Ok(id)
     }
 
     fn get_by_id(&self, entity: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
-        self.inner.get_by_id(entity, id)
+        let mut row = self.inner.get_by_id(entity, id)?;
+        if let Some(r) = row.as_mut() {
+            self.normalize(entity, r);
+        }
+        Ok(row)
     }
 
     fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
-        self.inner.list(entity)
+        let mut rows = self.inner.list(entity)?;
+        for r in rows.iter_mut() {
+            self.normalize(entity, r);
+        }
+        Ok(rows)
     }
 
     fn list_after(
@@ -3218,17 +3249,24 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         after: Option<&str>,
         limit: usize,
     ) -> Result<Vec<serde_json::Value>, DataError> {
-        self.inner.list_after(entity, after, limit)
+        let mut rows = self.inner.list_after(entity, after, limit)?;
+        for r in rows.iter_mut() {
+            self.normalize(entity, r);
+        }
+        Ok(rows)
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
         // Snapshot pre-update so the buffered event carries
         // `prev_data` for the visibility-transition tombstone.
         // Matches the SQLite TxStore::update fix.
-        let pre_row = self.inner.get_by_id(entity, id).ok().flatten();
+        let mut pre_row = self.inner.get_by_id(entity, id).ok().flatten();
+        if let Some(r) = pre_row.as_mut() {
+            self.normalize(entity, r);
+        }
         let updated = self.inner.update(entity, id, data)?;
         if updated {
-            let payload = match self.inner.get_by_id(entity, id) {
+            let mut payload = match self.inner.get_by_id(entity, id) {
                 Ok(Some(full)) => full,
                 Ok(None) => {
                     tracing::warn!(
@@ -3244,6 +3282,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                     return Ok(updated);
                 }
             };
+            self.normalize(entity, &mut payload);
             // No-op suppression — an identical row has nothing to
             // replicate (see pylon_router::update_is_noop).
             if pylon_router::update_is_noop(self.manifest(), entity, pre_row.as_ref(), &payload) {
@@ -3267,7 +3306,10 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         // broadcast filter evaluates against `data: None`, fails,
         // and suppresses the delete event — including from the
         // owner's own tab. Matches the SQLite TxStore::delete fix.
-        let snapshot = self.inner.get_by_id(entity, id).ok().flatten();
+        let mut snapshot = self.inner.get_by_id(entity, id).ok().flatten();
+        if let Some(r) = snapshot.as_mut() {
+            self.normalize(entity, r);
+        }
         let deleted = self.inner.delete(entity, id)?;
         if deleted {
             self.record(
@@ -3286,7 +3328,11 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         field: &str,
         value: &str,
     ) -> Result<Option<serde_json::Value>, DataError> {
-        self.inner.lookup(entity, field, value)
+        let mut row = self.inner.lookup(entity, field, value)?;
+        if let Some(r) = row.as_mut() {
+            self.normalize(entity, r);
+        }
+        Ok(row)
     }
 
     fn link(
@@ -3301,7 +3347,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
             // Re-read the full row so subscribers see the same
             // policy-keyed fields they'd see on any other update. See
             // TxStore::link for the longer commentary.
-            let payload = match self.inner.get_by_id(entity, id) {
+            let mut payload = match self.inner.get_by_id(entity, id) {
                 Ok(Some(full)) => full,
                 Ok(None) => {
                     tracing::warn!(
@@ -3317,6 +3363,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                     return Ok(linked);
                 }
             };
+            self.normalize(entity, &mut payload);
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
         }
         Ok(linked)
@@ -3325,7 +3372,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     fn unlink(&self, entity: &str, id: &str, relation: &str) -> Result<bool, DataError> {
         let unlinked = self.inner.unlink(entity, id, relation)?;
         if unlinked {
-            let payload = match self.inner.get_by_id(entity, id) {
+            let mut payload = match self.inner.get_by_id(entity, id) {
                 Ok(Some(full)) => full,
                 Ok(None) => {
                     tracing::warn!(
@@ -3341,6 +3388,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
                     return Ok(unlinked);
                 }
             };
+            self.normalize(entity, &mut payload);
             self.record(entity, id, pylon_sync::ChangeKind::Update, Some(&payload));
         }
         Ok(unlinked)
@@ -3351,7 +3399,11 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         entity: &str,
         filter: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DataError> {
-        self.inner.query_filtered(entity, filter)
+        let mut rows = self.inner.query_filtered(entity, filter)?;
+        for r in rows.iter_mut() {
+            self.normalize(entity, r);
+        }
+        Ok(rows)
     }
 
     fn query_graph(&self, query: &serde_json::Value) -> Result<serde_json::Value, DataError> {
@@ -4910,9 +4962,9 @@ fn install_schedule_hook(
 /// PYLON_EMAIL_PROVIDER see the failure and know to wire one up.
 fn install_email_hook(runner: &Arc<FnRunner>, email_adapter: Arc<EmailAdapter>) {
     runner.set_email_hook(Box::new(
-        move |to: &str, subject: &str, body: &str| -> Result<(), String> {
+        move |msg: &pylon_kernel::EmailMessage| -> Result<(), String> {
             use pylon_router::EmailSender as _;
-            email_adapter.send(to, subject, body)
+            email_adapter.send(msg)
         },
     ));
 }

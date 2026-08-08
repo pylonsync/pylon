@@ -537,6 +537,10 @@ fn map_field_type(field_type: &str) -> Value {
         "bool" => json!({ "type": "boolean" }),
         "datetime" => json!({ "type": "string", "format": "date-time" }),
         "richtext" => json!({ "type": "string" }),
+        // Free-form JSON: any value shape is legal, so emit the empty
+        // schema (OpenAPI's "anything") with a description instead of
+        // mis-documenting it as a string.
+        "json" => json!({ "description": "Arbitrary JSON value" }),
         t if t.starts_with("id(") => json!({ "type": "string" }),
         _ => json!({ "type": "string" }),
     }
@@ -921,6 +925,11 @@ mod tests {
         let post = &spec["components"]["schemas"]["Post"];
         // id(User) -> string
         assert_eq!(post["properties"]["authorId"]["type"], "string");
+
+        // json -> free-form (no `type` key; any value shape is legal)
+        let mapped = map_field_type("json");
+        assert!(mapped.get("type").is_none());
+        assert_eq!(mapped["description"], "Arbitrary JSON value");
     }
 
     #[test]

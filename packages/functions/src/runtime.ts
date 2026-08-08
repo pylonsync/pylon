@@ -18,6 +18,8 @@
 import type {
   DbReader,
   DbWriter,
+  EmailAttachment,
+  EmailOptions,
   EmailSender,
   Stream,
   Scheduler,
@@ -428,34 +430,68 @@ function rpcStreaming(
 }
 
 /**
- * RPC for non-db protocol replies (scheduler.runAfter, nested function
- * calls, etc.) where at-most-one in-flight per call_id is the right
- * contract. Keeps the legacy keying so these reply shapes don't need
- * op_id support on the host.
+ * Tail of the in-order queue of legacy (call_id-keyed) RPCs, per call.
+ * See {@link rpc} for why these serialize.
+ */
+const rpcQueues = new Map<string, Promise<unknown>>();
+
+/**
+ * RPC for non-db protocol replies (scheduler.runAfter, elevate, email,
+ * nested function calls, etc.). These reply frames carry no op_id, so
+ * only one can be in flight per call_id — but instead of rejecting a
+ * second request (the old "concurrent RPC attempted on same call_id"
+ * error), requests QUEUE: each one waits for the previous request on
+ * the same call_id to settle, then sends. The host drains a per-call
+ * channel strictly in order, so wire order == call order and the
+ * replies can't cross.
+ *
+ * This is what makes an un-awaited `ctx.auth.elevate(...)` followed by
+ * `ctx.scheduler.runAfter(...)` behave correctly: the elevate frame is
+ * sent (and replied to) before the schedule frame goes out, so the
+ * host-side admin flag is already set when the schedule arm reads it.
+ * `Promise.all` over these ctx calls serializes for the same reason.
+ *
+ * The timeout starts when the frame is actually SENT, not while the
+ * request is queued behind a predecessor, and each request chains on
+ * the predecessor's SETTLEMENT — a rejected predecessor doesn't poison
+ * the rest of the queue.
  */
 function rpc(callId: string, msg: Record<string, unknown>): Promise<unknown> {
-  return new Promise((resolve, reject) => {
-    if (pendingRpcs.has(callId)) {
-      reject(
-        new Error(
-          `Internal: concurrent RPC attempted on same call_id (${callId})`,
-        ),
-      );
-      return;
-    }
-    const timeout = setTimeout(() => {
-      if (pendingRpcs.has(callId)) {
-        pendingRpcs.delete(callId);
-        reject(
-          new Error(
-            `RPC timed out after ${RPC_TIMEOUT_MS}ms (call_id=${callId})`,
-          ),
-        );
-      }
-    }, RPC_TIMEOUT_MS);
-    pendingRpcs.set(callId, { resolve, reject, timeout });
-    send({ ...msg, call_id: callId });
-  });
+  const prev = rpcQueues.get(callId) ?? Promise.resolve();
+  const run = prev
+    .then(
+      () => undefined,
+      () => undefined,
+    )
+    .then(
+      () =>
+        new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            if (pendingRpcs.has(callId)) {
+              pendingRpcs.delete(callId);
+              reject(
+                new Error(
+                  `RPC timed out after ${RPC_TIMEOUT_MS}ms (call_id=${callId})`,
+                ),
+              );
+            }
+          }, RPC_TIMEOUT_MS);
+          pendingRpcs.set(callId, { resolve, reject, timeout });
+          send({ ...msg, call_id: callId });
+        }),
+    );
+  rpcQueues.set(callId, run);
+  // Drop the queue entry once this tail settles (if nothing chained
+  // after it) so the map doesn't hold one entry per call_id forever.
+  run.then(
+    () => {
+      if (rpcQueues.get(callId) === run) rpcQueues.delete(callId);
+    },
+    () => {
+      if (rpcQueues.get(callId) === run) rpcQueues.delete(callId);
+    },
+  );
+  return run;
 }
 
 // ---------------------------------------------------------------------------
@@ -705,17 +741,60 @@ function buildScheduler(callId: string): Scheduler {
  * replies success or error. Errors arrive as thrown exceptions on
  * the action's await, just like every other RPC. No silent failures.
  */
+// Mirrors the Rust-side guard in the send_email dispatch arm: attachments
+// ride one NDJSON line, so an oversized payload is an unbounded allocation
+// on both sides of the pipe. Reject before any framing happens.
+const EMAIL_MAX_ATTACHMENT_B64_BYTES = 15 * 1024 * 1024;
+const EMAIL_MAX_ATTACHMENTS = 20;
+
 function buildEmail(callId: string): EmailSender {
-  return {
-    async send(to, subject, body) {
+  async function send(
+    toOrOptions: string | EmailOptions,
+    subject?: string,
+    body?: string,
+  ): Promise<void> {
+    // Options form: first argument is the message object.
+    if (typeof toOrOptions === "object" && toOrOptions !== null) {
+      const opts = toOrOptions;
+      const attachments = opts.attachments ?? [];
+      if (attachments.length > EMAIL_MAX_ATTACHMENTS) {
+        throw new Error(
+          `ctx.email.send: ${attachments.length} attachments exceeds the limit of ${EMAIL_MAX_ATTACHMENTS} per email`,
+        );
+      }
+      const b64Total = attachments.reduce(
+        (n: number, a: EmailAttachment) => n + a.content.length,
+        0,
+      );
+      if (b64Total > EMAIL_MAX_ATTACHMENT_B64_BYTES) {
+        throw new Error(
+          `ctx.email.send: attachments total ${b64Total} base64 bytes, exceeding the ${EMAIL_MAX_ATTACHMENT_B64_BYTES}-byte limit (≈11MB of raw file data)`,
+        );
+      }
       await rpc(callId, {
         type: "send_email",
-        to,
-        subject,
-        body,
+        to: opts.to,
+        subject: opts.subject,
+        body: opts.text,
+        html: opts.html,
+        // Wire fields are snake_case; contentType is the TS-facing name.
+        attachments: attachments.map((a: EmailAttachment) => ({
+          filename: a.filename,
+          content_type: a.contentType,
+          content: a.content,
+        })),
       });
-    },
-  };
+      return;
+    }
+    // Positional form: send(to, subject, body).
+    await rpc(callId, {
+      type: "send_email",
+      to: toOrOptions,
+      subject,
+      body,
+    });
+  }
+  return { send } as EmailSender;
 }
 
 /**

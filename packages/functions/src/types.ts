@@ -289,7 +289,7 @@ export interface Scheduler {
  * Transactional email transport.
  *
  * Sends through whatever provider the runtime is configured for
- * (PYLON_EMAIL_PROVIDER env var → SendGrid / Resend / Stack0 / SMTP /
+ * (PYLON_EMAIL_PROVIDER env var → SendGrid / Resend / Stack0 /
  * webhook). Available on action ctx only — sending email is external
  * I/O, not allowed in mutation transactions.
  *
@@ -302,16 +302,51 @@ export interface Scheduler {
  * shared auth key can never be used to send arbitrary mail.
  *
  * The runtime owns provider config + credentials; functions only
- * supply the (to, subject, body) tuple. Failures are surfaced as
- * thrown errors; on success the return is void.
+ * supply the message. Failures are surfaced as thrown errors; on
+ * success the return is void.
  *
  * Use cases: invite emails, password-reset hand-offs, notifications,
- * digest reports. NOT for marketing email — those should go through
- * a dedicated bulk transport, not the transactional path.
+ * digest reports, calendar invites (attach an .ics with contentType
+ * `text/calendar; method=REQUEST` and mail clients render an
+ * RSVP-able event). NOT for marketing email — those should go
+ * through a dedicated bulk transport, not the transactional path.
  */
+export interface EmailAttachment {
+  filename: string;
+  /**
+   * Full MIME content type, passed to the provider VERBATIM —
+   * parameterized types like `text/calendar; method=REQUEST` are
+   * preserved (that parameter is what makes an invite RSVP-able).
+   */
+  contentType: string;
+  /** Base64-encoded file bytes. */
+  content: string;
+}
+
+export interface EmailOptions {
+  /** Single recipient address. */
+  to: string;
+  subject: string;
+  /**
+   * Plain-text body. Required even with `html` — it's the text/plain
+   * part clients with HTML disabled fall back to.
+   */
+  text: string;
+  /** Optional HTML body; providers send multipart with `text`. */
+  html?: string;
+  /**
+   * Base64 attachments. Limits: at most 20 per email, 15MB of base64
+   * text total (≈11MB of raw file data); larger sends throw before
+   * any network I/O.
+   */
+  attachments?: EmailAttachment[];
+}
+
 export interface EmailSender {
   /** Send a plain-text email. `to` is a single address. */
   send(to: string, subject: string, body: string): Promise<void>;
+  /** Send with options: HTML body and/or base64 attachments. */
+  send(options: EmailOptions): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

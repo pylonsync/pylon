@@ -3,7 +3,9 @@ use pylon_kernel::{
     Severity, MANIFEST_VERSION,
 };
 
-const VALID_SCALAR_TYPES: &[&str] = &["string", "int", "float", "bool", "datetime", "richtext"];
+const VALID_SCALAR_TYPES: &[&str] = &[
+    "string", "int", "float", "bool", "datetime", "richtext", "json",
+];
 
 // ---------------------------------------------------------------------------
 // Canonical schema model
@@ -44,6 +46,10 @@ pub enum FieldType {
     Datetime,
     Id(String),
     Richtext,
+    /// Arbitrary JSON value (object, array, or scalar). Stored as
+    /// serialized JSON TEXT; parsed back to the real value on every
+    /// read path, so clients never see the string form.
+    Json,
 }
 
 impl std::fmt::Display for FieldType {
@@ -56,6 +62,7 @@ impl std::fmt::Display for FieldType {
             FieldType::Datetime => f.write_str("datetime"),
             FieldType::Id(target) => write!(f, "id({target})"),
             FieldType::Richtext => f.write_str("richtext"),
+            FieldType::Json => f.write_str("json"),
         }
     }
 }
@@ -1740,6 +1747,7 @@ mod tests {
         assert_eq!(format!("{}", FieldType::Bool), "bool");
         assert_eq!(format!("{}", FieldType::Datetime), "datetime");
         assert_eq!(format!("{}", FieldType::Richtext), "richtext");
+        assert_eq!(format!("{}", FieldType::Json), "json");
         assert_eq!(format!("{}", FieldType::Id("User".into())), "id(User)");
     }
 
@@ -1856,6 +1864,7 @@ mod tests {
                 make_manifest_field("d", "bool", false),
                 make_manifest_field("e", "datetime", false),
                 make_manifest_field("f", "richtext", false),
+                make_manifest_field("g", "json", false),
             ],
         )]);
         let diags = validate_field_types(&m);
@@ -1926,6 +1935,7 @@ mod tests {
         assert!(is_known_field_type("bool"));
         assert!(is_known_field_type("datetime"));
         assert!(is_known_field_type("richtext"));
+        assert!(is_known_field_type("json"));
         assert!(is_known_field_type("id(User)"));
         assert!(!is_known_field_type("strng"));
         assert!(!is_known_field_type("boolean"));

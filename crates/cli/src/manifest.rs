@@ -86,6 +86,7 @@ fn parse_field_type(s: &str) -> FieldType {
         "bool" => FieldType::Bool,
         "datetime" => FieldType::Datetime,
         "richtext" => FieldType::Richtext,
+        "json" => FieldType::Json,
         other if other.starts_with("id(") && other.ends_with(')') => {
             FieldType::Id(other[3..other.len() - 1].to_string())
         }

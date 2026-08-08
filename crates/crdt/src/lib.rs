@@ -152,6 +152,12 @@ pub enum CrdtFieldKind {
     /// Reconciles existing nodes by user-id so concurrent moves
     /// actually merge via Loro's tree CRDT.
     Tree,
+    /// LWW register holding an arbitrary JSON value (object, array,
+    /// or scalar). Default for `json`. The whole value replaces on
+    /// write — concurrent writers converge on one writer's value,
+    /// never a structural merge. Apps that need mergeable structure
+    /// should use `crdt: "list"` / `"tree"` or separate entities.
+    LwwJson,
 }
 
 impl CrdtFieldKind {
@@ -195,6 +201,7 @@ pub fn field_kind(
         "int" | "float" => CrdtFieldKind::LwwNumber,
         "bool" => CrdtFieldKind::LwwBool,
         "richtext" => CrdtFieldKind::Text,
+        "json" => CrdtFieldKind::LwwJson,
         // `id(EntityName)` — base_type strips the parens; the prefix is "id".
         "id" => CrdtFieldKind::LwwString,
         other => {
@@ -332,6 +339,25 @@ pub fn apply_patch(doc: &LoroDoc, fields: &[CrdtField], patch: &Value) -> Result
                     .ok_or_else(|| format!("field {}: expected string, got {value}", field.name))?;
                 map.insert(&field.name, s.to_string())
                     .map_err(|e| format!("write string {}: {e}", field.name))?;
+            }
+            CrdtFieldKind::LwwJson => {
+                if value.is_null() {
+                    // Deleting the register and storing an explicit null
+                    // project identically (absent → Value::Null), so null
+                    // keeps the same wipe semantics as the other LWW kinds.
+                    map.delete(&field.name).ok();
+                    continue;
+                }
+                let lv = json_to_loro(value).ok_or_else(|| {
+                    format!(
+                        "field {}: json value exceeds max nesting depth ({MAX_VALUE_NEST_DEPTH}) or contains an unsupported shape",
+                        field.name
+                    )
+                })?;
+                // Whole-value LWW: the register is replaced atomically, so
+                // concurrent writers converge on one writer's value.
+                map.insert(&field.name, lv)
+                    .map_err(|e| format!("write json {}: {e}", field.name))?;
             }
             CrdtFieldKind::Counter => {
                 let counter = match map.get(&field.name) {
@@ -1011,6 +1037,7 @@ mod tests {
             field_kind("id(User)", None).unwrap(),
             CrdtFieldKind::LwwString
         );
+        assert_eq!(field_kind("json", None).unwrap(), CrdtFieldKind::LwwJson);
     }
 
     #[test]

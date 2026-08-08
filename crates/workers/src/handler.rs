@@ -437,19 +437,30 @@ struct HttpWebhookEmailSender {
 }
 
 impl pylon_router::EmailSender for HttpWebhookEmailSender {
-    fn send(&self, to: &str, subject: &str, body: &str) -> std::result::Result<(), String> {
+    fn send(&self, msg: &pylon_kernel::EmailMessage) -> std::result::Result<(), String> {
         let Some(url) = self.url.as_deref() else {
             worker::console_warn!(
-                "[email] PYLON_EMAIL_WEBHOOK_URL unset — dropped message to {to}. Set the env to enable HTTP-transport mail delivery.",
+                "[email] PYLON_EMAIL_WEBHOOK_URL unset — dropped message to {}. Set the env to enable HTTP-transport mail delivery.",
+                msg.to,
             );
             return Ok(());
         };
-        let payload = serde_json::json!({
-            "to": to,
-            "subject": subject,
-            "body": body,
-        })
-        .to_string();
+        // `body` (the legacy key) stays for existing receiver endpoints;
+        // `text` / `html` / `attachments` are additive.
+        let mut payload_json = serde_json::json!({
+            "to": msg.to,
+            "subject": msg.subject,
+            "body": msg.text,
+            "text": msg.text,
+        });
+        if let Some(html) = &msg.html {
+            payload_json["html"] = serde_json::Value::String(html.clone());
+        }
+        if !msg.attachments.is_empty() {
+            payload_json["attachments"] =
+                serde_json::to_value(&msg.attachments).unwrap_or(serde_json::Value::Null);
+        }
+        let payload = payload_json.to_string();
         let mut headers = Headers::new();
         headers
             .set("Content-Type", "application/json")

@@ -756,6 +756,50 @@ impl std::fmt::Display for CrdtAnnotation {
     }
 }
 
+/// One attachment on an outgoing email. `content` is base64; the
+/// provider layer forwards it verbatim. `content_type` passes through
+/// UNTOUCHED — parameterized types like `text/calendar; method=REQUEST`
+/// are load-bearing (they're what makes mail clients render an RSVP-able
+/// calendar invite instead of a file download).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailAttachment {
+    pub filename: String,
+    pub content_type: String,
+    /// Base64-encoded file bytes.
+    pub content: String,
+}
+
+/// An outgoing email, shared by the app channel (`ctx.email.send`) and
+/// the auth channel (verification / magic-code mail). One struct through
+/// every layer — hook, router trait, transport — so adding a field is a
+/// single-site change instead of a three-trait signature break.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmailMessage {
+    pub to: String,
+    pub subject: String,
+    /// Plain-text body. Always present — providers use it as the
+    /// text/plain part (and clients with HTML disabled fall back to it).
+    pub text: String,
+    /// Optional HTML body; providers send multipart with `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<EmailAttachment>,
+}
+
+impl EmailMessage {
+    /// Plain-text message — what every auth call site sends.
+    pub fn plain(to: &str, subject: &str, text: &str) -> Self {
+        Self {
+            to: to.to_string(),
+            subject: subject.to_string(),
+            text: text.to_string(),
+            html: None,
+            attachments: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestIndex {
     pub name: String,

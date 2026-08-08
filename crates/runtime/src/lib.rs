@@ -1853,26 +1853,36 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Decrypt every field in `row` declared `encrypted: true` for
-    /// the entity. Called on the READ side (get_by_id, list,
-    /// list_after, lookup). Plaintext values (no `enc:v1:` prefix)
-    /// pass through — rows written before the field gained
-    /// `encrypted: true` stay readable.
-    fn maybe_decrypt_row(&self, entity: &str, row: &mut serde_json::Value) {
-        let fields = match self.encrypted_fields.get(entity) {
-            Some(f) => f,
-            None => return,
-        };
-        let key = match &self.encryption_key {
-            Some(k) => k,
-            None => return, // legacy plaintext rows pass through
-        };
-        let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
-        if let Err(e) = encryption::decrypt_row_fields(key, entity, row, &field_refs) {
-            tracing::warn!(
-                "[encryption] Failed to decrypt encrypted fields on {entity}: {e}. \
-                 Ciphertext returned as-is."
-            );
+    /// Read-boundary row normalization, called on every read path
+    /// (get_by_id, list, list_after, lookup, query_filtered, transact
+    /// pre-snapshots) for BOTH storage engines:
+    ///
+    ///  1. decrypt every field declared `encrypted: true` (plaintext
+    ///     values without the `enc:v1:` prefix pass through, so rows
+    ///     written before the field gained `encrypted: true` stay
+    ///     readable);
+    ///  2. parse `json`-typed fields from their stored serialized TEXT
+    ///     form back into the real JSON value — callers (functions,
+    ///     entity endpoints, serverData, sync events) never see the
+    ///     string form.
+    fn normalize_row_on_read(&self, entity: &str, row: &mut serde_json::Value) {
+        if let (Some(fields), Some(key)) =
+            (self.encrypted_fields.get(entity), &self.encryption_key)
+        {
+            let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+            if let Err(e) = encryption::decrypt_row_fields(key, entity, row, &field_refs) {
+                tracing::warn!(
+                    "[encryption] Failed to decrypt encrypted fields on {entity}: {e}. \
+                     Ciphertext returned as-is."
+                );
+            }
+        }
+        self.parse_json_fields_on_read(entity, row);
+    }
+
+    fn parse_json_fields_on_read(&self, entity: &str, row: &mut serde_json::Value) {
+        if let Some(ent) = self.entities.get(entity) {
+            parse_json_fields_in_row(ent, row);
         }
     }
 
@@ -2089,6 +2099,18 @@ impl Runtime {
         };
         if let Some(pg) = self.pg_backend() {
             let ent = self.require_entity(entity)?;
+            // `json` fields: pre-serialize to TEXT for the PG SQL
+            // builders (pylon_storage never sees the manifest). The
+            // CRDT patch below keeps the PARSED `data` — only the
+            // materialized row stores the serialized form.
+            let pg_ser;
+            let pg_data = match serialize_json_fields_for_storage(ent, data) {
+                Some(s) => {
+                    pg_ser = s;
+                    &pg_ser
+                }
+                None => data,
+            };
             // Both CRDT-mode and non-CRDT writes go through one
             // transaction so the row, the FTS shadow, and (for CRDT)
             // the LoroDoc snapshot either all commit or all roll back.
@@ -2099,7 +2121,7 @@ impl Runtime {
                 let id = resolve_or_generate_id(data)?;
                 // Inject the resolved id so build_insert_sql reuses
                 // it — keeps the snapshot key and the row id aligned.
-                let mut row = data.clone();
+                let mut row = pg_data.clone();
                 if let Some(obj) = row.as_object_mut() {
                     obj.insert("id".into(), serde_json::Value::String(id.clone()));
                 }
@@ -2133,7 +2155,7 @@ impl Runtime {
             // Non-CRDT path: still one tx — the typed `DataStore::insert`
             // already wraps in `with_transaction` internally for FTS
             // atomicity, so we can delegate straight through.
-            return pylon_http::DataStore::insert(&pg.store, entity, data)
+            return pylon_http::DataStore::insert(&pg.store, entity, pg_data)
                 .map_err(data_err_to_runtime);
         }
         let ent = self.require_entity(entity)?;
@@ -2185,7 +2207,7 @@ impl Runtime {
                 }
                 col_names.push(quote_ident(key));
                 placeholders.push(format!("?{idx}"));
-                values.push(json_to_sql(val));
+                values.push(json_to_sql_typed(ent, key, val));
                 idx += 1;
             }
 
@@ -2247,7 +2269,7 @@ impl Runtime {
             let mut row = pylon_http::DataStore::get_by_id(&pg.store, entity, id)
                 .map_err(data_err_to_runtime)?;
             if let Some(r) = row.as_mut() {
-                self.maybe_decrypt_row(entity, r);
+                self.normalize_row_on_read(entity, r);
             }
             return Ok(row);
         }
@@ -2266,7 +2288,7 @@ impl Runtime {
             .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &fields)))
             .ok();
         if let Some(r) = result.as_mut() {
-            self.maybe_decrypt_row(entity, r);
+            self.normalize_row_on_read(entity, r);
         }
         Ok(result)
     }
@@ -2277,7 +2299,7 @@ impl Runtime {
             let mut rows =
                 pylon_http::DataStore::list(&pg.store, entity).map_err(data_err_to_runtime)?;
             for r in rows.iter_mut() {
-                self.maybe_decrypt_row(entity, r);
+                self.normalize_row_on_read(entity, r);
             }
             return Ok(rows);
         }
@@ -2302,7 +2324,7 @@ impl Runtime {
         let mut result = Vec::new();
         for row in rows {
             if let Ok(mut val) = row {
-                self.maybe_decrypt_row(entity, &mut val);
+                self.normalize_row_on_read(entity, &mut val);
                 result.push(val);
             }
         }
@@ -2320,7 +2342,7 @@ impl Runtime {
             let mut rows = pylon_http::DataStore::list_after(&pg.store, entity, after, limit)
                 .map_err(data_err_to_runtime)?;
             for r in rows.iter_mut() {
-                self.maybe_decrypt_row(entity, r);
+                self.normalize_row_on_read(entity, r);
             }
             return Ok(rows);
         }
@@ -2362,7 +2384,7 @@ impl Runtime {
         let mut result = Vec::new();
         for row in rows {
             if let Ok(mut val) = row {
-                self.maybe_decrypt_row(entity, &mut val);
+                self.normalize_row_on_read(entity, &mut val);
                 result.push(val);
             }
         }
@@ -2388,7 +2410,7 @@ impl Runtime {
                 .map_err(data_err_to_runtime)?
                 .unwrap_or_default();
             for r in rows.iter_mut() {
-                self.maybe_decrypt_row(entity, r);
+                self.normalize_row_on_read(entity, r);
             }
             return Ok(rows);
         }
@@ -2427,7 +2449,7 @@ impl Runtime {
         let mut result = Vec::new();
         for row in rows {
             if let Ok(mut val) = row {
-                self.maybe_decrypt_row(entity, &mut val);
+                self.normalize_row_on_read(entity, &mut val);
                 result.push(val);
             }
         }
@@ -2458,6 +2480,16 @@ impl Runtime {
         };
         if let Some(pg) = self.pg_backend() {
             let ent = self.require_entity(entity)?;
+            // `json` fields: serialized for the PG row write, parsed
+            // for the CRDT patch — same split as `insert()`.
+            let pg_ser;
+            let pg_data = match serialize_json_fields_for_storage(ent, data) {
+                Some(s) => {
+                    pg_ser = s;
+                    &pg_ser
+                }
+                None => data,
+            };
             if ent.crdt {
                 // CRDT mode: snapshot apply + materialized update +
                 // FTS shadow rebuild all share one tx. Pre-fix the
@@ -2486,7 +2518,7 @@ impl Runtime {
                             &self.manifest,
                             entity,
                             id,
-                            data,
+                            pg_data,
                         )
                         .map_err(data_err_to_runtime)?;
                         if !updated {
@@ -2521,7 +2553,7 @@ impl Runtime {
                 }
                 return result;
             }
-            return pylon_http::DataStore::update(&pg.store, entity, id, data)
+            return pylon_http::DataStore::update(&pg.store, entity, id, pg_data)
                 .map_err(data_err_to_runtime);
         }
         let ent = self.require_entity(entity)?;
@@ -2564,7 +2596,7 @@ impl Runtime {
             let mut idx = 1;
             for key in &writable_keys {
                 set_clauses.push(format!("{} = ?{idx}", quote_ident(key)));
-                values.push(json_to_sql(&obj[key.as_str()]));
+                values.push(json_to_sql_typed(ent, key, &obj[key.as_str()]));
                 idx += 1;
             }
 
@@ -2694,7 +2726,7 @@ impl Runtime {
             let mut row = pylon_http::DataStore::lookup(&pg.store, entity, field, value)
                 .map_err(data_err_to_runtime)?;
             if let Some(r) = row.as_mut() {
-                self.maybe_decrypt_row(entity, r);
+                self.normalize_row_on_read(entity, r);
             }
             return Ok(row);
         }
@@ -2716,7 +2748,7 @@ impl Runtime {
             .ok()
         });
         if let Some(r) = result.as_mut() {
-            self.maybe_decrypt_row(entity, r);
+            self.normalize_row_on_read(entity, r);
         }
         Ok(result)
     }
@@ -2774,7 +2806,7 @@ impl Runtime {
             // Decrypt `field.encrypted()` columns, same as get_by_id/list/lookup
             // — a server-side ctx.db.query() must see plaintext, not ciphertext.
             for r in rows.iter_mut() {
-                self.maybe_decrypt_row(entity, r);
+                self.normalize_row_on_read(entity, r);
             }
             return Ok(rows);
         }
@@ -2847,32 +2879,45 @@ impl Runtime {
                     validate_column_name(key, ent)?;
                     let quoted_key = quote_ident(key);
 
-                    if let Some(op_obj) = val.as_object() {
+                    // A json-typed column filtered with a plain object
+                    // (no $-operators) is a WHOLE-VALUE equality match
+                    // on the serialized form — otherwise the object
+                    // would be misread as an operator map and silently
+                    // match everything.
+                    if entity_field_is_json(ent, key)
+                        && val
+                            .as_object()
+                            .is_some_and(|o| !o.keys().any(|k| k.starts_with('$')))
+                    {
+                        where_clauses.push(format!("{quoted_key} = ?{idx}"));
+                        values.push(json_to_sql_typed(ent, key, val));
+                        idx += 1;
+                    } else if let Some(op_obj) = val.as_object() {
                         for (op, op_val) in op_obj {
                             match op.as_str() {
                                 "$not" => {
                                     where_clauses.push(format!("{quoted_key} != ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$gt" => {
                                     where_clauses.push(format!("{quoted_key} > ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$gte" => {
                                     where_clauses.push(format!("{quoted_key} >= ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$lt" => {
                                     where_clauses.push(format!("{quoted_key} < ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$lte" => {
                                     where_clauses.push(format!("{quoted_key} <= ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$like" => {
@@ -2898,7 +2943,7 @@ impl Runtime {
                                                 .iter()
                                                 .map(|v| {
                                                     let p = format!("?{idx}");
-                                                    values.push(json_to_sql(v));
+                                                    values.push(json_to_sql_typed(ent, key, v));
                                                     idx += 1;
                                                     p
                                                 })
@@ -2916,7 +2961,7 @@ impl Runtime {
                     } else {
                         // Simple equality.
                         where_clauses.push(format!("{quoted_key} = ?{idx}"));
-                        values.push(json_to_sql(val));
+                        values.push(json_to_sql_typed(ent, key, val));
                         idx += 1;
                     }
                 }
@@ -2974,9 +3019,9 @@ impl Runtime {
         for row in rows {
             if let Ok(mut val) = row {
                 // Decrypt `field.encrypted()` columns — see the PG branch above
-                // and get_by_id/list/lookup. maybe_decrypt_row self-guards, so
+                // and get_by_id/list/lookup. normalize_row_on_read self-guards, so
                 // entities with no encrypted fields pay nothing.
-                self.maybe_decrypt_row(entity, &mut val);
+                self.normalize_row_on_read(entity, &mut val);
                 result.push(val);
             }
         }
@@ -3191,7 +3236,7 @@ impl Runtime {
             validate_column_name(key, ent)?;
             col_names.push(quote_ident(key));
             placeholders.push(format!("?{idx}"));
-            values.push(json_to_sql(val));
+            values.push(json_to_sql_typed(ent, key, val));
             idx += 1;
         }
 
@@ -3262,7 +3307,7 @@ impl Runtime {
             }
             validate_column_name(key, ent)?;
             set_clauses.push(format!("{} = ?{idx}", quote_ident(key)));
-            values.push(json_to_sql(val));
+            values.push(json_to_sql_typed(ent, key, val));
             idx += 1;
         }
         if set_clauses.is_empty() {
@@ -3360,7 +3405,7 @@ impl Runtime {
             .query_row(rusqlite::params![id], |row| Ok(row_to_json(row, &fields)))
             .ok();
         if let Some(r) = row.as_mut() {
-            self.maybe_decrypt_row(entity, r);
+            self.normalize_row_on_read(entity, r);
         }
         Ok(row)
     }
@@ -3386,7 +3431,7 @@ impl Runtime {
             })?;
         let mut out: Vec<serde_json::Value> = rows.flatten().collect();
         for r in out.iter_mut() {
-            self.maybe_decrypt_row(entity, r);
+            self.normalize_row_on_read(entity, r);
         }
         Ok(out)
     }
@@ -3426,7 +3471,7 @@ impl Runtime {
             })?;
         let mut out: Vec<serde_json::Value> = rows.flatten().collect();
         for r in out.iter_mut() {
-            self.maybe_decrypt_row(entity, r);
+            self.normalize_row_on_read(entity, r);
         }
         Ok(out)
     }
@@ -3454,7 +3499,7 @@ impl Runtime {
             .ok()
         });
         if let Some(r) = row.as_mut() {
-            self.maybe_decrypt_row(entity, r);
+            self.normalize_row_on_read(entity, r);
         }
         Ok(row)
     }
@@ -3559,32 +3604,42 @@ impl Runtime {
                 _ => {
                     validate_column_name(key, ent)?;
                     let qk = quote_ident(key);
-                    if let Some(op_obj) = val.as_object() {
+                    // Same json whole-value equality rule as the main
+                    // query_filtered loop above.
+                    if entity_field_is_json(ent, key)
+                        && val
+                            .as_object()
+                            .is_some_and(|o| !o.keys().any(|k| k.starts_with('$')))
+                    {
+                        where_clauses.push(format!("{qk} = ?{idx}"));
+                        values.push(json_to_sql_typed(ent, key, val));
+                        idx += 1;
+                    } else if let Some(op_obj) = val.as_object() {
                         for (op, op_val) in op_obj {
                             match op.as_str() {
                                 "$not" => {
                                     where_clauses.push(format!("{qk} != ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$gt" => {
                                     where_clauses.push(format!("{qk} > ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$gte" => {
                                     where_clauses.push(format!("{qk} >= ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$lt" => {
                                     where_clauses.push(format!("{qk} < ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$lte" => {
                                     where_clauses.push(format!("{qk} <= ?{idx}"));
-                                    values.push(json_to_sql(op_val));
+                                    values.push(json_to_sql_typed(ent, key, op_val));
                                     idx += 1;
                                 }
                                 "$like" => {
@@ -3599,7 +3654,7 @@ impl Runtime {
                                             .iter()
                                             .map(|v| {
                                                 let p = format!("?{idx}");
-                                                values.push(json_to_sql(v));
+                                                values.push(json_to_sql_typed(ent, key, v));
                                                 idx += 1;
                                                 p
                                             })
@@ -3615,7 +3670,7 @@ impl Runtime {
                         }
                     } else {
                         where_clauses.push(format!("{qk} = ?{idx}"));
-                        values.push(json_to_sql(val));
+                        values.push(json_to_sql_typed(ent, key, val));
                         idx += 1;
                     }
                 }
@@ -3838,7 +3893,7 @@ impl Runtime {
             for (k, v) in where_obj {
                 validate_column_name(k, ent)?;
                 where_clauses.push(format!("{} = ?{idx}", quote_ident(k)));
-                values.push(json_to_sql(v));
+                values.push(json_to_sql_typed(ent, k, v));
                 idx += 1;
             }
         }
@@ -4243,6 +4298,92 @@ fn resolve_or_generate_id(data: &serde_json::Value) -> Result<String, RuntimeErr
 
 fn is_valid_pylon_id(s: &str) -> bool {
     s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Field-aware variant of [`json_to_sql`]: a `json`-typed column ALWAYS
+/// binds the serialized JSON TEXT of the value — `{"a":1}` binds as
+/// `{"a":1}`, but so does the bare string `"42"` bind as `"\"42\""` —
+/// so every JSON value round-trips exactly through the TEXT column and
+/// `parse_json_fields_on_read`. Every other field keeps the
+/// shape-driven binding. Applied at the SQL boundary only: the
+/// in-memory row (change events, hooks, policies) always carries the
+/// parsed value.
+fn json_to_sql_typed(
+    ent: &pylon_kernel::ManifestEntity,
+    key: &str,
+    val: &serde_json::Value,
+) -> Box<dyn rusqlite::types::ToSql> {
+    if entity_field_is_json(ent, key) {
+        return Box::new(
+            serde_json::to_string(val).unwrap_or_else(|_| "null".to_string()),
+        );
+    }
+    json_to_sql(val)
+}
+
+/// Parse each `json`-typed field's stored TEXT back to the real value.
+/// Idempotent: only `Value::String` cells are touched, so a row that
+/// already carries parsed values (e.g. a Postgres JSONB read, or a
+/// double-normalized path) passes through unchanged. Text that doesn't
+/// parse (hand-written legacy rows) stays a string rather than erroring
+/// the whole read.
+pub(crate) fn parse_json_fields_in_row(
+    ent: &pylon_kernel::ManifestEntity,
+    row: &mut serde_json::Value,
+) {
+    if !ent.fields.iter().any(|f| f.field_type == "json") {
+        return;
+    }
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    for f in &ent.fields {
+        if f.field_type != "json" {
+            continue;
+        }
+        let Some(serde_json::Value::String(s)) = obj.get(&f.name) else {
+            continue;
+        };
+        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+            obj.insert(f.name.clone(), parsed);
+        }
+    }
+}
+
+fn entity_field_is_json(ent: &pylon_kernel::ManifestEntity, key: &str) -> bool {
+    ent.fields
+        .iter()
+        .any(|f| f.name == key && f.field_type == "json")
+}
+
+/// Postgres counterpart of [`json_to_sql_typed`]: the PG SQL builders
+/// live in `pylon_storage` and never see the manifest, so `json` field
+/// values are pre-serialized to `Value::String` in a CLONE of the row
+/// right before the storage call. Returns `None` when the entity has no
+/// json fields present in `data` (the common case — no clone).
+pub(crate) fn serialize_json_fields_for_storage(
+    ent: &pylon_kernel::ManifestEntity,
+    data: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let obj = data.as_object()?;
+    if !ent
+        .fields
+        .iter()
+        .any(|f| f.field_type == "json" && obj.contains_key(&f.name))
+    {
+        return None;
+    }
+    let mut out = obj.clone();
+    for f in &ent.fields {
+        if f.field_type != "json" {
+            continue;
+        }
+        if let Some(v) = out.get(&f.name) {
+            let ser = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
+            out.insert(f.name.clone(), serde_json::Value::String(ser));
+        }
+    }
+    Some(serde_json::Value::Object(out))
 }
 
 /// Convert a `serde_json::Value` to a boxed `ToSql` for rusqlite.
@@ -5268,7 +5409,7 @@ mod tests {
     fn query_filtered_and_graph_decrypt_encrypted_fields_like_get() {
         // #353: a server-side ctx.db.query() / queryGraph() must return
         // PLAINTEXT for field.encrypted() columns, exactly like ctx.db.get().
-        // Before the fix query_filtered skipped maybe_decrypt_row and returned
+        // Before the fix query_filtered skipped read normalization and returned
         // the raw `enc:v1:...` ciphertext — so a function that queried then
         // read a "decrypted" SSN got garbage. CI runs --test-threads=1, so
         // mutating the key env here is safe.

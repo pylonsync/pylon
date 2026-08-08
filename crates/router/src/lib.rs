@@ -372,9 +372,11 @@ pub trait FileOps: Send + Sync {
     fn get_file(&self, id: &str, requester_user_id: Option<&str>, is_admin: bool) -> (u16, String);
 }
 
-/// Sends emails (magic codes, invitations, etc.).
+/// Sends emails (magic codes, invitations, app mail via `ctx.email`).
+/// Messages carry optional HTML + base64 attachments; plain-text call
+/// sites build one with `pylon_kernel::EmailMessage::plain`.
 pub trait EmailSender: Send + Sync {
-    fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String>;
+    fn send(&self, msg: &pylon_kernel::EmailMessage) -> Result<(), String>;
 }
 
 /// Access to sharded real-time simulations (game matches, MMO zones, etc.).
@@ -3188,7 +3190,7 @@ mod auth_gate_tests {
         }
     }
     impl EmailSender for StubEmail {
-        fn send(&self, _to: &str, _subject: &str, _body: &str) -> Result<(), String> {
+        fn send(&self, _msg: &pylon_kernel::EmailMessage) -> Result<(), String> {
             Ok(())
         }
     }
@@ -3952,14 +3954,11 @@ mod auth_gate_tests {
     /// have received. Production wiring does this through an Resend /
     /// SES adapter; tests just want to read what got "sent".
     struct CaptureEmail {
-        sent: std::sync::Mutex<Vec<(String, String, String)>>,
+        sent: std::sync::Mutex<Vec<pylon_kernel::EmailMessage>>,
     }
     impl EmailSender for CaptureEmail {
-        fn send(&self, to: &str, subject: &str, body: &str) -> Result<(), String> {
-            self.sent
-                .lock()
-                .unwrap()
-                .push((to.into(), subject.into(), body.into()));
+        fn send(&self, msg: &pylon_kernel::EmailMessage) -> Result<(), String> {
+            self.sent.lock().unwrap().push(msg.clone());
             Ok(())
         }
     }
@@ -4102,7 +4101,7 @@ mod auth_gate_tests {
             // not the body's victim.
             let sent = email.sent.lock().unwrap();
             assert_eq!(sent.len(), 1);
-            assert_eq!(sent[0].0, "alice@example.com");
+            assert_eq!(sent[0].to, "alice@example.com");
             assert!(body.contains("alice@example.com"));
             assert!(!body.contains("victim@example.com"));
         });

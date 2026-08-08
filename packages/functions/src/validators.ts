@@ -115,6 +115,13 @@ export const v = {
 
   /** Any valid JSON value. */
   any: (): Validator<any, false> => validator("any"),
+
+  /**
+   * Arbitrary JSON value (object, array, or scalar). The validator-side
+   * match for `field.json()` — accepts any JSON shape but types the arg
+   * as `unknown`, so handlers narrow before use instead of getting `any`.
+   */
+  json: (): Validator<unknown, false> => validator("json"),
 };
 
 // ---------------------------------------------------------------------------
@@ -178,6 +185,10 @@ function validateValue(
         ? null
         : `${path}: expected null, got ${typeof value}`;
     case "any":
+      return null;
+    case "json":
+      // Any JSON shape is legal, including null — presence/absence is
+      // handled by the optional pass above.
       return null;
     case "literal":
       return value === validator.value

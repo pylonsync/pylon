@@ -139,8 +139,15 @@ field.float()         // REAL 64-bit
 field.bool()          // 0/1 stored as INTEGER; field.boolean() alias also works
 field.datetime()      // ISO-8601 string
 field.richtext()      // long-form text
+field.json()          // arbitrary JSON value (object/array/scalar), parsed-on-read
 field.id("OtherEntity") // FK to another entity's id column
 ```
+
+`field.json()` hands back the PARSED value on every read path (entity API,
+`serverData`, `ctx.db`, sync events) — never a string to `JSON.parse`
+yourself. Codegen types it `unknown` (narrow with your own row type). On CRDT
+entities the whole value is one LWW register; not searchable, not
+encryptable. The matching arg validator is `v.json()`.
 
 **Modifiers (chainable):**
 - `.optional()` — nullable
@@ -499,8 +506,11 @@ export default action({
   args: { email: v.string(), orgId: v.id("Org") },
   async handler(ctx, args) {
     // Built-in transactional email — no HTTP call, uses the runtime's
-    // PYLON_EMAIL_* provider (Resend / SendGrid / Stack0 / SMTP):
+    // PYLON_EMAIL_* provider (sendgrid / resend / stack0 / webhook):
     await ctx.email.send(args.email, "Invite", "You're invited!");
+    // Options form adds HTML + base64 attachments (contentType passes
+    // through verbatim, so `text/calendar; method=REQUEST` invites work):
+    // await ctx.email.send({ to, subject, text, html?, attachments? });
     // (Or hit an external HTTP API directly with fetch(...) + ctx.env.KEY.)
     return { ok: true };
   },
@@ -518,7 +528,7 @@ export default action({
 ctx.auth.userId       // string | null  (narrows to string when auth: "user"/"admin")
 ctx.auth.isAdmin      // boolean
 ctx.auth.tenantId     // string | null  (selected org)
-ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER you verify a webhook/HMAC
+await ctx.auth.elevate({ admin: true, reason: "..." })  // async — promote AFTER you verify a webhook/HMAC
 ctx.env               // Record<string,string> — secrets / env (same values as process.env)
 ctx.requireMember(orgId, { role })     // assert org membership/role — throws (UNAUTHENTICATED / MISSING_ORG / FORBIDDEN), fails closed
 // NOTE: there is NO ctx.auth.email and NO ctx.auth.roles on the handler ctx.
@@ -546,6 +556,7 @@ ctx.scheduler.runAt(unixMs, "fnName", args)       // enqueue at a wall-clock tim
 ctx.runQuery("fnName", args)           // read by invoking a registered query
 ctx.runMutation("fnName", args)        // write by invoking a registered mutation (own tx)
 ctx.email.send(to, subject, body)      // transactional email via PYLON_EMAIL_* provider
+ctx.email.send({ to, subject, text, html?, attachments? })  // options form: HTML + base64 attachments
 throw ctx.error("CODE", "message")
 ctx.request?.rawBody / ctx.request?.headers   // raw HTTP request (verify Stripe/GitHub webhook sigs)
 
