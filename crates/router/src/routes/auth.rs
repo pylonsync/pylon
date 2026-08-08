@@ -1210,7 +1210,9 @@ pub(crate) fn handle(
             pylon_auth::email_templates::EmailTemplate::MagicCode,
             &vars,
         );
-        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(&email, &subject, &body_text)) {
+        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
+            &email, &subject, &body_text,
+        )) {
             if !ctx.is_dev {
                 tracing::warn!(
                     "[email] Failed to send magic code to {}: {e}",
@@ -1411,7 +1413,9 @@ pub(crate) fn handle(
         let body_text = format!(
             "Your email verification code is: {code}\n\nThis code will expire in 10 minutes."
         );
-        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(&email, subject, &body_text)) {
+        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
+            &email, subject, &body_text,
+        )) {
             if !ctx.is_dev {
                 tracing::warn!(
                     "[email] Failed to send verification code to {}: {e}",
@@ -1664,7 +1668,9 @@ pub(crate) fn handle(
                 let body_text = format!(
                     "Welcome to Pylon!\n\nYour email verification code is: {code}\n\nThis code will expire in 10 minutes."
                 );
-                if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(&email, subject, &body_text)) {
+                if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
+                    &email, subject, &body_text,
+                )) {
                     tracing::warn!(
                         "[auth] post-register verification email to {} failed: {e}",
                         redact_email(&email)
@@ -4328,7 +4334,9 @@ pub(crate) fn handle(
                     pylon_auth::email_templates::EmailTemplate::OrgInvite,
                     &vars,
                 );
-                if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(email, &subject, &body_text)) {
+                if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
+                    email, &subject, &body_text,
+                )) {
                     tracing::warn!("[org] invite email to {} failed: {e}", redact_email(email));
                 }
                 return Some((
@@ -6042,7 +6050,9 @@ pub(crate) fn handle(
                 pylon_auth::email_templates::EmailTemplate::PasswordReset,
                 &vars,
             );
-            if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(&email, &subject, &body_text)) {
+            if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
+                &email, &subject, &body_text,
+            )) {
                 tracing::warn!("[auth] reset email to {} failed: {e}", redact_email(&email));
             }
         } else {
@@ -6210,7 +6220,9 @@ pub(crate) fn handle(
             pylon_auth::email_templates::EmailTemplate::MagicLink,
             &vars,
         );
-        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(&email, &subject, &body_text)) {
+        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
+            &email, &subject, &body_text,
+        )) {
             tracing::warn!(
                 "[auth] magic-link email to {} failed: {e}",
                 redact_email(&email)
@@ -6371,7 +6383,9 @@ pub(crate) fn handle(
             pylon_auth::email_templates::EmailTemplate::EmailChangeConfirm,
             &vars,
         );
-        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(&new_email, &subject, &body_text)) {
+        if let Err(e) = ctx.email.send(&pylon_kernel::EmailMessage::plain(
+            &new_email, &subject, &body_text,
+        )) {
             tracing::warn!(
                 "[auth] email-change confirm to {} failed: {e}",
                 redact_email(&new_email)

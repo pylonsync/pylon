@@ -143,8 +143,7 @@ pub type NestedCallHook = Box<
 /// about PYLON_EMAIL_PROVIDER + credentials). Without this hook installed,
 /// `ctx.email.send` returns a "transport not configured" error instead
 /// of silently no-op'ing — apps shouldn't think email sent when it didn't.
-pub type EmailHook =
-    Box<dyn Fn(&pylon_kernel::EmailMessage) -> Result<(), String> + Send + Sync>;
+pub type EmailHook = Box<dyn Fn(&pylon_kernel::EmailMessage) -> Result<(), String> + Send + Sync>;
 
 /// Hard cap on the total base64 attachment payload of one email (bytes of
 /// base64 text, ≈ 11MB of raw file data after the 4/3 inflation). Enforced

@@ -81,7 +81,10 @@ fn object_round_trips_parsed_on_plain_entity() {
     let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
     assert_eq!(row["config"], cfg, "get_by_id must return the parsed value");
     let listed = rt.list("Doc").unwrap();
-    assert_eq!(listed[0]["config"], cfg, "list must return the parsed value");
+    assert_eq!(
+        listed[0]["config"], cfg,
+        "list must return the parsed value"
+    );
 }
 
 #[test]
@@ -135,9 +138,7 @@ fn equality_filter_matches_serialized_form() {
         .unwrap();
     rt.insert("Doc", &json!({"title": "two", "config": {"kind": "b"}}))
         .unwrap();
-    let hits = rt
-        .query_filtered("Doc", &json!({"config": cfg}))
-        .unwrap();
+    let hits = rt.query_filtered("Doc", &json!({"config": cfg})).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["title"], "one");
     assert_eq!(hits[0]["config"], cfg, "filtered rows come back parsed");
@@ -154,7 +155,8 @@ fn crdt_entity_json_field_round_trips() {
     assert_eq!(row["layout"], layout, "CRDT LwwJson projects parsed");
 
     let layout2 = json!({"panes": [], "grid": false, "note": "n"});
-    rt.update("Board", &id, &json!({"layout": layout2})).unwrap();
+    rt.update("Board", &id, &json!({"layout": layout2}))
+        .unwrap();
     let row = rt.get_by_id("Board", &id).unwrap().unwrap();
     assert_eq!(row["layout"], layout2, "whole-value LWW replaces");
 }

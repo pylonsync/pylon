@@ -1866,8 +1866,7 @@ impl Runtime {
     ///     entity endpoints, serverData, sync events) never see the
     ///     string form.
     fn normalize_row_on_read(&self, entity: &str, row: &mut serde_json::Value) {
-        if let (Some(fields), Some(key)) =
-            (self.encrypted_fields.get(entity), &self.encryption_key)
+        if let (Some(fields), Some(key)) = (self.encrypted_fields.get(entity), &self.encryption_key)
         {
             let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
             if let Err(e) = encryption::decrypt_row_fields(key, entity, row, &field_refs) {
@@ -4314,9 +4313,7 @@ fn json_to_sql_typed(
     val: &serde_json::Value,
 ) -> Box<dyn rusqlite::types::ToSql> {
     if entity_field_is_json(ent, key) {
-        return Box::new(
-            serde_json::to_string(val).unwrap_or_else(|_| "null".to_string()),
-        );
+        return Box::new(serde_json::to_string(val).unwrap_or_else(|_| "null".to_string()));
     }
     json_to_sql(val)
 }

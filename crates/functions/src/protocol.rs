@@ -1022,7 +1022,8 @@ mod tests {
     fn send_email_old_frame_still_deserializes() {
         // Frames from TS runtimes predating html/attachments carry only
         // to/subject/body — `#[serde(default)]` must keep them parsing.
-        let json = r#"{"type":"send_email","call_id":"c1","to":"u@t.com","subject":"s","body":"b"}"#;
+        let json =
+            r#"{"type":"send_email","call_id":"c1","to":"u@t.com","subject":"s","body":"b"}"#;
         let msg: TsMessage = serde_json::from_str(json).unwrap();
         match msg {
             TsMessage::SendEmail(m) => {

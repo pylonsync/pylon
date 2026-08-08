@@ -282,8 +282,8 @@ impl HttpEmailTransport {
                     body["html"] = serde_json::Value::String(html.clone());
                 }
                 if !msg.attachments.is_empty() {
-                    body["attachments"] = serde_json::to_value(&msg.attachments)
-                        .unwrap_or(serde_json::Value::Null);
+                    body["attachments"] =
+                        serde_json::to_value(&msg.attachments).unwrap_or(serde_json::Value::Null);
                 }
                 body.to_string()
             }
@@ -410,10 +410,8 @@ mod tests {
         };
         // html-only: text/plain part FIRST, text/html second (SendGrid
         // rejects other orderings), no attachments key.
-        let p: serde_json::Value = serde_json::from_str(
-            &t.build_body(&with_extras(Some("<p>hi</p>"), false)),
-        )
-        .unwrap();
+        let p: serde_json::Value =
+            serde_json::from_str(&t.build_body(&with_extras(Some("<p>hi</p>"), false))).unwrap();
         assert_eq!(p["content"][0]["type"], "text/plain");
         assert_eq!(p["content"][1]["type"], "text/html");
         assert_eq!(p["content"][1]["value"], "<p>hi</p>");
@@ -429,10 +427,8 @@ mod tests {
         assert_eq!(p["attachments"][0]["disposition"], "attachment");
 
         // both together
-        let p: serde_json::Value = serde_json::from_str(
-            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
-        )
-        .unwrap();
+        let p: serde_json::Value =
+            serde_json::from_str(&t.build_body(&with_extras(Some("<p>hi</p>"), true))).unwrap();
         assert_eq!(p["content"][1]["type"], "text/html");
         assert_eq!(p["attachments"][0]["content"], "QkVHSU46VkNBTEVOREFS");
     }
@@ -445,10 +441,8 @@ mod tests {
             from: "noreply@test.com".into(),
             provider: HttpEmailProvider::Resend,
         };
-        let p: serde_json::Value = serde_json::from_str(
-            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
-        )
-        .unwrap();
+        let p: serde_json::Value =
+            serde_json::from_str(&t.build_body(&with_extras(Some("<p>hi</p>"), true))).unwrap();
         assert_eq!(p["html"], "<p>hi</p>");
         assert_eq!(p["text"], "You're invited");
         assert_eq!(
@@ -470,10 +464,8 @@ mod tests {
             from: "noreply@test.com".into(),
             provider: HttpEmailProvider::Stack0,
         };
-        let p: serde_json::Value = serde_json::from_str(
-            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
-        )
-        .unwrap();
+        let p: serde_json::Value =
+            serde_json::from_str(&t.build_body(&with_extras(Some("<p>hi</p>"), true))).unwrap();
         assert_eq!(p["html"], "<p>hi</p>");
         assert_eq!(
             p["attachments"][0]["content_type"],
@@ -489,10 +481,8 @@ mod tests {
             from: "noreply@test.com".into(),
             provider: HttpEmailProvider::Webhook,
         };
-        let p: serde_json::Value = serde_json::from_str(
-            &t.build_body(&with_extras(Some("<p>hi</p>"), true)),
-        )
-        .unwrap();
+        let p: serde_json::Value =
+            serde_json::from_str(&t.build_body(&with_extras(Some("<p>hi</p>"), true))).unwrap();
         // `body` is the legacy key existing receiver endpoints parse;
         // text/html/attachments are additive.
         assert_eq!(p["body"], "You're invited");
