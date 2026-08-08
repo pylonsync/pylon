@@ -1,6 +1,5 @@
-import React, { use } from "react";
+import React from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
-import { DashboardShell } from "@/components/dashboard-shell";
 import { Members } from "../dashboard-client";
 
 export const metadata: Metadata = {
@@ -10,30 +9,18 @@ export const metadata: Metadata = {
 
 // `/dashboard/members` — the active org's roster + invites. The roster (with
 // real emails) is loaded client-side from the framework's org-members endpoint;
-// invites are gated to owners/admins both here and on the server.
-export default function MembersPage({ auth, response, serverData }: PageProps) {
-  if (!auth.user_id) {
-    response.redirect("/login");
-    return null;
-  }
+// invites are gated to owners/admins both here and on the server. Auth gate +
+// shell chrome come from the dashboard layout.
+export default function MembersPage({ auth, response }: PageProps) {
   if (!auth.tenant_id) {
     response.redirect("/dashboard");
     return null;
   }
-  const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
-  const org = use(serverData.get<{ name?: string }>("Org", auth.tenant_id));
   return (
-    <DashboardShell
-      active="members"
-      title="Members"
-      userEmail={me?.email ?? ""}
-      orgName={org?.name}
-    >
-      <Members
-        tenantId={auth.tenant_id}
-        currentUserId={auth.user_id}
-        role={auth.roles?.[0] ?? ""}
-      />
-    </DashboardShell>
+    <Members
+      tenantId={auth.tenant_id}
+      currentUserId={auth.user_id!}
+      role={auth.roles?.[0] ?? ""}
+    />
   );
 }

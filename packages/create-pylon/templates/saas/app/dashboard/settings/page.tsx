@@ -1,6 +1,5 @@
 import React, { use } from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
-import { DashboardShell } from "@/components/dashboard-shell";
 import {
   Settings,
   type OrgInfo,
@@ -14,34 +13,23 @@ export const metadata: Metadata = {
 
 // `/dashboard/settings` — workspace settings: rename (owners/admins) and delete
 // (owners). The active org + member count are resolved server-side so the page
-// paints with real values on the first byte.
+// paints with real values on the first byte. Auth gate + shell chrome come from
+// the dashboard layout.
 export default function SettingsPage({ auth, response, serverData }: PageProps) {
-  if (!auth.user_id) {
-    response.redirect("/login");
-    return null;
-  }
   if (!auth.tenant_id) {
     response.redirect("/dashboard");
     return null;
   }
-  const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
   const org = use(serverData.get<OrgInfo>("Org", auth.tenant_id));
   const members = use(serverData.list<OrgMemberRow>("OrgMember"));
   const memberCount = members.filter(
     (m) => m.orgId === auth.tenant_id,
   ).length;
   return (
-    <DashboardShell
-      active="settings"
-      title="Settings"
-      userEmail={me?.email ?? ""}
-      orgName={org?.name}
-    >
-      <Settings
-        org={org}
-        role={auth.roles?.[0] ?? ""}
-        memberCount={memberCount}
-      />
-    </DashboardShell>
+    <Settings
+      org={org}
+      role={auth.roles?.[0] ?? ""}
+      memberCount={memberCount}
+    />
   );
 }

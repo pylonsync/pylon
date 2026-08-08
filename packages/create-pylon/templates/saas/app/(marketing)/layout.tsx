@@ -7,8 +7,8 @@ import { siteConfig } from "@/lib/site.config";
 // `(marketing)` is a ROUTE GROUP: the parens segment is stripped from every
 // URL (so `(marketing)/page.tsx` still serves `/`), and this layout wraps
 // only the pages inside the group — the marketing nav up top, a fat footer
-// below. Routes outside the group (/login, /signup, /dashboard) render bare
-// in the root shell; the dashboard brings its own sidebar shell.
+// below. The other sections bring their own layouts: `(auth)` the split-screen
+// frame, `dashboard/` the sidebar shell.
 //
 // A layout receives the page props plus `children`. `auth.user_id` is null for
 // anonymous visitors and the signed-in user's id otherwise — resolved

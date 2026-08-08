@@ -14,9 +14,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-type NavKey = "overview" | "projects" | "members" | "billing" | "settings";
+export type NavKey = "overview" | "projects" | "members" | "billing" | "settings";
 
-const NAV: { key: NavKey; label: string; href: string; Icon: LucideIcon }[] = [
+// Exported so `app/dashboard/layout.tsx` can derive the active item + page
+// title from the request URL — one table drives both the sidebar and the
+// layout's routing awareness.
+export const NAV: { key: NavKey; label: string; href: string; Icon: LucideIcon }[] = [
   { key: "overview", label: "Overview", href: "/dashboard", Icon: LayoutDashboard },
   { key: "projects", label: "Projects", href: "/dashboard/projects", Icon: FolderKanban },
   { key: "members", label: "Members", href: "/dashboard/members", Icon: Users },
@@ -25,10 +28,11 @@ const NAV: { key: NavKey; label: string; href: string; Icon: LucideIcon }[] = [
 ];
 
 // Dashboard chrome: a fixed sidebar (logo, workspace switcher, nav) plus a top
-// bar with a user menu. /dashboard sits outside the `(marketing)` route group,
-// so this shell is the only chrome here. `userEmail` is
-// resolved on the server (serverData.get("User", …)) and passed in, so the menu
-// shows a real email instead of a raw id.
+// bar with a user menu. Rendered by `app/dashboard/layout.tsx`, which wraps
+// every /dashboard page — /dashboard sits outside the `(marketing)` route
+// group, so this shell is the only chrome here. `userEmail` is resolved on the
+// server (serverData.get("User", …)) and passed in, so the menu shows a real
+// email instead of a raw id.
 export function DashboardShell({
   active,
   title,

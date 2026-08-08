@@ -1,6 +1,5 @@
 import React, { use } from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
-import { DashboardShell } from "@/components/dashboard-shell";
 import { ProvisionWorkspace } from "./provision-workspace";
 import {
   Overview,
@@ -14,29 +13,20 @@ export const metadata: Metadata = {
   robots: "noindex",
 };
 
-// `app/dashboard/page.tsx` → `/dashboard`. Server-side auth gate, then the
-// active org (`auth.tenant_id`) + this org's rows are read during the render
-// via `serverData` + React 19 `use()` — resolved server-side and replayed on
-// hydration, so the dashboard paints with real data on the first byte (no
-// client fetch, no empty-state flash). /dashboard sits outside the
-// `(marketing)` route group, so the marketing nav/footer never render here;
-// the shell is the only chrome.
-export default function DashboardPage({
-  auth,
-  response,
-  serverData,
-}: PageProps) {
-  if (!auth.user_id) {
-    response.redirect("/login");
-    return null;
-  }
+// `app/dashboard/page.tsx` → `/dashboard`. The dashboard layout owns the auth
+// gate and the shell chrome; this page reads the active org's rows during the
+// render via `serverData` + React 19 `use()` — resolved server-side and
+// replayed on hydration, so the dashboard paints with real data on the first
+// byte (no client fetch, no empty-state flash).
+export default function DashboardPage({ auth, serverData }: PageProps) {
   // No active workspace (signup's auto-provision failed, or the user left/
   // deleted their last org). Every read below is tenant-scoped, so instead of
   // an empty shell, provision one client-side and reload into a ready dashboard.
+  // The layout renders this bare (no shell) when there's no tenant.
   if (!auth.tenant_id) {
     return <ProvisionWorkspace />;
   }
-  const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
+  const me = use(serverData.get<{ email?: string }>("User", auth.user_id!));
   const org = use(serverData.get<{ name?: string }>("Org", auth.tenant_id));
   const projects = use(serverData.list<Project>("Project"));
   const members = use(serverData.list<OrgMemberRow>("OrgMember"));
@@ -51,20 +41,13 @@ export default function DashboardPage({
   );
   const plan = active ? active.plan : "free";
   return (
-    <DashboardShell
-      active="overview"
-      title="Overview"
-      userEmail={me?.email ?? ""}
+    <Overview
+      tenantId={auth.tenant_id}
       orgName={org?.name}
-    >
-      <Overview
-        tenantId={auth.tenant_id}
-        orgName={org?.name}
-        userEmail={me?.email}
-        projects={projects}
-        memberCount={memberCount}
-        plan={plan}
-      />
-    </DashboardShell>
+      userEmail={me?.email}
+      projects={projects}
+      memberCount={memberCount}
+      plan={plan}
+    />
   );
 }

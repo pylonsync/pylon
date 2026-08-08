@@ -1,22 +1,26 @@
 import React from "react";
-import { Link } from "@pylonsync/react";
+import { Link, type PageAuth, type SsrResponse } from "@pylonsync/react";
 
-// Server-rendered split-screen shell for /login and /signup: the form on the
-// left, a brand/testimonial panel on the right (hidden on small screens). The
-// form itself (the client island) is passed in as `children`.
-export function AuthShell({
-  title,
-  switchPrompt,
-  switchLabel,
-  switchHref,
-  children,
-}: {
-  title: string;
-  switchPrompt: string;
-  switchLabel: string;
-  switchHref: string;
+// `(auth)` route group → the shared split-screen frame for /login and /signup:
+// the form card on the left, a brand/testimonial panel on the right (hidden on
+// small screens). Each page supplies what differs — heading, switch link, and
+// the form — as `children`. The group segment adds no URL prefix, and because
+// these routes sit outside `(marketing)`, none of the site nav/footer renders
+// here.
+interface LayoutProps {
   children: React.ReactNode;
-}) {
+  auth: PageAuth;
+  response: SsrResponse;
+}
+
+export default function AuthLayout({ children, auth, response }: LayoutProps) {
+  // Already signed in? Skip the auth screens entirely. Gating here covers
+  // every page in the group; `response.redirect` runs in the synchronous
+  // shell render, so it's a real 307 before any HTML is sent.
+  if (auth.user_id) {
+    response.redirect("/dashboard");
+    return null;
+  }
   return (
     <div className="grid min-h-screen bg-white lg:grid-cols-2">
       {/* Form side */}
@@ -27,19 +31,7 @@ export function AuthShell({
               A
             </span>
           </Link>
-          <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">
-            {title}
-          </h1>
-          <p className="mt-1 text-[13px] text-zinc-500">
-            {switchPrompt}{" "}
-            <Link
-              href={switchHref}
-              className="font-medium text-zinc-900 underline underline-offset-2"
-            >
-              {switchLabel}
-            </Link>
-          </p>
-          <div className="mt-6">{children}</div>
+          {children}
         </div>
       </div>
 

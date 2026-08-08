@@ -6,11 +6,10 @@ interface LayoutProps {
 }
 
 // The root layout is only the document shell: <html>, <head>, <body>, and the
-// site-wide theme variables. Section chrome lives in route-group layouts —
-// `(marketing)/layout.tsx` adds the nav + footer for every marketing page.
-// Routes outside the group (/login, /signup, /dashboard) render bare here:
-// the auth screens are full-screen and the dashboard brings its own sidebar
-// shell.
+// site-wide theme variables. Each section owns its chrome in its own layout:
+// `(marketing)/layout.tsx` adds the nav + footer, `(auth)/layout.tsx` the
+// split-screen frame for /login + /signup, and `dashboard/layout.tsx` the
+// sidebar shell.
 export default function RootLayout({ children }: LayoutProps) {
   return (
     <html
