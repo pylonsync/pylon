@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/loro",
-  "version": "0.3.384",
+  "version": "0.3.385",
   "description": "Pylon's local-first React layer — wraps loro-crdt with a registry, useLoroDoc hook, and the binary WS wire-format decoder that mirrors crates/router/encode_crdt_frame.",
   "publishConfig": { "access": "public" },
   "type": "module",
