@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/pylonsync/pylon/compare/v0.3.385...v0.4.0) (2026-08-09)
+
+
+### Features
+
+* **auth:** support custom organization roles end-to-end ([84c9a5c](https://github.com/pylonsync/pylon/commit/84c9a5ca946ca6dad4581ab4842f9ab3fe155379))
+
 ## [0.3.96](https://github.com/pylonsync/pylon/compare/v0.3.95...v0.3.96) (2026-05-15)
 
 
