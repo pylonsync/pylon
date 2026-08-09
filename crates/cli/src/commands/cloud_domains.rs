@@ -182,31 +182,49 @@ fn run_verify(
     host_arg: Option<&str>,
     json_mode: bool,
 ) -> ExitCode {
-    let Some(hostname) = host_arg else {
+    let Some(host_or_id) = host_arg else {
         output::print_error("Usage: pylon domains verify <hostname>");
+        return ExitCode::Usage;
+    };
+    // The control plane keys verification by domain id (verifyDomainDNS
+    // takes `domainId`), while the ergonomic CLI form — the one `add`
+    // suggests — is the hostname. Resolve through the same listing the
+    // `list` subcommand renders; a raw id is accepted too.
+    #[derive(serde::Serialize)]
+    struct ListArgs<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+    }
+    let domains: Vec<Domain> =
+        match post_json(creds, "/api/fn/listProjectDomains", &ListArgs { project_id }) {
+            Ok(d) => d,
+            Err(e) => {
+                output::print_error(&e);
+                return ExitCode::Error;
+            }
+        };
+    let Some(domain) = domains
+        .iter()
+        .find(|d| d.hostname.eq_ignore_ascii_case(host_or_id) || d.id == host_or_id)
+    else {
+        output::print_error(&format!(
+            "no domain \"{host_or_id}\" on this project — run: pylon domains list"
+        ));
         return ExitCode::Usage;
     };
     #[derive(serde::Serialize)]
     struct Args<'a> {
-        #[serde(rename = "projectId")]
-        project_id: &'a str,
-        hostname: &'a str,
+        #[serde(rename = "domainId")]
+        domain_id: &'a str,
     }
     #[derive(Deserialize)]
-    #[allow(dead_code)]
     struct Out {
-        ok: Option<bool>,
         status: Option<String>,
-        error: Option<String>,
+        #[serde(rename = "pointsAt")]
+        points_at: Option<String>,
     }
-    let r: Out = match post_json(
-        creds,
-        "/api/fn/verifyDomainDNS",
-        &Args {
-            project_id,
-            hostname,
-        },
-    ) {
+    let r: Out = match post_json(creds, "/api/fn/verifyDomainDNS", &Args { domain_id: &domain.id })
+    {
         Ok(o) => o,
         Err(e) => {
             output::print_error(&e);
@@ -217,19 +235,39 @@ fn run_verify(
         println!(
             "{}",
             serde_json::to_string(&serde_json::json!({
-                "hostname": hostname, "status": r.status, "error": r.error,
+                "hostname": domain.hostname, "status": r.status, "pointsAt": r.points_at,
             }))
             .unwrap_or_default()
         );
-    } else {
-        println!("  Status: {}", r.status.as_deref().unwrap_or("?"),);
-        if let Some(e) = &r.error {
-            if !e.is_empty() {
-                println!("  Error: {e}");
-            }
+        return ExitCode::Ok;
+    }
+    match r.status.as_deref() {
+        Some("ok") => {
+            println!("✓ {} — DNS points at the right target", domain.hostname);
+            ExitCode::Ok
+        }
+        Some("wrong") => {
+            println!(
+                "✗ {} resolves to {}, expected {}",
+                domain.hostname,
+                r.points_at.as_deref().unwrap_or("?"),
+                domain.dns_target.as_deref().unwrap_or("the DNS target"),
+            );
+            ExitCode::Error
+        }
+        Some("missing") => {
+            println!(
+                "✗ {} — no DNS record found yet (point it at {})",
+                domain.hostname,
+                domain.dns_target.as_deref().unwrap_or("the DNS target"),
+            );
+            ExitCode::Error
+        }
+        other => {
+            println!("  Status: {}", other.unwrap_or("?"));
+            ExitCode::Ok
         }
     }
-    ExitCode::Ok
 }
 
 fn run_rm(
