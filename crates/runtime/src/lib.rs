@@ -375,6 +375,13 @@ fn validate_encrypted_fields(manifest: &AppManifest) -> Result<(), RuntimeError>
     Ok(())
 }
 
+fn validate_manifest_org_roles(manifest: &AppManifest) -> Result<(), RuntimeError> {
+    pylon_kernel::validate_org_roles(&manifest.auth.org_roles).map_err(|message| RuntimeError {
+        code: "BAD_ORG_ROLE".into(),
+        message,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Runtime errors
 // ---------------------------------------------------------------------------
@@ -741,6 +748,7 @@ impl Runtime {
         // against the runtime's own manifest — so this only bites Postgres.)
         ensure_connection_entity(&mut manifest);
         ensure_cron_lease_entity(&mut manifest);
+        validate_manifest_org_roles(&manifest)?;
         // Serialize this machine's boot DDL against peers sharing the
         // database (see pg_boot_guard) — released by start_server once
         // every backend has bootstrapped its tables.
@@ -1487,6 +1495,7 @@ impl Runtime {
 
         ensure_connection_entity(&mut manifest);
         ensure_cron_lease_entity(&mut manifest);
+        validate_manifest_org_roles(&manifest)?;
         validate_encrypted_fields(&manifest)?;
         // Encryption key + connections requirement check must run
         // BEFORE schema init — a manifest declaring connections

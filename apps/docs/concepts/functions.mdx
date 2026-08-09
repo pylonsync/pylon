@@ -49,8 +49,9 @@ The filename becomes the RPC name — `createMessage` is callable at `POST /api/
 ctx.auth.userId   // string (when auth: "user" | "admin") OR string | null (when auth: "public" | "guest")
 ctx.auth.isAdmin  // boolean
 ctx.auth.tenantId // string | null  (selected org)
+ctx.auth.roles    // string[] (exact active-org/session roles)
 ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER verifying a webhook/HMAC
-// No ctx.auth.email / ctx.auth.roles on the handler ctx — fetch the user row for email:
+// No ctx.auth.email on the handler ctx — fetch the user row for email:
 //   const u = await ctx.db.get("User", ctx.auth.userId)
 
 // ctx.db — on queries (read-only) and mutations (read + write). NOT on actions.

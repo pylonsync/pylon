@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildManifest, entity, field } from "./index";
+import { auth, buildManifest, entity, field } from "./index";
 
 /**
  * The shape callers actually hit.
@@ -65,5 +65,40 @@ describe("entity() sync option", () => {
   test("sync: false still opts out entirely", () => {
     expect(manifestFor(entity("Snap", fields, { sync: false })).entities[0].sync)
       .toBe(false);
+  });
+});
+
+describe("custom organization roles", () => {
+  const base = {
+    name: "roles",
+    version: "1",
+    entities: [],
+    policies: [],
+    routes: [],
+  };
+
+  test("buildManifest accepts the concise auth.orgRoles form", () => {
+    const manifest = buildManifest({
+      ...base,
+      auth: { orgRoles: ["reviewer", "speaker_manager"] },
+    });
+    expect(manifest.auth?.org_roles).toEqual([
+      "reviewer",
+      "speaker_manager",
+    ]);
+  });
+
+  test("the auth() helper emits the same role allowlist", () => {
+    expect(auth({ orgRoles: ["billing"] }).org_roles).toEqual(["billing"]);
+  });
+
+  test("invalid, duplicate, and redeclared built-in roles fail clearly", () => {
+    expect(() => auth({ orgRoles: ["Reviewer"] })).toThrow(
+      "Invalid organization role",
+    );
+    expect(() => auth({ orgRoles: ["reviewer", "reviewer"] })).toThrow(
+      "Duplicate organization role",
+    );
+    expect(() => auth({ orgRoles: ["member"] })).toThrow("is built in");
   });
 });

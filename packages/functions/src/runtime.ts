@@ -35,6 +35,7 @@ import type {
   FnDefinition,
   AuthInfo,
 } from "./types";
+import { normalizeAuthClaims } from "./auth";
 import { makeRequireMember } from "./member";
 import { isDevMode } from "./ssr-runtime";
 import { validateArgs } from "./validators";
@@ -1082,11 +1083,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
   // already got camelCase don't regress.
   const rawAuth = msg.auth as unknown as Record<string, unknown>;
   const auth: AuthInfo = {
-    userId: ((rawAuth.userId ?? rawAuth.user_id) as string | null | undefined) ?? null,
-    isAdmin: Boolean(rawAuth.isAdmin ?? rawAuth.is_admin),
-    tenantId:
-      ((rawAuth.tenantId ?? rawAuth.tenant_id) as string | null | undefined) ??
-      null,
+    ...normalizeAuthClaims(rawAuth),
     // `elevate` round-trips through the host runtime which mutates
     // the per-call caller_is_admin flag — that's what subsequent
     // scheduler.runAfter() reads. We also mutate the local

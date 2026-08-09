@@ -31,7 +31,7 @@ export const Org = entity("Org", {
 export const OrgMember = entity("OrgMember", {
   orgId: field.id("Org"),
   userId: field.id("User"),
-  role: field.string(),    // "owner" | "admin" | "member"
+  role: field.string(),    // built-in or manifest-declared custom role
   joinedAt: field.string(),
 
   // Custom fields:
@@ -94,6 +94,21 @@ With `disabled: true`, the routes return `501 ORG_NOT_CONFIGURED` and the framew
 | Member | No | No | No |
 
 Multiple owners are allowed — the convention is to promote a successor before stepping down.
+
+Apps can declare additional least-privilege roles directly in `buildManifest`:
+
+```typescript
+const manifest = buildManifest({
+  // ...
+  auth: {
+    orgRoles: ["reviewer", "speaker_manager", "billing"],
+  },
+});
+```
+
+The equivalent helper form is `auth: auth({ orgRoles: [...] })`. Role slugs must match `[a-z][a-z0-9_-]{0,63}`. Built-ins are always available and must not be redeclared.
+
+Custom roles are exact-match labels: they do **not** inherit `member`, `admin`, or any other permission. The framework still reserves member management for owners/admins. Grant application permissions explicitly with `auth.hasRole("reviewer")` in policies or `ctx.requireMember(orgId, { role: ["reviewer"] })` in functions.
 
 ## Endpoints
 
@@ -226,7 +241,7 @@ curl -X PUT https://your-app/api/auth/orgs/org_a1b2/members/usr_alice \
 
 Guardrails enforced server-side:
 
-- **Only Owners can promote to Owner.** Admins can't self-promote. `400 BAD_ROLE` for unknown roles, `403 FORBIDDEN` for "only owners can promote a member to owner".
+- **Only Owners can promote to Owner.** Admins can't self-promote. `400 BAD_ROLE` lists the built-in and manifest-declared roles when a role is unknown; `403 FORBIDDEN` is returned when a non-owner tries to promote a member to owner.
 - **The last Owner cannot be demoted.** Demote attempt that would leave 0 owners returns `400 LAST_OWNER`. Promote someone else to Owner first, then demote.
 - **The last Owner cannot be removed.** Same `400 LAST_OWNER` on `DELETE /members/:user_id`.
 
@@ -234,7 +249,7 @@ Self-removal is allowed for any role except a last-Owner without successor.
 
 ## Active tenant — `auth.tenantId`
 
-A session can have an active org. The active tenant is what policies, change-event filters, and `ctx.auth.tenantId` see:
+A session can have an active org. The active tenant is what policies, change-event filters, and `ctx.auth.tenantId` see. Its exact membership role is exposed consistently by `/api/auth/me`, SSR `PageAuth.roles`, policy `auth.hasRole(...)`, and function `ctx.auth.roles`:
 
 ```bash
 curl -X POST https://your-app/api/auth/select-org \

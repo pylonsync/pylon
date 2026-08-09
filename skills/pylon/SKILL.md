@@ -530,10 +530,11 @@ export default action({
 ctx.auth.userId       // string | null  (narrows to string when auth: "user"/"admin")
 ctx.auth.isAdmin      // boolean
 ctx.auth.tenantId     // string | null  (selected org)
+ctx.auth.roles        // string[] (exact active-org/session role slugs)
 await ctx.auth.elevate({ admin: true, reason: "..." })  // async — promote AFTER you verify a webhook/HMAC
 ctx.env               // Record<string,string> — secrets / env (same values as process.env)
 ctx.requireMember(orgId, { role })     // assert org membership/role — throws (UNAUTHENTICATED / MISSING_ORG / FORBIDDEN), fails closed
-// NOTE: there is NO ctx.auth.email and NO ctx.auth.roles on the handler ctx.
+// NOTE: there is NO ctx.auth.email on the handler ctx.
 // Need the email? -> const u = await ctx.db.get("User", ctx.auth.userId)  (query/mutation only)
 
 // ---- query ctx — ctx.db is a READ-ONLY reader (no error, no scheduler, no writes) ----

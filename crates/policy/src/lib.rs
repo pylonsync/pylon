@@ -2151,6 +2151,18 @@ mod tests {
     }
 
     #[test]
+    fn custom_role_policy_checks_are_exact_and_deny_by_default() {
+        let reviewer = AuthContext::user("u-reviewer".into()).with_roles(vec!["reviewer".into()]);
+        assert!(evaluate_allow("auth.hasRole('reviewer')", &reviewer, None, None).is_allowed());
+        assert!(!evaluate_allow("auth.hasRole('member')", &reviewer, None, None).is_allowed());
+        assert!(!evaluate_allow("auth.hasRole('admin')", &reviewer, None, None).is_allowed());
+        assert!(
+            !evaluate_allow("auth.hasAnyRole('owner', 'admin')", &reviewer, None, None,)
+                .is_allowed()
+        );
+    }
+
+    #[test]
     fn parse_quoted_list_comma_inside_string_is_literal() {
         // This is the whole point of the fix.
         assert_eq!(

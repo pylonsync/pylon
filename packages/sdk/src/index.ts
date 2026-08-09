@@ -1408,6 +1408,12 @@ export function policiesToManifest(
  * })
  */
 export type AuthConfig = {
+  /**
+   * Additional organization role slugs. Built-ins (`owner`, `admin`,
+   * `member`) remain available. Custom roles are exact-match labels and do
+   * not inherit member/admin permissions.
+   */
+  orgRoles?: string[];
   user?: {
     /** Manifest entity name pylon treats as the User table. Default `"User"`. */
     entity?: string;
@@ -1621,8 +1627,33 @@ export type ManifestAuthConfig = {
     invite_entity: string;
     disabled: boolean;
   };
+  org_roles: string[];
   trusted_origins: string[];
 };
+
+const BUILTIN_ORG_ROLES = new Set(["owner", "admin", "member"]);
+const ORG_ROLE_PATTERN = /^[a-z][a-z0-9_-]{0,63}$/;
+
+function validateOrgRoles(roles: string[]): string[] {
+  const seen = new Set<string>();
+  return roles.map((role) => {
+    if (!ORG_ROLE_PATTERN.test(role)) {
+      throw new Error(
+        `Invalid organization role "${role}". Roles must match ${ORG_ROLE_PATTERN}`,
+      );
+    }
+    if (BUILTIN_ORG_ROLES.has(role)) {
+      throw new Error(
+        `Organization role "${role}" is built in and must not be redeclared`,
+      );
+    }
+    if (seen.has(role)) {
+      throw new Error(`Duplicate organization role "${role}"`);
+    }
+    seen.add(role);
+    return role;
+  });
+}
 
 /**
  * Build the manifest's `auth` block from the user-facing camelCase
@@ -1653,8 +1684,15 @@ export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
       invite_entity: cfg.org?.inviteEntity ?? "OrgInvite",
       disabled: cfg.org?.disabled ?? false,
     },
+    org_roles: validateOrgRoles(cfg.orgRoles ?? []),
     trusted_origins: cfg.trustedOrigins ?? [],
   };
+}
+
+function isManifestAuthConfig(
+  cfg: ManifestAuthConfig | AuthConfig,
+): cfg is ManifestAuthConfig {
+  return "trusted_origins" in cfg;
 }
 
 export function buildManifest(options: {
@@ -1665,7 +1703,7 @@ export function buildManifest(options: {
   queries?: QueryDefinition[];
   actions?: ActionDefinition[];
   policies?: PolicyDefinition[];
-  auth?: ManifestAuthConfig;
+  auth?: ManifestAuthConfig | AuthConfig;
   llm?: ManifestLlmConfig;
   connections?: ManifestConnection[];
   crons?: ManifestCron[];
@@ -1707,7 +1745,11 @@ export function buildManifest(options: {
     queries: queriesToManifest(options.queries ?? []),
     actions: actionsToManifest(options.actions ?? []),
     policies: policiesToManifest(allPolicies),
-    auth: options.auth ?? auth(),
+    auth: options.auth
+      ? isManifestAuthConfig(options.auth)
+        ? options.auth
+        : auth(options.auth)
+      : auth(),
     ...(options.llm && Object.keys(options.llm).length > 0
       ? { llm: options.llm }
       : {}),

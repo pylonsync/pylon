@@ -9,10 +9,13 @@ This page covers the data model, the policy syntax, and the patterns for typical
 
 ## Roles
 
-`AuthContext.roles` is a string array. You decide the role names. Common choices:
+`AuthContext.roles` is a string array. Organization roles must be built-ins or declared in the app manifest:
 
 ```typescript
-type Role = "admin" | "owner" | "editor" | "viewer" | "billing";
+buildManifest({
+  // ...
+  auth: { orgRoles: ["reviewer", "billing"] },
+});
 ```
 
 Roles are typically stored on a per-user, per-tenant join table:
@@ -37,9 +40,9 @@ When the user calls `/api/auth/select-org`, the runtime loads the matching `OrgM
 
 | Name | What it does |
 | --- | --- |
-| `admin` | Bypasses every policy — `auth.hasRole('x')` returns true for any `x` |
+| `admin` admin context | Bypasses every policy — `auth.hasRole('x')` returns true for any `x` |
 
-No other role has built-in meaning. Requests authenticated with `PYLON_ADMIN_TOKEN` receive `admin`; user accounts do not.
+Organization owners/admins receive only their exact org role in `roles`; framework org-management routes separately authorize those built-ins. Custom roles have no implicit inheritance: a `reviewer` does not satisfy `member` or `admin`. Requests authenticated with `PYLON_ADMIN_TOKEN` are global admin contexts and retain the documented policy bypass.
 
 ## Policy syntax
 
@@ -170,12 +173,12 @@ Inside a `mutation` / `query` / `action`, `ctx.auth` exposes:
 ctx.auth.userId        // string | null
 ctx.auth.isAdmin       // boolean
 ctx.auth.tenantId      // string | null
+ctx.auth.roles         // string[] — exact active-org/session role slugs
 ctx.auth.elevate({ admin: true, reason: "..." })  // promote after verifying a webhook/HMAC
 ```
 
-The handler `ctx.auth` carries **no `roles` array, no `hasRole`, and no `email`** —
-those are policy-expression / session concerns. For the admin case, `ctx.auth.isAdmin`
-is enough. To gate a function on org membership or a role, use the first-class
+The handler `ctx.auth` carries no `hasRole` helper and no email. `roles` is useful for
+branching/rendering, but authorization should use the first-class
 `ctx.requireMember` helper — it looks up the membership row and fails closed:
 
 ```typescript
@@ -184,21 +187,28 @@ const member = await ctx.requireMember(args.orgId, { role: "owner" });
 ```
 
 This matters because functions bypass policies — a mutation/action with a forgotten
-membership check is an IDOR. Roles themselves "aren't first-class data" (see below) —
-they're strings on your membership table, which is exactly what `requireMember` reads.
+membership check is an IDOR. The manifest declares which role strings are valid;
+assignments live on the membership table, which is exactly what `requireMember` reads.
 
 ## Granting roles
 
-Roles aren't first-class data — they're just strings on whatever join table you use. Typical "promote to admin" mutation:
+Role assignments are strings on the membership table. Prefer the built-in
+`PUT /api/auth/orgs/:orgId/members/:userId` endpoint, which validates them against
+built-ins plus `auth.orgRoles`. A custom mutation should apply the same allowlist:
 
 ```typescript
 import { mutation, v } from "@pylonsync/functions";
+
+const VALID_ROLES = new Set(["owner", "admin", "member", "reviewer"]);
 
 export default mutation({
   args: { targetUserId: v.string(), role: v.string() },
   async handler(ctx, args) {
     if (!ctx.auth.tenantId) throw new Error("must select an org first");
-    // ctx.auth has no hasRole inside functions — gate on the membership row.
+    if (!VALID_ROLES.has(args.role)) {
+      throw ctx.error("INVALID_ARGS", "role is not declared by this app");
+    }
+    // Gate authorization on the current membership row.
     // requireMember reads OrgMember and throws FORBIDDEN if the caller isn't an owner.
     await ctx.requireMember(ctx.auth.tenantId, { role: "owner" });
 

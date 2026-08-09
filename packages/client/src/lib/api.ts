@@ -210,8 +210,8 @@ export async function updateMemberRole(
 	orgId: string,
 	userId: string,
 	role: string,
-): Promise<{ updated: boolean }> {
-	return req<{ updated: boolean }>(
+): Promise<{ updated: boolean; role: string }> {
+	return req<{ updated: boolean; role: string }>(
 		"PUT",
 		`/api/auth/orgs/${orgId}/members/${userId}`,
 		{ role },

@@ -542,7 +542,7 @@ function messageFromError(err: unknown): string {
 			case "INVALID_EMAIL":
 				return "Enter a valid email address.";
 			case "BAD_ROLE":
-				return "Role must be owner, admin, or member.";
+				return err.message;
 			case "LAST_OWNER":
 				return "Can't demote or remove the last owner. Promote someone else first.";
 			case "FORBIDDEN":

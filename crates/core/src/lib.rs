@@ -237,10 +237,42 @@ pub struct ManifestAuthConfig {
     /// get zero-config.
     #[serde(default)]
     pub org: ManifestAuthOrgConfig,
+    /// Additional application-defined organization role slugs. Built-in
+    /// roles (`owner`, `admin`, `member`) are always available and custom
+    /// roles grant no framework permissions implicitly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub org_roles: Vec<String>,
     /// Per-app trusted origins for OAuth `?callback=` validation.
     /// Merged with anything in `PYLON_TRUSTED_ORIGINS` env.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_origins: Vec<String>,
+}
+
+/// Validate application-defined organization role slugs. Kept in the kernel
+/// so every manifest producer/runtime applies the same security boundary.
+pub fn validate_org_roles(roles: &[String]) -> Result<(), String> {
+    let builtins = ["owner", "admin", "member"];
+    let mut seen = std::collections::HashSet::new();
+    for role in roles {
+        let mut chars = role.chars();
+        let valid = matches!(chars.next(), Some('a'..='z'))
+            && role.len() <= 64
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-');
+        if !valid {
+            return Err(format!(
+                "invalid organization role \"{role}\": expected [a-z][a-z0-9_-]{{0,63}}"
+            ));
+        }
+        if builtins.contains(&role.as_str()) {
+            return Err(format!(
+                "organization role \"{role}\" is built in and must not be redeclared"
+            ));
+        }
+        if !seen.insert(role) {
+            return Err(format!("duplicate organization role \"{role}\""));
+        }
+    }
+    Ok(())
 }
 
 /// Org / OrgMember / OrgInvite entity configuration.
@@ -950,6 +982,22 @@ mod tests {
             "entities": [], "routes": [] }"#;
         let m2: AppManifest = serde_json::from_str(no_crons).expect("deserialize without crons");
         assert!(m2.crons.is_empty());
+    }
+
+    #[test]
+    fn manifest_deserializes_custom_org_roles_and_validates_slugs() {
+        let json = r#"{
+            "manifest_version": 1, "name": "t", "version": "0",
+            "entities": [], "routes": [],
+            "auth": { "org_roles": ["reviewer", "speaker_manager"] }
+        }"#;
+        let manifest: AppManifest = serde_json::from_str(json).unwrap();
+        assert_eq!(manifest.auth.org_roles, ["reviewer", "speaker_manager"]);
+        assert!(validate_org_roles(&manifest.auth.org_roles).is_ok());
+
+        assert!(validate_org_roles(&["Reviewer".into()]).is_err());
+        assert!(validate_org_roles(&["member".into()]).is_err());
+        assert!(validate_org_roles(&["reviewer".into(), "reviewer".into()]).is_err());
     }
 
     #[test]

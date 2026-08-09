@@ -65,6 +65,20 @@ describe("ctx.requireMember", () => {
     ).toBe("FORBIDDEN");
   });
 
+  test("custom roles are exact-match and inherit no built-in role", async () => {
+    const reviewer = { id: "m1", role: "reviewer" };
+    const requireMember = makeRequireMember("u1", spyRead([reviewer]).read);
+
+    expect(
+      await codeOf(() =>
+        requireMember("org_1", { role: ["owner", "admin", "member"] }),
+      ),
+    ).toBe("FORBIDDEN");
+    expect(await requireMember("org_1", { role: ["reviewer"] })).toEqual(
+      reviewer,
+    );
+  });
+
   test("role gate: passes when the member's role IS allowed (string or array)", async () => {
     const owner = { id: "m1", role: "owner" };
     expect(

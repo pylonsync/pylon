@@ -1099,30 +1099,20 @@ pub(crate) fn handle(
             ctx.notifier.notify_session_changed(user_id, None);
             return Some((200, serde_json::json!({"tenantId": null}).to_string()));
         }
-        // Look up an OrgMember row matching this user + target org.
-        let filter = serde_json::json!({ "userId": user_id, "orgId": &target });
-        match ctx.store.query_filtered("OrgMember", &filter) {
-            Ok(rows) if !rows.is_empty() => {
-                ctx.session_store.set_tenant(token, Some(target.clone()));
-                ctx.notifier.notify_session_changed(user_id, Some(&target));
-                return Some((200, serde_json::json!({"tenantId": target}).to_string()));
-            }
-            Ok(_) => {
-                return Some((
-                    403,
-                    json_error(
-                        "NOT_A_MEMBER",
-                        "you are not a member of the target organization",
-                    ),
-                ));
-            }
-            Err(e) => {
-                return Some((
-                    500,
-                    json_error_safe("LOOKUP_FAILED", "could not verify membership", &e.message),
-                ));
-            }
+        // Resolve through OrgStore so renamed membership entities and the
+        // manifest role allowlist are applied consistently.
+        if ctx.orgs.role_of(&target, user_id).is_some() {
+            ctx.session_store.set_tenant(token, Some(target.clone()));
+            ctx.notifier.notify_session_changed(user_id, Some(&target));
+            return Some((200, serde_json::json!({"tenantId": target}).to_string()));
         }
+        return Some((
+            403,
+            json_error(
+                "NOT_A_MEMBER",
+                "you are not a member of the target organization",
+            ),
+        ));
     }
 
     // POST /api/auth/magic/send
@@ -4186,12 +4176,18 @@ pub(crate) fn handle(
                 }
                 let data: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
                 let role_str = data.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                let role = match pylon_auth::org::OrgRole::from_str(role_str) {
+                let role = match ctx.orgs.parse_role(role_str) {
                     Some(r) => r,
                     None => {
                         return Some((
                             400,
-                            json_error("BAD_ROLE", "role must be owner|admin|member"),
+                            json_error(
+                                "BAD_ROLE",
+                                &format!(
+                                    "role must be one of: {}",
+                                    ctx.orgs.allowed_roles().join(", ")
+                                ),
+                            ),
                         ))
                     }
                 };
@@ -4230,6 +4226,7 @@ pub(crate) fn handle(
                         }
                     }
                 }
+                let returned_role = role.as_str().to_string();
                 let updated = ctx.orgs.set_role(org_id, target_user, role);
                 if !updated {
                     return Some((
@@ -4237,7 +4234,10 @@ pub(crate) fn handle(
                         json_error("NOT_A_MEMBER", "Target user is not a member"),
                     ));
                 }
-                return Some((200, serde_json::json!({"updated": true}).to_string()));
+                return Some((
+                    200,
+                    serde_json::json!({"updated": true, "role": returned_role}).to_string(),
+                ));
             }
             [_id, "members", target_user] if method == HttpMethod::Delete => {
                 if !caller_role.can_manage_members() && target_user != &user_id.as_str() {
@@ -4296,8 +4296,21 @@ pub(crate) fn handle(
                     .get("role")
                     .and_then(|v| v.as_str())
                     .unwrap_or("member");
-                let role = pylon_auth::org::OrgRole::from_str(role_str)
-                    .unwrap_or(pylon_auth::org::OrgRole::Member);
+                let role = match ctx.orgs.parse_role(role_str) {
+                    Some(role) => role,
+                    None => {
+                        return Some((
+                            400,
+                            json_error(
+                                "BAD_ROLE",
+                                &format!(
+                                    "role must be one of: {}",
+                                    ctx.orgs.allowed_roles().join(", ")
+                                ),
+                            ),
+                        ))
+                    }
+                };
                 let invited = match ctx.orgs.create_invite(org_id, email, role, &user_id) {
                     Some(inv) => inv,
                     None => {
@@ -4450,6 +4463,7 @@ pub(crate) fn handle(
                             pylon_auth::org::AcceptError::AlreadyAccepted => "ALREADY_ACCEPTED",
                             pylon_auth::org::AcceptError::EmailMismatch => "WRONG_EMAIL",
                             pylon_auth::org::AcceptError::AlreadyMember => "ALREADY_MEMBER",
+                            pylon_auth::org::AcceptError::InvalidRole => "BAD_ROLE",
                         };
                         return Some((400, json_error(code, &e.to_string())));
                     }

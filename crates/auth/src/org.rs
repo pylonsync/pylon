@@ -20,7 +20,7 @@
 //!   - `id: string` (auto)
 //!   - `orgId: string` (relation to Org)
 //!   - `userId: string` (relation to User)
-//!   - `role: string` (owner | admin | member)
+//!   - `role: string` (owner | admin | member | manifest-declared custom role)
 //!   - `joinedAt: string` (ISO 8601)
 //!
 //! **OrgInvite**
@@ -49,8 +49,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// Role within an organization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrgRole {
     /// Can do everything, including deleting the org and reassigning
     /// ownership. Multiple owners allowed (pass an existing owner's
@@ -61,9 +60,14 @@ pub enum OrgRole {
     Admin,
     /// Default role for invited members.
     Member,
+    /// App-defined exact-match role. Custom roles deliberately receive no
+    /// built-in member/admin capabilities.
+    Custom(String),
 }
 
 impl OrgRole {
+    /// Parse a built-in role. Use `OrgStore::parse_role` for request values so
+    /// manifest-declared custom roles are included in validation.
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "owner" => Some(Self::Owner),
@@ -72,11 +76,20 @@ impl OrgRole {
             _ => None,
         }
     }
-    pub fn as_str(&self) -> &'static str {
+    fn from_declared(s: &str, declared: &[String]) -> Option<Self> {
+        Self::from_str(s).or_else(|| {
+            declared
+                .iter()
+                .any(|role| role == s)
+                .then(|| Self::Custom(s.to_string()))
+        })
+    }
+    pub fn as_str(&self) -> &str {
         match self {
             Self::Owner => "owner",
             Self::Admin => "admin",
             Self::Member => "member",
+            Self::Custom(role) => role,
         }
     }
     pub fn can_manage_members(&self) -> bool {
@@ -87,6 +100,31 @@ impl OrgRole {
     }
     pub fn can_transfer_ownership(&self) -> bool {
         matches!(self, Self::Owner)
+    }
+}
+
+impl Serialize for OrgRole {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OrgRole {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let role = String::deserialize(deserializer)?;
+        if let Some(builtin) = Self::from_str(&role) {
+            return Ok(builtin);
+        }
+        if pylon_kernel::validate_org_roles(std::slice::from_ref(&role)).is_ok() {
+            return Ok(Self::Custom(role));
+        }
+        Err(serde::de::Error::custom("invalid organization role slug"))
     }
 }
 
@@ -140,6 +178,8 @@ pub enum AcceptError {
     EmailMismatch,
     /// User is already a member of this org via a different path.
     AlreadyMember,
+    /// The invite contains a role that is no longer declared by the app.
+    InvalidRole,
 }
 
 impl std::fmt::Display for AcceptError {
@@ -150,6 +190,7 @@ impl std::fmt::Display for AcceptError {
             Self::AlreadyAccepted => "invite already accepted",
             Self::EmailMismatch => "invite email doesn't match this account",
             Self::AlreadyMember => "user is already a member of this org",
+            Self::InvalidRole => "invite role is not declared by this app",
         })
     }
 }
@@ -168,11 +209,29 @@ impl std::fmt::Display for AcceptError {
 pub struct OrgStore {
     store: Arc<dyn DataStore>,
     cfg: ManifestAuthOrgConfig,
+    declared_roles: Vec<String>,
 }
 
 impl OrgStore {
     pub fn new(store: Arc<dyn DataStore>, cfg: ManifestAuthOrgConfig) -> Self {
-        Self { store, cfg }
+        let declared_roles = store.manifest().auth.org_roles.clone();
+        Self {
+            store,
+            cfg,
+            declared_roles,
+        }
+    }
+
+    /// Validate a role supplied to an org-management endpoint.
+    pub fn parse_role(&self, role: &str) -> Option<OrgRole> {
+        OrgRole::from_declared(role, &self.declared_roles)
+    }
+
+    /// Human-readable allowlist for validation errors.
+    pub fn allowed_roles(&self) -> Vec<&str> {
+        let mut roles = vec!["owner", "admin", "member"];
+        roles.extend(self.declared_roles.iter().map(String::as_str));
+        roles
     }
 
     fn is_disabled(&self) -> bool {
@@ -288,11 +347,13 @@ impl OrgStore {
                 Some(s) => s.to_string(),
                 None => continue,
             };
-            let role = m
+            let Some(role) = m
                 .get("role")
                 .and_then(|v| v.as_str())
-                .and_then(OrgRole::from_str)
-                .unwrap_or(OrgRole::Member);
+                .and_then(|role| self.parse_role(role))
+            else {
+                continue;
+            };
             if let Some(org) = self.get(&org_id) {
                 out.push((org, role));
             }
@@ -313,7 +374,7 @@ impl OrgStore {
             )
             .unwrap_or_default()
             .iter()
-            .map(row_to_membership)
+            .filter_map(|row| row_to_membership(row, &self.declared_roles))
             .collect()
     }
 
@@ -323,7 +384,7 @@ impl OrgStore {
         }
         self.find_member_row(org_id, user_id)
             .and_then(|m| m.get("role").and_then(|v| v.as_str()).map(String::from))
-            .and_then(|s| OrgRole::from_str(&s))
+            .and_then(|s| self.parse_role(&s))
     }
 
     /// Update an existing member's role. Returns true if a row matched.
@@ -464,7 +525,7 @@ impl OrgStore {
             )
             .unwrap_or_default()
             .iter()
-            .map(row_to_invite)
+            .filter_map(|row| row_to_invite(row, &self.declared_roles))
             .collect()
     }
 
@@ -513,7 +574,7 @@ impl OrgStore {
             }
         }
         let row = invite_row.ok_or(AcceptError::NotFound)?;
-        let invite = row_to_invite(&row);
+        let invite = row_to_invite(&row, &self.declared_roles).ok_or(AcceptError::InvalidRole)?;
         if invite.accepted_at.is_some() {
             return Err(AcceptError::AlreadyAccepted);
         }
@@ -601,8 +662,8 @@ fn row_to_org(row: &serde_json::Value) -> Org {
     }
 }
 
-fn row_to_membership(row: &serde_json::Value) -> Membership {
-    Membership {
+fn row_to_membership(row: &serde_json::Value, declared_roles: &[String]) -> Option<Membership> {
+    Some(Membership {
         org_id: row
             .get("orgId")
             .and_then(|v| v.as_str())
@@ -616,14 +677,13 @@ fn row_to_membership(row: &serde_json::Value) -> Membership {
         role: row
             .get("role")
             .and_then(|v| v.as_str())
-            .and_then(OrgRole::from_str)
-            .unwrap_or(OrgRole::Member),
+            .and_then(|role| OrgRole::from_declared(role, declared_roles))?,
         joined_at: parse_unix_seconds(row.get("joinedAt")),
-    }
+    })
 }
 
-fn row_to_invite(row: &serde_json::Value) -> Invite {
-    Invite {
+fn row_to_invite(row: &serde_json::Value, declared_roles: &[String]) -> Option<Invite> {
+    Some(Invite {
         id: row.get("id").and_then(|v| v.as_str()).unwrap_or("").into(),
         org_id: row
             .get("orgId")
@@ -638,8 +698,7 @@ fn row_to_invite(row: &serde_json::Value) -> Invite {
         role: row
             .get("role")
             .and_then(|v| v.as_str())
-            .and_then(OrgRole::from_str)
-            .unwrap_or(OrgRole::Member),
+            .and_then(|role| OrgRole::from_declared(role, declared_roles))?,
         invited_by: row
             .get("invitedBy")
             .and_then(|v| v.as_str())
@@ -662,7 +721,7 @@ fn row_to_invite(row: &serde_json::Value) -> Invite {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(parse_unix_seconds_str),
-    }
+    })
 }
 
 fn parse_unix_seconds(v: Option<&serde_json::Value>) -> u64 {
@@ -765,13 +824,19 @@ mod tests {
 
     impl InMemStore {
         fn new() -> Arc<Self> {
+            Self::with_roles(Vec::new())
+        }
+
+        fn with_roles(org_roles: Vec<String>) -> Arc<Self> {
+            let mut manifest = AppManifest {
+                manifest_version: MANIFEST_VERSION,
+                name: "test".into(),
+                version: "0".into(),
+                ..Default::default()
+            };
+            manifest.auth.org_roles = org_roles;
             Arc::new(Self {
-                manifest: AppManifest {
-                    manifest_version: MANIFEST_VERSION,
-                    name: "test".into(),
-                    version: "0".into(),
-                    ..Default::default()
-                },
+                manifest,
                 rows: Mutex::new(HashMap::new()),
                 next_id: Mutex::new(0),
             })
@@ -913,6 +978,13 @@ mod tests {
         OrgStore::new(InMemStore::new(), ManifestAuthOrgConfig::default())
     }
 
+    fn store_with_roles(roles: &[&str]) -> OrgStore {
+        OrgStore::new(
+            InMemStore::with_roles(roles.iter().map(|role| role.to_string()).collect()),
+            ManifestAuthOrgConfig::default(),
+        )
+    }
+
     #[test]
     fn create_org_seeds_owner_membership() {
         let s = store();
@@ -961,6 +1033,34 @@ mod tests {
         s.add_member(&org.id, "u-bob", OrgRole::Member);
         assert!(s.set_role(&org.id, "u-bob", OrgRole::Admin));
         assert_eq!(s.role_of(&org.id, "u-bob"), Some(OrgRole::Admin));
+    }
+
+    #[test]
+    fn custom_role_round_trips_without_builtin_permissions() {
+        let s = store_with_roles(&["reviewer"]);
+        let org = s.create("Acme", "u-alice").unwrap();
+        let reviewer = s.parse_role("reviewer").unwrap();
+        assert!(!reviewer.can_manage_members());
+        assert!(!reviewer.can_delete_org());
+        assert!(!reviewer.can_transfer_ownership());
+
+        s.add_member(&org.id, "u-bob", OrgRole::Member);
+        assert!(s.set_role(&org.id, "u-bob", reviewer.clone()));
+        assert_eq!(s.role_of(&org.id, "u-bob"), Some(reviewer.clone()));
+
+        let mut auth = crate::AuthContext::user("u-bob".into()).with_tenant(org.id);
+        enrich_active_org_role(&s, &mut auth);
+        assert_eq!(auth.roles, vec!["reviewer"]);
+        assert!(auth.has_role("reviewer"));
+        assert!(!auth.has_role("member"));
+        assert!(!auth.has_role("admin"));
+    }
+
+    #[test]
+    fn undeclared_role_is_rejected_instead_of_normalized() {
+        let s = store_with_roles(&["reviewer"]);
+        assert_eq!(s.parse_role("reviewer").unwrap().as_str(), "reviewer");
+        assert!(s.parse_role("billing").is_none());
     }
 
     // Regression: `to_auth_context` leaves `roles` empty, so without this
@@ -1027,6 +1127,27 @@ mod tests {
             .unwrap();
         assert_eq!(membership.role, OrgRole::Admin);
         assert_eq!(s.role_of(&org.id, "u-bob"), Some(OrgRole::Admin));
+    }
+
+    #[test]
+    fn custom_role_invite_acceptance_preserves_role() {
+        let s = store_with_roles(&["reviewer"]);
+        let org = s.create("Acme", "u-alice").unwrap();
+        let invited = s
+            .create_invite(
+                &org.id,
+                "bob@example.com",
+                s.parse_role("reviewer").unwrap(),
+                "u-alice",
+            )
+            .unwrap();
+        assert_eq!(invited.invite.role.as_str(), "reviewer");
+
+        let membership = s
+            .accept_invite(&invited.token, "u-bob", "bob@example.com")
+            .unwrap();
+        assert_eq!(membership.role.as_str(), "reviewer");
+        assert_eq!(s.role_of(&org.id, "u-bob").unwrap().as_str(), "reviewer");
     }
 
     #[test]

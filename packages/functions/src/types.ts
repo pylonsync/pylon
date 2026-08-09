@@ -47,6 +47,10 @@ export interface AuthInfo<R extends AuthRequirement = "optional"> {
   /** Active tenant id (selected organization) for multi-tenant apps.
    *  Null when the session hasn't selected one. */
   tenantId: string | null;
+  /** Exact role slugs for the active organization/session. Custom roles do
+   *  not imply `member` or `admin`; compare explicitly or use
+   *  `ctx.requireMember` for an authoritative membership lookup. */
+  roles: string[];
   /**
    * Promote the call's auth context after the handler has done its
    * own authentication check (HMAC signature verification on a
