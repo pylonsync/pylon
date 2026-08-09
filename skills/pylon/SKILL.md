@@ -616,6 +616,8 @@ Events: `text_delta {text}` | `tool_use_start {id, name}` | `tool_input_delta {p
 
 **`ctx.stream.write` vs `ctx.rooms.broadcast`.** `ctx.stream.write` reaches only the one client holding the HTTP response (it reads back with `db.streamFn(fn, args)`) — close the tab and the output is gone. `ctx.rooms.broadcast(room, topic, data)` reaches every subscriber of the presence room, so agent output survives a reload, reaches a second device, or ships from a job with no HTTP caller at all. `{ delivered: false }` means the room had no members — a no-op, not an error. Doing both in one handler is normal. Clients join with `useRoom(roomId, userId)` and read pushes via `getSync().subscribeRoomMessages(roomId, (m) => ...)`; server broadcasts arrive with an empty `m.from`.
 
+**`ctx.files.signedUrl(fileId, { ttlSecs })` (≥0.4.1)** — `GET /api/files/<id>` serves only the file's owner (or an unscoped admin). For authorized cross-user reads (an organizer reviewing a member's upload), a server function mints a short-lived signed path: `await ctx.files.signedUrl(fileId, { ttlSecs: 300 })` → `/api/files/<id>?sig=<hmac>&exp=<unix>`, anonymously fetchable (works in `<img src>`). ttl defaults 300s, capped at 24h. Available on query/mutation/action ctx. WHO gets a URL is your function's job — gate the mint with `ctx.requireMember`. Invalid/expired signatures fall through to the normal owner check; nothing becomes enumerable.
+
 **Functions bypass policies** — a `mutation`/`action` that reads or writes another tenant's
 rows without re-checking membership is an IDOR. Use `ctx.requireMember(orgId, { role })` (it
 looks up the membership row and throws `UNAUTHENTICATED`/`FORBIDDEN`) rather than trusting

@@ -59,6 +59,7 @@ ring = { workspace = true }
 # SHA-256 for ctx.connections.* stable id (hash of user+connection
 # name fits Pylon's 40-char id constraint).
 sha2 = { workspace = true }
+hmac = { workspace = true }
 # Image processing pipeline for <Image>.
 #
 # Decode: `image` crate (pure Rust). Handles JPEG, PNG, WebP, GIF

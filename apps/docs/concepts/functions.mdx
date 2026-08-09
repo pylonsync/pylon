@@ -71,7 +71,27 @@ ctx.llm.complete(request)             // LLM completion, returns when the model 
 ctx.llm.stream(request, onEvent)      // LLM completion, event per delta
 ctx.stream.write(text)                // SSE chunk → the one client holding this request
 ctx.rooms.broadcast(room, topic, data) // push → every subscriber of a presence room
+
+// All three flavors:
+ctx.files.signedUrl(fileId, { ttlSecs: 300 })  // mint a short-lived signed download URL
 ```
+
+### Signed file URLs
+
+`GET /api/files/<id>` serves a file only to its owner (or an unscoped admin). When your app's own rules say someone else should see it — an organizer reviewing a member's upload — mint a signed URL from a function that enforces those rules:
+
+```ts
+export default query({
+  args: { eventId: v.id("Event"), fileId: v.string() },
+  async handler(ctx, args) {
+    const event = await ctx.db.get("Event", args.eventId);
+    await ctx.requireMember(event.orgId, { role: "organizer" });
+    return { url: await ctx.files.signedUrl(args.fileId, { ttlSecs: 300 }) };
+  },
+});
+```
+
+The returned path (`/api/files/<id>?sig=<hmac>&exp=<unix>`) is anonymously fetchable until it expires — it works in `<img src>` and download links. `ttlSecs` defaults to 300 and is capped at 24 hours; a signed URL is a bearer capability, so keep lifetimes short. Invalid or expired signatures fall back to the ordinary owner check, so nothing new becomes enumerable.
 
 The three flavors expose different context surfaces:
 

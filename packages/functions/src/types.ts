@@ -644,6 +644,37 @@ export type RequireMember = (
   opts?: RequireMemberOptions,
 ) => Promise<MemberRow>;
 
+/**
+ * Signed file-download URLs. `GET /api/files/<id>` only serves a file to its
+ * owner (or an unscoped admin) — `signedUrl` is the supported way to
+ * authorize a cross-user read: the host mints a short-lived HMAC-signed
+ * path (`/api/files/<id>?sig=...&exp=...`) that the GET handler honors as
+ * an alternative to the owner check, anonymously fetchable (works in
+ * `<img src>` and download links).
+ *
+ * WHO gets a URL is the calling function's responsibility — wrap the mint
+ * in a membership-gated function so authorization stays app-policy-driven:
+ *
+ * ```ts
+ * export default query({
+ *   args: { eventId: v.id("Event"), fileId: v.string() },
+ *   async handler(ctx, args) {
+ *     const event = await ctx.db.get("Event", args.eventId);
+ *     await ctx.requireMember(event.orgId, { role: "organizer" });
+ *     return { url: await ctx.files.signedUrl(args.fileId) };
+ *   },
+ * });
+ * ```
+ */
+export interface Files {
+  /**
+   * Mint a signed download path for a file id. `ttlSecs` defaults to 300
+   * and is capped by the host (24h) — a signed URL is a bearer capability,
+   * so keep lifetimes short.
+   */
+  signedUrl(fileId: string, opts?: { ttlSecs?: number }): Promise<string>;
+}
+
 /** Context for query handlers (read-only).
  *
  * NOTE: `ctx.llm` is NOT exposed here. Queries are reactive: a
@@ -667,6 +698,8 @@ export interface QueryCtx<R extends AuthRequirement = "optional"> {
   error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */
   requireMember: RequireMember;
+  /** Signed file-download URLs — see {@link Files}. */
+  files: Files;
 }
 
 /** Context for mutation handlers (read + write, transactional). */
@@ -683,6 +716,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   rooms: Rooms;
   /** Per-user OAuth connection registry. */
   connections: Connections;
+  /** Signed file-download URLs — see {@link Files}. */
+  files: Files;
   /** Create a typed error that triggers rollback. */
   error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */
@@ -704,6 +739,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   connections: Connections;
   /** Environment variables / secrets. */
   env: Record<string, string>;
+  /** Signed file-download URLs — see {@link Files}. */
+  files: Files;
   /** Run a registered query within its own read transaction. */
   runQuery<T = unknown>(
     fnName: string,

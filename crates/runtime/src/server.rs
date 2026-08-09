@@ -4967,7 +4967,21 @@ fn start_server(
                     || asset_id == "confirm"
                     || asset_id.starts_with("local-put/");
                 if !asset_id.is_empty() && !is_reserved {
-                    if auth_ctx.user_id.is_none() {
+                    // Signed URL (ctx.files.signedUrl): a valid, unexpired
+                    // HMAC over (asset_id, exp) authorizes the read WITHOUT a
+                    // session or owner match — server functions mint these
+                    // behind app-side authorization (e.g. an organizer
+                    // reviewing a speaker's upload gets a URL from a
+                    // membership-gated function). Invalid or expired
+                    // signatures fall through to the ordinary auth + owner
+                    // path rather than erroring, so an owner's stale link
+                    // still serves and nothing new becomes enumerable.
+                    let signed_ok = url
+                        .split_once('?')
+                        .and_then(|(_, q)| crate::file_urls::sig_params(q))
+                        .map(|(sig, exp)| crate::file_urls::verify(asset_id, &exp, &sig))
+                        .unwrap_or(false);
+                    if !signed_ok && auth_ctx.user_id.is_none() {
                         let err = json_error(
                             "AUTH_REQUIRED",
                             "GET /api/files requires an authenticated session",
@@ -5006,7 +5020,8 @@ fn start_server(
                     // acting within a tenant context stays scoped to the owner
                     // check (#354/#355). Only an admin with no active tenant
                     // gets the cross-owner read bypass.
-                    if storage.requires_owner_check() && !auth_ctx.is_unscoped_admin() {
+                    if !signed_ok && storage.requires_owner_check() && !auth_ctx.is_unscoped_admin()
+                    {
                         let owned_by_caller = file_read_authorized(
                             &storage.owner_of(asset_id),
                             auth_ctx.user_id.as_deref(),

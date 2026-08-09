@@ -136,6 +136,13 @@ pub type NestedCallHook = Box<
         + Sync,
 >;
 
+/// Callback for `ctx.files.signedUrl(fileId, {ttlSecs})`. Takes the file id
+/// and an optional TTL, returns the signed download path (or an error pair).
+/// Installed by the runtime, which owns the signing secret; without it,
+/// `ctx.files.signedUrl` returns FILES_SIGNING_NOT_CONFIGURED.
+pub type FileUrlSigner =
+    Box<dyn Fn(&str, Option<u64>) -> Result<String, (String, String)> + Send + Sync>;
+
 /// Callback invoked when an action calls `ctx.email.send(to, subject, body)`.
 /// Returns Ok(()) on transport success, Err(reason) on failure.
 ///
@@ -316,6 +323,7 @@ pub struct FnRunner {
     /// fall back to the old recursive path (no transaction for nested
     /// mutations — documented limitation).
     nested_call_hook: Mutex<Option<NestedCallHook>>,
+    file_url_signer: Mutex<Option<FileUrlSigner>>,
     /// Optional handler for `ctx.email.send(...)`. Apps that don't configure
     /// an email transport see `ctx.email.send` reject with an explicit
     /// error so silently-dropped invite emails surface in the action's
@@ -367,6 +375,7 @@ impl FnRunner {
             trace_log: TraceLog::new(trace_capacity),
             schedule_hook: Mutex::new(None),
             nested_call_hook: Mutex::new(None),
+            file_url_signer: Mutex::new(None),
             email_hook: Mutex::new(None),
             llm_hook: Mutex::new(None),
             llm_stream_hook: Mutex::new(None),
@@ -446,6 +455,12 @@ impl FnRunner {
     /// the outer action's non-transactional store and writes aren't atomic.
     pub fn set_nested_call_hook(&self, hook: NestedCallHook) {
         *self.nested_call_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the signed-file-URL minter backing `ctx.files.signedUrl`.
+    /// The runtime installs this with a closure over its signing secret.
+    pub fn set_file_url_signer(&self, hook: FileUrlSigner) {
+        *self.file_url_signer.lock().unwrap() = Some(hook);
     }
 
     /// Install a callback for `ctx.email.send(to, subject, body)` from
@@ -1449,6 +1464,31 @@ impl FnRunner {
                         );
                         caller_is_admin = true;
                         DbResultMessage::ok(call_id.clone(), serde_json::json!({"elevated": true}))
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::SignFileUrl(req) if req.call_id == call_id => {
+                    // `ctx.files.signedUrl` — mint an HMAC-signed download
+                    // path. Authorization for WHO may receive the URL is the
+                    // calling function's job (membership gates); the runner
+                    // just signs.
+                    let result: Option<Result<String, (String, String)>> = {
+                        let signer = self.file_url_signer.lock().unwrap();
+                        signer.as_ref().map(|cb| cb(&req.file_id, req.ttl_secs))
+                    };
+                    let reply = match result {
+                        Some(Ok(url)) => {
+                            DbResultMessage::ok(call_id.clone(), serde_json::json!(url))
+                        }
+                        Some(Err((code, msg))) => {
+                            DbResultMessage::err(call_id.clone(), &code, &msg)
+                        }
+                        None => DbResultMessage::err(
+                            call_id.clone(),
+                            "FILES_SIGNING_NOT_CONFIGURED",
+                            "this host does not support signed file URLs",
+                        ),
                     };
                     self.send(&reply)?;
                 }

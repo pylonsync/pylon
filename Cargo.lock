@@ -2847,6 +2847,7 @@ version = "0.4.0"
 dependencies = [
  "base64",
  "fast_image_resize",
+ "hmac 0.12.1",
  "image",
  "libc",
  "mozjpeg",

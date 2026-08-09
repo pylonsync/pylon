@@ -4855,6 +4855,17 @@ pub fn try_spawn_functions(
     // to reach the runtime/notifier/plugins.
     for runner in ops.pool.runners() {
         install_nested_call_hook(&ops, runner);
+        // `ctx.files.signedUrl` — the runtime owns the signing secret, the
+        // runner just forwards. Stateless closure, same on every runner.
+        runner.set_file_url_signer(Box::new(|file_id: &str, ttl_secs: Option<u64>| {
+            if file_id.is_empty() || file_id.contains('/') || file_id.contains('?') {
+                return Err((
+                    "INVALID_FILE_ID".into(),
+                    "file id must be a bare asset id".into(),
+                ));
+            }
+            Ok(crate::file_urls::signed_path(file_id, ttl_secs))
+        }));
     }
     register_function_job_handlers(&ops, &job_queue_for_handlers);
     spawn_runtime_supervisor(Arc::clone(&ops));

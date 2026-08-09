@@ -353,6 +353,15 @@ pub enum TsMessage {
     #[serde(rename = "run_fn")]
     RunFn(RunFnMessage),
 
+    /// `ctx.files.signedUrl(fileId, {ttlSecs})` — mint a short-lived
+    /// HMAC-signed download path for `/api/files/<id>`. The host signs
+    /// with its file-URL secret; the GET handler honors the signature
+    /// as an alternative to the owner check, so app functions can
+    /// authorize cross-user reads (review/moderation flows) behind
+    /// their own membership gates.
+    #[serde(rename = "sign_file_url")]
+    SignFileUrl(SignFileUrlMessage),
+
     /// Send a transactional email via the runtime's configured provider.
     /// Only valid from action handlers — mutations + queries reject by
     /// the time the dispatcher hands the message off.
@@ -447,6 +456,7 @@ impl TsMessage {
             TsMessage::ElevateAuth(m) => Some(&m.call_id),
             TsMessage::CancelSchedule(m) => Some(&m.call_id),
             TsMessage::RunFn(m) => Some(&m.call_id),
+            TsMessage::SignFileUrl(m) => Some(&m.call_id),
             TsMessage::SendEmail(m) => Some(&m.call_id),
             TsMessage::LlmComplete(m) => Some(&m.call_id),
             TsMessage::LlmStream(m) => Some(&m.call_id),
@@ -625,6 +635,17 @@ pub struct RunFnMessage {
     pub fn_name: String,
     pub fn_type: FnType,
     pub args: serde_json::Value,
+}
+
+/// See [`TsMessage::SignFileUrl`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignFileUrlMessage {
+    pub call_id: String,
+    pub file_id: String,
+    /// Requested lifetime in seconds. `None` → the host default (300);
+    /// the host clamps to its maximum regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
 }
 
 /// Send a transactional email via the runtime's configured provider.

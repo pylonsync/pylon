@@ -11,6 +11,7 @@ pub mod cron;
 pub mod datastore;
 pub mod dev_diagnostics;
 pub mod encryption;
+pub mod file_urls;
 pub mod frontend;
 pub mod image_optim;
 pub mod ip_limit;
