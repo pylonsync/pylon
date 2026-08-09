@@ -5481,7 +5481,10 @@ fn start_server(
             }
         }
 
-        // --- POST /api/fn/:name with Accept: text/event-stream — streaming functions ---
+        // --- POST /api/fn/:name with Accept: text/event-stream ---
+        // The fast path for callers that can consume SSE. Whether the
+        // response IS SSE is decided by the handler, not the header:
+        // see the content-negotiation comment at the call site below.
         if method == Method::Post
             && url.starts_with("/api/fn/")
             && url != "/api/fn/traces"
@@ -5669,16 +5672,33 @@ fn start_server(
                     roles: auth_ctx.roles.clone(),
                 };
 
-                let (tx, streaming_body) =
-                    bounded_stream(FINITE_STREAM_BUFFER_CAPACITY);
+                // The Accept header alone does not pick the wire format.
+                // MCP streamable-HTTP clients send `Accept:
+                // application/json, text/event-stream` on every POST but
+                // only parse SSE events of the default `message` type —
+                // an unconditional SSE upgrade answers with
+                // `event: result`, which those clients ignore, so they
+                // hang until their timeout. The MCP spec explicitly
+                // permits a plain-JSON answer to a POST that advertises
+                // SSE support. So the response upgrades to SSE only when
+                // the handler actually streams: the first `ctx.stream`
+                // chunk switches the response to SSE; a handler that
+                // completes without streaming gets the same plain-JSON
+                // body as the non-SSE router path.
+                enum FnEvent {
+                    Chunk(String),
+                    Done(Result<serde_json::Value, pylon_functions::runner::FnCallError>),
+                }
+
+                let (ev_tx, ev_rx) =
+                    std::sync::mpsc::sync_channel::<FnEvent>(FINITE_STREAM_BUFFER_CAPACITY);
 
                 let fn_ops_cl = Arc::clone(fn_ops);
-                let tx_stream = tx.clone();
+                let ev_tx_call = ev_tx.clone();
                 std::thread::spawn(move || {
-                    let tx_cb = tx_stream.clone();
+                    let tx_cb = ev_tx_call.clone();
                     let on_stream: Box<dyn FnMut(&str) + Send> = Box::new(move |chunk: &str| {
-                        let sse = format!("data: {}\n\n", chunk);
-                        let _ = tx_cb.send(sse.into_bytes());
+                        let _ = tx_cb.send(FnEvent::Chunk(chunk.to_string()));
                     });
 
                     let result = pylon_router::FnOps::call(
@@ -5689,63 +5709,142 @@ fn start_server(
                         Some(on_stream),
                         None, // streaming /api/fn/:name never carries HTTP request metadata
                     );
-                    match result {
-                        Ok((value, _trace)) => {
-                            let done = format!(
-                                "event: result\ndata: {}\n\n",
-                                serde_json::to_string(&value).unwrap_or_else(|_| "null".into())
+                    let _ = ev_tx_call.send(FnEvent::Done(result.map(|(value, _trace)| value)));
+                });
+                drop(ev_tx);
+
+                // Block until the handler streams or finishes. The
+                // non-SSE router path holds this same worker thread for
+                // the whole call, so waiting here costs nothing extra.
+                // All sends come from the one call thread (the runner
+                // invokes on_stream synchronously), so chunk order and
+                // chunks-before-Done are guaranteed.
+                match ev_rx.recv() {
+                    Err(_) => {
+                        // Call thread died without reporting (panic).
+                        let err = json_error(
+                            "FN_CRASHED",
+                            "Function runner exited before returning a result",
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(500u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", 500);
+                    }
+                    Ok(FnEvent::Done(result)) => {
+                        // Never streamed — answer as plain JSON with the
+                        // router path's exact shapes (raw value on 200,
+                        // json_error on 400).
+                        let (status, resp_body) = match result {
+                            Ok(value) => (
+                                200u16,
+                                serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
+                            ),
+                            Err(e) => (400u16, json_error(&e.code, &e.message)),
+                        };
+                        let response = with_security_headers(
+                            Response::from_string(&resp_body)
+                                .with_status_code(status)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("POST", status);
+                    }
+                    Ok(FnEvent::Chunk(first)) => {
+                        // The handler streams — SSE from here on.
+                        let (tx, streaming_body) = bounded_stream(FINITE_STREAM_BUFFER_CAPACITY);
+                        let _ = tx.send(format!("data: {first}\n\n").into_bytes());
+                        std::thread::spawn(move || {
+                            while let Ok(ev) = ev_rx.recv() {
+                                match ev {
+                                    FnEvent::Chunk(chunk) => {
+                                        let _ =
+                                            tx.send(format!("data: {chunk}\n\n").into_bytes());
+                                    }
+                                    FnEvent::Done(Ok(value)) => {
+                                        let done = format!(
+                                            "event: result\ndata: {}\n\n",
+                                            serde_json::to_string(&value)
+                                                .unwrap_or_else(|_| "null".into())
+                                        );
+                                        let _ = tx.send(done.into_bytes());
+                                    }
+                                    FnEvent::Done(Err(e)) => {
+                                        let err = format!(
+                                            "event: error\ndata: {}\n\n",
+                                            serde_json::json!({"code": e.code, "message": e.message})
+                                        );
+                                        let _ = tx.send(err.into_bytes());
+                                    }
+                                }
+                            }
+                        });
+
+                        let response = with_security_headers(Response::new(
+                            tiny_http::StatusCode(200),
+                            vec![
+                                Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+                                Header::from_bytes("Cache-Control", "no-cache").unwrap(),
+                                Header::from_bytes("Connection", "keep-alive").unwrap(),
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ],
+                            streaming_body,
+                            None,
+                            None,
+                        ));
+                        if let Err(request) = spawn_streaming_response(
+                            request,
+                            response,
+                            &stream_limiter,
+                            dispatch_peer_ip,
+                            Arc::clone(&mt),
+                            "POST".to_string(),
+                            200,
+                        ) {
+                            let body = json_error(
+                                "STREAM_OVERLOADED",
+                                "Server is at its streaming concurrency cap. Retry shortly.",
                             );
-                            let _ = tx_stream.send(done.into_bytes());
-                        }
-                        Err(e) => {
-                            let err = format!(
-                                "event: error\ndata: {}\n\n",
-                                serde_json::json!({"code": e.code, "message": e.message})
+                            let resp = with_security_headers(
+                                Response::from_string(&body)
+                                    .with_status_code(503u16)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes("Retry-After", "1").unwrap(),
+                                    ),
                             );
-                            let _ = tx_stream.send(err.into_bytes());
+                            let _ = request.respond(resp);
+                            mt.record_request("POST", 503);
                         }
                     }
-                });
-
-                let response = with_security_headers(Response::new(
-                    tiny_http::StatusCode(200),
-                    vec![
-                        Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
-                        Header::from_bytes("Cache-Control", "no-cache").unwrap(),
-                        Header::from_bytes("Connection", "keep-alive").unwrap(),
-                        Header::from_bytes(
-                            "Access-Control-Allow-Origin",
-                            cors_origin.as_bytes().to_vec(),
-                        )
-                        .unwrap(),
-                    ],
-                    streaming_body,
-                    None,
-                    None,
-                ));
-                if let Err(request) = spawn_streaming_response(
-                    request,
-                    response,
-                    &stream_limiter,
-                    dispatch_peer_ip,
-                    Arc::clone(&mt),
-                    "POST".to_string(),
-                    200,
-                ) {
-                    let body = json_error(
-                        "STREAM_OVERLOADED",
-                        "Server is at its streaming concurrency cap. Retry shortly.",
-                    );
-                    let resp = with_security_headers(
-                        Response::from_string(&body)
-                            .with_status_code(503u16)
-                            .with_header(
-                                Header::from_bytes("Content-Type", "application/json").unwrap(),
-                            )
-                            .with_header(Header::from_bytes("Retry-After", "1").unwrap()),
-                    );
-                    let _ = request.respond(resp);
-                    mt.record_request("POST", 503);
                 }
                 return;
             }

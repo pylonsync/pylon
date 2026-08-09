@@ -525,6 +525,30 @@ export async function* streamFn(
       accept: "text/event-stream",
     },
   );
+  // The server only upgrades to SSE once the handler actually calls
+  // ctx.stream. A function that completes without streaming answers
+  // with plain JSON (Content-Type: application/json) — the raw return
+  // value on 200, `{"error":{code,message}}` on 400 — so SSE-capable
+  // clients that hit a non-streaming function still get a result.
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.includes("text/event-stream")) {
+    const text = await res.text();
+    if (!res.ok) {
+      let message = `Stream failed: HTTP ${res.status}`;
+      try {
+        const err = JSON.parse(text) as { error?: { message?: string } };
+        if (err.error?.message) message = err.error.message;
+      } catch {
+        // non-JSON error body — keep the HTTP status message
+      }
+      throw new Error(message);
+    }
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return text;
+    }
+  }
   if (!res.ok || !res.body) {
     throw new Error(`Stream failed: HTTP ${res.status}`);
   }

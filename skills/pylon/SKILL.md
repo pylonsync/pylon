@@ -609,6 +609,8 @@ export default action({
 
 Events: `text_delta {text}` | `tool_use_start {id, name}` | `tool_input_delta {partial_json}` | `done {stop_reason, usage}`. Tool arguments arrive as raw JSON fragments — concatenate, parse ONCE at the end (a single fragment is not valid JSON). Same auth gate and model allowlist as `complete`.
 
+**SSE only when the handler streams (≥0.3.380).** `POST /api/fn/:name` with `Accept: text/event-stream` answers as SSE only if the handler actually calls `ctx.stream.write`; a handler that returns without streaming gets plain JSON (the raw return value), same as a JSON-only call. This makes MCP-over-an-action work out of the box — MCP clients advertise SSE on every POST but only parse plain JSON or default-type SSE events, so a non-streaming MCP handler now just works.
+
 **`ctx.stream.write` vs `ctx.rooms.broadcast`.** `ctx.stream.write` reaches only the one client holding the HTTP response (it reads back with `db.streamFn(fn, args)`) — close the tab and the output is gone. `ctx.rooms.broadcast(room, topic, data)` reaches every subscriber of the presence room, so agent output survives a reload, reaches a second device, or ships from a job with no HTTP caller at all. `{ delivered: false }` means the room had no members — a no-op, not an error. Doing both in one handler is normal. Clients join with `useRoom(roomId, userId)` and read pushes via `getSync().subscribeRoomMessages(roomId, (m) => ...)`; server broadcasts arrive with an empty `m.from`.
 
 **Functions bypass policies** — a `mutation`/`action` that reads or writes another tenant's

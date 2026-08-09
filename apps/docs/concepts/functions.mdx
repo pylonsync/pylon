@@ -263,6 +263,12 @@ for await (const chunk of db.streamFn("ask", { question: "why is the sky blue?" 
 }
 ```
 
+The `Accept: text/event-stream` header alone does not force an SSE response. A handler
+that returns without ever calling `ctx.stream.write` answers with plain JSON (the raw
+return value), exactly like a JSON-only call — `db.streamFn` handles both. This is what
+makes serving MCP from an action work: MCP clients advertise SSE support on every POST
+but expect a plain JSON body when the server doesn't stream.
+
 ### Stream events
 
 `onEvent` receives one of four shapes:
