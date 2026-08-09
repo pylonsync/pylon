@@ -1,7 +1,7 @@
 {
   "name": "@pylonsync/functions",
-  "version": "0.3.385",
-  "description": "TypeScript function runtime for pylon \u2014 defines server-side queries, mutations, and actions.",
+  "version": "0.4.0",
+  "description": "TypeScript function runtime for pylon — defines server-side queries, mutations, and actions.",
   "type": "module",
   "main": "src/index.ts",
   "types": "./dist/index.d.ts",
