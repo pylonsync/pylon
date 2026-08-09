@@ -1291,13 +1291,35 @@ export async function discoverAppRoutes(opts?: {
     kind: "og-image" as const,
   }));
 
-  return [
+  // Every navigable route — pages, method handlers, sitemap/robots, dynamic
+  // OG images — shares one first-match-wins table in the Rust matcher, so
+  // they must ALL sort literal-before-parameterized together. Appending the
+  // special kinds after pages let a top-level dynamic page shadow its
+  // literal siblings: with `app/[orgSlug]/page.tsx` in the table first,
+  // GET /opengraph-image (and /sitemap.xml, /robots.txt) matched `/:orgSlug`
+  // and rendered the page's 404 instead of the special route. Boundaries are
+  // excluded — they're picked by longest-prefix, not table order.
+  const tokenRank = (s: string): number =>
+    s.startsWith("*?") ? 3 : s.startsWith("*") ? 2 : s.startsWith(":") ? 1 : 0;
+  const navigable = [
     ...pageRoutes,
-    ...boundaryRoutes,
     ...routeRoutes,
     ...dataRoutes,
     ...ogImageRoutes,
-  ];
+  ].sort((a, b) => {
+    const as = a.path.split("/").filter(Boolean);
+    const bs = b.path.split("/").filter(Boolean);
+    const minLen = Math.min(as.length, bs.length);
+    for (let i = 0; i < minLen; i++) {
+      const ar = tokenRank(as[i]);
+      const br = tokenRank(bs[i]);
+      if (ar !== br) return ar - br; // more specific (lower rank) first
+      if (as[i] !== bs[i]) return as[i] < bs[i] ? -1 : 1;
+    }
+    return as.length - bs.length;
+  });
+
+  return [...navigable, ...boundaryRoutes];
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {

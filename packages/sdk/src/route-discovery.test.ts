@@ -82,4 +82,26 @@ describe("discoverAppRoutes — opengraph-image convention", () => {
     const routes = await discoverAppRoutes();
     expect(routes.some((r) => r.kind === "og-image")).toBe(false);
   });
+
+  test("special routes sort before a top-level dynamic segment", async () => {
+    // The Rust matcher is first-match-wins over the whole table, so the
+    // literal special routes must come before `/:orgSlug` — otherwise
+    // GET /opengraph-image (and /sitemap.xml, /robots.txt) binds
+    // orgSlug="opengraph-image" and renders the page's 404.
+    app({
+      "page.tsx": PAGE,
+      "[orgSlug]/page.tsx": PAGE,
+      "opengraph-image.tsx": OG,
+      "sitemap.ts": "export default function S(){ return []; }",
+      "robots.ts": "export default function R(){ return {}; }",
+    });
+    const routes = await discoverAppRoutes();
+    const idx = (p: string) => routes.findIndex((r) => r.path === p);
+    const dynamic = idx("/:orgSlug");
+    expect(dynamic).toBeGreaterThan(-1);
+    for (const literal of ["/opengraph-image", "/sitemap.xml", "/robots.txt"]) {
+      expect(idx(literal)).toBeGreaterThan(-1);
+      expect(idx(literal)).toBeLessThan(dynamic);
+    }
+  });
 });
