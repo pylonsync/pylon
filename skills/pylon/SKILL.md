@@ -62,7 +62,9 @@ my-app/
                          #   select, badge, table, textarea
   components.json        # shadcn config — `bunx shadcn@latest add <name>` works
   lib/utils.ts           # `cn` (clsx + tailwind-merge)
-  public/                # static assets served verbatim at the root
+  public/                # static assets served verbatim at the root; a real file
+                         #   beats [param]/catch-all route matches (≥0.3.381),
+                         #   static route paths beat files — Next semantics
   package.json           # deps: @pylonsync/sdk, @pylonsync/functions, @pylonsync/react, @pylonsync/client, react, react-dom
                          #   + @pylonsync/cli as a devDependency (so `npm run dev` needs no global install)
   pylon.manifest.json    # GENERATED — never edit by hand

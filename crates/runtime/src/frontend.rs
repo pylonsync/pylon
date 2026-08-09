@@ -1042,6 +1042,22 @@ pub fn try_handle(
                 route = %matched.route.path,
                 "SSR match"
             );
+            // A dynamic-segment match yields to a real `public/` file
+            // (Next semantics) — see dynamic_match_public_override.
+            if let Some(file_path) =
+                dynamic_match_public_override(&public_dir(), &matched.params, path_only)
+            {
+                if let Ok(bytes) = std::fs::read(&file_path) {
+                    let ct = content_type_for(&file_path);
+                    let cache = if is_dev_mode() {
+                        "no-cache, must-revalidate"
+                    } else {
+                        "public, max-age=3600"
+                    };
+                    respond_static_file(request, bytes, ct, cache, cors_origin);
+                    return Ok(());
+                }
+            }
             // #277 Stage 2 — on-disk ISR fast path. A render that proved
             // itself anonymous-safe (Stage 1 `x-pylon-cacheable`) was teed to
             // `.pylon/.cache/ssr`. Serve it straight off disk — skipping the
@@ -1124,6 +1140,21 @@ pub fn try_handle(
         if matches!(request.method(), Method::Get) {
             if let Some(matched) = match_form_route(&url, &cfg.ssr_routes) {
                 tracing::debug!(url = %url, route = %matched.route.path, "SSR raw GET route");
+                // Same `public/`-beats-dynamic-segments rule as pages.
+                if let Some(file_path) =
+                    dynamic_match_public_override(&public_dir(), &matched.params, path_only)
+                {
+                    if let Ok(bytes) = std::fs::read(&file_path) {
+                        let ct = content_type_for(&file_path);
+                        let cache = if is_dev_mode() {
+                            "no-cache, must-revalidate"
+                        } else {
+                            "public, max-age=3600"
+                        };
+                        respond_static_file(request, bytes, ct, cache, cors_origin);
+                        return Ok(());
+                    }
+                }
                 return serve_via_form_rpc(cfg, matched, request, cors_origin);
             }
         }
@@ -1172,11 +1203,7 @@ pub fn try_handle(
     // resolve_safe traversal guard as dist serving applies (`..`,
     // symlink escapes, and non-files all return None).
     {
-        let public_dir = std::env::current_dir()
-            .ok()
-            .unwrap_or_default()
-            .join("public");
-        if let Some(file_path) = resolve_safe(&public_dir, path_only) {
+        if let Some(file_path) = resolve_safe(&public_dir(), path_only) {
             if let Ok(bytes) = std::fs::read(&file_path) {
                 let ct = content_type_for(&file_path);
                 let cache = if is_dev_mode() {
@@ -1520,6 +1547,36 @@ fn serve_via_proxy(proxy_base: &str, request: Request, cors_origin: &str) -> Res
 // `into_reader` returns a `Box<dyn Read>`. Bring `Read` into scope so
 // `.read_to_end` resolves without a turbofish.
 use std::io::Read as _;
+
+/// The Next-style `public/` root for this process.
+fn public_dir() -> std::path::PathBuf {
+    std::env::current_dir()
+        .ok()
+        .unwrap_or_default()
+        .join("public")
+}
+
+/// A route match that consumed DYNAMIC segments yields to a real file
+/// under `public/`. Next semantics: files in `public/` always win over
+/// `[param]` / catch-all segments, so adding `app/[orgSlug]/page.tsx`
+/// must not swallow `GET /icon.svg` — the segment matcher binds
+/// `orgSlug="icon.svg"`, and the static-serving block sits BELOW the
+/// SSR branch, so without this probe it never runs. A match with no
+/// params is a fully-static route path; that keeps beating files
+/// (Next refuses that collision outright, so the case is unambiguous).
+///
+/// Returns the resolved file path when the match should yield. The
+/// same `resolve_safe` traversal guard as all static serving applies.
+fn dynamic_match_public_override(
+    public_dir: &std::path::Path,
+    params: &std::collections::HashMap<String, String>,
+    path_only: &str,
+) -> Option<std::path::PathBuf> {
+    if params.is_empty() {
+        return None;
+    }
+    resolve_safe(public_dir, path_only)
+}
 
 /// An SSR route hit by an incoming GET, with dynamic-segment
 /// parameters extracted from the URL path.
@@ -4524,6 +4581,56 @@ mod tests {
             deep.params.get("slug").map(String::as_str),
             Some("guides/intro")
         );
+    }
+
+    #[test]
+    fn public_file_beats_dynamic_segments_but_not_static_routes() {
+        // Next semantics: a real file under `public/` wins over a route
+        // match that consumed dynamic segments (`[orgSlug]` binding
+        // "icon.svg"), while a fully-static route path keeps beating
+        // files (Next forbids that collision, so no ambiguity).
+        let dir = std::env::temp_dir().join(format!("pylon-public-{}", std::process::id()));
+        let public = dir.join("public");
+        std::fs::create_dir_all(&public).unwrap();
+        std::fs::write(public.join("icon.svg"), b"<svg/>").unwrap();
+
+        let routes = vec![route("/:orgSlug", None), route("/icon.svg", None)];
+
+        // Dynamic match on a URL where the file exists → yield to file.
+        let dynamic = match_ssr_route("/icon.svg", &[routes[0].clone()]).unwrap();
+        assert!(!dynamic.params.is_empty());
+        let hit = dynamic_match_public_override(&public, &dynamic.params, "/icon.svg");
+        assert!(
+            hit.is_some(),
+            "a [param] match must yield to an existing public/ file"
+        );
+
+        // Dynamic match where no file exists → route keeps it.
+        let dynamic = match_ssr_route("/some-org", &[routes[0].clone()]).unwrap();
+        assert!(
+            dynamic_match_public_override(&public, &dynamic.params, "/some-org").is_none(),
+            "no file on disk — the dynamic route must render"
+        );
+
+        // Static route path match (no params) → route wins even though
+        // the file exists.
+        let static_match = match_ssr_route("/icon.svg", &routes).unwrap();
+        assert_eq!(static_match.route.path, "/:orgSlug"); // first-match table order
+        let fully_static = match_ssr_route("/icon.svg", &[routes[1].clone()]).unwrap();
+        assert!(fully_static.params.is_empty());
+        assert!(
+            dynamic_match_public_override(&public, &fully_static.params, "/icon.svg").is_none(),
+            "a fully-static route path keeps precedence over public/ files"
+        );
+
+        // Catch-all match yields too — params are never empty for `*name`.
+        let ca = match_ssr_route("/icon.svg", &[route("/*rest", None)]).unwrap();
+        assert!(
+            dynamic_match_public_override(&public, &ca.params, "/icon.svg").is_some(),
+            "a catch-all match must yield to an existing public/ file"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
