@@ -195,14 +195,17 @@ fn run_verify(
         #[serde(rename = "projectId")]
         project_id: &'a str,
     }
-    let domains: Vec<Domain> =
-        match post_json(creds, "/api/fn/listProjectDomains", &ListArgs { project_id }) {
-            Ok(d) => d,
-            Err(e) => {
-                output::print_error(&e);
-                return ExitCode::Error;
-            }
-        };
+    let domains: Vec<Domain> = match post_json(
+        creds,
+        "/api/fn/listProjectDomains",
+        &ListArgs { project_id },
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            output::print_error(&e);
+            return ExitCode::Error;
+        }
+    };
     let Some(domain) = domains
         .iter()
         .find(|d| d.hostname.eq_ignore_ascii_case(host_or_id) || d.id == host_or_id)
@@ -223,8 +226,13 @@ fn run_verify(
         #[serde(rename = "pointsAt")]
         points_at: Option<String>,
     }
-    let r: Out = match post_json(creds, "/api/fn/verifyDomainDNS", &Args { domain_id: &domain.id })
-    {
+    let r: Out = match post_json(
+        creds,
+        "/api/fn/verifyDomainDNS",
+        &Args {
+            domain_id: &domain.id,
+        },
+    ) {
         Ok(o) => o,
         Err(e) => {
             output::print_error(&e);
