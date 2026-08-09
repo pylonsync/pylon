@@ -385,6 +385,14 @@ function makeClientServerData(ssrData) {
   };
   const sd = wrap("");
   sd.unsafe = wrap("u:");
+  // serverData.fn(name, args) — key MUST match the server's makeServerData
+  // ("fn:" + name + ":" + stableStringify(args ?? {})) so hydration replays
+  // the query function's SSR'd result without a mismatch.
+  sd.fn = (name, args) => {
+    const key = "fn:" + name + ":" + stableStringify(args ?? {});
+    if (!pc.has(key)) pc.set(key, fulfilledThenable(cache[key]));
+    return pc.get(key);
+  };
   return sd;
 }
 
@@ -411,6 +419,11 @@ function makePendingServerData() {
   };
   const sd = wrap("");
   sd.unsafe = wrap("u:");
+  sd.fn = (name, args) => {
+    const key = "fn:" + name + ":" + stableStringify(args ?? {});
+    if (!pc.has(key)) pc.set(key, pending());
+    return pc.get(key);
+  };
   return sd;
 }
 

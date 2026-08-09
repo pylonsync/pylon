@@ -121,6 +121,24 @@ export interface ServerData {
     total: number;
     tookMs?: number;
   }>;
+  /**
+   * Run a registered QUERY function during the render, with this page's own
+   * auth context (anonymous on a public page). Use when the safe projection
+   * of your data lives in a gated query rather than open row policies —
+   * the query stays the single source of truth for SSR and client alike.
+   *
+   * ```tsx
+   * const schedule = use(
+   *   serverData.fn<Session[]>("getPublicSchedule", { eventId }),
+   * );
+   * ```
+   *
+   * Queries only — mutations/actions are rejected (a GET render must not
+   * mutate). The result is serialized into the hydration payload like any
+   * other serverData read; calling this with a signed-in identity opts the
+   * render out of shared SSR caching (the query may read `ctx.auth`).
+   */
+  fn<T = unknown>(name: string, args?: Record<string, unknown>): Promise<T>;
 }
 
 /**

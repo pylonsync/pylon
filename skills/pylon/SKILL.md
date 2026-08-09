@@ -787,6 +787,8 @@ function PostList({ promise }: { promise: Promise<Post[]> }) {
 
 `serverData` has `get` / `list` / `lookup` / `query` / `queryGraph` / `paginate` / `search` (same read shapes as `ctx.db`). For live, client-updating data prefer a `"use client"` island with `db.useQuery` instead.
 
+**`serverData.fn(name, args)` (≥0.3.385)** — run a registered **query** function during SSR with the page's own auth (anonymous on public pages): `use(serverData.fn<Session[]>("getPublicSchedule", { eventId }))`. Use it when the safe public projection lives in a gated query (published-only rows, stripped fields) instead of open row policies — the query stays the single source of truth for SSR and client. Results replay through the hydration payload like other serverData reads. Mutations/actions are rejected (`FN_TYPE_MISMATCH`). Calling it on a signed-in request opts the render out of shared SSR caching (the query may read `ctx.auth`); anonymous renders stay cacheable.
+
 ### Navigation, images, metadata
 
 - `import { Link, Image } from "@pylonsync/react"` — `<Link href>` = client-side nav; `<Image src width height>` = a built-in optimizer (emits `srcset`; pass `priority` for LCP).

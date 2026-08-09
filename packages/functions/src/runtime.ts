@@ -509,6 +509,26 @@ export function buildDbReader(callId: string, ssrRead = false): DbReader {
   };
 }
 
+/**
+ * Query-function caller for SSR `serverData.fn(name, args)`. Sends the same
+ * `run_fn` frame `ctx.runQuery` uses, on the render's call_id — the host's
+ * render loop executes the query with the PAGE's auth context (anonymous on
+ * public pages) and rejects anything that isn't a query. Legacy rpc() (no
+ * op_id) is correct here: concurrent calls queue settle-chained on the one
+ * call_id, matching how ctx.runQuery behaves inside a function.
+ */
+export function buildSsrFnCaller(
+  callId: string,
+): (name: string, args?: Record<string, unknown>) => Promise<unknown> {
+  return (name, args) =>
+    rpc(callId, {
+      type: "run_fn",
+      fn_name: name,
+      fn_type: "query",
+      args: args ?? {},
+    });
+}
+
 function buildReaderOps(
   callId: string,
   unsafeOp: boolean,

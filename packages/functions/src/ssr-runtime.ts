@@ -2193,7 +2193,19 @@ const SERVER_DATA_METHODS = [
  * can be serialized into `__PYLON_DATA__.ssrData` and replayed on the client
  * — keeping hydration free of mismatches.
  */
-function makeServerData(reader: any, valueCache: Record<string, any>): any {
+export function makeServerData(
+  reader: any,
+  valueCache: Record<string, any>,
+  // `serverData.fn(name, args)` — runs a registered QUERY function with the
+  // page's own auth context (the host's render loop enforces query-only and
+  // executes it exactly like ctx.runQuery). Lets a page SSR data whose safe
+  // public projection lives in a gated query instead of open row policies.
+  callFn?: (name: string, args?: Record<string, unknown>) => Promise<unknown>,
+  // Fired on every serverData.fn call so the render can veto shared caching
+  // when the call carried a real identity (the fn may read ctx.auth, making
+  // its output identity-specific without the page ever touching props.auth).
+  onFnCall?: () => void,
+): any {
   const promiseCache = new Map<string, Promise<any>>();
   const wrap = (r: any, prefix: string): any => {
     const out: any = {};
@@ -2215,6 +2227,23 @@ function makeServerData(reader: any, valueCache: Record<string, any>): any {
   };
   const sd = wrap(reader, "");
   if (reader.unsafe) sd.unsafe = wrap(reader.unsafe, "u:");
+  if (callFn) {
+    sd.fn = (name: string, args?: Record<string, unknown>) => {
+      // Key MUST match the client shim's `fn` key so hydration replays
+      // the value from ssrData without a mismatch.
+      const key = "fn:" + name + ":" + stableStringify(args ?? {});
+      let p = promiseCache.get(key);
+      if (!p) {
+        onFnCall?.();
+        p = callFn(name, args).then((value: any) => {
+          valueCache[key] = value;
+          return value;
+        });
+        promiseCache.set(key, p);
+      }
+      return p;
+    };
+  }
   return sd;
 }
 
@@ -2794,7 +2823,11 @@ export async function handleRenderRoute(
     // gate as a query function's ctx.db, and rejects any write. Promise-
     // cached so `use()` doesn't re-suspend forever; resolved values land in
     // `ssrValueCache` for hydration replay.
-    const { buildDbReader } = await import("./runtime");
+    const { buildDbReader, buildSsrFnCaller } = await import("./runtime");
+    // Reading auth at all (even for an anon request) opts the render OUT of
+    // caching, because the output could differ by identity. Declared before
+    // serverData so `serverData.fn` can flip it too (below).
+    let authTouched = false;
     // `ssrRead: true` — serverData results are serialized into the
     // client-visible `__PYLON_DATA__` blob, so the host applies the same
     // per-row policy filter + `server_only`/`passwordHash` projection the
@@ -2802,6 +2835,19 @@ export async function handleRenderRoute(
     const serverData = makeServerData(
       buildDbReader(msg.call_id, true),
       ssrValueCache,
+      buildSsrFnCaller(msg.call_id),
+      // A query function runs with the page's auth and may read ctx.auth
+      // internally — identity-specific output the read-tracking proxies
+      // can't see. An identity-carrying render that called serverData.fn
+      // must therefore veto shared caches exactly as if it read props.auth.
+      // Anonymous renders stay cacheable: the anonymous result is uniform
+      // across every anonymous visitor.
+      () => {
+        const a = msg.auth as Record<string, unknown> | undefined;
+        if (a && (a.user_id || a.is_admin || a.tenant_id)) {
+          authTouched = true;
+        }
+      },
     );
 
     // #277 cache-safety proof. A render is shareable (CDN/disk cacheable) ONLY
@@ -2820,9 +2866,6 @@ export async function handleRenderRoute(
       return proxy;
     };
 
-    // Reading auth at all (even for an anon request) opts the render OUT of
-    // caching, because the output could differ by identity.
-    let authTouched = false;
     const authProxy = track(
       msg.auth as Record<string, unknown> | undefined,
       () => {

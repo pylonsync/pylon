@@ -95,6 +95,23 @@ Layouts survive client-side navigation — when the user clicks a `<Link>` from 
 
 The whole pipeline is streaming — first byte goes to the client as soon as React emits its first chunk, not after the whole page is built.
 
+## Loading data during the render
+
+Pages read the database mid-render through the `serverData` prop — a read-only, policy-gated handle awaited with React 19 `use()` inside `<Suspense>`. Resolved values replay through the hydration payload, so the client never re-fetches. Writes are rejected: a GET render must not mutate.
+
+When the data you need is shaped by a **query function** rather than raw entity reads — a gated public projection that filters unpublished rows or strips private fields — call the function itself:
+
+```tsx
+export default function EventPage({ params, serverData }: PageProps<{ slug: string }>) {
+  const schedule = use(
+    serverData.fn<Session[]>("getPublicSchedule", { eventSlug: params.slug }),
+  );
+  return <Schedule sessions={schedule} />;
+}
+```
+
+`serverData.fn(name, args)` runs the registered query with the page's own auth context (anonymous on a public page), so the query stays the single source of truth for SSR and client alike. Query functions only — mutations and actions are rejected. Calling it on a signed-in request opts the render out of shared SSR caching, since the query may read `ctx.auth`; anonymous renders stay cacheable.
+
 ## Per-route code splitting
 
 Each page becomes its own entry chunk (~500 bytes gzipped) sharing one big chunk with React + react-dom + Pylon's runtime (~98KB gz). When the user lands on `/hello`, the browser downloads the shared chunk + the `/hello` entry. When they navigate to `/about`, only the `/about` entry hits the wire (a couple hundred bytes); the shared chunk is already cached with `Cache-Control: immutable`.

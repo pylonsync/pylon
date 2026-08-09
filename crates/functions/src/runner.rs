@@ -887,6 +887,64 @@ impl FnRunner {
                     };
                     on_chunk(&bytes);
                 }
+                TsMessage::RunFn(run) if run.call_id == call_id => {
+                    // `serverData.fn(name, args)` — the page runs a registered
+                    // QUERY function with its OWN request auth (anonymous on a
+                    // public page), so a gated query can be the single source
+                    // of truth for both SSR and client data. Query-only: a GET
+                    // render must not mutate (same posture as the
+                    // SSR_WRITE_FORBIDDEN arm above). Executed through the
+                    // same nested-call hook `ctx.runQuery` uses, so tracing
+                    // and store wiring match a function-initiated call.
+                    let reply = if run.fn_type != crate::protocol::FnType::Query {
+                        DbResultMessage::err(
+                            call_id.clone(),
+                            "SSR_FN_NOT_QUERY",
+                            "only query functions can be called during server-side render",
+                        )
+                    } else {
+                        let hook_result: Option<Result<serde_json::Value, (String, String)>> = {
+                            let hook = self.nested_call_hook.lock().unwrap();
+                            hook.as_ref().map(|cb| {
+                                cb(
+                                    &run.fn_name,
+                                    run.fn_type,
+                                    run.args.clone(),
+                                    ssr_auth.clone(),
+                                )
+                            })
+                        };
+                        match hook_result {
+                            Some(Ok(value)) => DbResultMessage::ok(call_id.clone(), value),
+                            Some(Err((code, msg))) => {
+                                DbResultMessage::err(call_id.clone(), &code, &msg)
+                            }
+                            None => {
+                                // No hook installed — direct recursion, same as
+                                // the nested-call fallback in the call loop.
+                                match self.call_inner(
+                                    store,
+                                    &run.fn_name,
+                                    run.fn_type,
+                                    run.args,
+                                    ssr_auth.clone(),
+                                    None,
+                                    None,
+                                ) {
+                                    Ok((value, _nested_trace)) => {
+                                        DbResultMessage::ok(call_id.clone(), value)
+                                    }
+                                    Err(e) => DbResultMessage::err(
+                                        call_id.clone(),
+                                        "FN_CALL_FAILED",
+                                        &e.message,
+                                    ),
+                                }
+                            }
+                        }
+                    };
+                    self.send(&reply)?;
+                }
                 TsMessage::RenderDone(d) if d.call_id == call_id => {
                     return Ok(());
                 }
