@@ -125,6 +125,21 @@ server  →  validates state (CSRF check)                        │
                         └──────────────────────────────────────┘
 ```
 
+## Profile pictures
+
+The provider's profile picture (OIDC `picture` claim, GitHub `avatar_url`) is
+captured on every OAuth login and stored on the account link — refreshed each
+sign-in, so rotated provider CDN URLs never go stale. It surfaces as
+`avatar_url` on:
+
+- `GET /api/auth/me` and `GET /api/auth/session` — for the signed-in user's
+  own account chip (`useSession()` exposes it as `session.avatarUrl`);
+- `GET /api/auth/orgs/:id/members` — so team rosters can render real photos.
+
+The value is `null` for password and magic-link users (no provider picture) —
+render an initials fallback. Only `https://` URLs are stored. When a user has
+several linked providers, the most recently used one wins.
+
 ## Two ways to invoke
 
 ### Browser flow (302 redirect)

@@ -940,10 +940,20 @@ pub(crate) fn handle(
     // calling session_store.resolve here would miss the
     // PYLON_ADMIN_TOKEN bearer-auth branch.
     if url == "/api/auth/me" && method == HttpMethod::Get {
-        return Some((
-            200,
-            serde_json::to_string(ctx.auth_ctx).unwrap_or_else(|_| "{}".into()),
-        ));
+        let mut body = serde_json::to_value(ctx.auth_ctx)
+            .ok()
+            .and_then(|v| match v {
+                serde_json::Value::Object(m) => Some(m),
+                _ => None,
+            })
+            .unwrap_or_default();
+        body.insert(
+            "avatar_url".into(),
+            avatar_url_for_user(ctx, ctx.auth_ctx.user_id.as_deref())
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
+        return Some((200, serde_json::Value::Object(body).to_string()));
     }
 
     // GET /api/auth/session
@@ -979,6 +989,12 @@ pub(crate) fn handle(
             })
             .unwrap_or(serde_json::Value::Null);
         body.insert("user".into(), user_value);
+        body.insert(
+            "avatar_url".into(),
+            avatar_url_for_user(ctx, ctx.auth_ctx.user_id.as_deref())
+                .map(serde_json::Value::String)
+                .unwrap_or(serde_json::Value::Null),
+        );
         return Some((200, serde_json::Value::Object(body).to_string()));
     }
 
@@ -4161,6 +4177,7 @@ pub(crate) fn handle(
                             "joined_at": m.joined_at,
                             "email": email,
                             "name": name,
+                            "avatar_url": avatar_url_for_user(ctx, Some(&m.user_id)),
                         })
                     })
                     .collect();
@@ -6631,7 +6648,50 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-    use super::{insert_oidc_email_claims, oidc_email_is_verified};
+    use super::{insert_oidc_email_claims, newest_avatar, oidc_email_is_verified};
+
+    fn account(provider: &str, avatar: Option<&str>, updated_at: u64) -> pylon_auth::Account {
+        pylon_auth::Account {
+            id: format!("acct_{provider}"),
+            user_id: "u1".into(),
+            provider_id: provider.into(),
+            account_id: format!("{provider}_sub"),
+            access_token: None,
+            refresh_token: None,
+            id_token: None,
+            access_token_expires_at: None,
+            refresh_token_expires_at: None,
+            scope: None,
+            password: None,
+            avatar_url: avatar.map(String::from),
+            created_at: 0,
+            updated_at,
+        }
+    }
+
+    #[test]
+    fn newest_avatar_prefers_most_recent_login_and_skips_blank() {
+        // Google (older) has an avatar; GitHub (newer) also has one —
+        // the LAST provider the user signed in with wins.
+        let picked = newest_avatar(vec![
+            account("google", Some("https://g/pic.png"), 10),
+            account("github", Some("https://gh/pic.png"), 20),
+        ]);
+        assert_eq!(picked.as_deref(), Some("https://gh/pic.png"));
+
+        // A newer account WITHOUT an avatar (password link, Apple) must
+        // not shadow an older one that has one.
+        let picked = newest_avatar(vec![
+            account("google", Some("https://g/pic.png"), 10),
+            account("credential", None, 99),
+            account("apple", Some(""), 98), // blank string == absent
+        ]);
+        assert_eq!(picked.as_deref(), Some("https://g/pic.png"));
+
+        // No provider carries one → None (initials fallback).
+        assert_eq!(newest_avatar(vec![account("credential", None, 1)]), None);
+        assert_eq!(newest_avatar(Vec::new()), None);
+    }
 
     #[test]
     fn oidc_email_claims_mark_password_created_user_unverified() {
@@ -6689,4 +6749,29 @@ mod tests {
             &serde_json::json!({"emailVerified": "éééééééééé"})
         )));
     }
+}
+
+/// The avatar to render for a user: the most recently refreshed OAuth
+/// account link carrying a provider profile picture. `None` for
+/// password/magic-link users (no linked provider with a picture) and
+/// for anonymous/guest callers — apps fall back to initials.
+///
+/// Cost: one indexed accounts-by-user read; only called from the
+/// explicitly-identity-shaped endpoints (/me, /session, org members),
+/// never on the per-request auth path.
+fn avatar_url_for_user(ctx: &RouterContext, user_id: Option<&str>) -> Option<String> {
+    let uid = user_id?;
+    newest_avatar(ctx.account_store.find_for_user(uid))
+}
+
+/// Pure selection: the avatar from the most recently refreshed account
+/// that actually carries one. Multiple linked providers (Google +
+/// GitHub) resolve to whichever the user signed in with last, so the
+/// rendered avatar tracks their latest choice.
+fn newest_avatar(accounts: Vec<pylon_auth::Account>) -> Option<String> {
+    accounts
+        .into_iter()
+        .filter(|a| a.avatar_url.as_deref().is_some_and(|u| !u.is_empty()))
+        .max_by_key(|a| a.updated_at)
+        .and_then(|a| a.avatar_url)
 }

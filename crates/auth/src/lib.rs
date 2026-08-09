@@ -954,11 +954,13 @@ impl OAuthConfig {
                     .and_then(|v| v.as_str())
                     .ok_or("no sub in userinfo")?
                     .to_string();
+                let avatar_url = provider_avatar(&parsed, "picture");
                 Ok(UserInfo {
                     provider: self.provider.clone(),
                     provider_account_id,
                     email,
                     name,
+                    avatar_url,
                 })
             }
             provider::UserinfoParser::GitHub => {
@@ -984,11 +986,13 @@ impl OAuthConfig {
                     })
                     .filter(|s| !s.is_empty())
                     .ok_or("no id in userinfo")?;
+                let avatar_url = provider_avatar(&parsed, "avatar_url");
                 Ok(UserInfo {
                     provider: self.provider.clone(),
                     provider_account_id,
                     email,
                     name,
+                    avatar_url,
                 })
             }
             provider::UserinfoParser::Custom {
@@ -1022,6 +1026,7 @@ impl OAuthConfig {
                     provider_account_id,
                     email,
                     name,
+                    avatar_url: None,
                 })
             }
             provider::UserinfoParser::AppleIdToken => unreachable!("handled above"),
@@ -1106,6 +1111,7 @@ fn parse_apple_id_token(id_token: &str, provider: &str) -> Result<UserInfo, Stri
         provider_account_id,
         email,
         name: None, // Apple sends `name` as a separate form field on FIRST signup only.
+        avatar_url: None, // Apple has no profile-picture concept.
     })
 }
 
@@ -1288,7 +1294,22 @@ fn fetch_linear_userinfo(provider: &str, access_token: &str) -> Result<UserInfo,
         provider_account_id,
         email,
         name,
+        avatar_url: None,
     })
+}
+
+/// Extract a provider profile-picture URL from a userinfo payload.
+/// `key` is the provider's field name (OIDC `picture`, GitHub
+/// `avatar_url`). HTTPS-only: a plain-http (or garbage) value is
+/// dropped rather than persisted — the URL is later rendered verbatim
+/// into `<img src>` on every team roster, so refusing to store a
+/// downgraded scheme here is cheaper than auditing every consumer.
+pub fn provider_avatar(parsed: &serde_json::Value, key: &str) -> Option<String> {
+    parsed
+        .get(key)?
+        .as_str()
+        .filter(|s| s.starts_with("https://"))
+        .map(String::from)
 }
 
 /// JSON-pointer (RFC 6901) string extraction. Returns `None` for
@@ -1318,6 +1339,10 @@ pub struct UserInfo {
     pub provider_account_id: String,
     pub email: String,
     pub name: Option<String>,
+    /// Profile picture URL from the provider (OIDC `picture`, GitHub
+    /// `avatar_url`). `None` when the provider has no picture concept
+    /// (Apple) or the parser doesn't extract one.
+    pub avatar_url: Option<String>,
 }
 
 /// Token bundle returned by [`OAuthConfig::exchange_code_full`]. Stored
@@ -2738,6 +2763,10 @@ pub struct Account {
     /// Always `None` today — present so adding password auth later
     /// doesn't require a schema migration.
     pub password: Option<String>,
+    /// Provider profile-picture URL (OIDC `picture` / GitHub
+    /// `avatar_url`). Refreshed on every OAuth login so stale provider
+    /// CDN URLs self-heal. `None` for password/credential rows.
+    pub avatar_url: Option<String>,
     /// Unix epoch seconds when this account was first linked.
     pub created_at: u64,
     /// Unix epoch seconds when the token bundle was last refreshed.
@@ -2762,6 +2791,7 @@ impl Account {
             refresh_token_expires_at: None,
             scope: tokens.scope.clone(),
             password: None,
+            avatar_url: info.avatar_url.clone(),
             created_at: now,
             updated_at: now,
         }
@@ -3096,6 +3126,71 @@ impl RefreshError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------------------------------------------------------------
+    // Avatar extraction + persistence shape
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn provider_avatar_extracts_https_only() {
+        // OIDC picture claim (Google shape).
+        let oidc = serde_json::json!({
+            "sub": "g-123",
+            "email": "u@example.com",
+            "picture": "https://lh3.googleusercontent.com/a/photo.jpg",
+        });
+        assert_eq!(
+            provider_avatar(&oidc, "picture").as_deref(),
+            Some("https://lh3.googleusercontent.com/a/photo.jpg")
+        );
+
+        // GitHub shape.
+        let gh = serde_json::json!({
+            "id": 42,
+            "avatar_url": "https://avatars.githubusercontent.com/u/42",
+        });
+        assert_eq!(
+            provider_avatar(&gh, "avatar_url").as_deref(),
+            Some("https://avatars.githubusercontent.com/u/42")
+        );
+
+        // Plain-http, non-string, and missing values are all dropped —
+        // the URL is rendered verbatim into <img src> downstream.
+        let bad = serde_json::json!({
+            "picture": "http://insecure.example/pic.png",
+            "avatar_url": 42,
+        });
+        assert_eq!(provider_avatar(&bad, "picture"), None);
+        assert_eq!(provider_avatar(&bad, "avatar_url"), None);
+        assert_eq!(provider_avatar(&bad, "absent"), None);
+    }
+
+    #[test]
+    fn account_new_carries_the_avatar_and_login_refresh_replaces_it() {
+        let mut info = UserInfo {
+            provider: "google".into(),
+            provider_account_id: "g-sub".into(),
+            email: "u@example.com".into(),
+            name: Some("U".into()),
+            avatar_url: Some("https://cdn/old.png".into()),
+        };
+        let tokens = TokenSet {
+            access_token: "at".into(),
+            refresh_token: None,
+            id_token: None,
+            expires_at: None,
+            scope: None,
+        };
+        let first = Account::new("user-1".into(), &info, &tokens);
+        assert_eq!(first.avatar_url.as_deref(), Some("https://cdn/old.png"));
+
+        // The re-login path rebuilds the Account from FRESH userinfo
+        // (router complete_oauth: Account::new + preserved created_at),
+        // so a rotated provider CDN URL replaces the stale one.
+        info.avatar_url = Some("https://cdn/new.png".into());
+        let relogin = Account::new("user-1".into(), &info, &tokens);
+        assert_eq!(relogin.avatar_url.as_deref(), Some("https://cdn/new.png"));
+    }
 
     // ---------------------------------------------------------------
     // Email normalization — lock in the lower/trim shape every auth
@@ -4271,6 +4366,7 @@ mod tests {
             refresh_token_expires_at: None,
             scope: Some("openid email".into()),
             password: None,
+            avatar_url: None,
             created_at: now,
             updated_at: now,
         }

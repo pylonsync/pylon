@@ -108,6 +108,7 @@ fn account_backend_better_auth_schema_full_roundtrip() {
         refresh_token_expires_at: Some(now + 30 * 24 * 3600),
         scope: Some("email profile openid".into()),
         password: None,
+        avatar_url: None,
         created_at: now,
         updated_at: now,
     };
@@ -159,6 +160,7 @@ fn account_backend_credential_provider_stores_password() {
         refresh_token_expires_at: None,
         scope: None,
         password: Some("argon2id$dummy_hash".into()),
+        avatar_url: None,
         created_at: now,
         updated_at: now,
     };
@@ -189,6 +191,7 @@ fn account_backend_find_for_user_lists_multi_provider() {
             refresh_token_expires_at: None,
             scope: None,
             password: None,
+            avatar_url: None,
             created_at: now,
             updated_at: now,
         });

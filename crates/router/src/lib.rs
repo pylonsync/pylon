@@ -906,6 +906,7 @@ pub(crate) fn complete_oauth_login_pkce(
             provider_account_id: format!("dev:{email}"),
             email: email.to_string(),
             name: dev_name.map(String::from),
+            avatar_url: None,
         };
         let tokens = pylon_auth::TokenSet {
             access_token: "dev_access_token".into(),

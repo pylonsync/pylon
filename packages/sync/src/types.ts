@@ -35,6 +35,10 @@ export interface ResolvedSession {
   tenantId: string | null;
   isAdmin: boolean;
   roles: string[];
+  /** Provider profile picture (OAuth `picture` claim), refreshed each
+   *  login. `null` for password/magic-link users — render an initials
+   *  fallback. Absent on servers older than 0.4.2. */
+  avatarUrl?: string | null;
 }
 
 /**

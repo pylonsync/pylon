@@ -360,8 +360,8 @@ export async function createSession(
 
 export async function getAuthContext(
   token?: string
-): Promise<{ user_id: string | null }> {
-  return pylonFetch<{ user_id: string | null }>(
+): Promise<{ user_id: string | null; avatar_url?: string | null }> {
+  return pylonFetch<{ user_id: string | null; avatar_url?: string | null }>(
     { baseUrl: getBaseUrl(), token },
     "/api/auth/me",
   );

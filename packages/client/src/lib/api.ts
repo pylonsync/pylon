@@ -196,6 +196,10 @@ export interface OrgMember {
 	email: string | null;
 	/** Member's display name (displayName / name / fullName), if set. */
 	name: string | null;
+	/** OAuth profile picture from the member's most recent provider login.
+	 *  `null` for password/magic-link users — render an initials fallback.
+	 *  Absent on servers older than 0.4.2. */
+	avatar_url?: string | null;
 }
 
 export async function listOrgMembers(orgId: string): Promise<OrgMember[]> {

@@ -170,17 +170,22 @@ public struct ResolvedSession: Sendable, Codable, Hashable {
     public var tenantId: String?
     public var isAdmin: Bool
     public var roles: [String]
+    /// Provider profile picture (OAuth `picture` claim). `nil` for
+    /// password/magic-link users and on servers older than 0.4.2.
+    public var avatarUrl: String?
 
     public init(
         userId: String? = nil,
         tenantId: String? = nil,
         isAdmin: Bool = false,
-        roles: [String] = []
+        roles: [String] = [],
+        avatarUrl: String? = nil
     ) {
         self.userId = userId
         self.tenantId = tenantId
         self.isAdmin = isAdmin
         self.roles = roles
+        self.avatarUrl = avatarUrl
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -188,6 +193,7 @@ public struct ResolvedSession: Sendable, Codable, Hashable {
         case tenantId = "tenant_id"
         case isAdmin = "is_admin"
         case roles
+        case avatarUrl = "avatar_url"
     }
 }
 

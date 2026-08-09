@@ -43,6 +43,7 @@ export interface TokenTransition {
 
 const EMPTY_SESSION: ResolvedSession = {
   userId: null,
+  avatarUrl: null,
   tenantId: null,
   isAdmin: false,
   roles: [],
@@ -138,5 +139,5 @@ export class SessionResolver {
  *  order doesn't trip the equality check. */
 export function sessionSignature(s: ResolvedSession): string {
   const roles = (s.roles ?? []).slice().sort().join(",");
-  return `${s.userId ?? ""}|${s.tenantId ?? ""}|${s.isAdmin ? "1" : "0"}|${roles}`;
+  return `${s.userId ?? ""}|${s.tenantId ?? ""}|${s.isAdmin ? "1" : "0"}|${roles}|${s.avatarUrl ?? ""}`;
 }

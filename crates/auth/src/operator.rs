@@ -259,6 +259,7 @@ fn account_for(
         refresh_token_expires_at: None,
         scope: None,
         password: Some(password_hash.to_string()),
+        avatar_url: None,
         created_at,
         updated_at,
     }
@@ -433,6 +434,7 @@ mod tests {
             refresh_token_expires_at: None,
             scope: None,
             password: None,
+            avatar_url: None,
             created_at: 0,
             updated_at: 0,
         });
@@ -464,6 +466,7 @@ mod tests {
             refresh_token_expires_at: None,
             scope: None,
             password: Some(password::hash_password(GOOD)),
+            avatar_url: None,
             created_at: 0,
             updated_at: 0,
         });

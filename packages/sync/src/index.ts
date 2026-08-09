@@ -2348,12 +2348,14 @@ export class SyncEngine {
         tenant_id?: string | null;
         is_admin?: boolean;
         roles?: string[];
+        avatar_url?: string | null;
       };
       return {
         userId: raw.user_id ?? null,
         tenantId: raw.tenant_id ?? null,
         isAdmin: raw.is_admin ?? false,
         roles: raw.roles ?? [],
+        avatarUrl: raw.avatar_url ?? null,
       };
     } catch {
       // Swallow — /api/auth/me errors are transient and the next pull
