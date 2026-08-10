@@ -4437,9 +4437,71 @@ pub(crate) fn handle(
         }
     }
 
-    // POST /api/auth/invites/:token/accept
+    // GET /api/auth/invites/:token/accept — the link the invite EMAIL
+    // carries. Browsers navigate with GET, so this arm must never answer
+    // bare JSON: a signed-out click bounces to /login with a `next` that
+    // resumes the accept after sign-in, and every outcome for a signed-in
+    // click is a redirect. The token is the capability (standard for
+    // emailed invite links); the accept itself is idempotent-safe:
+    //  - Ok            → membership created, land on the app root.
+    //  - AlreadyMember → the email matched (accept_invite checks email
+    //    BEFORE membership) and they're in — clicking twice must not
+    //    strand the user on an error page. Same success redirect.
+    //  - AlreadyAccepted → fires before the email check, so it covers
+    //    both the invitee re-clicking a used link AND a stranger holding
+    //    one. Neutral root redirect (`invite=already_accepted`) — no
+    //    membership was granted here either way, so nothing to leak.
+    //  - Everything else → /login?invite_error=<code>, where the app's
+    //    login page can render the failure.
+    // The JSON POST below is unchanged — programmatic accepts (and app
+    // landing pages like /invite/:token) keep their exact contract.
     if let Some(rest) = url.strip_prefix("/api/auth/invites/") {
         if let Some(token) = rest.strip_suffix("/accept") {
+            if method == HttpMethod::Get {
+                let base = auth_link_base(ctx);
+                let redirect = |ctx: &RouterContext, target: String| {
+                    ctx.add_response_header("Location", target);
+                    Some((302, String::new()))
+                };
+                let Some(user_id) = ctx.auth_ctx.user_id.as_deref().map(str::to_string) else {
+                    return redirect(
+                        ctx,
+                        format!("{base}/login?next=/api/auth/invites/{token}/accept"),
+                    );
+                };
+                let email = match ctx
+                    .store
+                    .get_by_id(&ctx.store.manifest().auth.user.entity, &user_id)
+                {
+                    Ok(Some(row)) => match row.get("email").and_then(|v| v.as_str()) {
+                        Some(e) => e.to_string(),
+                        None => {
+                            return redirect(ctx, format!("{base}/login?invite_error=NO_EMAIL"))
+                        }
+                    },
+                    _ => return redirect(ctx, format!("{base}/login?invite_error=AUTH_REQUIRED")),
+                };
+                return match ctx.orgs.accept_invite(token, &user_id, &email) {
+                    Ok(_) | Err(pylon_auth::org::AcceptError::AlreadyMember) => {
+                        redirect(ctx, format!("{base}/?invite=accepted"))
+                    }
+                    Err(pylon_auth::org::AcceptError::AlreadyAccepted) => {
+                        redirect(ctx, format!("{base}/?invite=already_accepted"))
+                    }
+                    Err(e) => {
+                        let code = match e {
+                            pylon_auth::org::AcceptError::NotFound => "INVITE_NOT_FOUND",
+                            pylon_auth::org::AcceptError::Expired => "INVITE_EXPIRED",
+                            pylon_auth::org::AcceptError::EmailMismatch => "WRONG_EMAIL",
+                            pylon_auth::org::AcceptError::InvalidRole => "BAD_ROLE",
+                            // Handled above; kept for exhaustiveness.
+                            pylon_auth::org::AcceptError::AlreadyAccepted
+                            | pylon_auth::org::AcceptError::AlreadyMember => "ALREADY_ACCEPTED",
+                        };
+                        redirect(ctx, format!("{base}/login?invite_error={code}"))
+                    }
+                };
+            }
             if method == HttpMethod::Post {
                 let user_id = match ctx.auth_ctx.user_id.as_deref() {
                     Some(u) => u.to_string(),

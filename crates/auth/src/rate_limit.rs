@@ -46,22 +46,60 @@ pub enum AuthBucket {
 
 impl AuthBucket {
     /// `(per_ip_limit_per_min, per_account_limit_per_hour)`.
+    ///
+    /// Defaults are deliberately tight (Better-Auth-equivalent). Each cap
+    /// is overridable per deployment via env — automated evals, load
+    /// tests, and shared-NAT setups legitimately exceed the single-user
+    /// shape. `0`/invalid values are ignored (the default stays), so a
+    /// typo can't disable a limiter. Read per auth attempt, not per
+    /// request — auth attempts are rare enough that the env syscall is
+    /// irrelevant, and it means a `fly machine update -e` takes effect
+    /// on restart with no code path invalidated.
     fn caps(&self) -> (u32, u32) {
-        match self {
-            // 5 logins/min/IP, 30/hr/account — Better-Auth-equivalent.
-            Self::Login => (5, 30),
+        let (ip_env, acct_env, ip_default, acct_default) = match self {
+            // 5 logins/min/IP, 30/hr/account.
+            Self::Login => (
+                "PYLON_AUTH_LOGIN_IP_PER_MIN",
+                "PYLON_AUTH_LOGIN_ACCOUNT_PER_HOUR",
+                5,
+                30,
+            ),
             // 3 sends/min/IP, 10/hr/email — protects SMS/email spend.
-            Self::Send => (3, 10),
+            Self::Send => (
+                "PYLON_AUTH_SEND_IP_PER_MIN",
+                "PYLON_AUTH_SEND_ACCOUNT_PER_HOUR",
+                3,
+                10,
+            ),
             // 30/min/IP — generous because legitimate flows can retry.
-            Self::Verify => (30, 100),
-            // 30/min/IP — matches Verify because a single sign-in
-            // attempt issues one nonce then one verify; a legit user
-            // who fat-fingers a wallet popup retries a handful of
-            // times. Per-account cap doesn't apply: nonce issuance
-            // has no account binding (the address is attacker-chosen).
-            Self::NonceIssue => (30, 0),
-        }
+            Self::Verify => (
+                "PYLON_AUTH_VERIFY_IP_PER_MIN",
+                "PYLON_AUTH_VERIFY_ACCOUNT_PER_HOUR",
+                30,
+                100,
+            ),
+            // Matches Verify; a legit user retries a handful of times.
+            // Per-account cap doesn't apply: nonce issuance has no
+            // account binding (the address is attacker-chosen).
+            Self::NonceIssue => {
+                return (env_cap("PYLON_AUTH_NONCE_IP_PER_MIN", 30), 0);
+            }
+        };
+        (env_cap(ip_env, ip_default), env_cap(acct_env, acct_default))
     }
+}
+
+/// Parse an env-override cap. `None` (unset), unparsable, or `0` all
+/// yield the default — an override can loosen or tighten, never disable.
+fn parse_cap(value: Option<&str>, default: u32) -> u32 {
+    value
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+fn env_cap(name: &str, default: u32) -> u32 {
+    parse_cap(std::env::var(name).ok().as_deref(), default)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -255,5 +293,21 @@ mod tests {
         // (now-exhausted) per-account bucket from a fresh IP.
         let result = rl.check(bucket, "172.16.0.1", Some("A@B.COM"));
         assert!(matches!(result, RateLimitDecision::Deny { .. }));
+    }
+}
+
+#[cfg(test)]
+mod cap_override_tests {
+    use super::parse_cap;
+
+    #[test]
+    fn parse_cap_honors_valid_overrides_and_rejects_disabling() {
+        assert_eq!(parse_cap(Some("30"), 5), 30); // loosen
+        assert_eq!(parse_cap(Some("2"), 5), 2); // tighten
+        assert_eq!(parse_cap(Some(" 12 "), 5), 12); // whitespace tolerated
+        assert_eq!(parse_cap(Some("0"), 5), 5); // 0 can't disable
+        assert_eq!(parse_cap(Some("-3"), 5), 5); // negative → default
+        assert_eq!(parse_cap(Some("lots"), 5), 5); // garbage → default
+        assert_eq!(parse_cap(None, 5), 5); // unset → default
     }
 }
