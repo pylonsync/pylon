@@ -2413,7 +2413,29 @@ fn start_server(
     // JWT, session. Pre-v0.3.72 the WS path only validated session
     // tokens, leaving admin/API-key/JWT bearers silently broken on
     // WS. Caught in the 2026-05-10 codex pass-3 audit (P3).
+    // Second half of WS identity resolution, mirroring what the HTTP
+    // handler does right after `resolve_bearer_token` (see the
+    // `lift_admin` / `enrich_active_org_role` block in the request
+    // path). The WS handshake resolved the bearer but stopped there, so
+    // sockets carried an EMPTY `roles` vec and any read policy calling
+    // `auth.hasAnyRole(...)` denied every broadcast to that client —
+    // invisible in practice, because unfiltered presence frames kept
+    // flowing on the same socket. Same closure is reused when a client's
+    // active org changes (`hub.set_auth_enricher`), since roles are
+    // per-active-org.
+    let ws_enrich: crate::ws::AuthEnricher = {
+        let rt = Arc::clone(&runtime);
+        let accounts = Arc::clone(&account_store);
+        let orgs_for_ws = Arc::clone(&orgs);
+        Arc::new(move |ctx: &mut pylon_auth::AuthContext| {
+            lift_admin(&rt, ctx);
+            lift_operator(&accounts, ctx);
+            pylon_auth::org::enrich_active_org_role(&orgs_for_ws, ctx);
+        })
+    };
+    ws_hub.set_auth_enricher(Arc::clone(&ws_enrich));
     let ws_auth = Arc::new(crate::ws::WsAuth {
+        enrich: Some(Arc::clone(&ws_enrich)),
         sessions: Arc::clone(&session_store),
         api_keys: Arc::clone(&api_keys),
         admin_token: admin_token.clone(),

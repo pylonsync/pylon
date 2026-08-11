@@ -24,7 +24,25 @@ pub struct WsAuth {
     pub admin_token: Option<String>,
     pub jwt_secret: Option<String>,
     pub jwt_issuer: Option<String>,
+    /// Second half of identity resolution — see [`AuthEnricher`]. `None`
+    /// leaves the raw `resolve_bearer_token` result, which carries no
+    /// active-org role.
+    pub enrich: Option<AuthEnricher>,
 }
+
+/// Completes a freshly-resolved `AuthContext` the way the HTTP handler
+/// does: per-user admin designation (`lift_admin` / `lift_operator`) plus
+/// the caller's role in their ACTIVE org (`enrich_active_org_role`).
+///
+/// `resolve_bearer_token` alone yields identity + tenant but an EMPTY
+/// `roles` vec, because the session store can't resolve org membership.
+/// HTTP (`server.rs`) and SSR (`frontend.rs`) each ran this step; the WS
+/// handshake did not, so every socket filtered broadcasts under an
+/// identity with no roles. Any read policy calling `auth.hasAnyRole(...)`
+/// then denied EVERY change event for that connection — silently, since
+/// presence frames are unfiltered and kept flowing. Cross-client realtime
+/// looked dead on exactly the apps that gate reads by org role.
+pub type AuthEnricher = Arc<dyn Fn(&mut AuthContext) + Send + Sync>;
 use pylon_sync::{ChangeEvent, ChangeKind};
 use tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tungstenite::protocol::Role;
@@ -767,7 +785,12 @@ impl Shard {
     /// requiring a reconnect. Read paths (`broadcast_change`,
     /// `send_text_to_user`) acquire read locks, so a concurrent
     /// update is a brief write-lock contention — no tearing.
-    fn update_tenant_for_user(&self, user_id: &str, new_tenant: Option<&str>) -> usize {
+    fn update_tenant_for_user(
+        &self,
+        user_id: &str,
+        new_tenant: Option<&str>,
+        enrich: Option<&AuthEnricher>,
+    ) -> usize {
         let handles: Vec<ClientSocket> = {
             let clients = self.clients.lock().unwrap();
             clients
@@ -789,6 +812,15 @@ impl Shard {
                 Err(poisoned) => poisoned.into_inner(),
             };
             auth.tenant_id = new_tenant.map(|t| t.to_string());
+            // Roles are per-ACTIVE-ORG, so the old org's role must not
+            // survive the switch — `enrich_active_org_role` no-ops when
+            // `roles` is already populated, so clear before re-running.
+            // Skipped when no enricher is installed: clearing without a
+            // way to repopulate would only lose information.
+            if let Some(enrich) = enrich {
+                auth.roles.clear();
+                enrich(&mut auth);
+            }
             updated += 1;
         }
         updated
@@ -869,6 +901,9 @@ pub struct WsHub {
     /// Auth-user manifest config, used by `maybe_project_user_row`
     /// inside the wire projection.
     auth_user: pylon_kernel::ManifestAuthUserConfig,
+    /// Identity-completion hook re-applied when a client's active org
+    /// changes (`update_tenant_for_user`). See [`AuthEnricher`].
+    auth_enricher: Mutex<Option<AuthEnricher>>,
     /// Per-client CRDT subscriptions. Reader threads register `(entity,
     /// row_id)` pairs as the client mounts/unmounts useLoroDoc hooks;
     /// the binary CRDT broadcast path uses `subscribers()` to filter the
@@ -939,6 +974,7 @@ impl WsHub {
             policy,
             manifest,
             auth_user,
+            auth_enricher: Mutex::new(None),
             subscriptions: CrdtSubscriptions::new(),
             room_subscriptions: RoomSubscriptions::new(),
         })
@@ -1380,10 +1416,24 @@ impl WsHub {
     /// for telemetry — a session-change with zero matching sockets
     /// means the user has no open tabs on this machine.
     pub fn update_tenant_for_user(&self, user_id: &str, new_tenant: Option<&str>) -> usize {
+        let enrich = match self.auth_enricher.lock() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
         self.shards
             .iter()
-            .map(|s| s.update_tenant_for_user(user_id, new_tenant))
+            .map(|s| s.update_tenant_for_user(user_id, new_tenant, enrich.as_ref()))
             .sum()
+    }
+
+    /// Install the identity-completion hook used when a connection's
+    /// active org changes. Set once at boot by the server, which owns the
+    /// org store; see [`AuthEnricher`].
+    pub fn set_auth_enricher(&self, enrich: AuthEnricher) {
+        match self.auth_enricher.lock() {
+            Ok(mut g) => *g = Some(enrich),
+            Err(poisoned) => *poisoned.into_inner() = Some(enrich),
+        }
     }
 
     pub fn send_text_to(&self, client_id: u64, text: &str) {
@@ -1773,6 +1823,16 @@ fn run_authenticated_session(
             }));
             return;
         }
+    };
+    // Finish resolving the identity exactly as HTTP does — admin lift +
+    // active-org role. Without this the socket's `roles` stay empty and
+    // every `auth.hasAnyRole(...)` read policy denies the broadcast.
+    let auth_ctx = {
+        let mut ctx = auth_ctx;
+        if let Some(enrich) = auth.enrich.as_ref() {
+            enrich(&mut ctx);
+        }
+        ctx
     };
     // Anonymous WS connections are accepted — they subscribe to the
     // public broadcast firehose. Per-broadcast policy filtering
@@ -2867,6 +2927,101 @@ mod tests {
             PolicyResult::Allowed => panic!("tenant-B must be denied"),
             PolicyResult::Denied { .. } => {}
         }
+    }
+
+    /// Regression: a WS connection must resolve its identity the SAME
+    /// way HTTP does, including the caller's role in their active org.
+    ///
+    /// `resolve_bearer_token` yields user + tenant but an EMPTY `roles`
+    /// vec — org membership lives in the app's entities, not the session
+    /// store. HTTP and SSR each ran `enrich_active_org_role` afterwards;
+    /// the WS handshake did not. Any read policy calling
+    /// `auth.hasAnyRole(...)` therefore denied EVERY change broadcast to
+    /// that socket, which read as "realtime is dead" while unfiltered
+    /// presence frames kept arriving on the same connection.
+    #[test]
+    fn role_gated_read_needs_the_ws_auth_enricher() {
+        use pylon_kernel::{ManifestEntity, ManifestField, ManifestPolicy};
+
+        let field = |name: &str| ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: false,
+            unique: false,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+            sync_omit: false,
+        };
+        let manifest = pylon_kernel::AppManifest {
+            manifest_version: pylon_kernel::MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![ManifestEntity {
+                name: "Room".into(),
+                fields: vec![field("id"), field("orgId")],
+                ..Default::default()
+            }],
+            // The exact shape a role-gated multi-tenant app uses.
+            policies: vec![ManifestPolicy {
+                name: "room_read".into(),
+                entity: Some("Room".into()),
+                allow_read: Some(
+                    r#"auth.tenantId == data.orgId && auth.hasAnyRole("owner","admin")"#.into(),
+                ),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let policy = PolicyEngine::from_manifest(&manifest);
+        let row = serde_json::json!({"id": "r1", "orgId": "org1"});
+
+        // What the WS handshake produced before the fix: right user, right
+        // tenant, no roles.
+        let mut ctx = AuthContext::user("alice".into()).with_tenant("org1".into());
+        assert!(
+            matches!(
+                policy.check_entity_read("Room", &ctx, Some(&row)),
+                PolicyResult::Denied { .. }
+            ),
+            "an un-enriched socket identity must be denied — this is the bug"
+        );
+
+        // Applying an enricher (server installs one that reads the org
+        // store) completes the identity and the same row now passes.
+        let enrich: AuthEnricher = Arc::new(|c: &mut AuthContext| {
+            if c.roles.is_empty() {
+                c.roles = vec!["owner".to_string()];
+            }
+        });
+        enrich(&mut ctx);
+        assert!(
+            matches!(
+                policy.check_entity_read("Room", &ctx, Some(&row)),
+                PolicyResult::Allowed
+            ),
+            "enriched identity must receive the broadcast"
+        );
+
+        // Org switch: the previous org's role must not survive, or a
+        // member of org1 keeps owner rights while scoped to org2. The
+        // enricher no-ops on a non-empty `roles`, which is why
+        // `update_tenant_for_user` clears before re-running it.
+        ctx.tenant_id = Some("org2".into());
+        ctx.roles.clear();
+        let deny_enrich: AuthEnricher = Arc::new(|_c: &mut AuthContext| {});
+        deny_enrich(&mut ctx);
+        let other_org_row = serde_json::json!({"id": "r2", "orgId": "org2"});
+        assert!(
+            matches!(
+                policy.check_entity_read("Room", &ctx, Some(&other_org_row)),
+                PolicyResult::Denied { .. }
+            ),
+            "stale roles must not carry across an org switch"
+        );
     }
 
     #[test]
