@@ -946,20 +946,29 @@ For Fly.io the common pattern is a 1GB volume mounted at `/data` with `auto_stop
 Once logged in (`pylon login`, or via the dashboard's "Hand off to your coding agent" card → `pylon login --code XXXX-XXXX`), the CLI covers every dashboard operation. Use these instead of clicking through `www.usesmallware.com` for anything scripted.
 
 ```bash
+pylon whoami                             # account + cloud + active project
 pylon projects list                     # all projects you can see
 pylon projects create my-app            # create + provision a project, set it as context
 pylon projects use my-app               # set current project for this dir
 pylon secrets list / set KEY=v / rm KEY / import .env
-pylon logs tail                          # 2s-polling request log
+pylon logs --limit 100                   # last N request-log rows, then exit
+pylon logs tail                          # 2s-polling stream (never exits — use --limit instead)
 pylon status                             # uptime / requests / jobs / WS clients
-pylon deployments list / rollback <id>
+pylon restart --yes                      # cycle the machines, same code
+pylon deployments list / logs [<id>] / rollback <id> --yes
 pylon domains list / add HOST / verify HOST / rm HOST
-pylon db list / backup / restore <id>
+pylon db list / backup / restore <id> --yes
 pylon data entities / list <E> / get <E> <id>
 pylon members list / invite EMAIL [role]
 ```
 
 Every command accepts `--json` for piping to `jq`. Project context resolves from `--project` flag → `$PYLON_PROJECT` → `.pylon/project` file → interactive picker. The `.pylon/project` file is what `pylon projects use` writes; subsequent commands in that directory tree auto-target.
+
+**Start with `pylon whoami`** when a command targets the wrong thing. It reports the account, the cloud origin, and which project is active *and where that slug came from* — a `.pylon/project` inherited from a parent directory is the usual culprit. It also flags a slug that resolves locally but names no project on the account.
+
+**Destructive commands refuse to run unattended without `--yes`**: `restart`, `deployments rollback`, `db restore`, `secrets rm`, `domains rm`. Under `--json` or a non-TTY there is no prompt to answer, so the command errors out instead — pass `--yes` in scripts.
+
+**`pylon restart`** (pylon ≥ 0.4.5) cycles the running process on the code already deployed. Reach for it when the app is wedged or crash-looping — `pylon deploy` rebuilds for no reason and `deployments rollback` ships older code. A stopped machine is started rather than restarted, and multi-region projects cycle one region at a time. Exits non-zero if any region failed to come back, so a script won't move on from a half-recovered app. Requires org owner or admin.
 
 **Project creation** (pylon ≥ 0.3.317): `pylon projects create <slug> [--name <name>] [--org <org-slug>] [--region iad] [--db sqlite|postgres] [--no-wait]`. Creates the project, waits for the Fly machine to provision (~30–60s; Postgres adds a managed-DB provision), pins it as the local context, and prints the live `https://<slug>.smallware.run` URL — so login → create → deploy runs end-to-end without the dashboard. `--org` is only needed when the account belongs to multiple orgs. On older CLI versions (or if the account has no org yet), create the project in the dashboard and run `pylon projects use <slug>` instead.
 
