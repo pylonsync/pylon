@@ -27,6 +27,13 @@ const VALUE_FLAGS: &[&str] = &[
     "--to",
     "--name",
     "--cwd",
+    // Cloud commands. `--project <slug>` in particular is accepted by
+    // every cloud subcommand, and its value looks exactly like the ids
+    // those commands take positionally: `pylon deployments logs
+    // --project acme` read "acme" as a deployment id.
+    "--project",
+    "--limit",
+    "--token",
 ];
 
 /// Short flags that consume the next arg as their value. `-p` is the

@@ -65,26 +65,11 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         print_help();
         return ExitCode::Ok;
     }
-    // Walk the args dropping flag values too (--project <slug>,
-    // --limit N, etc.). Previously the positional filter only
-    // skipped dash-prefixed tokens, so `--project yapless` left
-    // `yapless` floating and got mistaken for a subcommand.
-    let flag_takes_value =
-        |s: &str| matches!(s, "--project" | "--limit" | "--token") && !s.contains('=');
-    let mut positional: Vec<&str> = Vec::new();
-    let mut iter = args.iter().enumerate();
-    while let Some((_, a)) = iter.next() {
-        if a == "logs" {
-            continue;
-        }
-        if a.starts_with('-') {
-            if flag_takes_value(a) {
-                let _ = iter.next();
-            }
-            continue;
-        }
-        positional.push(a.as_str());
-    }
+    // collect_positional drops flag values (--project <slug>,
+    // --limit N) as well as the flags. A filter that only skips
+    // dash-prefixed tokens leaves `yapless` from `--project yapless`
+    // floating, where it gets mistaken for a subcommand.
+    let positional = crate::commands::args::collect_positional(args, "logs");
     match positional.first().copied() {
         Some("tail") | None => run_tail(args, json_mode),
         Some(sub) => {
@@ -156,7 +141,6 @@ fn run_tail(args: &[String], json_mode: bool) -> ExitCode {
 
     let mut cursor: Option<String> = None;
     let mut printed_unavailable = false;
-    let mut emitted: usize = 0;
     loop {
         match fetch_chunk(&creds, &project_id, cursor.as_deref()) {
             Ok(TailResponse::Ok { rows, cursor: next }) => {
@@ -190,7 +174,6 @@ fn run_tail(args: &[String], json_mode: bool) -> ExitCode {
                     } else {
                         print_human(row);
                     }
-                    emitted += 1;
                 }
                 let _ = std::io::stdout().flush();
                 if one_shot {

@@ -24,11 +24,12 @@ struct Deployment {
 }
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
-    let positional: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-') && *a != "deployments")
-        .map(|s| s.as_str())
-        .collect();
+    // collect_positional drops flag VALUES as well as the flags. A
+    // plain "skip anything starting with -" leaves the value of
+    // `--project <slug>` floating, where it gets read as a deployment
+    // id: `pylon deployments logs --project acme` looked up a
+    // deployment called "acme" instead of the latest one.
+    let positional = crate::commands::args::collect_positional(args, "deployments");
     let creds = match require_credentials() {
         Ok(c) => c,
         Err(e) => {
@@ -54,9 +55,14 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     match positional.first().copied() {
         Some("list") | None => run_list(&creds, &project_id, json_mode),
-        Some("rollback") => {
-            run_rollback(&creds, &project_id, positional.get(1).copied(), json_mode)
-        }
+        Some("rollback") => run_rollback(
+            &creds,
+            &project_slug,
+            &project_id,
+            positional.get(1).copied(),
+            args,
+            json_mode,
+        ),
         Some("logs") => run_logs(&creds, &project_id, positional.get(1).copied(), json_mode),
         Some(sub) => {
             output::print_error(&format!("unknown subcommand: \"{sub}\""));
@@ -121,15 +127,28 @@ fn run_list(creds: &Credentials, project_id: &str, json_mode: bool) -> ExitCode 
 
 fn run_rollback(
     creds: &Credentials,
+    project_slug: &str,
     project_id: &str,
     deployment_id: Option<&str>,
+    args: &[String],
     json_mode: bool,
 ) -> ExitCode {
     let Some(id) = deployment_id else {
-        output::print_error("Usage: pylon deployments rollback <deployment-id>");
+        output::print_error("Usage: pylon deployments rollback <deployment-id> [--yes]");
         eprintln!("  Find ids with: pylon deployments list");
         return ExitCode::Usage;
     };
+    // Rollback replaces what production is serving. It sat behind no
+    // confirmation at all while `db restore`, `secrets rm`, and
+    // `domains rm` all required one, so a mistyped id silently shipped
+    // the wrong build.
+    if !output::confirm_destructive(
+        args,
+        &format!("roll {project_slug} back to deployment {id}"),
+        json_mode,
+    ) {
+        return ExitCode::Usage;
+    }
     #[derive(serde::Serialize)]
     struct Args<'a> {
         #[serde(rename = "projectId")]
@@ -339,4 +358,71 @@ fn resolve_project_id(creds: &Credentials, slug: &str) -> Result<String, String>
     let proj: ProjectIdResponse = post_json(creds, "/api/fn/getProjectForCli", &Args { slug })
         .map_err(|e| format!("Could not resolve project \"{slug}\": {e}"))?;
     Ok(proj.id)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::commands::args::collect_positional;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn positional(parts: &[&str]) -> Vec<String> {
+        let args = argv(parts);
+        collect_positional(&args, "deployments")
+            .into_iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn positional_keeps_subcommand_and_id() {
+        assert_eq!(
+            positional(&["deployments", "rollback", "dep_123"]),
+            vec!["rollback", "dep_123"]
+        );
+    }
+
+    #[test]
+    fn positional_drops_the_project_flag_value() {
+        // The value must not survive as a positional — it would be read
+        // as the deployment id.
+        assert_eq!(
+            positional(&["deployments", "logs", "--project", "acme"]),
+            vec!["logs"]
+        );
+    }
+
+    #[test]
+    fn positional_drops_the_project_flag_value_before_the_id() {
+        assert_eq!(
+            positional(&["deployments", "rollback", "--project", "acme", "dep_9"]),
+            vec!["rollback", "dep_9"]
+        );
+    }
+
+    #[test]
+    fn positional_handles_the_equals_form() {
+        // `--project=acme` carries its own value, so the next token is a
+        // real positional and must be kept.
+        assert_eq!(
+            positional(&["deployments", "rollback", "--project=acme", "dep_9"]),
+            vec!["rollback", "dep_9"]
+        );
+    }
+
+    #[test]
+    fn positional_drops_valueless_flags() {
+        assert_eq!(
+            positional(&["deployments", "list", "--json", "--yes"]),
+            vec!["list"]
+        );
+    }
 }

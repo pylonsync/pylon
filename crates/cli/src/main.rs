@@ -73,6 +73,8 @@ fn run() -> ExitCode {
         // themselves. Everyone else falls back to the top-level usage.
         match positional.first().copied() {
             Some("logs") => return commands::cloud_logs::run(&args, json_mode),
+            Some("restart") => return commands::cloud_restart::run(&args, json_mode),
+            Some("whoami") => return commands::whoami::run(&args, json_mode),
             // Commands with focused, flag-level help print it here. Help
             // must never cause a side effect, so this only ever prints.
             Some(cmd) if print_command_help(cmd) => return ExitCode::Ok,
@@ -120,6 +122,7 @@ fn run() -> ExitCode {
         Some("members") => commands::cloud_members::run(&args, json_mode),
         Some("migrate") => commands::migrate::run(&args, json_mode),
         Some("projects") => commands::cloud_projects::run(&args, json_mode),
+        Some("restart") => commands::cloud_restart::run(&args, json_mode),
         Some("runtime") => commands::cloud_runtime::run(&args, json_mode),
         Some("secrets") => commands::cloud_secrets::run(&args, json_mode),
         Some("status") => commands::cloud_status::run(&args, json_mode),
@@ -153,6 +156,7 @@ fn run() -> ExitCode {
         Some("backup") => commands::backup::run_backup(&args, json_mode),
         Some("restore") => commands::backup::run_restore(&args, json_mode),
         Some("version") => commands::version::run(json_mode),
+        Some("whoami") => commands::whoami::run(&args, json_mode),
         Some(cmd) => {
             output::print_error(&format!("unknown command: \"{cmd}\""));
             if let Some(suggestion) = suggest_command(cmd, &TOP_LEVEL_COMMANDS) {
@@ -180,7 +184,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 41] = [
+const TOP_LEVEL_COMMANDS: [&str; 44] = [
     "backup",
     "billing",
     "build",
@@ -212,7 +216,9 @@ const TOP_LEVEL_COMMANDS: [&str; 41] = [
     "migrate",
     "plugins",
     "projects",
+    "restart",
     "restore",
+    "runtime",
     "schema",
     "secrets",
     "seed",
@@ -221,6 +227,7 @@ const TOP_LEVEL_COMMANDS: [&str; 41] = [
     "test",
     "test:security",
     "version",
+    "whoami",
     "help",
 ];
 
@@ -389,6 +396,7 @@ fn print_usage() {
     println!();
     println!("  login                     Authenticate against Pylon Cloud");
     println!("  logout                    Remove stored Pylon Cloud credentials");
+    println!("  whoami                    Show the signed-in account, cloud, and active project");
     println!("  link                      Connect this project to a GitHub repo for auto-deploy");
     println!("  projects [list|create|use|current] List / create / set / show cloud projects");
     println!("  secrets  [list|set|rm|import] Manage project secrets");
@@ -400,6 +408,7 @@ fn print_usage() {
     println!("  members  [list|invite]    Org members");
     println!("  fn <name> [k=v ...]       Call any Pylon Cloud function by name");
     println!("  status                    One-glance project health");
+    println!("  restart                   Restart the project's machines without rebuilding");
     println!("  billing                   Plan, this month's usage + projected charge, invoices");
     println!("  upgrade                   Upgrade the org to Pro (opens Stripe checkout)");
     println!();
@@ -435,6 +444,7 @@ fn print_usage() {
     println!();
     println!("Options:");
     println!("  --json                    Output as JSON");
+    println!("  --yes, -y                 Confirm destructive commands without prompting");
     println!("  --help                    Show this message");
 }
 
