@@ -14,25 +14,25 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.4.3" }
-pylon-http = { path = "../http", version = "0.4.3" }
-pylon-router = { path = "../router", version = "0.4.3" }
-pylon-auth = { path = "../auth", version = "0.4.3" }
-pylon-policy = { path = "../policy", version = "0.4.3" }
-pylon-plugin = { path = "../plugin", version = "0.4.3" }
-pylon-sync = { path = "../sync", version = "0.4.3" }
-pylon-studio-api = { path = "../studio_api", version = "0.4.3" }
-pylon-storage = { path = "../storage", version = "0.4.3", features = ["postgres-live"] }
-pylon-crdt = { path = "../crdt", version = "0.4.3" }
-pylon-functions = { path = "../functions", version = "0.4.3" }
-pylon-migrate = { path = "../migrate", version = "0.4.3" }
-pylon-observability = { path = "../observability", version = "0.4.3" }
-pylon-realtime = { path = "../realtime", version = "0.4.3" }
+pylon-kernel = { path = "../core", version = "0.4.4" }
+pylon-http = { path = "../http", version = "0.4.4" }
+pylon-router = { path = "../router", version = "0.4.4" }
+pylon-auth = { path = "../auth", version = "0.4.4" }
+pylon-policy = { path = "../policy", version = "0.4.4" }
+pylon-plugin = { path = "../plugin", version = "0.4.4" }
+pylon-sync = { path = "../sync", version = "0.4.4" }
+pylon-studio-api = { path = "../studio_api", version = "0.4.4" }
+pylon-storage = { path = "../storage", version = "0.4.4", features = ["postgres-live"] }
+pylon-crdt = { path = "../crdt", version = "0.4.4" }
+pylon-functions = { path = "../functions", version = "0.4.4" }
+pylon-migrate = { path = "../migrate", version = "0.4.4" }
+pylon-observability = { path = "../observability", version = "0.4.4" }
+pylon-realtime = { path = "../realtime", version = "0.4.4" }
 # Cross-machine fanout. Default build links the Noop bus only; the
 # `redis-bus` feature pulls the Redis impl so operators running
 # horizontally-scaled deploys can enable PYLON_CLUSTER_BUS=redis://...
 # without a separate build.
-pylon-cluster = { path = "../cluster", version = "0.4.3", features = ["redis-bus"] }
+pylon-cluster = { path = "../cluster", version = "0.4.4", features = ["redis-bus"] }
 postgres = { workspace = true }
 rusqlite = { workspace = true }
 # Raw accept() with a null address — see `accept_tcp` (panic-proof accept
