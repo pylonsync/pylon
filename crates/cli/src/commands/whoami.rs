@@ -155,11 +155,10 @@ enum ProjectLookup {
 }
 
 fn lookup_project(creds: &Credentials, slug: &str) -> ProjectLookup {
-    let projects: Vec<ProjectEntry> =
-        match post_json(creds, "/api/fn/listMyProjectsForCli", &()) {
-            Ok(p) => p,
-            Err(_) => return ProjectLookup::Unavailable,
-        };
+    let projects: Vec<ProjectEntry> = match post_json(creds, "/api/fn/listMyProjectsForCli", &()) {
+        Ok(p) => p,
+        Err(_) => return ProjectLookup::Unavailable,
+    };
     match projects.into_iter().find(|p| p.slug == slug) {
         Some(p) => ProjectLookup::Found { org: p.org_slug },
         None => ProjectLookup::NotVisible,
