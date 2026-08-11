@@ -826,6 +826,7 @@ export default async function sitemap(): Promise<Sitemap> {
 
 - `import { useRouter, useSearchParams, usePathname, useParams, redirect, notFound } from "@pylonsync/react"` — for `"use client"` components.
 - The `response` prop shapes the HTTP reply from a server component: `response.setStatus(404)`, `response.redirect("/login")`, `response.notFound()`, `response.setHeader(...)`, `response.setCookie(...)`.
+- **Never `window.location` for in-app navigation** — use `<Link>` or `useRouter().push/replace`. A full document load tears down the sync engine and rebuilds it: fresh multi-tab election, fresh WebSocket, fresh initial pull, plus a flash of the old page. It's invisible when it works, so it shows up as "why is every login doing four pulls". The ONE case where a hard load is correct is an identity change — after login/logout you WANT a new document so SSR renders under the new session and the replica resets for the new user (this is why the templates' auth forms call `window.location.assign`). Redirecting inside an effect (`window.location.replace` in a landing page) is the common wrong version.
 
 ### Caching (SSR output cache)
 
