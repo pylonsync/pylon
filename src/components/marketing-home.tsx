@@ -133,8 +133,13 @@ export function MarketingPage({
 				    the headline. DOM order is headline -> copy -> CTAs so the stacked
 				    mobile layout reads correctly; the explicit row/column starts only
 				    apply at lg, where the copy moves up beside the headline. */}
-				<div className="mx-auto max-w-[1180px] px-5 pb-10 pt-14 sm:px-8 sm:pt-20">
-					<div className="flex flex-col gap-7 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,400px)] lg:gap-x-16 lg:gap-y-9">
+				<div className="mx-auto max-w-[1280px] px-5 pb-10 pt-14 sm:px-8 sm:pt-20">
+					{/* The copy column is measured, not proportional: the headline caps
+					    at 14ch, so a `1fr` first column just parks the copy against the
+					    far edge and opens a canyon in the middle. 460px + a 48px gutter
+					    keeps the two blocks reading as one paragraph-and-heading pair at
+					    every width above lg. */}
+					<div className="flex flex-col gap-7 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,460px)] lg:gap-x-12 lg:gap-y-9">
 						<h1 className="max-w-[14ch] text-[clamp(42px,6.2vw,64px)] font-semibold leading-[1.0] tracking-[-0.045em] text-[var(--color-ink)] lg:col-start-1 lg:row-start-1">
 							{/* NBSP, not a space: keeps the accented phrase on one line so the
 							    headline breaks 15 / 13 / 9 instead of orphaning "agents". */}
@@ -166,7 +171,7 @@ export function MarketingPage({
 				{/* The framework on screen: one card per pillar, each running the thing
 				    it describes rather than illustrating it. Shares the copy's measure
 				    so the hero reads as one left-aligned block. */}
-				<div className="mx-auto mt-6 max-w-[1180px] px-5 pb-20 sm:mt-8 sm:px-8 sm:pb-24">
+				<div className="mx-auto mt-6 max-w-[1280px] px-5 pb-20 sm:mt-8 sm:px-8 sm:pb-24">
 					<HeroBento />
 				</div>
 			</header>
@@ -189,16 +194,16 @@ export function MarketingPage({
 						<Link
 							key={a.title}
 							href={a.href}
-							className="group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-[filter,box-shadow] duration-300 ease-[var(--ease-out-quart)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper-1)] [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-visible:grayscale-0 [@media(hover:hover)]:hover:grayscale-0"
+							className="group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper-1)]"
 						>
-							{/* The artifact, cropped by the card so it reads as a window
-							    onto something real rather than a boxed illustration. */}
-							<div className="relative h-[186px] overflow-hidden bg-[var(--color-paper-1)] px-6 pt-6">
-								<div className="h-full overflow-hidden rounded-t-[var(--radius-lg)] border border-b-0 border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[0_8px_24px_-16px_rgba(15,23,42,0.35)]">
-									<a.visual />
-								</div>
+							{/* The artifact itself, cropped by the card. It used to sit in a
+							    third frame — a bordered, shadowed panel inside a padded well
+							    inside the card — so the reader was looking at an illustration
+							    of a screenshot. One surface, one rule under it. */}
+							<div className="h-[168px] overflow-hidden border-b border-[var(--color-rule)]">
+								<a.visual />
 							</div>
-							<div className="flex flex-col gap-2 border-t border-[var(--color-rule)] p-6">
+							<div className="flex flex-col gap-2 p-6">
 								<div className="flex items-center gap-2">
 									<a.icon className="size-4 shrink-0 text-[var(--color-cobalt)]" />
 									<h3 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
@@ -206,7 +211,7 @@ export function MarketingPage({
 									</h3>
 									<ArrowUpRight className="ml-auto size-3.5 shrink-0 text-[var(--color-ink-4)] opacity-0 transition-opacity duration-200 group-focus-visible:opacity-100 group-hover:opacity-100" />
 								</div>
-								<p className="text-[13.5px] leading-[1.55] text-[var(--color-ink-2)]">
+								<p className="text-[14px] leading-[1.6] text-[var(--color-ink-2)]">
 									{a.desc}
 								</p>
 							</div>
@@ -219,9 +224,7 @@ export function MarketingPage({
 			<Section id="model">
 				<div className="grid items-center gap-12 lg:grid-cols-2 lg:gap-16">
 					<div>
-						<h2 className="text-[clamp(28px,3.6vw,44px)] font-semibold leading-[1.06] tracking-[-0.035em] text-[var(--color-ink)]">
-							Your app model stays in TypeScript.
-						</h2>
+						<H2>Your app model stays in TypeScript.</H2>
 						<p className="mt-5 max-w-[460px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
 							Declare an entity and its access policy. Pylon creates the table,
 							REST and realtime API, row-level checks, and typed React client.
@@ -260,19 +263,22 @@ const { data } = db.useQuery("Order");`}
 			<Section id="deploy" tone="sunken">
 				<div>
 					<H2>Deploy from GitHub or the CLI.</H2>
+					<p className="mt-5 max-w-[560px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
+						Both paths reach the same Cloud runtime, so a repo push and a manual
+						release produce the same deployment.
+					</p>
 				</div>
 
 				<div className="mt-14 grid gap-4 lg:grid-cols-2">
 					<Card>
-						<h3 className="text-[19px] font-semibold tracking-tight text-[var(--color-ink)]">
+						<h3 className="text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
 							Connect GitHub
 						</h3>
-						<p className="mt-2.5 text-[14.5px] leading-[1.6] text-[var(--color-ink-2)]">
-							Install the Smallware GitHub App once. Pushes to the default
-							branch deploy; pull requests get previews that disappear after
-							merge.
+						<p className="mt-2.5 text-[14px] leading-[1.6] text-[var(--color-ink-2)]">
+							Install the Smallware GitHub App once. Pull requests get preview
+							environments that disappear after merge.
 						</p>
-						<ol className="mt-6 grid gap-2.5 text-[13.5px] leading-[1.55] text-[var(--color-ink-2)] [&>li]:flex [&>li]:gap-3 [&>li>span:first-child]:font-mono [&>li>span:first-child]:text-[var(--color-ink-3)] [&>li>span:first-child]:tabular-nums">
+						<ol className="mt-6 grid gap-2.5 text-[14px] leading-[1.55] text-[var(--color-ink-2)] [&>li]:flex [&>li]:gap-3 [&>li>span:first-child]:font-mono [&>li>span:first-child]:text-[var(--color-ink-3)] [&>li>span:first-child]:tabular-nums">
 							<li>
 								<span>1.</span>
 								<span>Create a project and connect a repo.</span>
@@ -293,15 +299,17 @@ const { data } = db.useQuery("Order");`}
 					</Card>
 
 					<Card>
-						<h3 className="text-[19px] font-semibold tracking-tight text-[var(--color-ink)]">
+						<h3 className="text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
 							<InlineCode>pylon deploy</InlineCode>
 						</h3>
-						<p className="mt-2.5 text-[14.5px] leading-[1.6] text-[var(--color-ink-2)]">
-							Use the CLI for CI, locked-down environments, or a manual
-							release. It reaches the same Cloud runtime as the GitHub flow.
+						<p className="mt-2.5 text-[14px] leading-[1.6] text-[var(--color-ink-2)]">
+							Use the CLI for CI, locked-down environments, or a manual release.
 						</p>
-						<div className="mt-6 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] font-mono text-[12.5px] leading-[1.75] text-[var(--color-ink)]">
-							<div className="border-b border-[var(--color-rule)] px-4 py-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-[var(--color-ink-4)]">
+						<div className="mt-6 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] font-mono text-[12px] leading-[1.75] text-[var(--color-ink)]">
+							{/* Same label strip as the four artifact cards above — plain mono,
+							    sentence case. It was uppercase-tracked, which rendered
+							    "MY-APP — PYLON DEPLOY" and shouted a filename. */}
+							<div className="border-b border-[var(--color-rule)] bg-[var(--color-paper-1)] px-4 py-2 font-mono text-[10.5px] text-[var(--color-ink-3)]">
 								my-app — pylon deploy
 							</div>
 							<div className="px-4 py-3">
@@ -345,8 +353,11 @@ const { data } = db.useQuery("Order");`}
 								<span className="size-2.5 rounded-full bg-[var(--color-rule)]" />
 								<span className="size-2.5 rounded-full bg-[var(--color-rule)]" />
 							</span>
+							{/* The dashboard in the shot answers on the product host, not this
+							    one. The bar used to read pylonsync.com/dashboard, which is a
+							    404 — this site has no auth and no dashboard. */}
 							<span className="mx-auto rounded-full border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-3 py-0.5 font-mono text-[10.5px] text-[var(--color-ink-4)]">
-								pylonsync.com/dashboard
+								usesmallware.com/dashboard
 							</span>
 						</div>
 						<Image
@@ -381,10 +392,10 @@ const { data } = db.useQuery("Order");`}
 							key={title}
 							className="flex flex-col gap-1.5 border-t border-[var(--color-rule)] py-5"
 						>
-							<h4 className="text-[14.5px] font-semibold tracking-tight text-[var(--color-ink)]">
+							<h4 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
 								{title}
 							</h4>
-							<p className="text-[13.5px] leading-[1.55] text-[var(--color-ink-2)]">
+							<p className="text-[13px] leading-[1.55] text-[var(--color-ink-2)]">
 								{body}
 							</p>
 						</div>
@@ -450,10 +461,10 @@ const { data } = db.useQuery("Order");`}
 							key={o.q}
 							className="flex flex-col gap-2.5 border-t border-[var(--color-rule)] py-6"
 						>
-							<h3 className="text-[15.5px] font-semibold leading-snug tracking-tight text-[var(--color-ink)]">
+							<h3 className="text-[15px] font-semibold leading-snug tracking-tight text-[var(--color-ink)]">
 								{o.q}
 							</h3>
-							<p className="text-[13.5px] leading-[1.65] text-[var(--color-ink-2)]">
+							<p className="text-[14px] leading-[1.65] text-[var(--color-ink-2)]">
 								{o.a}
 							</p>
 						</div>
@@ -461,28 +472,27 @@ const { data } = db.useQuery("Order");`}
 				</div>
 			</Section>
 
-			{/* CTA */}
-			<section>
-				<div className="mx-auto max-w-[860px] px-5 pb-20 pt-10 text-center sm:px-8 sm:pb-24">
-					<h2 className="mx-auto max-w-[18ch] text-[clamp(34px,5vw,60px)] font-semibold leading-[1.05] tracking-[-0.035em] text-[var(--color-ink)]">
-						Create a Pylon app.
-					</h2>
-					<p className="mx-auto mt-5 max-w-[460px] text-[16px] leading-[1.55] text-[var(--color-ink-2)] sm:text-[17px]">
-						The framework is free to self-host. Smallware runs it for you —
-						connect GitHub or deploy from the CLI.
-					</p>
-					<div className="mt-8 flex flex-col items-stretch justify-center gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-						<Button asChild variant="primary" size="lg">
-							<Link href={ctaUrl(signedIn)}>
-								{signedIn ? "Open dashboard →" : "Create your account →"}
-							</Link>
-						</Button>
-						<Button asChild variant="ghost" size="lg">
-							<a href="https://docs.pylonsync.com/cloud">Read the docs</a>
-						</Button>
-					</div>
+			{/* CTA. Sits on the same column and heading scale as every section
+			    above it. It used to be centred in an 860px box at its own
+			    clamp(34,5vw,60), so the page's single left edge — and its type
+			    scale — broke on the last screen. */}
+			<Section>
+				<H2>Create a Pylon app.</H2>
+				<p className="mt-5 max-w-[520px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
+					The framework is free to self-host. Smallware runs it for you —
+					connect GitHub or deploy from the CLI.
+				</p>
+				<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
+					<Button asChild variant="primary" size="lg">
+						<Link href={ctaUrl(signedIn)}>
+							{signedIn ? "Open dashboard →" : "Create your account →"}
+						</Link>
+					</Button>
+					<Button asChild variant="ghost" size="lg">
+						<a href="https://docs.pylonsync.com/cloud">Read the docs</a>
+					</Button>
 				</div>
-			</section>
+			</Section>
 
 			<SiteFooter />
 		</div>
@@ -510,7 +520,7 @@ function InstallCommand({ command }: { command: string }) {
 			type="button"
 			onClick={copy}
 			aria-label={`Copy: ${command}`}
-			className="group inline-flex items-center gap-3 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)] py-3 pl-5 pr-4 font-mono text-[13.5px] text-[var(--color-ink)] shadow-[var(--shadow-card)] transition-colors hover:border-[var(--color-cobalt)]/50 hover:bg-[var(--color-paper-1)]"
+			className="group inline-flex items-center gap-3 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)] py-3 pl-5 pr-4 font-mono text-[13px] text-[var(--color-ink)] shadow-[var(--shadow-card)] transition-colors hover:border-[var(--color-cobalt)]/50 hover:bg-[var(--color-paper-1)]"
 		>
 			<span className="select-none text-[var(--color-cobalt)]">$</span>
 			<span className="tracking-tight">{command}</span>
@@ -537,13 +547,11 @@ function VisualBar({
 	right?: React.ReactNode;
 }) {
 	return (
-		<div className="flex items-center gap-2 border-b border-[var(--color-rule)] px-3.5 py-2">
-			<span className="flex gap-1">
-				<span className="size-2 rounded-full bg-[var(--color-rule)]" />
-				<span className="size-2 rounded-full bg-[var(--color-rule)]" />
-				<span className="size-2 rounded-full bg-[var(--color-rule)]" />
-			</span>
-			<span className="truncate font-mono text-[10.5px] text-[var(--color-ink-4)]">
+		// No traffic-light dots. Between these four cards and the browser frame
+		// around the dashboard screenshot the page was drawing five fake windows,
+		// and the dots said nothing the label doesn't say better.
+		<div className="flex items-center gap-2 border-b border-[var(--color-rule)] bg-[var(--color-paper-1)] px-4 py-2">
+			<span className="truncate font-mono text-[10.5px] text-[var(--color-ink-3)]">
 				{label}
 			</span>
 			{right && <span className="ml-auto shrink-0">{right}</span>}
@@ -561,7 +569,7 @@ function RepoVisual() {
 	return (
 		<div>
 			<VisualBar label="my-app" />
-			<div className="px-3.5 py-2.5 font-mono text-[11.5px] leading-[1.95]">
+			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.95]">
 				{files.map((f) => (
 					<div key={f.name} className="flex items-center gap-2">
 						<span
@@ -594,7 +602,7 @@ function TerminalVisual() {
 	return (
 		<div>
 			<VisualBar label="zsh — my-app" />
-			<div className="px-3.5 py-2.5 font-mono text-[11.5px] leading-[1.9]">
+			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
 				<div className="text-[var(--color-ink-2)]">
 					<span className="text-[var(--color-cobalt)]">$</span> npm create
 					@pylonsync/pylon
@@ -620,12 +628,12 @@ function TypeErrorVisual() {
 			<VisualBar
 				label="app/page.tsx"
 				right={
-					<span className="font-mono text-[10px] uppercase tracking-[0.1em] text-[var(--color-status-fail)]">
+					<span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-status-fail)]">
 						1 error
 					</span>
 				}
 			/>
-			<div className="px-3.5 py-2.5 font-mono text-[11.5px] leading-[1.9]">
+			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
 				<div className="text-[var(--color-ink-3)]">
 					<span className="text-[var(--color-cobalt)]">const</span> {"{ data }"} ={" "}
 					db.useQuery(
@@ -654,7 +662,7 @@ function StudioVisual() {
 			<VisualBar
 				label="/studio — Order"
 				right={
-					<span className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.14em] text-[var(--color-ink-4)]">
+					<span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--color-ink-4)]">
 						<span
 							className="block size-1.5 rounded-full"
 							style={{ backgroundColor: "var(--color-status-live)" }}
@@ -667,7 +675,7 @@ function StudioVisual() {
 				{rows.map(([id, name, total]) => (
 					<div
 						key={id}
-						className="flex items-center gap-3 px-3.5 py-[7px] font-mono text-[11.5px]"
+						className="flex items-center gap-3 px-4 py-[7px] font-mono text-[11.5px]"
 					>
 						<span className="w-[62px] shrink-0 text-[var(--color-ink-4)]">{id}</span>
 						<span className="flex-1 truncate font-sans text-[12px] text-[var(--color-ink-2)]">
@@ -706,22 +714,24 @@ function BentoCard({
 }) {
 	const [hovered, setHovered] = useState(false);
 	return (
-		// The whole card is the link to its product page. Grayscale is scoped to
-		// `(hover: hover)` so touch users — who can never un-grey it — get the
-		// coloured card instead. Focus mirrors hover so keyboard users get the
-		// same reveal, and the ring keeps the card visible as a tab stop.
+		// The whole card is the link to its product page. The cards used to sit
+		// under `filter: grayscale` until pointed at — but these twelve are the
+		// only cards on the site whose contents actually carry colour, so at rest
+		// the page's centrepiece was twelve grey panels and the reveal was a
+		// gimmick a reader had to find. They render in their own colour now, and
+		// hover moves the border only.
 		<Link
 			href={href}
 			onMouseEnter={() => setHovered(true)}
 			onMouseLeave={() => setHovered(false)}
 			onFocus={() => setHovered(true)}
 			onBlur={() => setHovered(false)}
-			className={`group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-[filter,box-shadow,border-color] duration-300 ease-[var(--ease-out-quart)] hover:border-[var(--color-rule)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper)] [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-within:grayscale-0 [@media(hover:hover)]:hover:grayscale-0 ${className ?? ""}`}
+			className={`group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper)] ${className ?? ""}`}
 		>
 			<div className="flex flex-col gap-1.5 p-5 pb-3">
 				<div className="flex items-center gap-2">
 					<Icon className="size-4 shrink-0 text-[var(--color-cobalt)]" />
-					<h3 className="text-[14.5px] font-semibold tracking-tight text-[var(--color-ink)]">
+					<h3 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
 						{title}
 					</h3>
 					<ArrowUpRight className="ml-auto size-3.5 shrink-0 text-[var(--color-ink-4)] opacity-0 transition-opacity duration-200 group-focus-visible:opacity-100 group-hover:opacity-100" />
@@ -737,148 +747,155 @@ function BentoCard({
 	);
 }
 
+// Two card heights, not four. The grid ran 290 / 230 / 210 / 230 down its four
+// rows, so every row landed on a different baseline and the block read as four
+// unrelated grids stacked up. One height for the three lead cards, one for
+// everything under them. Cards in a row already stretch to their tallest
+// sibling, so these floors are set at where the copy actually lands — a lower
+// floor is inert on the dense rows and leaves the two wide cards short.
+const BENTO_LEAD = "min-h-[290px]";
+const BENTO_ROW = "min-h-[280px]";
+
 function HeroBento() {
 	return (
 		<div>
 			<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-12">
-			<BentoCard
+				<BentoCard
 				icon={Table2}
 				title="Typed schema"
 				href="/product/database"
 				desc="Entities and fields in TypeScript. Pylon creates the tables and migrates on save."
-				className="min-h-[290px] lg:col-span-4"
-			>
+				className={`${BENTO_LEAD} lg:col-span-4`}
+				>
 				<SchemaBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={RefreshCw}
 				title="Live queries"
 				href="/product/sync"
 				desc="db.useQuery opens a subscription. Every write pushes a diff — no polling, no refetch."
-				className="min-h-[290px] lg:col-span-4"
-			>
+				className={`${BENTO_LEAD} lg:col-span-4`}
+				>
 				<LiveQueryBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={ShieldCheck}
 				title="Row-level policies"
 				href="/product/auth"
 				desc="Access rules sit next to the schema. Every read and write is checked; default deny."
-				className="min-h-[290px] lg:col-span-4"
-			>
+				className={`${BENTO_LEAD} lg:col-span-4`}
+				>
 				<PolicyBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={KeyRound}
 				title="Auth, included"
 				href="/product/auth"
 				desc="Magic link, 25+ OAuth providers, OIDC, and API keys."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<AuthBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Upload}
 				title="File uploads"
 				href="/product/storage"
 				desc="Presigned uploads to local disk or any S3-compatible bucket."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<UploadBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Radio}
 				title="Rooms & presence"
 				href="/product/realtime"
 				desc="Cursors, typing, and who is online over the same server."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<PresenceBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Search}
 				title="Faceted search"
 				href="/product/search"
 				desc="Full-text queries with live facet counts, updated in the same transaction as your writes."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<SearchBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Database}
 				title="SQLite or Postgres"
 				href="/product/database"
 				desc="Start on a single SQLite file. Point DATABASE_URL at Postgres and nothing above the driver changes."
-				className="min-h-[210px] lg:col-span-6"
-			>
+				className={`${BENTO_ROW} lg:col-span-6`}
+				>
 				<EngineBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Server}
 				title="Server-rendered React"
 				href="/product/ssr"
 				desc="Queries and policies run on the server for first paint, then the same typed client hydrates and subscribes."
-				className="min-h-[210px] lg:col-span-6"
-			>
+				className={`${BENTO_ROW} lg:col-span-6`}
+				>
 				<SsrBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Braces}
 				title="Server functions"
 				href="/product/functions"
 				desc="Queries, mutations, and actions in TypeScript files, validated and called through the typed client."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<FunctionsBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Activity}
 				title="Reactive server queries"
 				href="/product/functions"
 				desc="Joins and derived data. The server tracks what it read and re-runs when those rows change."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<ReactiveBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={Workflow}
 				title="Scheduled & deferred work"
 				href="/product/workflows"
 				desc="runAfter, runAt, and cancel. Delays and retries run in the same process — no separate worker."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<SchedulerBento />
-			</BentoCard>
+				</BentoCard>
 
-			<BentoCard
+				<BentoCard
 				icon={LayoutDashboard}
 				title="Admin studio"
 				href="/product/studio"
 				desc="Browse tables, inspect live queries, and tail logs at /studio. Admin-gated in production."
-				className="min-h-[230px] lg:col-span-3"
-			>
+				className={`${BENTO_ROW} lg:col-span-3`}
+				>
 				<StudioTabsBento />
-			</BentoCard>
+				</BentoCard>
 			</div>
 
 			{/* Carries the thesis and the /product link that the primitives grid
-			    used to hold, now that the grid is gone. */}
+			    used to hold, now that the grid is gone. The line opened on a bold
+			    "Pick what you need." — a slogan the sentence after it didn't need. */}
 			<div className="mt-6 flex flex-col items-start justify-between gap-3 border-t border-[var(--color-rule)] pt-5 sm:flex-row sm:items-center">
-				<p className="text-[14.5px] leading-[1.55] text-[var(--color-ink-2)]">
-					<span className="font-semibold text-[var(--color-ink)]">
-						Pick what you need.
-					</span>{" "}
+				<p className="text-[15px] leading-[1.6] text-[var(--color-ink-2)]">
 					Every piece shares one schema and one runtime.
 				</p>
 				<Button asChild variant="ghost" size="sm">
@@ -930,7 +947,7 @@ function Card({ children }: { children: React.ReactNode }) {
 
 function InlineCode({ children }: { children: React.ReactNode }) {
 	return (
-		<code className="rounded-[2px] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-1.5 py-0.5 font-mono text-[12.5px] text-[var(--color-ink)]">
+		<code className="rounded-[2px] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-1.5 py-0.5 font-mono text-[12px] text-[var(--color-ink)]">
 			{children}
 		</code>
 	);

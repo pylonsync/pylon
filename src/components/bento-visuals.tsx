@@ -276,10 +276,14 @@ export function AuthBento() {
 
 // Uploads: bars advance on each tick and settle at done. At rest every file is
 // complete, which is the honest end state rather than a frozen half-upload.
+// `rest` is where each bar sits when the card isn't animating. All three used
+// to rest at 100%, which drew three full-width saturated green rules — the
+// loudest thing in the grid, and a picture of three finished uploads rather
+// than of uploading. Two done and one in flight is calmer and shows the subject.
 const UPLOAD_FILES = [
-	{ name: "invoice.pdf", size: "248 KB", offset: 0 },
-	{ name: "avatar.png", size: "64 KB", offset: 1 },
-	{ name: "export.csv", size: "1.2 MB", offset: 2 },
+	{ name: "invoice.pdf", size: "248 KB", offset: 0, rest: 100 },
+	{ name: "avatar.png", size: "64 KB", offset: 1, rest: 100 },
+	{ name: "export.csv", size: "1.2 MB", offset: 2, rest: 58 },
 ];
 
 export function UploadBento() {
@@ -288,7 +292,7 @@ export function UploadBento() {
 		<div className="flex h-full flex-col justify-between px-5 pb-5">
 			<div className="flex flex-col gap-2.5">
 				{UPLOAD_FILES.map((f) => {
-					const pct = still ? 100 : ((tick + f.offset * 2) % 7) * 16.7;
+					const pct = still ? f.rest : ((tick + f.offset * 2) % 7) * 16.7;
 					const done = pct >= 99;
 					return (
 						<div key={f.name} className="flex flex-col gap-1">
