@@ -121,6 +121,42 @@ async function sha256(path: string): Promise<{ hex: string; size: number }> {
 	return { hex: hasher.digest("hex"), size };
 }
 
+/**
+ * The `@pylonsync/*` version this build actually installed.
+ *
+ * Read from the resolved `node_modules`, not the package.json spec: a range
+ * like `^0.4.0` is only a version after `bun install` picks one, and the
+ * runtime image has to match what the code will actually import.
+ *
+ * `@pylonsync/functions` is the one that matters — it speaks the function
+ * protocol to the Rust host over stdio, so a mismatch there is the one that
+ * produces confusing failures rather than cosmetic drift. Falls back to
+ * `sdk`, then `react`, for apps that don't use server functions.
+ */
+async function resolveInstalledSdkVersion(
+	appDir: string,
+	root: string,
+): Promise<{ version: string | null; source: "declared" | "rewritten" | "unknown" }> {
+	const pkgs = ["functions", "sdk", "react"];
+	// The app dir first (a monorepo member can have its own node_modules),
+	// then the workspace root where bun hoists.
+	const roots = appDir === root ? [root] : [appDir, root];
+	for (const dir of roots) {
+		for (const name of pkgs) {
+			const path = `${dir}/node_modules/@pylonsync/${name}/package.json`;
+			try {
+				const pkg = (await Bun.file(path).json()) as { version?: string };
+				if (typeof pkg.version === "string" && pkg.version.length > 0) {
+					return { version: pkg.version, source: "declared" };
+				}
+			} catch {
+				/* not installed here — try the next candidate */
+			}
+		}
+	}
+	return { version: null, source: "unknown" };
+}
+
 async function main() {
 	const sourceUrl = need("PYLON_BUILD_SOURCE_URL");
 	const putUrl = need("PYLON_ARTIFACT_PUT_URL");
@@ -145,6 +181,9 @@ async function main() {
 		"",
 	);
 	const isWorkspaceDeploy = appSubdir.length > 0;
+	// Set when we filled in `workspace:*` specs below; the marker uses it to
+	// tell a version the app ASKED for from one we supplied.
+	let workspaceRewritten = false;
 	// Directory the app's own build script (if any) runs in.
 	const appDir = isWorkspaceDeploy ? `${SRC}/${appSubdir}` : SRC;
 
@@ -169,7 +208,6 @@ async function main() {
 		// resolve from npm. NOTE: this only works for PUBLISHED workspace deps;
 		// an unpublished one (e.g. examples/_shared) needs the monorepo path above.
 		const pkgPath = `${SRC}/package.json`;
-		let rewroteWorkspace = false;
 		try {
 			const pkg = (await Bun.file(pkgPath).json()) as Record<string, unknown>;
 			const sdkVersion = process.env.PYLON_SDK_VERSION || "latest";
@@ -184,11 +222,11 @@ async function main() {
 				for (const [name, spec] of Object.entries(deps)) {
 					if (typeof spec === "string" && spec.startsWith("workspace:")) {
 						deps[name] = sdkVersion;
-						rewroteWorkspace = true;
+						workspaceRewritten = true;
 					}
 				}
 			}
-			if (rewroteWorkspace) {
+			if (workspaceRewritten) {
 				await Bun.write(pkgPath, JSON.stringify(pkg, null, 2));
 				console.log(
 					`[builder] rewrote workspace:* deps → ${sdkVersion} (standalone install)`,
@@ -201,12 +239,12 @@ async function main() {
 		// Install (frozen — the lockfile is the contract). EXCEPT when we rewrote
 		// workspace specifiers: the lockfile that rode along is the monorepo's, so
 		// a frozen install against it always fails. Drop it so bun re-resolves.
-		if (rewroteWorkspace) {
+		if (workspaceRewritten) {
 			await rm(`${SRC}/bun.lock`, { force: true });
 			await rm(`${SRC}/bun.lockb`, { force: true });
 		}
 		const hasLock =
-			!rewroteWorkspace &&
+			!workspaceRewritten &&
 			((await Bun.file(`${SRC}/bun.lock`).exists()) ||
 				(await Bun.file(`${SRC}/bun.lockb`).exists()));
 		await sh(
@@ -453,6 +491,15 @@ async function main() {
 
 	// 7. Write the COMPLETE marker LAST — its presence + contents are how the
 	//    control plane knows the build succeeded and learns the verified hash.
+	// The `@pylonsync/*` version the app actually installed. The control
+	// plane boots the machine on the matching runtime image, so the binary
+	// and the packages that talk to it over the function protocol are
+	// always the same release. Reported from the resolved node_modules
+	// rather than the package.json spec, because a range like `^0.4.0`
+	// only becomes a version at install time.
+	const installed = await resolveInstalledSdkVersion(appDir, SRC);
+	if (workspaceRewritten) installed.source = "rewritten";
+
 	const marker = JSON.stringify({
 		sha256: hex,
 		size,
@@ -462,6 +509,13 @@ async function main() {
 		// CDN (step 3c). The control plane uses this to decide whether to fan the
 		// assets out to the public bucket and point machines at the CDN.
 		clientAssets: clientAssetsPublished,
+		sdkVersion: installed.version,
+		// "declared" — the app asked for this version, so the runtime should
+		// follow it. "rewritten" — the deps were `workspace:*` and we filled
+		// in the runtime's own version above, which makes it a restatement of
+		// the runtime rather than a request; the control plane must not treat
+		// it as an instruction to change anything.
+		sdkVersionSource: installed.source,
 	});
 	console.log(`[builder] build ${buildId} done`);
 	// Flush the build log to Tigris BEFORE the COMPLETE marker so it's already
