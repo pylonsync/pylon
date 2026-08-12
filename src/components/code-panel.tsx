@@ -96,13 +96,12 @@ export function CodePanel({
 		<div
 			className={`w-full min-w-0 max-w-full overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] shadow-[0_30px_60px_-40px_rgba(15,23,42,0.4)] ${className ?? ""}`}
 		>
+			{/* Filename strip, not a fake window: the traffic-light dots here were
+			    one of five sets on the landing page, and a file is not a window.
+			    The browser frame around the dashboard screenshot keeps its dots —
+			    that one is genuinely a browser. */}
 			<div className="flex items-center gap-2.5 border-b border-[var(--color-rule)] px-4 py-2.5">
-				<span className="flex gap-1.5">
-					<span className="size-2.5 rounded-full bg-[var(--color-rule)]" />
-					<span className="size-2.5 rounded-full bg-[var(--color-rule)]" />
-					<span className="size-2.5 rounded-full bg-[var(--color-rule)]" />
-				</span>
-				<span className="truncate font-mono text-[11px] text-[var(--color-ink-4)]">
+				<span className="truncate font-mono text-[10.5px] text-[var(--color-ink-3)]">
 					{filename}
 				</span>
 			</div>

@@ -299,8 +299,11 @@ const { data } = db.useQuery("Order");`}
 					</Card>
 
 					<Card>
-						<h3 className="text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
-							<InlineCode>pylon deploy</InlineCode>
+						{/* Mono, but a heading — this sat in an <InlineCode> chip, so the
+						    card's title rendered at 12px next to "Connect GitHub" at 18px
+						    and the pair read as a heading beside a tag. */}
+						<h3 className="font-mono text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
+							pylon deploy
 						</h3>
 						<p className="mt-2.5 text-[14px] leading-[1.6] text-[var(--color-ink-2)]">
 							Use the CLI for CI, locked-down environments, or a manual release.
@@ -520,10 +523,14 @@ function InstallCommand({ command }: { command: string }) {
 			type="button"
 			onClick={copy}
 			aria-label={`Copy: ${command}`}
-			className="group inline-flex items-center gap-3 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)] py-3 pl-5 pr-4 font-mono text-[13px] text-[var(--color-ink)] shadow-[var(--shadow-card)] transition-colors hover:border-[var(--color-cobalt)]/50 hover:bg-[var(--color-paper-1)]"
+			// max-w-full + nowrap: on a 390px screen the command wrapped inside the
+			// pill, which centred the two halves under a vertically-centred `$` and
+			// stopped looking like a command line. It sheds a point of type below sm
+			// instead, where it fits on one line.
+			className="group inline-flex max-w-full items-center gap-3 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)] py-3 pl-5 pr-4 font-mono text-[12px] text-[var(--color-ink)] shadow-[var(--shadow-card)] transition-colors hover:border-[var(--color-cobalt)]/50 hover:bg-[var(--color-paper-1)] sm:text-[13px]"
 		>
 			<span className="select-none text-[var(--color-cobalt)]">$</span>
-			<span className="tracking-tight">{command}</span>
+			<span className="truncate tracking-tight">{command}</span>
 			<span className="ml-1 text-[var(--color-ink-3)] transition-colors group-hover:text-[var(--color-ink)]">
 				{copied ? (
 					<Check className="size-4 text-[var(--color-status-live)]" />
