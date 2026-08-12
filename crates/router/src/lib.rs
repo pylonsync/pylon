@@ -1302,18 +1302,22 @@ fn route_inner(
 
     // GET /api/openapi.json
     //
-    // Gated to admin / dev mode. The full spec includes batch/transact
-    // and the entity-API surface, which is useful reconnaissance for
-    // an attacker probing app shape. Public clients don't need it (they
-    // use the typed SDK), so admins-only is the right default. Dev
-    // mode keeps it open so hand-curl explorations still work.
+    // Admin / dev by default. The full spec enumerates the entity API and
+    // every callable function, which is useful reconnaissance for an
+    // attacker probing app shape, and typed-SDK clients never need it.
     // Caught in the 2026-05-10 codex pass-3 audit (P3 NEW).
+    //
+    // `PYLON_OPENAPI_PUBLIC=true` opts an app out. Hosted documentation
+    // (Mintlify, Scalar, Redoc) renders from a URL it can fetch
+    // anonymously, which the default gate makes impossible — an app that
+    // wants published API docs is choosing to disclose its surface, and
+    // that is a decision to make deliberately rather than a reason to
+    // weaken the default.
     if url == "/api/openapi.json" && method == HttpMethod::Get {
-        if !ctx.is_dev && !ctx.auth_ctx.is_admin {
-            return (
-                404,
-                json_error("NOT_FOUND", "OpenAPI spec is admin-only outside dev mode"),
-            );
+        if let Some(denied) =
+            openapi_access_denied(ctx.is_dev, ctx.auth_ctx.is_admin, openapi_is_public())
+        {
+            return denied;
         }
         return (200, ctx.openapi.generate(""));
     }
@@ -2535,6 +2539,35 @@ pub(crate) fn require_gdpr_tenant_scope(
 fn email_verification_gate(ctx: &RouterContext, url: &str) -> Option<(u16, String)> {
     let required = std::env::var("PYLON_REQUIRE_EMAIL_VERIFICATION").as_deref() == Ok("1");
     email_verification_gate_inner(ctx, url, required)
+}
+
+/// Whether this app publishes its OpenAPI spec to anonymous callers.
+fn openapi_is_public() -> bool {
+    std::env::var("PYLON_OPENAPI_PUBLIC")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// `None` to serve the spec, `Some(response)` to refuse.
+///
+/// The refusal names the env var. The message already disclosed that a
+/// spec exists, so saying how to publish it leaks nothing further — and
+/// without it, a developer who curls this endpoint on a deployed app
+/// reads the 404 as "Pylon has no OpenAPI support" and goes off to build
+/// their own generator. That has actually happened.
+fn openapi_access_denied(is_dev: bool, is_admin: bool, is_public: bool) -> Option<(u16, String)> {
+    if is_dev || is_admin || is_public {
+        return None;
+    }
+    Some((
+        404,
+        json_error_with_hint(
+            "NOT_FOUND",
+            "OpenAPI spec is admin-only outside dev mode",
+            "Set PYLON_OPENAPI_PUBLIC=true to serve it to anonymous callers \
+             (it enumerates every entity and callable function).",
+        ),
+    ))
 }
 
 /// Pure gate logic, with the "is verification required" decision passed
@@ -6847,5 +6880,65 @@ mod consolidation_tests {
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod openapi_gate_tests {
+    use super::*;
+
+    // The gate's whole job is deciding who may enumerate the app's surface,
+    // so each of the three ways in gets its own case — a regression that
+    // opened it to anonymous callers would otherwise pass on the dev case
+    // alone.
+
+    #[test]
+    fn anonymous_callers_are_refused_by_default() {
+        let denied = openapi_access_denied(false, false, false);
+        let (status, body) = denied.expect("should refuse");
+        assert_eq!(status, 404);
+        // The refusal has to name the escape hatch, or a developer reads it
+        // as "Pylon has no OpenAPI support" and writes their own generator.
+        assert!(
+            body.contains("PYLON_OPENAPI_PUBLIC"),
+            "refusal must say how to publish it: {body}"
+        );
+    }
+
+    #[test]
+    fn dev_mode_serves_it() {
+        assert!(openapi_access_denied(true, false, false).is_none());
+    }
+
+    #[test]
+    fn admins_get_it_in_production() {
+        assert!(openapi_access_denied(false, true, false).is_none());
+    }
+
+    #[test]
+    fn the_public_flag_opens_it_to_anonymous_callers() {
+        // What makes hosted docs (Mintlify, Scalar, Redoc) possible — they
+        // fetch the spec URL with no credentials.
+        assert!(openapi_access_denied(false, false, true).is_none());
+    }
+
+    #[test]
+    fn the_public_flag_is_off_unless_explicitly_set() {
+        // Guard the default: this endpoint enumerates every entity and
+        // callable function, so an unset or malformed value must not
+        // publish it.
+        for value in ["", "0", "false", "no", "yes-please", "TRUE-ish"] {
+            std::env::set_var("PYLON_OPENAPI_PUBLIC", value);
+            assert!(
+                !openapi_is_public(),
+                "{value:?} must not enable the public spec"
+            );
+        }
+        for value in ["1", "true", "TRUE", "True"] {
+            std::env::set_var("PYLON_OPENAPI_PUBLIC", value);
+            assert!(openapi_is_public(), "{value:?} should enable it");
+        }
+        std::env::remove_var("PYLON_OPENAPI_PUBLIC");
+        assert!(!openapi_is_public(), "unset must not enable it");
     }
 }

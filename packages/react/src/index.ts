@@ -64,6 +64,7 @@ import {
   pylonFetchRaw,
   type Storage as PylonStorage,
 } from "@pylonsync/sync";
+import { peekActiveEngine } from "./engine-registry";
 
 // React hooks — high-level ergonomic shape
 export {
@@ -485,6 +486,25 @@ export async function callFn<T = unknown>(
   args: Record<string, unknown> = {},
   options: { token?: string } = {}
 ): Promise<T> {
+  // Route through the engine when the app has one. `SyncEngine.fn`
+  // observes the `X-Pylon-Change-Seq` response header and fires a
+  // one-shot pull when the call produced events the replica hasn't
+  // seen — without it the caller's own write doesn't appear until
+  // something else refreshes, which reads as "I added it and nothing
+  // happened". `db.fn` and `useMutation` have always done this; the
+  // free helper silently didn't, so the same operation behaved
+  // differently depending on which import you reached for.
+  //
+  // Two cases deliberately keep the bare fetch:
+  //   - no engine: apps that never call `init()` must not have one
+  //     constructed (and a WebSocket opened) by a plain POST.
+  //   - an explicit `options.token`: that's a call as some other
+  //     identity, and pulling its results into this replica would mix
+  //     two users' data.
+  const engine = options.token ? null : peekActiveEngine();
+  if (engine) {
+    return engine.fn<T>(name, args);
+  }
   return pylonFetch<T>(
     {
       baseUrl: getBaseUrl(),

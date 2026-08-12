@@ -1417,10 +1417,12 @@ mod tests {
         new.queries.push(ManifestQuery {
             name: "getUser".into(),
             input: vec![],
+            ..Default::default()
         });
         new.actions.push(ManifestAction {
             name: "createUser".into(),
             input: vec![],
+            ..Default::default()
         });
         let changes = compute_diff(&old, &new);
         assert!(changes

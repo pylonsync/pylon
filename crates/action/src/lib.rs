@@ -128,6 +128,7 @@ mod tests {
                             sync_omit: false,
                         },
                     ],
+                    ..Default::default()
                 },
                 ManifestAction {
                     name: "toggleTodo".into(),
@@ -144,6 +145,7 @@ mod tests {
                         encrypted: false,
                         sync_omit: false,
                     }],
+                    ..Default::default()
                 },
             ],
             auth: Default::default(),
@@ -211,6 +213,7 @@ mod tests {
                     sync_omit: false,
                 },
             ],
+            ..Default::default()
         };
         let desc = ActionDescriptor::from_manifest(&ma);
         assert_eq!(desc.name, "doThing");

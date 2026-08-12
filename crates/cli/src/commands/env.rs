@@ -46,6 +46,12 @@ const ENV_VARS: &[EnvVarDef] = &[
         sensitive: false,
     },
     EnvVarDef {
+        name: "PYLON_OPENAPI_PUBLIC",
+        description: "Serve GET /api/openapi.json to anonymous callers (set 1/true), so hosted docs can render from the live URL. Off by default — the spec enumerates every entity and callable function.",
+        default: None,
+        sensitive: false,
+    },
+    EnvVarDef {
         name: "PYLON_SSR_INLINE_CSS",
         description: "Inline the compiled stylesheet into SSR <head> instead of a render-blocking <link> (set 1/true). Sheets over PYLON_SSR_INLINE_CSS_MAX bytes keep the link.",
         default: None,

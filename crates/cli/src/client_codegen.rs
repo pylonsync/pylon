@@ -473,14 +473,17 @@ mod tests {
                 ManifestQuery {
                     name: "todosByAuthor".into(),
                     input: vec![f("authorId", "id(User)", false)],
+                    ..Default::default()
                 },
                 ManifestQuery {
                     name: "allTodos".into(),
                     input: vec![f("done", "bool", true)],
+                    ..Default::default()
                 },
                 ManifestQuery {
                     name: "todoById".into(),
                     input: vec![f("id", "id(Todo)", false)],
+                    ..Default::default()
                 },
             ],
             actions: vec![
@@ -490,10 +493,12 @@ mod tests {
                         f("title", "string", false),
                         f("authorId", "id(User)", false),
                     ],
+                    ..Default::default()
                 },
                 ManifestAction {
                     name: "toggleTodo".into(),
                     input: vec![f("todoId", "id(Todo)", false)],
+                    ..Default::default()
                 },
             ],
             auth: Default::default(),

@@ -885,18 +885,30 @@ pub struct ManifestRoute {
     pub kind: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ManifestQuery {
     pub name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input: Vec<ManifestField>,
+    /// Declarative auth gate as the router enforces it ("public", "user",
+    /// …). Absent in manifests built before `discoverFunctions()` existed;
+    /// the runtime's default is "user".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ManifestAction {
     pub name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input: Vec<ManifestField>,
+    /// See [`ManifestQuery::auth`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth: Option<String>,
+    /// "mutation" or "action". The manifest's split is read vs write, so
+    /// both land in `actions`; this preserves which one it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fn_type: Option<String>,
 }
 
 /// Row-level access policy attached to an entity or action.

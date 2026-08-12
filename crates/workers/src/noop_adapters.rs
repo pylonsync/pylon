@@ -466,10 +466,12 @@ mod tests {
             actions: vec![ManifestAction {
                 name: "publishNote".into(),
                 input: vec![],
+                ..Default::default()
             }],
             queries: vec![ManifestQuery {
                 name: "listNotes".into(),
                 input: vec![],
+                ..Default::default()
             }],
             ..Default::default()
         }

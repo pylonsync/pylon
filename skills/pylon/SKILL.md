@@ -79,7 +79,7 @@ my-app/
 Every Pylon app has an `app.ts` that imports from `@pylonsync/sdk`, declares entities + policies, and calls `buildManifest`.
 
 ```ts
-import { entity, field, policy, buildManifest, discoverAppRoutes } from "@pylonsync/sdk";
+import { entity, field, policy, buildManifest, discoverAppRoutes, discoverFunctions } from "@pylonsync/sdk";
 
 const User = entity(
   "User",
@@ -117,20 +117,24 @@ const messagePolicy = policy({
   allowDelete: "auth.userId == existing.authorId",
 });
 
+const fns = await discoverFunctions();     // walks functions/*.ts
+
 const manifest = buildManifest({
   name: "my-app",
   version: "0.1.0",
   entities: [User, Message],
   policies: [messagePolicy],
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   routes: await discoverAppRoutes(),   // full-stack SSR: enumerates app/**/page.tsx (a backend-only app can pass routes: [])
 });
 
 console.log(JSON.stringify(manifest, null, 2));
 ```
 
-**The last line is required** — `pylon dev` runs `bun run app.ts` and captures stdout as the manifest. Top-level `await` works because Bun runs `app.ts` as an ES module. (Note: `queries`/`actions` here are for `defineRoute`-style HTTP route bindings — your RPC functions live in `functions/*.ts` and are discovered separately, NOT listed here.)
+**The last line is required** — `pylon dev` runs `bun run app.ts` and captures stdout as the manifest. Top-level `await` works because Bun runs `app.ts` as an ES module.
+
+**`discoverFunctions()` is what puts your `functions/*.ts` in the manifest** (pylon ≥ 0.4.7). They are callable at `POST /api/fn/<name>` either way — the router loads them independently — but a manifest built with `queries: []` / `actions: []` reports an app with **zero** endpoints, so `/api/manifest`, the OpenAPI spec, and `pylon codegen` all silently under-report. It mirrors the runtime loader exactly (top-level `.ts`/`.js`, name = basename, default export with a `type` and a `handler`) and excludes `internal: true` functions, which aren't externally callable. Mutations and actions both land in `actions` — the manifest's split is read vs write — with `fnType` preserving which was which.
 
 ### Field types — EXACT API
 
@@ -665,6 +669,8 @@ async function onSend(roomId: string, body: string) {
 }
 ```
 
+`callFn`, `db.fn`, and `useMutation` all reach the same endpoint and all keep your replica current: the response's `X-Pylon-Change-Seq` header triggers a one-shot pull when the call produced changes the replica hasn't seen. **On pylon < 0.4.7 the exported `callFn` skipped that**, so your own write didn't show up until something else refreshed — if you're pinned below 0.4.7, use `db.fn` instead. Passing an explicit `{ token }` still bypasses the replica by design: that's a call as a different identity, and its results must not land in this user's data.
+
 ### Realtime hooks beyond `db.useQuery`
 
 `db.useQuery` is the workhorse, but the React SDK ships a full realtime surface. Pick the right primitive:
@@ -969,6 +975,8 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 **Start with `pylon whoami`** when a command targets the wrong thing. It reports the account, the cloud origin, and which project is active *and where that slug came from* — a `.pylon/project` inherited from a parent directory is the usual culprit. It also flags a slug that resolves locally but names no project on the account.
 
 **Destructive commands refuse to run unattended without `--yes`**: `restart`, `deployments rollback`, `db restore`, `secrets rm`, `domains rm`. Under `--json` or a non-TTY there is no prompt to answer, so the command errors out instead — pass `--yes` in scripts.
+
+**API docs.** The server generates an OpenAPI **3.1** spec from the manifest and serves it at `GET /api/openapi.json`; `pylon codegen openapi` writes the same document to `pylon.openapi.json` without booting anything. Point Mintlify, Scalar, or Redoc at either. Every query/mutation/action appears at its real endpoint, `POST /api/fn/<name>`, with `auth: "public"` functions marked as needing no credentials; `internal: true` ones are omitted because they aren't externally callable. The spec is **admin/dev-only by default** — it enumerates your whole surface — so set `PYLON_OPENAPI_PUBLIC=true` if you want hosted docs to fetch it anonymously. A spec with entities but no functions means `app.ts` isn't calling `discoverFunctions()`.
 
 **Two different "update" commands, don't mix them up.** `pylon update` bumps every `@pylonsync/*` dependency in the project's package.json files. `pylon upgrade` (pylon ≥ 0.4.6) updates the **pylon binary itself** to the latest release — `pylon upgrade --check` reports without changing anything. A CLI installed by npm or cargo is left alone; upgrade prints the command that manages it. Before 0.4.6, `pylon upgrade` opened a Stripe checkout; that is `pylon billing upgrade` now.
 

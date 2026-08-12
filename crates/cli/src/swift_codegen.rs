@@ -319,10 +319,12 @@ mod tests {
             queries: vec![ManifestQuery {
                 name: "todosByAuthor".into(),
                 input: vec![f("authorId", "id(User)", false)],
+                ..Default::default()
             }],
             actions: vec![ManifestAction {
                 name: "createTodo".into(),
                 input: vec![f("title", "string", false), f("done", "bool", true)],
+                ..Default::default()
             }],
             auth: Default::default(),
             llm: Default::default(),

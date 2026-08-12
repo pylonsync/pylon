@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
   font,
 } from "@pylonsync/sdk";
 // Per-workspace Stripe billing — see lib/billing.ts. `billing.manifest` brings
@@ -168,17 +169,22 @@ const projectPolicy = policy({
   allowDelete: "auth.tenantId == data.orgId",
 });
 
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [User, Org, OrgMember, OrgInvite, Project, ...billing.manifest.entities],
-  queries: [],
+  queries: fns.queries,
   // Billing actions (createCheckoutSession / createBillingPortalSession /
   // cancelSubscription / restoreSubscription / stripeWebhook). The plugin also
   // declares getSubscription/listSubscriptions queries, but the dashboard reads
   // the StripeSubscription entity directly (it's client-readable via the
   // plugin's policy), so we don't wire those.
-  actions: [...billing.manifest.actions],
+  actions: [...fns.actions, ...billing.manifest.actions],
   policies: [
     userPolicy,
     orgPolicy,

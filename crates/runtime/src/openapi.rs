@@ -1,7 +1,7 @@
 use pylon_kernel::AppManifest;
 use serde_json::{json, Value};
 
-/// Generate a complete OpenAPI 3.0.3 specification from an `AppManifest`.
+/// Generate a complete OpenAPI 3.1 specification from an `AppManifest`.
 ///
 /// The `base_url` is used as the server URL in the spec. Pass an empty string
 /// or "/" if the server URL should be relative to the host.
@@ -54,7 +54,7 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
             "summary": "Get OpenAPI specification",
             "tags": ["system"],
             "responses": {
-                "200": { "description": "OpenAPI 3.0.3 spec", "content": { "application/json": { "schema": { "type": "object" } } } }
+                "200": { "description": "OpenAPI 3.1 spec", "content": { "application/json": { "schema": { "type": "object" } } } }
             }
         }
     }));
@@ -445,40 +445,70 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
     }
 
     // -----------------------------------------------------------------------
-    // Action paths (generated from manifest)
+    // Function paths (generated from manifest)
+    //
+    // Every query, mutation, and action is reachable the same way:
+    // `POST /api/fn/<name>` with a flat JSON object of args, returning the
+    // function's own value.
+    //
+    // This deliberately does NOT document `/api/actions/<name>`. That route
+    // exists, but it validates input against the manifest, runs the policy
+    // check, and then returns `{action, input, executed: true}` without ever
+    // invoking the handler (crates/router/src/routes/actions.rs). A spec
+    // pointing there hands callers a 200 for work that never happened —
+    // worse than omitting the endpoint.
     // -----------------------------------------------------------------------
 
-    for action in &manifest.actions {
-        let action_lower = action.name.to_lowercase();
-        let input_schema_name = format!("{}Input", action.name);
-        let input_schema = build_fields_schema(&action.input);
-        schemas.insert(input_schema_name.clone(), input_schema);
+    for (name, input, auth, kind) in manifest
+        .queries
+        .iter()
+        .map(|q| (&q.name, &q.input, q.auth.as_deref(), "query"))
+        .chain(manifest.actions.iter().map(|a| {
+            (
+                &a.name,
+                &a.input,
+                a.auth.as_deref(),
+                a.fn_type.as_deref().unwrap_or("action"),
+            )
+        }))
+    {
+        let input_schema_name = format!("{name}Input");
+        schemas.insert(input_schema_name.clone(), build_fields_schema(input));
 
-        let path = format!("/api/actions/{action_lower}");
-        paths.insert(path, json!({
-            "post": {
-                "operationId": format!("execute{}", action.name),
-                "summary": format!("Execute the {} action", action.name),
-                "tags": ["actions"],
-                "security": [{ "BearerAuth": [] }],
-                "requestBody": {
-                    "required": true,
-                    "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{input_schema_name}") } } }
-                },
-                "responses": {
-                    "200": { "description": "Action executed", "content": { "application/json": { "schema": {
-                        "type": "object",
-                        "properties": {
-                            "action": { "type": "string" },
-                            "input": { "type": "object" },
-                            "executed": { "type": "boolean" }
-                        }
-                    }}}},
-                    "400": { "description": "Validation error", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
-                    "404": { "description": "Action not found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        // `auth: "public"` is the router's own no-credentials gate. Anything
+        // else — including an unset value, whose runtime default is "user" —
+        // requires a caller identity.
+        let security = if auth == Some("public") {
+            json!([])
+        } else {
+            json!([{ "BearerAuth": [] }, { "CookieAuth": [] }])
+        };
+
+        paths.insert(
+            format!("/api/fn/{name}"),
+            json!({
+                "post": {
+                    "operationId": format!("call{name}"),
+                    "summary": format!("Call the {name} {kind}"),
+                    "tags": [if kind == "query" { "queries" } else { "actions" }],
+                    "security": security,
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": { "$ref": format!("#/components/schemas/{input_schema_name}") } } }
+                    },
+                    "responses": {
+                        // The handler's return value. Functions are free to
+                        // return any JSON, so the schema is deliberately open
+                        // rather than a wrong guess.
+                        "200": { "description": format!("The value returned by {name}"), "content": { "application/json": { "schema": { "description": "Whatever the function returns" } } } },
+                        "400": { "description": "Invalid arguments", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+                        "401": { "description": "Authentication required", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+                        "403": { "description": "Denied by policy", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+                        "404": { "description": "No such function. Internal functions are not externally callable and are omitted from this spec.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+                    }
                 }
-            }
-        }));
+            }),
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -508,7 +538,7 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
     // -----------------------------------------------------------------------
 
     json!({
-        "openapi": "3.0.3",
+        "openapi": "3.1.0",
         "info": {
             "title": manifest.name,
             "version": manifest.version,
@@ -522,6 +552,15 @@ pub fn generate_openapi(manifest: &AppManifest, base_url: &str) -> Value {
                 "BearerAuth": {
                     "type": "http",
                     "scheme": "bearer"
+                },
+                // The browser path. Every authenticated endpoint accepts
+                // either a bearer token or the session cookie, so a spec
+                // that only listed the token would tell a browser client
+                // it needed one.
+                "CookieAuth": {
+                    "type": "apiKey",
+                    "in": "cookie",
+                    "name": "pylon_session"
                 }
             }
         }
@@ -775,6 +814,7 @@ mod tests {
                         sync_omit: false,
                     },
                 ],
+                ..Default::default()
             }],
             policies: vec![],
             auth: Default::default(),
@@ -789,7 +829,7 @@ mod tests {
     fn spec_has_correct_structure() {
         let spec = generate_openapi(&sample_manifest(), "http://localhost:3000");
 
-        assert_eq!(spec["openapi"], "3.0.3");
+        assert_eq!(spec["openapi"], "3.1.0");
         assert_eq!(spec["info"]["title"], "TestApp");
         assert_eq!(spec["info"]["version"], "0.1.0");
         assert!(spec["info"]["description"]
@@ -857,17 +897,105 @@ mod tests {
     }
 
     #[test]
-    fn action_paths_generated() {
+    fn functions_are_documented_at_their_real_endpoint() {
         let spec = generate_openapi(&sample_manifest(), "/");
         let paths = spec["paths"].as_object().unwrap();
 
+        // `POST /api/fn/<name>` — case-preserved, because that's what the
+        // router matches on.
         assert!(
-            paths.contains_key("/api/actions/publishpost"),
-            "missing action path"
+            paths.contains_key("/api/fn/PublishPost"),
+            "function should be documented at /api/fn/<name>"
         );
-        let action_path = &paths["/api/actions/publishpost"];
-        assert!(action_path.get("post").is_some());
-        assert_eq!(action_path["post"]["operationId"], "executePublishPost");
+        let fn_path = &paths["/api/fn/PublishPost"];
+        assert!(fn_path.get("post").is_some());
+        assert_eq!(fn_path["post"]["operationId"], "callPublishPost");
+    }
+
+    #[test]
+    fn the_action_stub_endpoint_is_not_documented() {
+        // /api/actions/<name> validates input and policy, then returns
+        // {action, input, executed: true} without running the handler.
+        // Documenting it hands callers a 200 for work that never happened.
+        let spec = generate_openapi(&sample_manifest(), "/");
+        let paths = spec["paths"].as_object().unwrap();
+        assert!(
+            !paths.keys().any(|p| p.starts_with("/api/actions/")),
+            "the action stub must not appear in the spec"
+        );
+    }
+
+    #[test]
+    fn queries_get_paths_too() {
+        // Queries were absent from the spec entirely — only entities and
+        // actions produced paths.
+        let mut manifest = sample_manifest();
+        manifest.queries.push(pylon_kernel::ManifestQuery {
+            name: "listPosts".into(),
+            input: vec![],
+            auth: None,
+        });
+        let spec = generate_openapi(&manifest, "/");
+        let paths = spec["paths"].as_object().unwrap();
+        assert!(paths.contains_key("/api/fn/listPosts"));
+        assert_eq!(paths["/api/fn/listPosts"]["post"]["tags"][0], "queries");
+    }
+
+    #[test]
+    fn public_functions_carry_no_security_requirement() {
+        let mut manifest = sample_manifest();
+        manifest.queries.push(pylon_kernel::ManifestQuery {
+            name: "publicFeed".into(),
+            input: vec![],
+            auth: Some("public".into()),
+        });
+        manifest.queries.push(pylon_kernel::ManifestQuery {
+            name: "myFeed".into(),
+            input: vec![],
+            // Undeclared → the runtime defaults to "user", so it must be
+            // documented as requiring credentials.
+            auth: None,
+        });
+        let spec = generate_openapi(&manifest, "/");
+        let paths = spec["paths"].as_object().unwrap();
+
+        let public = paths["/api/fn/publicFeed"]["post"]["security"]
+            .as_array()
+            .unwrap();
+        assert!(public.is_empty(), "public fn should require no security");
+
+        let gated = paths["/api/fn/myFeed"]["post"]["security"]
+            .as_array()
+            .unwrap();
+        assert_eq!(gated.len(), 2, "bearer token or session cookie");
+    }
+
+    #[test]
+    fn mutations_and_actions_are_labelled_apart() {
+        let mut manifest = sample_manifest();
+        manifest.actions.push(pylon_kernel::ManifestAction {
+            name: "saveDraft".into(),
+            input: vec![],
+            auth: None,
+            fn_type: Some("mutation".into()),
+        });
+        let spec = generate_openapi(&manifest, "/");
+        let summary = spec["paths"]["/api/fn/saveDraft"]["post"]["summary"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(summary.contains("mutation"), "got: {summary}");
+    }
+
+    #[test]
+    fn spec_declares_openapi_3_1_and_both_auth_schemes() {
+        let spec = generate_openapi(&sample_manifest(), "/");
+        assert_eq!(spec["openapi"], "3.1.0");
+        let schemes = spec["components"]["securitySchemes"].as_object().unwrap();
+        assert!(schemes.contains_key("BearerAuth"));
+        // Browser clients authenticate with the session cookie; a spec
+        // listing only the token would tell them they need one.
+        assert!(schemes.contains_key("CookieAuth"));
     }
 
     #[test]
@@ -992,7 +1120,7 @@ mod tests {
         };
         let spec = generate_openapi(&manifest, "");
 
-        assert_eq!(spec["openapi"], "3.0.3");
+        assert_eq!(spec["openapi"], "3.1.0");
         assert_eq!(spec["info"]["title"], "Empty");
         // Only fixed paths + Error schema should exist.
         let schemas = spec["components"]["schemas"].as_object().unwrap();

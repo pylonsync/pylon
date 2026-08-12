@@ -18,6 +18,7 @@ pub mod cloud_secrets;
 pub mod cloud_status;
 pub mod codegen;
 pub mod codegen_client;
+pub mod codegen_openapi;
 pub mod deploy;
 pub mod deploy_cloud;
 pub mod dev;

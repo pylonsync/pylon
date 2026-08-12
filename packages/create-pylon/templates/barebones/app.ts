@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
 } from "@pylonsync/sdk";
 
 // The smallest useful Pylon app: one entity, owned by its creator, with a
@@ -38,12 +39,17 @@ const itemPolicy = policy({
 // under `app/`. `pylon dev` serves the SSR frontend and the API from one
 // port. Add fields to `Item`, or a second `entity()`, and the typed client +
 // REST/realtime API follow.
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Item],
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   policies: [itemPolicy],
   auth: auth(),
   routes: await discoverAppRoutes(),

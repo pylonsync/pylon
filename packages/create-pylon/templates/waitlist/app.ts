@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
   font,
 } from "@pylonsync/sdk";
 
@@ -116,14 +117,19 @@ const userPolicy = policy({
   allowDelete: "false",
 });
 
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Signup, WaitlistStat, User],
   // joinWaitlist (public mutation) + waitlistStats (owner-gated query) live in
   // functions/ and are discovered automatically — they don't need listing here.
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   policies: [signupPolicy, waitlistStatPolicy, userPolicy],
   // Email/password is on by default against the User entity above. No orgs,
   // no billing — a waitlist is single-tenant (one business, one owner).

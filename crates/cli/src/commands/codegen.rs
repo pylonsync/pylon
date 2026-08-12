@@ -229,7 +229,7 @@ enum ManifestTarget {
     Stdout,
 }
 
-fn ensure_parent_dir(path: &str, json_mode: bool) -> Result<(), ExitCode> {
+pub(crate) fn ensure_parent_dir(path: &str, json_mode: bool) -> Result<(), ExitCode> {
     if let Some(parent) = Path::new(path).parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             if let Err(e) = std::fs::create_dir_all(parent) {

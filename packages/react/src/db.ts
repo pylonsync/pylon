@@ -1,6 +1,7 @@
 "use client";
 
 import { SyncEngine, createSyncEngine, type Row, type SyncEngineConfig } from "@pylonsync/sync";
+import { setActiveEngine } from "./engine-registry";
 import {
   useQuery as useQueryHook,
   useQueryOne as useQueryOneHook,
@@ -57,6 +58,9 @@ let _started = false;
 export function init(config?: Partial<SyncEngineConfig> & { baseUrl?: string }) {
   _sync = createSyncEngine(config?.baseUrl, config);
   _started = false;
+  // Publish it so the free helpers in index.ts (callFn) can route
+  // through the engine and observe X-Pylon-Change-Seq.
+  setActiveEngine(_sync);
   // Keep the React-side helpers in sync — a single init() should fully
   // namespace this app's storage without a separate configureClient call.
   // Match createSyncEngine's resolution: when init({ appName }) omits
@@ -124,6 +128,7 @@ export function getSync(): SyncEngine {
     // app's SyncProvider effect lands would leak `localhost:4321`
     // requests in production.
     _sync = createSyncEngine();
+    setActiveEngine(_sync);
   }
   if (!_started) {
     _started = true;

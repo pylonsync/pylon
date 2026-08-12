@@ -91,13 +91,11 @@ fn run() -> ExitCode {
         Some("build") => commands::build::run(&args, json_mode),
         Some("cache") => commands::cache::run(&args, json_mode),
         Some("deploy") => commands::deploy::run(&args, json_mode),
-        Some("codegen") => {
-            if positional.get(1) == Some(&"client") {
-                commands::codegen_client::run(&args, json_mode)
-            } else {
-                commands::codegen::run(&args, json_mode)
-            }
-        }
+        Some("codegen") => match positional.get(1).copied() {
+            Some("client") => commands::codegen_client::run(&args, json_mode),
+            Some("openapi") => commands::codegen_openapi::run(&args, json_mode),
+            _ => commands::codegen::run(&args, json_mode),
+        },
         Some("dev") => commands::dev::run(&args, json_mode),
         Some("diagnostics") => commands::diagnostics::run(&args, json_mode),
         Some("doctor") => commands::doctor::run(&args, json_mode),
@@ -425,6 +423,7 @@ fn print_usage() {
     println!();
     println!("  codegen                   Generate manifest from TypeScript");
     println!("  codegen client            Generate typed client SDK");
+    println!("  codegen openapi           Write the OpenAPI 3.1 spec (pylon.openapi.json)");
     println!("  seed                      Seed database from JSON file");
     println!();
     println!("  plugins                   List available plugins");

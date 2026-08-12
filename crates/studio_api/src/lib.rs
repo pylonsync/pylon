@@ -140,6 +140,7 @@ mod tests {
         m.queries.push(pylon_kernel::ManifestQuery {
             name: "todosByAuthor".into(),
             input: vec![],
+            ..Default::default()
         });
         m
     }

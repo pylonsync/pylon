@@ -116,14 +116,17 @@ mod tests {
                 ManifestQuery {
                     name: "todosByAuthor".into(),
                     input: vec![f("authorId", "id(User)", false)],
+                    ..Default::default()
                 },
                 ManifestQuery {
                     name: "allTodos".into(),
                     input: vec![f("done", "bool", true)],
+                    ..Default::default()
                 },
                 ManifestQuery {
                     name: "todoById".into(),
                     input: vec![f("id", "id(Todo)", false)],
+                    ..Default::default()
                 },
             ],
             auth: Default::default(),
@@ -184,6 +187,7 @@ mod tests {
                 encrypted: false,
                 sync_omit: false,
             }],
+            ..Default::default()
         };
         let desc = QueryDescriptor::from_manifest(&mq);
         assert_eq!(desc.name, "test");

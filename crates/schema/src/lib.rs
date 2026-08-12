@@ -986,10 +986,12 @@ mod tests {
                 ManifestQuery {
                     name: "getPost".into(),
                     input: vec![],
+                    ..Default::default()
                 },
                 ManifestQuery {
                     name: "getPost".into(),
                     input: vec![],
+                    ..Default::default()
                 },
             ],
             actions: vec![],
@@ -1013,10 +1015,12 @@ mod tests {
                 ManifestAction {
                     name: "createPost".into(),
                     input: vec![],
+                    ..Default::default()
                 },
                 ManifestAction {
                     name: "createPost".into(),
                     input: vec![],
+                    ..Default::default()
                 },
             ],
             policies: vec![],
@@ -1037,6 +1041,7 @@ mod tests {
             queries: vec![ManifestQuery {
                 name: "".into(),
                 input: vec![],
+                ..Default::default()
             }],
             actions: vec![],
             policies: vec![],
@@ -1058,6 +1063,7 @@ mod tests {
             actions: vec![ManifestAction {
                 name: "".into(),
                 input: vec![],
+                ..Default::default()
             }],
             policies: vec![],
             routes: vec![],
@@ -1155,6 +1161,7 @@ mod tests {
         s.queries = vec![ManifestQuery {
             name: "allX".into(),
             input: vec![],
+            ..Default::default()
         }];
         s.routes = vec![ManifestRoute {
             path: "/x".into(),
@@ -1268,6 +1275,7 @@ mod tests {
         s.actions = vec![ManifestAction {
             name: "doThing".into(),
             input: vec![],
+            ..Default::default()
         }];
         s.policies = vec![ManifestPolicy {
             name: "p1".into(),
@@ -1292,6 +1300,7 @@ mod tests {
         s.actions = vec![ManifestAction {
             name: "doThing".into(),
             input: vec![],
+            ..Default::default()
         }];
         s.policies = vec![ManifestPolicy {
             name: "p1".into(),
@@ -1432,6 +1441,7 @@ mod tests {
         s.queries = vec![ManifestQuery {
             name: "getX".into(),
             input: vec![],
+            ..Default::default()
         }];
         s.routes = vec![make_route("/x/:xId", Some("getX"), None)];
         let diags = validate(&s);
@@ -1456,6 +1466,7 @@ mod tests {
                 encrypted: false,
                 sync_omit: false,
             }],
+            ..Default::default()
         }];
         s.routes = vec![make_route("/x/:xId", Some("getX"), None)];
         let diags = validate(&s);
@@ -1658,6 +1669,7 @@ mod tests {
                 encrypted: false,
                 sync_omit: false,
             }],
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags
@@ -1683,6 +1695,7 @@ mod tests {
                 encrypted: false,
                 sync_omit: false,
             }],
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags
@@ -1719,6 +1732,7 @@ mod tests {
                     encrypted: false,
                     sync_omit: false,
                 }],
+                ..Default::default()
             }],
             actions: vec![],
             policies: vec![],
@@ -1776,6 +1790,7 @@ mod tests {
                 make_manifest_field("x", "string", false),
                 make_manifest_field("x", "int", false),
             ],
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "INPUT_FIELD_DUPLICATE"));
@@ -1787,6 +1802,7 @@ mod tests {
         s.actions = vec![ManifestAction {
             name: "a".into(),
             input: vec![make_manifest_field("", "string", false)],
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "INPUT_FIELD_NAME_EMPTY"));
@@ -1798,6 +1814,7 @@ mod tests {
         s.queries = vec![ManifestQuery {
             name: "q".into(),
             input: vec![make_manifest_field("ref", "id(Missing)", true)],
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "FIELD_ID_TARGET_NOT_FOUND"));
@@ -1812,6 +1829,7 @@ mod tests {
                 make_manifest_field("x", "string", false),
                 make_manifest_field("x", "string", true),
             ],
+            ..Default::default()
         }];
         let diags = validate(&s);
         assert!(diags.iter().any(|d| d.code == "INPUT_FIELD_DUPLICATE"));
@@ -1887,6 +1905,7 @@ mod tests {
         m.queries = vec![pylon_kernel::ManifestQuery {
             name: "q".into(),
             input: vec![make_manifest_field("x", "boolean", false)],
+            ..Default::default()
         }];
         let diags = validate_field_types(&m);
         assert!(diags
@@ -1900,6 +1919,7 @@ mod tests {
         m.actions = vec![pylon_kernel::ManifestAction {
             name: "a".into(),
             input: vec![make_manifest_field("x", "date_time", false)],
+            ..Default::default()
         }];
         let diags = validate_field_types(&m);
         assert!(diags

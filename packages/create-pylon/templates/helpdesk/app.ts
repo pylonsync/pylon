@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
   font,
 } from "@pylonsync/sdk";
 
@@ -111,12 +112,17 @@ const userPolicy = policy({
   allowDelete: "false",
 });
 
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Customer, Ticket, Message, User],
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   policies: [
     teamPolicy("customer_team", "Customer"),
     teamPolicy("ticket_team", "Ticket"),

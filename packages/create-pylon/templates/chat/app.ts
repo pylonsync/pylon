@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
 } from "@pylonsync/sdk";
 
 // A chat message in the shared room. `authorId: field.owner()` stamps the
@@ -37,12 +38,17 @@ const messagePolicy = policy({
 
 // buildManifest assembles the entities, policies, auth, and routes into the
 // single manifest `pylon dev` serves — SSR room + realtime API on one port.
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Message],
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   policies: [messagePolicy],
   auth: auth(),
   routes: await discoverAppRoutes(),

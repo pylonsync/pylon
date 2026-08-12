@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
 } from "@pylonsync/sdk";
 
 // A post in the public feed. `authorId: field.owner()` stamps the signed-in
@@ -72,12 +73,17 @@ const likePolicy = policy({
 // login. Natural next steps: a `Profile` entity (displayName/avatar keyed by
 // userId) to show names instead of ids, and a `Follow` join entity
 // (followerId/followedId) to scope the feed to people you follow.
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Post, Like],
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   policies: [postPolicy, likePolicy],
   auth: auth(),
   routes: await discoverAppRoutes(),

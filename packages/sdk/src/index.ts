@@ -532,13 +532,21 @@ export interface InputFieldDefinition {
 export interface QueryDefinition {
   name: string;
   input?: InputFieldDefinition[];
+  /**
+   * The function's declarative auth gate ("public" | "user" | …), as the
+   * router enforces it. Populated by `discoverFunctions()`; consumers
+   * (the OpenAPI generator) use it to mark which endpoints need
+   * credentials. Undefined means "not declared" — the runtime's default
+   * is "user".
+   */
+  auth?: string;
 }
 
 export function query(
   name: string,
-  options?: { input?: InputFieldDefinition[] }
+  options?: { input?: InputFieldDefinition[]; auth?: string }
 ): QueryDefinition {
-  return { name, input: options?.input };
+  return { name, input: options?.input, auth: options?.auth };
 }
 
 // ---------------------------------------------------------------------------
@@ -548,13 +556,30 @@ export function query(
 export interface ActionDefinition {
   name: string;
   input?: InputFieldDefinition[];
+  /** See `QueryDefinition.auth`. */
+  auth?: string;
+  /**
+   * Which write kind this was before the manifest's read/write split
+   * collapsed mutations and actions into one bucket. Preserved so a
+   * generated spec can tell them apart.
+   */
+  fnType?: "mutation" | "action";
 }
 
 export function action(
   name: string,
-  options?: { input?: InputFieldDefinition[] }
+  options?: {
+    input?: InputFieldDefinition[];
+    auth?: string;
+    fnType?: "mutation" | "action";
+  }
 ): ActionDefinition {
-  return { name, input: options?.input };
+  return {
+    name,
+    input: options?.input,
+    auth: options?.auth,
+    fnType: options?.fnType,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -745,11 +770,17 @@ export interface ManifestInputField {
 export interface ManifestQuery {
   name: string;
   input?: ManifestInputField[];
+  /** Declarative auth gate as the router enforces it. Absent → "user". */
+  auth?: string;
 }
 
 export interface ManifestAction {
   name: string;
   input?: ManifestInputField[];
+  /** Declarative auth gate as the router enforces it. Absent → "user". */
+  auth?: string;
+  /** "mutation" or "action" — the manifest bucket holds both. */
+  fn_type?: string;
 }
 
 export interface ManifestPolicy {
@@ -1322,6 +1353,190 @@ export async function discoverAppRoutes(opts?: {
   return [...navigable, ...boundaryRoutes];
 }
 
+// ---------------------------------------------------------------------------
+// Function discovery
+// ---------------------------------------------------------------------------
+
+/**
+ * A function definition as `@pylonsync/functions` builds it. Structural —
+ * the SDK does not depend on that package (it would drag server-only
+ * modules into client bundles), so this mirrors the shape the runtime
+ * loader checks for.
+ */
+interface RuntimeFnDefinition {
+  type: "query" | "mutation" | "action";
+  handler: unknown;
+  args?: Record<string, RuntimeValidator>;
+  internal?: boolean;
+  auth?: string;
+}
+
+/** A `v.*` validator: `{type, optional?, table?, items?}`. */
+interface RuntimeValidator {
+  type: string;
+  optional?: boolean;
+  table?: string;
+}
+
+/**
+ * Map a validator onto the manifest's field type.
+ *
+ * `FieldType` has no array or union variant, so `v.array(...)`,
+ * `v.union(...)`, and `v.any()` all land on `json`. The element type in
+ * `Validator.items` is information this boundary throws away — widening
+ * `FieldType` is the fix, and it would materially improve a generated
+ * OpenAPI spec.
+ */
+function validatorToFieldType(validator: RuntimeValidator): FieldType {
+  switch (validator.type) {
+    case "string":
+      return "string";
+    case "int":
+      return "int";
+    case "float":
+    case "number":
+      return "float";
+    case "bool":
+    case "boolean":
+      return "bool";
+    case "datetime":
+      return "datetime";
+    case "id":
+      // `v.optional(v.id("Event"))` spreads the inner validator, so
+      // `table` survives the optional wrapper.
+      return validator.table ? (`id(${validator.table})` as FieldType) : "string";
+    default:
+      return "json";
+  }
+}
+
+function argsToInput(
+  args: Record<string, RuntimeValidator> | undefined
+): InputFieldDefinition[] {
+  if (!args) return [];
+  return Object.entries(args).map(([name, validator]) => ({
+    name,
+    type: validatorToFieldType(validator),
+    // `v.optional(inner)` sets `optional: true` on the spread validator
+    // itself, so this reads correctly without unwrapping.
+    optional: validator.optional === true,
+  }));
+}
+
+export interface DiscoveredFunctions {
+  queries: QueryDefinition[];
+  actions: ActionDefinition[];
+}
+
+/**
+ * Walk `functions/` and return every externally callable function, for
+ * `buildManifest({ queries, actions })`.
+ *
+ * The counterpart to `discoverAppRoutes()`. Without it, `buildManifest`
+ * takes `queries`/`actions` that nothing produces, so apps ship
+ * manifests describing zero callable endpoints while `/api/fn/<name>`
+ * serves dozens — `/api/manifest`, the generated OpenAPI spec, and
+ * `pylon codegen` all under-report in the same silent way.
+ *
+ * Discovery deliberately mirrors the runtime loader
+ * (`packages/functions/src/runtime.ts`) exactly: top-level `.ts`/`.js`
+ * files in `functions/`, no recursion, name = basename without the
+ * extension, and a default export whose `type` is a string and whose
+ * `handler` is a function. Anything the runtime would not register does
+ * not appear here, and vice versa — a manifest that disagrees with the
+ * router describes endpoints that don't exist.
+ *
+ * `internal: true` functions are excluded: the router refuses external
+ * calls to them with `FN_NOT_FOUND`, so listing them would document
+ * endpoints no client can reach.
+ *
+ * Queries go to `queries`; mutations and actions both go to `actions`,
+ * because the manifest's split is read vs write and has no third bucket.
+ * `fnType` on the entry preserves which one it was.
+ *
+ * Each file is dynamically imported, so function modules must be free of
+ * side effects at import time. That is already true of any module the
+ * runtime loads — this runs the same imports the server does — but it is
+ * a contract worth knowing about.
+ */
+export async function discoverFunctions(opts?: {
+  fnDir?: string;
+}): Promise<DiscoveredFunctions> {
+  // Same lazy node-builtin resolution as discoverAppRoutes: the SDK
+  // carries no @types/node and must stay importable from client code.
+  let fs: any;
+  let path: any;
+  let url: any;
+  try {
+    const nodeReq =
+      (globalThis as any).require ??
+      (await import("node:module")).createRequire(import.meta.url);
+    fs = nodeReq("node:fs");
+    path = nodeReq("node:path");
+    url = nodeReq("node:url");
+  } catch {
+    return { queries: [], actions: [] };
+  }
+  if (!fs || !path || !url) return { queries: [], actions: [] };
+
+  const cwd = (globalThis as any).process?.cwd?.() ?? ".";
+  const fnDir =
+    opts?.fnDir && path.isAbsolute(opts.fnDir)
+      ? opts.fnDir
+      : path.join(cwd, opts?.fnDir ?? "functions");
+  if (!fs.existsSync(fnDir) || !fs.statSync(fnDir).isDirectory()) {
+    return { queries: [], actions: [] };
+  }
+
+  const files: string[] = fs
+    .readdirSync(fnDir)
+    .filter((f: string) => f.endsWith(".ts") || f.endsWith(".js"))
+    // Sorted so two machines produce byte-identical manifests.
+    .sort();
+
+  const queries: QueryDefinition[] = [];
+  const actions: ActionDefinition[] = [];
+
+  for (const file of files) {
+    const name = file.replace(/\.(ts|js)$/, "");
+    let definition: RuntimeFnDefinition | undefined;
+    try {
+      const mod = await import(
+        url.pathToFileURL(path.join(fnDir, file)).href
+      );
+      definition = mod?.default as RuntimeFnDefinition | undefined;
+    } catch {
+      // A module that won't import can't be serving traffic either.
+      // The runtime loader logs and skips; so do we, rather than
+      // failing the whole manifest build over one bad file.
+      continue;
+    }
+
+    // The runtime's own registration check. A default export that isn't
+    // a function definition (a config object, a React component in the
+    // wrong directory) is silently skipped there and here.
+    const shape = definition as unknown as Record<string, unknown> | undefined;
+    if (
+      !shape ||
+      typeof shape.type !== "string" ||
+      typeof shape.handler !== "function"
+    ) {
+      continue;
+    }
+    if (shape.internal === true) continue;
+
+    const input = argsToInput(definition!.args);
+    const auth = typeof shape.auth === "string" ? shape.auth : undefined;
+    if (definition!.type === "query") {
+      queries.push({ name, input, auth });
+    } else {
+      actions.push({ name, input, auth, fnType: definition!.type });
+    }
+  }
+
+  return { queries, actions };
+}
+
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
   return queries.map((q) => {
     const result: ManifestQuery = { name: q.name };
@@ -1333,6 +1548,7 @@ export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
         unique: false as const,
       }));
     }
+    if (q.auth) result.auth = q.auth;
     return result;
   });
 }
@@ -1350,6 +1566,8 @@ export function actionsToManifest(
         unique: false as const,
       }));
     }
+    if (a.auth) result.auth = a.auth;
+    if (a.fnType) result.fn_type = a.fnType;
     return result;
   });
 }

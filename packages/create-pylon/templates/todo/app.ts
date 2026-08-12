@@ -5,6 +5,7 @@ import {
   auth,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
 } from "@pylonsync/sdk";
 
 // A todo that belongs to one person. `userId: field.owner()` stamps the
@@ -52,12 +53,17 @@ const todoPolicy = policy({
 // To require real accounts instead, enable email/password (it's built in
 // against a `User` entity) and swap `<EnsureGuest>` for `<SignedIn>` /
 // `<SignedOut>` from `@pylonsync/client`.
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [Todo],
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   policies: [todoPolicy],
   auth: auth(),
   // File-based routing: `discoverAppRoutes()` walks `app/**/page.tsx` and

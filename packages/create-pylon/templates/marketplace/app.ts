@@ -20,6 +20,7 @@ import {
   policy,
   buildManifest,
   discoverAppRoutes,
+  discoverFunctions,
 } from "@pylonsync/sdk";
 
 // Accounts. Email/password auth is built in: registering through
@@ -174,12 +175,17 @@ const offerPolicy = policy({
   allowDelete: "auth.userId == data.buyerId",
 });
 
+// Every non-internal function in functions/ becomes a manifest entry —
+// this is what makes them show up in /api/manifest, the OpenAPI spec,
+// and `pylon codegen`.
+const fns = await discoverFunctions();
+
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
   entities: [User, Listing, Offer, Watch],
-  queries: [],
-  actions: [],
+  queries: fns.queries,
+  actions: fns.actions,
   policies: [userPolicy, listingPolicy, offerPolicy, watchPolicy],
   // File-based SSR routing: app/**/page.tsx. One binary serves the frontend
   // and the API on one port.
