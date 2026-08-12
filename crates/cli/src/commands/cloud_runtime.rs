@@ -24,11 +24,10 @@ struct ProjectIdResponse {
 }
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
-    let positional: Vec<&str> = args
-        .iter()
-        .filter(|a| !a.starts_with('-') && *a != "runtime")
-        .map(|s| s.as_str())
-        .collect();
+    // Must drop flag VALUES, not just flags: `pylon runtime --project pad`
+    // read "pad" as the version and tried to upgrade the runtime to a
+    // release called "pad".
+    let positional = crate::commands::args::collect_positional(args, "runtime");
     let creds = match require_credentials() {
         Ok(c) => c,
         Err(e) => {
