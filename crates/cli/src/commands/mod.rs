@@ -35,6 +35,7 @@ pub mod plugins;
 pub mod policy_test;
 pub mod schema;
 pub mod seed;
+pub mod self_update;
 pub mod start;
 pub mod test;
 pub mod test_security;

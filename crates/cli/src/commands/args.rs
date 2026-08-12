@@ -32,6 +32,7 @@ const VALUE_FLAGS: &[&str] = &[
     // those commands take positionally: `pylon deployments logs
     // --project acme` read "acme" as a deployment id.
     "--project",
+    "--org",
     "--limit",
     "--token",
 ];

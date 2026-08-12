@@ -74,6 +74,7 @@ fn run() -> ExitCode {
         match positional.first().copied() {
             Some("logs") => return commands::cloud_logs::run(&args, json_mode),
             Some("restart") => return commands::cloud_restart::run(&args, json_mode),
+            Some("upgrade") => return commands::self_update::run(&args, json_mode),
             Some("whoami") => return commands::whoami::run(&args, json_mode),
             // Commands with focused, flag-level help print it here. Help
             // must never cause a side effect, so this only ever prints.
@@ -111,7 +112,7 @@ fn run() -> ExitCode {
         Some("update") => commands::update::run(&args, json_mode),
         Some("verify") => commands::verify::run(&args, json_mode),
         Some("billing") => commands::cloud_billing::run(&args, json_mode),
-        Some("upgrade") => commands::cloud_billing::run_upgrade(&args, json_mode),
+        Some("upgrade") => commands::self_update::run(&args, json_mode),
         Some("data") => commands::cloud_data::run(&args, json_mode),
         Some("db") => commands::cloud_db::run(&args, json_mode),
         Some("deployments") => commands::cloud_deployments::run(&args, json_mode),
@@ -410,7 +411,7 @@ fn print_usage() {
     println!("  status                    One-glance project health");
     println!("  restart                   Restart the project's machines without rebuilding");
     println!("  billing                   Plan, this month's usage + projected charge, invoices");
-    println!("  upgrade                   Upgrade the org to Pro (opens Stripe checkout)");
+    println!("  billing upgrade           Move the org to Pro (opens Stripe checkout)");
     println!();
     println!("  schema check              Validate schema");
     println!("  schema diff               Show schema changes");
@@ -438,6 +439,7 @@ fn print_usage() {
   mcp [--url <base>]        Serve this app to agents over MCP (stdio)
   policy test <expr>        Dry-run a policy expression (--auth k=v --row json)
   update [--dry-run]        Bump every @pylonsync/* dependency to the latest release
+  upgrade [--check]         Update the pylon binary itself to the latest release
   verify [--url <base>]     Boot (or target) the app and verify routes + assets serve"
     );
     println!("  version                   Show version");

@@ -960,6 +960,8 @@ pylon domains list / add HOST / verify HOST / rm HOST
 pylon db list / backup / restore <id> --yes
 pylon data entities / list <E> / get <E> <id>
 pylon members list / invite EMAIL [role]
+pylon billing                            # plan, month-to-date + projected charge
+pylon billing upgrade                    # move the org to Pro (Stripe checkout)
 ```
 
 Every command accepts `--json` for piping to `jq`. Project context resolves from `--project` flag → `$PYLON_PROJECT` → `.pylon/project` file → interactive picker. The `.pylon/project` file is what `pylon projects use` writes; subsequent commands in that directory tree auto-target.
@@ -967,6 +969,8 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 **Start with `pylon whoami`** when a command targets the wrong thing. It reports the account, the cloud origin, and which project is active *and where that slug came from* — a `.pylon/project` inherited from a parent directory is the usual culprit. It also flags a slug that resolves locally but names no project on the account.
 
 **Destructive commands refuse to run unattended without `--yes`**: `restart`, `deployments rollback`, `db restore`, `secrets rm`, `domains rm`. Under `--json` or a non-TTY there is no prompt to answer, so the command errors out instead — pass `--yes` in scripts.
+
+**Two different "update" commands, don't mix them up.** `pylon update` bumps every `@pylonsync/*` dependency in the project's package.json files. `pylon upgrade` (pylon ≥ 0.4.6) updates the **pylon binary itself** to the latest release — `pylon upgrade --check` reports without changing anything. A CLI installed by npm or cargo is left alone; upgrade prints the command that manages it. Before 0.4.6, `pylon upgrade` opened a Stripe checkout; that is `pylon billing upgrade` now.
 
 **`pylon restart`** (pylon ≥ 0.4.5) cycles the running process on the code already deployed. Reach for it when the app is wedged or crash-looping — `pylon deploy` rebuilds for no reason and `deployments rollback` ships older code. A stopped machine is started rather than restarted, and multi-region projects cycle one region at a time. Exits non-zero if any region failed to come back, so a script won't move on from a half-recovered app. Requires org owner or admin.
 

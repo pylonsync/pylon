@@ -1,6 +1,6 @@
 //! `pylon billing` — show the caller's org plan, this month's usage charge +
 //! projected month-end, and recent invoices.
-//! `pylon upgrade` — open the Stripe checkout to move the org to Pro.
+//! `pylon billing upgrade` — open the Stripe checkout to move the org to Pro.
 //!
 //! Both resolve the org via `--org <slug>` or the single-org default (same rule
 //! as `pylon projects`), so single-org users never think about orgs.
@@ -103,6 +103,12 @@ fn dollars(cents: i64) -> String {
 }
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
+    // `pylon billing upgrade` is the plan change. It used to live at the
+    // top level as `pylon upgrade`, which collided with what every other
+    // CLI means by that word — `pylon upgrade` now updates the binary.
+    if crate::commands::args::collect_positional(args, "billing").first() == Some(&"upgrade") {
+        return run_upgrade(args, json_mode);
+    }
     let creds = match require_credentials() {
         Ok(c) => c,
         Err(e) => {
@@ -185,7 +191,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
     println!();
     if cost.plan == "hobby" {
-        println!("  Upgrade to Pro:  pylon upgrade");
+        println!("  Upgrade to Pro:  pylon billing upgrade");
     }
     ExitCode::Ok
 }
@@ -269,4 +275,45 @@ fn open_browser(url: &str) -> std::io::Result<()> {
             .spawn()?;
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use crate::commands::args::collect_positional;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn subcommand(parts: &[&str]) -> Option<String> {
+        let args = argv(parts);
+        collect_positional(&args, "billing")
+            .first()
+            .map(|s| s.to_string())
+    }
+
+    #[test]
+    fn upgrade_routes_to_the_plan_change() {
+        assert_eq!(
+            subcommand(&["billing", "upgrade"]).as_deref(),
+            Some("upgrade")
+        );
+        assert_eq!(
+            subcommand(&["billing", "upgrade", "--org", "acme"]).as_deref(),
+            Some("upgrade")
+        );
+    }
+
+    #[test]
+    fn bare_billing_shows_the_summary() {
+        assert_eq!(subcommand(&["billing"]), None);
+        // The org flag's value must not be read as a subcommand — that
+        // would send `pylon billing --org acme` to the checkout.
+        assert_eq!(subcommand(&["billing", "--org", "acme"]), None);
+        assert_eq!(subcommand(&["billing", "--json"]), None);
+    }
 }
