@@ -1310,8 +1310,18 @@ export function applyAutoSocialImages(
  *
  * Shared by the page render and the boundary render so head injection has
  * exactly one implementation.
+ *
+ * Decoding uses ONE `TextDecoder` with `{stream: true}` for the whole
+ * reader, never a per-chunk decode. React splits the byte stream at
+ * arbitrary offsets, so a multi-byte character can land across two chunks;
+ * decoding each chunk independently turns the orphaned bytes into one
+ * U+FFFD apiece — `…` (e2 80 a6) arrives as three replacement characters.
+ * The failure is silent and position-dependent: markup added anywhere
+ * earlier shifts the boundary, so a page can render correctly for months
+ * and corrupt on an unrelated CSS change. A streaming decoder holds the
+ * partial sequence back until the bytes that complete it arrive.
  */
-async function streamWithHeadInjection(
+export async function streamWithHeadInjection(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   headBlob: string,
   sendChunk: (text: string) => void,
@@ -1319,11 +1329,15 @@ async function streamWithHeadInjection(
   let headInjected = headBlob.length === 0;
   let carry = "";
   const HEAD_CLOSE = "</head>";
+  const decoder = new TextDecoder("utf-8");
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
     if (!value || value.byteLength === 0) continue;
-    const text = Buffer.from(value).toString("utf8");
+    const text = decoder.decode(value, { stream: true });
+    // A chunk that ended mid-character decodes to "" — the bytes are held
+    // in the decoder until the rest arrives. Nothing to emit yet.
+    if (!text) continue;
     if (!headInjected) {
       const combined = carry + text;
       const idx = combined.indexOf(HEAD_CLOSE);
@@ -1346,6 +1360,17 @@ async function streamWithHeadInjection(
       }
     } else {
       sendChunk(text);
+    }
+  }
+  // Flush the decoder. A stream that ends mid-character is genuinely
+  // truncated input, and this is where it becomes a replacement character
+  // rather than silently vanishing.
+  const tail = decoder.decode();
+  if (tail) {
+    if (!headInjected) {
+      carry += tail;
+    } else {
+      sendChunk(tail);
     }
   }
   if (carry) sendChunk(carry);
