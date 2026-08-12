@@ -18,9 +18,18 @@ export interface RouteMatch {
   params: Record<string, string>;
 }
 
-/** The slice of the build manifest this matcher needs. */
+/** The slice of the build manifest this module needs. */
 export interface MatchableManifest {
-  routes: Record<string, { path?: string }>;
+  routes: Record<
+    string,
+    {
+      path?: string;
+      /** The route's own entry chunk (outdir-relative). */
+      file?: string;
+      /** Shared chunks the browser needs before that entry runs. */
+      imports?: string[];
+    }
+  >;
 }
 
 function splitPath(p: string): string[] {
@@ -101,4 +110,40 @@ export function matchRoute(
     }
   }
   return best ? best.match : null;
+}
+
+/** What `<Link prefetch>` should warm for a destination href. */
+export interface PrefetchTargets {
+  /** The destination route's own entry chunk, or "" when no page route matches. */
+  file: string;
+  /** Shared chunks to warm alongside it. */
+  imports: string[];
+}
+
+/**
+ * The chunks a click on `pathname` will need before anything can render: the
+ * destination route's entry, plus the shared chunks (React, the client
+ * runtime, common layouts) that every route pulls in.
+ *
+ * Warming the page payload alone leaves the entry chunk to be fetched after
+ * the click, and the route cannot render until it lands — so the prefetch
+ * covers only the half that was already fast. An href matching no page route
+ * (an API path, a route this build doesn't serve) still yields the shared set;
+ * `file` is "" and the caller skips it.
+ */
+export function prefetchTargets(
+  manifest: MatchableManifest | null | undefined,
+  pathname: string,
+): PrefetchTargets {
+  const imports = new Set<string>();
+  if (!manifest || !manifest.routes) return { file: "", imports: [] };
+  for (const r of Object.values(manifest.routes)) {
+    for (const i of r?.imports || []) imports.add(i);
+  }
+  const matched = matchRoute(manifest, pathname);
+  const route = matched ? manifest.routes[matched.component] : null;
+  if (route) {
+    for (const i of route.imports || []) imports.add(i);
+  }
+  return { file: route?.file || "", imports: Array.from(imports) };
 }

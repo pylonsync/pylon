@@ -21,20 +21,25 @@
 
 import { Component, createElement, useEffect, useState } from "react";
 
+/** A per-directory module resolved by walking up from a route: the two error
+ *  boundaries, plus `loading` (the pending-navigation skeleton). */
+export type BoundaryFile = "not-found" | "error" | "loading";
+
 /**
- * Resolve the nearest boundary module (`<dir>/not-found` or `<dir>/error`)
- * for a route by walking its component path up to the app root, returning the
- * first manifest route key that exists. Nearest ancestor wins — the same model
- * the server's `findBoundary` uses, but driven off the client build manifest's
- * route keys so the client runtime needs no extra server round-trip.
+ * Resolve the nearest `<dir>/<fileName>` module for a route by walking its
+ * component path up to the app root, returning the first key that exists.
+ * Nearest ancestor wins — the same model the server's `findBoundary` uses, but
+ * driven off client-side keys so the runtime needs no extra server round-trip.
  *
  * `component` is a cwd-relative path with "/" separators and no extension
- * (e.g. "web/app/dashboard/orgs/[slug]/page"); `routeKeys` is
- * `Object.keys(manifest.routes)`.
+ * (e.g. "web/app/dashboard/orgs/[slug]/page"). `keys` is the set to resolve
+ * against: `Object.keys(manifest.routes)` for not-found/error, which ship as
+ * route entries, or the loading registry's keys for `loading`, which ships in
+ * the shared chunk instead.
  */
 export function nearestBoundaryComponent(
   component: string,
-  fileName: "not-found" | "error",
+  fileName: BoundaryFile,
   routeKeys: Iterable<string>,
 ): string | null {
   const keys = routeKeys instanceof Set ? routeKeys : new Set(routeKeys);

@@ -25,6 +25,8 @@ import {
   buildClientBundle,
   buildTailwind,
   assertNotServerOnly,
+  discoverLoadingModules,
+  generateLoadingRegistry,
   type PylonBundleManifest,
 } from "./ssr-client-bundler";
 import { nearestBoundaryComponent } from "./ssr-client-boundary";
@@ -486,5 +488,165 @@ describe("server-only guard (secrets can't leak into the client bundle)", () => 
     expect(guardFired).toBe(true);
     expect(failed).toBe(true);
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// loading.tsx during client-side navigation.
+//
+// Regression: a route-level loading.tsx was honored ONLY by the server's
+// streaming render. The client bundler emitted entries for not-found and error
+// but not loading, so no loading module existed on the client at all and a
+// pending navigation left the previous page fully painted until the
+// destination was ready. Polling the DOM every 15ms across a sidebar click
+// never saw the skeleton; the same route hard-loaded streamed it fine.
+// ---------------------------------------------------------------------------
+
+const LOADING_BODY = `
+import React from "react";
+export default function Loading() {
+  return <div aria-busy="true" data-skeleton="pylon-pending">Loading…</div>;
+}
+`;
+
+describe("discoverLoadingModules", () => {
+  test("finds loading modules at every depth, sorted", () => {
+    tempDir = makeFixture(
+      {
+        "page.tsx": PAGE_BODY("Home"),
+        "loading.tsx": LOADING_BODY,
+        "dashboard/page.tsx": PAGE_BODY("Dash"),
+        "dashboard/events/[id]/page.tsx": PAGE_BODY("Event"),
+        "dashboard/events/[id]/loading.tsx": LOADING_BODY,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    expect(discoverLoadingModules(fs, path, tempDir, "app")).toEqual([
+      "app/dashboard/events/[id]/loading",
+      "app/loading",
+    ]);
+  });
+
+  test("finds one inside a route group", () => {
+    // Chrome commonly lives in a (group) layout; its loading sibling has to be
+    // discoverable by the same path walk the server uses.
+    tempDir = makeFixture(
+      {
+        "(dash)/settings/page.tsx": PAGE_BODY("Settings"),
+        "(dash)/loading.tsx": LOADING_BODY,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    expect(discoverLoadingModules(fs, path, tempDir, "app")).toEqual([
+      "app/(dash)/loading",
+    ]);
+  });
+
+  test("an app with no loading.tsx yields an empty list, not an error", () => {
+    tempDir = makeFixture(
+      { "page.tsx": PAGE_BODY("Home") },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    expect(discoverLoadingModules(fs, path, tempDir, "app")).toEqual([]);
+  });
+});
+
+describe("generateLoadingRegistry", () => {
+  test("keys each module by component path so the nearest-ancestor walk works", () => {
+    const src = generateLoadingRegistry([
+      "app/loading",
+      "app/dashboard/loading",
+    ]);
+    expect(src).toContain(`import M0 from "../app/loading";`);
+    expect(src).toContain(`import M1 from "../app/dashboard/loading";`);
+    expect(src).toContain(`"app/loading": M0,`);
+    expect(src).toContain(`"app/dashboard/loading": M1,`);
+  });
+
+  test("emits a valid empty registry when the app has none", () => {
+    // The runtime imports LOADING_MODULES unconditionally — an app without a
+    // loading.tsx must still produce a module that parses and exports it.
+    const src = generateLoadingRegistry([]);
+    expect(src).toContain("export const LOADING_MODULES = {");
+    expect(src).not.toContain("import M0");
+  });
+});
+
+describe("nearestBoundaryComponent resolves loading.tsx", () => {
+  const loadingKeys = new Set([
+    "web/app/loading",
+    "web/app/dashboard/events/[id]/loading",
+  ]);
+
+  test("a sibling route picks up the nearest ancestor's skeleton", () => {
+    // Every tab under events/[id] shares that one loading.tsx.
+    expect(
+      nearestBoundaryComponent(
+        "web/app/dashboard/events/[id]/speakers/page",
+        "loading",
+        loadingKeys,
+      ),
+    ).toBe("web/app/dashboard/events/[id]/loading");
+  });
+
+  test("falls back to the root skeleton outside that subtree", () => {
+    expect(
+      nearestBoundaryComponent("web/app/settings/page", "loading", loadingKeys),
+    ).toBe("web/app/loading");
+  });
+
+  test("returns null when the app ships none", () => {
+    expect(
+      nearestBoundaryComponent("web/app/page", "loading", new Set()),
+    ).toBeNull();
+  });
+});
+
+describe("loading.tsx is wired into the client build", () => {
+  test("ships in the SHARED chunk — a skeleton can't wait on its own fetch", async () => {
+    tempDir = makeFixture(
+      {
+        "page.tsx": PAGE_BODY("Home"),
+        "dashboard/page.tsx": PAGE_BODY("Dash"),
+        "dashboard/loading.tsx": LOADING_BODY,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const { manifestPath, outdir } = await buildClientBundle();
+    const manifest = JSON.parse(
+      fs.readFileSync(manifestPath, "utf8"),
+    ) as PylonBundleManifest;
+
+    // Not a route entry: it has no URL of its own, and a loading state that
+    // costs a chunk fetch sits behind the very delay it exists to cover.
+    expect(manifest.routes["app/dashboard/loading"]).toBeUndefined();
+
+    const sharedChunks = fs
+      .readdirSync(path.join(outdir, "chunks"))
+      .map((n) => fs.readFileSync(path.join(outdir, "chunks", n), "utf8"))
+      .join("\n");
+    // The skeleton's own markup, and the registry key the runtime walks to.
+    expect(sharedChunks).toContain("pylon-pending");
+    expect(sharedChunks).toContain("app/dashboard/loading");
+  });
+
+  test("an app with no loading.tsx still builds and navigates", async () => {
+    // The runtime's import of ./loading-registry is unconditional, so the
+    // staged module must exist even with nothing to put in it.
+    tempDir = makeFixture(
+      { "page.tsx": PAGE_BODY("Home"), "about/page.tsx": PAGE_BODY("About") },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    originalCwd = process.cwd();
+    process.chdir(tempDir);
+
+    const { manifestPath } = await buildClientBundle();
+    expect(fs.existsSync(manifestPath)).toBe(true);
+    expect(
+      fs.existsSync(path.join(tempDir, ".pylon", "loading-registry.ts")),
+    ).toBe(true);
   });
 });

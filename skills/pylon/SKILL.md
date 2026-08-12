@@ -811,7 +811,7 @@ function PostList({ promise }: { promise: Promise<Post[]> }) {
 
 ### File conventions (all optional, walked up from the page dir)
 
-- `loading.tsx` → a Suspense fallback (set `export const streaming = true` on a page for progressive streaming).
+- `loading.tsx` → the route's pending state, in both directions: the Suspense fallback the SSR stream flushes first (set `export const streaming = true` on a page for progressive streaming), and what the client router paints over the page area when a `<Link>` navigation runs longer than ~100ms. Faster navigations swap straight to content, so it never flashes.
 - `error.tsx` → error boundary; `not-found.tsx` → 404 boundary (call `notFound()` to trigger).
 - `sitemap.ts` → `/sitemap.xml`, `robots.ts` → `/robots.txt`. Default export, **may be async** (enumerate dynamic pages from the DB). Types `Sitemap` / `Robots` from `@pylonsync/react`:
 
