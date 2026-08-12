@@ -949,11 +949,16 @@ fn openapi_spec() {
     let (status, body) = http_request("GET", &format!("{base}/api/openapi.json"), None);
     assert_eq!(status, 200, "openapi: {body}");
     let spec: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(spec["openapi"], "3.0.3");
+    assert_eq!(spec["openapi"], "3.1.0");
     assert!(
         spec["paths"].as_object().unwrap().len() > 10,
         "expected >10 path entries in OpenAPI spec"
     );
+    // Both ways a caller authenticates against this server. A generated client
+    // that knows only about bearer tokens can't drive a browser session.
+    let schemes = &spec["components"]["securitySchemes"];
+    assert!(schemes["BearerAuth"].is_object(), "spec: {body}");
+    assert!(schemes["CookieAuth"].is_object(), "spec: {body}");
 }
 
 #[test]
