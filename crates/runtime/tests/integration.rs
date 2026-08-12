@@ -206,14 +206,16 @@ fn test_manifest() -> AppManifest {
 /// in CI.
 fn available_port() -> u16 {
     use std::sync::atomic::{AtomicU16, Ordering};
-    // Start high in the ephemeral range with a random offset so two parallel
-    // `cargo test` invocations (e.g. one local, one triggered by a watcher)
-    // don't stomp each other immediately.
+    // Random offset so two parallel `cargo test` invocations (e.g. one local,
+    // one triggered by a watcher) don't stomp each other immediately — but
+    // BELOW the ephemeral range (Linux 32768-60999), because a port up there
+    // can be handed to this suite's own client sockets between the probe and
+    // the server's bind, which surfaces as EADDRINUSE on CI.
     static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
-    // Initialize on first use with a random offset in [30000, 40000).
+    // Initialize on first use with a random offset in [28000, 31000).
     let seed = NEXT_PORT.load(Ordering::Relaxed);
     if seed == 0 {
-        let off: u16 = rand::random::<u16>() % 10_000 + 30_000;
+        let off: u16 = rand::random::<u16>() % 3_000 + 28_000;
         let _ = NEXT_PORT.compare_exchange(0, off, Ordering::Relaxed, Ordering::Relaxed);
     }
 

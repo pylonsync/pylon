@@ -146,7 +146,11 @@ fn empty_manifest() -> AppManifest {
 }
 
 fn available_port() -> u16 {
-    static NEXT: AtomicU16 = AtomicU16::new(45_600);
+    // Below the ephemeral range (Linux 32768-60999): a port up there can be
+    // handed to one of these tests' OWN client sockets between the probe
+    // below and the server's bind, which surfaces as EADDRINUSE on CI.
+    // One 1000-port lane per test binary so parallel binaries can't overlap.
+    static NEXT: AtomicU16 = AtomicU16::new(26_000);
     for _ in 0..200 {
         let base = NEXT.fetch_add(4, Ordering::Relaxed);
         let ok = (0..4)
