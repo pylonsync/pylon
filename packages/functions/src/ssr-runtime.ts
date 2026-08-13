@@ -2279,6 +2279,19 @@ async function tryRenderBoundary(
         boundaryMeta = mod.metadata;
       }
     }
+    // The same file conventions a page gets, resolved against the BOUNDARY's
+    // own directory: a colocated opengraph-image / icon next to not-found.tsx
+    // is that boundary's, not the failing page's. Without these, one 404 URL
+    // carried the social card and another didn't, depending only on whether
+    // the route matched — the boundary was reached two ways and looked
+    // different each way.
+    boundaryMeta = applyAutoSocialImages(
+      rel,
+      compProps?.headers,
+      boundaryMeta,
+      compProps?.url,
+    );
+    boundaryMeta = applyAutoIcons(rel, boundaryMeta);
     const boundaryMetaFragment = renderMetadata(React, boundaryMeta);
     let tree = React.createElement(Comp, compProps);
     if (boundaryMetaFragment) {
