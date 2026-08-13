@@ -8,12 +8,12 @@
 //     route entry, and re-renders the React root in place. Layouts
 //     that match across the two routes survive reconciliation, so
 //     their state persists.
-//   - Prefetches on viewport entry (IntersectionObserver) by default.
-//     The runtime injects `<link rel=prefetch>` for the HTML and
-//     `<link rel=modulepreload>` for the shared chunks the user
-//     will need.
-//   - Hover/touch escalation: if the link isn't in the viewport
-//     long enough, hovering still triggers prefetch.
+//   - Prefetches in two stages, because the two halves cost very
+//     different things. On viewport entry (IntersectionObserver) the
+//     runtime modulepreloads the destination's client chunks — static,
+//     immutable, cacheable. On hover/touch it also fetches the page
+//     itself, which costs a server render, so that waits for a real
+//     signal of intent rather than firing for a screenful of links.
 //   - Modifier keys (cmd/ctrl/shift/alt) or middle-click fall
 //     through to the browser's default behavior (open in new tab,
 //     etc.) — matches Next.js semantics.
@@ -29,7 +29,13 @@ import React, { useEffect, useRef } from "react";
 declare global {
   interface Window {
     __pylon?: {
-      prefetch: (href: string) => Promise<void>;
+      prefetch: (
+        href: string,
+        opts?: {
+          /** Also fetch the page payload (costs a server render — hover only). */
+          document?: boolean;
+        },
+      ) => Promise<void>;
       navigate: (
         href: string,
         opts?: { push?: boolean; replace?: boolean; seed?: unknown },
@@ -115,11 +121,18 @@ export function Link({
     }
 
     const el = ref.current;
-    let prefetched = false;
-    const doPrefetch = () => {
-      if (prefetched) return;
-      prefetched = true;
+    // Chunks warm once, on sight. The page payload warms on intent — and may
+    // re-warm on a later hover, since the runtime expires payloads that have
+    // gone stale.
+    let warmedChunks = false;
+    const warmChunks = () => {
+      if (warmedChunks) return;
+      warmedChunks = true;
       window.__pylon?.prefetch(href);
+    };
+    const warmPage = () => {
+      warmedChunks = true;
+      window.__pylon?.prefetch(href, { document: true });
     };
 
     let io: IntersectionObserver | null = null;
@@ -128,7 +141,7 @@ export function Link({
         (entries) => {
           for (const e of entries) {
             if (e.isIntersecting) {
-              doPrefetch();
+              warmChunks();
               io?.disconnect();
             }
           }
@@ -138,14 +151,13 @@ export function Link({
       io.observe(el);
     }
 
-    const onHover = () => doPrefetch();
-    el.addEventListener("mouseenter", onHover, { once: true });
-    el.addEventListener("touchstart", onHover, { once: true, passive: true });
+    el.addEventListener("mouseenter", warmPage);
+    el.addEventListener("touchstart", warmPage, { passive: true });
 
     return () => {
       io?.disconnect();
-      el.removeEventListener("mouseenter", onHover);
-      el.removeEventListener("touchstart", onHover);
+      el.removeEventListener("mouseenter", warmPage);
+      el.removeEventListener("touchstart", warmPage);
     };
   }, [href, prefetch]);
 

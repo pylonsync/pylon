@@ -332,6 +332,7 @@ import { createElement } from "react";
 import { hydrateRoot } from "react-dom/client";
 import { createPylonBoundary, nearestBoundaryComponent } from "./client-boundary";
 import { LOADING_MODULES } from "./loading-registry";
+import { createNavPayloadCache } from "./nav-cache";
 import { matchRoute, prefetchTargets } from "./route-match";
 
 const routeCache = Object.create(null);
@@ -597,16 +598,30 @@ function whenLoaded(fn) {
   window.addEventListener("load", fn, { once: true });
 }
 
-async function prefetch(href) {
-  // HTML prefetch — primes the SSR response cache.
+// Payloads warmed by a hover, consumed by the click that follows. See
+// ./nav-cache for why this is in memory rather than an HTTP-level prefetch.
+const navPayloads = createNavPayloadCache({
+  now: () => Date.now(),
+  fetchPage: (target) =>
+    fetch(target, {
+      credentials: "same-origin",
+      headers: { Accept: "text/html" },
+    }).then((res) => {
+      // A redirect means the URL navigate() would commit isn't the one that
+      // answered; let the real navigation resolve that itself.
+      if (!res.ok || res.redirected) return null;
+      return res.text();
+    }),
+});
+
+async function prefetch(href, opts) {
   const url = new URL(href, location.href);
   if (url.origin !== location.origin) return;
-  if (!document.querySelector('link[rel="prefetch"][href="' + url.pathname + '"]')) {
-    const html = document.createElement("link");
-    html.rel = "prefetch";
-    html.as = "document";
-    html.href = url.pathname + url.search;
-    document.head.appendChild(html);
+  // The page payload, but ONLY on a real intent signal (hover / touch). It
+  // costs a full SSR render, so warming a screenful of links on sight would
+  // spend a dozen renders per page load to save one.
+  if (opts && opts.document) {
+    navPayloads.prefetch(url.pathname + url.search);
   }
   const manifest = await loadManifest();
   if (!manifest) return;
@@ -643,6 +658,11 @@ async function loadRouteEntry(component) {
 export function hydrate(component, Page, Layouts) {
   // Always cache the route for nav.
   routeCache[component] = { Page, Layouts };
+  // Start the manifest fetch NOW rather than on first use. Nothing can resolve
+  // a route without it — the first <Link> reaching the viewport warms its
+  // chunks only after it lands — so leaving it lazy put a round trip in front
+  // of all prefetching. In flight from here, it resolves during hydration.
+  void loadManifest();
   const data = readPylonData();
   // First hydrate: the entry's component MATCHES the SSR'd page.
   // Establish the root + install the click + popstate handlers
@@ -851,15 +871,21 @@ async function navigate(href, opts) {
   // ---- Real fetch + render -----------------------------------------------
   let html;
   try {
-    const res = await fetch(target, {
-      credentials: "same-origin",
-      headers: { Accept: "text/html" },
-    });
-    if (!res.ok) {
-      fullLoad();
-      return;
+    // A hover-prefetch usually has this in hand, or in flight — either way the
+    // click joins it instead of opening a second request for the same page.
+    const prefetched = navPayloads.take(target);
+    html = prefetched ? await prefetched : null;
+    if (html == null) {
+      const res = await fetch(target, {
+        credentials: "same-origin",
+        headers: { Accept: "text/html" },
+      });
+      if (!res.ok) {
+        fullLoad();
+        return;
+      }
+      html = await res.text();
     }
-    html = await res.text();
   } catch {
     fullLoad();
     return;
@@ -912,6 +938,10 @@ async function navigate(href, opts) {
   // next macrotask once the commit has settled with no error.
   pendingNav = target;
   currentComponent = data.component;
+  // Drop every other prefetched payload once a navigation commits: they were
+  // rendered against the previous page's state, and whatever the user does
+  // here can invalidate them. Hovering on the new page re-warms in one request.
+  navPayloads.clear();
   activeRoot.render(tree);
   setTimeout(() => {
     if (pendingNav === target) pendingNav = null;
@@ -1404,6 +1434,15 @@ async function _doBuildInner(
     fs.writeFileSync(
       path.join(stageDir, "route-match.ts"),
       fs.readFileSync(path.join(here, "ssr-route-match.ts"), "utf8"),
+      "utf8",
+    );
+
+    // Same pattern for the prefetch payload cache — the runtime imports it as
+    // `./nav-cache`; its source of truth is ssr-nav-cache.ts, unit-tested
+    // directly (expiry, eviction, single-use).
+    fs.writeFileSync(
+      path.join(stageDir, "nav-cache.ts"),
+      fs.readFileSync(path.join(here, "ssr-nav-cache.ts"), "utf8"),
       "utf8",
     );
 

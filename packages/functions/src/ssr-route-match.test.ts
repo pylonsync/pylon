@@ -162,10 +162,15 @@ describe("prefetchTargets", () => {
   });
 
   it("is null-safe on an absent or empty manifest", () => {
-    expect(prefetchTargets(null, "/")).toEqual({ file: "", imports: [] });
+    expect(prefetchTargets(null, "/")).toEqual({
+      file: "",
+      imports: [],
+
+    });
     expect(prefetchTargets({ routes: {} }, "/")).toEqual({
       file: "",
       imports: [],
+
     });
   });
 
