@@ -446,79 +446,45 @@ jobs:
         run: bun install --frozen-lockfile && bun run build
       - name: Build
         run: cargo build --release --locked --bin pylon --target ${{ matrix.target }}
-      # macOS dyld is strict: a binary linked against
-      # /opt/homebrew/opt/libxmlsec1/lib/libxmlsec1-openssl.10311.dylib
-      # ONLY loads if libxmlsec1 1.3.11 (exactly) is installed. Homebrew
-      # bottles trail upstream and any user whose `brew install
-      # libxmlsec1` predates the current bottle gets a "Library not
-      # loaded" abort mentioning the .NNNNN filename. Recurring DX
-      # papercut.
+      # The SAML verifier links libxmlsec1, which on macOS comes from Homebrew,
+      # so a fresh build carries absolute /opt/homebrew paths and dyld aborts on
+      # any machine without that exact prefix populated. Since this binary ships
+      # through npm, that made `npm install @pylonsync/cli` hand people something
+      # that could not start unless they happened to have run `brew install
+      # libxmlsec1` — including on a new Mac set up from an Intel one, where
+      # Migration Assistant leaves Homebrew at the /usr/local prefix.
       #
-      # Fix: rewrite each LC_LOAD_DYLIB entry from the point-versioned
-      # filename (.10311.dylib) to the unversioned symlink (.dylib).
-      # Homebrew's libxmlsec1 formula installs that symlink in every
-      # bottle — `ls /opt/homebrew/opt/libxmlsec1/lib/` always shows
-      # `libxmlsec1-openssl.dylib -> libxmlsec1-openssl.NNNNN.dylib`.
-      # The major-versioned `.1.dylib` symlink does NOT exist (verified
-      # against the live formula); only the unversioned alias does.
-      # libxmlsec1's compatibility_version is bumped per release so the
-      # dyld compat check would fail across versions, but resolving via
-      # the unversioned symlink follows the symlink to whatever bottle
-      # is installed and trusts the lib's own ABI guarantees within the
-      # 1.x line.
-      #
-      # install_name_tool invalidates the binary's ad-hoc signature;
-      # re-sign with empty identity (`-`) so macOS 11+ dyld doesn't
-      # reject the modified binary. CLI binaries aren't notarized
-      # (users `xattr -d com.apple.quarantine pylon`), so ad-hoc is the
-      # right level.
-      - name: Rewrite libxmlsec1 dylib refs (macOS)
+      # Vendor the closure next to the binary instead and rewrite the references
+      # to @loader_path/lib/, which resolves in both shipping layouts (the npm
+      # package's bin/pylon + bin/lib/, and the tarball's pylon + lib/).
+      - name: Bundle libxmlsec1 + deps into the binary (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        run: |
-          set -euo pipefail
-          BIN="target/${{ matrix.target }}/release/pylon"
-          echo "→ original dylib references:"
-          otool -L "$BIN" | grep -E 'libxmlsec1' || true
+        env:
+          TARGET: ${{ matrix.target }}
+        run: scripts/bundle-macos-dylibs.sh "target/$TARGET/release/pylon"
 
-          # macOS runners ship bash 3.2 which doesn't have `mapfile`;
-          # use a while-read loop instead. `read -r` for raw bytes,
-          # IFS= so leading whitespace stays attached to $line.
-          REWRITES=0
-          while IFS= read -r full; do
-            [[ -z "$full" ]] && continue
-            # libxmlsec1-openssl.10311.dylib → libxmlsec1-openssl.dylib
-            base="$(basename "$full")"
-            libname="${base%%.*}"
-            dir="$(dirname "$full")"
-            new="${dir}/${libname}.dylib"
-            echo "→ rewriting: $full → $new"
-            install_name_tool -change "$full" "$new" "$BIN"
-            REWRITES=$((REWRITES + 1))
-          done < <(
-            otool -L "$BIN" \
-              | awk '{print $1}' \
-              | grep -E '/libxmlsec1[a-z0-9-]*\.[0-9.]+\.dylib$' \
-              || true
-          )
-
-          if [[ "$REWRITES" -eq 0 ]]; then
-            echo "→ no point-versioned libxmlsec1 references found; nothing to rewrite"
-          else
-            echo "→ post-rewrite dylib references:"
-            otool -L "$BIN" | grep -E 'libxmlsec1' || true
-            # Re-sign ad-hoc; install_name_tool invalidates LC_CODE_SIGNATURE.
-            codesign --force --sign - "$BIN"
-            # Sanity: confirm the binary still loads its dylibs.
-            "$BIN" --version
-          fi
       # Artifact names must match what install.sh and Formula/pylon.rb
       # expect: pylon-${TAG}-${TARGET}.{tar.gz,zip}
       - name: Package (unix)
         if: matrix.archive == 'tar.gz'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_name }}
+          OS_NAME: ${{ runner.os }}
         run: |
-          cd target/${{ matrix.target }}/release
-          tar czf ../../../pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz pylon
+          set -euo pipefail
+          cd "target/$TARGET/release"
+          # macOS carries its vendored dylibs in lib/ (see the bundle step above)
+          # and the binary resolves them via @loader_path, so the archive has to
+          # keep the two side by side. The Linux build links its deps from the
+          # distro and ships the binary alone.
+          if [ "$OS_NAME" = "macOS" ]; then
+            tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon lib
+          else
+            tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon
+          fi
       # Windows archive step removed alongside the windows-msvc target
       # (samael/xmlsec1 isn't available on native Windows).
       - name: Compute SHA256 (unix)
@@ -559,7 +525,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: pylon-bin-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/pylon
+          # lib/ only exists for macOS (the vendored libxmlsec1 closure) and
+          # the binary is useless without it. Listing both puts the common
+          # parent at the artifact root, so the layout the binary expects
+          # survives the round trip; Linux just contributes the binary.
+          path: |
+            target/${{ matrix.target }}/release/pylon
+            target/${{ matrix.target }}/release/lib
           retention-days: 1
           if-no-files-found: error
 
@@ -616,8 +588,22 @@ jobs:
             mkdir -p "$(dirname "$dest")"
             cp "$src" "$dest"
             chmod +x "$dest"
+            # macOS binaries load their vendored dylibs from lib/ next to
+            # themselves. Ship it or the package installs and then aborts in
+            # dyld on first run.
+            libsrc="artifacts/pylon-bin-${target}/lib"
+            if [[ -d "$libsrc" ]]; then
+              cp -R "$libsrc" "$(dirname "$dest")/lib"
+              echo "  ↳ staged $(ls "$libsrc" | wc -l | tr -d ' ') vendored dylibs → $pkg/bin/lib/"
+            fi
             echo "✓ staged $target → $pkg/bin/pylon ($(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest") bytes)"
           done
+          # A macOS package without lib/ would publish cleanly and fail on
+          # every user's machine, so fail the release here instead.
+          if [[ ! -d packages/cli-darwin-arm64/bin/lib ]]; then
+            echo "::error::cli-darwin-arm64 has no bin/lib — the macOS build did not vendor its dylibs" >&2
+            exit 1
+          fi
       - name: Auth + preflight
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

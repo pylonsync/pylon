@@ -35,7 +35,14 @@ class Pylon < Formula
   end
 
   def install
-    bin.install "pylon"
+    # The macOS archive carries the libxmlsec1 closure the binary links, and
+    # resolves it via @loader_path/lib — so the two have to stay adjacent.
+    # Installing into libexec and symlinking keeps lib/ out of the shared bin
+    # dir; @loader_path follows the symlink to the real path, so it still
+    # resolves. The Linux archive links its deps from the system and has no lib/.
+    libexec.install "pylon"
+    libexec.install "lib" if File.exist?("lib")
+    bin.install_symlink libexec/"pylon"
   end
 
   test do

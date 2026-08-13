@@ -250,6 +250,11 @@ jobs:
         working-directory: packages/sync
       - run: bun test
         working-directory: packages/react
+      # The launcher decides which platform binary runs, and getting it wrong
+      # tells the user their machine is unsupported. It spawns node (not bun)
+      # for the subject under test, so it exercises what users actually run.
+      - run: bun test
+        working-directory: packages/cli
 
   # End-to-end gate for @pylonsync/create-pylon. Catches the regression
   # that shipped 0.3.50 broken: real tabs in bin/create-pylon.js were

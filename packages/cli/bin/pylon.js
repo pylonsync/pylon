@@ -46,6 +46,28 @@ const UNSUPPORTED_HINTS = {
 		"(libxmlsec1 cross-compile from ubuntu-latest is unsolved).",
 };
 
+// `process.arch` is the architecture node was BUILT for, not the machine's.
+// An x64 node on an Apple Silicon Mac runs under Rosetta and reports "x64",
+// which would send an M-series user to the "Intel Macs aren't supported"
+// message above — a wrong answer with no way out of it. That setup is common
+// rather than exotic: Migration Assistant carries the Intel node and the
+// /usr/local Homebrew over to the new Mac, and both keep working, so nothing
+// signals that the toolchain is now the odd one out.
+//
+// Ask the kernel about the hardware instead. `hw.optional.arm64` is 1 on
+// every Apple Silicon Mac and readable from inside a translated process.
+// Only darwin-x64 pays for the probe; a native arm64 or Linux node returns
+// immediately without spawning anything.
+function hardwareArch() {
+	if (process.platform !== "darwin" || process.arch !== "x64") {
+		return process.arch;
+	}
+	const probe = spawnSync("sysctl", ["-n", "hw.optional.arm64"], {
+		encoding: "utf8",
+	});
+	return probe.status === 0 && probe.stdout.trim() === "1" ? "arm64" : "x64";
+}
+
 function resolveBinary() {
 	// Escape hatch for a locally-built binary (esbuild's ESBUILD_BINARY_PATH
 	// pattern). Without this, a `cargo install`ed or hand-built `pylon` is
@@ -64,7 +86,9 @@ function resolveBinary() {
 		return override;
 	}
 
-	const key = `${process.platform}-${process.arch}`;
+	const arch = hardwareArch();
+	const translated = arch !== process.arch;
+	const key = `${process.platform}-${arch}`;
 	const pkg = PLATFORM_PACKAGES[key];
 	if (!pkg) {
 		const hint = UNSUPPORTED_HINTS[key]
@@ -83,10 +107,25 @@ function resolveBinary() {
 	try {
 		entry = require.resolve(`${pkg}/package.json`);
 	} catch (e) {
+		// Package managers match optionalDependencies against the `cpu` field
+		// using the architecture of the running node, so a Rosetta node skips
+		// the arm64 binary at install time. The package is genuinely absent
+		// here and reinstalling the same way will skip it again — say so, and
+		// give the flags that override the match.
+		const cause = translated
+			? `node is an x64 build running under Rosetta, so the install ` +
+				`matched optional dependencies against x64 and skipped the ` +
+				`arm64 binary. The machine itself is Apple Silicon.\n\n` +
+				`Fix it for good by installing an arm64 node (the x64 one came ` +
+				`over from an Intel Mac):\n` +
+				`  arch -arm64 brew install node\n\n` +
+				`Or install the binary for this machine directly:\n` +
+				`  npm install --os=darwin --cpu=arm64 ${pkg}\n`
+			: `This usually means npm/bun install skipped the optional ` +
+				`dependency.\n` +
+				`Try: npm install --no-optional=false @pylonsync/cli\n`;
 		throw new Error(
-			`@pylonsync/cli: ${pkg} is not installed.\n` +
-				`This usually means npm/bun install skipped the optional dependency.\n` +
-				`Try: npm install --no-optional=false @pylonsync/cli\n\n` +
+			`@pylonsync/cli: ${pkg} is not installed.\n${cause}\n` +
 				`Underlying error: ${e.message}`,
 		);
 	}
