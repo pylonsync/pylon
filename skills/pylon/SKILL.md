@@ -809,6 +809,28 @@ function PostList({ promise }: { promise: Promise<Post[]> }) {
   - Need other values? Set `PYLON_IMAGE_QUALITIES` / `PYLON_IMAGE_DEVICE_SIZES` / `PYLON_IMAGE_IMAGE_SIZES` / `PYLON_IMAGE_FORMATS` (comma-separated). Prefer picking an allowed value over widening the list.
 - SEO: `export const metadata: Metadata = {…}` (static) or `export async function generateMetadata(props)` (dynamic — keep it cheap, e.g. params→title). Fields: `title`, `description`, `canonical`, `robots`, `openGraph`, `twitter`, `icons`. Colocate `opengraph-image.png` / `icon.png` / `favicon.ico` next to a route and they're auto-wired.
 
+### Code splitting
+
+Every page is its own entry chunk, sharing one chunk with React + the runtime. That handles many routes; it does nothing for **one route with a heavy dependency**. A page that statically imports an editor puts the whole editor in its entry — and since `<Link>` warms sibling routes on sight, that weight lands on the first load of every page in the section, for a component most visitors never open.
+
+`dynamic()` moves it behind a real `import()`: its own chunk, deliberately left out of the route's modulepreload set, fetched only when something renders it.
+
+```tsx
+import { dynamic } from "@pylonsync/react";
+
+const Composer = dynamic(() => import("./Composer"), {
+  loading: () => <ComposerSkeleton />,
+});
+
+// …then render <Composer /> behind whatever opens it.
+```
+
+Call it at **module level**, never inside a render — a `dynamic()` per render is a new component type each time and remounts the subtree.
+
+`ssr` defaults to **false**, the opposite of Next, and deliberately: a Pylon page hydrates once after the whole document streams, so the safe contract is that the server HTML and the first client render are identical, which `ssr: false` guarantees by rendering the fallback in both. It's also the only mode that removes bytes from the first load — an `ssr: true` component must be in the client bundle before hydration, so it saves nothing and exists for organizing code, not weight.
+
+Note the name collision: the route-segment export `export const dynamic = "force-static" | "force-dynamic"` is a **cache directive**, unrelated to this loader. Same word, different thing, both inherited from Next.
+
 ### File conventions (all optional, walked up from the page dir)
 
 - `loading.tsx` → the route's pending state, in both directions: the Suspense fallback the SSR stream flushes first (set `export const streaming = true` on a page for progressive streaming), and what the client router paints over the page area when a `<Link>` navigation runs longer than ~100ms. Faster navigations swap straight to content, so it never flashes.

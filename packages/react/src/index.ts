@@ -5,6 +5,8 @@ export type { RouteMode, AppManifest } from "@pylonsync/sdk";
 // progressively (work without JS) and enhance on the client.
 export { Link } from "./Link";
 export type { LinkProps } from "./Link";
+export { dynamic } from "./dynamic";
+export type { DynamicOptions } from "./dynamic";
 export { Image } from "./Image";
 export type { ImageProps } from "./Image";
 export { Form } from "./Form";

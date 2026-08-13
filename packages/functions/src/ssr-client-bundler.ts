@@ -1621,11 +1621,17 @@ async function _doBuildInner(
       // against; the build itself is fine.
     }
 
-    // Scan a built JS file for static `import` literals pointing
-    // at `./chunks/<file>.js` and return them resolved to outdir-
-    // relative paths. Bun's minified output uses simple double
-    // quotes for module specifiers, so a `matchAll` covers both
-    // `import X from "Y"` and bare `import "Y"`.
+    // Scan a built JS file for STATIC `import` literals pointing at
+    // `./chunks/<file>.js` and return them resolved to outdir-relative paths.
+    // Bun's minified output uses simple double quotes for module specifiers,
+    // so a `matchAll` covers both `import X from "Y"` and bare `import "Y"`.
+    //
+    // DYNAMIC `import("Y")` is deliberately NOT matched. This list becomes the
+    // route's modulepreload set, and a chunk the author deferred behind
+    // `import()` must not be downloaded eagerly anyway — that would split the
+    // code out of the entry (so it isn't parsed on load) while still shipping
+    // every byte, which is the expensive half of the cost with none of the
+    // saving. The trailing `(` is what distinguishes the two forms.
     function scanChunkImports(jsAbsPath: string): string[] {
       let src: string;
       try {
@@ -1634,9 +1640,7 @@ async function _doBuildInner(
         return [];
       }
       const found = new Set<string>();
-      const matches = src.matchAll(
-        /(?:from\s*|import\s*\(?\s*)["']([^"']+)["']/g,
-      );
+      const matches = src.matchAll(/(?:from\s*|import\s*)["']([^"']+)["']/g);
       for (const m of matches) {
         const spec = m[1];
         if (spec.startsWith("./chunks/") || spec.startsWith("chunks/")) {
