@@ -899,6 +899,17 @@ const OG_IMAGE_CODE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
 function findColocatedOgImageRoute(
   componentPath: string,
   url: string,
+  /**
+   * True when `componentPath` is a not-found / error boundary rather than a
+   * page. A page's URL depth matches its directory depth, so when the image
+   * sits in the page's own directory the request path IS the route path —
+   * including the tail a catch-all consumed, which is why that shortcut
+   * exists. A boundary is dispatched at whatever URL failed, so the same
+   * shortcut advertised a card under the 404'd path: mostly a 404 of its own,
+   * but at a depth where a dynamic route really does define one, a 200
+   * serving an unrelated page's card.
+   */
+  isBoundary = false,
 ): string | null {
   const fs = require("node:fs");
   const path = require("node:path");
@@ -918,7 +929,9 @@ function findColocatedOgImageRoute(
     for (const ext of OG_IMAGE_CODE_EXTS) {
       if (fs.existsSync(path.join(cwd, dir, `opengraph-image${ext}`))) {
         const prefix =
-          dir === pageDir ? urlSegs : urlSegs.slice(0, nonGroupDepth(dir));
+          dir === pageDir && !isBoundary
+            ? urlSegs
+            : urlSegs.slice(0, nonGroupDepth(dir));
         return "/" + [...prefix, "opengraph-image"].join("/");
       }
     }
@@ -1287,6 +1300,8 @@ export function applyAutoSocialImages(
   headers: Record<string, string> | undefined,
   metadata: SsrMetadata | undefined,
   requestUrl?: string,
+  /** True for a not-found / error boundary — see findColocatedOgImageRoute. */
+  isBoundary = false,
 ): SsrMetadata | undefined {
   // A relative image is the single most common way a share card breaks:
   // the page ships `og:image="/og.png"`, Facebook and Slack resolve it,
@@ -1310,7 +1325,7 @@ export function applyAutoSocialImages(
   const ogRoute =
     hasOg || ogFile || requestUrl == null
       ? null
-      : findColocatedOgImageRoute(component, requestUrl);
+      : findColocatedOgImageRoute(component, requestUrl, isBoundary);
 
   if (!ogFile && !twFile && !ogRoute) return metadata;
 
@@ -2290,6 +2305,7 @@ async function tryRenderBoundary(
       compProps?.headers,
       boundaryMeta,
       compProps?.url,
+      true,
     );
     boundaryMeta = applyAutoIcons(rel, boundaryMeta);
     const boundaryMetaFragment = renderMetadata(React, boundaryMeta);
@@ -3120,7 +3136,16 @@ export async function handleRenderRoute(
     // File conventions: auto-wire <meta og:image>/<twitter:image> from a
     // colocated opengraph-image.* / twitter-image.*, and <link rel="icon">
     // from icon.* / apple-icon.* / favicon.ico — unless the page set them.
-    metadata = applyAutoSocialImages(msg.component, msg.headers, metadata, msg.url);
+    // The host dispatches `app/not-found` / `app/error` BY NAME for an
+    // unmatched URL, so this path renders boundaries too.
+    const componentIsBoundary = /(^|\/)(not-found|error)$/.test(msg.component);
+    metadata = applyAutoSocialImages(
+      msg.component,
+      msg.headers,
+      metadata,
+      msg.url,
+      componentIsBoundary,
+    );
     metadata = applyAutoIcons(msg.component, metadata);
     const metaFragment = renderMetadata(React, metadata);
 

@@ -181,3 +181,75 @@ describe("renderMetadata drives boundary heads too", () => {
     expect(renderMetadata(require("react"), undefined)).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// A boundary's dynamic og:image URL.
+//
+// Regression: the URL was composed from the REQUEST path while the file was
+// resolved from the boundary's directory. A 404 therefore advertised a card
+// under whatever path failed. Usually that 404s in turn — a broken card is
+// worse than none, since a crawler now has something to fail on — but at a
+// depth where a dynamic route really does define one, it returned 200 and
+// served an unrelated page's card. Silent wrong content.
+// ---------------------------------------------------------------------------
+
+import { applyAutoSocialImages } from "./ssr-runtime";
+
+describe("boundary og:image points at the boundary's own card", () => {
+  // Compare the PATH only. Absolutizing against the request origin needs a
+  // trusted host, which is a separate concern from which route the card lives
+  // at — and the path is the thing that regressed.
+  const ogPath = (m: any) => {
+    const u = m?.openGraph?.image as string | undefined;
+    if (!u) return u;
+    return u.startsWith("http") ? new URL(u).pathname : u;
+  };
+  const headers = { host: "example.com" };
+
+  test("a root boundary advertises the root card whatever URL failed", () => {
+    const root = tree([
+      "app/opengraph-image.tsx",
+      "app/not-found.tsx",
+      "app/[orgSlug]/[eventSlug]/opengraph-image.tsx",
+      "app/[orgSlug]/[eventSlug]/page.tsx",
+    ]);
+    const prev = process.cwd();
+    process.chdir(root);
+    try {
+      for (const url of [
+        "/a/b/c/d/e",
+        "/nope-does-not-exist",
+        // The dangerous one: a real card EXISTS at this depth, so the old
+        // behavior returned 200 with another event's image.
+        "/no-such-org/no-such-event",
+      ]) {
+        const md = applyAutoSocialImages("app/not-found", headers, undefined, url, true);
+        expect(ogPath(md), `for ${url}`).toBe("/opengraph-image");
+      }
+    } finally {
+      process.chdir(prev);
+    }
+  });
+
+  test("a page still advertises the card at its own path", () => {
+    // The request path IS the route path for a page — including a tail a
+    // catch-all consumed, which is why that shortcut exists.
+    const root = tree([
+      "app/[orgSlug]/[eventSlug]/opengraph-image.tsx",
+      "app/[orgSlug]/[eventSlug]/page.tsx",
+    ]);
+    const prev = process.cwd();
+    process.chdir(root);
+    try {
+      const md = applyAutoSocialImages(
+        "app/[orgSlug]/[eventSlug]/page",
+        headers,
+        undefined,
+        "/acme/summit",
+      );
+      expect(ogPath(md)).toBe("/acme/summit/opengraph-image");
+    } finally {
+      process.chdir(prev);
+    }
+  });
+});
