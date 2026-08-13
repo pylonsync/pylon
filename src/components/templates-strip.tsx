@@ -1,7 +1,8 @@
 "use client";
 
 import { Link } from "@pylonsync/react";
-import { ArrowUpRight, Check, Copy, Github } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Check, Copy, Github } from "lucide-react";
 import {
 	createCommand,
 	type Example,
@@ -10,18 +11,16 @@ import {
 } from "../lib/examples-content";
 import { useCopy } from "../lib/use-copy";
 import { FRAME_COL } from "./marketing-frame";
-
-// Templates, directly under the hero bento. The reader has just seen what the
-// framework does; this is the shortest path from that to a running app.
-//
-// Every card carries the three things someone needs to act: what it looks
-// like, the command that scaffolds it, and the source to read first. The set
-// is derived from the same examples data the /developers/examples page uses,
-// so a template is described once.
+import { TransitionChevron } from "./transition-chevron";
 
 const FEATURED = featuredExamples();
 
 export function TemplatesStrip() {
+	const [activeIndex, setActiveIndex] = useState(0);
+	const active = FEATURED[activeIndex] ?? FEATURED[0];
+
+	if (!active) return null;
+
 	return (
 		<section
 			id="templates"
@@ -34,148 +33,158 @@ export function TemplatesStrip() {
 							Start from a working app.
 						</h2>
 						<p className="mt-5 max-w-[620px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-							Every template is a complete Pylon app with a schema, access
-							rules, server functions, and server-rendered pages. Run the
-							command, read the source, change what you need.
+							Choose a complete app. Run one command, read the source, and
+							change what you need.
 						</p>
 					</div>
 					<Link
 						href="/developers/examples"
-						className="group inline-flex shrink-0 items-center gap-1.5 text-[14px] font-medium text-[var(--color-brand)] hover:underline"
+						className="t-learn inline-flex shrink-0 items-center gap-1.5 text-[14px] font-medium text-[var(--color-brand)] hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2"
 					>
 						All templates
-						<ArrowUpRight className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+						<TransitionChevron />
 					</Link>
 				</div>
 
-				<div className="mt-12 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-					{FEATURED.map((ex) => (
-						<TemplateCard key={ex.template} ex={ex} />
-					))}
+				<div className="mt-12 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] lg:grid lg:grid-cols-[280px_minmax(0,1fr)]">
+					<div
+						className="flex overflow-x-auto border-b border-[var(--color-rule)] lg:flex-col lg:overflow-visible lg:border-b-0 lg:border-r"
+						role="group"
+						aria-label="Featured templates"
+					>
+						{FEATURED.map((example, index) => {
+							const selected = index === activeIndex;
+							return (
+								<button
+									key={example.template}
+									type="button"
+									aria-pressed={selected}
+									onClick={() => setActiveIndex(index)}
+									className={`min-w-[72%] border-r border-[var(--color-rule)] px-5 py-4 text-left transition-[background-color,color] duration-200 last:border-r-0 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)] sm:min-w-[42%] lg:min-w-0 lg:border-b lg:border-r-0 lg:last:border-b-0 ${
+										selected
+											? "bg-[var(--color-brand-soft)] text-[var(--color-ink)]"
+											: "text-[var(--color-ink-3)] hover:bg-[var(--color-paper-1)] hover:text-[var(--color-ink)]"
+									}`}
+								>
+									<span className="block text-[14px] font-semibold">
+										{example.name}
+									</span>
+									<span className="mt-1 block truncate font-mono text-[10.5px] text-[var(--color-ink-4)]">
+										{example.shows.slice(0, 2).join(" + ")}
+									</span>
+								</button>
+							);
+						})}
+					</div>
+
+					<TemplateDetail key={active.template} example={active} />
 				</div>
 			</div>
 		</section>
 	);
 }
 
-function TemplateCard({ ex }: { ex: Example }) {
+function TemplateDetail({ example }: { example: Example }) {
 	const { copied, copy } = useCopy();
-	// FEATURED is filtered to examples that have a template, so this is always
-	// set; the fallback keeps the card renderable if the featured list is ever
-	// pointed at a live-demo-only entry.
-	const template = ex.template ?? "";
+	const [shown, setShown] = useState(false);
+	const template = example.template ?? "";
 	const command = createCommand(template);
 
-	return (
-		<div className="group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-[border-color,box-shadow] duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] hover:shadow-[var(--shadow-card-hover)]">
-			<div className="relative aspect-[16/10] overflow-hidden border-b border-[var(--color-rule)] bg-[var(--color-paper-1)]">
-				{ex.shot ? (
-					<img
-						src={ex.shot}
-						alt={`The ${ex.name} template running`}
-						loading="lazy"
-						decoding="async"
-						className="size-full object-cover object-top"
-					/>
-				) : (
-					<ShotPlaceholder name={ex.name} />
-				)}
-				{ex.live ? (
-					<span className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-[var(--color-paper)]/92 px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-status-live)] shadow-[var(--shadow-card)]">
-						<span className="block size-1.5 rounded-full bg-[var(--color-status-live)]" />
-						Live demo
-					</span>
-				) : null}
-			</div>
+	useEffect(() => {
+		const frame = requestAnimationFrame(() => setShown(true));
+		return () => cancelAnimationFrame(frame);
+	}, []);
 
-			<div className="flex flex-1 flex-col gap-3 p-5">
-				<div>
-					<h3 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
-						{ex.name}
-					</h3>
-					<p className="mt-1.5 text-[13px] leading-[1.55] text-[var(--color-ink-3)]">
-						{ex.blurb}
-					</p>
-				</div>
-
-				<button
-					type="button"
-					onClick={() => copy(command)}
-					aria-label={`Copy: ${command}`}
-					title={command}
-					className="mt-auto flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-2.5 py-2 text-left font-mono text-[11px] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-brand)]/50 hover:bg-[var(--color-paper)]"
-				>
-					<span className="select-none text-[var(--color-brand)]">$</span>
-					{/* The command is long and the card is narrow, so the pill shows the
-					    part that varies — the template name — and copies the whole
-					    thing. The full command is in the title + aria-label. */}
-					<span className="truncate">
-						create …{" "}
-						<span className="text-[var(--color-ink)]">
-							--template {template}
-						</span>
-					</span>
-					<span className="ml-auto shrink-0 text-[var(--color-ink-4)]">
-						{copied ? (
-							<Check className="size-3.5 text-[var(--color-status-live)]" />
-						) : (
-							<Copy className="size-3.5" />
-						)}
-					</span>
-				</button>
-
-				<div className="flex items-center gap-3 text-[12px]">
-					<a
-						href={templateRepoUrl(template)}
-						className="inline-flex items-center gap-1.5 text-[var(--color-ink-3)] transition-colors hover:text-[var(--color-ink)]"
-					>
-						<Github className="size-3.5" />
-						Source
-					</a>
-					{ex.live ? (
-						<a
-							href={ex.live}
-							className="inline-flex items-center gap-1 text-[var(--color-brand)] hover:underline"
-						>
-							Open demo
-							<ArrowUpRight className="size-3" />
-						</a>
-					) : null}
-				</div>
-			</div>
-		</div>
-	);
-}
-
-/**
- * Drawn stand-in for a template with no capture yet.
- *
- * A designed placeholder rather than an <img> with an onError swap: the page
- * is server-rendered, so a missing file would paint a broken image before
- * hydration could replace it. Whether a shot exists is data, not a runtime
- * error.
- */
-function ShotPlaceholder({ name }: { name: string }) {
 	return (
 		<div
-			aria-hidden="true"
-			className="flex size-full flex-col gap-2 bg-[var(--color-paper-1)] p-4"
+			className="template-detail-panel t-panel-slide min-w-0"
+			data-open={shown}
 		>
-			<div className="flex items-center gap-1.5">
-				<span className="block size-1.5 rounded-full bg-[var(--color-rule)]" />
-				<span className="block size-1.5 rounded-full bg-[var(--color-rule)]" />
-				<span className="block size-1.5 rounded-full bg-[var(--color-rule)]" />
-				<span className="ml-2 h-1.5 w-20 rounded-full bg-[var(--color-rule)]" />
+			<div className="relative min-h-[360px] overflow-hidden bg-[#111116] p-6 text-[#f7f7f8] sm:p-9">
+				<div
+					aria-hidden="true"
+					className="pointer-events-none absolute inset-0 opacity-80"
+					style={{
+						background:
+							"radial-gradient(circle at 78% 18%, rgba(109,74,255,.42), transparent 34%), linear-gradient(135deg, transparent 0 48%, rgba(255,255,255,.035) 48% 49%, transparent 49% 100%)",
+						backgroundSize: "auto, 38px 38px",
+					}}
+				/>
+
+				<div className="relative flex min-h-[312px] flex-col justify-between">
+					<div className="flex items-center justify-between gap-4 font-mono text-[10.5px] uppercase tracking-[0.12em] text-[#92929d]">
+						<span>template/{template}</span>
+						{example.live ? (
+							<span className="text-[#6ee7b7]">Live demo</span>
+						) : (
+							<span>Source included</span>
+						)}
+					</div>
+
+					<div className="my-9 grid max-w-[640px] gap-px overflow-hidden rounded-[var(--radius-lg)] border border-white/10 bg-white/10 sm:grid-cols-3">
+						{example.shows.slice(0, 3).map((item) => (
+							<div
+								key={item}
+								className="bg-[#15151b]/90 px-4 py-5 font-mono text-[11px] text-[#c7c7ce]"
+							>
+								<span className="mb-3 block size-1.5 rounded-full bg-[#8d72ff]" />
+								{item}
+							</div>
+						))}
+					</div>
+
+					<div>
+						<h3 className="max-w-[15ch] text-[clamp(32px,5vw,54px)] font-semibold leading-[0.98] tracking-[-0.04em]">
+							{example.name}
+						</h3>
+					</div>
+				</div>
 			</div>
-			<div className="flex flex-1 items-center justify-center">
-				<span className="font-mono text-[11px] text-[var(--color-ink-4)]">
-					{name}
-				</span>
-			</div>
-			<div className="flex gap-1.5">
-				<span className="h-6 flex-1 rounded-[3px] bg-[var(--color-rule)]/60" />
-				<span className="h-6 flex-1 rounded-[3px] bg-[var(--color-rule)]/40" />
-				<span className="h-6 flex-1 rounded-[3px] bg-[var(--color-rule)]/25" />
+
+			<div>
+				<div className="grid gap-7 border-t border-[var(--color-rule)] p-6 sm:p-8 md:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)] md:items-end">
+					<p className="max-w-[620px] text-[15px] leading-[1.65] text-[var(--color-ink-2)]">
+						{example.blurb}
+					</p>
+
+					<div className="grid gap-3">
+						<button
+							type="button"
+							onClick={() => copy(command)}
+							aria-label={`Copy: ${command}`}
+							className="flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-3 py-2.5 text-left font-mono text-[11px] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-brand)]/50 hover:bg-[var(--color-paper)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
+						>
+							<span className="select-none text-[var(--color-brand)]">$</span>
+							<span className="min-w-0 flex-1 truncate">{command}</span>
+							<span className="ml-auto shrink-0 text-[var(--color-ink-4)]">
+								{copied ? (
+									<Check className="size-3.5 text-[var(--color-status-live)]" />
+								) : (
+									<Copy className="size-3.5" />
+								)}
+							</span>
+						</button>
+
+						<div className="flex items-center gap-4 text-[12.5px]">
+							<a
+								href={templateRepoUrl(template)}
+								className="inline-flex items-center gap-1.5 text-[var(--color-ink-3)] transition-colors hover:text-[var(--color-ink)]"
+							>
+								<Github className="size-3.5" />
+								Source
+							</a>
+							{example.live ? (
+								<a
+									href={example.live}
+									className="t-learn inline-flex items-center gap-1 text-[var(--color-brand)] hover:underline"
+								>
+									Open demo
+									<TransitionChevron />
+								</a>
+							) : null}
+						</div>
+					</div>
+				</div>
 			</div>
 		</div>
 	);

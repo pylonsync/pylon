@@ -4,12 +4,13 @@ import { Image, Link } from "@pylonsync/react";
 import { createContext, useContext, useEffect, useState } from "react";
 import {
 	type LucideIcon,
-	Activity,
-	ArrowUpRight,
 	Braces,
-	Copy,
 	Eye,
 	FileText,
+	Github,
+	GitPullRequest,
+	Globe2,
+	PackageCheck,
 	Terminal,
 } from "lucide-react";
 import { Button } from "./ui/button";
@@ -17,15 +18,15 @@ import { MarketingNav } from "./marketing-nav";
 import { SiteFooter } from "./site-footer";
 import { CodePanel } from "./code-panel";
 import { TemplatesStrip } from "./templates-strip";
+import { TransitionChevron } from "./transition-chevron";
 import { FRAME_COL } from "./marketing-frame";
 import { HeroStack } from "./hero-stack";
 import { HeroStart } from "./hero-start";
 import { FeatureScroll } from "./feature-scroll";
-import { useCopy } from "../lib/use-copy";
 import { ctaUrl } from "../lib/account-urls";
 
 // Concrete affordances that let a coding agent build, verify, and ship on Pylon.
-// Each one ships with the artifact it describes (`visual`) — the claim and the
+// Each one ships with the artifact it describes (`visual`). The claim and the
 // evidence for it stay in the same card.
 const AGENT_AFFORDANCES: {
 	title: string;
@@ -36,37 +37,77 @@ const AGENT_AFFORDANCES: {
 }[] = [
 	{
 		title: "Rules live in the repo",
-		desc: "New apps include AGENTS.md, and the Pylon skill installs with npx skills add pylonsync/pylon. The agent reads the conventions before it edits code.",
+		desc: "New apps include AGENTS.md and the Pylon skill. The agent reads project rules before it edits code.",
 		icon: FileText,
 		href: "/skill",
 		visual: RepoVisual,
 	},
 	{
 		title: "The path is command-line",
-		desc: "npm create @pylonsync/pylon scaffolds the app. pylon dev runs it locally. pylon deploy ships it to Cloud.",
+		desc: "Run npm create, pylon dev, and pylon deploy from one terminal.",
 		icon: Terminal,
 		href: "/product/cloud",
 		visual: TerminalVisual,
 	},
 	{
 		title: "Generated types catch drift",
-		desc: "pylon codegen builds the client from your schema and functions. Bad entity names, missing fields, and wrong arguments fail at compile time.",
+		desc: "Generated clients turn schema drift, missing fields, and invalid arguments into compile errors.",
 		icon: Braces,
 		href: "/product/functions",
 		visual: TypeErrorVisual,
 	},
 	{
 		title: "Runtime state is visible",
-		desc: "The agent can inspect tables, live queries, and logs in /studio while pylon dev runs. Debugging happens against current data.",
+		desc: "The agent can inspect tables, live queries, and logs in /studio while the local server runs.",
 		icon: Eye,
 		href: "/product/studio",
 		visual: StudioVisual,
 	},
 ];
 
+const DEPLOY_STEPS: {
+	icon: LucideIcon;
+	title: string;
+	body: string;
+}[] = [
+	{
+		icon: Github,
+		title: "Connect the repo",
+		body: "Install the GitHub App once, or use the CLI from CI.",
+	},
+	{
+		icon: GitPullRequest,
+		title: "Open a preview",
+		body: "Each pull request gets an isolated preview environment.",
+	},
+	{
+		icon: PackageCheck,
+		title: "Build the release",
+		body: "Pylon validates the app and applies the schema before cutover.",
+	},
+	{
+		icon: Globe2,
+		title: "Send traffic",
+		body: "The release moves to production with the same runtime.",
+	},
+];
+
+function agentVisualTone(index: number): string {
+	switch (index) {
+		case 0:
+			return "bg-[var(--color-brand-soft)]/55";
+		case 2:
+			return "bg-[var(--color-status-fail-soft)]/45";
+		case 3:
+			return "bg-[var(--color-status-live-soft)]/45";
+		default:
+			return "bg-[var(--color-paper-1)]";
+	}
+}
+
 // Signed-in state for the nav/CTA. Seeded from the SSR `auth` prop (resolved
-// server-side from the shared SessionStore) so the correct CTA — "Dashboard"
-// vs "Sign in" — is in the server-rendered HTML on first paint. No flash: the
+// server-side from the shared SessionStore) so the correct CTA, "Dashboard"
+// or "Sign in", is in the server-rendered HTML on first paint. No flash: the
 // old version started at `null` and only learned the answer after a client
 // /api/auth/session round-trip, so the CTA popped in after hydration. The
 // effect just revalidates after a client-side nav back to this page.
@@ -102,7 +143,7 @@ export function MarketingPage({
 		<div className="relative min-h-screen bg-[var(--color-paper)] text-[var(--color-ink)]">
 			<MarketingNav signedIn={signedIn} />
 
-			{/* HERO — one subject.
+			{/* HERO: one subject.
 			    Centred headline, one line of copy, one focal diagram. The nine
 			    bento cards used to open the page: the reader met nine small
 			    equal-weight claims before meeting one idea, so nothing was the
@@ -146,44 +187,49 @@ export function MarketingPage({
 			    does; this is the shortest path from reading that to running one. */}
 			<TemplatesStrip />
 
-			{/* Agent workflow. Each claim carries the artifact it's about — the
-			    repo layout, the terminal, the type error, the studio table — so
-			    the section reads as evidence instead of four more paragraphs. */}
+			{/* Agent workflow. One continuous frame replaces the repeated card grid.
+			    Each row keeps the claim and its evidence in the same reading path. */}
 			<Section id="agents" tone="sunken">
 				<div>
 					<H2>Give agents a system they can inspect.</H2>
 					<p className="mt-5 max-w-[620px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-						Pylon keeps rules, commands, generated types, local data, and logs
-						inside the workflow. Your agent can scaffold, run, debug, and deploy
-						without guessing which console owns the next step.
+						Rules, commands, types, data, and logs stay in one workflow. Your
+						agent can create, run, inspect, and deploy the app without changing
+						tools.
 					</p>
 				</div>
 
-				<div className="mt-14 grid gap-4 sm:grid-cols-2">
-					{AGENT_AFFORDANCES.map((a) => (
+				<div className="mt-14 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)]">
+					{AGENT_AFFORDANCES.map((a, index) => (
 						<Link
 							key={a.title}
 							href={a.href}
-							className="group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper-1)]"
+							className="t-learn group grid border-b border-[var(--color-rule)] transition-colors duration-200 last:border-b-0 hover:bg-[var(--color-paper-1)] focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)] md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]"
 						>
-							{/* The artifact itself, cropped by the card. It used to sit in a
-							    third frame — a bordered, shadowed panel inside a padded well
-							    inside the card — so the reader was looking at an illustration
-							    of a screenshot. One surface, one rule under it. */}
-							<div className="h-[168px] overflow-hidden border-b border-[var(--color-rule)]">
-								<a.visual />
-							</div>
-							<div className="flex flex-col gap-2 p-6">
-								<div className="flex items-center gap-2">
-									<a.icon className="size-4 shrink-0 text-[var(--color-brand)]" />
-									<h3 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
+							<div className="flex flex-col justify-center p-6 sm:p-8 md:min-h-[230px] lg:p-10">
+								<div className="flex items-center gap-3">
+									<span className="flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] text-[var(--color-brand)] transition-colors group-hover:border-[var(--color-brand)]/40">
+										<a.icon className="size-4" />
+									</span>
+									<h3 className="text-[20px] font-semibold tracking-[-0.02em] text-[var(--color-ink)]">
 										{a.title}
 									</h3>
-									<ArrowUpRight className="ml-auto size-3.5 shrink-0 text-[var(--color-ink-4)] opacity-0 transition-opacity duration-200 group-focus-visible:opacity-100 group-hover:opacity-100" />
 								</div>
-								<p className="text-[14px] leading-[1.6] text-[var(--color-ink-2)]">
+								<p className="mt-5 max-w-[440px] text-[15px] leading-[1.65] text-[var(--color-ink-2)]">
 									{a.desc}
 								</p>
+								<span className="mt-7 inline-flex items-center gap-1.5 text-[13px] font-medium text-[var(--color-brand)]">
+									Explore
+									<TransitionChevron />
+								</span>
+							</div>
+
+							<div
+								className={`flex min-h-[190px] items-center border-t border-[var(--color-rule)] p-5 sm:p-8 md:min-h-[230px] md:border-l md:border-t-0 ${agentVisualTone(index)}`}
+							>
+								<div className="w-full overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)]">
+									<a.visual />
+								</div>
 							</div>
 						</Link>
 					))}
@@ -217,13 +263,13 @@ const Order = entity("Order", {
   paid: field.boolean().default(false),
 });
 
-// access rules next to the schema — deny by default
+// access rules next to the schema. Deny by default.
 policy({ entity: "Order",
   allowRead: "auth.userId != null",
   allowInsert: "auth.userId == data.ownerId",
 });
 
-// the React side — live, typed, no fetch
+// the React side: live, typed, no fetch
 const { data } = db.useQuery("Order");`}
 					/>
 				</div>
@@ -234,89 +280,73 @@ const { data } = db.useQuery("Order");`}
 				<div>
 					<H2>Deploy from GitHub or the CLI.</H2>
 					<p className="mt-5 max-w-[560px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-						Both paths reach the same Cloud runtime, so a repo push and a manual
-						release produce the same deployment.
+						A repository push and a CLI release use the same build, preview, and
+						production path.
 					</p>
 				</div>
 
-				<div className="mt-14 grid gap-4 lg:grid-cols-2">
-					<Card>
-						<h3 className="text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
-							Connect GitHub
-						</h3>
-						<p className="mt-2.5 text-[14px] leading-[1.6] text-[var(--color-ink-2)]">
-							Install the Smallware GitHub App once. Pull requests get preview
-							environments that disappear after merge.
-						</p>
-						<ol className="mt-6 grid gap-2.5 text-[14px] leading-[1.55] text-[var(--color-ink-2)] [&>li]:flex [&>li]:gap-3 [&>li>span:first-child]:font-mono [&>li>span:first-child]:text-[var(--color-ink-3)] [&>li>span:first-child]:tabular-nums">
-							<li>
-								<span>1.</span>
-								<span>Create a project and connect a repo.</span>
-							</li>
-							<li>
-								<span>2.</span>
-								<span>
-									<InlineCode>git push origin main</InlineCode> triggers a
-									deploy.
-								</span>
-							</li>
-							<li>
-								<span>3.</span>
-								<span>
-									Live at <InlineCode>your-app.smallware.run</InlineCode>.
-								</span>
-							</li>
-						</ol>
-					</Card>
-
-					<Card>
-						{/* Mono, but a heading — this sat in an <InlineCode> chip, so the
-						    card's title rendered at 12px next to "Connect GitHub" at 18px
-						    and the pair read as a heading beside a tag. */}
-						<h3 className="font-mono text-[18px] font-semibold tracking-tight text-[var(--color-ink)]">
-							pylon deploy
-						</h3>
-						<p className="mt-2.5 text-[14px] leading-[1.6] text-[var(--color-ink-2)]">
-							Use the CLI for CI, locked-down environments, or a manual release.
-						</p>
-						<div className="mt-6 overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper)] font-mono text-[12px] leading-[1.75] text-[var(--color-ink)]">
-							{/* Same label strip as the four artifact cards above — plain mono,
-							    sentence case. It was uppercase-tracked, which rendered
-							    "MY-APP — PYLON DEPLOY" and shouted a filename. */}
-							<div className="border-b border-[var(--color-rule)] bg-[var(--color-paper-1)] px-4 py-2 font-mono text-[10.5px] text-[var(--color-ink-3)]">
-								my-app — pylon deploy
-							</div>
-							<div className="px-4 py-3">
-								<div>
-									<span className="text-[var(--color-brand)]">$</span> pylon
-									login
-								</div>
-								<div>
-									<span className="text-[var(--color-brand)]">$</span> pylon
-									deploy{" "}
-									<span className="text-[var(--color-ink-3)]">
-										--target cloud
+				<div className="mt-14 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)]">
+					<div className="grid grid-cols-2 lg:grid-cols-4">
+						{DEPLOY_STEPS.map((step, index) => (
+							<div
+								key={step.title}
+								className="border-b border-[var(--color-rule)] p-4 odd:border-r [&:nth-child(n+3)]:border-b-0 sm:p-6 lg:border-b-0 lg:even:border-r lg:last:border-r-0"
+							>
+								<div className="mb-5 flex items-center justify-between">
+									<span className="flex size-9 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-brand-soft)] text-[var(--color-brand)]">
+										<step.icon className="size-4" />
 									</span>
+									{index < 3 ? (
+										<span className="hidden h-px w-10 bg-[var(--color-brand)]/35 lg:block" />
+									) : null}
 								</div>
-								<div className="text-[var(--color-status-live)]">
-									{" "}
-									✓ Build · 12s
-								</div>
-								<div className="text-[var(--color-status-live)]">
-									{" "}
-									✓ Schema synced
-								</div>
-								<div className="text-[var(--color-status-live)]">
-									{" "}
-									✓ Cutover · 0 errors
-								</div>
-								<div className="text-[var(--color-ink-3)]">
-									{" "}
-									→ https://acme.smallware.run
-								</div>
+								<h3 className="text-[15px] font-semibold text-[var(--color-ink)]">
+									{step.title}
+								</h3>
+								<p className="mt-2 text-[13px] leading-[1.6] text-[var(--color-ink-3)]">
+									{step.body}
+								</p>
+							</div>
+						))}
+					</div>
+
+					<div className="grid border-t border-[var(--color-rule)] lg:grid-cols-[minmax(0,0.72fr)_minmax(0,1.28fr)]">
+						<div className="flex flex-col justify-between p-6 sm:p-8 lg:p-10">
+							<div>
+								<p className="font-mono text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-brand)]">
+									One release path
+								</p>
+								<h3 className="mt-4 max-w-[15ch] text-[28px] font-semibold leading-[1.05] tracking-[-0.03em] text-[var(--color-ink)] sm:text-[34px]">
+									Push from GitHub or run the command.
+								</h3>
+							</div>
+							<p className="mt-8 max-w-[420px] text-[14px] leading-[1.65] text-[var(--color-ink-2)]">
+								Preview environments disappear after merge. Production keeps the
+								release history and logs.
+							</p>
+						</div>
+
+						<div className="border-t border-[var(--color-rule)] bg-[#111116] p-5 font-mono text-[12px] leading-[1.9] text-[#d4d4d8] sm:p-8 lg:border-l lg:border-t-0 lg:p-10">
+							<div className="mb-6 flex items-center justify-between border-b border-white/10 pb-3 text-[10.5px] text-[#85858f]">
+								<span>my-app / release</span>
+								<span className="text-[#6ee7b7]">ready</span>
+							</div>
+							<div>
+								<span className="text-[#9f8cff]">$</span> git push origin main
+							</div>
+							<div className="text-[#85858f]">or</div>
+							<div>
+								<span className="text-[#9f8cff]">$</span> pylon deploy --target
+								cloud
+							</div>
+							<div className="mt-5 text-[#6ee7b7]">✓ Build complete in 12s</div>
+							<div className="text-[#6ee7b7]">✓ Schema applied</div>
+							<div className="text-[#6ee7b7]">✓ Traffic moved with 0 errors</div>
+							<div className="mt-5 text-[#a8a8b2]">
+								→ https://your-app.smallware.run
 							</div>
 						</div>
-					</Card>
+					</div>
 				</div>
 			</Section>
 
@@ -331,7 +361,7 @@ const { data } = db.useQuery("Order");`}
 					</p>
 				</div>
 
-				{/* The Cloud dashboard itself — the managed surface for the framework
+				{/* The Cloud dashboard itself: the managed surface for the framework
 				    above. Given a browser frame and set wider than the copy column so
 				    it reads as the section's centerpiece. Width/height match the
 				    source (3456×2234) so the slot is reserved and CLS stays 0. */}
@@ -345,25 +375,27 @@ const { data } = db.useQuery("Order");`}
 							</span>
 							{/* The dashboard in the shot answers on the product host, not this
 							    one. The bar used to read pylonsync.com/dashboard, which is a
-							    404 — this site has no auth and no dashboard. */}
+							    404. This site has no auth and no dashboard. */}
 							<span className="mx-auto rounded-full border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-3 py-0.5 font-mono text-[10.5px] text-[var(--color-ink-4)]">
 								usesmallware.com/dashboard
 							</span>
 						</div>
-						<Image
-							src="/marketing/pylon-cloud-dashboard.png"
-							alt="Smallware dashboard — project overview with deployments, machine status, and live metrics"
-							width={3456}
-							height={2234}
-							sizes="(min-width: 1120px) 1120px, 100vw"
-							widths={[828, 1200, 2048]}
-							className="block h-auto w-full"
-						/>
+						<div className="overflow-hidden">
+							<Image
+								src="/marketing/pylon-cloud-dashboard.png"
+								alt="Smallware dashboard with deployments, machine status, and live metrics"
+								width={3456}
+								height={2234}
+								sizes="(min-width: 1120px) 1120px, 100vw"
+								widths={[828, 1200, 2048]}
+								className="block h-[320px] w-full object-cover object-[20%_top] sm:h-auto sm:object-contain"
+							/>
+						</div>
 					</div>
 				</div>
 
 				{/* A hairline ledger, not a card mesh. Ten items divide evenly across
-				    two columns — the old three-column mesh left two dead cells that
+				    two columns. The old three-column mesh left two dead cells that
 				    rendered as gray voids. */}
 				<div className="mt-12 grid gap-x-12 sm:grid-cols-2">
 					{[
@@ -385,7 +417,7 @@ const { data } = db.useQuery("Order");`}
 							"Grow storage live when the app needs room.",
 						],
 						[
-							"Managed Postgres — private beta",
+							"Managed Postgres (private beta)",
 							"Bundled SQLite by default; co-located managed Postgres is in private beta.",
 						],
 						[
@@ -394,7 +426,7 @@ const { data } = db.useQuery("Order");`}
 						],
 						["Custom domains + TLS", "Bring your domain; Pylon handles TLS."],
 						[
-							"SSO — OIDC + SAML",
+							"SSO: OIDC + SAML",
 							"Configure org-level SSO from the dashboard.",
 						],
 						[
@@ -417,7 +449,7 @@ const { data } = db.useQuery("Order");`}
 				</div>
 			</Section>
 
-			{/* FAQ — practical questions with checkable answers. This replaced a
+			{/* FAQ: practical questions with checkable answers. This replaced a
 			    "here are the objections we expect" block: writing the reader's
 			    doubts for them is a rhetorical device, not information, and it left
 			    the page with no plain statement of what Pylon actually supports. */}
@@ -440,11 +472,11 @@ const { data } = db.useQuery("Order");`}
 					{[
 						{
 							q: "Which database does it use?",
-							a: "SQLite by default — one file, nothing to provision. Set DATABASE_URL to a Postgres connection string and the same schema and application code target Postgres instead. On Cloud, bundled SQLite is the default and co-located managed Postgres is in private beta.",
+							a: "SQLite is the default. It uses one file and needs no setup. Set DATABASE_URL to a Postgres connection string to use the same schema and application code with Postgres. On Cloud, bundled SQLite is the default. Co-located managed Postgres is in private beta.",
 						},
 						{
 							q: "Do I have to use Smallware?",
-							a: "No. The runtime is a single open-source binary — run it on your own box or container platform with a volume for SQLite, or point it at your own Postgres. Cloud is the managed path, not a requirement, and it runs the same binary.",
+							a: "No. The runtime is one open-source binary. Run it on your own computer or container platform with a volume for SQLite, or use your own Postgres database. Cloud is the managed option, not a requirement. It runs the same binary.",
 						},
 						{
 							q: "How do migrations work?",
@@ -464,7 +496,7 @@ const { data } = db.useQuery("Order");`}
 						},
 						{
 							q: "Can it run background work?",
-							a: "Yes — ctx.scheduler.runAfter, runAt, and cancel schedule follow-up work, and delays and retries run in the same process as the rest of your app. There is no separate queue or worker to deploy.",
+							a: "Yes. ctx.scheduler.runAfter, runAt, and cancel schedule follow-up work. Delays and retries run in the same process as the rest of your app. You do not deploy a separate queue or worker.",
 						},
 						{
 							q: "What happens to my data if I leave?",
@@ -486,27 +518,29 @@ const { data } = db.useQuery("Order");`}
 				</div>
 			</Section>
 
-			{/* CTA. Sits on the same column and heading scale as every section
-			    above it. It used to be centred in an 860px box at its own
-			    clamp(34,5vw,60), so the page's single left edge — and its type
-			    scale — broke on the last screen. */}
-			<Section>
-				<H2>Create a Pylon app.</H2>
-				<p className="mt-5 max-w-[520px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-					The framework is free to self-host. Smallware runs it for you —
-					connect GitHub or deploy from the CLI.
-				</p>
-				<div className="mt-8 flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-					<Button asChild variant="primary" size="lg">
-						<Link href={ctaUrl(signedIn)}>
-							{signedIn ? "Open dashboard →" : "Create your account →"}
-						</Link>
-					</Button>
-					<Button asChild variant="ghost" size="lg">
-						<a href="https://docs.pylonsync.com/cloud">Read the docs</a>
-					</Button>
+			<section className="border-t border-[var(--color-rule)] bg-[var(--color-brand-soft)]">
+				<div className={`${FRAME_COL} px-5 py-16 sm:px-8 sm:py-20 lg:py-24`}>
+					<div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+						<div>
+							<H2>Create a Pylon app.</H2>
+							<p className="mt-5 max-w-[520px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
+								Self-host the framework, or use Smallware to run it. Connect
+								GitHub or deploy from the CLI.
+							</p>
+						</div>
+						<div className="flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
+							<Button asChild variant="primary" size="lg">
+								<Link href={ctaUrl(signedIn)}>
+									{signedIn ? "Open dashboard →" : "Create your account →"}
+								</Link>
+							</Button>
+							<Button asChild variant="outline" size="lg">
+								<a href="https://docs.pylonsync.com/cloud">Read the docs</a>
+							</Button>
+						</div>
+					</div>
 				</div>
-			</Section>
+			</section>
 
 			<SiteFooter />
 		</div>
@@ -582,7 +616,7 @@ function RepoVisual() {
 function TerminalVisual() {
 	return (
 		<div>
-			<VisualBar label="zsh — my-app" />
+			<VisualBar label="zsh / my-app" />
 			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
 				<div className="text-[var(--color-ink-2)]">
 					<span className="text-[var(--color-brand)]">$</span> npm create
@@ -639,14 +673,14 @@ function TypeErrorVisual() {
 
 function StudioVisual() {
 	const rows: [string, string, string][] = [
-		["ord_9f2a", "Sarah Chen", "$1,240"],
-		["ord_7c41", "Marcus Lee", "$880"],
+		["ord_9f2a", "Mina Okafor", "$1,240"],
+		["ord_7c41", "Mateo Silva", "$880"],
 		["ord_5b88", "Priya Nair", "$2,100"],
 	];
 	return (
 		<div>
 			<VisualBar
-				label="/studio — Order"
+				label="/studio / Order"
 				right={
 					<span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--color-ink-4)]">
 						<span
@@ -707,21 +741,5 @@ function H2({ children }: { children: React.ReactNode }) {
 		<h2 className="max-w-[20ch] text-[clamp(30px,4vw,46px)] font-semibold leading-[1.05] tracking-[-0.035em] text-[var(--color-ink)]">
 			{children}
 		</h2>
-	);
-}
-
-function Card({ children }: { children: React.ReactNode }) {
-	return (
-		<div className="rounded-[var(--radius-lg)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] p-7 sm:p-8">
-			{children}
-		</div>
-	);
-}
-
-function InlineCode({ children }: { children: React.ReactNode }) {
-	return (
-		<code className="rounded-[2px] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-1.5 py-0.5 font-mono text-[12px] text-[var(--color-ink)]">
-			{children}
-		</code>
 	);
 }
