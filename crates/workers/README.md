@@ -1,57 +1,67 @@
 # pylon-workers
 
-**Status: experimental / unverified.** This crate has been built and its
-unit tests pass, but it has never been deployed end-to-end to Cloudflare
-Workers. Several APIs were written against the `worker` crate's documented
-surface without live testing. Use at your own risk.
+**Status: compiles, never run.** `.github/workflows/ci.yml` runs
+`cargo check -p pylon-workers --features workers --target wasm32-unknown-unknown`
+on every Rust change, and it is a required job — so the crate type-checks
+against the real `worker` crate on the real target. Nothing here has ever
+executed. No `worker-build`, no `wrangler deploy`, no live request.
 
-## What works
+The gap between "type-checks" and "works" is load-bearing here. See
+[The `block_on` problem](#the-block_on-problem).
 
-- **`D1DataStore`** — a `DataStore` implementation that generates
-  SQLite-dialect SQL and executes it through a pluggable `D1Executor`
-  trait. The SQL generation is unit-tested. Safe to use outside of Workers
-  by implementing `D1Executor` against any SQLite-compatible backend.
-- **`NoopAll`** — stub implementations of the router's service traits
-  (rooms, cache, pubsub, jobs, scheduler, workflows, files, openapi) for
-  platforms that don't offer those capabilities. Safe to use.
-- **`durable_object` module** — helper primitives (`do_websocket_sink`,
-  `persist_to_do_storage`, `restore_from_do_storage`,
-  `register_do_subscriber`) + a JavaScript template for writing your own
-  Durable Object class. These are library building blocks, not a working
-  deployment.
+## What's in the crate
 
-## What is NOT verified
+| Module | What it is |
+| --- | --- |
+| `d1_store` | `DataStore` over D1. SQLite-dialect SQL generation behind a pluggable `D1Executor` trait. SQL generation is unit-tested and usable outside Workers against any SQLite-compatible backend. |
+| `rooms_do` | `PylonRoom` Durable Object + the `WorkersRooms` `RoomOps` adapter. Rooms map 1:1 onto DOs via `id_from_name`; sockets are accepted with `state.accept_web_socket()` so they survive hibernation. |
+| `pubsub_do` | DO-backed pub/sub fan-out. |
+| `durable_object` | Helper primitives (`do_websocket_sink`, `persist_to_do_storage`, `restore_from_do_storage`, `register_do_subscriber`) + a JS class template. |
+| `kv_cache` | `CacheOps` over Workers KV. |
+| `r2_files` | File storage over R2. |
+| `queue_jobs` | Job queue over Cloudflare Queues, with a KV-backed registry and DLQ. |
+| `handler` | The `#[event(fetch)]` entry point wiring the router to a Worker request. |
+| `noop_adapters` | `NoopAll` — stubs for the router's service traits (rooms, cache, pubsub, jobs, scheduler, workflows, files, openapi) on platforms lacking them. Safe to use anywhere. |
 
-- **`handler` module (behind the `workers` feature).** Uses the `worker`
-  crate's `#[event(fetch)]` macro and calls `futures::executor::block_on`
-  inside the fetch handler. The block-on strategy almost certainly **does
-  not work on `wasm32-unknown-unknown`** (single-threaded, no pool). This
-  module has never been built with `--features workers` against the real
-  `worker` crate.
-- **End-to-end deploy.** Nobody has run `worker-build --release
-  --features workers` or `wrangler deploy` against this crate.
-- **The Durable Object handler integration.** The JS template is a
-  starting point, not an integrated flow. Wiring the DO to the Rust
-  `Shard` abstraction requires bindings that don't exist yet.
+## The `block_on` problem
 
-## What would be needed for a real Workers path
+Roughly 30 call sites across `kv_cache`, `queue_jobs`, `r2_files`, `handler`,
+and the `RoomOps` adapters in `rooms_do` / `pubsub_do` call
+`futures::executor::block_on` to bridge the router's sync service traits to
+the `worker` crate's async API.
 
-1. Replace `futures::executor::block_on` with genuinely async execution.
-   Either:
-   - Add an `AsyncDataStore` trait alongside the sync one
-   - Or make `DataStore` itself async (affects every platform)
-2. Actually build with `worker-build` and iterate until it compiles and
-   deploys. Expect multiple API surprises with `worker` vs. what's documented.
-3. Write an integration test that hits a deployed Worker from a test script
-   and asserts behavior end-to-end.
-4. Add Durable Object bindings so shards survive across DO instances and
-   survive hibernation.
-5. Swap the `ureq`-based OAuth and email HTTP clients for `fetch()`
-   (available inside Workers) — `ureq` can't run in WASM.
+On `wasm32-unknown-unknown` there is no thread to park and no way to yield
+back to the JS event loop, so a pending JS promise never resolves. These call
+sites **compile and then hang on first use.** `cargo check` cannot catch a
+runtime deadlock, which is why CI is green.
+
+The comment at `rooms_do.rs:27` claiming Workers' single-threaded runtime
+tolerates this inside request handlers is wrong.
+
+The fix is to make the trait boundary async — `DataStore`, `RoomOps`,
+`CacheOps` — which affects every platform, not just Workers.
+
+**Scope note:** the Durable Object *classes* are already fully async and free
+of `block_on` (`rooms_do.rs:88-288`). Only the Worker-side adapters are
+affected. A design that uses DOs without running the router on Workers does
+not need this refactor. See
+[`docs/SYNC_DURABLE_OBJECTS_DESIGN.md`](../../docs/SYNC_DURABLE_OBJECTS_DESIGN.md).
+
+## What a full Workers deployment would still need
+
+1. Async trait boundary, per above.
+2. An actual `worker-build --release --features workers` + `wrangler deploy`.
+   Expect API surprises between the `worker` crate and its docs.
+3. An integration test that hits a deployed Worker and asserts behavior.
+   `cargo check` is not evidence.
+4. DO bindings so shards survive across instances and hibernation.
+5. `fetch()` in place of the `ureq`-based OAuth and email HTTP clients —
+   `ureq` cannot run in WASM.
+6. D1 is the only SQL backend here. Apps on `postgres-live` have no path.
 
 ## Using this crate today
 
-The safe subset you can depend on:
+The safe subset:
 
 ```rust
 use pylon_workers::{D1DataStore, D1Executor, NoopAll};
@@ -64,10 +74,4 @@ impl D1Executor for MyExecutor { /* ... */ }
 let store = D1DataStore::new(MyExecutor { /* ... */ }, manifest);
 ```
 
-For deployment to actual Cloudflare Workers, we recommend waiting until
-this crate has been marked stable. Until then, self-hosting (via the
-`pylon-runtime` crate) is the supported path.
-
-## Tracking
-
-See [issue #TODO — file this] for the path to 1.0.
+Self-hosting via `pylon-runtime` is the supported deployment path.
