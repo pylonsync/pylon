@@ -28,6 +28,8 @@ import { Button } from "./ui/button";
 import { MarketingNav } from "./marketing-nav";
 import { SiteFooter } from "./site-footer";
 import { CodePanel } from "./code-panel";
+import { TemplatesStrip } from "./templates-strip";
+import { useCopy } from "../lib/use-copy";
 import {
 	AuthBento,
 	BentoHoverContext,
@@ -184,6 +186,11 @@ export function MarketingPage({
 					<HeroBento />
 				</div>
 			</header>
+
+			{/* Templates, straight after the bento. The bento says what the
+			    framework does; this is the shortest path from reading that to
+			    running one. */}
+			<TemplatesStrip />
 
 			{/* Agent workflow. Each claim carries the artifact it's about — the
 			    repo layout, the terminal, the type error, the studio table — so
@@ -515,22 +522,11 @@ const { data } = db.useQuery("Order");`}
 // to copy; the icon flips to a check for a beat. Falls back silently if the
 // Clipboard API is unavailable (older browsers / insecure origins).
 function InstallCommand({ command }: { command: string }) {
-	const [copied, setCopied] = useState(false);
-	function copy() {
-		navigator.clipboard
-			?.writeText(command)
-			.then(() => {
-				setCopied(true);
-				setTimeout(() => setCopied(false), 1600);
-			})
-			.catch(() => {
-				/* clipboard unavailable — no-op */
-			});
-	}
+	const { copied, copy } = useCopy();
 	return (
 		<button
 			type="button"
-			onClick={copy}
+			onClick={() => copy(command)}
 			aria-label={`Copy: ${command}`}
 			// max-w-full + nowrap: on a 390px screen the command wrapped inside the
 			// pill, which centred the two halves under a vertically-centred `$` and

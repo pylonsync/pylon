@@ -8,10 +8,70 @@ export interface Example {
 	name: string;
 	blurb: string;
 	shows: string[];
-	/** A real template name (run npm create, pick it) — or undefined. */
+	/**
+	 * A real template name (run npm create, pick it) — or undefined.
+	 *
+	 * This must be the template's DIRECTORY name, not one of the retired
+	 * aliases in TEMPLATE_ALIASES. `templateRepoUrl` builds a repo path from
+	 * it, and an alias resolves to a directory that doesn't exist.
+	 */
 	template?: string;
 	/** A live demo URL — or undefined. */
 	live?: string;
+	/**
+	 * Screenshot of the template running, served from the site's public dir.
+	 * Undefined means no capture exists yet and the card draws a placeholder
+	 * instead. Populate with `scripts/capture-template-shots.mjs`.
+	 */
+	shot?: string;
+}
+
+/** Where a template's source lives on GitHub. */
+export function templateRepoUrl(template: string): string {
+	return `https://github.com/pylonsync/pylon/tree/main/packages/create-pylon/templates/${template}`;
+}
+
+/**
+ * The copy/paste command that scaffolds a template.
+ *
+ * Flag form matches what `create-pylon --help` documents; `@latest` matches
+ * the hero's install pill so a stale cached scaffolder can't produce a
+ * template the docs no longer describe.
+ */
+export function createCommand(template: string): string {
+	return `npm create @pylonsync/pylon@latest my-app --template ${template}`;
+}
+
+/**
+ * The templates the landing page shows, in order. A subset chosen for
+ * breadth — a product starter, realtime, commerce, search, AI, a two-sided
+ * marketplace, and two business sites — not a ranking. The full set lives on
+ * /developers/examples.
+ */
+export const FEATURED_TEMPLATES = [
+	"saas",
+	"chat",
+	"shop",
+	"directory",
+	"ai-chat",
+	"marketplace",
+	"agency",
+	"waitlist",
+] as const;
+
+/**
+ * The featured examples, resolved from the same GROUPS + LIVE_DEMOS data the
+ * examples page renders. Deriving them keeps one description per template;
+ * a second hand-maintained list is how the two pages would drift.
+ *
+ * A name in FEATURED_TEMPLATES with no matching example is skipped rather
+ * than rendered empty.
+ */
+export function featuredExamples(): Example[] {
+	const all = [...LIVE_DEMOS, ...GROUPS.flatMap((g) => g.items)];
+	return FEATURED_TEMPLATES.map((t) =>
+		all.find((e) => e.template === t),
+	).filter((e): e is Example => Boolean(e));
 }
 
 export interface Group {
@@ -62,9 +122,12 @@ export const GROUPS: Group[] = [
 			{
 				name: "SaaS starter",
 				blurb:
-					"A complete SaaS product with a marketing site, onboarding, a multi-tenant dashboard, and Stripe billing. This is what `npm create` gives you by default.",
+					"A complete SaaS product with a marketing site, onboarding, a multi-tenant dashboard, and Stripe billing. Reach for this one to build a product.",
 				shows: ["Stripe billing", "Marketing + dashboard", "Onboarding"],
-				template: "default",
+				// "default" is a retired alias kept working by TEMPLATE_ALIASES.
+				// The directory is `saas`, and templateRepoUrl() builds a path from
+				// this value — an alias here points at a directory that isn't there.
+				template: "saas",
 			},
 			{
 				name: "Consumer app",
