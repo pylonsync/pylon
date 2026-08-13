@@ -112,19 +112,47 @@ export default function EventPage({ params, serverData }: PageProps<{ slug: stri
 
 `serverData.fn(name, args)` runs the registered query with the page's own auth context (anonymous on a public page), so the query stays the single source of truth for SSR and client alike. Query functions only — mutations and actions are rejected. Calling it on a signed-in request opts the render out of shared SSR caching, since the query may read `ctx.auth`; anonymous renders stay cacheable.
 
-## Per-route code splitting
+## Code splitting
 
-Each page becomes its own entry chunk (~500 bytes gzipped) sharing one big chunk with React + react-dom + Pylon's runtime (~98KB gz). When the user lands on `/hello`, the browser downloads the shared chunk + the `/hello` entry. When they navigate to `/about`, only the `/about` entry hits the wire (a couple hundred bytes); the shared chunk is already cached with `Cache-Control: immutable`.
+### Per route
 
-Add a 50th route → the shared chunk stays the same size and the new page contributes its own tiny entry. The bundle does not grow linearly with route count.
+Each page becomes its own entry chunk, sharing one big chunk with React + react-dom + Pylon's runtime (~98KB gz). When the user lands on `/hello`, the browser downloads the shared chunk + the `/hello` entry. When they navigate to `/about`, only the `/about` entry hits the wire; the shared chunk is already cached with `Cache-Control: immutable`.
+
+Add a 50th route → the shared chunk stays the same size and the new page contributes its own entry. The bundle does not grow linearly with route count.
 
 The bundler emits a `manifest.json` listing every route's entry file + the chunks it depends on. The SSR head adapter reads it on each render and emits the right preload tags.
+
+### Within a route
+
+A route's entry is only as small as what the page imports. A page that pulls in a rich-text editor puts the **whole editor** in its entry — one real app measured a single route at 1MB brotli for a composer most visitors never opened. And since [`<Link>`](/ssr/link) warms sibling routes on sight, that weight lands on the first load of every page in the section.
+
+`dynamic()` moves a component behind a real `import()`: its own chunk, deliberately left out of the route's preload set, fetched only when something renders it.
+
+```tsx
+import { dynamic } from "@pylonsync/react";
+
+const Composer = dynamic(() => import("./Composer"), {
+  loading: () => <ComposerSkeleton />,
+});
+
+// …then render <Composer /> behind whatever opens it.
+```
+
+Call it at **module level**, never inside a render — a `dynamic()` per render is a new component type each time and remounts the subtree.
+
+<Note>
+`ssr` defaults to **false**, the opposite of Next, and deliberately. A Pylon page hydrates once after the whole document has streamed, so the safe contract is that the server HTML and the first client render are identical — which `ssr: false` guarantees by rendering the fallback in both, making a hydration mismatch impossible by construction. It is also the only mode that removes bytes from the first load: an `ssr: true` component has to be in the client bundle before hydration, so it saves nothing and exists for organizing code, not weight.
+</Note>
+
+Don't confuse this with the route-segment export `export const dynamic = "force-static" | "force-dynamic"`, which is a **cache directive**. Same word, different thing, both inherited from Next.
 
 ## Current limits
 
 - **Server Actions / RSC** — Pylon serves dynamic pages but doesn't ship React Server Components or the `"use server"` action model. Server functions (`query` / `mutation` / `action`) plus the typed client cover the same ground: call them from client components instead of inlining server code into the render tree.
 
 Special files (`loading.tsx`, `error.tsx`, `not-found.tsx`), `<Suspense>` streaming (opt in with a `loading.tsx` boundary or `export const streaming = true`), and metadata (`metadata` / `generateMetadata`, plus dynamic `opengraph-image.tsx`) have all shipped since this list was first written.
+
+`loading.tsx` works in both directions: it's the Suspense fallback the SSR stream flushes first on a document load, and it's what the client router paints over the page area when a [`<Link>`](/ssr/link) navigation runs longer than ~100ms. Faster navigations swap straight to content, so it never flashes. It resolves by nearest ancestor, and route groups are transparent — a `loading.tsx` in `app/(dash)/` covers routes at `/`, the same rule `error.tsx` and `not-found.tsx` follow.
 
 ## Try it
 

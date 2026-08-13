@@ -1,6 +1,6 @@
 ---
 title: <Link>
-description: "Instant client-side navigation between SSR routes, with viewport-based prefetch. Drop-in <a> replacement."
+description: "Instant client-side navigation between SSR routes, with two-stage prefetch. Drop-in <a> replacement."
 ---
 
 ```tsx
@@ -16,12 +16,20 @@ import { Link } from "@pylonsync/react";
 | Phase | Behavior |
 |---|---|
 | SSR / no JS | Renders `<a href data-pylon-link>...</a>`. Same as a regular anchor. |
-| In viewport | IntersectionObserver fires `__pylon.prefetch(href)` — adds `<link rel="prefetch" as="document">` for the URL + `<link rel="modulepreload">` for the shared chunk. |
-| Hover / touchstart | Same prefetch logic, escalated for users who never saw the link in the viewport (touch devices, fast scrollers). |
-| Click | `preventDefault()`, fetch the new SSR HTML, dynamic-import the new route's entry chunk (already preloaded), and re-render the React root in place. |
+| In viewport | IntersectionObserver `modulepreload`s the destination's **client chunks** — its own route entry plus what it imports. Deferred until the page's `load` event, so warming a screenful of links never competes with the current page's own render. |
+| Hover / touchstart / focus | Also fetches the **page payload**, and holds it in memory for the click. `focus` is included so a keyboard user tabbing to a link gets the same warm path as a cursor. |
+| Click | `preventDefault()`, consume the prefetched payload (or fetch it), render the new route, and re-render the React root in place. |
 | Modifier keys / target="_blank" | Falls through to the browser's default behavior — open in new tab, etc. |
 
+**Why the two stages differ.** Chunks are content-hashed and served `immutable`, so warming one costs its bytes once per browser and makes every later visit instant — cheap enough to do on sight. The page payload costs a **server render** every time, so it waits for a real signal of intent. Warming payloads on sight instead would spend one render per visible link on every page load and throw nearly all of them away.
+
+The payload is held in memory only, never in a disk cache, so a reload always re-renders. It's single-use and short-lived, and dropped when a navigation commits.
+
 The React root persists across navigations, so any layout that's shared between the old and new route keeps its instance. State, scroll position, video playback — all survive the nav.
+
+<Note>
+A page that takes longer than ~100ms to arrive shows the nearest [`loading.tsx`](/ssr/overview) over the page area while it loads. Faster navigations swap straight to content, so the skeleton never flashes.
+</Note>
 
 ## API
 
@@ -29,7 +37,8 @@ The React root persists across navigations, so any layout that's shared between 
 interface LinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
   /** Destination path. Same-origin paths get client-side nav; off-origin renders as plain <a>. */
   href: string;
-  /** Default true. Set false to skip prefetch (long lists, pagination tails). */
+  /** Default true. Set false to skip BOTH prefetch stages — no chunk warming
+   *  and no payload fetch, so the click pays for everything. */
   prefetch?: boolean;
   children?: React.ReactNode;
 }
@@ -55,15 +64,21 @@ export default function Nav() {
 }
 ```
 
-### Disable prefetch for off-screen links
+### Disable prefetch
 
-A large paginated list with a "next page" link the user might never click:
+`prefetch={false}` turns off both stages. Reach for it when a link is unlikely
+to be followed and you would rather not warm anything for it:
 
 ```tsx
 <Link href={`/posts?page=${page + 1}`} prefetch={false}>
   Next →
 </Link>
 ```
+
+You rarely need it for *weight*. A heavy destination is best fixed at the
+source with [`dynamic()`](/ssr/overview#code-splitting), which keeps the heavy
+component out of the route's chunk entirely — `prefetch={false}` only delays
+the download to the click, where the user is waiting on it.
 
 ### Open in a new tab
 
@@ -88,8 +103,8 @@ The runtime is loaded as part of the shared chunk; `window.__pylon` is defined a
 ## How nav actually works
 
 1. User clicks a `<Link>`. The runtime's delegated handler picks it off `a[data-pylon-link]` clicks.
-2. Runtime fetches the target URL with the standard `Accept: text/html` header. The server SSRs the new page just like a direct navigation would.
-3. Runtime parses the response and extracts the `__PYLON_DATA__` JSON tag (component name, layouts, props).
+2. Runtime uses the payload a hover already fetched, or fetches the target URL now. Either way the request carries `X-Pylon-Nav: 1`, which tells the server this is a navigation rather than a document load.
+3. The server still runs the render — that's what resolves the page's `serverData` reads — but replies with only the head metadata and the `__PYLON_DATA__` JSON (component, layouts, props, data), not the rendered markup, which the client is about to re-render from that data anyway. Roughly half the bytes of a full page on a typical route.
 4. Runtime looks up the new component in the bundle manifest and dynamically imports its entry chunk.
 5. The entry chunk's `hydrate(component, Page, Layouts)` populates the route cache without re-rendering (the cache is keyed on component path).
 6. Runtime calls `root.render(buildTree(Page, Layouts, newProps))`. React's reconciler diffs against the existing tree — shared layouts get reused, the page subtree swaps.
@@ -101,9 +116,10 @@ If anything fails (fetch errored, response wasn't HTML, manifest didn't know the
 
 | | Pylon `<Link>` | Next.js `<Link>` |
 |---|---|---|
-| Prefetch trigger | IntersectionObserver (256px rootMargin) | IntersectionObserver |
-| Hover escalation | Yes (once) | Yes |
-| Prefetch payload | HTML + shared chunk | RSC payload + per-route JS |
+| Prefetch trigger | Two stages: chunks on viewport (256px rootMargin), payload on intent | IntersectionObserver |
+| Hover escalation | Hover, touch **and focus** — keyboard gets the warm path too | Hover |
+| Prefetch payload | Route's own chunks; page payload only on intent | RSC payload + per-route JS |
+| Component splitting | `dynamic()` — `ssr: false` by default | `next/dynamic` — `ssr: true` by default |
 | Nav model | Re-render in place, layouts preserved | App router preserves layouts the same way |
 | `scroll={false}` prop | Not yet | Yes |
 | Hash-only links (`#section`) | Falls through to browser | Smooth-scrolls in app router |
