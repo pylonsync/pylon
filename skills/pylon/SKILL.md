@@ -831,6 +831,8 @@ Call it at **module level**, never inside a render — a `dynamic()` per render 
 
 Note the name collision: the route-segment export `export const dynamic = "force-static" | "force-dynamic"` is a **cache directive**, unrelated to this loader. Same word, different thing, both inherited from Next.
 
+**Deferring one component isn't enough on its own.** `dynamic()` removes weight only if nothing else in the route imports the same library statically — a sibling component doing `import { H1, TEXT } from "@react-email/editor/ui"` drags the whole thing back in eagerly, and the only symptom is a heavy chunk in the route's preload set, which looks like a bundler bug. Check with `grep -o 'import[( ]*"[^"]*<chunk>[^"]*"'` against the built entry: a paren means deferred, no paren means something still imports it eagerly.
+
 ### File conventions (all optional, walked up from the page dir)
 
 - `loading.tsx` → the route's pending state, in both directions: the Suspense fallback the SSR stream flushes first (set `export const streaming = true` on a page for progressive streaming), and what the client router paints over the page area when a `<Link>` navigation runs longer than ~100ms. Faster navigations swap straight to content, so it never flashes.

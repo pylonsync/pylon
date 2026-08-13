@@ -148,6 +148,28 @@ Call it at **module level**, never inside a render — a `dynamic()` per render 
 
 Don't confuse this with the route-segment export `export const dynamic = "force-static" | "force-dynamic"`, which is a **cache directive**. Same word, different thing, both inherited from Next.
 
+#### Deferring one component isn't enough on its own
+
+`dynamic()` only removes weight if **nothing else in the route imports the same library statically**. One sibling component is enough to undo it:
+
+```tsx
+// The composer is deferred…
+const Composer = dynamic(() => import("./Composer"));
+
+// …and this drags the whole library back in, eagerly.
+import { BULLET_LIST, H1, TEXT } from "@react-email/editor/ui";
+```
+
+The bundler is right to preload it at that point — the route genuinely does import it eagerly — so the symptom is a heavy chunk sitting in the route's preload set, which looks from the outside exactly like a bundler that ignored your `dynamic()`. A real app lost the entire saving this way to thirteen imported constants used by a sidebar rendered next to the editor.
+
+To check, look at how your route's entry references the chunk:
+
+```bash
+curl -s <origin>/_pylon/build/<route-entry>.js | grep -o 'import[( ]*"[^"]*<chunk>[^"]*"'
+```
+
+`import("…")` with a paren is deferred and won't be preloaded. `import"…"` without one is eager — grep your own source for that library and defer the other importer too.
+
 ## Current limits
 
 - **Server Actions / RSC** — Pylon serves dynamic pages but doesn't ship React Server Components or the `"use server"` action model. Server functions (`query` / `mutation` / `action`) plus the typed client cover the same ground: call them from client components instead of inlining server code into the render tree.
