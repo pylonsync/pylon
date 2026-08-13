@@ -7,49 +7,21 @@ import {
 	Activity,
 	ArrowUpRight,
 	Braces,
-	Check,
 	Copy,
-	Database,
 	Eye,
 	FileText,
-	KeyRound,
-	LayoutDashboard,
-	Radio,
-	RefreshCw,
-	Search,
-	Server,
-	ShieldCheck,
-	Table2,
 	Terminal,
-	Upload,
-	Workflow,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { MarketingNav } from "./marketing-nav";
 import { SiteFooter } from "./site-footer";
 import { CodePanel } from "./code-panel";
 import { TemplatesStrip } from "./templates-strip";
-import { Band, FRAME_COL } from "./marketing-frame";
+import { FRAME_COL } from "./marketing-frame";
 import { HeroStack } from "./hero-stack";
 import { HeroStart } from "./hero-start";
+import { FeatureScroll } from "./feature-scroll";
 import { useCopy } from "../lib/use-copy";
-import {
-	AuthBento,
-	BentoHoverContext,
-	EngineBento,
-	FunctionsBento,
-	LiveQueryBento,
-	PolicyBento,
-	PresenceBento,
-	ReactiveBento,
-	SchedulerBento,
-	SchemaBento,
-	SearchBento,
-	SsrBento,
-	StudioTabsBento,
-	UploadBento,
-	useMotionTick,
-} from "./bento-visuals";
 import { ctaUrl } from "../lib/account-urls";
 
 // Concrete affordances that let a coding agent build, verify, and ship on Pylon.
@@ -138,7 +110,9 @@ export function MarketingPage({
 			    bento now runs as its own band below, and the entity diagram
 			    carries the hero. */}
 			<header className="relative isolate overflow-hidden">
-				<div className={`${FRAME_COL} px-5 pb-20 pt-16 text-center sm:px-8 sm:pb-24 sm:pt-24`}>
+				<div
+					className={`${FRAME_COL} px-5 pb-20 pt-16 text-center sm:px-8 sm:pb-24 sm:pt-24`}
+				>
 					<h1 className="mx-auto max-w-[21ch] text-[clamp(42px,6.4vw,68px)] font-semibold leading-[1.02] tracking-[-0.045em] text-[var(--color-ink)]">
 						Give your agent{" "}
 						{/* No `whitespace-nowrap` here: it's three words, and forcing them
@@ -163,21 +137,10 @@ export function MarketingPage({
 				</div>
 			</header>
 
-			{/* The nine pillars, now a band of their own with a heading that says
-			    what they are. Each card runs the thing it describes rather than
-			    illustrating it. */}
-			<Band id="included" tone="sunken" label="What ships with it">
-				<div>
-					<H2>Everything an app needs, already wired.</H2>
-					<p className="mt-5 max-w-[620px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-						No service to bolt on for auth, files, search, or realtime. Each
-						card below is running the feature it describes.
-					</p>
-				</div>
-				<div className="mt-12">
-					<HeroBento />
-				</div>
-			</Band>
+			{/* A dark scroll chapter interrupts the white hero and makes the runtime
+			    relationship tangible. The sticky index follows the reader while each
+			    capability group reveals its own live product composition. */}
+			<FeatureScroll />
 
 			{/* Templates, straight after the pillars. Those say what the framework
 			    does; this is the shortest path from reading that to running one. */}
@@ -191,8 +154,8 @@ export function MarketingPage({
 					<H2>Give agents a system they can inspect.</H2>
 					<p className="mt-5 max-w-[620px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
 						Pylon keeps rules, commands, generated types, local data, and logs
-						inside the workflow. Your agent can scaffold, run, debug, and
-						deploy without guessing which console owns the next step.
+						inside the workflow. Your agent can scaffold, run, debug, and deploy
+						without guessing which console owns the next step.
 					</p>
 				</div>
 
@@ -293,7 +256,8 @@ const { data } = db.useQuery("Order");`}
 							<li>
 								<span>2.</span>
 								<span>
-									<InlineCode>git push origin main</InlineCode> triggers a deploy.
+									<InlineCode>git push origin main</InlineCode> triggers a
+									deploy.
 								</span>
 							</li>
 							<li>
@@ -324,16 +288,32 @@ const { data } = db.useQuery("Order");`}
 							</div>
 							<div className="px-4 py-3">
 								<div>
-									<span className="text-[var(--color-brand)]">$</span> pylon login
+									<span className="text-[var(--color-brand)]">$</span> pylon
+									login
 								</div>
 								<div>
-									<span className="text-[var(--color-brand)]">$</span> pylon deploy{" "}
-									<span className="text-[var(--color-ink-3)]">--target cloud</span>
+									<span className="text-[var(--color-brand)]">$</span> pylon
+									deploy{" "}
+									<span className="text-[var(--color-ink-3)]">
+										--target cloud
+									</span>
 								</div>
-								<div className="text-[var(--color-status-live)]">  ✓ Build · 12s</div>
-								<div className="text-[var(--color-status-live)]">  ✓ Schema synced</div>
-								<div className="text-[var(--color-status-live)]">  ✓ Cutover · 0 errors</div>
-								<div className="text-[var(--color-ink-3)]">  → https://acme.smallware.run</div>
+								<div className="text-[var(--color-status-live)]">
+									{" "}
+									✓ Build · 12s
+								</div>
+								<div className="text-[var(--color-status-live)]">
+									{" "}
+									✓ Schema synced
+								</div>
+								<div className="text-[var(--color-status-live)]">
+									{" "}
+									✓ Cutover · 0 errors
+								</div>
+								<div className="text-[var(--color-ink-3)]">
+									{" "}
+									→ https://acme.smallware.run
+								</div>
 							</div>
 						</div>
 					</Card>
@@ -387,16 +367,40 @@ const { data } = db.useQuery("Order");`}
 				    rendered as gray voids. */}
 				<div className="mt-12 grid gap-x-12 sm:grid-cols-2">
 					{[
-						["Global edge network", "Cloudflare's edge provides CDN caching, TLS, and DDoS protection worldwide with no extra configuration."],
-						["Resize on demand", "Add RAM up to 64 GB, choose performance CPUs, and expand the volume without redeploying."],
+						[
+							"Global edge network",
+							"Cloudflare's edge provides CDN caching, TLS, and DDoS protection worldwide with no extra configuration.",
+						],
+						[
+							"Resize on demand",
+							"Add RAM up to 64 GB, choose performance CPUs, and expand the volume without redeploying.",
+						],
 						["Replicas", "Run up to 32 load-balanced replicas per region."],
-						["Global regions", "Deploy in US, EU, APAC, and South America regions."],
-						["Up to 500 GB volume", "Grow storage live when the app needs room."],
-						["Managed Postgres — private beta", "Bundled SQLite by default; co-located managed Postgres is in private beta."],
-						["Autostop on idle", "Scale to zero when idle, or keep a project always warm."],
+						[
+							"Global regions",
+							"Deploy in US, EU, APAC, and South America regions.",
+						],
+						[
+							"Up to 500 GB volume",
+							"Grow storage live when the app needs room.",
+						],
+						[
+							"Managed Postgres — private beta",
+							"Bundled SQLite by default; co-located managed Postgres is in private beta.",
+						],
+						[
+							"Autostop on idle",
+							"Scale to zero when idle, or keep a project always warm.",
+						],
 						["Custom domains + TLS", "Bring your domain; Pylon handles TLS."],
-						["SSO — OIDC + SAML", "Configure org-level SSO from the dashboard."],
-						["Audit log + snapshots", "Activity log, one-click volume restore."],
+						[
+							"SSO — OIDC + SAML",
+							"Configure org-level SSO from the dashboard.",
+						],
+						[
+							"Audit log + snapshots",
+							"Activity log, one-click volume restore.",
+						],
 					].map(([title, body]) => (
 						<div
 							key={title}
@@ -584,7 +588,9 @@ function TerminalVisual() {
 					<span className="text-[var(--color-brand)]">$</span> npm create
 					@pylonsync/pylon
 				</div>
-				<div className="text-[var(--color-ink-4)]">&nbsp;&nbsp;✓ scaffolded my-app</div>
+				<div className="text-[var(--color-ink-4)]">
+					&nbsp;&nbsp;✓ scaffolded my-app
+				</div>
 				<div className="text-[var(--color-ink-2)]">
 					<span className="text-[var(--color-brand)]">$</span> pylon dev
 				</div>
@@ -612,15 +618,18 @@ function TypeErrorVisual() {
 			/>
 			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
 				<div className="text-[var(--color-ink-3)]">
-					<span className="text-[var(--color-brand)]">const</span> {"{ data }"} ={" "}
-					db.useQuery(
+					<span className="text-[var(--color-brand)]">const</span> {"{ data }"}{" "}
+					= db.useQuery(
 					<span className="text-[var(--color-status-live)] underline decoration-[var(--color-status-fail)] decoration-wavy underline-offset-[3px]">
 						&quot;Ordr&quot;
 					</span>
 					);
 				</div>
 				<div className="mt-2 rounded-[var(--radius-sm)] border border-[var(--color-status-fail)]/25 bg-[var(--color-status-fail-soft)] px-2 py-1.5 text-[10.5px] leading-[1.5] text-[var(--color-ink-2)]">
-					Argument of type <span className="text-[var(--color-status-fail)]">&quot;Ordr&quot;</span>{" "}
+					Argument of type{" "}
+					<span className="text-[var(--color-status-fail)]">
+						&quot;Ordr&quot;
+					</span>{" "}
 					is not assignable to &quot;Order&quot; | &quot;Customer&quot;.
 				</div>
 			</div>
@@ -654,7 +663,9 @@ function StudioVisual() {
 						key={id}
 						className="flex items-center gap-3 px-4 py-[7px] font-mono text-[11.5px]"
 					>
-						<span className="w-[62px] shrink-0 text-[var(--color-ink-4)]">{id}</span>
+						<span className="w-[62px] shrink-0 text-[var(--color-ink-4)]">
+							{id}
+						</span>
 						<span className="flex-1 truncate font-sans text-[12px] text-[var(--color-ink-2)]">
 							{name}
 						</span>
@@ -663,221 +674,6 @@ function StudioVisual() {
 						</span>
 					</div>
 				))}
-			</div>
-		</div>
-	);
-}
-
-// ── Hero feature bento ───────────────────────────────────────────────
-// The framework's pillars, each carrying a live visual instead of a static
-// illustration. Every visual is decorative, so all of it is gated on
-// prefers-reduced-motion: `still` freezes the loop, and each card is written so
-// that its resting frame is already a complete, truthful picture — nothing is
-// only legible mid-animation.
-function BentoCard({
-	icon: Icon,
-	title,
-	desc,
-	href,
-	className,
-	children,
-}: {
-	icon: LucideIcon;
-	title: string;
-	desc: string;
-	href: string;
-	className?: string;
-	children: React.ReactNode;
-}) {
-	const [hovered, setHovered] = useState(false);
-	return (
-		// The whole card is the link to its product page. The cards used to sit
-		// under `filter: grayscale` until pointed at — but these twelve are the
-		// only cards on the site whose contents actually carry colour, so at rest
-		// the page's centrepiece was twelve grey panels and the reveal was a
-		// gimmick a reader had to find. They render in their own colour now, and
-		// hover moves the border only.
-		<Link
-			href={href}
-			onMouseEnter={() => setHovered(true)}
-			onMouseLeave={() => setHovered(false)}
-			onFocus={() => setHovered(true)}
-			onBlur={() => setHovered(false)}
-			className={`group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper)] ${className ?? ""}`}
-		>
-			<div className="flex flex-col gap-1.5 p-5 pb-3">
-				<div className="flex items-center gap-2">
-					<Icon className="size-4 shrink-0 text-[var(--color-brand)]" />
-					<h3 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
-						{title}
-					</h3>
-					<ArrowUpRight className="ml-auto size-3.5 shrink-0 text-[var(--color-ink-4)] opacity-0 transition-opacity duration-200 group-focus-visible:opacity-100 group-hover:opacity-100" />
-				</div>
-				<p className="text-[13px] leading-[1.5] text-[var(--color-ink-2)]">{desc}</p>
-			</div>
-			<div className="relative min-h-0 flex-1 overflow-hidden">
-				<BentoHoverContext.Provider value={hovered}>
-					{children}
-				</BentoHoverContext.Provider>
-			</div>
-		</Link>
-	);
-}
-
-// Two card heights, not four. The grid ran 290 / 230 / 210 / 230 down its four
-// rows, so every row landed on a different baseline and the block read as four
-// unrelated grids stacked up. One height for the three lead cards, one for
-// everything under them. Cards in a row already stretch to their tallest
-// sibling, so these floors are set at where the copy actually lands — a lower
-// floor is inert on the dense rows and leaves the two wide cards short.
-const BENTO_LEAD = "min-h-[290px]";
-const BENTO_ROW = "min-h-[280px]";
-
-function HeroBento() {
-	return (
-		<div>
-			<div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-12">
-				<BentoCard
-				icon={Table2}
-				title="Typed schema"
-				href="/product/database"
-				desc="Entities and fields in TypeScript. Pylon creates the tables and migrates on save."
-				className={`${BENTO_LEAD} lg:col-span-4`}
-				>
-				<SchemaBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={RefreshCw}
-				title="Live queries"
-				href="/product/sync"
-				desc="db.useQuery opens a subscription. Every write pushes a diff — no polling, no refetch."
-				className={`${BENTO_LEAD} lg:col-span-4`}
-				>
-				<LiveQueryBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={ShieldCheck}
-				title="Row-level policies"
-				href="/product/auth"
-				desc="Access rules sit next to the schema. Every read and write is checked; default deny."
-				className={`${BENTO_LEAD} lg:col-span-4`}
-				>
-				<PolicyBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={KeyRound}
-				title="Auth, included"
-				href="/product/auth"
-				desc="Magic link, 25+ OAuth providers, OIDC, and API keys."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<AuthBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Upload}
-				title="File uploads"
-				href="/product/storage"
-				desc="Presigned uploads to local disk or any S3-compatible bucket."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<UploadBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Radio}
-				title="Rooms & presence"
-				href="/product/realtime"
-				desc="Cursors, typing, and who is online over the same server."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<PresenceBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Search}
-				title="Faceted search"
-				href="/product/search"
-				desc="Full-text queries with live facet counts, updated in the same transaction as your writes."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<SearchBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Database}
-				title="SQLite or Postgres"
-				href="/product/database"
-				desc="Start on a single SQLite file. Point DATABASE_URL at Postgres and nothing above the driver changes."
-				className={`${BENTO_ROW} lg:col-span-6`}
-				>
-				<EngineBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Server}
-				title="Server-rendered React"
-				href="/product/ssr"
-				desc="Queries and policies run on the server for first paint, then the same typed client hydrates and subscribes."
-				className={`${BENTO_ROW} lg:col-span-6`}
-				>
-				<SsrBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Braces}
-				title="Server functions"
-				href="/product/functions"
-				desc="Queries, mutations, and actions in TypeScript files, validated and called through the typed client."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<FunctionsBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Activity}
-				title="Reactive server queries"
-				href="/product/functions"
-				desc="Joins and derived data. The server tracks what it read and re-runs when those rows change."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<ReactiveBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={Workflow}
-				title="Scheduled & deferred work"
-				href="/product/workflows"
-				desc="runAfter, runAt, and cancel. Delays and retries run in the same process — no separate worker."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<SchedulerBento />
-				</BentoCard>
-
-				<BentoCard
-				icon={LayoutDashboard}
-				title="Admin studio"
-				href="/product/studio"
-				desc="Browse tables, inspect live queries, and tail logs at /studio. Admin-gated in production."
-				className={`${BENTO_ROW} lg:col-span-3`}
-				>
-				<StudioTabsBento />
-				</BentoCard>
-			</div>
-
-			{/* Carries the thesis and the /product link that the primitives grid
-			    used to hold, now that the grid is gone. The line opened on a bold
-			    "Pick what you need." — a slogan the sentence after it didn't need. */}
-			<div className="mt-6 flex flex-col items-start justify-between gap-3 border-t border-[var(--color-rule)] pt-5 sm:flex-row sm:items-center">
-				<p className="text-[15px] leading-[1.6] text-[var(--color-ink-2)]">
-					Every piece shares one schema and one runtime.
-				</p>
-				<Button asChild variant="ghost" size="sm">
-					<Link href="/product">Explore the product →</Link>
-				</Button>
 			</div>
 		</div>
 	);
