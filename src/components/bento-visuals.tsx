@@ -191,7 +191,7 @@ export function LiveQueryBento() {
 const POLICY_RULES: { op: string; expr: string; allow: boolean }[] = [
 	{ op: "read", expr: "auth.userId != null", allow: true },
 	{ op: "insert", expr: "auth.userId == data.ownerId", allow: true },
-	{ op: "delete", expr: "—  no rule", allow: false },
+	{ op: "delete", expr: "-  no rule", allow: false },
 ];
 
 export function PolicyBento() {
@@ -505,6 +505,66 @@ export function SchedulerBento() {
 	);
 }
 
+// Durable workflows are not background jobs. A job is one queued unit of work;
+// a workflow checkpoints named steps and can resume after a sleep, deploy, or
+// process restart. This visual keeps that distinction visible in a still frame.
+const WORKFLOW_STEPS = [
+	{ name: "welcome", operation: "step", result: "recorded" },
+	{ name: "wait 3d", operation: "sleep", result: "resumable" },
+	{ name: "checkActive", operation: "step", result: "recorded" },
+	{ name: "nudge", operation: "step", result: "next" },
+];
+
+export function WorkflowBento() {
+	const { tick, still } = useMotionTick(1500);
+	const active = still ? 3 : tick % WORKFLOW_STEPS.length;
+
+	return (
+		<div className="flex h-full flex-col justify-between px-5 pb-5">
+			<div className="flex flex-col gap-1.5">
+				{WORKFLOW_STEPS.map((step, index) => {
+					const complete = index < active;
+					const current = index === active;
+					return (
+						<div
+							key={step.name}
+							className="grid grid-cols-[14px_minmax(0,1fr)_auto] items-center gap-2 rounded-[var(--radius-sm)] border px-2.5 py-1.5 font-mono text-[10.5px] transition-colors duration-500"
+							style={{
+								borderColor: current
+									? "color-mix(in oklab, var(--color-brand) 45%, transparent)"
+									: "var(--color-rule-soft)",
+								backgroundColor: current
+									? "color-mix(in oklab, var(--color-brand) 7%, transparent)"
+									: "transparent",
+							}}
+						>
+							<span
+								className="size-1.5 rounded-full transition-colors duration-500"
+								style={{
+									backgroundColor: complete
+										? "var(--color-status-live)"
+										: current
+											? "var(--color-brand)"
+											: "var(--color-ink-4)",
+								}}
+							/>
+							<span className="truncate text-[var(--color-ink-2)]">
+								{step.name}
+							</span>
+							<span className="text-[var(--color-ink-4)]">
+								{current ? step.operation : step.result}
+							</span>
+						</div>
+					);
+				})}
+			</div>
+			<div className="mt-3 border-t border-[var(--color-rule)] pt-2.5 font-mono text-[10.5px] text-[var(--color-ink-4)]">
+				checkpoint saved after every step
+			</div>
+		</div>
+	);
+}
+
 // Studio: the three surfaces it actually gives you, with the tab cycling. Each
 // tab's body is a complete little view, so any frozen frame is a real one.
 const STUDIO_TABS = [
@@ -782,7 +842,10 @@ export const PRIMITIVE_VISUALS: Record<
 	realtime: [{ caption: "room · presence", Visual: PresenceBento }],
 	storage: [{ caption: "presigned uploads", Visual: UploadBento }],
 	search: [{ caption: "faceted search", Visual: SearchBento }],
-	workflows: [{ caption: "scheduler", Visual: SchedulerBento }],
+	workflows: [
+		{ caption: "durable workflow", Visual: WorkflowBento },
+		{ caption: "background jobs", Visual: SchedulerBento },
+	],
 	ssr: [{ caption: "GET /orders", Visual: SsrBento }],
 	studio: [{ caption: "/studio", Visual: StudioTabsBento }],
 };
