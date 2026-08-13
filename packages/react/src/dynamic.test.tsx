@@ -108,3 +108,24 @@ describe("dynamic() with ssr:true", () => {
     await waitFor(() => expect(screen.getByTestId("heavy")).toBeDefined());
   });
 });
+
+describe("dynamic() and refs", () => {
+  test("a ref reaches the loaded component's imperative handle", async () => {
+    // React 19 passes `ref` as an ordinary prop, so the spread carries it —
+    // but that's incidental enough to be worth pinning: a deferred editor
+    // whose save path calls ref.current.export() breaks silently otherwise.
+    const Editor = React.forwardRef<{ save: () => string }, { doc: string }>(
+      (props, ref) => {
+        React.useImperativeHandle(ref, () => ({ save: () => `saved:${props.doc}` }));
+        return <div data-testid="ed">{props.doc}</div>;
+      },
+    );
+    const D = dynamic<{ doc: string }>(async () => ({ default: Editor as any }), {
+      loading: Skeleton,
+    });
+    const ref = React.createRef<{ save: () => string }>();
+    render(<D doc="hello" ref={ref} />);
+    await waitFor(() => expect(screen.getByTestId("ed")).toBeDefined());
+    expect(ref.current?.save()).toBe("saved:hello");
+  });
+});

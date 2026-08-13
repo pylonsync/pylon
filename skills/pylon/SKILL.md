@@ -825,7 +825,7 @@ const Composer = dynamic(() => import("./Composer"), {
 // …then render <Composer /> behind whatever opens it.
 ```
 
-Call it at **module level**, never inside a render — a `dynamic()` per render is a new component type each time and remounts the subtree.
+Call it at **module level**, never inside a render — a `dynamic()` per render is a new component type each time and remounts the subtree. `ref` reaches the loaded component, so a deferred `forwardRef` editor still exposes its imperative handle.
 
 `ssr` defaults to **false**, the opposite of Next, and deliberately: a Pylon page hydrates once after the whole document streams, so the safe contract is that the server HTML and the first client render are identical, which `ssr: false` guarantees by rendering the fallback in both. It's also the only mode that removes bytes from the first load — an `ssr: true` component must be in the client bundle before hydration, so it saves nothing and exists for organizing code, not weight.
 

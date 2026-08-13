@@ -59,11 +59,17 @@ function resolveComponent<P>(
  * The returned component renders `loading` until the chunk arrives, then the
  * real one. Call it at MODULE level, not inside a render — a `dynamic()` call
  * per render creates a new component type each time and remounts the subtree.
+ *
+ * `ref` reaches the loaded component: React 19 treats it as an ordinary prop,
+ * so the spread carries it to a `forwardRef` target's imperative handle. That
+ * matters for the exact components people defer — an editor whose save path
+ * calls `ref.current.export()` would fail silently otherwise — so it's covered
+ * by a test rather than left to React's prop semantics staying put.
  */
 export function dynamic<P extends object>(
   loader: Loader<P>,
   options: DynamicOptions = {},
-): ComponentType<P> {
+): ComponentType<P & { ref?: React.Ref<any> }> {
   const { loading: Loading = null, ssr = false } = options;
 
   if (ssr) {
@@ -81,7 +87,7 @@ export function dynamic<P extends object>(
       </Suspense>
     );
     WithSuspense.displayName = "DynamicSSR";
-    return WithSuspense as ComponentType<P>;
+    return WithSuspense as ComponentType<P & { ref?: React.Ref<any> }>;
   }
 
   // Client-only. The fallback renders on the server AND on the first client
@@ -117,5 +123,5 @@ export function dynamic<P extends object>(
     return <Loaded {...(props as any)} />;
   };
   ClientOnly.displayName = "Dynamic";
-  return ClientOnly as ComponentType<P>;
+  return ClientOnly as ComponentType<P & { ref?: React.Ref<any> }>;
 }
