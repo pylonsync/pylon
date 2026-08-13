@@ -16,12 +16,12 @@ export const revalidate = 3600; // 1 hour
 export const metadata: Metadata = {
 	title: "Pylon: full-stack framework for coding agents",
 	description:
-		"Declare an entity once. Pylon derives the table, the access rules, the API, and the typed React client. SQLite by default, Postgres when you need it.",
+		"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly. SQLite by default, Postgres when you need it.",
 	canonical: "https://www.pylonsync.com",
 	openGraph: {
 		title: "Pylon: full-stack framework for coding agents",
 		description:
-			"Declare an entity once. Pylon derives the table, the access rules, the API, and the typed React client.",
+			"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly.",
 		url: "https://www.pylonsync.com",
 		siteName: "Pylon",
 		type: "website",
@@ -30,7 +30,7 @@ export const metadata: Metadata = {
 		card: "summary_large_image",
 		title: "Pylon: full-stack framework for coding agents",
 		description:
-			"Declare an entity once. Pylon derives the table, the access rules, the API, and the typed React client.",
+			"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly.",
 	},
 };
 

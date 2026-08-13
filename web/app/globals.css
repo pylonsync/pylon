@@ -24,7 +24,7 @@
 
    Inspired by PlanetScale's dashboard: clean neutrals, soft-rounded cards
    with hairline borders, tinted icon backgrounds for visual hierarchy.
-   Cobalt is still the brand accent, but it's used sparingly — the surface
+   The brand accent is used sparingly — the surface
    speaks through neutrals, status colors, and tinted category icons.
    The palette is cool by mandate: no warm/orange decorative color. The only
    sanctioned warm signal is the `warn` status (muted amber), always paired
@@ -76,16 +76,19 @@
   --color-ink-3: #71717a;        /* muted — zinc-500 */
   --color-ink-4: #a1a1aa;        /* hint — zinc-400 */
 
-  /* Cobalt — pylon's accent. Used for primary CTAs, active nav, links. */
-  --color-cobalt: #1d4ed8;
-  --color-cobalt-hover: #1e40af;
-  --color-cobalt-soft: #e0e7ff;
-  --color-cobalt-fg: #ffffff;
+  /* Pylon's accent. Used for primary CTAs, active nav, links.
+     Electric violet, not blue: blue-700 is the default SaaS accent and read
+     as generic enterprise software rather than a developer tool. */
+  --color-brand: #6d4aff;
+  --color-brand-hover: #5838e0;
+  --color-brand-soft: #ece7ff;
+  --color-brand-fg: #ffffff;
 
   /* Status — tinted-pill style, soft backgrounds */
   --color-status-live: #059669;        /* emerald-600 */
   --color-status-live-soft: #d1fae5;   /* emerald-100 */
-  --color-status-build: #1d4ed8;       /* cobalt */
+  --color-status-build: #1d4ed8;       /* blue-700 — "in progress", deliberately
+                                          not the brand accent any more */
   --color-status-build-soft: #dbeafe;  /* blue-100 */
   --color-status-warn: #b45309;        /* amber-700 */
   --color-status-warn-soft: #fef3c7;   /* amber-100 */
@@ -136,10 +139,10 @@
   --color-ink-3: #a1a1aa;        /* zinc-400 */
   --color-ink-4: #71717a;        /* zinc-500 */
 
-  --color-cobalt: #60a5fa;        /* blue-400 — light blue brand accent */
-  --color-cobalt-hover: #93c5fd;  /* blue-300 */
-  --color-cobalt-soft: rgba(96, 165, 250, 0.12);
-  --color-cobalt-fg: #09090b;
+  --color-brand: #a78bfa;        /* violet-400 — lifted for dark paper */
+  --color-brand-hover: #c4b5fd;  /* violet-300 */
+  --color-brand-soft: rgba(167, 139, 250, 0.12);
+  --color-brand-fg: #09090b;
 
   --color-status-live: #34d399;
   --color-status-live-soft: #064e3b33;
@@ -174,7 +177,7 @@
   --color-card-foreground: var(--color-ink);
   --color-popover: var(--color-paper);
   --color-popover-foreground: var(--color-ink);
-  --color-primary: var(--color-ink);              /* primary = ink, not cobalt — PS-style */
+  --color-primary: var(--color-ink);              /* primary = ink, not brand — PS-style */
   --color-primary-foreground: var(--color-paper);
   --color-secondary: var(--color-paper-1);
   --color-secondary-foreground: var(--color-ink);
@@ -186,7 +189,7 @@
   --color-destructive-foreground: #ffffff;
   --color-border: var(--color-rule);
   --color-input: var(--color-rule);
-  --color-ring: var(--color-cobalt);
+  --color-ring: var(--color-brand);
   --radius: var(--radius-md);
 }
 
@@ -236,7 +239,7 @@ pre,
 }
 
 ::selection {
-  background: var(--color-cobalt-soft);
+  background: var(--color-brand-soft);
   color: var(--color-ink);
 }
 
@@ -319,7 +322,7 @@ pre,
   animation: pylon-rise 280ms var(--ease-out-quart) both;
 }
 
-/* Focus ring — cobalt, thin, offset. */
+/* Focus ring — brand, thin, offset. */
 :focus-visible {
   outline: none;
 }
@@ -330,7 +333,7 @@ a:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  outline: 2px solid var(--color-cobalt);
+  outline: 2px solid var(--color-brand);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }

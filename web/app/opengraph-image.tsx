@@ -126,8 +126,8 @@ export default function OpengraphImage() {
 						color: INK_2,
 					}}
 				>
-					Declare an entity once. Pylon derives the table, the access rules, the
-					API, and the typed React client.
+					Pylon is a full-stack framework built for agents to ship
+					high-performance and secure apps quickly.
 				</div>
 
 				{/* Closes on the command that starts the thing. Every OG client
