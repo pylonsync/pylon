@@ -539,22 +539,28 @@ function FeatureCopy({ feature }: { feature: FeatureChapter }) {
 				</span>
 				<span>{feature.label}</span>
 			</div>
-			<h3 className="mt-6 max-w-[15ch] text-[clamp(28px,3.2vw,42px)] font-semibold leading-[1.06] tracking-[-0.035em]">
+			{/* 20ch, not 15. At 15 these titles broke into three short lines — "You
+			    define / the data / in TypeScript." — a staircase in a column with
+			    room to spare. */}
+			<h3 className="mt-6 max-w-[20ch] text-[clamp(28px,3.2vw,42px)] font-semibold leading-[1.06] tracking-[-0.035em]">
 				{feature.title}
 			</h3>
 			<p className="mt-5 max-w-[42ch] text-[15px] leading-[1.65] text-[var(--color-ink-3)]">
 				{feature.description}
 			</p>
-			<div className="mt-7 border-y border-[var(--color-rule)]">
+			{/* Chips, not stacked rows. Three keywords in full-width rows with a
+			    rule above, below, and between read as a table missing its second
+			    column. */}
+			<ul className="mt-7 flex flex-wrap gap-2">
 				{feature.details.map((detail) => (
-					<div
+					<li
 						key={detail}
-						className="border-b border-[var(--color-rule-soft)] py-2.5 text-[12.5px] text-[var(--color-ink-2)] last:border-b-0"
+						className="rounded-full border border-[var(--color-rule)] px-2.5 py-1 text-[12px] text-[var(--color-ink-2)]"
 					>
 						{detail}
-					</div>
+					</li>
 				))}
-			</div>
+			</ul>
 			<Link
 				href={feature.href}
 				className="group mt-8 inline-flex items-center gap-2 text-[13.5px] font-medium text-[var(--color-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
