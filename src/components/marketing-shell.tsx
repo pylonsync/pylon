@@ -62,7 +62,7 @@ export function Eyebrow({
 		<div
 			className={`font-mono text-[11px] uppercase tracking-[0.14em] ${
 				tone === "cobalt"
-					? "text-[var(--color-cobalt)]"
+					? "text-[var(--color-brand)]"
 					: "text-[var(--color-ink-4)]"
 			}`}
 		>

@@ -64,8 +64,8 @@ export function SiteFooter() {
 							</span>
 						</Link>
 						<p className="mt-4 max-w-[28ch] text-[13px] leading-[1.55] text-[var(--color-ink-3)]">
-							Declare an entity once. Pylon derives the table, the access
-							rules, the API, and the typed React client.
+							Pylon is a full-stack framework built for agents to ship
+							high-performance and secure apps quickly.
 						</p>
 						<div className="mt-5 flex items-center gap-4">
 							<a

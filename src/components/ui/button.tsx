@@ -8,7 +8,7 @@ import { cn } from "../../lib/utils";
 // and tertiary slots. Sizes are tighter than stock shadcn for dashboard
 // density. Soft shadow under the primary so it feels elevated.
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[var(--radius-md)] text-[13px] font-medium tracking-tight transition-[background-color,border-color,color,box-shadow,scale] duration-150 ease-out active:scale-[0.96] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper)] disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-3.5 [&_svg]:shrink-0",
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[var(--radius-md)] text-[13px] font-medium tracking-tight transition-[background-color,border-color,color,box-shadow,scale] duration-150 ease-out active:scale-[0.96] motion-reduce:active:scale-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper)] disabled:pointer-events-none disabled:opacity-40 [&_svg]:size-3.5 [&_svg]:shrink-0",
   {
     variants: {
       variant: {
@@ -32,12 +32,12 @@ const buttonVariants = cva(
         // be too heavy (e.g. an inline-cta in a card alongside neutral
         // text). Sparingly.
         cobalt:
-          "bg-[var(--color-cobalt)] text-[var(--color-cobalt-fg)] hover:bg-[var(--color-cobalt-hover)] border border-[var(--color-cobalt)]",
+          "bg-[var(--color-brand)] text-[var(--color-brand-fg)] hover:bg-[var(--color-brand-hover)] border border-[var(--color-brand)]",
         // Destructive
         destructive:
           "bg-[var(--color-status-fail)] text-white hover:opacity-90 border border-[var(--color-status-fail)]",
         // Link — looks like text, behaves like a button
-        link: "bg-transparent text-[var(--color-cobalt)] hover:underline underline-offset-4 border-0 p-0 h-auto active:scale-100",
+        link: "bg-transparent text-[var(--color-brand)] hover:underline underline-offset-4 border-0 p-0 h-auto active:scale-100",
       },
       size: {
         xs: "h-7 px-2 text-[12px] [&_svg]:size-3",

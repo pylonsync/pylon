@@ -31,19 +31,19 @@ export function ThemeToggle() {
         <DropdownMenuItem onClick={() => setTheme("light")}>
           <Sun /> Paper
           {mounted && theme === "light" && (
-            <span className="ml-auto text-[var(--color-cobalt)]">·</span>
+            <span className="ml-auto text-[var(--color-brand)]">·</span>
           )}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setTheme("dark")}>
           <Moon /> Graphite
           {mounted && theme === "dark" && (
-            <span className="ml-auto text-[var(--color-cobalt)]">·</span>
+            <span className="ml-auto text-[var(--color-brand)]">·</span>
           )}
         </DropdownMenuItem>
         <DropdownMenuItem onClick={() => setTheme("system")}>
           <Monitor /> System
           {mounted && theme === "system" && (
-            <span className="ml-auto text-[var(--color-cobalt)]">·</span>
+            <span className="ml-auto text-[var(--color-brand)]">·</span>
           )}
         </DropdownMenuItem>
       </DropdownMenuContent>

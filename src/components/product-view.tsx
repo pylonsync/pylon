@@ -65,7 +65,7 @@ export function ProductView({
 
 					<div className="mt-8 grid min-w-0 grid-cols-[minmax(0,1fr)] gap-10 lg:grid-cols-[1fr_minmax(0,520px)] lg:gap-12">
 						<div>
-							<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-cobalt)]">
+							<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-brand)]">
 								{p.category}
 							</div>
 							<h1 className="mt-4 max-w-[18ch] text-[clamp(34px,5vw,58px)] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--color-ink)]">
@@ -101,7 +101,7 @@ export function ProductView({
 					<ul className="grid gap-x-8 gap-y-3.5 sm:grid-cols-2">
 						{p.highlights.map((h) => (
 							<li key={h} className="flex items-start gap-3">
-								<span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-cobalt)]/12 text-[var(--color-cobalt)]">
+								<span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-brand)]/12 text-[var(--color-brand)]">
 									<Check className="size-3" />
 								</span>
 								<span className="text-[14px] leading-[1.5] text-[var(--color-ink-2)]">
@@ -214,7 +214,7 @@ export function ProductView({
 										{ex.template && (
 											<span className="font-mono text-[11px] text-[var(--color-ink-4)]">
 												template:{" "}
-												<span className="text-[var(--color-cobalt)]">{ex.template}</span>
+												<span className="text-[var(--color-brand)]">{ex.template}</span>
 											</span>
 										)}
 										{ex.live && (
@@ -222,7 +222,7 @@ export function ProductView({
 												href={ex.live}
 												target="_blank"
 												rel="noreferrer"
-												className="ml-auto inline-flex items-center gap-1 text-[12.5px] text-[var(--color-cobalt)] hover:underline"
+												className="ml-auto inline-flex items-center gap-1 text-[12.5px] text-[var(--color-brand)] hover:underline"
 											>
 												Open <ArrowUpRight className="size-3.5" />
 											</a>
@@ -249,7 +249,7 @@ export function ProductView({
 										<Link
 											key={r.slug}
 											href={`/product/${r.slug}`}
-											className="group flex flex-col rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5 shadow-[var(--shadow-card)] transition-[filter,box-shadow] duration-300 ease-[var(--ease-out-quart)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper-1)] [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-visible:grayscale-0 [@media(hover:hover)]:hover:grayscale-0"
+											className="group flex flex-col rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] p-5 shadow-[var(--shadow-card)] transition-[filter,box-shadow] duration-300 ease-[var(--ease-out-quart)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper-1)] [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-visible:grayscale-0 [@media(hover:hover)]:hover:grayscale-0"
 										>
 											<div className="flex items-center gap-2">
 												<span className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
@@ -345,7 +345,7 @@ function ProductDeepDive({
 						aria-selected={i === active}
 						aria-controls={`deepdive-panel-${i}`}
 						onClick={() => setActive(i)}
-						className={`flex items-baseline gap-3 rounded-[var(--radius-md)] px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] ${
+						className={`flex items-baseline gap-3 rounded-[var(--radius-md)] px-3 py-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] ${
 							i === active
 								? "bg-[var(--color-paper)] shadow-[var(--shadow-card)]"
 								: "hover:bg-[var(--color-paper)]/60"
@@ -354,7 +354,7 @@ function ProductDeepDive({
 						<span
 							className={`font-mono text-[11px] tabular-nums ${
 								i === active
-									? "text-[var(--color-cobalt)]"
+									? "text-[var(--color-brand)]"
 									: "text-[var(--color-ink-4)]"
 							}`}
 						>
@@ -394,7 +394,7 @@ function ProductDeepDive({
 								key={h}
 								className="flex items-start gap-3 border-b border-[var(--color-rule)] px-5 py-3.5 text-[13.5px] leading-[1.55] text-[var(--color-ink-2)] last:border-b-0"
 							>
-								<Check className="mt-0.5 size-3.5 shrink-0 text-[var(--color-cobalt)]" />
+								<Check className="mt-0.5 size-3.5 shrink-0 text-[var(--color-brand)]" />
 								{h}
 							</li>
 						))}

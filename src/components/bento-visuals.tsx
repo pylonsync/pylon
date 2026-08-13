@@ -74,7 +74,7 @@ export function SchemaBento() {
 							i === active
 								? {
 										backgroundColor:
-											"color-mix(in oklab, var(--color-cobalt) 10%, transparent)",
+											"color-mix(in oklab, var(--color-brand) 10%, transparent)",
 									}
 								: undefined
 						}
@@ -156,7 +156,7 @@ export function LiveQueryBento() {
 							row.fresh
 								? {
 										backgroundColor:
-											"color-mix(in oklab, var(--color-cobalt) 9%, transparent)",
+											"color-mix(in oklab, var(--color-brand) 9%, transparent)",
 									}
 								: undefined
 						}
@@ -207,11 +207,11 @@ export function PolicyBento() {
 						style={{
 							borderColor:
 								i === active
-									? "color-mix(in oklab, var(--color-cobalt) 45%, transparent)"
+									? "color-mix(in oklab, var(--color-brand) 45%, transparent)"
 									: "var(--color-rule)",
 							backgroundColor:
 								i === active
-									? "color-mix(in oklab, var(--color-cobalt) 7%, transparent)"
+									? "color-mix(in oklab, var(--color-brand) 7%, transparent)"
 									: "transparent",
 						}}
 					>
@@ -254,12 +254,12 @@ export function AuthBento() {
 						style={{
 							borderColor:
 								i === active
-									? "color-mix(in oklab, var(--color-cobalt) 45%, transparent)"
+									? "color-mix(in oklab, var(--color-brand) 45%, transparent)"
 									: "var(--color-rule)",
 							color:
-								i === active ? "var(--color-cobalt)" : "var(--color-ink-3)",
+								i === active ? "var(--color-brand)" : "var(--color-ink-3)",
 							backgroundColor:
-								i === active ? "var(--color-cobalt-soft)" : "transparent",
+								i === active ? "var(--color-brand-soft)" : "transparent",
 						}}
 					>
 						{p}
@@ -311,7 +311,7 @@ export function UploadBento() {
 										width: `${Math.min(100, pct)}%`,
 										backgroundColor: done
 											? "var(--color-status-live)"
-											: "var(--color-cobalt)",
+											: "var(--color-brand)",
 									}}
 								/>
 							</div>
@@ -393,16 +393,16 @@ export function FunctionsBento() {
 						style={{
 							borderColor:
 								i === active
-									? "color-mix(in oklab, var(--color-cobalt) 45%, transparent)"
+									? "color-mix(in oklab, var(--color-brand) 45%, transparent)"
 									: "var(--color-rule)",
 							backgroundColor:
 								i === active
-									? "color-mix(in oklab, var(--color-cobalt) 7%, transparent)"
+									? "color-mix(in oklab, var(--color-brand) 7%, transparent)"
 									: "transparent",
 						}}
 					>
 						<span className="truncate text-[var(--color-ink-2)]">{f.name}</span>
-						<span className="text-[var(--color-cobalt)]">{f.kind}</span>
+						<span className="text-[var(--color-brand)]">{f.kind}</span>
 						<span className="ml-auto shrink-0 tabular-nums text-[var(--color-ink-4)]">
 							{f.ms}
 						</span>
@@ -475,7 +475,7 @@ export function SchedulerBento() {
 						state === "done"
 							? "var(--color-status-live)"
 							: state === "running"
-								? "var(--color-cobalt)"
+								? "var(--color-brand)"
 								: "var(--color-ink-4)";
 					return (
 						<div
@@ -536,9 +536,9 @@ export function StudioTabsBento() {
 							className="rounded-[var(--radius-xs)] px-1.5 py-0.5 font-mono text-[9.5px] transition-colors duration-500"
 							style={{
 								color:
-									i === active ? "var(--color-cobalt)" : "var(--color-ink-4)",
+									i === active ? "var(--color-brand)" : "var(--color-ink-4)",
 								backgroundColor:
-									i === active ? "var(--color-cobalt-soft)" : "transparent",
+									i === active ? "var(--color-brand-soft)" : "transparent",
 							}}
 						>
 							{t.name}
@@ -592,11 +592,11 @@ export function EngineBento() {
 							style={{
 								borderColor:
 									i === active
-										? "color-mix(in oklab, var(--color-cobalt) 45%, transparent)"
+										? "color-mix(in oklab, var(--color-brand) 45%, transparent)"
 										: "var(--color-rule)",
 								backgroundColor:
 									i === active
-										? "color-mix(in oklab, var(--color-cobalt) 7%, transparent)"
+										? "color-mix(in oklab, var(--color-brand) 7%, transparent)"
 										: "transparent",
 							}}
 						>
@@ -649,7 +649,7 @@ export function SsrBento() {
 		<div className="flex h-full flex-col justify-between px-5 pb-5">
 			<div>
 				<div className="flex items-baseline gap-2 font-mono text-[10.5px]">
-					<span className="text-[var(--color-cobalt)]">GET</span>
+					<span className="text-[var(--color-brand)]">GET</span>
 					<span className="text-[var(--color-ink-2)]">/orders</span>
 					<span className="ml-auto text-[var(--color-ink-4)]">200 · 14ms</span>
 				</div>

@@ -29,6 +29,9 @@ import { MarketingNav } from "./marketing-nav";
 import { SiteFooter } from "./site-footer";
 import { CodePanel } from "./code-panel";
 import { TemplatesStrip } from "./templates-strip";
+import { Band, FRAME_COL } from "./marketing-frame";
+import { HeroStack } from "./hero-stack";
+import { HeroStart } from "./hero-start";
 import { useCopy } from "../lib/use-copy";
 import {
 	AuthBento,
@@ -124,72 +127,60 @@ export function MarketingPage({
 	const signedIn = useSignedIn(initialSignedIn);
 
 	return (
-		<div className="min-h-screen bg-[var(--color-paper)] text-[var(--color-ink)]">
+		<div className="relative min-h-screen bg-[var(--color-paper)] text-[var(--color-ink)]">
 			<MarketingNav signedIn={signedIn} />
 
-			{/* HERO — framework-first. The merged site leads with the framework
-			    story (open source, runs anywhere); Smallware is the managed
-			    way to ship it, covered further down + in the nav. */}
+			{/* HERO — one subject.
+			    Centred headline, one line of copy, one focal diagram. The nine
+			    bento cards used to open the page: the reader met nine small
+			    equal-weight claims before meeting one idea, so nothing was the
+			    subject and the thesis in the paragraph was drawn nowhere. The
+			    bento now runs as its own band below, and the entity diagram
+			    carries the hero. */}
 			<header className="relative isolate overflow-hidden">
-				{/* Headline left, supporting copy in a right-hand column, CTAs beneath
-				    the headline. DOM order is headline -> copy -> CTAs so the stacked
-				    mobile layout reads correctly; the explicit row/column starts only
-				    apply at lg, where the copy moves up beside the headline. */}
-				<div className="mx-auto max-w-[1280px] px-5 pb-10 pt-14 sm:px-8 sm:pt-20">
-					{/* The copy column is measured, not proportional: the headline caps
-				    at 15ch, so a `1fr` first column just parks the copy against the
-					    far edge and opens a canyon in the middle. 460px + a 48px gutter
-					    keeps the two blocks reading as one paragraph-and-heading pair at
-					    every width above lg. */}
-					<div className="flex flex-col gap-7 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,460px)] lg:gap-x-12 lg:gap-y-9">
-						<h1 className="max-w-[15ch] text-[clamp(42px,6.2vw,64px)] font-semibold leading-[1.0] tracking-[-0.045em] text-[var(--color-ink)] lg:col-start-1 lg:row-start-1">
-							{/* "that" is load-bearing. Without it the line reads "…apps coding
-							    agents…" and garden-paths: "apps coding" parses as a compound
-							    before the reader backs up. The cobalt span was compensating for a
-							    syntax problem, and colour is not available where this sentence
-							    actually travels — the <title> in a search result, a tweet, an HN
-							    submission, or read aloud. `whitespace-nowrap` keeps the accented
-							    phrase whole. */}
-							Full-stack apps that{" "}
-							<span className="whitespace-nowrap text-[var(--color-cobalt)]">
-								coding agents
-							</span>{" "}
-							can ship.
-						</h1>
+				<div className={`${FRAME_COL} px-5 pb-20 pt-16 text-center sm:px-8 sm:pb-24 sm:pt-24`}>
+					<h1 className="mx-auto max-w-[21ch] text-[clamp(42px,6.4vw,68px)] font-semibold leading-[1.02] tracking-[-0.045em] text-[var(--color-ink)]">
+						Give your agent{" "}
+						{/* No `whitespace-nowrap` here: it's three words, and forcing them
+						    onto one line overflows the measure below ~420px. Colour
+						    carries across a wrap fine. */}
+						<span className="text-[var(--color-brand)]">
+							app building superpowers
+						</span>
+					</h1>
 
-						<p className="text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px] lg:col-start-2 lg:row-start-1 lg:pt-2">
-							Declare an entity once. Pylon derives the table, the access rules,
-							the API, and the typed React client from it, so a schema change
-							fails at compile time instead of in production.
-						</p>
+					<p className="mx-auto mt-6 max-w-[62ch] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
+						Pylon is a full-stack framework built for agents to ship
+						high-performance and secure apps quickly
+					</p>
 
-						<div className="flex flex-col items-start gap-3 lg:col-start-1 lg:row-start-2">
-							<InstallCommand command="npm create @pylonsync/pylon@latest" />
-							<div className="flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-								<Button asChild variant="primary" size="lg">
-									<a href="https://docs.pylonsync.com">Read the docs →</a>
-								</Button>
-								<Button asChild variant="ghost" size="lg">
-									<Link href={ctaUrl(signedIn)}>
-										{signedIn ? "Open dashboard" : "Create your account"}
-									</Link>
-								</Button>
-							</div>
-						</div>
-					</div>
-				</div>
+					{/* The only action in the hero. Docs and sign-up live in the nav;
+					    a pair of large buttons here competed with the diagram for the
+					    reader's first move. */}
+					<HeroStart />
 
-				{/* The framework on screen: one card per pillar, each running the thing
-				    it describes rather than illustrating it. Shares the copy's measure
-				    so the hero reads as one left-aligned block. */}
-				<div className="mx-auto mt-6 max-w-[1280px] px-5 pb-20 sm:mt-8 sm:px-8 sm:pb-24">
-					<HeroBento />
+					<HeroStack />
 				</div>
 			</header>
 
-			{/* Templates, straight after the bento. The bento says what the
-			    framework does; this is the shortest path from reading that to
-			    running one. */}
+			{/* The nine pillars, now a band of their own with a heading that says
+			    what they are. Each card runs the thing it describes rather than
+			    illustrating it. */}
+			<Band id="included" tone="sunken" label="What ships with it">
+				<div>
+					<H2>Everything an app needs, already wired.</H2>
+					<p className="mt-5 max-w-[620px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
+						No service to bolt on for auth, files, search, or realtime. Each
+						card below is running the feature it describes.
+					</p>
+				</div>
+				<div className="mt-12">
+					<HeroBento />
+				</div>
+			</Band>
+
+			{/* Templates, straight after the pillars. Those say what the framework
+			    does; this is the shortest path from reading that to running one. */}
 			<TemplatesStrip />
 
 			{/* Agent workflow. Each claim carries the artifact it's about — the
@@ -210,7 +201,7 @@ export function MarketingPage({
 						<Link
 							key={a.title}
 							href={a.href}
-							className="group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper-1)]"
+							className="group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper-1)]"
 						>
 							{/* The artifact itself, cropped by the card. It used to sit in a
 							    third frame — a bordered, shadowed panel inside a padded well
@@ -221,7 +212,7 @@ export function MarketingPage({
 							</div>
 							<div className="flex flex-col gap-2 p-6">
 								<div className="flex items-center gap-2">
-									<a.icon className="size-4 shrink-0 text-[var(--color-cobalt)]" />
+									<a.icon className="size-4 shrink-0 text-[var(--color-brand)]" />
 									<h3 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
 										{a.title}
 									</h3>
@@ -333,10 +324,10 @@ const { data } = db.useQuery("Order");`}
 							</div>
 							<div className="px-4 py-3">
 								<div>
-									<span className="text-[var(--color-cobalt)]">$</span> pylon login
+									<span className="text-[var(--color-brand)]">$</span> pylon login
 								</div>
 								<div>
-									<span className="text-[var(--color-cobalt)]">$</span> pylon deploy{" "}
+									<span className="text-[var(--color-brand)]">$</span> pylon deploy{" "}
 									<span className="text-[var(--color-ink-3)]">--target cloud</span>
 								</div>
 								<div className="text-[var(--color-status-live)]">  ✓ Build · 12s</div>
@@ -433,7 +424,7 @@ const { data } = db.useQuery("Order");`}
 						Everything else is in the{" "}
 						<a
 							href="https://docs.pylonsync.com"
-							className="text-[var(--color-cobalt)] underline underline-offset-2"
+							className="text-[var(--color-brand)] underline underline-offset-2"
 						>
 							docs
 						</a>
@@ -521,32 +512,6 @@ const { data } = db.useQuery("Order");`}
 // Copy-to-clipboard install command for the hero. Click anywhere on the pill
 // to copy; the icon flips to a check for a beat. Falls back silently if the
 // Clipboard API is unavailable (older browsers / insecure origins).
-function InstallCommand({ command }: { command: string }) {
-	const { copied, copy } = useCopy();
-	return (
-		<button
-			type="button"
-			onClick={() => copy(command)}
-			aria-label={`Copy: ${command}`}
-			// max-w-full + nowrap: on a 390px screen the command wrapped inside the
-			// pill, which centred the two halves under a vertically-centred `$` and
-			// stopped looking like a command line. It sheds a point of type below sm
-			// instead, where it fits on one line.
-			className="group inline-flex max-w-full items-center gap-3 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)] py-3 pl-5 pr-4 font-mono text-[12px] text-[var(--color-ink)] shadow-[var(--shadow-card)] transition-colors hover:border-[var(--color-cobalt)]/50 hover:bg-[var(--color-paper-1)] sm:text-[13px]"
-		>
-			<span className="select-none text-[var(--color-cobalt)]">$</span>
-			<span className="truncate tracking-tight">{command}</span>
-			<span className="ml-1 text-[var(--color-ink-3)] transition-colors group-hover:text-[var(--color-ink)]">
-				{copied ? (
-					<Check className="size-4 text-[var(--color-status-live)]" />
-				) : (
-					<Copy className="size-4" />
-				)}
-			</span>
-		</button>
-	);
-}
-
 // ── Hero furniture ───────────────────────────────────────────────────
 // ── Agent affordance visuals ─────────────────────────────────────────
 // Small, honest mocks of the four artifacts an agent actually touches. They
@@ -587,7 +552,7 @@ function RepoVisual() {
 						<span
 							className={
 								f.mark
-									? "text-[var(--color-cobalt)]"
+									? "text-[var(--color-brand)]"
 									: "text-[var(--color-ink-4)]"
 							}
 						>
@@ -596,7 +561,7 @@ function RepoVisual() {
 						<span
 							className={
 								f.mark
-									? "font-medium text-[var(--color-cobalt)]"
+									? "font-medium text-[var(--color-brand)]"
 									: "text-[var(--color-ink-2)]"
 							}
 						>
@@ -616,12 +581,12 @@ function TerminalVisual() {
 			<VisualBar label="zsh — my-app" />
 			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
 				<div className="text-[var(--color-ink-2)]">
-					<span className="text-[var(--color-cobalt)]">$</span> npm create
+					<span className="text-[var(--color-brand)]">$</span> npm create
 					@pylonsync/pylon
 				</div>
 				<div className="text-[var(--color-ink-4)]">&nbsp;&nbsp;✓ scaffolded my-app</div>
 				<div className="text-[var(--color-ink-2)]">
-					<span className="text-[var(--color-cobalt)]">$</span> pylon dev
+					<span className="text-[var(--color-brand)]">$</span> pylon dev
 				</div>
 				<div className="text-[var(--color-status-live)]">
 					&nbsp;&nbsp;✓ schema applied · studio ready
@@ -647,7 +612,7 @@ function TypeErrorVisual() {
 			/>
 			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
 				<div className="text-[var(--color-ink-3)]">
-					<span className="text-[var(--color-cobalt)]">const</span> {"{ data }"} ={" "}
+					<span className="text-[var(--color-brand)]">const</span> {"{ data }"} ={" "}
 					db.useQuery(
 					<span className="text-[var(--color-status-live)] underline decoration-[var(--color-status-fail)] decoration-wavy underline-offset-[3px]">
 						&quot;Ordr&quot;
@@ -738,11 +703,11 @@ function BentoCard({
 			onMouseLeave={() => setHovered(false)}
 			onFocus={() => setHovered(true)}
 			onBlur={() => setHovered(false)}
-			className={`group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper)] ${className ?? ""}`}
+			className={`group flex flex-col overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)] transition-colors duration-200 ease-[var(--ease-out-quart)] hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--color-paper)] ${className ?? ""}`}
 		>
 			<div className="flex flex-col gap-1.5 p-5 pb-3">
 				<div className="flex items-center gap-2">
-					<Icon className="size-4 shrink-0 text-[var(--color-cobalt)]" />
+					<Icon className="size-4 shrink-0 text-[var(--color-brand)]" />
 					<h3 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
 						{title}
 					</h3>
@@ -934,7 +899,7 @@ function Section({
 				tone === "sunken" ? " bg-[var(--color-paper-1)]" : ""
 			}`}
 		>
-			<div className="mx-auto max-w-[1280px] px-5 py-16 sm:px-8 sm:py-20 lg:py-24">
+			<div className={`${FRAME_COL} px-5 py-16 sm:px-8 sm:py-20 lg:py-24`}>
 				{children}
 			</div>
 		</section>

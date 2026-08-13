@@ -9,6 +9,7 @@ import {
 	templateRepoUrl,
 } from "../lib/examples-content";
 import { useCopy } from "../lib/use-copy";
+import { FRAME_COL } from "./marketing-frame";
 
 // Templates, directly under the hero bento. The reader has just seen what the
 // framework does; this is the shortest path from that to a running app.
@@ -26,7 +27,7 @@ export function TemplatesStrip() {
 			id="templates"
 			className="border-t border-[var(--color-rule)] bg-[var(--color-paper-1)]"
 		>
-			<div className="mx-auto max-w-[1280px] px-5 py-16 sm:px-8 sm:py-20 lg:py-24">
+			<div className={`${FRAME_COL} px-5 py-16 sm:px-8 sm:py-20 lg:py-24`}>
 				<div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between">
 					<div>
 						<h2 className="max-w-[20ch] text-[clamp(30px,4vw,46px)] font-semibold leading-[1.05] tracking-[-0.035em] text-[var(--color-ink)]">
@@ -40,7 +41,7 @@ export function TemplatesStrip() {
 					</div>
 					<Link
 						href="/developers/examples"
-						className="group inline-flex shrink-0 items-center gap-1.5 text-[14px] font-medium text-[var(--color-cobalt)] hover:underline"
+						className="group inline-flex shrink-0 items-center gap-1.5 text-[14px] font-medium text-[var(--color-brand)] hover:underline"
 					>
 						All templates
 						<ArrowUpRight className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
@@ -102,9 +103,9 @@ function TemplateCard({ ex }: { ex: Example }) {
 					onClick={() => copy(command)}
 					aria-label={`Copy: ${command}`}
 					title={command}
-					className="mt-auto flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-2.5 py-2 text-left font-mono text-[11px] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-cobalt)]/50 hover:bg-[var(--color-paper)]"
+					className="mt-auto flex w-full items-center gap-2 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-2.5 py-2 text-left font-mono text-[11px] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-brand)]/50 hover:bg-[var(--color-paper)]"
 				>
-					<span className="select-none text-[var(--color-cobalt)]">$</span>
+					<span className="select-none text-[var(--color-brand)]">$</span>
 					{/* The command is long and the card is narrow, so the pill shows the
 					    part that varies — the template name — and copies the whole
 					    thing. The full command is in the title + aria-label. */}
@@ -134,7 +135,7 @@ function TemplateCard({ ex }: { ex: Example }) {
 					{ex.live ? (
 						<a
 							href={ex.live}
-							className="inline-flex items-center gap-1 text-[var(--color-cobalt)] hover:underline"
+							className="inline-flex items-center gap-1 text-[var(--color-brand)] hover:underline"
 						>
 							Open demo
 							<ArrowUpRight className="size-3" />

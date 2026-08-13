@@ -43,7 +43,7 @@ export function highlightLine(line: string): React.ReactNode {
 		}
 		if (CODE_KEYWORDS.has(tok)) {
 			return (
-				<span key={i} className="text-[var(--color-cobalt)]">
+				<span key={i} className="text-[var(--color-brand)]">
 					{tok}
 				</span>
 			);
@@ -75,7 +75,7 @@ function renderLine(line: string, shell: boolean): React.ReactNode {
 	return (
 		<>
 			{indent}
-			<span className="text-[var(--color-cobalt)]">$</span>
+			<span className="text-[var(--color-brand)]">$</span>
 			<span className="text-[var(--color-ink-2)]">{trimmed.slice(1)}</span>
 		</>
 	);

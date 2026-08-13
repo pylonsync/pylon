@@ -57,7 +57,7 @@ export function ComparisonView({
 					</nav>
 					<h1 className="mt-7 text-[clamp(34px,5vw,58px)] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--color-ink)]">
 						Pylon vs.{" "}
-						<span className="text-[var(--color-cobalt)]">{c.competitor}</span>
+						<span className="text-[var(--color-brand)]">{c.competitor}</span>
 					</h1>
 					<p className="mt-6 max-w-[64ch] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[18px]">
 						{c.lede}
@@ -90,8 +90,8 @@ export function ComparisonView({
 								{c.tldr.chooseCompetitor}
 							</p>
 						</div>
-						<div className="rounded-[var(--radius-lg)] border border-[var(--color-cobalt)]/50 bg-[var(--color-paper)] p-6">
-							<div className="text-[14px] font-semibold tracking-tight text-[var(--color-cobalt)]">
+						<div className="rounded-[var(--radius-lg)] border border-[var(--color-brand)]/50 bg-[var(--color-paper)] p-6">
+							<div className="text-[14px] font-semibold tracking-tight text-[var(--color-brand)]">
 								Choose Pylon if…
 							</div>
 							<p className="mt-3 text-[13.5px] leading-[1.6] text-[var(--color-ink-2)]">
@@ -113,7 +113,7 @@ export function ComparisonView({
 							<thead>
 								<tr className="border-b border-[var(--color-rule)] bg-[var(--color-paper-1)]">
 									<th className="px-4 py-3 font-mono text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-ink-4)]" />
-									<th className="px-4 py-3 font-semibold text-[var(--color-cobalt)]">
+									<th className="px-4 py-3 font-semibold text-[var(--color-brand)]">
 										Pylon
 									</th>
 									<th className="px-4 py-3 font-semibold text-[var(--color-ink-2)]">
@@ -153,7 +153,7 @@ export function ComparisonView({
 					<ul className="mt-6 grid gap-x-8 gap-y-3 sm:grid-cols-2">
 						{c.sameShape.map((s) => (
 							<li key={s} className="flex items-start gap-3">
-								<span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-cobalt)]/12 text-[var(--color-cobalt)]">
+								<span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-brand)]/12 text-[var(--color-brand)]">
 									<Check className="size-3" />
 								</span>
 								<span className="text-[14px] leading-[1.5] text-[var(--color-ink-2)]">
@@ -187,7 +187,7 @@ export function ComparisonView({
 							</div>
 						</div>
 						<div>
-							<h2 className="text-[20px] font-semibold tracking-tight text-[var(--color-cobalt)]">
+							<h2 className="text-[20px] font-semibold tracking-tight text-[var(--color-brand)]">
 								Where Pylon wins
 							</h2>
 							<div className="mt-6 flex flex-col gap-5">
@@ -221,7 +221,7 @@ export function ComparisonView({
 										<th className="px-4 py-3 font-semibold text-[var(--color-ink-2)]">
 											{c.competitor}
 										</th>
-										<th className="px-4 py-3 font-semibold text-[var(--color-cobalt)]">
+										<th className="px-4 py-3 font-semibold text-[var(--color-brand)]">
 											Pylon
 										</th>
 									</tr>
@@ -271,7 +271,7 @@ export function ComparisonView({
 						Scaffold a full-stack app in seconds and deploy free on Cloud.
 					</p>
 					<div className="mt-7 inline-flex items-center gap-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-4 py-2.5 font-mono text-[13.5px] text-[var(--color-ink)]">
-						<span className="text-[var(--color-cobalt)]">$</span>
+						<span className="text-[var(--color-brand)]">$</span>
 						npm create @pylonsync/pylon@latest
 					</div>
 					<div className="mt-8 flex justify-center">

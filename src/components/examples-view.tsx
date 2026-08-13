@@ -34,7 +34,7 @@ function TemplateCard({ ex }: { ex: Example }) {
 			{ex.template && (
 				<div className="mt-5 rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-3 py-2 font-mono text-[11.5px] text-[var(--color-ink-2)]">
 					template:{" "}
-					<span className="text-[var(--color-cobalt)]">{ex.template}</span>
+					<span className="text-[var(--color-brand)]">{ex.template}</span>
 				</div>
 			)}
 		</div>
@@ -46,7 +46,7 @@ function LiveDemoCard({ ex }: { ex: Example }) {
 	return (
 		<a
 			href={ex.live}
-			className="group flex flex-col rounded-[var(--radius-xl)] border border-[var(--color-rule)] shadow-[var(--shadow-card)] transition-[filter,box-shadow] duration-300 ease-[var(--ease-out-quart)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-visible:grayscale-0 [@media(hover:hover)]:hover:grayscale-0 bg-[var(--color-paper)] p-6"
+			className="group flex flex-col rounded-[var(--radius-xl)] border border-[var(--color-rule)] shadow-[var(--shadow-card)] transition-[filter,box-shadow] duration-300 ease-[var(--ease-out-quart)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-visible:grayscale-0 [@media(hover:hover)]:hover:grayscale-0 bg-[var(--color-paper)] p-6"
 		>
 			<div className="flex items-center gap-2">
 				<span className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-status-live)]/12 px-2.5 py-0.5 font-mono text-[10.5px] uppercase tracking-[0.08em] text-[var(--color-status-live)]">
@@ -74,12 +74,12 @@ function LiveDemoCard({ ex }: { ex: Example }) {
 				{ex.template ? (
 					<span className="rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-2.5 py-1 font-mono text-[11px] text-[var(--color-ink-2)]">
 						template:{" "}
-						<span className="text-[var(--color-cobalt)]">{ex.template}</span>
+						<span className="text-[var(--color-brand)]">{ex.template}</span>
 					</span>
 				) : (
 					<span />
 				)}
-				<span className="inline-flex shrink-0 items-center gap-1.5 text-[12.5px] font-medium text-[var(--color-cobalt)]">
+				<span className="inline-flex shrink-0 items-center gap-1.5 text-[12.5px] font-medium text-[var(--color-brand)]">
 					Open
 					<ArrowUpRight className="size-3.5" />
 				</span>
@@ -93,7 +93,7 @@ export function ExamplesView({ signedIn = false }: { signedIn?: boolean }) {
 		<MarketingShell signedIn={signedIn}>
 			<header className="border-b border-[var(--color-rule)]">
 				<div className="mx-auto max-w-[1100px] px-5 pb-14 pt-20 sm:px-8 sm:pb-16 sm:pt-28">
-					<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-cobalt)]">
+					<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-brand)]">
 						Examples
 					</div>
 					<h1 className="mt-4 max-w-[20ch] text-[clamp(34px,5vw,60px)] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--color-ink)]">
@@ -104,7 +104,7 @@ export function ExamplesView({ signedIn = false }: { signedIn?: boolean }) {
 						functions, and React client working together.
 					</p>
 					<div className="mt-7 inline-flex items-center gap-3 rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-4 py-2.5 font-mono text-[13.5px] text-[var(--color-ink)]">
-						<span className="text-[var(--color-cobalt)]">$</span>
+						<span className="text-[var(--color-brand)]">$</span>
 						npm create @pylonsync/pylon@latest
 					</div>
 				</div>

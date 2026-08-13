@@ -44,7 +44,7 @@ export function ProductSubNav({ slug }: { slug?: string }) {
 							>
 								{Icon && (
 									<Icon
-										className={`size-[15px] shrink-0 ${active ? "text-[var(--color-cobalt)]" : ""}`}
+										className={`size-[15px] shrink-0 ${active ? "text-[var(--color-brand)]" : ""}`}
 									/>
 								)}
 								{l.label}

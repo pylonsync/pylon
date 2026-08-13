@@ -13,6 +13,7 @@ import { PylonMark } from "./brand";
 import { Button } from "./ui/button";
 import { ThemeToggle } from "./theme-toggle";
 import { cn } from "../lib/utils";
+import { FRAME_COL } from "./marketing-frame";
 import { COMPARISONS_ENABLED } from "../lib/comparison-content";
 import {
 	COMPARISONS,
@@ -38,7 +39,7 @@ function MenuLink({ link, onClick }: { link: NavLink; onClick?: () => void }) {
 	const body = (
 		<>
 			{Icon && (
-				<span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] text-[var(--color-ink-2)] transition-colors group-hover/mi:border-[var(--color-cobalt)]/40 group-hover/mi:text-[var(--color-cobalt)]">
+				<span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-[var(--radius-sm)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] text-[var(--color-ink-2)] transition-colors group-hover/mi:border-[var(--color-brand)]/40 group-hover/mi:text-[var(--color-brand)]">
 					<Icon className="size-[15px]" />
 				</span>
 			)}
@@ -150,17 +151,29 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 		);
 
 	return (
-		// Floating pill nav: the bar is a contained, fully-rounded surface that
-		// hovers over the page rather than a full-bleed band. Page content scrolls
-		// past it on both sides, which is what makes it read as a control surface
-		// instead of a header. The sticky wrapper still occupies layout height, so
-		// nothing underneath needs a compensating top offset.
-		<div ref={navRef} className="sticky top-0 z-50 px-4 pt-3 sm:px-6">
-			<nav className="mx-auto flex max-w-[1180px] items-center justify-between gap-3 rounded-full border border-[var(--color-rule)] bg-[var(--color-paper)]/80 py-2 pl-3 pr-2 shadow-[var(--shadow-dropdown)] backdrop-blur-xl sm:pl-5 sm:pr-2.5">
+		// Flush header band, aligned to the frame rails.
+		//
+		// This was a floating rounded pill that hovered over the page. Against
+		// the framed layout it read as a separate object parked on top of the
+		// drawing — a second set of rounded edges cutting across the two
+		// hairlines that run the full height. A flush band inside the same
+		// measure makes the header the drawing's top edge instead.
+		//
+		// The nav column carries FRAME_COL too, so the frame's two hairlines run
+		// all the way to the top of the page instead of starting under the
+		// header. No bottom rule: a full-width horizontal line here crossed both
+		// verticals and read as a lid on the drawing.
+		<div
+			ref={navRef}
+			className="sticky top-0 z-50 bg-[var(--color-paper)]/85 backdrop-blur-xl"
+		>
+			<nav
+				className={`${FRAME_COL} flex h-[62px] items-center justify-between gap-3 px-5 sm:px-8`}
+			>
 				<div className="flex items-center gap-1">
 					<Link
 						href="/"
-						className="mr-2 flex items-center gap-2 text-[var(--color-ink)]"
+						className="mr-5 flex items-center gap-2 text-[var(--color-ink)]"
 					>
 						<PylonMark size={20} />
 						<span className="text-[15px] font-semibold leading-none tracking-tight">
@@ -214,8 +227,8 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 			    compiled Tailwind here, while `hidden lg:flex` worked — so we
 			    don't depend on `lg:block` winning over `hidden`.) */}
 			{open && (
-				<div className="absolute left-4 right-4 top-full block pt-2 sm:left-6 sm:right-6">
-					<div className="mx-auto max-w-[1180px] rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-5 py-6 shadow-[var(--shadow-dropdown)] sm:px-6">
+				<div className="absolute left-0 right-0 top-full block px-5 pt-2 sm:px-8">
+					<div className="mx-auto max-w-[1280px] rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-5 py-6 shadow-[var(--shadow-dropdown)] sm:px-6">
 						{open === "product" && (
 							<div className="grid grid-cols-12 gap-6">
 								<div className="col-span-9 grid grid-cols-2 gap-x-6 gap-y-1">
@@ -266,8 +279,8 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 
 			{/* Mobile sheet */}
 			{mobileOpen && (
-				<div className="absolute left-4 right-4 top-full pt-2 sm:left-6 sm:right-6 lg:hidden">
-					<div className="mx-auto flex max-h-[75vh] max-w-[1180px] flex-col gap-4 overflow-y-auto rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-5 py-5 shadow-[var(--shadow-dropdown)]">
+				<div className="absolute left-0 right-0 top-full px-5 pt-2 sm:px-8 lg:hidden">
+					<div className="mx-auto flex max-h-[75vh] max-w-[1280px] flex-col gap-4 overflow-y-auto rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] px-5 py-5 shadow-[var(--shadow-dropdown)]">
 						{[
 							{ title: "Product", links: PRODUCT_GROUPS.flatMap((g) => g.links) },
 							{ title: "Solutions", links: SOLUTIONS },

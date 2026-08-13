@@ -47,7 +47,7 @@ export function SolutionView({
 						<span className="text-[var(--color-ink-2)]">{s.navLabel}</span>
 					</nav>
 					<div className="mt-8 max-w-[760px]">
-						<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-cobalt)]">
+						<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-brand)]">
 							{s.category}
 						</div>
 						<h1 className="mt-4 max-w-[18ch] text-[clamp(34px,5vw,58px)] font-semibold leading-[1.02] tracking-[-0.04em] text-[var(--color-ink)]">
@@ -85,7 +85,7 @@ export function SolutionView({
 			{/* CAPABILITIES */}
 			<section>
 				<div className="mx-auto max-w-[1280px] px-5 py-16 sm:px-8 sm:py-20">
-					<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-cobalt)]">
+					<div className="font-mono text-[11px] uppercase tracking-[0.14em] text-[var(--color-brand)]">
 						How Pylon solves it
 					</div>
 					<div className="mt-8 flex flex-col gap-px overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-rule)] bg-[var(--color-rule)]">
@@ -115,7 +115,7 @@ export function SolutionView({
 											<Link
 												key={slug}
 												href={`/product/${slug}`}
-												className="inline-flex items-center rounded-full border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-3 py-1 font-mono text-[11.5px] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-cobalt)]/50 hover:text-[var(--color-ink)]"
+												className="inline-flex items-center rounded-full border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-3 py-1 font-mono text-[11.5px] text-[var(--color-ink-2)] transition-colors hover:border-[var(--color-brand)]/50 hover:text-[var(--color-ink)]"
 											>
 												{p.navLabel}
 											</Link>
@@ -142,7 +142,7 @@ export function SolutionView({
 										<Link
 											key={p.slug}
 											href={`/product/${p.slug}`}
-											className="group flex flex-col rounded-[var(--radius-xl)] border border-[var(--color-rule)] shadow-[var(--shadow-card)] transition-[filter,box-shadow] duration-300 ease-[var(--ease-out-quart)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-cobalt)] focus-visible:ring-offset-2 [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-visible:grayscale-0 [@media(hover:hover)]:hover:grayscale-0 bg-[var(--color-paper)] p-5"
+											className="group flex flex-col rounded-[var(--radius-xl)] border border-[var(--color-rule)] shadow-[var(--shadow-card)] transition-[filter,box-shadow] duration-300 ease-[var(--ease-out-quart)] hover:shadow-[var(--shadow-card-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] focus-visible:ring-offset-2 [@media(hover:hover)]:grayscale [@media(hover:hover)]:focus-visible:grayscale-0 [@media(hover:hover)]:hover:grayscale-0 bg-[var(--color-paper)] p-5"
 										>
 											<div className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
 												{p.navLabel}
@@ -150,7 +150,7 @@ export function SolutionView({
 											<div className="mt-1.5 text-[13px] leading-[1.5] text-[var(--color-ink-3)]">
 												{p.title}
 											</div>
-											<span className="mt-4 text-[12.5px] text-[var(--color-cobalt)]">
+											<span className="mt-4 text-[12.5px] text-[var(--color-brand)]">
 												Learn more →
 											</span>
 										</Link>
