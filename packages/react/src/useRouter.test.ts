@@ -48,10 +48,16 @@ describe("notFound() — branded for the SSR not-found boundary", () => {
 describe("redirect() — client-side replace navigation", () => {
   let calls: Array<{ href: string; opts?: unknown }>;
   const hadWindow = "window" in globalThis;
+  // The suite preloads happy-dom, so a real window usually EXISTS here. Put it
+  // back rather than leaving the stub in place: bun isolates globals per test
+  // file today, so nothing observable depends on this, but a test that
+  // replaces a global and never restores it is one isolation change away from
+  // breaking every file that mounts.
+  const originalWindow = (globalThis as any).window;
 
   beforeEach(() => {
     calls = [];
-    // bun:test has no DOM — stand up a minimal window the module can see.
+    // Stand up a minimal window the module can see, without assuming a DOM.
     (globalThis as any).window = {
       __pylon: {
         prefetch: async () => {},
@@ -63,8 +69,11 @@ describe("redirect() — client-side replace navigation", () => {
   });
 
   afterEach(() => {
-    if (hadWindow) return;
-    delete (globalThis as any).window;
+    if (hadWindow) {
+      (globalThis as any).window = originalWindow;
+    } else {
+      delete (globalThis as any).window;
+    }
   });
 
   test("delegates to __pylon.navigate with replace:true (no history push)", () => {
