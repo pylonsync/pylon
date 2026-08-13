@@ -1093,15 +1093,18 @@ pub fn try_handle(
             if bucket_eligible {
                 let (path_only, _) = url.split_once('?').unwrap_or((url.as_str(), ""));
                 let host = request_host(&request);
+                // HTML and the navigation payload are different answers to the
+                // same URL, so they key apart (see `ssr_cache_vary`).
+                let nav = is_nav_request(&request);
                 // Anon entry (`export const revalidate`) — cookie-anonymous only.
                 if cacheable_eligible {
-                    let cache_vary = ssr_cache_vary(host.as_deref());
+                    let cache_vary = ssr_cache_vary(host.as_deref(), nav);
                     if let Some(entry) =
                         crate::ssr_cache::get(&matched.route.path, path_only, &cache_vary)
                     {
                         if entry.fresh {
                             tracing::debug!(url = %url, "SSR cache hit (disk, anon)");
-                            return serve_cached_ssr(entry, cors_origin, request);
+                            return serve_cached_ssr(entry, cors_origin, nav, request);
                         }
                     }
                 }
@@ -1110,13 +1113,13 @@ pub fn try_handle(
                 // expired/invalid cookie resolves to not-signed-in → sess=0, the
                 // same bit the render path stores under.
                 let session_present = session_authenticated(cfg, &request);
-                let bucket_vary = ssr_cache_bucket_vary(host.as_deref(), session_present);
+                let bucket_vary = ssr_cache_bucket_vary(host.as_deref(), session_present, nav);
                 if let Some(entry) =
                     crate::ssr_cache::get(&matched.route.path, path_only, &bucket_vary)
                 {
                     if entry.fresh {
                         tracing::debug!(url = %url, session = session_present, "SSR cache hit (disk, bucket)");
-                        return serve_cached_bucket_ssr(entry, cors_origin, request);
+                        return serve_cached_bucket_ssr(entry, cors_origin, nav, request);
                     }
                 }
             }
@@ -1852,7 +1855,14 @@ fn serve_via_ssr_rpc(
     // from this request's Host and threaded identically through the write +
     // stale-on-error paths so they key the same way the read path (in
     // `serve_frontend`) does.
-    let cache_vary = ssr_cache_vary(headers_map.get("host").map(String::as_str));
+    // Read off the already-lowercased map rather than the request, so this
+    // agrees with `is_nav_request` on the read path AND with what the runner
+    // sees — the runner switches shape off the same header.
+    let nav = headers_map
+        .get("x-pylon-nav")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false);
+    let cache_vary = ssr_cache_vary(headers_map.get("host").map(String::as_str), nav);
 
     let params_json =
         serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
@@ -1870,8 +1880,11 @@ fn serve_via_ssr_rpc(
     let session_present = auth.user_id.is_some();
     // Bucket cache key — host + session presence. A render emitting the
     // `x-pylon-bucket` proof is stored here; the read path keys the same way.
-    let bucket_vary =
-        ssr_cache_bucket_vary(headers_map.get("host").map(String::as_str), session_present);
+    let bucket_vary = ssr_cache_bucket_vary(
+        headers_map.get("host").map(String::as_str),
+        session_present,
+        nav,
+    );
 
     // Cold-start robustness: the Rust HTTP listener accepts connections the
     // moment it binds, but the Bun runner that executes this render boots
@@ -1901,6 +1914,7 @@ fn serve_via_ssr_rpc(
             bucket_eligible,
             &bucket_vary,
             cors_origin,
+            nav,
             request,
         ) {
             Ok(()) => Ok(()),
@@ -2078,6 +2092,7 @@ fn serve_via_ssr_rpc(
                 bucket_eligible,
                 &bucket_vary,
                 cors_origin,
+                nav,
                 request,
             ) {
                 Ok(()) => Ok(()),
@@ -2094,13 +2109,16 @@ fn serve_via_ssr_rpc(
     // Without that, a bucket response stays browser-`private`/no-store (origin ISR
     // still serves it fast) so a cookie-blind shared cache can't mis-serve a
     // signed-in shell to a signed-out visitor or vice versa.
-    let bucket_shareable = bucket_eligible && bucket_cdn_sharing_enabled();
+    let bucket_shareable = bucket_eligible && bucket_cdn_sharing_enabled() && !nav;
     let response = Response::new(
         tiny_http::StatusCode(status),
         build_ssr_response_headers(
             &page_headers,
             cors_origin,
-            cacheable_eligible,
+            // A navigation payload answers the same URL as the page with
+            // different content. The origin keys them apart; a CDN keys on URL
+            // alone, so this must never advertise `public`.
+            cacheable_eligible && !nav,
             bucket_shareable,
         ),
         streaming_body,
@@ -2233,11 +2251,37 @@ fn ssr_cache_host_bucket(request_host: Option<&str>) -> String {
     }
 }
 
-/// Cache-key `vary` for a render, derived from its request `Host`: a single
-/// `("host", bucket)` pair (see `ssr_cache_host_bucket`). Threaded identically
+/// Does this request want the navigation payload (JSON) instead of the page
+/// (HTML)? Set by the client runtime on a client-side navigation, which
+/// re-renders from data and throws the markup away.
+///
+/// A header rather than a query string: the cache read path bypasses anything
+/// with a query, so `?__nav=1` would silently disable ISR for every
+/// navigation.
+pub fn is_nav_request(request: &Request) -> bool {
+    request.headers().iter().any(|h| {
+        h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("x-pylon-nav")
+            && h.value.as_str().trim() == "1"
+    })
+}
+
+/// Cache-key `vary` for a render, derived from its request `Host` (see
+/// `ssr_cache_host_bucket`) plus the response SHAPE. Threaded identically
 /// through the read, write, and stale-on-error paths so their keys agree.
-fn ssr_cache_vary(request_host: Option<&str>) -> Vec<(String, String)> {
-    vec![("host".to_string(), ssr_cache_host_bucket(request_host))]
+///
+/// SECURITY: `nav` is part of the key, not a detail. The two shapes answer the
+/// same URL with different content types — HTML for a document load, JSON for
+/// a client-side navigation — so sharing a key would let one be served where
+/// the other is expected: a navigation rendering a raw JSON blob, or a
+/// crawler being handed a payload instead of a page.
+fn ssr_cache_vary(request_host: Option<&str>, nav: bool) -> Vec<(String, String)> {
+    vec![
+        ("host".to_string(), ssr_cache_host_bucket(request_host)),
+        ("nav".to_string(), if nav { "1" } else { "0" }.to_string()),
+    ]
 }
 
 /// PPR Phase 0 cache-key `vary` for an auth-BUCKET render: the host dimension
@@ -2250,6 +2294,7 @@ fn ssr_cache_vary(request_host: Option<&str>) -> Vec<(String, String)> {
 fn ssr_cache_bucket_vary(
     request_host: Option<&str>,
     session_present: bool,
+    nav: bool,
 ) -> Vec<(String, String)> {
     vec![
         ("host".to_string(), ssr_cache_host_bucket(request_host)),
@@ -2257,6 +2302,7 @@ fn ssr_cache_bucket_vary(
             "sess".to_string(),
             if session_present { "1" } else { "0" }.to_string(),
         ),
+        ("nav".to_string(), if nav { "1" } else { "0" }.to_string()),
     ]
 }
 
@@ -2460,6 +2506,7 @@ fn maybe_cache_render(
 fn serve_cached_ssr(
     entry: crate::ssr_cache::CacheEntry,
     cors_origin: &str,
+    nav: bool,
     request: Request,
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
@@ -2467,7 +2514,10 @@ fn serve_cached_ssr(
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
     // Reached only for cookie-anonymous, eligible requests (the cache READ gate),
     // and the stored body is the anonymous render → safe to advertise `public`.
-    for h in build_ssr_response_headers(&page_headers, cors_origin, true, false) {
+    // EXCEPT for a navigation payload: the origin keys HTML and JSON apart, but
+    // a CDN keys on URL alone, so advertising `public` on the JSON would let it
+    // be cached at the page's URL and then served to a real document request.
+    for h in build_ssr_response_headers(&page_headers, cors_origin, !nav, false) {
         resp = resp.with_header(h);
     }
     let _ = request.respond(resp);
@@ -2484,6 +2534,7 @@ fn serve_cached_ssr(
 fn serve_cached_bucket_ssr(
     entry: crate::ssr_cache::CacheEntry,
     cors_origin: &str,
+    nav: bool,
     request: Request,
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
@@ -2493,7 +2544,8 @@ fn serve_cached_bucket_ssr(
         &page_headers,
         cors_origin,
         false,
-        bucket_cdn_sharing_enabled(),
+        // Never hand a navigation payload to a shared cache keyed on URL alone.
+        bucket_cdn_sharing_enabled() && !nav,
     ) {
         resp = resp.with_header(h);
     }
@@ -2518,6 +2570,7 @@ fn try_serve_stale_on_error(
     bucket_eligible: bool,
     bucket_vary: &[(String, String)],
     cors_origin: &str,
+    nav: bool,
     request: Request,
 ) -> Result<(), Request> {
     // Prefer an anon entry; fall back to this request's session bucket. Both are
@@ -2538,7 +2591,7 @@ fn try_serve_stale_on_error(
                 fresh = entry.fresh,
                 "SSR render unavailable — serving cached copy (stale-on-error)"
             );
-            serve_cached_ssr_stale(entry, cors_origin, request)
+            serve_cached_ssr_stale(entry, cors_origin, nav, request)
         }
         None => Err(request),
     }
@@ -2570,6 +2623,7 @@ fn stale_on_error_candidate(
 fn serve_cached_ssr_stale(
     entry: crate::ssr_cache::CacheEntry,
     cors_origin: &str,
+    nav: bool,
     request: Request,
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
@@ -2583,7 +2637,7 @@ fn serve_cached_ssr_stale(
         .keys()
         .any(|k| k.eq_ignore_ascii_case("x-pylon-bucket"));
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
-    for h in build_ssr_response_headers(&page_headers, cors_origin, true, false) {
+    for h in build_ssr_response_headers(&page_headers, cors_origin, !nav, false) {
         // Drop the stored Cache-Control; we re-apply a short one below.
         if h.field
             .as_str()
@@ -2594,7 +2648,9 @@ fn serve_cached_ssr_stale(
         }
         resp = resp.with_header(h);
     }
-    let stale_cc = if is_bucket && !bucket_cdn_sharing_enabled() {
+    // A navigation payload is never shareable: a CDN keys on URL alone and
+    // would serve this JSON to a document request.
+    let stale_cc = if nav || (is_bucket && !bucket_cdn_sharing_enabled()) {
         "private, no-store"
     } else {
         "public, max-age=10, stale-while-revalidate=30"
@@ -5046,15 +5102,48 @@ mod tests {
     }
 
     #[test]
+    fn nav_payload_and_html_never_share_a_cache_entry() {
+        // The same URL answers with HTML for a document load and with JSON for
+        // a client-side navigation. If they shared a key, one would be served
+        // where the other is expected: a navigation painting a raw payload, or
+        // a crawler handed JSON instead of a page.
+        let key = |vary: &[(String, String)]| crate::ssr_cache::cache_key("/p", "/p", vary);
+        assert_ne!(
+            key(&ssr_cache_vary(Some("a.example.com"), false)),
+            key(&ssr_cache_vary(Some("a.example.com"), true)),
+            "anon lane: html and nav are distinct entries"
+        );
+        assert_ne!(
+            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, false)),
+            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, true)),
+            "bucket lane: html and nav are distinct entries"
+        );
+        // And the nav dimension must not collapse the dimensions already there.
+        assert_ne!(
+            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, true)),
+            key(&ssr_cache_bucket_vary(Some("a.example.com"), false, true)),
+            "session presence still separates nav entries"
+        );
+        // Loopback hosts each get their own bucket (untrusted public hosts
+        // deliberately collapse to one, so a Host sprayer can't multiply
+        // entries — see ssr_cache_host_bucket).
+        assert_ne!(
+            key(&ssr_cache_vary(Some("127.0.0.1"), true)),
+            key(&ssr_cache_vary(Some("localhost"), true)),
+            "host still separates nav entries"
+        );
+    }
+
+    #[test]
     fn bucket_vary_separates_session_presence_and_never_collides_with_anon() {
         // The session dimension actually changes the cache key, so a signed-in and
         // a signed-out request land on DIFFERENT bucket entries (different shells)
         // — and a bucket entry can never collide with an anon entry for the same
         // route (distinct vary shape).
         let key = |vary: &[(String, String)]| crate::ssr_cache::cache_key("/p", "/p", vary);
-        let anon = ssr_cache_vary(Some("a.example.com"));
-        let b_in = ssr_cache_bucket_vary(Some("a.example.com"), true);
-        let b_out = ssr_cache_bucket_vary(Some("a.example.com"), false);
+        let anon = ssr_cache_vary(Some("a.example.com"), false);
+        let b_in = ssr_cache_bucket_vary(Some("a.example.com"), true, false);
+        let b_out = ssr_cache_bucket_vary(Some("a.example.com"), false, false);
         assert_ne!(
             key(&b_in),
             key(&b_out),
@@ -5072,7 +5161,7 @@ mod tests {
         );
         // Same inputs → same key (deterministic, so read/write/stale agree).
         assert_eq!(
-            key(&ssr_cache_bucket_vary(Some("a.example.com"), true)),
+            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, false)),
             key(&b_in)
         );
     }

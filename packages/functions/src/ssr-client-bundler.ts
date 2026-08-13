@@ -598,6 +598,14 @@ function whenLoaded(fn) {
   window.addEventListener("load", fn, { once: true });
 }
 
+// Marks a request as a client-side NAVIGATION rather than a document load.
+// The server answers with the head metadata + __PYLON_DATA__ and skips the
+// page markup, which this runtime re-renders from that data anyway. The host
+// keys its render cache on the same header, so the two shapes never share an
+// entry. Prefetch and navigate MUST send identical headers, or the prefetched
+// response is the wrong shape for the click that consumes it.
+const NAV_REQUEST_HEADERS = { Accept: "text/html", "X-Pylon-Nav": "1" };
+
 // Payloads warmed by a hover, consumed by the click that follows. See
 // ./nav-cache for why this is in memory rather than an HTTP-level prefetch.
 const navPayloads = createNavPayloadCache({
@@ -605,7 +613,7 @@ const navPayloads = createNavPayloadCache({
   fetchPage: (target) =>
     fetch(target, {
       credentials: "same-origin",
-      headers: { Accept: "text/html" },
+      headers: NAV_REQUEST_HEADERS,
     }).then((res) => {
       // A redirect means the URL navigate() would commit isn't the one that
       // answered; let the real navigation resolve that itself.
@@ -878,7 +886,7 @@ async function navigate(href, opts) {
     if (html == null) {
       const res = await fetch(target, {
         credentials: "same-origin",
-        headers: { Accept: "text/html" },
+        headers: NAV_REQUEST_HEADERS,
       });
       if (!res.ok) {
         fullLoad();

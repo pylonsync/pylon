@@ -1904,6 +1904,13 @@ export function buildHydrationTail(args: {
   // user's identity to another (the #277 leak class, at the body level). The
   // raw `auth` is replaced AFTER the live-handle strip below.
   bucketAuth?: { signedIn: boolean };
+  /** Client-side NAVIGATION payload: emit the `__PYLON_DATA__` blob and
+   *  nothing else. The client already has the runtime and resolves the route
+   *  entry from the build manifest, so the entry `<script>`, the preload tags
+   *  and the dev-reload snippet are all dead weight on a navigation. Shares
+   *  this function — and therefore its props strip — rather than rebuilding
+   *  the payload somewhere the security-relevant parts could drift. */
+  dataOnly?: boolean;
 }): string {
   // Strip live, non-serializable handles (serverData / response / reset) + the
   // request headers/cookies (SECURITY: never expose the session cookie to
@@ -1950,6 +1957,7 @@ export function buildHydrationTail(args: {
   if (args.kind) hydrationPayload.kind = args.kind;
   const json = escapeScriptJson(JSON.stringify(hydrationPayload));
   let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;
+  if (args.dataOnly) return tail;
   if (args.manifestRoute) {
     // A cross-origin CDN module (`public_prefix` is an absolute http(s) URL) is
     // fetched in CORS mode; `crossorigin` makes the matching modulepreload
@@ -1965,6 +1973,54 @@ export function buildHydrationTail(args: {
   }
   if (isDevMode()) tail += DEV_LIVE_RELOAD_SNIPPET;
   return tail;
+}
+
+/**
+ * Is this render answering a client-side navigation rather than a document
+ * load? The client runtime sets `X-Pylon-Nav: 1`; the Rust host reads the same
+ * header to key the ISR cache, so the two always agree on which shape a URL
+ * is being asked for.
+ */
+export function isNavRequest(
+  headers: Record<string, unknown> | undefined,
+): boolean {
+  if (!headers) return false;
+  const v = headers["x-pylon-nav"] ?? headers["X-Pylon-Nav"];
+  return typeof v === "string" && v.trim() === "1";
+}
+
+/**
+ * Render a detached element (the metadata fragment) to an HTML string.
+ *
+ * A navigation response carries the page's `<title>`/`<meta>`/`<link>` so the
+ * client can swap them, but not the page body — which the client re-renders
+ * from `__PYLON_DATA__` anyway. Rendering the fragment on its own is what
+ * lets the body be dropped without losing the head.
+ */
+export async function renderElementToString(
+  renderToReadableStream: any,
+  element: any,
+): Promise<string> {
+  if (!element) return "";
+  try {
+    const stream = await renderToReadableStream(element);
+    if ((stream as any).allReady) await (stream as any).allReady;
+    const reader = stream.getReader();
+    // One decoder across the whole read: a multi-byte character split across
+    // chunk boundaries decodes correctly only if the decoder carries state.
+    const decoder = new TextDecoder("utf-8");
+    let out = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      out += decoder.decode(value, { stream: true });
+    }
+    out += decoder.decode();
+    return out;
+  } catch {
+    // Metadata is never worth failing a navigation over.
+    return "";
+  }
 }
 
 /**
@@ -2969,6 +3025,14 @@ export async function handleRenderRoute(
     metadata = applyAutoIcons(msg.component, metadata);
     const metaFragment = renderMetadata(React, metadata);
 
+    // Client-side navigation: the browser already has the runtime, the layouts
+    // and the styles, and re-renders the page from `__PYLON_DATA__`. Measured
+    // on a real route, the full document was 16442 bytes to deliver a 374-byte
+    // payload — the markup is built, shipped, parsed, and thrown away. This
+    // render still runs (it is what resolves serverData), but the response
+    // carries only the head metadata and the data.
+    const navRender = isNavRequest(msg.headers as Record<string, unknown>);
+
     // loading.tsx (#278): the nearest `loading` module — walked up from the
     // page dir, like not-found/error — becomes ONE route-level Suspense
     // fallback wrapping the page. When present, the shell (layouts) + this
@@ -3094,7 +3158,10 @@ export async function handleRenderRoute(
     // the fully-resolved `ssrData` map) and after all of React's $RC reveals,
     // so the client's `use()` reads a fulfilled value and never re-suspends —
     // there is no progressive hydration racing the stream.
-    if (!wantsStream && (stream as any).allReady) {
+    // A navigation response is data, so it must wait for the whole render even
+    // on a page that would otherwise stream: `ssrData` is only complete once
+    // every serverData read has resolved, and that map IS the response.
+    if ((!wantsStream || navRender) && (stream as any).allReady) {
       await (stream as any).allReady;
     }
 
@@ -3314,7 +3381,26 @@ export async function handleRenderRoute(
         data: Buffer.from(text, "utf8").toString("base64"),
       });
     };
-    await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
+    if (navRender) {
+      // Drain React's output and drop it. The render is what resolves the
+      // serverData reads that fill `ssrData`; the markup it produces is the
+      // part the client rebuilds for itself.
+      const reader = stream.getReader();
+      for (;;) {
+        const { done } = await reader.read();
+        if (done) break;
+      }
+      // A minimal document, so the client's existing parse path works
+      // unchanged: it reads document.title, copies [data-pylon-meta], and
+      // pulls __PYLON_DATA__ — all of which this carries.
+      sendChunk(
+        '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+          (await renderElementToString(renderToReadableStream, metaFragment)) +
+          "</head><body>",
+      );
+    } else {
+      await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
+    }
 
     // #278: detect a late response.* mutation from a suspended subtree that the
     // already-committed head couldn't carry, and warn loudly (a silently
@@ -3401,9 +3487,11 @@ export async function handleRenderRoute(
         bucketAuth: bucketable
           ? { signedIn: msg.session_present === true }
           : undefined,
+        dataOnly: navRender,
       });
       sendChunk(tail);
     }
+
 
     // Dev HUD (dev only): append the cache-verdict + render-timing blob + the
     // floating overlay, and emit ONE structured log line. After the page tail so
@@ -3411,7 +3499,10 @@ export async function handleRenderRoute(
     // sync engine. `devVerdict` was computed once above (reused here + in the
     // x-pylon-dev header). The log rides the runtime's inherited stderr, so an
     // agent running `pylon dev` sees the verdict without any extra call.
-    if (devVerdict) {
+    //
+    // Never on a navigation response: there is no document for the overlay to
+    // attach to, and its blob would dwarf the payload it rode in on.
+    if (devVerdict && !navRender) {
       const renderMs = Math.round((performance.now() - renderStart) * 10) / 10;
       // Build-level failures that degraded this page (currently: the
       // Tailwind compile). Dev-only and unmissable — the HUD paints a
@@ -3451,6 +3542,8 @@ export async function handleRenderRoute(
       // x-pylon-dev header, so it rides the same log stream as every other
       // [pylon] line — no duplicate console.error here.
     }
+
+    if (navRender) sendChunk("</body></html>");
 
     send({ type: "render_done", call_id: msg.call_id });
   } catch (err: any) {
