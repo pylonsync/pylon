@@ -135,15 +135,24 @@ export function MarketingPage({
 				    apply at lg, where the copy moves up beside the headline. */}
 				<div className="mx-auto max-w-[1280px] px-5 pb-10 pt-14 sm:px-8 sm:pt-20">
 					{/* The copy column is measured, not proportional: the headline caps
-					    at 14ch, so a `1fr` first column just parks the copy against the
+				    at 15ch, so a `1fr` first column just parks the copy against the
 					    far edge and opens a canyon in the middle. 460px + a 48px gutter
 					    keeps the two blocks reading as one paragraph-and-heading pair at
 					    every width above lg. */}
 					<div className="flex flex-col gap-7 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,460px)] lg:gap-x-12 lg:gap-y-9">
-						<h1 className="max-w-[14ch] text-[clamp(42px,6.2vw,64px)] font-semibold leading-[1.0] tracking-[-0.045em] text-[var(--color-ink)] lg:col-start-1 lg:row-start-1">
-							{/* NBSP, not a space: keeps the accented phrase on one line so the
-							    headline breaks 15 / 13 / 9 instead of orphaning "agents". */}
-							Full-stack apps <span className="text-[var(--color-cobalt)]">{"coding agents"}</span> can ship.
+						<h1 className="max-w-[15ch] text-[clamp(42px,6.2vw,64px)] font-semibold leading-[1.0] tracking-[-0.045em] text-[var(--color-ink)] lg:col-start-1 lg:row-start-1">
+							{/* "that" is load-bearing. Without it the line reads "…apps coding
+							    agents…" and garden-paths: "apps coding" parses as a compound
+							    before the reader backs up. The cobalt span was compensating for a
+							    syntax problem, and colour is not available where this sentence
+							    actually travels — the <title> in a search result, a tweet, an HN
+							    submission, or read aloud. `whitespace-nowrap` keeps the accented
+							    phrase whole. */}
+							Full-stack apps that{" "}
+							<span className="whitespace-nowrap text-[var(--color-cobalt)]">
+								coding agents
+							</span>{" "}
+							can ship.
 						</h1>
 
 						<p className="text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px] lg:col-start-2 lg:row-start-1 lg:pt-2">

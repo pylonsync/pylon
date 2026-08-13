@@ -64,8 +64,8 @@ export function SiteFooter() {
 							</span>
 						</Link>
 						<p className="mt-4 max-w-[28ch] text-[13px] leading-[1.55] text-[var(--color-ink-3)]">
-							Full-stack framework for coding agents. Schema, sync, auth,
-							functions, and deploy in one TypeScript app.
+							Declare an entity once. Pylon derives the table, the access
+							rules, the API, and the typed React client.
 						</p>
 						<div className="mt-5 flex items-center gap-4">
 							<a
