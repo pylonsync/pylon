@@ -763,20 +763,81 @@ async function buildLayoutTree(
  * Returns the project-relative path (no extension) or null.
  */
 function findBoundary(componentPath: string, fileName: string): string | null {
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const cwd = process.cwd();
+  return findBoundaryIn(
+    require("node:fs"),
+    require("node:path"),
+    process.cwd(),
+    componentPath,
+    fileName,
+  );
+}
+
+/**
+ * `findBoundary` with its filesystem and root injected, so the walk is
+ * testable against a fixture without `chdir` — which races every other test
+ * in the process.
+ */
+export function findBoundaryIn(
+  fs: any,
+  path: any,
+  cwd: string,
+  componentPath: string,
+  fileName: string,
+): string | null {
   // Component paths use "/" — walk up directory by directory.
   let dir = componentPath.replace(/\\/g, "/");
   dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
   while (dir && dir !== "." && dir !== "/") {
-    for (const ext of MODULE_EXTS) {
-      if (fs.existsSync(path.join(cwd, dir, `${fileName}${ext}`))) {
-        return `${dir}/${fileName}`;
-      }
-    }
+    const hit = boundaryInDirOrGroups(fs, path, cwd, dir, fileName);
+    if (hit) return hit;
     const slash = dir.lastIndexOf("/");
     dir = slash >= 0 ? dir.slice(0, slash) : "";
+  }
+  return null;
+}
+
+/**
+ * The boundary for one URL-space level: `<dir>/<fileName>`, or the same file
+ * inside a route group under it.
+ *
+ * A route group contributes no URL segment, so `app/(marketing)/not-found` is
+ * the boundary for `/` exactly as `app/not-found` is — and an app can't ship
+ * both, because the duplicate-path check rejects two routes claiming `/`.
+ * Without this, putting the file in a group left `/` with no boundary at all
+ * while the build insisted the group's copy owned it.
+ *
+ * Groups nest, so this recurses. The directory's own file wins over a group's,
+ * and groups are searched in name order so the answer never depends on
+ * readdir ordering.
+ */
+function boundaryInDirOrGroups(
+  fs: any,
+  path: any,
+  cwd: string,
+  dir: string,
+  fileName: string,
+): string | null {
+  for (const ext of MODULE_EXTS) {
+    if (fs.existsSync(path.join(cwd, dir, `${fileName}${ext}`))) {
+      return `${dir}/${fileName}`;
+    }
+  }
+  let entries: any[];
+  try {
+    entries = fs.readdirSync(path.join(cwd, dir), { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const groups = entries
+    .filter(
+      (e: any) =>
+        e.isDirectory() && e.name.startsWith("(") && e.name.endsWith(")"),
+    )
+    .map((e: any) => e.name as string)
+    .sort();
+  for (const g of groups) {
+    const hit = boundaryInDirOrGroups(fs, path, cwd, `${dir}/${g}`, fileName);
+    if (hit) return hit;
   }
   return null;
 }
@@ -2202,7 +2263,32 @@ async function tryRenderBoundary(
       };
       compProps = { ...props, error: errorForClient, reset: () => {} };
     }
+    // A boundary's own `metadata` / `generateMetadata`, same as a page's.
+    // Without this a not-found.tsx rendered no <title> at all — and because
+    // the framework's built-in 404 body supplies one, taking over the boundary
+    // silently LOST the title rather than replacing it, leaving the tab
+    // showing the raw URL. The fragment goes first so React hoists its
+    // <title>/<meta> into the <head> a layout renders.
+    let boundaryMeta: SsrMetadata | undefined = mod.metadata;
+    if (typeof mod.generateMetadata === "function") {
+      try {
+        boundaryMeta = await mod.generateMetadata(compProps);
+      } catch {
+        // A boundary is already the failure path; don't fail it again over
+        // its title.
+        boundaryMeta = mod.metadata;
+      }
+    }
+    const boundaryMetaFragment = renderMetadata(React, boundaryMeta);
     let tree = React.createElement(Comp, compProps);
+    if (boundaryMetaFragment) {
+      tree = React.createElement(
+        React.Fragment,
+        null,
+        boundaryMetaFragment,
+        tree,
+      );
+    }
     tree = await buildLayoutTree(cwd, tree, boundaryLayouts, compProps, React);
     await renderBoundaryToClient(
       React,

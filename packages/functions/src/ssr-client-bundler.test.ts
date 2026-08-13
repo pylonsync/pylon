@@ -29,7 +29,10 @@ import {
   generateLoadingRegistry,
   type PylonBundleManifest,
 } from "./ssr-client-bundler";
-import { nearestBoundaryComponent } from "./ssr-client-boundary";
+import {
+  boundaryScope,
+  nearestBoundaryComponent,
+} from "./ssr-client-boundary";
 
 // State that needs cleanup between tests.
 let originalCwd: string | null = null;
@@ -648,5 +651,83 @@ describe("loading.tsx is wired into the client build", () => {
     expect(
       fs.existsSync(path.join(tempDir, ".pylon", "loading-registry.ts")),
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Route groups and boundary resolution.
+//
+// Regression: a `not-found.tsx` inside a route group served unmatched URLs
+// (the host matches those on the manifest's URL path, where a group adds no
+// segment, so it sits at "/") but NOT a notFound() thrown by a page (which
+// walked real directories and never crossed out of the page's own subtree).
+// So a group boundary silently covered one class of 404 and not the other,
+// while ROUTE_PATH_DUPLICATE blocked keeping a root copy alongside it.
+// ---------------------------------------------------------------------------
+
+describe("boundaryScope", () => {
+  test("drops group segments, keeps real ones", () => {
+    expect(boundaryScope("web/app/(marketing)/pricing/page")).toBe("web/app/pricing");
+    expect(boundaryScope("web/app/(marketing)/not-found")).toBe("web/app");
+    expect(boundaryScope("app/not-found")).toBe("app");
+  });
+
+  test("handles nested groups", () => {
+    expect(boundaryScope("app/(a)/(b)/not-found")).toBe("app");
+  });
+});
+
+describe("nearestBoundaryComponent across route groups", () => {
+  test("a group's boundary covers a page outside the group", () => {
+    // Both are at URL "/", so the group copy IS the root boundary.
+    expect(
+      nearestBoundaryComponent(
+        "app/gone/page",
+        "not-found",
+        new Set(["app/(marketing)/not-found", "app/gone/page"]),
+      ),
+    ).toBe("app/(marketing)/not-found");
+  });
+
+  test("a nested group's boundary resolves the same way", () => {
+    expect(
+      nearestBoundaryComponent(
+        "app/gone/page",
+        "not-found",
+        new Set(["app/(a)/(b)/not-found"]),
+      ),
+    ).toBe("app/(a)/(b)/not-found");
+  });
+
+  test("a nearer real boundary still beats a group one higher up", () => {
+    expect(
+      nearestBoundaryComponent(
+        "app/dashboard/settings/page",
+        "not-found",
+        new Set(["app/(marketing)/not-found", "app/dashboard/not-found"]),
+      ),
+    ).toBe("app/dashboard/not-found");
+  });
+
+  test("a group boundary does not leak into a deeper URL scope", () => {
+    // app/(marketing)/pricing/not-found is at "/pricing" — it must not answer
+    // for a page at "/dashboard".
+    expect(
+      nearestBoundaryComponent(
+        "app/dashboard/page",
+        "not-found",
+        new Set(["app/(marketing)/pricing/not-found"]),
+      ),
+    ).toBeNull();
+  });
+
+  test("a boundary inside a group still covers that group's own pages", () => {
+    expect(
+      nearestBoundaryComponent(
+        "app/(marketing)/pricing/page",
+        "not-found",
+        new Set(["app/(marketing)/not-found"]),
+      ),
+    ).toBe("app/(marketing)/not-found");
   });
 });

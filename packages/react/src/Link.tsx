@@ -11,9 +11,11 @@
 //   - Prefetches in two stages, because the two halves cost very
 //     different things. On viewport entry (IntersectionObserver) the
 //     runtime modulepreloads the destination's client chunks — static,
-//     immutable, cacheable. On hover/touch it also fetches the page
-//     itself, which costs a server render, so that waits for a real
-//     signal of intent rather than firing for a screenful of links.
+//     immutable, cacheable. On hover, touch, or focus it also fetches
+//     the page itself, which costs a server render, so that waits for a
+//     real signal of intent rather than firing for a screenful of links.
+//     Focus is included so a keyboard user tabbing to a link gets the
+//     same warm path a mouse user gets.
 //   - Modifier keys (cmd/ctrl/shift/alt) or middle-click fall
 //     through to the browser's default behavior (open in new tab,
 //     etc.) — matches Next.js semantics.
@@ -32,7 +34,8 @@ declare global {
       prefetch: (
         href: string,
         opts?: {
-          /** Also fetch the page payload (costs a server render — hover only). */
+          /** Also fetch the page payload. Costs a server render, so only on an
+           *  intent signal: hover, touch, or focus. */
           document?: boolean;
         },
       ) => Promise<void>;
@@ -153,11 +156,17 @@ export function Link({
 
     el.addEventListener("mouseenter", warmPage);
     el.addEventListener("touchstart", warmPage, { passive: true });
+    // Focus is the keyboard's version of hover, and a stronger signal: a
+    // cursor slides across links it isn't aiming at, but nobody tabs onto one
+    // idly. Without it, tabbing to a link and pressing Enter took the cold
+    // path while a mouse user got the warm one — the wrong way round.
+    el.addEventListener("focus", warmPage);
 
     return () => {
       io?.disconnect();
       el.removeEventListener("mouseenter", warmPage);
       el.removeEventListener("touchstart", warmPage);
+      el.removeEventListener("focus", warmPage);
     };
   }, [href, prefetch]);
 

@@ -42,16 +42,38 @@ export function nearestBoundaryComponent(
   fileName: BoundaryFile,
   routeKeys: Iterable<string>,
 ): string | null {
-  const keys = routeKeys instanceof Set ? routeKeys : new Set(routeKeys);
-  let dir = String(component);
-  dir = dir.includes("/") ? dir.slice(0, dir.lastIndexOf("/")) : "";
-  while (dir) {
-    const key = `${dir}/${fileName}`;
-    if (keys.has(key)) return key;
-    const slash = dir.lastIndexOf("/");
-    dir = slash >= 0 ? dir.slice(0, slash) : "";
+  const target = boundaryScope(component);
+  let best: { key: string; depth: number } | null = null;
+  for (const key of routeKeys) {
+    if (!key.endsWith(`/${fileName}`)) continue;
+    const scope = boundaryScope(key);
+    // Same URL scope, or an ancestor of it.
+    if (scope !== target && !target.startsWith(`${scope}/`)) continue;
+    const depth = scope === "" ? 0 : scope.split("/").length;
+    // Nearest ancestor wins; ties (a directory's own file vs one in a group
+    // beside it) resolve by key order so the answer is deterministic.
+    if (!best || depth > best.depth || (depth === best.depth && key < best.key)) {
+      best = { key, depth };
+    }
   }
-  return null;
+  return best ? best.key : null;
+}
+
+/**
+ * The URL-space directory a module sits in: its parent path with `(group)`
+ * segments removed, since a group contributes no URL segment.
+ *
+ * `web/app/(marketing)/pricing/page` → `web/app/pricing`, and
+ * `web/app/(marketing)/not-found` → `web/app`. That is what makes a group's
+ * boundary resolve for `/` — matching the server, which walks the real
+ * directories but treats group dirs as transparent the same way.
+ */
+export function boundaryScope(componentPath: string): string {
+  const parts = String(componentPath).replace(/\\/g, "/").split("/");
+  parts.pop(); // the module's own basename
+  return parts
+    .filter((p) => !(p.startsWith("(") && p.endsWith(")")))
+    .join("/");
 }
 
 /** Runtime internals the boundary needs, injected so the module stays
