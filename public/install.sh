@@ -30,6 +30,17 @@ command -v tar >/dev/null 2>&1 || fail "tar is required"
 os="$(uname -s)"
 arch="$(uname -m)"
 
+# `uname -m` reports the architecture of the calling process, so a shell under
+# Rosetta answers x86_64 on an Apple Silicon Mac and would send an M-series
+# user to the "no prebuilt binary for Intel macOS" dead end below. Ask about
+# the hardware instead: hw.optional.arm64 is 1 on every Apple Silicon Mac and
+# readable from inside a translated process.
+if [ "$os" = "Darwin" ] && [ "$arch" = "x86_64" ]; then
+    if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = "1" ]; then
+        arch="arm64"
+    fi
+fi
+
 case "$os" in
 Darwin)
     case "$arch" in
@@ -114,6 +125,18 @@ tar -xzf "$tmpdir/$asset" -C "$tmpdir"
 [ -f "$tmpdir/pylon" ] || fail "archive did not contain a 'pylon' binary"
 mv "$tmpdir/pylon" "$BIN_DIR/pylon"
 chmod +x "$BIN_DIR/pylon"
+
+# The macOS archive carries the libxmlsec1 closure the binary links against,
+# which it finds at lib/ next to itself (@loader_path). Without this the
+# install completes and every run dies in dyld. The Linux archive has no lib/.
+if [ -d "$tmpdir/lib" ]; then
+    rm -f "$BIN_DIR"/lib/*.dylib 2>/dev/null || true
+    mkdir -p "$BIN_DIR/lib"
+    for dylib in "$tmpdir"/lib/*; do
+        [ -e "$dylib" ] || continue
+        mv "$dylib" "$BIN_DIR/lib/"
+    done
+fi
 
 say "✓ pylon $version installed at $BIN_DIR/pylon"
 
