@@ -20,8 +20,7 @@ export interface Example {
 	live?: string;
 	/**
 	 * Screenshot of the template running, served from the site's public dir.
-	 * Undefined means no capture exists yet and the card draws a placeholder
-	 * instead. Populate with `scripts/capture-template-shots.mjs`.
+	 * Undefined means no capture exists yet and the card draws a placeholder.
 	 */
 	shot?: string;
 }
@@ -90,6 +89,7 @@ export const LIVE_DEMOS: Example[] = [
 		shows: ["Faceted search", "field.owner()", "Optimistic inserts"],
 		live: "https://market.pyln.dev",
 		template: "marketplace",
+		shot: "/marketing/templates/marketplace.webp",
 	},
 	{
 		name: "World3D",
@@ -128,6 +128,7 @@ export const GROUPS: Group[] = [
 				// The directory is `saas`, and templateRepoUrl() builds a path from
 				// this value — an alias here points at a directory that isn't there.
 				template: "saas",
+				shot: "/marketing/templates/saas.webp",
 			},
 			{
 				name: "Consumer app",
@@ -142,6 +143,7 @@ export const GROUPS: Group[] = [
 					"Rooms and messages with live queries and presence. The canonical 'see sync work' starter.",
 				shows: ["Live queries", "Presence", "Optimistic send"],
 				template: "chat",
+				shot: "/marketing/templates/chat.webp",
 			},
 			{
 				name: "Local-first todo",
@@ -170,6 +172,7 @@ export const GROUPS: Group[] = [
 					"A coming-soon landing with email capture and a live signup counter that ticks up across every open tab.",
 				shows: ["Live counter", "Email capture", "Owner dashboard"],
 				template: "waitlist",
+				shot: "/marketing/templates/waitlist.webp",
 			},
 			{
 				name: "Agency / studio",
@@ -177,6 +180,7 @@ export const GROUPS: Group[] = [
 					"A studio site with a case-study portfolio, plus a back-office: clients, invoices with PDF export, and live project availability.",
 				shows: ["Case studies", "Invoices + PDF", "Live availability"],
 				template: "agency",
+				shot: "/marketing/templates/agency.webp",
 			},
 			{
 				name: "Restaurant",
@@ -205,6 +209,7 @@ export const GROUPS: Group[] = [
 					"A DTC store with a product grid, live inventory, a cart, and real Stripe checkout with a no-key fallback.",
 				shows: ["Stripe checkout", "Live inventory", "Cart"],
 				template: "shop",
+				shot: "/marketing/templates/shop.webp",
 			},
 			{
 				name: "Directory",
@@ -212,6 +217,7 @@ export const GROUPS: Group[] = [
 					"A curated directory with live full-text search, facets, community upvotes, and a moderated submission flow.",
 				shows: ["Full-text search", "Facets", "Moderation"],
 				template: "directory",
+				shot: "/marketing/templates/directory.webp",
 			},
 		],
 	},
@@ -225,6 +231,7 @@ export const GROUPS: Group[] = [
 					"Streaming LLM chat keeps your key on the server and syncs conversation history across tabs. Pick from multiple models.",
 				shows: ["Token streaming", "Synced history", "Multi-model"],
 				template: "ai-chat",
+				shot: "/marketing/templates/ai-chat.webp",
 			},
 			{
 				name: "AI studio",

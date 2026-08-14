@@ -190,7 +190,8 @@ export function MarketingPage({
 			{/* Agent workflow. One continuous frame replaces the repeated card grid.
 			    Each row keeps the claim and its evidence in the same reading path. */}
 			<Section id="agents" tone="sunken">
-				<div>
+				<SectionLabel>Agent workflow</SectionLabel>
+				<div className="border-b border-[var(--color-rule)] px-5 py-16 sm:px-8 sm:py-20 lg:py-24">
 					<H2>Give agents a system they can inspect.</H2>
 					<p className="mt-5 max-w-[620px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
 						Rules, commands, types, data, and logs stay in one workflow. Your
@@ -199,7 +200,7 @@ export function MarketingPage({
 					</p>
 				</div>
 
-				<div className="mt-14 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)]">
+				<div className="bg-[var(--color-paper)]">
 					{AGENT_AFFORDANCES.map((a, index) => (
 						<Link
 							key={a.title}
@@ -225,9 +226,9 @@ export function MarketingPage({
 							</div>
 
 							<div
-								className={`flex min-h-[190px] items-center border-t border-[var(--color-rule)] p-5 sm:p-8 md:min-h-[230px] md:border-l md:border-t-0 ${agentVisualTone(index)}`}
+								className={`flex min-h-[210px] items-center border-t border-[var(--color-rule)] p-5 sm:p-8 md:min-h-[260px] md:border-l md:border-t-0 ${agentVisualTone(index)}`}
 							>
-								<div className="w-full overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)]">
+								<div className="w-full overflow-hidden rounded-[6px] border border-[var(--color-rule)] bg-[var(--color-paper)]">
 									<a.visual />
 								</div>
 							</div>
@@ -238,8 +239,10 @@ export function MarketingPage({
 
 			{/* The model */}
 			<Section id="model">
-				<div className="grid items-center gap-12 lg:grid-cols-2 lg:gap-16">
-					<div>
+				<SectionLabel>Application model</SectionLabel>
+				<div className="grid min-w-0 lg:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+					<div className="flex min-w-0 items-center px-5 py-16 sm:px-8 sm:py-20 lg:min-h-[560px] lg:px-12 lg:py-24">
+						<div className="min-w-0">
 						<H2>Your app model stays in TypeScript.</H2>
 						<p className="mt-5 max-w-[460px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
 							Declare an entity and its access policy. Pylon creates the table,
@@ -252,11 +255,14 @@ export function MarketingPage({
 								<a href="https://docs.pylonsync.com">Read the quickstart →</a>
 							</Button>
 						</div>
+						</div>
 					</div>
 
-					<CodePanel
-						filename="app.ts"
-						code={`// one entity → a synced table + typed client
+					<div className="flex min-w-0 items-center border-t border-[var(--color-rule)] bg-[var(--color-brand-soft)]/35 p-5 sm:p-8 lg:min-h-[560px] lg:border-l lg:border-t-0 lg:p-12">
+						<CodePanel
+							filename="app.ts"
+							className="rounded-[6px] shadow-none"
+							code={`// one entity → a synced table + typed client
 const Order = entity("Order", {
   customer: field.string(),
   total: field.float(),
@@ -271,13 +277,15 @@ policy({ entity: "Order",
 
 // the React side: live, typed, no fetch
 const { data } = db.useQuery("Order");`}
-					/>
+						/>
+					</div>
 				</div>
 			</Section>
 
 			{/* DEPLOY */}
 			<Section id="deploy" tone="sunken">
-				<div>
+				<SectionLabel>Release path</SectionLabel>
+				<div className="border-b border-[var(--color-rule)] px-5 py-16 sm:px-8 sm:py-20 lg:py-24">
 					<H2>Deploy from GitHub or the CLI.</H2>
 					<p className="mt-5 max-w-[560px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
 						A repository push and a CLI release use the same build, preview, and
@@ -285,7 +293,7 @@ const { data } = db.useQuery("Order");`}
 					</p>
 				</div>
 
-				<div className="mt-14 overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[var(--shadow-card)]">
+				<div className="bg-[var(--color-paper)]">
 					<div className="grid grid-cols-2 lg:grid-cols-4">
 						{DEPLOY_STEPS.map((step, index) => (
 							<div
@@ -293,12 +301,12 @@ const { data } = db.useQuery("Order");`}
 								className="border-b border-[var(--color-rule)] p-4 odd:border-r [&:nth-child(n+3)]:border-b-0 sm:p-6 lg:border-b-0 lg:even:border-r lg:last:border-r-0"
 							>
 								<div className="mb-5 flex items-center justify-between">
-									<span className="flex size-9 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-brand-soft)] text-[var(--color-brand)]">
+								<span className="flex size-9 items-center justify-center text-[var(--color-brand)]">
 										<step.icon className="size-4" />
 									</span>
-									{index < 3 ? (
-										<span className="hidden h-px w-10 bg-[var(--color-brand)]/35 lg:block" />
-									) : null}
+								<span className="font-mono text-[10px] text-[var(--color-ink-4)]">
+									0{index + 1}
+								</span>
 								</div>
 								<h3 className="text-[15px] font-semibold text-[var(--color-ink)]">
 									{step.title}
@@ -352,7 +360,8 @@ const { data } = db.useQuery("Order");`}
 
 			{/* SCALE */}
 			<Section id="scale">
-				<div>
+				<SectionLabel>Managed cloud</SectionLabel>
+				<div className="border-b border-[var(--color-rule)] px-5 py-16 sm:px-8 sm:py-20 lg:py-24">
 					<H2>Scale from one dashboard.</H2>
 					<p className="mt-5 max-w-[560px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
 						Every app sits behind a global edge network. Resize machines, add
@@ -365,8 +374,8 @@ const { data } = db.useQuery("Order");`}
 				    above. Given a browser frame and set wider than the copy column so
 				    it reads as the section's centerpiece. Width/height match the
 				    source (3456×2234) so the slot is reserved and CLS stays 0. */}
-				<div className="mt-14">
-					<div className="overflow-hidden rounded-[var(--radius-xl)] border border-[var(--color-rule)] bg-[var(--color-paper)] shadow-[0_40px_80px_-40px_rgba(15,23,42,0.45)]">
+				<div className="border-b border-[var(--color-rule)] bg-[var(--color-paper)]">
+					<div className="overflow-hidden">
 						<div className="flex items-center gap-2.5 border-b border-[var(--color-rule)] px-4 py-2.5">
 							<span className="flex gap-1.5">
 								<span className="size-2.5 rounded-full bg-[var(--color-rule)]" />
@@ -397,7 +406,7 @@ const { data } = db.useQuery("Order");`}
 				{/* A hairline ledger, not a card mesh. Ten items divide evenly across
 				    two columns. The old three-column mesh left two dead cells that
 				    rendered as gray voids. */}
-				<div className="mt-12 grid gap-x-12 sm:grid-cols-2">
+				<div className="grid sm:grid-cols-2">
 					{[
 						[
 							"Global edge network",
@@ -436,7 +445,7 @@ const { data } = db.useQuery("Order");`}
 					].map(([title, body]) => (
 						<div
 							key={title}
-							className="flex flex-col gap-1.5 border-t border-[var(--color-rule)] py-5"
+							className="flex flex-col gap-1.5 border-b border-[var(--color-rule)] px-5 py-6 odd:sm:border-r sm:px-8 lg:px-10"
 						>
 							<h4 className="text-[15px] font-semibold tracking-tight text-[var(--color-ink)]">
 								{title}
@@ -454,7 +463,8 @@ const { data } = db.useQuery("Order");`}
 			    doubts for them is a rhetorical device, not information, and it left
 			    the page with no plain statement of what Pylon actually supports. */}
 			<Section id="faq" tone="sunken">
-				<div>
+				<SectionLabel>FAQ</SectionLabel>
+				<div className="border-b border-[var(--color-rule)] px-5 py-16 sm:px-8 sm:py-20 lg:py-24">
 					<H2>Common questions.</H2>
 					<p className="mt-5 max-w-[560px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
 						Everything else is in the{" "}
@@ -468,7 +478,7 @@ const { data } = db.useQuery("Order");`}
 					</p>
 				</div>
 
-				<div className="mt-12 grid gap-x-14 sm:grid-cols-2">
+				<div className="grid sm:grid-cols-2">
 					{[
 						{
 							q: "Which database does it use?",
@@ -505,7 +515,7 @@ const { data } = db.useQuery("Order");`}
 					].map((o) => (
 						<div
 							key={o.q}
-							className="flex flex-col gap-2.5 border-t border-[var(--color-rule)] py-6"
+							className="flex flex-col gap-2.5 border-b border-[var(--color-rule)] px-5 py-8 odd:sm:border-r sm:px-8 lg:px-10"
 						>
 							<h3 className="text-[15px] font-semibold leading-snug tracking-tight text-[var(--color-ink)]">
 								{o.q}
@@ -729,9 +739,7 @@ function Section({
 				tone === "sunken" ? " bg-[var(--color-paper-1)]" : ""
 			}`}
 		>
-			<div className={`${FRAME_COL} px-5 py-16 sm:px-8 sm:py-20 lg:py-24`}>
-				{children}
-			</div>
+			<div className={FRAME_COL}>{children}</div>
 		</section>
 	);
 }
@@ -741,5 +749,15 @@ function H2({ children }: { children: React.ReactNode }) {
 		<h2 className="max-w-[20ch] text-[clamp(30px,4vw,46px)] font-semibold leading-[1.05] tracking-[-0.035em] text-[var(--color-ink)]">
 			{children}
 		</h2>
+	);
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+	return (
+		<div className="border-b border-[var(--color-rule)] px-5 py-3 sm:px-8">
+			<span className="font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--color-ink-4)]">
+				{children}
+			</span>
+		</div>
 	);
 }

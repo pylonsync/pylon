@@ -284,34 +284,9 @@ const DARK_TOKENS = {
 
 export function FeatureScroll() {
 	const [activeIndex, setActiveIndex] = useState(0);
-	const [revealed, setRevealed] = useState<Set<number>>(() => new Set());
 	const rows = useRef<(HTMLElement | null)[]>([]);
 
 	useEffect(() => {
-		const prefersReducedMotion = window.matchMedia(
-			"(prefers-reduced-motion: reduce)",
-		).matches;
-		if (prefersReducedMotion) {
-			setRevealed(new Set(FEATURES.map((_, index) => index)));
-		}
-
-		const revealObserver = new IntersectionObserver(
-			(entries) => {
-				for (const entry of entries) {
-					if (!entry.isIntersecting) continue;
-					const index = Number(
-						(entry.target as HTMLElement).dataset.featureIndex,
-					);
-					setRevealed((current) => {
-						if (current.has(index)) return current;
-						const next = new Set(current);
-						next.add(index);
-						return next;
-					});
-				}
-			},
-			{ rootMargin: "0px 0px -18%", threshold: 0.12 },
-		);
 		const activeObserver = new IntersectionObserver(
 			() => {
 				const focusLine = window.innerHeight * 0.43;
@@ -327,12 +302,10 @@ export function FeatureScroll() {
 
 		for (const row of rows.current) {
 			if (!row) continue;
-			revealObserver.observe(row);
 			activeObserver.observe(row);
 		}
 
 		return () => {
-			revealObserver.disconnect();
 			activeObserver.disconnect();
 		};
 	}, []);
@@ -418,14 +391,13 @@ export function FeatureScroll() {
 									rows.current[index] = node;
 								}}
 								data-feature-index={index}
-								className={`scroll-mt-28 border-b border-[var(--color-rule)] px-5 py-16 transition-[opacity,transform] duration-700 ease-[var(--ease-out-quart)] last:border-b-0 motion-reduce:translate-y-0 motion-reduce:transition-none sm:px-8 lg:grid lg:min-h-[670px] lg:grid-cols-[minmax(250px,0.72fr)_minmax(430px,1.28fr)] lg:items-center lg:gap-10 lg:px-10 lg:py-20 xl:gap-14 xl:px-14 ${
-									revealed.has(index)
-										? "translate-y-0 opacity-100"
-										: "translate-y-8 opacity-0"
-								}`}
+								data-active={activeIndex === index}
+								className="feature-ledger-row scroll-mt-28 border-b border-[var(--color-rule)] last:border-b-0 lg:grid lg:grid-cols-[minmax(300px,0.78fr)_minmax(480px,1.22fr)]"
 							>
-								<FeatureCopy feature={feature} />
-								<div className="mt-10 min-w-0 lg:mt-0">
+								<div className="feature-ledger-copy flex min-h-[430px] items-center px-5 py-16 sm:px-8 lg:min-h-[620px] lg:px-10 lg:py-20 xl:px-14">
+									<FeatureCopy feature={feature} />
+								</div>
+								<div className="feature-ledger-visual min-w-0 border-t border-[var(--color-rule)] lg:border-l lg:border-t-0">
 									<BentoHoverContext.Provider value={activeIndex === index}>
 										<FeatureVisual feature={feature} />
 									</BentoHoverContext.Provider>
@@ -451,36 +423,39 @@ function FeatureRail({
 			<nav
 				aria-label="Pylon capabilities"
 				data-feature-rail
-				className="sticky top-[82px] max-h-[calc(100dvh-102px)] overflow-y-auto px-4 py-5"
-			>
-				<ol className="space-y-0.5">
+			className="sticky top-[82px] max-h-[calc(100dvh-102px)] overflow-y-auto py-7"
+		>
+			<ol>
 					{FEATURES.map((feature, index) => {
 						const Icon = feature.icon;
 						const active = activeIndex === index;
 						return (
 							<li key={feature.key}>
-								<button
-									type="button"
-									onClick={() => onSelect(index)}
+								<a
+									href={`#feature-${feature.key}`}
+									onClick={(event) => {
+										event.preventDefault();
+										onSelect(index);
+									}}
 									data-feature-rail-tab={feature.key}
 									aria-current={active ? "step" : undefined}
-									className={`group flex w-full items-center gap-2 rounded-[var(--radius-md)] px-2 py-1.5 text-left text-[12px] transition-colors duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)] ${
+								className={`group flex w-full items-center gap-2 border-l-2 px-5 py-2 text-left text-[12px] transition-colors duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)] ${
+									active
+										? "border-[var(--color-brand)] text-[var(--color-ink)]"
+										: "border-transparent text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]"
+								}`}
+							>
+								<span
+									className={`flex size-5 shrink-0 items-center justify-center transition-colors duration-300 ${
 										active
-											? "bg-[var(--color-brand-soft)] text-[var(--color-ink)]"
-											: "text-[var(--color-ink-4)] hover:text-[var(--color-ink-2)]"
+											? "text-[var(--color-brand)]"
+											: "text-[var(--color-ink-4)]"
 									}`}
-								>
-									<span
-										className={`flex size-7 shrink-0 items-center justify-center rounded-[8px] border transition-colors duration-300 ${
-											active
-												? "border-[var(--color-brand)]/55 bg-[var(--color-brand)] text-[#111116]"
-												: "border-[var(--color-rule)] text-[var(--color-ink-4)] group-hover:border-[var(--color-ink-4)]"
-										}`}
 									>
 										<Icon className="size-3" />
 									</span>
 									<span>{feature.label}</span>
-								</button>
+								</a>
 							</li>
 						);
 					})}
@@ -507,9 +482,12 @@ function MobileFeatureRail({
 					const Icon = feature.icon;
 					const active = index === activeIndex;
 					return (
-						<button
-							type="button"
-							onClick={() => onSelect(index)}
+						<a
+							href={`#feature-${feature.key}`}
+							onClick={(event) => {
+								event.preventDefault();
+								onSelect(index);
+							}}
 							key={feature.key}
 							data-feature-tab={feature.key}
 							aria-current={active ? "step" : undefined}
@@ -521,7 +499,7 @@ function MobileFeatureRail({
 						>
 							<Icon className="size-3" />
 							{feature.label}
-						</button>
+						</a>
 					);
 				})}
 			</div>
@@ -532,11 +510,9 @@ function MobileFeatureRail({
 function FeatureCopy({ feature }: { feature: FeatureChapter }) {
 	const Icon = feature.icon;
 	return (
-		<div>
-			<div className="flex items-center gap-3 text-[12px] font-medium text-[var(--color-brand)]">
-				<span className="flex size-9 items-center justify-center rounded-[10px] border border-[var(--color-brand)]/45 bg-[var(--color-brand-soft)]">
-					<Icon className="size-4" />
-				</span>
+		<div className="w-full">
+			<div className="flex items-center gap-2 font-mono text-[10.5px] uppercase tracking-[0.12em] text-[var(--color-brand)]">
+				<Icon className="size-3.5" />
 				<span>{feature.label}</span>
 			</div>
 			{/* 20ch, not 15. At 15 these titles broke into three short lines — "You
@@ -551,19 +527,16 @@ function FeatureCopy({ feature }: { feature: FeatureChapter }) {
 			{/* Chips, not stacked rows. Three keywords in full-width rows with a
 			    rule above, below, and between read as a table missing its second
 			    column. */}
-			<ul className="mt-7 flex flex-wrap gap-2">
+			<ul className="mt-8 flex flex-wrap gap-x-3 gap-y-2 border-t border-[var(--color-rule)] pt-5 font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--color-ink-4)]">
 				{feature.details.map((detail) => (
-					<li
-						key={detail}
-						className="rounded-full border border-[var(--color-rule)] px-2.5 py-1 text-[12px] text-[var(--color-ink-2)]"
-					>
+					<li key={detail} className="after:ml-3 after:text-[var(--color-rule)] after:content-['/'] last:after:hidden">
 						{detail}
 					</li>
 				))}
 			</ul>
 			<Link
 				href={feature.href}
-				className="group mt-8 inline-flex items-center gap-2 text-[13.5px] font-medium text-[var(--color-ink)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
+				className="group mt-8 inline-flex items-center gap-2 border border-[var(--color-rule)] px-3 py-2 text-[13px] font-medium text-[var(--color-ink)] transition-colors hover:border-[var(--color-ink-4)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]"
 			>
 				Explore {feature.label.toLowerCase()}
 				<ArrowUpRight className="size-3.5 text-[var(--color-brand)] transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
@@ -575,12 +548,12 @@ function FeatureCopy({ feature }: { feature: FeatureChapter }) {
 function FeatureVisual({ feature }: { feature: FeatureChapter }) {
 	return (
 		<div
-			className="relative overflow-hidden rounded-[var(--radius-xl)] border border-white/10 p-3 shadow-[0_32px_80px_-38px_rgba(109,40,217,.75)] sm:p-6"
+			className="relative flex min-h-[430px] items-center overflow-hidden p-5 sm:p-8 lg:min-h-[620px] lg:p-10"
 			style={{ background: feature.background }}
 		>
 			<div
 				aria-hidden="true"
-				className="pointer-events-none absolute inset-0 opacity-25"
+				className="pointer-events-none absolute inset-0 opacity-15"
 				style={{
 					backgroundImage:
 						"linear-gradient(rgba(255,255,255,.1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.1) 1px, transparent 1px)",
@@ -589,11 +562,11 @@ function FeatureVisual({ feature }: { feature: FeatureChapter }) {
 						"linear-gradient(to bottom right, rgba(0,0,0,.78), transparent 78%)",
 				}}
 			/>
-			<div className="relative z-10 flex min-h-[390px] items-center justify-center">
+			<div className="relative z-10 flex w-full items-center justify-center">
 				<DemoPanel
 					label={feature.visualLabel}
 					icon={feature.icon}
-					className={`w-full max-w-[510px] sm:min-h-[280px] ${VISUAL_PLACEMENT[feature.key]}`}
+					className="w-full max-w-[560px] sm:min-h-[300px]"
 				>
 					<FeatureDemo featureKey={feature.key} />
 				</DemoPanel>
@@ -615,7 +588,7 @@ function DemoPanel({
 }) {
 	return (
 		<div
-			className={`flex min-h-[186px] min-w-0 flex-col overflow-hidden rounded-[var(--radius-lg)] border border-white/15 bg-[#101015]/94 shadow-[0_18px_50px_-32px_rgba(0,0,0,.95)] backdrop-blur-sm ${className}`}
+			className={`flex min-h-[186px] min-w-0 flex-col overflow-hidden rounded-[6px] border border-white/20 bg-[#101015]/96 ${className}`}
 		>
 			<div className="flex items-center gap-2 border-b border-[var(--color-rule-soft)] px-4 py-2.5 font-mono text-[9.5px] uppercase tracking-[0.12em] text-[var(--color-ink-4)]">
 				<Icon className="size-3 text-[var(--color-brand)]" />
@@ -625,23 +598,6 @@ function DemoPanel({
 		</div>
 	);
 }
-
-const VISUAL_PLACEMENT: Record<FeatureKey, string> = {
-	schema: "sm:-translate-x-4 sm:-translate-y-3",
-	"live-queries": "sm:translate-x-4 sm:translate-y-3",
-	policies: "sm:translate-x-3 sm:-translate-y-4",
-	auth: "sm:-translate-x-5 sm:translate-y-4",
-	uploads: "sm:translate-x-5 sm:-translate-y-2",
-	presence: "sm:-translate-x-3 sm:translate-y-5",
-	search: "sm:translate-x-4 sm:translate-y-2",
-	database: "sm:-translate-x-4 sm:-translate-y-4",
-	ssr: "sm:translate-x-3 sm:-translate-y-3",
-	functions: "sm:-translate-x-5 sm:translate-y-3",
-	"reactive-queries": "sm:translate-x-5 sm:translate-y-4",
-	jobs: "sm:-translate-x-3 sm:-translate-y-4",
-	workflows: "sm:translate-x-4 sm:-translate-y-2",
-	studio: "sm:-translate-x-4 sm:translate-y-4",
-};
 
 function FeatureDemo({ featureKey }: { featureKey: FeatureKey }) {
 	switch (featureKey) {
