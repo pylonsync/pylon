@@ -524,26 +524,32 @@ const { data } = db.useQuery("Order");`}
 				</div>
 			</Section>
 
-			<section className="border-t border-[var(--color-rule)] bg-[var(--color-brand-soft)]">
-				<div className={`${FRAME_COL} px-5 py-16 sm:px-8 sm:py-20 lg:py-24`}>
-					<div className="grid gap-10 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-						<div>
-							<H2>Create a Pylon app.</H2>
-							<p className="mt-5 max-w-[520px] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-								Self-host the framework, or use Smallware to run it. Connect
-								GitHub or deploy from the CLI.
-							</p>
-						</div>
-						<div className="flex flex-col items-stretch gap-2.5 sm:flex-row sm:items-center sm:gap-3">
-							<Button asChild variant="primary" size="lg">
-								<Link href={ctaUrl(signedIn)}>
-									{signedIn ? "Open dashboard →" : "Create your account →"}
-								</Link>
-							</Button>
-							<Button asChild variant="outline" size="lg">
-								<a href="https://docs.pylonsync.com/cloud">Read the docs</a>
-							</Button>
-						</div>
+			<section className="border-t border-[var(--color-rule)] bg-[#111116] text-[#fafafa]">
+				<div className={`${FRAME_COL} grid md:grid-cols-[minmax(0,1fr)_360px]`}>
+					<div className="border-b border-white/10 px-5 py-16 sm:px-8 sm:py-20 md:border-b-0 md:border-r md:border-white/10 lg:px-12 lg:py-24">
+						<h2 className="max-w-[14ch] text-[clamp(34px,5vw,54px)] font-semibold leading-[1.02] tracking-[-0.04em]">
+							Create a Pylon app.
+						</h2>
+						<p className="mt-5 max-w-[520px] text-[16px] leading-[1.6] text-[#a8a8b2] sm:text-[17px]">
+							Self-host the framework, or use Smallware to run it. Connect
+							GitHub or deploy from the CLI.
+						</p>
+					</div>
+
+					<div className="flex flex-col justify-end gap-5 px-5 py-10 sm:px-8 md:px-10 md:py-20 lg:py-24">
+						<Link
+							href={ctaUrl(signedIn)}
+							className="inline-flex min-h-11 items-center justify-between gap-6 rounded-[var(--radius-sm)] bg-[#f4f4f5] px-4 py-3 text-[14px] font-medium text-[#18181b] transition-[background-color,transform] hover:bg-white active:translate-y-px focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-[#111116]"
+						>
+							{signedIn ? "Open dashboard" : "Create your account"}
+							<span aria-hidden="true">→</span>
+						</Link>
+						<a
+							href="https://docs.pylonsync.com/cloud"
+							className="w-fit text-[14px] text-[#a8a8b2] underline decoration-white/25 underline-offset-4 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+						>
+							Read the cloud docs
+						</a>
 					</div>
 				</div>
 			</section>
