@@ -4,21 +4,16 @@ import { Image, Link } from "@pylonsync/react";
 import { createContext, useContext, useEffect, useState } from "react";
 import {
 	type LucideIcon,
-	Braces,
-	Eye,
-	FileText,
 	Github,
 	GitPullRequest,
 	Globe2,
 	PackageCheck,
-	Terminal,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { MarketingNav } from "./marketing-nav";
 import { SiteFooter } from "./site-footer";
 import { CodePanel } from "./code-panel";
 import { TemplatesStrip } from "./templates-strip";
-import { TransitionChevron } from "./transition-chevron";
 import { FRAME_COL } from "./marketing-frame";
 import { HeroStack } from "./hero-stack";
 import { HeroStart } from "./hero-start";
@@ -31,37 +26,50 @@ import { ctaUrl } from "../lib/account-urls";
 const AGENT_AFFORDANCES: {
 	title: string;
 	desc: string;
-	icon: LucideIcon;
 	href: string;
-	visual: () => React.ReactElement;
+	action: string;
+	artifact: string;
+	lines: string[];
 }[] = [
 	{
 		title: "Rules live in the repo",
 		desc: "New apps include AGENTS.md and the Pylon skill. The agent reads project rules before it edits code.",
-		icon: FileText,
 		href: "/skill",
-		visual: RepoVisual,
+		action: "Read the skill",
+		artifact: "Repository",
+		lines: ["AGENTS.md", ".agents/skills/pylon/SKILL.md", "app.ts"],
 	},
 	{
 		title: "The path is command-line",
 		desc: "Run npm create, pylon dev, and pylon deploy from one terminal.",
-		icon: Terminal,
 		href: "/product/cloud",
-		visual: TerminalVisual,
+		action: "See cloud deployment",
+		artifact: "Terminal",
+		lines: [
+			"npm create @pylonsync/pylon",
+			"pylon dev",
+			"pylon deploy",
+		],
 	},
 	{
 		title: "Generated types catch drift",
 		desc: "Generated clients turn schema drift, missing fields, and invalid arguments into compile errors.",
-		icon: Braces,
 		href: "/product/functions",
-		visual: TypeErrorVisual,
+		action: "See server functions",
+		artifact: "Type check",
+		lines: [
+			'db.useQuery("Order")',
+			'Property "owner" does not exist',
+			"Build stopped before deploy",
+		],
 	},
 	{
 		title: "Runtime state is visible",
 		desc: "The agent can inspect tables, live queries, and logs in /studio while the local server runs.",
-		icon: Eye,
 		href: "/product/studio",
-		visual: StudioVisual,
+		action: "See Studio",
+		artifact: "Studio",
+		lines: ["/studio/tables", "/studio/live-queries", "/studio/logs"],
 	},
 ];
 
@@ -91,19 +99,6 @@ const DEPLOY_STEPS: {
 		body: "The release moves to production with the same runtime.",
 	},
 ];
-
-function agentVisualTone(index: number): string {
-	switch (index) {
-		case 0:
-			return "bg-[var(--color-brand-soft)]/55";
-		case 2:
-			return "bg-[var(--color-status-fail-soft)]/45";
-		case 3:
-			return "bg-[var(--color-status-live-soft)]/45";
-		default:
-			return "bg-[var(--color-paper-1)]";
-	}
-}
 
 // Signed-in state for the nav/CTA. Seeded from the SSR `auth` prop (resolved
 // server-side from the shared SessionStore) so the correct CTA, "Dashboard"
@@ -201,35 +196,36 @@ export function MarketingPage({
 				</div>
 
 				<div className="bg-[var(--color-paper)]">
-					{AGENT_AFFORDANCES.map((a, index) => (
+					{AGENT_AFFORDANCES.map((a) => (
 						<Link
 							key={a.title}
 							href={a.href}
 							className="t-learn group grid border-b border-[var(--color-rule)] transition-colors duration-200 last:border-b-0 hover:bg-[var(--color-paper-1)] focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)] md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]"
 						>
 							<div className="flex flex-col justify-center p-6 sm:p-8 md:min-h-[230px] lg:p-10">
-								<div className="flex items-center gap-3">
-									<span className="flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-md)] border border-[var(--color-rule)] bg-[var(--color-paper-1)] text-[var(--color-brand)] transition-colors group-hover:border-[var(--color-brand)]/40">
-										<a.icon className="size-4" />
-									</span>
-									<h3 className="text-[20px] font-semibold tracking-[-0.02em] text-[var(--color-ink)]">
-										{a.title}
-									</h3>
-								</div>
+								<h3 className="text-[20px] font-semibold tracking-[-0.02em] text-[var(--color-ink)]">
+									{a.title}
+								</h3>
 								<p className="mt-5 max-w-[440px] text-[15px] leading-[1.65] text-[var(--color-ink-2)]">
 									{a.desc}
 								</p>
-								<span className="mt-7 inline-flex items-center gap-1.5 text-[13px] font-medium text-[var(--color-brand)]">
-									Explore
-									<TransitionChevron />
+								<span className="mt-7 text-[13px] font-medium text-[var(--color-brand)] underline-offset-4 group-hover:underline">
+									{a.action}
 								</span>
 							</div>
 
-							<div
-								className={`flex min-h-[210px] items-center border-t border-[var(--color-rule)] p-5 sm:p-8 md:min-h-[260px] md:border-l md:border-t-0 ${agentVisualTone(index)}`}
-							>
-								<div className="w-full overflow-hidden rounded-[6px] border border-[var(--color-rule)] bg-[var(--color-paper)]">
-									<a.visual />
+							<div className="flex min-h-[190px] items-center border-t border-white/10 bg-[#111116] p-6 sm:p-8 md:min-h-[230px] md:border-l md:border-t-0 md:p-10">
+								<div className="w-full min-w-0 font-mono">
+									<div className="border-b border-white/10 pb-3 text-[10.5px] uppercase tracking-[0.12em] text-[#85858f]">
+										{a.artifact}
+									</div>
+									<div className="mt-4 grid gap-3 text-[12px] text-[#d4d4d8] sm:text-[12.5px]">
+										{a.lines.map((line) => (
+											<code key={line} className="block truncate">
+												{line}
+											</code>
+										))}
+									</div>
 								</div>
 							</div>
 						</Link>
@@ -553,172 +549,6 @@ const { data } = db.useQuery("Order");`}
 			</section>
 
 			<SiteFooter />
-		</div>
-	);
-}
-
-// Copy-to-clipboard install command for the hero. Click anywhere on the pill
-// to copy; the icon flips to a check for a beat. Falls back silently if the
-// Clipboard API is unavailable (older browsers / insecure origins).
-// ── Hero furniture ───────────────────────────────────────────────────
-// ── Agent affordance visuals ─────────────────────────────────────────
-// Small, honest mocks of the four artifacts an agent actually touches. They
-// are cropped by their card, so each reads as a window onto a real surface.
-function VisualBar({
-	label,
-	right,
-}: {
-	label: string;
-	right?: React.ReactNode;
-}) {
-	return (
-		// No traffic-light dots. Between these four cards and the browser frame
-		// around the dashboard screenshot the page was drawing five fake windows,
-		// and the dots said nothing the label doesn't say better.
-		<div className="flex items-center gap-2 border-b border-[var(--color-rule)] bg-[var(--color-paper-1)] px-4 py-2">
-			<span className="truncate font-mono text-[10.5px] text-[var(--color-ink-3)]">
-				{label}
-			</span>
-			{right && <span className="ml-auto shrink-0">{right}</span>}
-		</div>
-	);
-}
-
-function RepoVisual() {
-	const files: { name: string; hint: string; mark?: boolean }[] = [
-		{ name: "AGENTS.md", hint: "conventions, read first", mark: true },
-		{ name: "schema/index.ts", hint: "entities · policies" },
-		{ name: "functions/orders.ts", hint: "queries · mutations" },
-		{ name: "app/page.tsx", hint: "db.useQuery" },
-	];
-	return (
-		<div>
-			<VisualBar label="my-app" />
-			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.95]">
-				{files.map((f) => (
-					<div key={f.name} className="flex items-center gap-2">
-						<span
-							className={
-								f.mark
-									? "text-[var(--color-brand)]"
-									: "text-[var(--color-ink-4)]"
-							}
-						>
-							{f.mark ? "▸" : "·"}
-						</span>
-						<span
-							className={
-								f.mark
-									? "font-medium text-[var(--color-brand)]"
-									: "text-[var(--color-ink-2)]"
-							}
-						>
-							{f.name}
-						</span>
-						<span className="truncate text-[var(--color-ink-4)]">{f.hint}</span>
-					</div>
-				))}
-			</div>
-		</div>
-	);
-}
-
-function TerminalVisual() {
-	return (
-		<div>
-			<VisualBar label="zsh / my-app" />
-			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
-				<div className="text-[var(--color-ink-2)]">
-					<span className="text-[var(--color-brand)]">$</span> npm create
-					@pylonsync/pylon
-				</div>
-				<div className="text-[var(--color-ink-4)]">
-					&nbsp;&nbsp;✓ scaffolded my-app
-				</div>
-				<div className="text-[var(--color-ink-2)]">
-					<span className="text-[var(--color-brand)]">$</span> pylon dev
-				</div>
-				<div className="text-[var(--color-status-live)]">
-					&nbsp;&nbsp;✓ schema applied · studio ready
-				</div>
-				<div className="text-[var(--color-ink-3)]">
-					&nbsp;&nbsp;→ http://localhost:3000
-				</div>
-			</div>
-		</div>
-	);
-}
-
-function TypeErrorVisual() {
-	return (
-		<div>
-			<VisualBar
-				label="app/page.tsx"
-				right={
-					<span className="font-mono text-[10.5px] uppercase tracking-[0.1em] text-[var(--color-status-fail)]">
-						1 error
-					</span>
-				}
-			/>
-			<div className="px-4 py-3 font-mono text-[11.5px] leading-[1.9]">
-				<div className="text-[var(--color-ink-3)]">
-					<span className="text-[var(--color-brand)]">const</span> {"{ data }"}{" "}
-					= db.useQuery(
-					<span className="text-[var(--color-status-live)] underline decoration-[var(--color-status-fail)] decoration-wavy underline-offset-[3px]">
-						&quot;Ordr&quot;
-					</span>
-					);
-				</div>
-				<div className="mt-2 rounded-[var(--radius-sm)] border border-[var(--color-status-fail)]/25 bg-[var(--color-status-fail-soft)] px-2 py-1.5 text-[10.5px] leading-[1.5] text-[var(--color-ink-2)]">
-					Argument of type{" "}
-					<span className="text-[var(--color-status-fail)]">
-						&quot;Ordr&quot;
-					</span>{" "}
-					is not assignable to &quot;Order&quot; | &quot;Customer&quot;.
-				</div>
-			</div>
-		</div>
-	);
-}
-
-function StudioVisual() {
-	const rows: [string, string, string][] = [
-		["ord_9f2a", "Mina Okafor", "$1,240"],
-		["ord_7c41", "Mateo Silva", "$880"],
-		["ord_5b88", "Priya Nair", "$2,100"],
-	];
-	return (
-		<div>
-			<VisualBar
-				label="/studio / Order"
-				right={
-					<span className="inline-flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.14em] text-[var(--color-ink-4)]">
-						<span
-							className="block size-1.5 rounded-full"
-							style={{ backgroundColor: "var(--color-status-live)" }}
-						/>
-						live
-					</span>
-				}
-			/>
-			<div className="divide-y divide-[var(--color-rule-soft)]">
-				{rows.map(([id, name, total]) => (
-					<div
-						key={id}
-						className="flex items-center gap-3 px-4 py-[7px] font-mono text-[11.5px]"
-					>
-						<span className="w-[62px] shrink-0 text-[var(--color-ink-4)]">
-							{id}
-						</span>
-						<span className="flex-1 truncate font-sans text-[12px] text-[var(--color-ink-2)]">
-							{name}
-						</span>
-						<span className="shrink-0 tabular-nums text-[var(--color-ink-3)]">
-							{total}
-						</span>
-					</div>
-				))}
-			</div>
 		</div>
 	);
 }
