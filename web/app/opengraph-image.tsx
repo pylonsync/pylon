@@ -105,11 +105,11 @@ function RuntimeBoard() {
 				<path d="M318 272 L408 324 L520 324" fill="none" stroke="#d4d4d8" strokeDasharray="3 5" />
 
 			</svg>
-			<span style={{ position: "absolute", top: 78, left: 8, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>TYPED SCHEMA</span>
-			<span style={{ position: "absolute", top: 313, left: 8, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>DATABASE + FILES</span>
-			<span style={{ position: "absolute", top: 72, right: 14, fontFamily: MONO, fontSize: 12, color: BRAND, letterSpacing: 1.6 }}>LIVE QUERIES</span>
-			<span style={{ position: "absolute", top: 317, right: 8, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>SERVER FUNCTIONS</span>
-			<span style={{ position: "absolute", bottom: 36, left: 172, fontFamily: MONO, fontSize: 11, color: INK_3, letterSpacing: 1.5 }}>ONE SCHEMA. ONE SERVER.</span>
+			<span style={{ position: "absolute", top: 78, left: 24, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>TYPED SCHEMA</span>
+			<span style={{ position: "absolute", top: 313, left: 24, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>DATABASE + FILES</span>
+			<span style={{ position: "absolute", top: 72, right: 28, fontFamily: MONO, fontSize: 12, color: BRAND, letterSpacing: 1.6 }}>LIVE QUERIES</span>
+			<span style={{ position: "absolute", top: 317, right: 24, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>SERVER FUNCTIONS</span>
+			<span style={{ position: "absolute", bottom: 36, left: 204, fontFamily: MONO, fontSize: 11, color: INK_3, letterSpacing: 1.5 }}>ONE SCHEMA. ONE SERVER.</span>
 		</div>
 	);
 }
@@ -148,7 +148,7 @@ export default function OpengraphImage() {
 			<div style={{ display: "flex", height: 550 }}>
 				<div
 					style={{
-						width: 665,
+						width: 600,
 						display: "flex",
 						flexDirection: "column",
 						padding: "56px 52px 48px 48px",
@@ -169,7 +169,7 @@ export default function OpengraphImage() {
 						<span style={{ color: BRAND }}>superpowers</span>
 					</div>
 
-					<div style={{ marginTop: 27, width: 530, fontSize: 22, lineHeight: 1.42, color: INK_2 }}>
+					<div style={{ marginTop: 27, width: 495, fontSize: 22, lineHeight: 1.42, color: INK_2 }}>
 						A full-stack framework for agents to ship secure, high-performance apps.
 					</div>
 
@@ -193,7 +193,7 @@ export default function OpengraphImage() {
 					</div>
 				</div>
 
-				<div style={{ width: 535, display: "flex", borderLeft: `1px solid ${RULE}` }}>
+				<div style={{ width: 600, display: "flex", borderLeft: `1px solid ${RULE}` }}>
 					<RuntimeBoard />
 				</div>
 			</div>
