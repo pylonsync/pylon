@@ -2,53 +2,116 @@ import { ImageResponse } from "@pylonsync/react";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-// The OG card for pylonsync.com, rendered by the framework.
-//
-// This used to be a PNG committed next to this file, screenshotted by hand out
-// of headless Chrome from a sibling .source.html. That pipeline has one failure
-// mode and the repo already hit it: apps/control-plane's source HTML was edited
-// to say usesmallware.com and the committed PNG — still reading pylonsync.com —
-// was never re-rendered, so the product's card advertised the wrong domain.
-// Nothing here can drift from itself.
-//
-// Satori is flexbox-only (same rule as next/og): every element with more than
-// one child sets `display: flex` explicitly. There is no inline layout, so a
-// line of code is a flex row and each colored token is its own child.
-
 export const size = { width: 1200, height: 630 };
 
-// Site tokens — apps/pylonsync-site/web/app/globals.css.
 const PAPER = "#ffffff";
 const PAPER_1 = "#fafafa";
 const RULE = "#e4e4e7";
 const INK = "#18181b";
 const INK_2 = "#3f3f46";
 const INK_3 = "#71717a";
-const INK_4 = "#a1a1aa";
-const COBALT = "#1d4ed8";
-const LIVE = "#059669";
+const BRAND = "#6d4aff";
+const BRAND_SOFT = "#eeeaff";
 
 const SANS = "Geist";
 const MONO = "Geist Mono";
 
-// Satori needs static TTF buffers — it cannot parse woff2 and a variable font
-// crashes it, so the app's usual self-hosted woff2 faces are no use here. These
-// four static cuts sit next to this module and ship with `web/` in the image.
-// Without them the framework falls back to its bundled Inter, which would put
-// the card in a different typeface than the page it links to.
 const font = (file: string) =>
 	readFileSync(fileURLToPath(new URL(`./_og-fonts/${file}`, import.meta.url)));
 
-/** One syntax-colored token. Spaces are significant, so nothing collapses. */
-function Tok({ t, c }: { t: string; c: string }) {
-	return <span style={{ color: c, whiteSpace: "pre" }}>{t}</span>;
+function PylonMark({ size: markSize, color = INK }: { size: number; color?: string }) {
+	return (
+		<svg width={markSize} height={(markSize * 4) / 3} viewBox="0 0 48 64" fill={color}>
+			<path d="M24 2 L10 20 L24 32 Z" />
+			<path d="M24 2 L38 20 L24 32 Z" />
+			<path d="M24 32 L18 48 L24 62 L30 48 Z" />
+			<path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
+			<path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
+		</svg>
+	);
 }
 
-/** A line of the sample. Colors mirror highlightLine() in code-panel.tsx:
- *  comment → ink-4, string → status-live, keyword → cobalt, identifier →
- *  ink-2, punctuation → ink-3. */
-function Line({ children }: { children: React.ReactNode }) {
-	return <div style={{ display: "flex", height: 31 }}>{children}</div>;
+function RuntimeBoard() {
+	const nodes = [
+		{ x: 138, y: 168 },
+		{ x: 228, y: 116 },
+		{ x: 318, y: 168 },
+		{ x: 138, y: 272 },
+		{ x: 228, y: 324 },
+		{ x: 318, y: 272 },
+	];
+
+	return (
+		<div
+			style={{
+				width: "100%",
+				height: "100%",
+				display: "flex",
+				alignItems: "center",
+				justifyContent: "center",
+				background: PAPER_1,
+				position: "relative",
+			}}
+		>
+			<svg width="535" height="470" viewBox="0 0 535 470">
+				<defs>
+					<filter id="board-shadow" x="-20%" y="-20%" width="140%" height="160%">
+						<feDropShadow dx="0" dy="14" stdDeviation="13" floodColor="#6d4aff" floodOpacity="0.12" />
+					</filter>
+				</defs>
+
+				<path d="M228 76 L432 193 L228 310 L24 193 Z" fill="#e8e2ff" stroke="#d8ceff" />
+				<path d="M228 58 L432 175 L228 292 L24 175 Z" fill={PAPER} stroke="#d4d4d8" filter="url(#board-shadow)" />
+
+				<path d="M228 83 L388 175 L228 267 L68 175 Z" fill="none" stroke="#e4e4e7" strokeDasharray="4 7" />
+				<path d="M228 109 L342 175 L228 241 L114 175 Z" fill="none" stroke="#ededf0" strokeDasharray="4 7" />
+				<path d="M228 135 L297 175 L228 215 L159 175 Z" fill="none" stroke="#ededf0" strokeDasharray="4 7" />
+
+				{nodes.map((node) => (
+					<path
+						key={`${node.x}-${node.y}`}
+						d={`M228 175 L${node.x} ${node.y}`}
+						stroke="#d4d4d8"
+						strokeDasharray="3 5"
+					/>
+				))}
+				<path d="M228 175 L318 168" stroke={BRAND} strokeWidth="2" />
+
+				{nodes.map((node, index) => (
+					<g key={`node-${node.x}-${node.y}`}>
+						<path
+							d={`M${node.x} ${node.y - 11} L${node.x + 19} ${node.y} L${node.x} ${node.y + 11} L${node.x - 19} ${node.y} Z`}
+							fill={index === 2 ? BRAND : PAPER}
+							stroke={index === 2 ? BRAND : "#a1a1aa"}
+							strokeWidth="1.4"
+						/>
+						{index !== 2 && <circle cx={node.x} cy={node.y} r="2.5" fill="#a1a1aa" />}
+					</g>
+				))}
+
+				<ellipse cx="228" cy="175" rx="66" ry="38" fill={BRAND_SOFT} />
+				<path d="M228 145 L274 171 L228 197 L182 171 Z" fill={PAPER} stroke={BRAND} strokeWidth="2" />
+				<g transform="translate(214 151) scale(0.58)" fill={BRAND}>
+					<path d="M24 2 L10 20 L24 32 Z" />
+					<path d="M24 2 L38 20 L24 32 Z" />
+					<path d="M24 32 L18 48 L24 62 L30 48 Z" />
+					<path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
+					<path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
+				</g>
+
+				<path d="M138 168 L58 122 L8 122" fill="none" stroke="#d4d4d8" strokeDasharray="3 5" />
+				<path d="M138 272 L58 318 L8 318" fill="none" stroke="#d4d4d8" strokeDasharray="3 5" />
+				<path d="M318 168 L408 116 L520 116" fill="none" stroke={BRAND} strokeWidth="1.6" />
+				<path d="M318 272 L408 324 L520 324" fill="none" stroke="#d4d4d8" strokeDasharray="3 5" />
+
+			</svg>
+			<span style={{ position: "absolute", top: 78, left: 8, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>TYPED SCHEMA</span>
+			<span style={{ position: "absolute", top: 313, left: 8, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>DATABASE + FILES</span>
+			<span style={{ position: "absolute", top: 72, right: 14, fontFamily: MONO, fontSize: 12, color: BRAND, letterSpacing: 1.6 }}>LIVE QUERIES</span>
+			<span style={{ position: "absolute", top: 317, right: 8, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>SERVER FUNCTIONS</span>
+			<span style={{ position: "absolute", bottom: 36, left: 172, fontFamily: MONO, fontSize: 11, color: INK_3, letterSpacing: 1.5 }}>ONE SCHEMA. ONE SERVER.</span>
+		</div>
+	);
 }
 
 export default function OpengraphImage() {
@@ -58,220 +121,85 @@ export default function OpengraphImage() {
 				width: "100%",
 				height: "100%",
 				display: "flex",
+				flexDirection: "column",
 				background: PAPER,
 				color: INK,
 				fontFamily: SANS,
-				// The card needs an edge — pure white bleeds into Slack's and X's
-				// chrome — but it's the same 1px rule the site uses everywhere.
 				border: `1px solid ${RULE}`,
 			}}
 		>
-			{/* Left column */}
 			<div
 				style={{
-					width: 640,
+					height: 80,
 					display: "flex",
-					flexDirection: "column",
-					padding: "62px 0 62px 64px",
+					alignItems: "center",
+					justifyContent: "space-between",
+					padding: "0 48px",
+					borderBottom: `1px solid ${RULE}`,
 				}}
 			>
 				<div style={{ display: "flex", alignItems: "center" }}>
-					{/* Ink, never tinted. DESIGN.md: the mark keeps its own value and
-					    the chrome around it carries the color. */}
-					<svg width="38" height="51" viewBox="0 0 48 64" fill={INK}>
-						<path d="M24 2 L10 20 L24 32 Z" />
-						<path d="M24 2 L38 20 L24 32 Z" />
-						<path d="M24 32 L18 48 L24 62 L30 48 Z" />
-						<path d="M6 30 Q3 46 16 56 L18 50 Q10 44 11 32 Z" />
-						<path d="M42 30 Q45 46 32 56 L30 50 Q38 44 37 32 Z" />
-					</svg>
-					<span
-						style={{
-							marginLeft: 16,
-							fontSize: 37,
-							fontWeight: 700,
-							letterSpacing: -1.1,
-						}}
-					>
-						Pylon
-					</span>
+					<PylonMark size={25} />
+					<span style={{ marginLeft: 12, fontSize: 26, fontWeight: 700, letterSpacing: -0.7 }}>Pylon</span>
 				</div>
-
-				{/* Breaks are explicit. No single measure reproduces the page's
-				    15 / 13 / 9: anything wide enough to hold "Full-stack apps" on
-				    one line also pulls "can" up onto the accent line and orphans
-				    "ship." The phrase "coding agents" has to stay whole. */}
-				<div
-					style={{
-						marginTop: 50,
-						display: "flex",
-						flexDirection: "column",
-						fontSize: 62,
-						fontWeight: 600,
-						letterSpacing: -2.2,
-						lineHeight: 1.02,
-					}}
-				>
-					<span>Full-stack apps that</span>
-					<span style={{ color: COBALT }}>coding agents</span>
-					<span>can ship.</span>
-				</div>
-
-				<div
-					style={{
-						marginTop: 26,
-						width: 430,
-						fontSize: 23,
-						lineHeight: 1.45,
-						color: INK_2,
-					}}
-				>
-					Pylon is a full-stack framework built for agents to ship
-					high-performance and secure apps quickly.
-				</div>
-
-				{/* Closes on the command that starts the thing. Every OG client
-				    already prints the domain under the card, so the old
-				    "— pylonsync.com" line was spending the close on a duplicate. */}
-				<div
-					style={{
-						marginTop: "auto",
-						display: "flex",
-						alignItems: "center",
-						alignSelf: "flex-start",
-						height: 52,
-						padding: "0 22px",
-						border: `1px solid ${RULE}`,
-						borderRadius: 999,
-						fontFamily: MONO,
-						fontSize: 20,
-						color: INK,
-					}}
-				>
-					<span style={{ color: COBALT }}>$</span>
-					<span style={{ marginLeft: 12 }}>npm create @pylonsync/pylon</span>
-				</div>
+				<span style={{ fontFamily: MONO, fontSize: 14, color: INK_3, letterSpacing: 1.5 }}>PYLONSYNC.COM</span>
 			</div>
 
-			{/* The product, cropped by the card's right edge — the same "window onto
-			    something real" the artifact cards on the page use, and it fills the
-			    40% the old card left empty. Top edge sits on the wordmark's top,
-			    bottom on the command pill's bottom, so the crop reads as intended
-			    rather than as a clipped element. */}
-			<div
-				style={{
-					width: 560,
-					margin: "62px 0 62px 24px",
-					display: "flex",
-					flexDirection: "column",
-					background: PAPER_1,
-					border: `1px solid ${RULE}`,
-					borderRight: "none",
-					borderTopLeftRadius: 16,
-					borderBottomLeftRadius: 16,
-				}}
-			>
+			<div style={{ display: "flex", height: 550 }}>
 				<div
 					style={{
-						display: "flex",
-						padding: "13px 22px",
-						borderBottom: `1px solid ${RULE}`,
-						fontFamily: MONO,
-						fontSize: 15,
-						color: INK_3,
-					}}
-				>
-					app.ts
-				</div>
-				<div
-					style={{
+						width: 665,
 						display: "flex",
 						flexDirection: "column",
-						padding: "20px 22px",
-						fontFamily: MONO,
-						fontSize: 18,
-						color: INK_2,
+						padding: "56px 52px 48px 48px",
 					}}
 				>
-					<Line>
-						<Tok t="// one entity → table, API, typed client" c={INK_4} />
-					</Line>
-					<Line>
-						<Tok t="const " c={COBALT} />
-						<Tok t="Order" c={INK_2} />
-						<Tok t=" = " c={INK_3} />
-						<Tok t="entity" c={COBALT} />
-						<Tok t="(" c={INK_3} />
-						<Tok t={'"Order"'} c={LIVE} />
-						<Tok t=", {" c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t="  customer" c={INK_2} />
-						<Tok t=": " c={INK_3} />
-						<Tok t="field" c={COBALT} />
-						<Tok t="." c={INK_3} />
-						<Tok t="string" c={INK_2} />
-						<Tok t="()," c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t="  total" c={INK_2} />
-						<Tok t=": " c={INK_3} />
-						<Tok t="field" c={COBALT} />
-						<Tok t="." c={INK_3} />
-						<Tok t="float" c={INK_2} />
-						<Tok t="()," c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t="});" c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t=" " c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t="// access rules next to the schema" c={INK_4} />
-					</Line>
-					<Line>
-						<Tok t="policy" c={COBALT} />
-						<Tok t="({ " c={INK_3} />
-						<Tok t="entity" c={COBALT} />
-						<Tok t=": " c={INK_3} />
-						<Tok t={'"Order"'} c={LIVE} />
-						<Tok t="," c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t="  allowRead" c={INK_2} />
-						<Tok t=": " c={INK_3} />
-						<Tok t={'"auth.userId != null"'} c={LIVE} />
-						<Tok t="," c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t="});" c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t=" " c={INK_3} />
-					</Line>
-					<Line>
-						<Tok t="const " c={COBALT} />
-						<Tok t="{ " c={INK_3} />
-						<Tok t="data" c={INK_2} />
-						<Tok t=" } = " c={INK_3} />
-						<Tok t="db" c={INK_2} />
-						<Tok t="." c={INK_3} />
-						<Tok t="useQuery" c={INK_2} />
-						<Tok t="(" c={INK_3} />
-						<Tok t={'"Order"'} c={LIVE} />
-						<Tok t=");" c={INK_3} />
-					</Line>
+					<div
+						style={{
+							display: "flex",
+							flexDirection: "column",
+							fontSize: 65,
+							fontWeight: 600,
+							letterSpacing: -2.8,
+							lineHeight: 0.98,
+						}}
+					>
+						<span>Give your agent</span>
+						<span style={{ color: BRAND }}>app building</span>
+						<span style={{ color: BRAND }}>superpowers</span>
+					</div>
+
+					<div style={{ marginTop: 27, width: 530, fontSize: 22, lineHeight: 1.42, color: INK_2 }}>
+						A full-stack framework for agents to ship secure, high-performance apps.
+					</div>
+
+					<div
+						style={{
+							marginTop: "auto",
+							display: "flex",
+							alignItems: "center",
+							alignSelf: "flex-start",
+							height: 52,
+							padding: "0 20px",
+							background: INK,
+							borderRadius: 10,
+							fontFamily: MONO,
+							fontSize: 17,
+							color: PAPER,
+						}}
+					>
+						<span style={{ color: "#a78bfa" }}>$</span>
+						<span style={{ marginLeft: 12 }}>npm create @pylonsync/pylon@latest</span>
+					</div>
+				</div>
+
+				<div style={{ width: 535, display: "flex", borderLeft: `1px solid ${RULE}` }}>
+					<RuntimeBoard />
 				</div>
 			</div>
 		</div>,
 		{
 			...size,
-			// No `headers` override on purpose. The OG route already defaults to
-			// `public, max-age=3600, s-maxage=86400` and the on-disk ISR layer keys
-			// by URL, so the render happens once per deploy, not once per crawler.
-			// (`pylon dev` forces `private, no-store` on every response — that's the
-			// dev live-reload default, not this route's production behavior.)
 			fonts: [
 				{ name: SANS, data: font("Geist-400.ttf"), weight: 400, style: "normal" },
 				{ name: SANS, data: font("Geist-600.ttf"), weight: 600, style: "normal" },
