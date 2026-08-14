@@ -65,9 +65,9 @@ export function TemplatesStrip() {
 									type="button"
 									aria-pressed={selected}
 									onClick={() => setActiveIndex(index)}
-								className={`min-w-[72%] border-r border-[var(--color-rule)] px-5 py-4 text-left transition-[background-color,color] duration-200 last:border-r-0 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)] sm:min-w-[42%] lg:min-w-0 lg:border-b lg:border-r-0 lg:last:border-b-0 ${
+									className={`min-w-[72%] border-r border-[var(--color-rule)] px-5 py-4 text-left transition-[background-color,color,box-shadow] duration-200 last:border-r-0 focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--color-brand)] sm:min-w-[42%] lg:min-w-0 lg:border-b lg:border-r-0 lg:last:border-b-0 ${
 										selected
-											? "bg-[var(--color-brand-soft)] text-[var(--color-ink)]"
+											? "bg-[var(--color-paper-2)] text-[var(--color-ink)] shadow-[inset_2px_0_0_var(--color-ink)]"
 											: "text-[var(--color-ink-3)] hover:bg-[var(--color-paper-1)] hover:text-[var(--color-ink)]"
 									}`}
 								>
