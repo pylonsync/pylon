@@ -845,6 +845,40 @@ html {
   --panel-translate-y: 16px;
 }
 
+/* The capability chapter stays readable before hydration. On large screens,
+   the active row gets the panel-reveal emphasis while nearby rows remain
+   visible. This avoids the blank mobile state caused by hiding rows before the
+   observer starts. */
+@media (min-width: 1024px) {
+  .feature-ledger-copy,
+  .feature-ledger-visual {
+    transition:
+      transform var(--panel-open-dur) var(--panel-ease),
+      opacity var(--panel-open-dur) var(--panel-ease),
+      filter var(--panel-open-dur) var(--panel-ease);
+    will-change: transform, opacity, filter;
+  }
+
+  .feature-ledger-row[data-active="false"] .feature-ledger-copy {
+    transform: translateY(12px);
+    opacity: 0.58;
+    filter: blur(1px);
+  }
+
+  .feature-ledger-row[data-active="false"] .feature-ledger-visual {
+    transform: translateY(16px);
+    opacity: 0.64;
+    filter: blur(var(--panel-blur));
+  }
+
+  .feature-ledger-row[data-active="true"] .feature-ledger-copy,
+  .feature-ledger-row[data-active="true"] .feature-ledger-visual {
+    transform: translateY(0);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
 .t-learn-chevron {
   display: inline-flex;
   transform: translateX(0);
@@ -862,5 +896,15 @@ html {
 .t-learn:hover .t-learn-arm-bot { transform: rotate(calc(var(--learn-spread) * -1)); }
 
 @media (prefers-reduced-motion: reduce) {
-  .t-learn-chevron, .t-learn-arm { transition: none !important; }
+  .feature-ledger-copy,
+  .feature-ledger-visual,
+  .t-learn-chevron,
+  .t-learn-arm { transition: none !important; }
+
+  .feature-ledger-copy,
+  .feature-ledger-visual {
+    transform: none !important;
+    opacity: 1 !important;
+    filter: none !important;
+  }
 }

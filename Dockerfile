@@ -17,11 +17,12 @@
 # runtime is actually pulled — :latest can resolve to a cached old digest on a
 # remote builder and silently ship a stale @pylonsync/functions.
 #
+# Keep this version equal to the exact @pylonsync versions in package.json.
 # >= 0.3.356 is REQUIRED, not merely preferred: every earlier release refuses to
 # boot an app with no entities ("SCHEMA_EMPTY — Schema has no entities"). This
 # site is exactly that shape — SSR pages, no database — so on 0.3.355 or older
 # the container crash-loops at startup.
-ARG PYLON_IMAGE=ghcr.io/pylonsync/pylon:0.3.356
+ARG PYLON_IMAGE=ghcr.io/pylonsync/pylon:0.4.17
 FROM ${PYLON_IMAGE}
 
 # We're already at WORKDIR=/app in the base image, owned by the pylon user.
