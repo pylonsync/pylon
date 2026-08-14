@@ -53,7 +53,7 @@ function RuntimeBoard() {
 				position: "relative",
 			}}
 		>
-			<svg width="535" height="470" viewBox="0 0 535 470">
+			<svg width="600" height="500" viewBox="0 0 535 470">
 				<defs>
 					<filter id="board-shadow" x="-20%" y="-20%" width="140%" height="160%">
 						<feDropShadow dx="0" dy="14" stdDeviation="13" floodColor="#6d4aff" floodOpacity="0.12" />
@@ -109,7 +109,7 @@ function RuntimeBoard() {
 			<span style={{ position: "absolute", top: 313, left: 24, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>DATABASE + FILES</span>
 			<span style={{ position: "absolute", top: 72, right: 28, fontFamily: MONO, fontSize: 12, color: BRAND, letterSpacing: 1.6 }}>LIVE QUERIES</span>
 			<span style={{ position: "absolute", top: 317, right: 24, fontFamily: MONO, fontSize: 12, color: INK_3, letterSpacing: 1.6 }}>SERVER FUNCTIONS</span>
-			<span style={{ position: "absolute", bottom: 36, left: 204, fontFamily: MONO, fontSize: 11, color: INK_3, letterSpacing: 1.5 }}>ONE SCHEMA. ONE SERVER.</span>
+			<span style={{ position: "absolute", bottom: 28, left: 234, fontFamily: MONO, fontSize: 11, color: INK_3, letterSpacing: 1.5 }}>ONE SCHEMA. ONE SERVER.</span>
 		</div>
 	);
 }
@@ -148,20 +148,20 @@ export default function OpengraphImage() {
 			<div style={{ display: "flex", height: 550 }}>
 				<div
 					style={{
-						width: 600,
+						width: 540,
 						display: "flex",
 						flexDirection: "column",
-						padding: "56px 52px 48px 48px",
+						padding: "56px 32px 48px 48px",
 					}}
 				>
 					<div
 						style={{
 							display: "flex",
 							flexDirection: "column",
-							fontSize: 65,
+							fontSize: 59,
 							fontWeight: 600,
-							letterSpacing: -2.8,
-							lineHeight: 0.98,
+							letterSpacing: -2.5,
+							lineHeight: 0.99,
 						}}
 					>
 						<span>Give your agent</span>
@@ -169,7 +169,7 @@ export default function OpengraphImage() {
 						<span style={{ color: BRAND }}>superpowers</span>
 					</div>
 
-					<div style={{ marginTop: 27, width: 495, fontSize: 22, lineHeight: 1.42, color: INK_2 }}>
+					<div style={{ marginTop: 27, width: 430, fontSize: 21, lineHeight: 1.42, color: INK_2 }}>
 						A full-stack framework for agents to ship secure, high-performance apps.
 					</div>
 
@@ -184,7 +184,7 @@ export default function OpengraphImage() {
 							background: INK,
 							borderRadius: 10,
 							fontFamily: MONO,
-							fontSize: 17,
+							fontSize: 16,
 							color: PAPER,
 						}}
 					>
@@ -193,7 +193,7 @@ export default function OpengraphImage() {
 					</div>
 				</div>
 
-				<div style={{ width: 600, display: "flex", borderLeft: `1px solid ${RULE}` }}>
+				<div style={{ width: 660, display: "flex", borderLeft: `1px solid ${RULE}` }}>
 					<RuntimeBoard />
 				</div>
 			</div>
