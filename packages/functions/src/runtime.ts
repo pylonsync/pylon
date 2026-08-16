@@ -29,6 +29,7 @@ import type {
   LlmCompleteResponse,
   LlmStreamEvent,
   Rooms,
+  Workflows,
   Connections,
   QueryCtx,
   MutationCtx,
@@ -937,6 +938,35 @@ export function buildRooms(callId: string): Rooms {
 }
 
 /**
+ * Build `ctx.workflows` — start a durable workflow or deliver an event
+ * to a waiting one, from mutation/action code. Round-trips a
+ * `workflow_op` frame to the host's WorkflowEngine; the engine's driver
+ * takes it from there, so `start` returns the instance id immediately.
+ * Uses the queued call_id-keyed `rpc` (the reply carries no op_id).
+ */
+export function buildWorkflows(callId: string): Workflows {
+  return {
+    async start(name: string, input?: unknown) {
+      return (await rpc(callId, {
+        type: "workflow_op",
+        op: "start",
+        name,
+        input: input ?? null,
+      })) as { id: string };
+    },
+    async sendEvent(workflowId: string, event: string, data?: unknown) {
+      return (await rpc(callId, {
+        type: "workflow_op",
+        op: "send_event",
+        workflow_id: workflowId,
+        event,
+        data: data ?? null,
+      })) as { delivered: boolean };
+    },
+  };
+}
+
+/**
  * Build the connection registry that round-trips through the host.
  * Each method emits a `{type:"connection", op:"..."}` message;
  * the host's ConnectionManager runs the actual OAuth flow + DB
@@ -1033,6 +1063,7 @@ function buildActionCtx(
     llm,
     rooms,
     connections,
+    workflows: buildWorkflows(callId),
     env: process.env as Record<string, string>,
     async runQuery(fnName, args) {
       return rpc(callId, {
@@ -1219,6 +1250,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
         llm,
         rooms,
         connections,
+        workflows: buildWorkflows(msg.call_id),
         error(code, message) {
           const err = new Error(message);
           (err as any).code = code;

@@ -208,6 +208,14 @@ pub type LlmStreamHook = Box<
 pub type RoomBroadcastHook =
     Box<dyn Fn(&str, &str, serde_json::Value) -> Result<bool, (String, String)> + Send + Sync>;
 
+/// Callback for `ctx.workflows.*` (start / send_event). Wired to the
+/// runtime's WorkflowEngine; returns the op's JSON result.
+pub type WorkflowOpHook = Box<
+    dyn Fn(&crate::protocol::WorkflowOpMessage) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
 /// Callback for `ctx.connections.{authorizeUrl,get,disconnect}`.
 ///
 /// Args: op name (`"authorize_url"` | `"get"` | `"disconnect"` |
@@ -347,6 +355,7 @@ pub struct FnRunner {
     /// Hook for `ctx.rooms.broadcast(...)`. Wires server-originated
     /// room events to the runtime's RoomManager + presence notifier.
     room_broadcast_hook: Mutex<Option<RoomBroadcastHook>>,
+    workflow_op_hook: Mutex<Option<WorkflowOpHook>>,
     /// Hook for `ctx.connections.*`. Wires authorize-url / get /
     /// list / disconnect calls to the runtime's ConnectionManager.
     connection_hook: Mutex<Option<ConnectionHook>>,
@@ -397,6 +406,7 @@ impl FnRunner {
             llm_hook: Mutex::new(None),
             llm_stream_hook: Mutex::new(None),
             room_broadcast_hook: Mutex::new(None),
+            workflow_op_hook: Mutex::new(None),
             connection_hook: Mutex::new(None),
             call_timeout: Mutex::new(DEFAULT_CALL_TIMEOUT),
             started_with: Mutex::new(None),
@@ -533,6 +543,12 @@ impl FnRunner {
     /// When unset, the call rejects with `ROOMS_NOT_CONFIGURED`.
     pub fn set_room_broadcast_hook(&self, hook: RoomBroadcastHook) {
         *self.room_broadcast_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the `ctx.workflows.*` hook. Without it, calls reject
+    /// with `WORKFLOWS_NOT_CONFIGURED`.
+    pub fn set_workflow_op_hook(&self, hook: WorkflowOpHook) {
+        *self.workflow_op_hook.lock().unwrap() = Some(hook);
     }
 
     /// Install the `ctx.connections.*` hook. Without it, calls
@@ -1595,6 +1611,29 @@ impl FnRunner {
                             call_id.clone(),
                             "FILES_SIGNING_NOT_CONFIGURED",
                             "this host does not support signed file URLs",
+                        ),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::WorkflowOp(req) if req.call_id == call_id => {
+                    // `ctx.workflows.start` / `.sendEvent` — app code
+                    // driving durable workflows. Trust model matches
+                    // ctx.scheduler: server-side handler code is trusted
+                    // to start its own app's workflows.
+                    let result: Option<Result<serde_json::Value, (String, String)>> = {
+                        let hook = self.workflow_op_hook.lock().unwrap();
+                        hook.as_ref().map(|cb| cb(&req))
+                    };
+                    let reply = match result {
+                        Some(Ok(value)) => DbResultMessage::ok(call_id.clone(), value),
+                        Some(Err((code, msg))) => {
+                            DbResultMessage::err(call_id.clone(), &code, &msg)
+                        }
+                        None => DbResultMessage::err(
+                            call_id.clone(),
+                            "WORKFLOWS_NOT_CONFIGURED",
+                            "this host has no workflow engine wired (no workflows/ dir was declared)",
                         ),
                     };
                     self.send(&reply)?;

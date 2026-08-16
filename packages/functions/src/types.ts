@@ -471,6 +471,30 @@ export interface Rooms {
   ): Promise<{ delivered: boolean }>;
 }
 
+/**
+ * Durable workflows, driven from app code (`ctx.workflows` on mutations
+ * and actions — not queries, whose reactive re-runs would re-start).
+ * Workflows are declared in the app's `workflows/` directory; see the
+ * `workflow()` export.
+ */
+export interface Workflows {
+  /**
+   * Start a workflow instance by name. Returns immediately with the
+   * instance id — the engine's background driver executes the steps.
+   */
+  start(name: string, input?: unknown): Promise<{ id: string }>;
+  /**
+   * Deliver an event to an instance paused on
+   * `wf.waitForEvent(event)`. Rejects when the instance isn't waiting
+   * for that event.
+   */
+  sendEvent(
+    workflowId: string,
+    event: string,
+    data?: unknown,
+  ): Promise<{ delivered: boolean }>;
+}
+
 export interface LlmMessage {
   role: "user" | "assistant" | "system" | "tool";
   content: string | LlmContentBlock[];
@@ -724,6 +748,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   rooms: Rooms;
   /** Per-user OAuth connection registry. */
   connections: Connections;
+  /** Durable workflows: start / deliver events — see {@link Workflows}. */
+  workflows: Workflows;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
   /** Create a typed error that triggers rollback. */
@@ -753,6 +779,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   rooms: Rooms;
   /** Per-user OAuth connection registry. */
   connections: Connections;
+  /** Durable workflows: start / deliver events — see {@link Workflows}. */
+  workflows: Workflows;
   /** Environment variables / secrets. */
   env: Record<string, string>;
   /** Signed file-download URLs — see {@link Files}. */

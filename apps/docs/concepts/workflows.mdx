@@ -53,23 +53,35 @@ same idle timeout and cancellation semantics as any action.
 
 ## Starting and driving
 
-Start a workflow from the admin API (or the dashboard):
+Start a workflow from any mutation or action — `ctx.workflows.start`
+returns the instance id immediately and the engine's background driver
+takes it from there:
 
-```bash
-curl -X POST https://your-app/api/workflows/start \
-  -H "Authorization: Bearer $PYLON_ADMIN_TOKEN" \
-  -d '{"name": "onboarding", "input": {"userId": "u_123"}}'
+```ts
+// functions/onSignup.ts
+export default mutation({
+  async handler(ctx, args) {
+    const user = await ctx.db.insert("User", args);
+    const { id } = await ctx.workflows.start("onboarding", {
+      userId: user.id,
+    });
+    return { userId: user.id, onboardingWorkflow: id };
+  },
+});
 ```
 
-The engine drives it automatically from there: steps execute through the
-background job queue, sleeps wake on schedule, and state persists to
-`<app-db>.workflows.db`. Deliver an event to a waiting run with:
+Deliver an event to a run paused on `waitForEvent` the same way — for
+example from the webhook action that received the confirmation:
 
-```bash
-curl -X POST https://your-app/api/workflows/<id>/event \
-  -H "Authorization: Bearer $PYLON_ADMIN_TOKEN" \
-  -d '{"event": "email_confirmed", "data": {"ok": true}}'
+```ts
+await ctx.workflows.sendEvent(workflowId, "email_confirmed", { ok: true });
 ```
+
+Steps execute through the background job queue, sleeps wake on
+schedule, and state persists to `<app-db>.workflows.db` across
+restarts. The admin API drives the same engine for operators:
+`POST /api/workflows/start`, `POST /api/workflows/<id>/event` (both
+with `Authorization: Bearer $PYLON_ADMIN_TOKEN`).
 
 Inspect runs at `GET /api/workflows` / `GET /api/workflows/<id>`
 (step-by-step results, timings, retry counts), or cancel with

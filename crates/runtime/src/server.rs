@@ -2249,6 +2249,47 @@ fn start_server(
                     .collect::<Vec<_>>()
                     .join(", ")
             );
+            // ctx.workflows.start / sendEvent from app code. Installed on
+            // EVERY pool runner (calls land on any of them). start()'s
+            // kick enqueues the advance job, so the caller returns
+            // immediately with the instance id.
+            for runner in ops.pool.runners() {
+                let we = Arc::clone(&workflow_engine);
+                runner.set_workflow_op_hook(Box::new(move |req| match req.op.as_str() {
+                    "start" => {
+                        let name = req.name.as_deref().ok_or_else(|| {
+                            ("WORKFLOW_BAD_REQUEST".to_string(), "start requires a name".to_string())
+                        })?;
+                        let input = req.input.clone().unwrap_or(serde_json::Value::Null);
+                        we.start(name, input)
+                            .map(|id| serde_json::json!({ "id": id }))
+                            .map_err(|e| ("WORKFLOW_START_FAILED".to_string(), e))
+                    }
+                    "send_event" => {
+                        let id = req.workflow_id.as_deref().ok_or_else(|| {
+                            (
+                                "WORKFLOW_BAD_REQUEST".to_string(),
+                                "send_event requires a workflow_id".to_string(),
+                            )
+                        })?;
+                        let event = req.event.as_deref().ok_or_else(|| {
+                            (
+                                "WORKFLOW_BAD_REQUEST".to_string(),
+                                "send_event requires an event name".to_string(),
+                            )
+                        })?;
+                        let data = req.data.clone().unwrap_or(serde_json::Value::Null);
+                        we.send_event(id, event, data)
+                            .map(|_| serde_json::json!({ "delivered": true }))
+                            .map_err(|e| ("WORKFLOW_EVENT_FAILED".to_string(), e))
+                    }
+                    other => Err((
+                        "WORKFLOW_BAD_REQUEST".to_string(),
+                        format!("unknown workflow op \"{other}\""),
+                    )),
+                }));
+            }
+
             let ops_for_wf: Arc<dyn pylon_router::FnOps> =
                 Arc::clone(ops) as Arc<dyn pylon_router::FnOps>;
             workflow_engine.set_runner_hook(std::sync::Arc::new(move |request| {

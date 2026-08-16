@@ -420,6 +420,12 @@ pub enum TsMessage {
     #[serde(rename = "connection")]
     Connection(ConnectionOpMessage),
 
+    /// `ctx.workflows.*` — start a durable workflow or deliver an event
+    /// to a waiting one, from app code (mutations/actions). The host
+    /// routes it to the WorkflowEngine via the workflow_op_hook.
+    #[serde(rename = "workflow_op")]
+    WorkflowOp(WorkflowOpMessage),
+
     /// Function completed successfully.
     #[serde(rename = "return")]
     Return(ReturnMessage),
@@ -488,6 +494,7 @@ impl TsMessage {
             TsMessage::LlmStream(m) => Some(&m.call_id),
             TsMessage::RoomBroadcast(m) => Some(&m.call_id),
             TsMessage::Connection(m) => Some(&m.call_id),
+            TsMessage::WorkflowOp(m) => Some(&m.call_id),
             TsMessage::Return(m) => Some(&m.call_id),
             TsMessage::Error(m) => Some(&m.call_id),
             TsMessage::ResponseStart(m) => Some(&m.call_id),
@@ -496,6 +503,26 @@ impl TsMessage {
             TsMessage::BundleClientResult(m) => Some(&m.call_id),
         }
     }
+}
+
+/// `ctx.workflows.start(name, input)` / `ctx.workflows.sendEvent(id,
+/// event, data)` from app code. `op` selects which; unused fields stay
+/// None. Replied to with a `result` frame.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowOpMessage {
+    pub call_id: String,
+    /// "start" | "send_event"
+    pub op: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub input: Option<serde_json::Value>,
+    #[serde(default)]
+    pub workflow_id: Option<String>,
+    #[serde(default)]
+    pub event: Option<String>,
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
 }
 
 /// Handshake payload from the TS runtime.

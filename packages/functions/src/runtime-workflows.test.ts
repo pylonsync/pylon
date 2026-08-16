@@ -43,10 +43,22 @@ function parseFrames(text: string): Record<string, unknown>[] {
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 }
 
+const START_ACTION = `
+export default {
+  type: "action",
+  auth: "user",
+  handler: async (ctx, args) => {
+    const started = await ctx.workflows.start("greet", { userId: args.userId });
+    return { workflowId: started.id };
+  },
+};
+`;
+
 test("workflows/ dir boots, declares in ready, and slices execute with a live ctx", async () => {
-  // App root: empty functions/ + one workflow file.
+  // App root: one action (exercises ctx.workflows.start) + one workflow.
   const appDir = mkdtempSync(join(tmpdir(), "pylon-wf-e2e-"));
   mkdirSync(join(appDir, "functions"));
+  writeFileSync(join(appDir, "functions", "kickoff.ts"), START_ACTION);
   mkdirSync(join(appDir, "workflows"));
   writeFileSync(join(appDir, "workflows", "greet.ts"), WORKFLOW_FILE);
 
@@ -212,6 +224,39 @@ test("workflows/ dir boots, declares in ready, and slices execute with a live ct
     action: "complete",
     output: { greeting: "Hello Ada" },
   });
+
+  // 5. App code starts a workflow: the kickoff action's
+  //    ctx.workflows.start emits a workflow_op frame; answer it as the
+  //    host's engine hook would and confirm the id flows back out.
+  send({
+    type: "call",
+    call_id: "c_4",
+    fn_name: "kickoff",
+    fn_type: "action",
+    auth: { user_id: "u1", is_admin: false },
+    args: { userId: "u1" },
+  });
+  await readUntil((fs) => fs.some((f) => f.type === "workflow_op"));
+  const wfOp = frames.find((f) => f.type === "workflow_op") as {
+    call_id: string;
+    op: string;
+    name: string;
+    input: unknown;
+  };
+  expect(wfOp).toMatchObject({
+    call_id: "c_4",
+    op: "start",
+    name: "greet",
+    input: { userId: "u1" },
+  });
+  send({ type: "result", call_id: "c_4", data: { id: "wf_777" } });
+  await readUntil((fs) =>
+    fs.some((f) => f.type === "return" && f.call_id === "c_4"),
+  );
+  const kicked = frames.find(
+    (f) => f.type === "return" && f.call_id === "c_4",
+  ) as { value: Record<string, unknown> };
+  expect(kicked.value).toEqual({ workflowId: "wf_777" });
 
   proc.kill();
   await proc.exited;
