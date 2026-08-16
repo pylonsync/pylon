@@ -92,6 +92,13 @@ pub struct Job {
     pub error: Option<String>,
     /// Delay before first execution (in seconds from creation).
     pub delay_secs: u64,
+    /// Absolute epoch-seconds before which the job must not run. 0 means
+    /// unset — readiness falls back to `created_at + delay_secs`. Stamped
+    /// by `fail()` with the retry back-off; `delay_secs`/`created_at` are
+    /// left alone so the job's creation time stays truthful in listings.
+    /// `#[serde(default)]` keeps older persisted jobs deserializable.
+    #[serde(default)]
+    pub ready_at: u64,
     /// Queue name (for routing to specific workers).
     pub queue: String,
     /// Auth identity to dispatch the handler with. `None` falls back
@@ -158,6 +165,10 @@ pub struct JobQueue {
     /// mirrored to SQLite so jobs survive restart. Failures to persist are
     /// logged but not surfaced — durability is best-effort, never blocking.
     store: Mutex<Option<std::sync::Arc<crate::job_store::JobStore>>>,
+    /// First-retry back-off in seconds (doubles per attempt, capped at
+    /// [`MAX_RETRY_BACKOFF_SECS`]). Default 1. Tests set 0 to keep the
+    /// fail→dequeue→fail loop synchronous.
+    retry_backoff_base_secs: AtomicU64,
 }
 
 impl JobQueue {
@@ -174,7 +185,14 @@ impl JobQueue {
             failed_count: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
             store: Mutex::new(None),
+            retry_backoff_base_secs: AtomicU64::new(1),
         }
+    }
+
+    /// Override the first-retry back-off (seconds). 0 disables the delay —
+    /// tests use it so retries are immediately dequeuable.
+    pub fn set_retry_backoff_base_secs(&self, secs: u64) {
+        self.retry_backoff_base_secs.store(secs, Ordering::Relaxed);
     }
 
     /// Attach a persistent store. After this, every enqueue, state change, and
@@ -300,6 +318,7 @@ impl JobQueue {
             completed_at: None,
             error: None,
             delay_secs,
+            ready_at: 0,
             queue: queue.to_string(),
             auth,
         };
@@ -398,7 +417,11 @@ impl JobQueue {
         }
     }
 
-    /// Mark a job as failed. Retries if under max_retries.
+    /// Mark a job as failed. Retries with exponential back-off if under
+    /// max_retries: base × 2^(attempt-1), capped at [`MAX_RETRY_BACKOFF_SECS`].
+    /// Without the back-off stamp, a deterministic failure burned every
+    /// retry in milliseconds and dead-lettered before the operator could
+    /// blink — the exact opposite of what retries are for.
     pub fn fail(&self, job_id: &str, error: &str) {
         let job = self.running.lock().unwrap().remove(job_id);
         if let Some(mut job) = job {
@@ -410,6 +433,10 @@ impl JobQueue {
                 job.status = JobStatus::Retrying;
                 job.started_at = None;
                 job.completed_at = None;
+                job.ready_at = now_secs().saturating_add(retry_backoff_secs(
+                    self.retry_backoff_base_secs.load(Ordering::Relaxed),
+                    job.retry_count,
+                ));
 
                 self.persist(&job);
                 let mut pending = self.pending.lock().unwrap();
@@ -528,6 +555,9 @@ impl JobQueue {
             job.error = None;
             job.started_at = None;
             job.completed_at = None;
+            // Clear the back-off stamp: a manual revive means "run it now",
+            // not "wait out the schedule the dead job earned".
+            job.ready_at = 0;
 
             let priority = job.priority as u8;
             let mut pending = self.pending.lock().unwrap();
@@ -754,6 +784,22 @@ fn now_iso() -> String {
     format!("{}Z", now_secs())
 }
 
+/// Ceiling on the retry back-off, whatever the attempt count. Five minutes
+/// keeps a long-failing job from parking itself for hours while still
+/// giving a flapping dependency real room to recover.
+const MAX_RETRY_BACKOFF_SECS: u64 = 300;
+
+/// base × 2^(attempt−1), capped. `attempt` is the retry_count AFTER the
+/// increment (first retry = 1). A base of 0 disables back-off entirely.
+fn retry_backoff_secs(base: u64, attempt: u32) -> u64 {
+    if base == 0 || attempt == 0 {
+        return 0;
+    }
+    // Shift capped well below u64 range; the MAX cap makes larger shifts moot.
+    let shift = (attempt - 1).min(16);
+    base.saturating_mul(1u64 << shift).min(MAX_RETRY_BACKOFF_SECS)
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -761,9 +807,13 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// True if a job's `delay_secs` has elapsed since `created_at`. Jobs
-/// without a delay (`delay_secs == 0`) are always ready.
+/// True when the job may run: past its retry back-off (`ready_at`,
+/// absolute epoch seconds — takes precedence when set), else past
+/// `created_at + delay_secs`. Jobs with neither are always ready.
 fn is_ready(job: &Job, now: u64) -> bool {
+    if job.ready_at > 0 {
+        return now >= job.ready_at;
+    }
     if job.delay_secs == 0 {
         return true;
     }
@@ -800,6 +850,7 @@ mod tests {
             retry_count: 0,
             queue: "default".to_string(),
             delay_secs: 0,
+            ready_at: 0,
             error: None,
             created_at: "1000Z".to_string(),
             started_at: None,
@@ -958,11 +1009,90 @@ mod tests {
         assert_eq!(job.retry_count, 1);
         assert_eq!(job.status, JobStatus::Retrying);
         assert_eq!(q.pending_count(), 1);
+
+        // The retry earned a back-off: it is NOT immediately dequeuable
+        // (this is the bug where a deterministic failure burned every
+        // retry in milliseconds and dead-lettered instantly).
+        assert!(job.ready_at > now_secs());
+        assert!(q.dequeue(Duration::from_millis(10)).is_none());
+    }
+
+    #[test]
+    fn retry_backoff_schedule_doubles_and_caps() {
+        // base × 2^(attempt−1), capped at MAX_RETRY_BACKOFF_SECS.
+        assert_eq!(retry_backoff_secs(1, 1), 1);
+        assert_eq!(retry_backoff_secs(1, 2), 2);
+        assert_eq!(retry_backoff_secs(1, 3), 4);
+        assert_eq!(retry_backoff_secs(1, 5), 16);
+        assert_eq!(retry_backoff_secs(1, 9), 256);
+        assert_eq!(retry_backoff_secs(1, 10), MAX_RETRY_BACKOFF_SECS);
+        assert_eq!(retry_backoff_secs(1, 63), MAX_RETRY_BACKOFF_SECS);
+        // A base of 0 disables the delay entirely (test hook).
+        assert_eq!(retry_backoff_secs(0, 5), 0);
+        // Attempt 0 never happens (fail() increments first) but must not
+        // underflow the shift.
+        assert_eq!(retry_backoff_secs(1, 0), 0);
+    }
+
+    #[test]
+    fn ready_at_gates_readiness_and_zero_falls_back() {
+        let now = now_secs();
+        let mut job = Job {
+            id: "j".into(),
+            name: "t".into(),
+            payload: serde_json::json!({}),
+            priority: Priority::Normal,
+            status: JobStatus::Retrying,
+            max_retries: 3,
+            retry_count: 1,
+            created_at: now_iso(),
+            started_at: None,
+            completed_at: None,
+            error: None,
+            delay_secs: 0,
+            ready_at: now + 30,
+            queue: "default".into(),
+            auth: None,
+        };
+        assert!(!is_ready(&job, now));
+        assert!(is_ready(&job, now + 30));
+        // ready_at = 0 → legacy created_at + delay_secs readiness.
+        job.ready_at = 0;
+        assert!(is_ready(&job, now));
+    }
+
+    #[test]
+    fn retry_dead_clears_backoff_stamp() {
+        let q = JobQueue::new(100);
+        // Base 0 still stamps ready_at (= now) on the retry, so the dead
+        // job carries a stale stamp for retry_dead to clear.
+        q.set_retry_backoff_base_secs(0);
+        let id = q.enqueue_with_options(
+            "test",
+            serde_json::json!({}),
+            Priority::Normal,
+            0,
+            1,
+            "default",
+        );
+        let _job = q.dequeue(Duration::from_millis(10)).unwrap();
+        q.fail(&id, "fail 1");
+        let _job = q.dequeue(Duration::from_millis(10)).unwrap();
+        q.fail(&id, "fail 2");
+        let dead = q.dead_letters();
+        assert_eq!(dead.len(), 1);
+        assert!(dead[0].ready_at > 0);
+
+        assert!(q.retry_dead(&id));
+        let job = q.get_job(&id).unwrap();
+        assert_eq!(job.ready_at, 0);
     }
 
     #[test]
     fn fail_moves_to_dead_after_max_retries() {
         let q = JobQueue::new(100);
+        // Zero back-off keeps the fail→dequeue→fail loop synchronous.
+        q.set_retry_backoff_base_secs(0);
         let id = q.enqueue_with_options(
             "test",
             serde_json::json!({}),
@@ -1157,6 +1287,7 @@ mod tests {
             retry_count: 0,
             queue: "default".into(),
             delay_secs: 0,
+            ready_at: 0,
             error: None,
             created_at: "1000Z".into(),
             started_at: None,
@@ -1173,6 +1304,7 @@ mod tests {
             retry_count: 1,
             queue: "default".into(),
             delay_secs: 0,
+            ready_at: 0,
             error: None,
             created_at: "2000Z".into(),
             started_at: Some("2001Z".into()),
@@ -1219,6 +1351,7 @@ mod tests {
             retry_count: 3,
             queue: "functions".into(),
             delay_secs: 0,
+            ready_at: 0,
             error: Some("UNAUTHENTICATED: log in first".into()),
             created_at: "5000Z".into(),
             started_at: Some("5001Z".into()),

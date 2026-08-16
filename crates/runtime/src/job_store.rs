@@ -83,6 +83,23 @@ impl JobStore {
             conn.execute("ALTER TABLE jobs ADD COLUMN auth TEXT", [])
                 .map_err(|e| format!("Schema migration (add auth) failed: {e}"))?;
         }
+        // Migration: retry back-off timestamp (absolute epoch seconds; 0 =
+        // unset). Same probe-then-ALTER dance as `auth` above.
+        let has_ready_at: bool = conn
+            .query_row(
+                "SELECT 1 FROM pragma_table_info('jobs') WHERE name = 'ready_at'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|_| true)
+            .unwrap_or(false);
+        if !has_ready_at {
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN ready_at INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|e| format!("Schema migration (add ready_at) failed: {e}"))?;
+        }
         Ok(())
     }
 
@@ -98,8 +115,9 @@ impl JobStore {
         conn.execute(
             "INSERT OR REPLACE INTO jobs \
              (id, name, payload, priority, status, max_retries, retry_count, \
-              queue, delay_secs, error, created_at, started_at, completed_at, auth) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              queue, delay_secs, error, created_at, started_at, completed_at, auth, \
+              ready_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![
                 job.id,
                 job.name,
@@ -115,6 +133,7 @@ impl JobStore {
                 job.started_at,
                 job.completed_at,
                 auth_json,
+                job.ready_at,
             ],
         )
         .map_err(|e| format!("Save failed: {e}"))?;
@@ -127,7 +146,8 @@ impl JobStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, payload, priority, status, max_retries, retry_count, \
-                 queue, delay_secs, error, created_at, started_at, completed_at, auth \
+                 queue, delay_secs, error, created_at, started_at, completed_at, auth, \
+                 ready_at \
                  FROM jobs WHERE id = ?1",
             )
             .map_err(|e| format!("Prepare failed: {e}"))?;
@@ -149,7 +169,8 @@ impl JobStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, payload, priority, status, max_retries, retry_count, \
-                 queue, delay_secs, error, created_at, started_at, completed_at, auth \
+                 queue, delay_secs, error, created_at, started_at, completed_at, auth, \
+                 ready_at \
                  FROM jobs \
                  WHERE status IN ('pending', 'running', 'retrying') \
                  ORDER BY priority DESC, created_at ASC",
@@ -175,7 +196,8 @@ impl JobStore {
         let mut stmt = conn
             .prepare(
                 "SELECT id, name, payload, priority, status, max_retries, retry_count, \
-                 queue, delay_secs, error, created_at, started_at, completed_at, auth \
+                 queue, delay_secs, error, created_at, started_at, completed_at, auth, \
+                 ready_at \
                  FROM jobs \
                  WHERE status = 'dead' \
                  ORDER BY completed_at DESC",
@@ -252,6 +274,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> Job {
         started_at: row.get(11).ok(),
         completed_at: row.get(12).ok(),
         auth,
+        ready_at: row.get(14).unwrap_or(0),
     }
 }
 
@@ -315,6 +338,7 @@ mod tests {
             retry_count: 0,
             queue: "default".to_string(),
             delay_secs: 0,
+            ready_at: 0,
             error: None,
             created_at: "1000Z".to_string(),
             started_at: None,

@@ -2126,7 +2126,16 @@ fn start_server(
     // background workers and the scheduler. Doing this here — not at queue
     // construction — closes the boot race where a restored function job could
     // dead-letter against a not-yet-registered handler.
-    let _worker_handles: Vec<_> = (0..2)
+    //
+    // PYLON_JOB_WORKERS sizes the pool (min 1, default 2). Two suits the
+    // common app; a queue-heavy workload (agent runs fanning out LLM jobs)
+    // raises it without recompiling.
+    let job_workers = std::env::var("PYLON_JOB_WORKERS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(2);
+    let _worker_handles: Vec<_> = (0..job_workers)
         .map(|i| {
             let w = Worker::new(Arc::clone(&job_queue), &format!("worker-{i}"));
             w.start()

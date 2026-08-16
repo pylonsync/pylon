@@ -5699,6 +5699,7 @@ mod cron_lease_logic_tests {
             completed_at: None,
             error: None,
             delay_secs: 0,
+            ready_at: 0,
             queue: "default".into(),
             auth: None,
         }
