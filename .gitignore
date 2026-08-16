@@ -38,6 +38,10 @@ pylon.sessions.db
 pylon.sessions.db-*
 pylon.jobs.db
 pylon.jobs.db-*
+pylon.workflows.db
+pylon.workflows.db-*
+*.workflows.db
+*.workflows.db-*
 
 # New layout: everything runtime-local under .pylon/ next to app.ts
 .pylon/
