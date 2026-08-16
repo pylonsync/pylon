@@ -1373,6 +1373,83 @@ async function main() {
     }
   }
 
+  // Workflows: scan the app's workflows/ dir (sibling of functions/).
+  // Each file default-exports a `workflow(...)`. Declared names ride the
+  // ready handshake so the host registers them with its WorkflowEngine;
+  // execution comes back through the implicit internal action below.
+  const { isWorkflowDefinition, executeWorkflowSlice } = await import(
+    "./workflows"
+  );
+  type WorkflowDefinition = import("./workflows").WorkflowDefinition;
+  const workflowRegistry = new Map<string, WorkflowDefinition>();
+  const wfDir = join(process.cwd(), "workflows");
+  let wfFiles: string[] = [];
+  try {
+    wfFiles = readdirSync(wfDir).filter(
+      (f) => f.endsWith(".ts") || f.endsWith(".js"),
+    );
+  } catch {
+    // No workflows/ directory — the common case; declare nothing.
+  }
+  for (const file of wfFiles) {
+    try {
+      const mod = await import(join(wfDir, file));
+      const def = mod.default;
+      if (isWorkflowDefinition(def)) {
+        if (workflowRegistry.has(def.name)) {
+          console.error(
+            `[workflows] duplicate workflow name "${def.name}" (${file}) — keeping the first`,
+          );
+          continue;
+        }
+        workflowRegistry.set(def.name, def);
+      } else {
+        console.error(
+          `[workflows] ${file} has no default-exported workflow(...) — skipped`,
+        );
+      }
+    } catch (err) {
+      console.error(`[workflows] Failed to load ${file}:`, err);
+    }
+  }
+  if (workflowRegistry.size > 0) {
+    // The host drives every workflow slice through this internal action,
+    // so step code gets a full ActionCtx (db, llm, scheduler, idle
+    // timeout, cancellation). admin auth + internal: only the host's
+    // engine hook may invoke it. timeout 600: one slice is one step —
+    // long AGENT steps stream (extending the idle budget); a silent 10
+    // minutes is a hang.
+    registry.set("__pylon_workflow_run", {
+      type: "action",
+      internal: true,
+      auth: "admin",
+      timeout: 600,
+      handler: async (ctx: unknown, args: unknown) => {
+        const req = args as import("./workflows").WorkflowRunRequest;
+        const def = workflowRegistry.get(req.workflow_name);
+        if (!def) {
+          return {
+            action: "fail",
+            error: `workflow "${req.workflow_name}" is not registered in this runtime`,
+          };
+        }
+        return executeWorkflowSlice(
+          def,
+          req,
+          ctx as import("./types").ActionCtx,
+        );
+      },
+    } as unknown as FnDefinition);
+  }
+  const workflows = Array.from(workflowRegistry.values()).map((w) => ({
+    name: w.name,
+    description: w.description ?? "",
+    max_retries:
+      typeof w.maxRetries === "number" && w.maxRetries >= 0
+        ? Math.floor(w.maxRetries)
+        : null,
+  }));
+
   const functions = Array.from(registry.entries()).map(([name, def]) => ({
     name,
     fn_type: def.type,
@@ -1395,7 +1472,7 @@ async function main() {
         ? Math.floor(def.timeout)
         : null,
   }));
-  send({ type: "ready", functions });
+  send({ type: "ready", functions, workflows });
 
   // Belt-and-suspenders against orphaning: if the host dies in a way that
   // somehow leaves our stdin open, we'll have been REPARENTED — our ppid

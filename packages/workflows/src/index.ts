@@ -1,5 +1,12 @@
 // ---------------------------------------------------------------------------
-// @pylonsync/workflows — define durable, multi-step workflows in TypeScript
+// @pylonsync/workflows — DEPRECATED external-runner workflow DSL
+//
+// Use `workflow()` from @pylonsync/functions instead: workflows in the
+// app's workflows/ dir execute IN-PROCESS through the function runtime
+// (steps get a full ActionCtx) with persistence and an automatic driver
+// — no separate runner server. This package remains only for the
+// PYLON_WORKFLOW_RUNNER_URL external-runner escape hatch; it was never
+// published and nothing in the framework spawns its serve() server.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,106 @@
+---
+title: "Durable Workflows"
+description: "Multi-step processes that survive restarts: steps run exactly once, sleeps span days, and events resume a paused run."
+---
+
+A workflow is a TypeScript function that composes `step`, `sleep`, and
+`waitForEvent` calls. The engine persists every step result, so a workflow
+survives server restarts and deploys: completed steps never re-run, a
+7-day `sleep` costs nothing while it waits, and an external event wakes a
+paused run exactly where it stopped.
+
+Use a workflow when a process spans more time than one function call
+should hold: onboarding sequences, agent pipelines with human approval
+gates, billing dunning, report generation with retries.
+
+## Writing a workflow
+
+Workflows live in a `workflows/` directory next to `functions/`. One file,
+one default-exported `workflow(...)`:
+
+```ts
+// workflows/onboarding.ts
+import { workflow } from "@pylonsync/functions";
+
+export default workflow("onboarding", async (wf, ctx) => {
+  // Steps run EXACTLY ONCE. On replay a completed step returns its
+  // recorded output without executing.
+  const user = await wf.step("load-user", () =>
+    ctx.runQuery("getUser", { id: wf.input.userId }),
+  );
+
+  await wf.step("send-welcome", () =>
+    ctx.email.send({
+      to: user.email,
+      subject: "Welcome!",
+      text: "Glad you're here.",
+    }),
+  );
+
+  // Pauses the workflow. No machine time is spent waiting.
+  await wf.sleep("24h");
+
+  // Pauses until POST /api/workflows/<id>/event delivers this event.
+  const confirmation = await wf.waitForEvent("email_confirmed");
+
+  return { done: true, confirmation };
+});
+```
+
+Each step's closure runs with a full action `ctx` — `ctx.runQuery` /
+`ctx.runMutation`, `ctx.llm`, `ctx.email`, `ctx.scheduler` — under the
+same idle timeout and cancellation semantics as any action.
+
+## Starting and driving
+
+Start a workflow from the admin API (or the dashboard):
+
+```bash
+curl -X POST https://your-app/api/workflows/start \
+  -H "Authorization: Bearer $PYLON_ADMIN_TOKEN" \
+  -d '{"name": "onboarding", "input": {"userId": "u_123"}}'
+```
+
+The engine drives it automatically from there: steps execute through the
+background job queue, sleeps wake on schedule, and state persists to
+`<app-db>.workflows.db`. Deliver an event to a waiting run with:
+
+```bash
+curl -X POST https://your-app/api/workflows/<id>/event \
+  -H "Authorization: Bearer $PYLON_ADMIN_TOKEN" \
+  -d '{"event": "email_confirmed", "data": {"ok": true}}'
+```
+
+Inspect runs at `GET /api/workflows` / `GET /api/workflows/<id>`
+(step-by-step results, timings, retry counts), or cancel with
+`POST /api/workflows/<id>/cancel`.
+
+## The determinism contract
+
+On every advance, the whole workflow function re-runs from the top —
+completed steps replay from their recorded outputs. That gives you plain
+TypeScript control flow (branches, loops, early returns) with one rule:
+
+**The sequence of `step` / `sleep` / `waitForEvent` calls must be
+identical on every replay for the same input and step outputs.**
+
+- Branch on `wf.input` and on step outputs freely — both are stable.
+- Never branch on wall-clock time, randomness, or external state read
+  outside a step. Put those READS inside a step, then branch on its
+  recorded output.
+- Step names must be unique within a run — the replay cache is
+  name-keyed, and a mismatch fails the run loudly rather than reusing
+  the wrong output.
+
+## Retries and failure
+
+A throwing step fails the current advance; the engine retries the same
+step (default 3 attempts, configurable per workflow):
+
+```ts
+export default workflow("sync-crm", handler, { maxRetries: 5 });
+```
+
+Retries exhausted → the run lands in `failed` with the error and the
+step that caused it, inspectable via the API. Code between steps should
+be side-effect free; anything that must happen once belongs in a step.

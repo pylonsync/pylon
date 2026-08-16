@@ -81,13 +81,42 @@ pub struct WorkflowDef {
 // Workflow Engine
 // ---------------------------------------------------------------------------
 
+/// Executes one workflow slice, in-process. Installed by the server: it
+/// dispatches the runner request through the Bun function pool as an
+/// internal action call (`__pylon_workflow_run`), so workflow steps get
+/// the full function runtime — ctx.db, ctx.llm, scheduling, the idle
+/// timeout — instead of a bespoke HTTP side-channel.
+pub type WorkflowRunnerHook =
+    Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
+
+/// Nudges the driver: "instance `id` has work". Installed by the server
+/// to enqueue a `pylon.workflow.advance` job — start/send_event/wake
+/// must never execute steps inline on the caller's thread (an HTTP
+/// route would block for the whole segment).
+pub type WorkflowKickHook = Box<dyn Fn(&str) + Send + Sync>;
+
 pub struct WorkflowEngine {
     /// Registered workflow definitions.
     definitions: Mutex<HashMap<String, WorkflowDef>>,
     /// Active and historical workflow instances.
     instances: Mutex<HashMap<String, WorkflowInstance>>,
-    /// URL of the TypeScript workflow runner.
+    /// URL of an EXTERNAL TypeScript workflow runner. Empty = none; the
+    /// in-process hook is the normal path. Kept for operators who set
+    /// PYLON_WORKFLOW_RUNNER_URL explicitly.
     runner_url: String,
+    /// In-process step executor. See [`WorkflowRunnerHook`].
+    runner_hook: Mutex<Option<WorkflowRunnerHook>>,
+    /// Driver nudge. See [`WorkflowKickHook`].
+    kick_hook: Mutex<Option<WorkflowKickHook>>,
+    /// Persistence. Every state transition is mirrored so workflows
+    /// survive restart (restore_from at boot). Best-effort like the job
+    /// store: a failed write logs, never blocks.
+    store: Mutex<Option<std::sync::Arc<crate::workflow_store::WorkflowStore>>>,
+    /// Instances currently being driven by run_to_pause. The driver can
+    /// receive duplicate kicks (the sweep tick re-kicks every Running
+    /// instance); without this guard two concurrent drivers would both
+    /// read current_step N and execute the same step twice.
+    advancing: Mutex<std::collections::HashSet<String>>,
     /// Max instances to keep in history (unused currently, reserved for GC).
     #[allow(dead_code)]
     max_history: usize,
@@ -99,7 +128,40 @@ impl WorkflowEngine {
             definitions: Mutex::new(HashMap::new()),
             instances: Mutex::new(HashMap::new()),
             runner_url: runner_url.to_string(),
+            runner_hook: Mutex::new(None),
+            kick_hook: Mutex::new(None),
+            store: Mutex::new(None),
+            advancing: Mutex::new(std::collections::HashSet::new()),
             max_history,
+        }
+    }
+
+    /// Install the in-process step executor (wins over `runner_url`).
+    pub fn set_runner_hook(&self, hook: WorkflowRunnerHook) {
+        *self.runner_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the driver nudge called whenever an instance gains work.
+    pub fn set_kick_hook(&self, hook: WorkflowKickHook) {
+        *self.kick_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Attach a persistent store; call once at startup after restore_from.
+    pub fn attach_store(&self, store: std::sync::Arc<crate::workflow_store::WorkflowStore>) {
+        *self.store.lock().unwrap() = Some(store);
+    }
+
+    fn persist(&self, instance: &WorkflowInstance) {
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            if let Err(e) = store.save(instance) {
+                tracing::warn!("[workflows] failed to persist {}: {e}", instance.id);
+            }
+        }
+    }
+
+    pub(crate) fn kick(&self, workflow_id: &str) {
+        if let Some(hook) = self.kick_hook.lock().unwrap().as_ref() {
+            hook(workflow_id);
         }
     }
 
@@ -136,8 +198,52 @@ impl WorkflowEngine {
             max_retries: def.max_retries,
         };
 
+        self.persist(&instance);
         self.instances.lock().unwrap().insert(id.clone(), instance);
+        // Hand the new instance to the driver — steps never run on the
+        // caller's thread.
+        self.kick(&id);
         Ok(id)
+    }
+
+    /// Drive a workflow until it pauses (sleep / wait_event) or reaches a
+    /// terminal state, executing at most `max_steps` steps. The driver's
+    /// entry point: `step_complete` leaves the status Running, which means
+    /// "there is more to do right now".
+    pub fn run_to_pause(
+        &self,
+        workflow_id: &str,
+        max_steps: usize,
+    ) -> Result<WorkflowStatus, String> {
+        // Single-driver guard: duplicate kicks (the sweep tick re-kicks
+        // every Running instance) must not race two drivers into
+        // executing the same step twice. Losing the race is a no-op —
+        // the winner drives the instance to its next pause.
+        {
+            let mut advancing = self.advancing.lock().unwrap();
+            if !advancing.insert(workflow_id.to_string()) {
+                return self
+                    .get(workflow_id)
+                    .map(|i| i.status)
+                    .ok_or_else(|| format!("Workflow '{}' not found", workflow_id));
+            }
+        }
+        let result = (|| {
+            let mut last = self.advance(workflow_id)?;
+            let mut steps = 1;
+            while last == WorkflowStatus::Running && steps < max_steps {
+                last = self.advance(workflow_id)?;
+                steps += 1;
+            }
+            Ok(last)
+        })();
+        self.advancing.lock().unwrap().remove(workflow_id);
+        if matches!(result, Ok(WorkflowStatus::Running)) {
+            // Budget exhausted mid-run — re-kick so the driver picks the
+            // instance up on a fresh job instead of monopolizing a worker.
+            self.kick(workflow_id);
+        }
+        result
     }
 
     /// Execute the next step of a workflow by calling the TS runner.
@@ -249,6 +355,10 @@ impl WorkflowEngine {
         inst.current_step += 1;
         inst.status = WorkflowStatus::Running;
         inst.waiting_for = None;
+        let snapshot = inst.clone();
+        drop(instances);
+        self.persist(&snapshot);
+        self.kick(workflow_id);
 
         Ok(())
     }
@@ -259,6 +369,9 @@ impl WorkflowEngine {
         let inst = instances.get_mut(workflow_id).ok_or("Workflow not found")?;
         inst.status = WorkflowStatus::Cancelled;
         inst.completed_at = Some(now_iso());
+        let snapshot = inst.clone();
+        drop(instances);
+        self.persist(&snapshot);
         Ok(())
     }
 
@@ -296,6 +409,7 @@ impl WorkflowEngine {
         let mut woken = Vec::new();
         let mut instances = self.instances.lock().unwrap();
 
+        let mut snapshots = Vec::new();
         for (id, inst) in instances.iter_mut() {
             if inst.status == WorkflowStatus::Sleeping {
                 if let Some(wake_at) = inst.wake_at {
@@ -303,9 +417,17 @@ impl WorkflowEngine {
                         inst.status = WorkflowStatus::Running;
                         inst.wake_at = None;
                         woken.push(id.clone());
+                        snapshots.push(inst.clone());
                     }
                 }
             }
+        }
+        drop(instances);
+        for snapshot in &snapshots {
+            self.persist(snapshot);
+        }
+        for id in &woken {
+            self.kick(id);
         }
 
         woken
@@ -369,7 +491,7 @@ impl WorkflowEngine {
             inst.started_at = Some(now_iso());
         }
 
-        match action {
+        let result = match action {
             "step_complete" => {
                 let step_name = response
                     .get("step_name")
@@ -470,11 +592,36 @@ impl WorkflowEngine {
                 }
             }
             _ => Err(format!("Unknown action: {action}")),
+        };
+        let snapshot = inst.clone();
+        drop(instances);
+        if result.is_ok() {
+            self.persist(&snapshot);
         }
+        result
     }
 
-    /// Call the TypeScript workflow runner via HTTP.
+    /// Execute one workflow slice: the in-process hook (the Bun function
+    /// pool) when installed, else an explicitly configured external HTTP
+    /// runner. No hook and no URL is a hard error — the old code
+    /// defaulted to 127.0.0.1:9876, which nothing has ever served, so TS
+    /// workflows silently never executed.
     fn call_runner(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
+        if let Some(hook) = self.runner_hook.lock().unwrap().as_ref() {
+            return hook(request);
+        }
+        if self.runner_url.is_empty() {
+            return Err(
+                "no workflow runner available: declare workflows in workflows/ (runs \
+                 in-process) or set PYLON_WORKFLOW_RUNNER_URL for an external runner"
+                    .into(),
+            );
+        }
+        self.call_runner_http(request)
+    }
+
+    /// Call an external TypeScript workflow runner via HTTP.
+    fn call_runner_http(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
         use std::io::{Read, Write};
         use std::net::TcpStream;
 
@@ -1110,5 +1257,141 @@ mod tests {
 
         // Verify the completed workflow was NOT restored.
         assert!(e.get("wf_ccc").is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // In-process runner hook + driver (the wiring that replaced the
+    // phantom 127.0.0.1:9876 HTTP runner).
+    // -----------------------------------------------------------------
+
+    /// Engine whose runner hook simulates the TS slice executor for a
+    /// two-step workflow: slice 0 and 1 complete a step, slice 2
+    /// completes the run.
+    fn engine_with_scripted_hook() -> WorkflowEngine {
+        let e = engine();
+        e.set_runner_hook(Box::new(|request| {
+            let current = request
+                .get("current_step")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Ok(match current {
+                0 => serde_json::json!({
+                    "action": "step_complete", "step_name": "one", "output": {"n": 1}
+                }),
+                1 => serde_json::json!({
+                    "action": "step_complete", "step_name": "two", "output": {"n": 2}
+                }),
+                _ => serde_json::json!({ "action": "complete", "output": {"done": true} }),
+            })
+        }));
+        e
+    }
+
+    #[test]
+    fn runner_hook_drives_run_to_pause_to_completion() {
+        let e = engine_with_scripted_hook();
+        let id = e.start("onboarding", serde_json::json!({"u": 1})).unwrap();
+
+        let status = e.run_to_pause(&id, 50).unwrap();
+        assert_eq!(status, WorkflowStatus::Completed);
+
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.steps.len(), 2);
+        assert_eq!(inst.steps[0].name, "one");
+        assert_eq!(inst.steps[1].name, "two");
+        assert_eq!(inst.output, Some(serde_json::json!({"done": true})));
+    }
+
+    #[test]
+    fn no_hook_and_no_url_is_a_hard_error_not_a_silent_hang() {
+        // The old default POSTed to 127.0.0.1:9876, which nothing served.
+        let e = WorkflowEngine::new("", 100);
+        e.register(WorkflowDef {
+            name: "onboarding".into(),
+            description: String::new(),
+            file: "workflows/".into(),
+            max_retries: 3,
+            step_timeout_secs: 600,
+        });
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        let err = e.advance(&id).unwrap_err();
+        assert!(err.contains("no workflow runner available"), "{err}");
+    }
+
+    #[test]
+    fn kicks_fire_on_start_send_event_and_wake() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let e = engine();
+        let kicks = std::sync::Arc::new(AtomicUsize::new(0));
+        let kicks_ref = std::sync::Arc::clone(&kicks);
+        e.set_kick_hook(Box::new(move |_id| {
+            kicks_ref.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // start() hands the new instance to the driver.
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        assert_eq!(kicks.load(Ordering::SeqCst), 1);
+
+        // A delivered event resumes the run — another kick.
+        e.advance_with_response(&id, serde_json::json!({"action": "wait_event", "event": "go"}))
+            .unwrap();
+        e.send_event(&id, "go", serde_json::json!({"ok": true})).unwrap();
+        assert_eq!(kicks.load(Ordering::SeqCst), 2);
+
+        // A woken sleeper — another kick.
+        e.advance_with_response(&id, serde_json::json!({"action": "sleep", "duration": "0s"}))
+            .unwrap();
+        let woken = e.wake_sleeping();
+        assert_eq!(woken, vec![id.clone()]);
+        assert_eq!(kicks.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn run_to_pause_respects_its_step_budget_and_rekicks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let e = engine();
+        // A hook that never finishes: every slice completes another step.
+        e.set_runner_hook(Box::new(|request| {
+            let n = request
+                .get("current_step")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            Ok(serde_json::json!({
+                "action": "step_complete", "step_name": format!("step-{n}"), "output": null
+            }))
+        }));
+        let kicks = std::sync::Arc::new(AtomicUsize::new(0));
+        let kicks_ref = std::sync::Arc::clone(&kicks);
+        e.set_kick_hook(Box::new(move |_id| {
+            kicks_ref.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        let kicks_after_start = kicks.load(Ordering::SeqCst);
+
+        let status = e.run_to_pause(&id, 3).unwrap();
+        // Budget exhausted mid-run: still Running, exactly 3 steps
+        // executed, and the driver was re-kicked to continue on a fresh
+        // job instead of monopolizing this worker.
+        assert_eq!(status, WorkflowStatus::Running);
+        assert_eq!(e.get(&id).unwrap().steps.len(), 3);
+        assert_eq!(kicks.load(Ordering::SeqCst), kicks_after_start + 1);
+    }
+
+    #[test]
+    fn engine_persists_transitions_through_the_attached_store() {
+        let store =
+            std::sync::Arc::new(crate::workflow_store::WorkflowStore::in_memory().unwrap());
+        let e = engine_with_scripted_hook();
+        e.attach_store(std::sync::Arc::clone(&store));
+
+        let id = e.start("onboarding", serde_json::json!({"u": 1})).unwrap();
+        // start() persisted the Pending instance.
+        assert!(store.load(&id).unwrap().is_some());
+
+        e.run_to_pause(&id, 50).unwrap();
+        let persisted = store.load(&id).unwrap().unwrap();
+        assert_eq!(persisted.status, WorkflowStatus::Completed);
+        assert_eq!(persisted.steps.len(), 2);
     }
 }

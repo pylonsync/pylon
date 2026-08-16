@@ -503,8 +503,25 @@ impl TsMessage {
 pub struct ReadyMessage {
     #[serde(default)]
     pub functions: Vec<crate::registry::FnDef>,
+    /// Workflows discovered in the app's `workflows/` directory. The host
+    /// registers each with the WorkflowEngine; execution comes back through
+    /// the pool as `__pylon_workflow_run` calls. `#[serde(default)]` keeps
+    /// older TS runtimes (which don't emit the field) deserializing.
+    #[serde(default)]
+    pub workflows: Vec<WorkflowInfo>,
     #[serde(default)]
     pub error: Option<String>,
+}
+
+/// One workflow declared by the TS runtime in the ready handshake.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Max retries per step; `None` → the engine default.
+    #[serde(default)]
+    pub max_retries: Option<u32>,
 }
 
 /// A database operation request from TypeScript.

@@ -20,6 +20,14 @@
 
 export { query, mutation, action } from "./define";
 export { v } from "./validators";
+export { workflow } from "./workflows";
+export type {
+  WorkflowDefinition,
+  WorkflowRun,
+  WorkflowRunRequest,
+  WorkflowRunnerResponse,
+  WorkflowStepResult,
+} from "./workflows";
 export { resetDb, installTestIsolation } from "./testing";
 export { slugifyName, availableSlug } from "./slugify";
 // SSR page response controller — pages/layouts receive `response` in

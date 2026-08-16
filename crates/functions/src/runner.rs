@@ -368,6 +368,10 @@ pub struct FnRunner {
     /// max (via [`max_fn_timeout_secs`]) so its wedge backstop never pre-empts
     /// the longest legitimate call.
     per_fn_timeouts: Mutex<std::collections::HashMap<String, u64>>,
+    /// Workflows the TS runtime declared in its ready handshake (from the
+    /// app's `workflows/` dir). Repopulated on every start/respawn; the
+    /// host registers them with the WorkflowEngine.
+    workflows: Mutex<Vec<crate::protocol::WorkflowInfo>>,
 }
 
 impl FnRunner {
@@ -393,7 +397,13 @@ impl FnRunner {
             started_with: Mutex::new(None),
             policy_gate: Mutex::new(None),
             per_fn_timeouts: Mutex::new(std::collections::HashMap::new()),
+            workflows: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Workflows declared by the live TS runtime's ready handshake.
+    pub fn workflow_infos(&self) -> Vec<crate::protocol::WorkflowInfo> {
+        self.workflows.lock().unwrap().clone()
     }
 
     /// Record per-function timeout overrides from the handshake FnDefs. Called
@@ -579,6 +589,10 @@ impl FnRunner {
                     let _ = child.wait();
                     return Err(format!("Runtime startup error: {err}"));
                 }
+                // Workflows declared in the app's workflows/ dir ride the
+                // same handshake; the host registers them with the
+                // WorkflowEngine after spawn (see try_spawn_functions).
+                *self.workflows.lock().unwrap() = r.workflows;
                 r.functions
             }
             other => {
@@ -2571,6 +2585,7 @@ mod tests {
             &ready_tx,
             TsMessage::Ready(ReadyMessage {
                 functions: vec![],
+                workflows: vec![],
                 error: None,
             }),
         );
@@ -2595,6 +2610,7 @@ mod tests {
         assert_eq!(
             TsMessage::Ready(ReadyMessage {
                 functions: vec![],
+                workflows: vec![],
                 error: None,
             })
             .call_id(),

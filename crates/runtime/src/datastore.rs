@@ -3937,6 +3937,17 @@ pub struct FnOpsImpl {
 }
 
 impl FnOpsImpl {
+    /// Workflows the TS runtime declared in its ready handshake. All pool
+    /// runners load the same workflows/ dir, so the first runner's list is
+    /// authoritative.
+    pub fn workflow_infos(&self) -> Vec<pylon_functions::protocol::WorkflowInfo> {
+        self.pool
+            .runners()
+            .first()
+            .map(|r| r.workflow_infos())
+            .unwrap_or_default()
+    }
+
     /// Drain a per-mutation schedule buffer and enqueue each entry on
     /// the job queue. Called only after COMMIT succeeds — a rolled-back
     /// handler's buffer is dropped without flushing.

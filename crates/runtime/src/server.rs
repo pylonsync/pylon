@@ -1925,10 +1925,106 @@ fn start_server(
     // and dead-letter before the Bun runner finishes spawning (~1-2s). See the
     // start site after `register_app_crons`.
 
-    // Workflow engine: TS runner URL configurable via env, defaults to local Bun server.
-    let wf_runner_url = std::env::var("PYLON_WORKFLOW_RUNNER_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:9876/run".to_string());
+    // Workflow engine. Workflows normally execute IN-PROCESS through the
+    // Bun function pool (the runner hook installed after
+    // try_spawn_functions); PYLON_WORKFLOW_RUNNER_URL remains as an
+    // explicit external-runner escape hatch. No more phantom default —
+    // the old 127.0.0.1:9876 fallback pointed at a port nothing has
+    // ever served, so TS workflows silently never executed.
+    let wf_runner_url = std::env::var("PYLON_WORKFLOW_RUNNER_URL").unwrap_or_default();
     let workflow_engine = Arc::new(WorkflowEngine::new(&wf_runner_url, 10_000));
+
+    // Workflow persistence: colocated with the app DB like the job store.
+    if !jobs_in_memory {
+        let wf_db_path = std::env::var("PYLON_WORKFLOWS_DB").ok().unwrap_or_else(|| {
+            runtime
+                .db_path()
+                .map(|p| format!("{p}.workflows.db"))
+                .unwrap_or_else(|| "pylon.workflows.db".into())
+        });
+        match crate::workflow_store::WorkflowStore::open(&wf_db_path) {
+            Ok(store) => {
+                let store = Arc::new(store);
+                let restored = workflow_engine.restore_from(&store);
+                if restored > 0 {
+                    tracing::info!(
+                        "[workflows] Restored {restored} active workflow(s) from {wf_db_path}"
+                    );
+                }
+                workflow_engine.attach_store(store);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[workflows] Could not open workflow store at {wf_db_path}: {e} — running without persistence"
+                );
+            }
+        }
+    }
+
+    // Driver plumbing, part 1: kicks enqueue an advance job; the handler
+    // (registered below, before workers start) drives the instance to its
+    // next pause. Restored instances get kicked once workers are up via
+    // the wake tick.
+    {
+        let jq = Arc::clone(&job_queue);
+        workflow_engine.set_kick_hook(Box::new(move |workflow_id: &str| {
+            let id = jq.enqueue_with_options(
+                "pylon.workflow.advance",
+                serde_json::json!({ "workflow_id": workflow_id }),
+                crate::jobs::Priority::Normal,
+                0,
+                // Step-level retries are the ENGINE's job (max_retries per
+                // instance); the advance job itself retries only transport
+                // hiccups.
+                2,
+                "default",
+            );
+            if id.is_empty() {
+                tracing::warn!(
+                    "[workflows] failed to enqueue advance for {workflow_id} — it will wait for the next wake tick"
+                );
+            }
+        }));
+        let we = Arc::clone(&workflow_engine);
+        job_queue.register(
+            "pylon.workflow.advance",
+            Arc::new(move |job: &crate::jobs::Job| {
+                let Some(id) = job.payload.get("workflow_id").and_then(|v| v.as_str()) else {
+                    return JobResult::Failure("advance job missing workflow_id".into());
+                };
+                // 50 steps per job keeps one long workflow from
+                // monopolizing a worker; run_to_pause re-kicks when it
+                // stops on budget rather than at a pause.
+                match we.run_to_pause(id, 50) {
+                    Ok(_) => JobResult::Success,
+                    Err(e) => JobResult::Retry(e),
+                }
+            }),
+        );
+        // Driver plumbing, part 2: wake expired sleepers (wake_sleeping
+        // kicks each woken instance) and sweep up instances that missed a
+        // kick (enqueue failure, crash between persist and kick) —
+        // Running/Pending instances with no queued advance job would
+        // otherwise strand. Cheap: in-memory scan.
+        let we_tick = Arc::clone(&workflow_engine);
+        let _ = scheduler.schedule(
+            "pylon.workflows.tick",
+            "* * * * *",
+            Arc::new(move |_job| {
+                let _ = we_tick.wake_sleeping();
+                for inst in we_tick.list(None) {
+                    if matches!(
+                        inst.status,
+                        crate::workflows::WorkflowStatus::Pending
+                            | crate::workflows::WorkflowStatus::Running
+                    ) {
+                        we_tick.kick(&inst.id);
+                    }
+                }
+                JobResult::Success
+            }),
+        );
+    }
 
     // Rate limiter: per-IP outer cap on total requests.
     //
@@ -2119,6 +2215,52 @@ fn start_server(
         // are loaded. The scheduler is already running (started above); adding
         // tasks to it is picked up on the next tick.
         crate::datastore::register_app_crons(&scheduler, ops, &runtime.manifest().crons);
+
+        // Workflows declared in the app's workflows/ dir (reported in the
+        // Bun runner's ready handshake): register each with the engine and
+        // install the in-process executor — every slice dispatches through
+        // the pool as the internal `__pylon_workflow_run` action, so step
+        // code runs with a full ActionCtx. Before this the engine POSTed
+        // to a default URL nothing served and TS workflows never executed.
+        let wf_infos = ops.workflow_infos();
+        if !wf_infos.is_empty() {
+            for info in &wf_infos {
+                workflow_engine.register(crate::workflows::WorkflowDef {
+                    name: info.name.clone(),
+                    description: info.description.clone(),
+                    file: "workflows/".to_string(),
+                    max_retries: info.max_retries.unwrap_or(3),
+                    step_timeout_secs: 600,
+                });
+            }
+            tracing::info!(
+                "[workflows] Registered {} workflow(s): {}",
+                wf_infos.len(),
+                wf_infos
+                    .iter()
+                    .map(|w| w.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            let ops_for_wf: Arc<dyn pylon_router::FnOps> =
+                Arc::clone(ops) as Arc<dyn pylon_router::FnOps>;
+            workflow_engine.set_runner_hook(Box::new(move |request| {
+                // System identity: __pylon_workflow_run is internal +
+                // auth:"admin"; the workflow author's step code decides its
+                // own data access (same trust model as scheduled jobs
+                // enqueued by internal callers).
+                let auth = pylon_functions::protocol::AuthInfo {
+                    user_id: None,
+                    is_admin: true,
+                    tenant_id: None,
+                    roles: Vec::new(),
+                };
+                ops_for_wf
+                    .call("__pylon_workflow_run", request.clone(), auth, None, None)
+                    .map(|(value, _trace)| value)
+                    .map_err(|e| format!("{}: {}", e.code, e.message))
+            }));
+        }
     }
 
     // Now that EVERY job handler is registered (built-in cleanup crons,
