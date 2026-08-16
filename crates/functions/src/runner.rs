@@ -42,11 +42,19 @@ use pylon_http::DataStore;
 use crate::protocol::*;
 use crate::trace::{TraceBuilder, TraceLog};
 
-/// Default ceiling on how long a single function call may take. Holds the
+/// Default ceiling on how long a single function call may go without
+/// producing a frame (an IDLE timeout — activity restarts it). Holds the
 /// SQLite write lock for mutations, so this is also a backstop against a
 /// runaway TS handler blocking the whole DB. Override via
 /// [`FnRunner::set_call_timeout`] or `PYLON_FN_CALL_TIMEOUT` (server-side).
 pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Runaway backstop: however chatty a call is, it may not outlive
+/// `timeout × this`. With the idle-timeout semantics a handler emitting a
+/// stream chunk every few seconds could otherwise run forever; 10× turns
+/// "forever" into "ten budgets", and a genuinely long agent run declares
+/// `timeout: 600` on its def for a 100-minute ceiling.
+pub const MAX_CALL_LIFETIME_MULTIPLIER: u32 = 10;
 
 /// Clone the call's auth context while applying its current mutable admin
 /// state. In-call elevation changes only `is_admin`; identity, tenancy, and
@@ -804,7 +812,12 @@ impl FnRunner {
     ) -> Result<(), FnCallError> {
         use base64::Engine;
         let timeout = *self.call_timeout.lock().unwrap();
-        let deadline = Instant::now() + timeout;
+        // Idle timeout, same semantics as the call loop: streamed chunks and
+        // serverData round-trips restart the budget, the hard deadline caps a
+        // chatty runaway.
+        let mut deadline = Instant::now() + timeout;
+        let hard_deadline =
+            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
         let call_id = format!("r_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register this render's demux route BEFORE sending so the reader can
         // route every reply (response_start, chunks, db round-trips, done) to
@@ -840,10 +853,12 @@ impl FnRunner {
         self.send(&msg)?;
 
         loop {
-            // Recycle the runner if this render wedges — a stuck render must
-            // not poison the runner for every subsequent request (the homepage
-            // outage). The host then serves stale-on-error from the ISR cache.
-            let m = self.recv_or_recycle(&rx, deadline, "SSR render")?;
+            // Cancel this render if it wedges — the caller then serves
+            // stale-on-error from the ISR cache. The child stays alive for
+            // its co-tenants; a render that blocked the whole event loop
+            // (the homepage outage) is the supervisor's wedge-strike kill.
+            let m = self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, "SSR render")?;
+            deadline = Instant::now() + timeout;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
                     if let Some(ref mut cb) = on_response_start {
@@ -1035,7 +1050,9 @@ impl FnRunner {
     ) -> Result<(), FnCallError> {
         use base64::Engine;
         let timeout = *self.call_timeout.lock().unwrap();
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        let hard_deadline =
+            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
         let call_id = format!("f_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register the demux route before send (same as render) so concurrent
         // form handlers can't receive each other's messages.
@@ -1062,9 +1079,11 @@ impl FnRunner {
         self.send(&msg)?;
 
         loop {
-            // Recycle the runner if the form handler wedges (same rationale as
-            // the SSR render loop) so a stuck POST can't poison the runner.
-            let m = self.recv_or_recycle(&rx, deadline, "form handler")?;
+            // Cancel a wedged form handler (same rationale as the SSR render
+            // loop); the child stays alive for its co-tenants.
+            let m =
+                self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, "form handler")?;
+            deadline = Instant::now() + timeout;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
                     if let Some(ref mut cb) = on_response_start {
@@ -1130,15 +1149,23 @@ impl FnRunner {
     /// directory (for serving files at `/_pylon/build/<rel>`).
     pub fn bundle_client(&self, app_dir: &str) -> Result<BundleClientPaths, FnCallError> {
         let timeout = *self.call_timeout.lock().unwrap();
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        let hard_deadline =
+            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
         let call_id = format!("b_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         let (_route, rx) = self.register_call(&call_id)?;
         let msg = crate::protocol::BundleClientMessage::new(call_id.clone(), app_dir.to_string());
         self.send(&msg)?;
         loop {
-            // Recycle the runner if the client-bundle build wedges so a stuck
-            // build doesn't poison the runner for subsequent calls.
-            let m = self.recv_or_recycle(&rx, deadline, "client bundle build")?;
+            // Cancel a wedged client-bundle build; the child stays alive for
+            // its co-tenants.
+            let m = self.recv_or_cancel(
+                &rx,
+                deadline.min(hard_deadline),
+                &call_id,
+                "client bundle build",
+            )?;
+            deadline = Instant::now() + timeout;
             match m {
                 TsMessage::BundleClientResult(r) if r.call_id == call_id => {
                     if let Some(err) = r.error {
@@ -1259,9 +1286,20 @@ impl FnRunner {
         let caller_tenant_id = auth.tenant_id.clone();
         // Per-function `timeout` override wins over the global call timeout, so a
         // function declared long-running (heavy render, big batch) gets the time
-        // it needs instead of being recycled at the 30s default.
+        // it needs instead of being cancelled at the 30s default.
+        //
+        // The timeout is an IDLE timeout, not a wall clock: every frame the
+        // call produces (stream chunk, db op, llm event) pushes the deadline
+        // out by the full budget. A call actively doing work is alive — the
+        // timeout exists to catch hangs, and the old absolute deadline killed
+        // long agent runs mid-token-stream at exactly the moment they were
+        // demonstrably making progress. `hard_deadline` is the runaway
+        // backstop: no call outlives timeout × MAX_CALL_LIFETIME_MULTIPLIER
+        // however chatty it is.
         let timeout = self.deadline_for(fn_name);
-        let deadline = Instant::now() + timeout;
+        let mut deadline = Instant::now() + timeout;
+        let hard_deadline =
+            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
 
         let call_id = format!("c_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register this call's demux route before send so its replies route to
@@ -1305,19 +1343,32 @@ impl FnRunner {
 
         // Process messages until we get a return or error.
         loop {
-            let msg = match recv_on(&rx, deadline) {
-                Ok(m) => m,
-                Err(e) if err_requires_recycle(&e.code) => {
-                    // The child is now in an unknown state — it owns the call
-                    // mid-flight and may be holding open whatever resource it
-                    // had. Kill it; the supervisor will respawn. Better to
-                    // lose the runtime than to wedge the SQLite write lock.
+            let msg = match recv_on(&rx, deadline.min(hard_deadline)) {
+                Ok(m) => {
+                    // Activity restarts the idle budget (bounded by
+                    // hard_deadline above).
+                    deadline = Instant::now() + timeout;
+                    m
+                }
+                Err(e) if e.code == "FN_TIMEOUT" => {
+                    // Cancel THIS call and leave the child alive. Killing
+                    // the multiplexed runner here failed every co-tenant
+                    // call and SSR render for one slow handler; a hung
+                    // `await` doesn't block the event loop, so the child
+                    // is fine. The one child-level failure mode — a busy
+                    // sync loop wedging the event loop — never processes
+                    // this frame either, and is exactly what the
+                    // supervisor's wedge-strike probe kills.
                     tracing::warn!(
-                        "[functions] Killing TS runtime: call \"{}\" exceeded {:?}",
+                        "[functions] Cancelling call \"{}\": no activity within {:?} (call_id {})",
                         fn_name,
-                        timeout
+                        timeout,
+                        call_id
                     );
-                    self.kill();
+                    let _ = self.send(&crate::protocol::CancelCallMessage::new(
+                        call_id.clone(),
+                        format!("idle timeout {timeout:?} exceeded"),
+                    ));
                     let fn_trace = trace.finish_error(
                         "FN_TIMEOUT".into(),
                         format!("Function \"{fn_name}\" exceeded timeout {timeout:?}"),
@@ -1837,35 +1888,37 @@ impl FnRunner {
         ))
     }
 
-    /// Receive the next message for a call from ITS demux channel, RECYCLING the
-    /// runner on a hard call timeout.
+    /// Receive the next message for a call from ITS demux channel, CANCELLING
+    /// the call on a timeout.
     ///
-    /// A deadline-exceeded means the bun child is wedged mid-op (a hung
-    /// `fetch`, an infinite loop) — it may be holding open resources and will
-    /// not answer the NEXT request either. Killing it (the supervisor respawns)
-    /// is the only way to get the runner back; leaving it alive poisons it,
-    /// because `pick()` keys off `is_alive()` (process up) and keeps routing
-    /// requests straight back into the wedge. That is exactly the SSR-render
-    /// wedge that took the homepage down. `label` names the op for the log.
-    ///
-    /// With multiplexing, killing the runner on one call's timeout also fails
-    /// the OTHER in-flight calls (their routes get disconnected). That's the
-    /// correct tradeoff: a wedged child can't be trusted, and the supervisor
-    /// respawns a fresh one; the failed siblings retry / surface a clean error
-    /// rather than ride a poisoned process.
-    fn recv_or_recycle(
+    /// This used to kill the whole child on timeout, on the theory that a
+    /// deadline-exceeded meant a wedged event loop. With multiplexing that
+    /// killed every co-tenant call and SSR render for one slow handler —
+    /// and the theory was wrong for the common case: a hung `await` blocks
+    /// nothing but its own call. Now the timeout cancels only the offending
+    /// call (the `cancel` frame aborts its `ctx.signal` and poisons its
+    /// future RPCs), and the one genuinely child-level failure — a busy
+    /// sync loop wedging the event loop — is detected and killed by the
+    /// supervisor's wedge-strike probe, which is also the only case where
+    /// the cancel frame itself would go unread. `label` names the op for
+    /// the log.
+    fn recv_or_cancel(
         &self,
         rx: &Receiver<TsMessage>,
         deadline: Instant,
+        call_id: &str,
         label: &str,
     ) -> Result<TsMessage, FnCallError> {
         match recv_on(rx, deadline) {
             Ok(m) => Ok(m),
-            Err(e) if err_requires_recycle(&e.code) => {
+            Err(e) if e.code == "FN_TIMEOUT" => {
                 tracing::warn!(
-                    "[functions] Recycling wedged TS runtime: {label} exceeded its call timeout"
+                    "[functions] Cancelling {label} (call_id {call_id}): exceeded its call timeout"
                 );
-                self.kill();
+                let _ = self.send(&crate::protocol::CancelCallMessage::new(
+                    call_id.to_string(),
+                    format!("{label} exceeded its call timeout"),
+                ));
                 Err(e)
             }
             Err(e) => Err(e),
@@ -1890,15 +1943,6 @@ fn recv_on(rx: &Receiver<TsMessage>, deadline: Instant) -> Result<TsMessage, FnC
             message: "TypeScript function runner process exited unexpectedly".into(),
         }),
     }
-}
-
-/// Whether a recv error means the runner is wedged and must be recycled
-/// (killed → supervisor respawns). A hard call-timeout = the child is stuck
-/// mid-op and won't answer again → recycle. `RUNNER_EXITED` is already dead
-/// (the supervisor's `is_alive()` will catch it) and `RUNNER_NOT_STARTED`
-/// hasn't come up yet — neither needs a kill here.
-fn err_requires_recycle(code: &str) -> bool {
-    code == "FN_TIMEOUT"
 }
 
 /// Kill a child and pass through an error message — used during start()
@@ -2567,21 +2611,26 @@ mod tests {
     }
 
     #[test]
-    fn only_a_hard_timeout_recycles_the_runner() {
-        // A call-deadline timeout = the child is wedged mid-op → recycle (kill,
-        // supervisor respawns). This is what the SSR-render / form / bundle
-        // loops now key off — pre-fix only `call_inner` recycled, so a wedged
-        // RENDER left the runner poisoned and every subsequent render to it
-        // timed out (the homepage outage).
-        assert!(err_requires_recycle("FN_TIMEOUT"));
-        // An already-exited child is caught by the supervisor's is_alive();
-        // a not-yet-started one just isn't up — neither needs a kill here.
-        assert!(!err_requires_recycle("RUNNER_EXITED"));
-        assert!(!err_requires_recycle("RUNNER_NOT_STARTED"));
-        // A normal function error must NEVER recycle the runner — that would
-        // turn an app bug into a runtime restart storm.
-        assert!(!err_requires_recycle("POLICY_DENIED"));
-        assert!(!err_requires_recycle("SOME_USER_ERROR"));
+    fn cancel_frame_shape_is_stable() {
+        // A timeout now emits a `cancel` frame for the one offending call
+        // instead of killing the multiplexed child (which failed every
+        // co-tenant call and SSR render). The TS runtime keys off this
+        // exact wire shape; runtime.ts's "cancel" dispatch arm must match.
+        let msg = crate::protocol::CancelCallMessage::new("c_7".into(), "idle timeout");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["type"], "cancel");
+        assert_eq!(json["call_id"], "c_7");
+        assert_eq!(json["reason"], "idle timeout");
+    }
+
+    #[test]
+    fn lifetime_multiplier_bounds_a_chatty_runaway() {
+        // Idle-timeout semantics mean activity extends the deadline; the
+        // hard cap is what keeps "a stream chunk every second, forever"
+        // from meaning forever.
+        let timeout = Duration::from_secs(30);
+        let cap = timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        assert_eq!(cap, Duration::from_secs(300));
     }
 
     // ---------------------------------------------------------------

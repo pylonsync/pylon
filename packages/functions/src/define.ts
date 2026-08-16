@@ -56,18 +56,22 @@ interface CommonDef<
    */
   internal?: boolean;
   /**
-   * Max wall-clock SECONDS this function may run before the runtime
-   * recycles its worker as wedged. Defaults to `PYLON_FN_CALL_TIMEOUT`
-   * (30s). Raise it for legitimately long-running work — heavy renders,
-   * big batch jobs, slow external calls — so the call isn't force-killed
-   * mid-flight. This also lifts the runtime's wedge backstop for the
-   * worker while such a call is in flight, so a busy-but-progressing
-   * worker (e.g. one doing synchronous canvas/image work that blocks the
-   * event loop) isn't respawned out from under the work.
+   * IDLE-timeout SECONDS for this function: how long it may go without
+   * producing any activity (a stream chunk, a `ctx.db` op, an LLM
+   * event) before the host cancels the call. Defaults to
+   * `PYLON_FN_CALL_TIMEOUT` (30s). Activity restarts the budget, so a
+   * streaming agent run stays alive as long as it keeps producing; a
+   * silent hang is cancelled at the budget. Total lifetime is capped at
+   * 10× this value however chatty the call is.
    *
-   * Keep it as small as the work honestly needs: a genuinely stuck call
-   * still ties up its worker until this deadline. Prefer offloading very
-   * heavy CPU work to a dedicated service over setting a huge timeout.
+   * Cancellation is per-call: the handler's next `ctx.*` call throws
+   * `CALL_CANCELLED` and `ctx.signal` aborts — other in-flight calls on
+   * the same worker are untouched. Raise it for legitimately long
+   * SILENT work (a single slow external call, synchronous CPU work);
+   * this also lifts the runtime's wedge backstop for the worker while
+   * such a call is in flight, so a busy-but-progressing worker (e.g.
+   * one doing synchronous canvas/image work that blocks the event loop)
+   * isn't respawned out from under the work.
    */
   timeout?: number;
 }

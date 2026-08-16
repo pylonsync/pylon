@@ -700,6 +700,14 @@ export interface QueryCtx<R extends AuthRequirement = "optional"> {
   requireMember: RequireMember;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
+  /**
+   * Fires when the host cancels this call (idle timeout exceeded).
+   * Thread it into `fetch(url, { signal: ctx.signal })` or SDK calls so
+   * a cancelled call stops its outbound work too — the runtime already
+   * makes every later `ctx.*` call throw `CALL_CANCELLED`. Optional
+   * because older hosts don't send cancel frames.
+   */
+  signal?: AbortSignal;
 }
 
 /** Context for mutation handlers (read + write, transactional). */
@@ -722,6 +730,14 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */
   requireMember: RequireMember;
+  /**
+   * Fires when the host cancels this call (idle timeout exceeded).
+   * Thread it into `fetch(url, { signal: ctx.signal })` or SDK calls so
+   * a cancelled call stops its outbound work too — the runtime already
+   * makes every later `ctx.*` call throw `CALL_CANCELLED`. Optional
+   * because older hosts don't send cancel frames.
+   */
+  signal?: AbortSignal;
 }
 
 /** Context for action handlers (external I/O, non-transactional). */
@@ -755,6 +771,14 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */
   requireMember: RequireMember;
+  /**
+   * Fires when the host cancels this call (idle timeout exceeded).
+   * Thread it into `fetch(url, { signal: ctx.signal })` or SDK calls so
+   * a cancelled call stops its outbound work too — the runtime already
+   * makes every later `ctx.*` call throw `CALL_CANCELLED`. Optional
+   * because older hosts don't send cancel frames.
+   */
+  signal?: AbortSignal;
   /**
    * HTTP request metadata — present only when the action was invoked via
    * a `defineRoute` HTTP binding. Missing when the action is called from

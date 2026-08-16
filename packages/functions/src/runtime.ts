@@ -188,6 +188,36 @@ const pendingRpcs = new Map<
  */
 const streamSinks = new Map<string, (event: unknown) => void>();
 
+/**
+ * Calls the host cancelled (idle-timeout exceeded), keyed by call_id →
+ * reason. The host stops listening the moment it sends `cancel` — its
+ * demux route is gone — so the goals here are to stop the handler from
+ * doing further work, not to answer:
+ *   - the call's AbortController fires (ctx.signal → fetch/LLM SDKs stop),
+ *   - its in-flight RPC promises reject,
+ *   - its FUTURE RPCs throw CALL_CANCELLED (this is what actually stops
+ *     a typical handler at its next ctx.db/ctx.scheduler touch),
+ *   - its return/error frames are suppressed (the host would drop them
+ *     as unknown-route frames anyway; suppressing skips the wasted send).
+ * Entries expire after CANCEL_TOMBSTONE_MS so a late cancel for an
+ * already-finished call can't leak forever.
+ */
+const cancelledCalls = new Map<string, string>();
+const callAborts = new Map<string, AbortController>();
+const CANCEL_TOMBSTONE_MS = 5 * 60_000;
+
+function cancelledError(callId: string): Error {
+  const reason = cancelledCalls.get(callId) ?? "cancelled by host";
+  const err = new Error(`call cancelled by host: ${reason}`);
+  (err as { code?: string }).code = "CALL_CANCELLED";
+  return err;
+}
+
+/** Throw when the host has cancelled this call — RPC entry gate. */
+function throwIfCancelled(callId: string): void {
+  if (cancelledCalls.has(callId)) throw cancelledError(callId);
+}
+
 let opSeq = 0;
 function nextOpId(callId: string): string {
   opSeq += 1;
@@ -320,6 +350,23 @@ function dispatch(line: string): void {
           error: err?.message || String(err),
         });
       });
+  } else if (msg.type === "cancel") {
+    // Host cancelled one call (idle timeout). See cancelledCalls above.
+    const c = msg as unknown as { call_id: string; reason?: string };
+    cancelledCalls.set(c.call_id, c.reason ?? "cancelled by host");
+    setTimeout(() => cancelledCalls.delete(c.call_id), CANCEL_TOMBSTONE_MS);
+    callAborts.get(c.call_id)?.abort(cancelledError(c.call_id));
+    for (const [key, pending] of pendingRpcs) {
+      if (key === c.call_id || key.startsWith(`${c.call_id}#`)) {
+        pendingRpcs.delete(key);
+        streamSinks.delete(key);
+        clearTimeout(pending.timeout);
+        pending.reject(cancelledError(c.call_id));
+      }
+    }
+    console.error(
+      `[functions] host cancelled call ${c.call_id}: ${c.reason ?? "(no reason)"}`,
+    );
   } else if (msg.type === "llm_event") {
     const ev = msg as unknown as {
       call_id: string;
@@ -357,6 +404,7 @@ function rpcDb(
   callId: string,
   msg: Record<string, unknown>,
 ): Promise<unknown> {
+  throwIfCancelled(callId);
   const opId = nextOpId(callId);
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -390,6 +438,7 @@ function rpcStreaming(
   msg: Record<string, unknown>,
   onEvent: (event: unknown) => void,
 ): Promise<unknown> {
+  throwIfCancelled(callId);
   const opId = nextOpId(callId);
   return new Promise((resolve, reject) => {
     const fail = () => {
@@ -459,6 +508,7 @@ const rpcQueues = new Map<string, Promise<unknown>>();
  * the rest of the queue.
  */
 function rpc(callId: string, msg: Record<string, unknown>): Promise<unknown> {
+  throwIfCancelled(callId);
   const prev = rpcQueues.get(callId) ?? Promise.resolve();
   const run = prev
     .then(
@@ -1083,6 +1133,12 @@ async function handleCall(msg: CallMessage): Promise<void> {
     }
   }
 
+  // Cooperative cancellation. The host's `cancel` frame aborts this
+  // controller; ctx.signal lets a handler thread it into fetch / SDK
+  // calls so a cancelled call stops burning tokens, not just replies.
+  const abort = new AbortController();
+  callAborts.set(msg.call_id, abort);
+
   const stream = buildStream(msg.call_id);
   const scheduler = buildScheduler(msg.call_id);
   const email = buildEmail(msg.call_id);
@@ -1190,14 +1246,25 @@ async function handleCall(msg: CallMessage): Promise<void> {
       break;
   }
 
+  // Expose the cancellation signal on every ctx variant. Assigned after
+  // the switch so all three ctx shapes get it without threading another
+  // parameter through each builder.
+  (ctx as { signal?: AbortSignal }).signal = abort.signal;
+
   try {
     const result = await def.handler(ctx, msg.args);
+    if (cancelledCalls.has(msg.call_id)) return;
     send({
       type: "return",
       call_id: msg.call_id,
       value: result ?? null,
     });
   } catch (err: any) {
+    // A cancelled call's host stopped listening — its demux route is
+    // gone, so any frame we send is dropped unread. Skip the send (and
+    // the redaction logging: CALL_CANCELLED is the expected way a
+    // cancelled handler unwinds, not an app error worth a stack trace).
+    if (cancelledCalls.has(msg.call_id)) return;
     // Redact. Handler errors historically shipped raw `err.message` to the
     // caller, which leaked DB error text, stack-trace-looking strings, and
     // internal concurrency-invariant messages. Authors can still surface a
@@ -1239,6 +1306,8 @@ async function handleCall(msg: CallMessage): Promise<void> {
         message: `Internal handler error${devDetail}`,
       });
     }
+  } finally {
+    callAborts.delete(msg.call_id);
   }
 }
 

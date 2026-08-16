@@ -312,6 +312,32 @@ impl LlmEventMessage {
     }
 }
 
+/// Rust → Bun: cancel an in-flight call. Sent when a call exceeds its
+/// idle timeout, INSTEAD of killing the whole multiplexed child (which
+/// took down every co-tenant call and SSR render on that runner). The
+/// TS runtime aborts the call's `ctx.signal`, makes its next ctx.* RPC
+/// throw `CALL_CANCELLED`, and drops any of its pending RPC promises.
+/// Best-effort: a child whose event loop is blocked can't process it —
+/// that case is the supervisor's wedge-strike kill, not ours.
+#[derive(Debug, Clone, Serialize)]
+pub struct CancelCallMessage {
+    #[serde(rename = "type")]
+    pub msg_type: &'static str, // always "cancel"
+    pub call_id: String,
+    /// Why the call was cancelled, for the TS-side debug log.
+    pub reason: String,
+}
+
+impl CancelCallMessage {
+    pub fn new(call_id: String, reason: impl Into<String>) -> Self {
+        Self {
+            msg_type: "cancel",
+            call_id,
+            reason: reason.into(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // TypeScript → Rust messages
 // ---------------------------------------------------------------------------
