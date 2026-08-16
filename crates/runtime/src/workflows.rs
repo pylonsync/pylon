@@ -1477,14 +1477,21 @@ mod tests {
         assert_eq!(kicks.load(Ordering::SeqCst), 1);
 
         // A delivered event resumes the run — another kick.
-        e.advance_with_response(&id, serde_json::json!({"action": "wait_event", "event": "go"}))
+        e.advance_with_response(
+            &id,
+            serde_json::json!({"action": "wait_event", "event": "go"}),
+        )
+        .unwrap();
+        e.send_event(&id, "go", serde_json::json!({"ok": true}))
             .unwrap();
-        e.send_event(&id, "go", serde_json::json!({"ok": true})).unwrap();
         assert_eq!(kicks.load(Ordering::SeqCst), 2);
 
         // A woken sleeper — another kick.
-        e.advance_with_response(&id, serde_json::json!({"action": "sleep", "duration": "0s"}))
-            .unwrap();
+        e.advance_with_response(
+            &id,
+            serde_json::json!({"action": "sleep", "duration": "0s"}),
+        )
+        .unwrap();
         let woken = e.wake_sleeping();
         assert_eq!(woken, vec![id.clone()]);
         assert_eq!(kicks.load(Ordering::SeqCst), 3);
@@ -1524,8 +1531,7 @@ mod tests {
 
     #[test]
     fn engine_persists_transitions_through_the_attached_store() {
-        let store =
-            std::sync::Arc::new(crate::workflow_store::WorkflowStore::in_memory().unwrap());
+        let store = std::sync::Arc::new(crate::workflow_store::WorkflowStore::in_memory().unwrap());
         let e = engine_with_scripted_hook();
         e.attach_store(std::sync::Arc::clone(&store));
 

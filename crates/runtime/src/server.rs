@@ -2258,7 +2258,10 @@ fn start_server(
                 runner.set_workflow_op_hook(Box::new(move |req| match req.op.as_str() {
                     "start" => {
                         let name = req.name.as_deref().ok_or_else(|| {
-                            ("WORKFLOW_BAD_REQUEST".to_string(), "start requires a name".to_string())
+                            (
+                                "WORKFLOW_BAD_REQUEST".to_string(),
+                                "start requires a name".to_string(),
+                            )
                         })?;
                         let input = req.input.clone().unwrap_or(serde_json::Value::Null);
                         we.start(name, input)

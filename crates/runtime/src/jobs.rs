@@ -797,7 +797,8 @@ fn retry_backoff_secs(base: u64, attempt: u32) -> u64 {
     }
     // Shift capped well below u64 range; the MAX cap makes larger shifts moot.
     let shift = (attempt - 1).min(16);
-    base.saturating_mul(1u64 << shift).min(MAX_RETRY_BACKOFF_SECS)
+    base.saturating_mul(1u64 << shift)
+        .min(MAX_RETRY_BACKOFF_SECS)
 }
 
 fn now_secs() -> u64 {

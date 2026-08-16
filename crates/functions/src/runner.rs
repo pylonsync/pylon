@@ -874,8 +874,7 @@ impl FnRunner {
         // serverData round-trips restart the budget, the hard deadline caps a
         // chatty runaway.
         let mut deadline = Instant::now() + timeout;
-        let hard_deadline =
-            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let hard_deadline = Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
         let started_ms = now_millis();
         let call_id = format!("r_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register this render's demux route BEFORE sending so the reader can
@@ -916,7 +915,13 @@ impl FnRunner {
             // stale-on-error from the ISR cache. The child stays alive for
             // its co-tenants; a render that blocked the whole event loop
             // (the homepage outage) is the supervisor's wedge-strike kill.
-            let m = self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, started_ms, "SSR render")?;
+            let m = self.recv_or_cancel(
+                &rx,
+                deadline.min(hard_deadline),
+                &call_id,
+                started_ms,
+                "SSR render",
+            )?;
             deadline = Instant::now() + timeout;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
@@ -1110,8 +1115,7 @@ impl FnRunner {
         use base64::Engine;
         let timeout = *self.call_timeout.lock().unwrap();
         let mut deadline = Instant::now() + timeout;
-        let hard_deadline =
-            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let hard_deadline = Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
         let started_ms = now_millis();
         let call_id = format!("f_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register the demux route before send (same as render) so concurrent
@@ -1141,8 +1145,13 @@ impl FnRunner {
         loop {
             // Cancel a wedged form handler (same rationale as the SSR render
             // loop); the child stays alive for its co-tenants.
-            let m =
-                self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, started_ms, "form handler")?;
+            let m = self.recv_or_cancel(
+                &rx,
+                deadline.min(hard_deadline),
+                &call_id,
+                started_ms,
+                "form handler",
+            )?;
             deadline = Instant::now() + timeout;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
@@ -1210,8 +1219,7 @@ impl FnRunner {
     pub fn bundle_client(&self, app_dir: &str) -> Result<BundleClientPaths, FnCallError> {
         let timeout = *self.call_timeout.lock().unwrap();
         let mut deadline = Instant::now() + timeout;
-        let hard_deadline =
-            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let hard_deadline = Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
         let started_ms = now_millis();
         let call_id = format!("b_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         let (_route, rx) = self.register_call(&call_id)?;
@@ -1360,8 +1368,7 @@ impl FnRunner {
         // however chatty it is.
         let timeout = self.deadline_for(fn_name);
         let mut deadline = Instant::now() + timeout;
-        let hard_deadline =
-            Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let hard_deadline = Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
         let call_started_ms = now_millis();
 
         let call_id = format!("c_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
