@@ -159,12 +159,27 @@ export async function executeWorkflowSlice(
 ): Promise<WorkflowRunnerResponse> {
   let index = 0;
   let currentStepName = "";
+  // Name uniqueness is enforced, not just documented: the replay cache
+  // is name-keyed, so a duplicate step name would silently replay the
+  // FIRST record's output into the second call — wrong data in a
+  // durability primitive. Same for repeated waitForEvent names.
+  const seenNames = new Set<string>();
+  const claimName = (kind: "step" | "event", name: string) => {
+    const key = `${kind}:${name}`;
+    if (seenNames.has(key)) {
+      throw new Error(
+        `duplicate ${kind} name "${name}" in one workflow run — names must be unique (the replay cache is name-keyed)`,
+      );
+    }
+    seenNames.add(key);
+  };
 
   const wf: WorkflowRun = {
     id: request.workflow_id,
     input: request.input,
 
     async step<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
+      claimName("step", name);
       const myIndex = index++;
       if (myIndex < request.current_step) {
         // Replay: return the recorded output. Name-keyed lookup so an
@@ -206,6 +221,7 @@ export async function executeWorkflowSlice(
     },
 
     async waitForEvent<T>(eventName: string): Promise<T> {
+      claimName("event", eventName);
       const myIndex = index++;
       // A delivered event is recorded as a completed step named
       // `event:<name>` (the Rust engine's send_event writes it).

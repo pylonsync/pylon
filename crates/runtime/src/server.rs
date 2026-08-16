@@ -1994,10 +1994,13 @@ fn start_server(
                 };
                 // 50 steps per job keeps one long workflow from
                 // monopolizing a worker; run_to_pause re-kicks when it
-                // stops on budget rather than at a pause.
+                // stops on budget rather than at a pause. Transport
+                // failures are absorbed into the ENGINE's per-step retry
+                // accounting inside advance(), so an Err here means the
+                // instance doesn't exist — retrying can't fix that.
                 match we.run_to_pause(id, 50) {
                     Ok(_) => JobResult::Success,
-                    Err(e) => JobResult::Retry(e),
+                    Err(e) => JobResult::Failure(e),
                 }
             }),
         );
@@ -2012,6 +2015,10 @@ fn start_server(
             "* * * * *",
             Arc::new(move |_job| {
                 let _ = we_tick.wake_sleeping();
+                // Keep 24h of terminal history for the dashboard, then GC —
+                // the instance map + workflows DB grow without bound
+                // otherwise.
+                let _ = we_tick.prune_terminal(24 * 3600);
                 for inst in we_tick.list(None) {
                     if matches!(
                         inst.status,
@@ -2244,7 +2251,7 @@ fn start_server(
             );
             let ops_for_wf: Arc<dyn pylon_router::FnOps> =
                 Arc::clone(ops) as Arc<dyn pylon_router::FnOps>;
-            workflow_engine.set_runner_hook(Box::new(move |request| {
+            workflow_engine.set_runner_hook(std::sync::Arc::new(move |request| {
                 // System identity: __pylon_workflow_run is internal +
                 // auth:"admin"; the workflow author's step code decides its
                 // own data access (same trust model as scheduled jobs
@@ -2275,7 +2282,7 @@ fn start_server(
     let job_workers = std::env::var("PYLON_JOB_WORKERS")
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
-        .filter(|&n| n >= 1)
+        .map(|n| n.clamp(1, 64))
         .unwrap_or(2);
     let _worker_handles: Vec<_> = (0..job_workers)
         .map(|i| {

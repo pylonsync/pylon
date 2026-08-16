@@ -66,7 +66,13 @@ interface CommonDef<
    *
    * Cancellation is per-call: the handler's next `ctx.*` call throws
    * `CALL_CANCELLED` and `ctx.signal` aborts — other in-flight calls on
-   * the same worker are untouched. Raise it for legitimately long
+   * the same worker are untouched. CAVEAT: the database transaction
+   * rolls back on cancel, but non-ctx work already in flight (a `fetch`,
+   * a payment SDK call) runs to completion unless you pass
+   * `{ signal: ctx.signal }` — a cancelled call can otherwise leave an
+   * external effect committed with its DB writes rolled back. Thread
+   * ctx.signal into every external call that must not outlive the
+   * handler. Raise the timeout for legitimately long
    * SILENT work (a single slow external call, synchronous CPU work);
    * this also lifts the runtime's wedge backstop for the worker while
    * such a call is in flight, so a busy-but-progressing worker (e.g.

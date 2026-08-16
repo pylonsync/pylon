@@ -160,6 +160,37 @@ describe("executeWorkflowSlice", () => {
     expect((res as { error: string }).error).toContain("replay mismatch");
   });
 
+  test("duplicate step names fail loudly instead of replaying the wrong output", async () => {
+    // The replay cache is name-keyed: without the uniqueness check, the
+    // second "fetch" would silently replay the FIRST record's output on
+    // every later slice — wrong data in a durability primitive.
+    const dup = workflow("dup", async (wf) => {
+      await wf.step("fetch", () => "A");
+      await wf.step("fetch", () => "B");
+    });
+    const res = await executeWorkflowSlice(
+      dup,
+      req(1, [done("fetch", "A")]),
+      ctx,
+    );
+    expect(res.action).toBe("fail");
+    expect((res as { error: string }).error).toContain("duplicate step name");
+  });
+
+  test("duplicate waitForEvent names fail loudly too", async () => {
+    const dup = workflow("dup-ev", async (wf) => {
+      await wf.waitForEvent("go");
+      await wf.waitForEvent("go");
+    });
+    const res = await executeWorkflowSlice(
+      dup,
+      req(1, [done("event:go", { n: 1 })]),
+      ctx,
+    );
+    expect(res.action).toBe("fail");
+    expect((res as { error: string }).error).toContain("duplicate event name");
+  });
+
   test("a stepless workflow completes on its first slice", async () => {
     const trivial = workflow("noop", async (wf) => ({ echoed: wf.input }));
     const res = await executeWorkflowSlice(trivial, req(0, [], 42), ctx);

@@ -81,7 +81,11 @@ test("workflows/ dir boots, declares in ready, and slices execute with a live ct
   await readUntil((fs) => fs.some((f) => f.type === "ready"));
   const ready = frames.find((f) => f.type === "ready") as {
     functions: Array<{ name: string; internal: boolean; auth: string }>;
-    workflows: Array<{ name: string; max_retries: number | null }>;
+    workflows: Array<{
+      name: string;
+      description: string;
+      max_retries: number | null;
+    }>;
   };
   expect(ready.workflows).toEqual([
     { name: "greet", description: "", max_retries: null },

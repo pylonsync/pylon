@@ -87,7 +87,7 @@ pub struct WorkflowDef {
 /// the full function runtime — ctx.db, ctx.llm, scheduling, the idle
 /// timeout — instead of a bespoke HTTP side-channel.
 pub type WorkflowRunnerHook =
-    Box<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
+    std::sync::Arc<dyn Fn(&serde_json::Value) -> Result<serde_json::Value, String> + Send + Sync>;
 
 /// Nudges the driver: "instance `id` has work". Installed by the server
 /// to enqueue a `pylon.workflow.advance` job — start/send_event/wake
@@ -218,7 +218,23 @@ impl WorkflowEngine {
         // Single-driver guard: duplicate kicks (the sweep tick re-kicks
         // every Running instance) must not race two drivers into
         // executing the same step twice. Losing the race is a no-op —
-        // the winner drives the instance to its next pause.
+        // the winner drives the instance to its next pause. The guard is
+        // a Drop type so a panic inside advance (poisoned lock in the
+        // ops plumbing) can't strand the instance behind a permanently
+        // held entry.
+        struct AdvancingGuard<'a> {
+            engine: &'a WorkflowEngine,
+            id: String,
+        }
+        impl Drop for AdvancingGuard<'_> {
+            fn drop(&mut self) {
+                // `if let Ok` (not unwrap): unwinding with a poisoned
+                // mutex here would double-panic into an abort.
+                if let Ok(mut advancing) = self.engine.advancing.lock() {
+                    advancing.remove(&self.id);
+                }
+            }
+        }
         {
             let mut advancing = self.advancing.lock().unwrap();
             if !advancing.insert(workflow_id.to_string()) {
@@ -228,6 +244,10 @@ impl WorkflowEngine {
                     .ok_or_else(|| format!("Workflow '{}' not found", workflow_id));
             }
         }
+        let _guard = AdvancingGuard {
+            engine: self,
+            id: workflow_id.to_string(),
+        };
         let result = (|| {
             let mut last = self.advance(workflow_id)?;
             let mut steps = 1;
@@ -237,7 +257,7 @@ impl WorkflowEngine {
             }
             Ok(last)
         })();
-        self.advancing.lock().unwrap().remove(workflow_id);
+        drop(_guard);
         if matches!(result, Ok(WorkflowStatus::Running)) {
             // Budget exhausted mid-run — re-kick so the driver picks the
             // instance up on a fresh job instead of monopolizing a worker.
@@ -291,7 +311,20 @@ impl WorkflowEngine {
             "completed_steps": instance.steps,
         });
 
-        let response = self.call_runner(&request)?;
+        // A transport failure (runner call error, slice idle-timeout) goes
+        // through the SAME retry accounting as a step that reported
+        // {action:"fail"}. Propagating it as Err instead let a hanging
+        // step retry forever: the advance job dead-lettered, the sweep
+        // tick re-kicked, and the instance showed Running while each
+        // attempt burned a worker for the full slice timeout.
+        let response = match self.call_runner(&request) {
+            Ok(r) => r,
+            Err(e) => serde_json::json!({
+                "action": "fail",
+                "error": format!("workflow runner error: {e}"),
+                "step_name": "__transport",
+            }),
+        };
         self.apply_response(workflow_id, &response)
     }
 
@@ -399,6 +432,48 @@ impl WorkflowEngine {
         self.definitions.lock().unwrap().values().cloned().collect()
     }
 
+    /// Prune terminal instances older than `max_age_secs` from memory and
+    /// the store. Returns how many were dropped from memory. Without
+    /// this, the instance map and the workflows DB grow without bound
+    /// now that workflows actually run.
+    pub fn prune_terminal(&self, max_age_secs: u64) -> usize {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let cutoff = now.saturating_sub(max_age_secs);
+        let mut instances = self.instances.lock().unwrap();
+        let before = instances.len();
+        instances.retain(|_, inst| {
+            let terminal = matches!(
+                inst.status,
+                WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled
+            );
+            if !terminal {
+                return true;
+            }
+            // completed_at is epoch-seconds + "Z" (now_iso below).
+            let completed = inst
+                .completed_at
+                .as_deref()
+                .and_then(|s| s.trim_end_matches('Z').parse::<u64>().ok());
+            match completed {
+                // Strictly newer than the cutoff survives; prune(0) means
+                // "drop every terminal instance".
+                Some(ts) => ts > cutoff,
+                // Terminal but unparsable/absent stamp: keep — never
+                // delete on ambiguity.
+                None => true,
+            }
+        });
+        let dropped = before - instances.len();
+        drop(instances);
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            store.cleanup_terminal(max_age_secs);
+        }
+        dropped
+    }
+
     /// Wake sleeping workflows whose timer has expired. Returns the IDs of
     /// workflows that were woken.
     pub fn wake_sleeping(&self) -> Vec<String> {
@@ -486,6 +561,17 @@ impl WorkflowEngine {
         let inst = instances
             .get_mut(workflow_id)
             .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?;
+
+        // A response for a terminal instance is DROPPED, not applied. The
+        // race this closes: cancel() lands while a slice is executing;
+        // without this check the slice's step_complete flips the status
+        // back to Running and the cancelled run keeps going.
+        if matches!(
+            inst.status,
+            WorkflowStatus::Completed | WorkflowStatus::Failed | WorkflowStatus::Cancelled
+        ) {
+            return Ok(inst.status.clone());
+        }
 
         if inst.started_at.is_none() {
             inst.started_at = Some(now_iso());
@@ -607,7 +693,12 @@ impl WorkflowEngine {
     /// defaulted to 127.0.0.1:9876, which nothing has ever served, so TS
     /// workflows silently never executed.
     fn call_runner(&self, request: &serde_json::Value) -> Result<serde_json::Value, String> {
-        if let Some(hook) = self.runner_hook.lock().unwrap().as_ref() {
+        // Clone the Arc OUT of the mutex before calling: a slice can run
+        // for minutes (long agent step), and holding the lock across it
+        // would serialize every workflow in the process behind one slow
+        // step — while its advance job occupies a worker doing nothing.
+        let hook = self.runner_hook.lock().unwrap().clone();
+        if let Some(hook) = hook {
             return hook(request);
         }
         if self.runner_url.is_empty() {
@@ -1259,6 +1350,41 @@ mod tests {
         assert!(e.get("wf_ccc").is_none());
     }
 
+    #[test]
+    fn cancel_mid_slice_is_not_reverted_by_the_slice_response() {
+        // Race: cancel() lands while a slice executes; the slice's
+        // step_complete used to flip the status back to Running.
+        let e = engine();
+        let id = e.start("onboarding", serde_json::json!({})).unwrap();
+        e.cancel(&id).unwrap();
+        let status = e
+            .advance_with_response(
+                &id,
+                serde_json::json!({"action": "step_complete", "step_name": "late", "output": null}),
+            )
+            .unwrap();
+        assert_eq!(status, WorkflowStatus::Cancelled);
+        let inst = e.get(&id).unwrap();
+        assert_eq!(inst.status, WorkflowStatus::Cancelled);
+        assert!(inst.steps.is_empty());
+    }
+
+    #[test]
+    fn prune_terminal_drops_old_finished_instances_only() {
+        let e = engine_with_scripted_hook();
+        let done_id = e.start("onboarding", serde_json::json!({})).unwrap();
+        e.run_to_pause(&done_id, 50).unwrap();
+        let live_id = e.start("onboarding", serde_json::json!({})).unwrap();
+
+        // Age 0: nothing old enough (completed_at is "now").
+        assert_eq!(e.prune_terminal(3600), 0);
+        // Cutoff in the future relative to completion: the terminal one
+        // goes, the running one stays.
+        assert_eq!(e.prune_terminal(0), 1);
+        assert!(e.get(&done_id).is_none());
+        assert!(e.get(&live_id).is_some());
+    }
+
     // -----------------------------------------------------------------
     // In-process runner hook + driver (the wiring that replaced the
     // phantom 127.0.0.1:9876 HTTP runner).
@@ -1269,7 +1395,7 @@ mod tests {
     /// completes the run.
     fn engine_with_scripted_hook() -> WorkflowEngine {
         let e = engine();
-        e.set_runner_hook(Box::new(|request| {
+        e.set_runner_hook(std::sync::Arc::new(|request| {
             let current = request
                 .get("current_step")
                 .and_then(|v| v.as_u64())
@@ -1303,19 +1429,37 @@ mod tests {
     }
 
     #[test]
-    fn no_hook_and_no_url_is_a_hard_error_not_a_silent_hang() {
-        // The old default POSTed to 127.0.0.1:9876, which nothing served.
+    fn no_hook_and_no_url_fails_the_instance_after_transport_retries() {
+        // The old default POSTed to 127.0.0.1:9876, which nothing served —
+        // and transport errors used to propagate as Err, which the driver
+        // retried FOREVER (dead-letter → tick re-kick loop) while the
+        // instance showed Running. Now a transport failure burns a step
+        // retry like any {action:"fail"}, so the instance lands in Failed
+        // with the diagnosis after max_retries.
         let e = WorkflowEngine::new("", 100);
         e.register(WorkflowDef {
             name: "onboarding".into(),
             description: String::new(),
             file: "workflows/".into(),
-            max_retries: 3,
+            max_retries: 2,
             step_timeout_secs: 600,
         });
         let id = e.start("onboarding", serde_json::json!({})).unwrap();
-        let err = e.advance(&id).unwrap_err();
-        assert!(err.contains("no workflow runner available"), "{err}");
+        let status = e.run_to_pause(&id, 50).unwrap();
+        assert_eq!(status, WorkflowStatus::Failed);
+        let inst = e.get(&id).unwrap();
+        assert!(
+            inst.error
+                .as_deref()
+                .unwrap_or("")
+                .contains("no workflow runner available"),
+            "{:?}",
+            inst.error
+        );
+        // Each attempt is a recorded __transport failure — visible in the
+        // step history, not an invisible retry loop.
+        assert!(inst.steps.iter().all(|s| s.name == "__transport"));
+        assert_eq!(inst.steps.len(), 2);
     }
 
     #[test]
@@ -1351,7 +1495,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let e = engine();
         // A hook that never finishes: every slice completes another step.
-        e.set_runner_hook(Box::new(|request| {
+        e.set_runner_hook(std::sync::Arc::new(|request| {
             let n = request
                 .get("current_step")
                 .and_then(|v| v.as_u64())

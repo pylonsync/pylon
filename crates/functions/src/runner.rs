@@ -372,6 +372,11 @@ pub struct FnRunner {
     /// app's `workflows/` dir). Repopulated on every start/respawn; the
     /// host registers them with the WorkflowEngine.
     workflows: Mutex<Vec<crate::protocol::WorkflowInfo>>,
+    /// When the runner last went from idle to busy (ms epoch). Paired with
+    /// `last_msg_at` in the health probe: silence is measured from
+    /// max(last frame from the child, start of the current busy period),
+    /// so an idle stretch before a call never counts as wedge silence.
+    busy_since: Arc<AtomicU64>,
 }
 
 impl FnRunner {
@@ -398,7 +403,19 @@ impl FnRunner {
             policy_gate: Mutex::new(None),
             per_fn_timeouts: Mutex::new(std::collections::HashMap::new()),
             workflows: Mutex::new(Vec::new()),
+            busy_since: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// True when the child has emitted ANY frame since `start_ms`. The
+    /// per-call wedge test: a call that times out while this is false was
+    /// running on a child that produced nothing the whole time — an
+    /// event-loop wedge (busy sync loop), not a slow await. That child
+    /// can't even read a `cancel` frame; killing it (supervisor respawns)
+    /// is the only recovery, and doing it here restores the old code's
+    /// property that a wedge is cleared within one call timeout.
+    fn child_emitted_since(&self, start_ms: u64) -> bool {
+        self.last_msg_at.load(Ordering::Relaxed) >= start_ms
     }
 
     /// Workflows declared by the live TS runtime's ready handshake.
@@ -438,8 +455,14 @@ impl FnRunner {
         self.per_fn_timeouts
             .lock()
             .unwrap()
-            .values()
-            .copied()
+            .iter()
+            // Framework-internal defs (__pylon_workflow_run declares 600s)
+            // must not size the wedge window for the whole runner — an app
+            // that merely HAS a workflows/ dir would otherwise stretch the
+            // supervisor's kill threshold ~18x for every call. A wedged
+            // workflow slice is caught by the per-call zero-frames kill.
+            .filter(|(name, _)| !name.starts_with("__pylon_"))
+            .map(|(_, secs)| *secs)
             .max()
             .unwrap_or(0)
     }
@@ -669,8 +692,13 @@ impl FnRunner {
         if self.in_flight.load(Ordering::Relaxed) == 0 {
             return Ok(());
         }
-        // Busy: healthy only while messages keep arriving.
-        let last = self.last_msg_at.load(Ordering::Relaxed);
+        // Busy: healthy only while messages keep arriving. Silence is
+        // measured from max(last child frame, start of the current busy
+        // period) — see busy_since.
+        let last = self
+            .last_msg_at
+            .load(Ordering::Relaxed)
+            .max(self.busy_since.load(Ordering::Relaxed));
         let now = now_millis();
         let silent_for = now.saturating_sub(last);
         if silent_for <= timeout.as_millis() as u64 {
@@ -832,6 +860,7 @@ impl FnRunner {
         let mut deadline = Instant::now() + timeout;
         let hard_deadline =
             Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let started_ms = now_millis();
         let call_id = format!("r_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register this render's demux route BEFORE sending so the reader can
         // route every reply (response_start, chunks, db round-trips, done) to
@@ -871,7 +900,7 @@ impl FnRunner {
             // stale-on-error from the ISR cache. The child stays alive for
             // its co-tenants; a render that blocked the whole event loop
             // (the homepage outage) is the supervisor's wedge-strike kill.
-            let m = self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, "SSR render")?;
+            let m = self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, started_ms, "SSR render")?;
             deadline = Instant::now() + timeout;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
@@ -1067,6 +1096,7 @@ impl FnRunner {
         let mut deadline = Instant::now() + timeout;
         let hard_deadline =
             Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let started_ms = now_millis();
         let call_id = format!("f_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register the demux route before send (same as render) so concurrent
         // form handlers can't receive each other's messages.
@@ -1096,7 +1126,7 @@ impl FnRunner {
             // Cancel a wedged form handler (same rationale as the SSR render
             // loop); the child stays alive for its co-tenants.
             let m =
-                self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, "form handler")?;
+                self.recv_or_cancel(&rx, deadline.min(hard_deadline), &call_id, started_ms, "form handler")?;
             deadline = Instant::now() + timeout;
             match m {
                 TsMessage::ResponseStart(rs) if rs.call_id == call_id => {
@@ -1166,6 +1196,7 @@ impl FnRunner {
         let mut deadline = Instant::now() + timeout;
         let hard_deadline =
             Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let started_ms = now_millis();
         let call_id = format!("b_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         let (_route, rx) = self.register_call(&call_id)?;
         let msg = crate::protocol::BundleClientMessage::new(call_id.clone(), app_dir.to_string());
@@ -1177,6 +1208,7 @@ impl FnRunner {
                 &rx,
                 deadline.min(hard_deadline),
                 &call_id,
+                started_ms,
                 "client bundle build",
             )?;
             deadline = Instant::now() + timeout;
@@ -1314,6 +1346,7 @@ impl FnRunner {
         let mut deadline = Instant::now() + timeout;
         let hard_deadline =
             Instant::now() + timeout.saturating_mul(MAX_CALL_LIFETIME_MULTIPLIER);
+        let call_started_ms = now_millis();
 
         let call_id = format!("c_{}", self.call_counter.fetch_add(1, Ordering::Relaxed));
         // Register this call's demux route before send so its replies route to
@@ -1365,24 +1398,33 @@ impl FnRunner {
                     m
                 }
                 Err(e) if e.code == "FN_TIMEOUT" => {
-                    // Cancel THIS call and leave the child alive. Killing
-                    // the multiplexed runner here failed every co-tenant
-                    // call and SSR render for one slow handler; a hung
-                    // `await` doesn't block the event loop, so the child
-                    // is fine. The one child-level failure mode — a busy
-                    // sync loop wedging the event loop — never processes
-                    // this frame either, and is exactly what the
-                    // supervisor's wedge-strike probe kills.
-                    tracing::warn!(
-                        "[functions] Cancelling call \"{}\": no activity within {:?} (call_id {})",
-                        fn_name,
-                        timeout,
-                        call_id
-                    );
-                    let _ = self.send(&crate::protocol::CancelCallMessage::new(
-                        call_id.clone(),
-                        format!("idle timeout {timeout:?} exceeded"),
-                    ));
+                    // Wedge test before deciding how to fail. A hung
+                    // `await` blocks only its own call — cancel it and
+                    // leave the child serving its co-tenants. But a child
+                    // that emitted NOTHING (no frame from ANY call) for
+                    // this call's whole lifetime has a blocked event loop:
+                    // it can't even read a cancel frame, and every future
+                    // call would burn its timeout too. Kill it — the
+                    // supervisor respawns — restoring the old guarantee
+                    // that a wedge clears within one call timeout.
+                    if !self.child_emitted_since(call_started_ms) {
+                        tracing::warn!(
+                            "[functions] Killing TS runtime: call \"{}\" timed out with ZERO frames from the child since it started — event loop wedged",
+                            fn_name
+                        );
+                        self.kill();
+                    } else {
+                        tracing::warn!(
+                            "[functions] Cancelling call \"{}\": no activity within {:?} (call_id {})",
+                            fn_name,
+                            timeout,
+                            call_id
+                        );
+                        let _ = self.send(&crate::protocol::CancelCallMessage::new(
+                            call_id.clone(),
+                            format!("idle timeout {timeout:?} exceeded"),
+                        ));
+                    }
                     let fn_trace = trace.finish_error(
                         "FN_TIMEOUT".into(),
                         format!("Function \"{fn_name}\" exceeded timeout {timeout:?}"),
@@ -1886,12 +1928,17 @@ impl FnRunner {
         let (tx, rx) = mpsc::channel();
         table.lock().unwrap().insert(call_id.to_string(), tx);
         self.in_flight.fetch_add(1, Ordering::Relaxed);
-        // A call STARTING is progress: reset the silence clock so the health
-        // probe measures "no message since this call began", not since an
-        // earlier idle period. Without this, a runner that sat idle past the
-        // probe window and then takes a normal call would read as wedged on the
-        // first probe (the start-handshake stamp would be stale by then).
-        self.last_msg_at.store(now_millis(), Ordering::Relaxed);
+        // Stamp busy_since (NOT last_msg_at). The probe measures silence
+        // from max(last_msg_at, busy_since), so a runner that sat idle past
+        // the probe window and then takes a call doesn't read as wedged on
+        // the first probe — while last_msg_at itself stays a truthful
+        // "last frame FROM the child" signal. Resetting last_msg_at here
+        // (the old code) let a steady stream of NEW calls keep a fully
+        // wedged child looking alive forever: every arrival reset the
+        // silence clock the probe reads, `pick()` kept routing into the
+        // wedge, and every call burned its timeout — the homepage-outage
+        // pattern.
+        self.busy_since.store(now_millis(), Ordering::Relaxed);
         Ok((
             CallRoute {
                 table,
@@ -1903,36 +1950,43 @@ impl FnRunner {
     }
 
     /// Receive the next message for a call from ITS demux channel, CANCELLING
-    /// the call on a timeout.
+    /// the call on a timeout — or KILLING the child when the timeout looks
+    /// like an event-loop wedge.
     ///
-    /// This used to kill the whole child on timeout, on the theory that a
-    /// deadline-exceeded meant a wedged event loop. With multiplexing that
-    /// killed every co-tenant call and SSR render for one slow handler —
+    /// This used to always kill the whole child on timeout, on the theory
+    /// that a deadline-exceeded meant a wedged event loop. With multiplexing
+    /// that killed every co-tenant call and SSR render for one slow handler —
     /// and the theory was wrong for the common case: a hung `await` blocks
-    /// nothing but its own call. Now the timeout cancels only the offending
-    /// call (the `cancel` frame aborts its `ctx.signal` and poisons its
-    /// future RPCs), and the one genuinely child-level failure — a busy
-    /// sync loop wedging the event loop — is detected and killed by the
-    /// supervisor's wedge-strike probe, which is also the only case where
-    /// the cancel frame itself would go unread. `label` names the op for
+    /// nothing but its own call. The wedge test is `started_ms`: if the child
+    /// emitted NO frame at all since this op began, its event loop is blocked
+    /// (it couldn't read a cancel frame either) and the kill is the only
+    /// recovery; otherwise cancel just this call. `label` names the op for
     /// the log.
     fn recv_or_cancel(
         &self,
         rx: &Receiver<TsMessage>,
         deadline: Instant,
         call_id: &str,
+        started_ms: u64,
         label: &str,
     ) -> Result<TsMessage, FnCallError> {
         match recv_on(rx, deadline) {
             Ok(m) => Ok(m),
             Err(e) if e.code == "FN_TIMEOUT" => {
-                tracing::warn!(
-                    "[functions] Cancelling {label} (call_id {call_id}): exceeded its call timeout"
-                );
-                let _ = self.send(&crate::protocol::CancelCallMessage::new(
-                    call_id.to_string(),
-                    format!("{label} exceeded its call timeout"),
-                ));
+                if !self.child_emitted_since(started_ms) {
+                    tracing::warn!(
+                        "[functions] Killing TS runtime: {label} (call_id {call_id}) timed out with ZERO frames from the child — event loop wedged"
+                    );
+                    self.kill();
+                } else {
+                    tracing::warn!(
+                        "[functions] Cancelling {label} (call_id {call_id}): exceeded its call timeout"
+                    );
+                    let _ = self.send(&crate::protocol::CancelCallMessage::new(
+                        call_id.to_string(),
+                        format!("{label} exceeded its call timeout"),
+                    ));
+                }
                 Err(e)
             }
             Err(e) => Err(e),

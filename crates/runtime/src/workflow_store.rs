@@ -223,6 +223,36 @@ impl WorkflowStore {
         Ok(workflows)
     }
 
+    /// Delete terminal (Completed/Failed/Cancelled) workflows whose
+    /// completed_at is older than `max_age_secs`; their steps go with
+    /// them. Returns workflow rows deleted. `completed_at` is
+    /// epoch-seconds + "Z" (the engine's encoding), so a string compare
+    /// against the same-width cutoff is numerically correct for any
+    /// realistic timestamp.
+    pub fn cleanup_terminal(&self, max_age_secs: u64) -> usize {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(max_age_secs);
+        let cutoff_str = format!("{cutoff}Z");
+        // Steps deleted explicitly: ON DELETE CASCADE only fires with
+        // foreign_keys=ON, which is per-connection and not guaranteed.
+        let _ = conn.execute(
+            "DELETE FROM workflow_steps WHERE workflow_id IN \
+             (SELECT id FROM workflows WHERE status IN ('Completed','Failed','Cancelled') \
+              AND completed_at IS NOT NULL AND completed_at < ?1)",
+            rusqlite::params![cutoff_str],
+        );
+        conn.execute(
+            "DELETE FROM workflows WHERE status IN ('Completed','Failed','Cancelled') \
+             AND completed_at IS NOT NULL AND completed_at < ?1",
+            rusqlite::params![cutoff_str],
+        )
+        .unwrap_or(0)
+    }
+
     /// Count workflow instances by status.
     pub fn count_by_status(&self, status: &str) -> usize {
         let conn = self.conn.lock().unwrap();
