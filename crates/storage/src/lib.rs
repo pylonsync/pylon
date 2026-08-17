@@ -7,6 +7,8 @@ pub mod pg_exec;
 pub mod pg_search;
 #[cfg(feature = "postgres-live")]
 pub mod pg_tx_store;
+#[cfg(feature = "postgres-live")]
+pub mod pg_vector;
 pub mod pool;
 pub mod postgres;
 pub mod s3;
@@ -14,6 +16,7 @@ pub mod search;
 pub mod search_maintenance;
 pub mod search_query;
 pub mod sqlite;
+pub mod vector;
 
 use std::fmt;
 

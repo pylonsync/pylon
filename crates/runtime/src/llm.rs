@@ -1173,6 +1173,281 @@ fn redact_body(body: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Embeddings — a separate provider axis from chat. An app can run
+// Anthropic for completions and OpenAI or Voyage for embeddings; each
+// resolves its own key so configuring one never silently disables the
+// other.
+// ---------------------------------------------------------------------------
+
+/// Embeddings provider identity. Loaded from `PYLON_EMBEDDINGS_PROVIDER`
+/// (`openai` | `voyage`); when unset, auto-detects from which key is
+/// present (OpenAI first — it's also the chat provider's key).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingsProvider {
+    Openai,
+    Voyage,
+}
+
+/// Request shape for `ctx.llm.embed`. `input` is 1..=2048 texts —
+/// the OpenAI batch cap; Voyage's is lower (128) and the provider
+/// rejects overage with a clear HTTP error.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmEmbedRequest {
+    pub input: Vec<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// One embedding per input text, in input order.
+#[derive(Debug, Clone, Serialize)]
+pub struct LlmEmbedResponse {
+    pub embeddings: Vec<Vec<f32>>,
+    pub model: String,
+    /// Provider-reported total token usage (0 when not reported).
+    pub total_tokens: u32,
+}
+
+#[derive(Clone)]
+pub struct EmbeddingsClient {
+    inner: Arc<EmbeddingsClientInner>,
+}
+
+struct EmbeddingsClientInner {
+    provider: EmbeddingsProvider,
+    api_key: String,
+    default_model: String,
+    /// `PYLON_EMBEDDINGS_BASE_URL` — OpenAI-compatible endpoint
+    /// override (Together, local inference servers).
+    base_url: Option<String>,
+    agent: ureq::Agent,
+}
+
+impl EmbeddingsClient {
+    /// Build from environment. Returns None when no embeddings
+    /// provider + key can be resolved.
+    ///
+    /// Resolution:
+    /// - `PYLON_EMBEDDINGS_PROVIDER=openai` → key from
+    ///   `PYLON_EMBEDDINGS_API_KEY` | `OPENAI_API_KEY` | `PYLON_AI_API_KEY`
+    /// - `PYLON_EMBEDDINGS_PROVIDER=voyage` → key from
+    ///   `PYLON_EMBEDDINGS_API_KEY` | `VOYAGE_API_KEY`
+    /// - unset → openai when an OpenAI key exists, else voyage when
+    ///   `VOYAGE_API_KEY` exists, else None.
+    ///
+    /// Default model: `PYLON_EMBEDDINGS_MODEL`, else
+    /// `text-embedding-3-small` (openai) / `voyage-3.5` (voyage).
+    pub fn from_env() -> Option<Self> {
+        let env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+        let explicit = env("PYLON_EMBEDDINGS_PROVIDER");
+        let openai_key = || {
+            env("PYLON_EMBEDDINGS_API_KEY")
+                .or_else(|| env("OPENAI_API_KEY"))
+                .or_else(|| env("PYLON_AI_API_KEY"))
+        };
+        let voyage_key = || env("PYLON_EMBEDDINGS_API_KEY").or_else(|| env("VOYAGE_API_KEY"));
+        let (provider, api_key) = match explicit.as_deref() {
+            Some("openai") => {
+                let Some(key) = openai_key() else {
+                    tracing::warn!(
+                        "[llm] PYLON_EMBEDDINGS_PROVIDER=openai but no OPENAI_API_KEY / PYLON_EMBEDDINGS_API_KEY; ctx.llm.embed will reject as EMBEDDINGS_NOT_CONFIGURED"
+                    );
+                    return None;
+                };
+                (EmbeddingsProvider::Openai, key)
+            }
+            Some("voyage") => {
+                let Some(key) = voyage_key() else {
+                    tracing::warn!(
+                        "[llm] PYLON_EMBEDDINGS_PROVIDER=voyage but no VOYAGE_API_KEY / PYLON_EMBEDDINGS_API_KEY; ctx.llm.embed will reject as EMBEDDINGS_NOT_CONFIGURED"
+                    );
+                    return None;
+                };
+                (EmbeddingsProvider::Voyage, key)
+            }
+            Some(other) => {
+                tracing::warn!(
+                    "[llm] Unknown PYLON_EMBEDDINGS_PROVIDER {other:?}; expected openai|voyage"
+                );
+                return None;
+            }
+            None => {
+                if let Some(key) = env("OPENAI_API_KEY").or_else(|| env("PYLON_AI_API_KEY")) {
+                    (EmbeddingsProvider::Openai, key)
+                } else if let Some(key) = env("VOYAGE_API_KEY") {
+                    (EmbeddingsProvider::Voyage, key)
+                } else if let Some(key) = env("PYLON_EMBEDDINGS_API_KEY") {
+                    // A dedicated embeddings key with no provider named:
+                    // default to OpenAI (the documented default), loudly.
+                    tracing::info!(
+                        "[llm] PYLON_EMBEDDINGS_API_KEY set with no PYLON_EMBEDDINGS_PROVIDER; defaulting to openai"
+                    );
+                    (EmbeddingsProvider::Openai, key)
+                } else {
+                    return None;
+                }
+            }
+        };
+        let default_model = env("PYLON_EMBEDDINGS_MODEL").unwrap_or_else(|| match provider {
+            EmbeddingsProvider::Openai => "text-embedding-3-small".into(),
+            EmbeddingsProvider::Voyage => "voyage-3.5".into(),
+        });
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
+            .build();
+        Some(Self {
+            inner: Arc::new(EmbeddingsClientInner {
+                provider,
+                api_key,
+                default_model,
+                base_url: env("PYLON_EMBEDDINGS_BASE_URL"),
+                agent,
+            }),
+        })
+    }
+
+    pub fn provider(&self) -> EmbeddingsProvider {
+        self.inner.provider
+    }
+    pub fn default_model(&self) -> &str {
+        &self.inner.default_model
+    }
+
+    fn url(&self) -> String {
+        match &self.inner.base_url {
+            Some(base) => format!("{}/v1/embeddings", base.trim_end_matches('/')),
+            None => match self.inner.provider {
+                EmbeddingsProvider::Openai => "https://api.openai.com/v1/embeddings".into(),
+                EmbeddingsProvider::Voyage => "https://api.voyageai.com/v1/embeddings".into(),
+            },
+        }
+    }
+
+    /// Embed a batch of texts. Both providers speak the same
+    /// OpenAI-shaped request/response (`{model, input}` →
+    /// `{data: [{embedding, index}], model, usage}`), so one transport
+    /// path serves both — only the host + auth header differ.
+    pub fn embed(&self, req: LlmEmbedRequest) -> Result<LlmEmbedResponse, LlmError> {
+        if req.input.is_empty() {
+            return Err(LlmError {
+                code: "INVALID_REQUEST".into(),
+                message: "embed input must contain at least one text".into(),
+            });
+        }
+        if req.input.len() > 2048 {
+            return Err(LlmError {
+                code: "INVALID_REQUEST".into(),
+                message: format!(
+                    "embed input has {} texts; max 2048 per call",
+                    req.input.len()
+                ),
+            });
+        }
+        let model = req
+            .model
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| self.inner.default_model.clone());
+        let body = serde_json::json!({ "model": model, "input": req.input });
+        let resp = self
+            .inner
+            .agent
+            .post(&self.url())
+            .set("authorization", &format!("Bearer {}", self.inner.api_key))
+            .set("content-type", "application/json")
+            .send_json(body)
+            .map_err(map_ureq_err)?;
+        let parsed: serde_json::Value = resp.into_json().map_err(|e| LlmError {
+            code: "INVALID_RESPONSE".into(),
+            message: format!("Failed to parse embeddings response: {e}"),
+        })?;
+        parse_embed_response(&parsed, req.input.len(), &model)
+    }
+}
+
+/// Parse the OpenAI-shaped embeddings response body. Factored out of
+/// [`EmbeddingsClient::embed`] so response-shape handling is unit-
+/// testable without a live provider.
+fn parse_embed_response(
+    parsed: &serde_json::Value,
+    input_len: usize,
+    fallback_model: &str,
+) -> Result<LlmEmbedResponse, LlmError> {
+    let data = parsed
+        .get("data")
+        .and_then(|d| d.as_array())
+        .ok_or_else(|| LlmError {
+            code: "INVALID_RESPONSE".into(),
+            message: "embeddings response has no data array".into(),
+        })?;
+    // Providers document data[] in input order, but each item carries
+    // `index` — honor it so a reordering can't silently mis-assign
+    // embeddings to texts. Sized to the INPUT count, not data.len(): a
+    // tail-truncated response must fail the emptiness check below,
+    // never return a short array.
+    let mut embeddings: Vec<Vec<f32>> = vec![Vec::new(); input_len];
+    for item in data {
+        let idx = item
+            .get("index")
+            .and_then(|i| i.as_u64())
+            .unwrap_or(u64::MAX) as usize;
+        let vec_json = item
+            .get("embedding")
+            .and_then(|e| e.as_array())
+            .ok_or_else(|| LlmError {
+                code: "INVALID_RESPONSE".into(),
+                message: "embeddings item has no embedding array".into(),
+            })?;
+        let values: Vec<f32> = vec_json
+            .iter()
+            .filter_map(|v| v.as_f64())
+            .map(|f| f as f32)
+            .collect();
+        if values.len() != vec_json.len() {
+            return Err(LlmError {
+                code: "INVALID_RESPONSE".into(),
+                message: "embeddings item contains non-number elements".into(),
+            });
+        }
+        if values.is_empty() {
+            return Err(LlmError {
+                code: "INVALID_RESPONSE".into(),
+                message: format!("embeddings item {idx} is empty"),
+            });
+        }
+        match embeddings.get_mut(idx) {
+            Some(slot) => *slot = values,
+            None => {
+                return Err(LlmError {
+                    code: "INVALID_RESPONSE".into(),
+                    message: format!("embeddings item index {idx} out of range"),
+                })
+            }
+        }
+    }
+    if embeddings.iter().any(|e| e.is_empty()) {
+        return Err(LlmError {
+            code: "INVALID_RESPONSE".into(),
+            message: "embeddings response is missing entries for some inputs".into(),
+        });
+    }
+    let response_model = parsed
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or(fallback_model)
+        .to_string();
+    let total_tokens = parsed
+        .get("usage")
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0) as u32;
+    Ok(LlmEmbedResponse {
+        embeddings,
+        model: response_model,
+        total_tokens,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1505,5 +1780,59 @@ mod tests {
             None => requested,
         };
         assert_eq!(capped, 8000);
+    }
+
+    #[test]
+    fn embed_response_full_shape_parses() {
+        let body = serde_json::json!({
+            "data": [
+                {"index": 1, "embedding": [0.5, 0.5]},
+                {"index": 0, "embedding": [1.0, 0.0]},
+            ],
+            "model": "text-embedding-3-small",
+            "usage": {"total_tokens": 7}
+        });
+        let out = parse_embed_response(&body, 2, "fallback").unwrap();
+        // Order restored from `index`, not array position.
+        assert_eq!(out.embeddings[0], vec![1.0, 0.0]);
+        assert_eq!(out.embeddings[1], vec![0.5, 0.5]);
+        assert_eq!(out.model, "text-embedding-3-small");
+        assert_eq!(out.total_tokens, 7);
+    }
+
+    #[test]
+    fn embed_response_truncated_tail_is_rejected() {
+        // Provider silently drops the last item — must error, never
+        // return a short array that mis-zips against inputs.
+        let body = serde_json::json!({
+            "data": [ {"index": 0, "embedding": [1.0]} ],
+        });
+        let err = parse_embed_response(&body, 2, "m").unwrap_err();
+        assert_eq!(err.code, "INVALID_RESPONSE");
+        assert!(err.message.contains("missing entries"), "{}", err.message);
+    }
+
+    #[test]
+    fn embed_response_bad_shapes_are_rejected() {
+        // Duplicate index leaves a hole.
+        let dup = serde_json::json!({
+            "data": [
+                {"index": 0, "embedding": [1.0]},
+                {"index": 0, "embedding": [2.0]},
+            ],
+        });
+        assert!(parse_embed_response(&dup, 2, "m").is_err());
+        // Out-of-range index.
+        let oob = serde_json::json!({
+            "data": [ {"index": 5, "embedding": [1.0]} ],
+        });
+        assert!(parse_embed_response(&oob, 1, "m").is_err());
+        // Non-number element.
+        let bad = serde_json::json!({
+            "data": [ {"index": 0, "embedding": [1.0, "x"]} ],
+        });
+        assert!(parse_embed_response(&bad, 1, "m").is_err());
+        // No data array.
+        assert!(parse_embed_response(&serde_json::json!({}), 1, "m").is_err());
     }
 }

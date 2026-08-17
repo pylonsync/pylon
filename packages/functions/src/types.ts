@@ -157,6 +157,32 @@ export interface DbReader {
   ): Promise<SearchResult>;
 
   /**
+   * Exact k-nearest-neighbor search over a `field.vector(dims)` field.
+   * Cosine similarity by default (`metric: "dot" | "l2"` to change);
+   * hits come back best-first with the full row on `doc` (vector
+   * fields stripped — re-fetch by id if you need the embedding).
+   *
+   * ```ts
+   * const [embedding] = await ctx.llm.embed(["how do I reset my password?"]);
+   * const { hits } = await ctx.db.vectorSearch("Doc", {
+   *   field: "embedding",
+   *   vector: embedding,
+   *   limit: 5,
+   *   filter: { status: "published" },   // equality / IN pre-filter
+   * });
+   * ```
+   *
+   * Exact scan, not ANN: every non-NULL embedding is scored. Fine to
+   * ~100k rows per entity; past that, a dedicated vector store wins.
+   * Throws `VECTOR_FIELD_NOT_FOUND` when `field` isn't a vector field
+   * and `INVALID_QUERY` on dimension mismatch or bad filters.
+   */
+  vectorSearch(
+    entity: string,
+    query: VectorSearchQuery
+  ): Promise<VectorSearchResult>;
+
+  /**
    * Cursor-paginated list. Pass `cursor` from a previous page's `nextCursor`
    * to continue; pass `null` for the first page.
    *
@@ -193,6 +219,30 @@ export interface SearchResult<T = Record<string, unknown>> {
   /** Total hit count before pagination. */
   total: number;
   /** Milliseconds spent in the search engine. */
+  tookMs: number;
+}
+
+/** Request shape for [`DbReader.vectorSearch`]. */
+export interface VectorSearchQuery {
+  /** The `vector(dims)` field to search. */
+  field: string;
+  /** Query embedding; length must equal the field's declared dims. */
+  vector: number[];
+  /** Max hits. Default 10, capped at 200. */
+  limit?: number;
+  /** Similarity metric. Default "cosine" (higher = closer);
+   *  "dot" (higher = closer); "l2" (Euclidean distance, lower = closer). */
+  metric?: "cosine" | "dot" | "l2";
+  /** Equality pre-filter applied in SQL before scoring. A plain value
+   *  means equality; an array means SQL `IN`; `null` means IS NULL. */
+  filter?: Record<string, unknown>;
+}
+
+/** Result shape for [`DbReader.vectorSearch`]. */
+export interface VectorSearchResult<T = Record<string, unknown>> {
+  /** Best-first hits for the chosen metric. */
+  hits: Array<{ id: string; score: number; doc: T }>;
+  /** Milliseconds spent scanning + scoring. */
   tookMs: number;
 }
 
@@ -422,6 +472,32 @@ export interface Llm {
     request: LlmCompleteRequest,
     onEvent: (event: LlmStreamEvent) => void,
   ): Promise<LlmCompleteResponse>;
+
+  /**
+   * Batch-embed texts via the configured embeddings provider. One
+   * embedding per input, in input order. Pair with a
+   * `field.vector(dims)` field and `ctx.db.vectorSearch` for
+   * retrieval:
+   *
+   * ```ts
+   * const [vec] = await ctx.llm.embed([doc.body]);
+   * await ctx.db.update("Doc", doc.id, { embedding: vec });
+   * ```
+   *
+   * The embeddings provider is a separate axis from chat: with
+   * `OPENAI_API_KEY` set it defaults to OpenAI
+   * `text-embedding-3-small` (1536 dims) even when chat runs
+   * Anthropic; `PYLON_EMBEDDINGS_PROVIDER=voyage` + `VOYAGE_API_KEY`
+   * selects Voyage `voyage-3.5` (1024 dims).
+   * `PYLON_EMBEDDINGS_MODEL` overrides the model.
+   *
+   * Not available in queries (reactive re-runs would re-bill the
+   * provider) — embed in a mutation/action and store the vector.
+   * Errors carry `err.code`: `EMBEDDINGS_NOT_CONFIGURED`,
+   * `PROVIDER_HTTP_<code>`, `PROVIDER_UNREACHABLE`,
+   * `INVALID_REQUEST`.
+   */
+  embed(input: string[], opts?: { model?: string }): Promise<number[][]>;
 }
 
 /**

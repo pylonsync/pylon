@@ -37,7 +37,7 @@ Both ship:
 ## Where Supabase is better
 
 - **Full Postgres** — every Postgres feature works: CTEs, window functions, JSONB operators, materialized views, foreign data wrappers, GIST indexes, partitioning. Pylon's query layer is intentionally limited.
-- **pgvector** — first-class vector search via Postgres extension. Pylon has the `vector_search` plugin (in-memory), but for million-scale vectors Supabase wins.
+- **pgvector at scale** — approximate indexes (HNSW/IVFFlat) for million-row vector tables. Pylon ships built-in [vector search](/concepts/vector-search) (`field.vector(dims)` + `ctx.db.vectorSearch`, exact k-NN with perfect recall) which is the simpler answer to ~100k rows per entity; past that, pgvector's ANN indexes win.
 - **PostgREST auto-API** — every table becomes a REST endpoint automatically. Pylon also auto-generates these (`/api/entities/<name>`) but PostgREST has 8 years of battle-testing.
 - **Edge Functions** — globally distributed Deno runtime; nice for latency-sensitive endpoints. Pylon functions run in your single binary's region.
 - **Larger ecosystem** — more libraries, more tutorials, more StackOverflow answers, more job postings.

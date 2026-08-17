@@ -27,6 +27,10 @@ fn pg_column_type(field_type: &str) -> &'static str {
         // later migration can move the column type without changing
         // the wire shape.)
         "json" => "TEXT",
+        // Packed little-endian f32 array, symmetric with SQLite's BLOB.
+        // Serialize/parse at the read/write boundary keyed off the
+        // manifest, like `json`.
+        _ if field_type.starts_with("vector(") => "BYTEA",
         _ if field_type.starts_with("id(") => "TEXT",
         _ => "TEXT",
     }
@@ -177,6 +181,8 @@ fn pg_add_column_null_default(field: &FieldSpec) -> String {
         "datetime" => Some("'1970-01-01T00:00:00Z'::TIMESTAMPTZ"),
         // `''` is not valid serialized JSON; the JSON literal `null` is.
         "json" => Some("'null'"),
+        // No sensible zero-vector default — like id(X), require a backfill.
+        ref t if t.starts_with("vector(") => None,
         ref t if t.starts_with("id(") => None,
         _ => Some("''"),
     };
@@ -730,6 +736,29 @@ impl postgres::types::ToSql for JsonParam {
                     .with_timezone(&chrono::Utc)
                     .date_naive();
                 dt.to_sql(ty, out)
+            }
+            (JsonParam::Text(s), &Type::BYTEA) => {
+                // BYTEA columns only come from `vector(dims)` fields. The
+                // runtime pre-serializes the number array to its JSON text
+                // (see `serialize_json_fields_for_storage`); parse it back
+                // and bind the packed little-endian f32 bytes. The literal
+                // "null" clears an optional embedding.
+                if s == "null" {
+                    return Ok(postgres::types::IsNull::Yes);
+                }
+                let parsed: serde_json::Value = serde_json::from_str(s)
+                    .map_err(|e| format!("invalid vector value for BYTEA column: {e}"))?;
+                let arr = parsed
+                    .as_array()
+                    .ok_or("vector value for BYTEA column must be a number array")?;
+                let mut floats: Vec<f32> = Vec::with_capacity(arr.len());
+                for v in arr {
+                    let f = v
+                        .as_f64()
+                        .ok_or("vector value contains a non-number element")?;
+                    floats.push(f as f32);
+                }
+                crate::vector::pack_f32(&floats).to_sql(ty, out)
             }
 
             // Cross-type fallback: render as text and bind into a TEXT

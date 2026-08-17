@@ -219,6 +219,28 @@ fn load_encryption_key() -> Result<Option<encryption::EncryptionKey>, RuntimeErr
 /// if an `_Connection` entity already exists (apps that want to
 /// extend it shouldn't have to, but we don't fight them), we leave
 /// it alone.
+/// Force `server_only` on every `vector(dims)` field. The SDK's
+/// `entitiesToManifest` already emits it, but a hand-written manifest
+/// JSON could omit the flag — and then multi-KB embeddings would ride
+/// HTTP entity reads, sync snapshots, and WS change events. The flag is
+/// non-negotiable for vector fields, so normalize at load rather than
+/// trusting the producer.
+fn force_vector_fields_server_only(manifest: &mut AppManifest) {
+    for entity in &mut manifest.entities {
+        for field in &mut entity.fields {
+            if pylon_storage::vector::vector_dims(&field.field_type).is_some() && !field.server_only
+            {
+                tracing::warn!(
+                    "[manifest] {}.{} is vector-typed but not serverOnly; forcing serverOnly (embeddings never leave the server)",
+                    entity.name,
+                    field.name
+                );
+                field.server_only = true;
+            }
+        }
+    }
+}
+
 fn ensure_connection_entity(manifest: &mut AppManifest) {
     if manifest.connections.is_empty() {
         return;
@@ -749,6 +771,7 @@ impl Runtime {
         // against the runtime's own manifest — so this only bites Postgres.)
         ensure_connection_entity(&mut manifest);
         ensure_cron_lease_entity(&mut manifest);
+        force_vector_fields_server_only(&mut manifest);
         validate_manifest_org_roles(&manifest)?;
         // Serialize this machine's boot DDL against peers sharing the
         // database (see pg_boot_guard) — released by start_server once
@@ -1496,6 +1519,7 @@ impl Runtime {
 
         ensure_connection_entity(&mut manifest);
         ensure_cron_lease_entity(&mut manifest);
+        force_vector_fields_server_only(&mut manifest);
         validate_manifest_org_roles(&manifest)?;
         validate_encrypted_fields(&manifest)?;
         // Encryption key + connections requirement check must run
@@ -1892,6 +1916,7 @@ impl Runtime {
     fn parse_json_fields_on_read(&self, entity: &str, row: &mut serde_json::Value) {
         if let Some(ent) = self.entities.get(entity) {
             parse_json_fields_in_row(ent, row);
+            parse_vector_fields_in_row(ent, row);
         }
     }
 
@@ -2038,6 +2063,15 @@ impl Runtime {
             if f.name == "id" {
                 continue;
             }
+            // Skip vector fields entirely: embeddings are server-only,
+            // and the LoroDoc is a client-syncing structure — including
+            // them would ship multi-KB vectors in every binary CRDT
+            // frame AND let a peer's merge projection overwrite the
+            // packed column. The embedding lives in the SQL column
+            // only; CRDT merges never touch it.
+            if pylon_storage::vector::vector_dims(&f.field_type).is_some() {
+                continue;
+            }
             let kind = pylon_crdt::field_kind(&f.field_type, f.crdt).map_err(|e| RuntimeError {
                 code: "INVALID_CRDT_FIELD".into(),
                 message: format!(
@@ -2106,6 +2140,7 @@ impl Runtime {
         } else {
             data
         };
+        validate_vector_fields(self.require_entity(entity)?, data)?;
         if let Some(pg) = self.pg_backend() {
             let ent = self.require_entity(entity)?;
             // `json` fields: pre-serialize to TEXT for the PG SQL
@@ -2487,6 +2522,7 @@ impl Runtime {
         } else {
             data
         };
+        validate_vector_fields(self.require_entity(entity)?, data)?;
         if let Some(pg) = self.pg_backend() {
             let ent = self.require_entity(entity)?;
             // `json` fields: serialized for the PG row write, parsed
@@ -3206,6 +3242,7 @@ impl Runtime {
         } else {
             data
         };
+        validate_vector_fields(ent, data)?;
 
         // Seed the per-row LoroDoc for CRDT entities, in the SAME transaction
         // as the SQL insert, so the CRDT sidecar and the materialized columns
@@ -3302,6 +3339,7 @@ impl Runtime {
         } else {
             data
         };
+        validate_vector_fields(ent, data)?;
         let obj = data.as_object().ok_or_else(|| RuntimeError {
             code: "INVALID_DATA".into(),
             message: "Update data must be a JSON object".into(),
@@ -4325,6 +4363,16 @@ fn json_to_sql_typed(
     if entity_field_is_json(ent, key) {
         return Box::new(serde_json::to_string(val).unwrap_or_else(|_| "null".to_string()));
     }
+    if let Some(dims) = entity_field_vector_dims(ent, key) {
+        // `validate_vector_fields` already rejected malformed writes at
+        // the mutation entry points; anything unpackable here (e.g. a
+        // filter value of the wrong shape) binds NULL, which matches
+        // nothing.
+        return match pylon_storage::vector::json_to_f32s(val, dims) {
+            Ok(f) => Box::new(pylon_storage::vector::pack_f32(&f)),
+            Err(_) => Box::new(rusqlite::types::Null),
+        };
+    }
     json_to_sql(val)
 }
 
@@ -4363,6 +4411,85 @@ fn entity_field_is_json(ent: &pylon_kernel::ManifestEntity, key: &str) -> bool {
         .any(|f| f.name == key && f.field_type == "json")
 }
 
+/// Declared dims when `key` is a `vector(dims)` field, else `None`.
+pub(crate) fn entity_field_vector_dims(
+    ent: &pylon_kernel::ManifestEntity,
+    key: &str,
+) -> Option<u32> {
+    ent.fields
+        .iter()
+        .find(|f| f.name == key)
+        .and_then(|f| pylon_storage::vector::vector_dims(&f.field_type))
+}
+
+/// Reject writes whose vector-field values are not finite number
+/// arrays of the declared dimension. Called at every mutation entry
+/// point (insert / update, direct and in-transaction) so a bad
+/// embedding fails loudly with a typed error instead of landing as an
+/// unsearchable NULL blob. JSON `null` passes — that's how an optional
+/// embedding is cleared.
+pub(crate) fn validate_vector_fields(
+    ent: &pylon_kernel::ManifestEntity,
+    data: &serde_json::Value,
+) -> Result<(), RuntimeError> {
+    let Some(obj) = data.as_object() else {
+        return Ok(());
+    };
+    for f in &ent.fields {
+        let Some(dims) = pylon_storage::vector::vector_dims(&f.field_type) else {
+            continue;
+        };
+        let Some(v) = obj.get(&f.name) else {
+            continue;
+        };
+        if v.is_null() {
+            continue;
+        }
+        if let Err(e) = pylon_storage::vector::json_to_f32s(v, dims) {
+            return Err(RuntimeError {
+                code: "VECTOR_INVALID".into(),
+                message: format!("{}.{}: {}", ent.name, f.name, e),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Parse vector fields on a row read back from storage. SQLite rows
+/// already carry decoded arrays (see `row_to_json`); Postgres BYTEA
+/// columns surface as base64 strings, which this converts to number
+/// arrays. Idempotent — non-string values pass through.
+pub(crate) fn parse_vector_fields_in_row(
+    ent: &pylon_kernel::ManifestEntity,
+    row: &mut serde_json::Value,
+) {
+    use base64::Engine as _;
+    if !ent
+        .fields
+        .iter()
+        .any(|f| f.field_type.starts_with("vector("))
+    {
+        return;
+    }
+    let Some(obj) = row.as_object_mut() else {
+        return;
+    };
+    for f in &ent.fields {
+        if pylon_storage::vector::vector_dims(&f.field_type).is_none() {
+            continue;
+        }
+        let Some(serde_json::Value::String(s)) = obj.get(&f.name) else {
+            continue;
+        };
+        let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(s) else {
+            continue;
+        };
+        if let Some(values) = pylon_storage::vector::unpack_f32(&bytes) {
+            obj.insert(f.name.clone(), pylon_storage::vector::f32s_to_json(&values));
+        }
+    }
+}
+
 /// Postgres counterpart of [`json_to_sql_typed`]: the PG SQL builders
 /// live in `pylon_storage` and never see the manifest, so `json` field
 /// values are pre-serialized to `Value::String` in a CLONE of the row
@@ -4373,19 +4500,25 @@ pub(crate) fn serialize_json_fields_for_storage(
     data: &serde_json::Value,
 ) -> Option<serde_json::Value> {
     let obj = data.as_object()?;
+    let needs_ser = |f: &pylon_kernel::ManifestField| {
+        f.field_type == "json" || f.field_type.starts_with("vector(")
+    };
     if !ent
         .fields
         .iter()
-        .any(|f| f.field_type == "json" && obj.contains_key(&f.name))
+        .any(|f| needs_ser(f) && obj.contains_key(&f.name))
     {
         return None;
     }
     let mut out = obj.clone();
     for f in &ent.fields {
-        if f.field_type != "json" {
+        if !needs_ser(f) {
             continue;
         }
         if let Some(v) = out.get(&f.name) {
+            // Vector fields ride the same pre-serialize channel: the
+            // JSON text of the number array. JsonParam's BYTEA arm
+            // parses it back and packs LE f32 bytes at bind time.
             let ser = serde_json::to_string(v).unwrap_or_else(|_| "null".to_string());
             out.insert(f.name.clone(), serde_json::Value::String(ser));
         }
@@ -4459,6 +4592,21 @@ fn row_to_json(row: &rusqlite::Row<'_>, fields: &[ManifestField]) -> serde_json:
             serde_json::Number::from_f64(f)
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null)
+        } else if let Ok(b) = row.get::<_, Vec<u8>>(i) {
+            // BLOB columns only come from `vector(dims)` fields — decode
+            // the packed LE f32 array back to a number array. (TEXT and
+            // numeric columns were caught by the branches above, so a
+            // Vec<u8> read here really is a blob.)
+            let is_vector = fields
+                .iter()
+                .any(|f| f.name == name && f.field_type.starts_with("vector("));
+            if is_vector {
+                pylon_storage::vector::unpack_f32(&b)
+                    .map(|v| pylon_storage::vector::f32s_to_json(&v))
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
         } else {
             serde_json::Value::Null
         };

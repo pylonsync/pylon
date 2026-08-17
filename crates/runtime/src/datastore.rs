@@ -219,6 +219,10 @@ impl Runtime {
                 let result = match op {
                     Op::Insert { entity, data } => {
                         let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                        if let Some(e) = ent {
+                            crate::validate_vector_fields(e, data)
+                                .map_err(|e| DataError { code: e.code, message: e.message })?;
+                        }
                         // json fields: serialized for the SQL row, parsed
                         // for the CRDT patch — same split as Runtime::insert.
                         let ser = ent
@@ -249,6 +253,10 @@ impl Runtime {
                     }
                     Op::Update { entity, id, data } => {
                         let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                        if let Some(e) = ent {
+                            crate::validate_vector_fields(e, data)
+                                .map_err(|e| DataError { code: e.code, message: e.message })?;
+                        }
                         let ser = ent
                             .and_then(|e| crate::serialize_json_fields_for_storage(e, data));
                         let sql_data: &serde_json::Value = ser.as_ref().unwrap_or(data);
@@ -691,6 +699,85 @@ impl DataStore for Runtime {
         })
     }
 
+    /// Exact k-NN over a `vector(dims)` field. Validates the request
+    /// against the manifest, runs the backend scan, then fetches +
+    /// normalizes the hit rows. Vector fields are stripped from hit
+    /// docs — a 1536-dim embedding per hit is dead weight the caller
+    /// can re-fetch by id if genuinely needed.
+    fn vector_search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        let t0 = std::time::Instant::now();
+        let ent = self
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        let parsed = pylon_storage::vector::prepare_query(ent, query).map_err(|e| DataError {
+            code: e.code,
+            message: e.message,
+        })?;
+        let limit = parsed.limit;
+
+        let scored = if self.is_postgres() {
+            let pg = self.pg_data_store().ok_or_else(|| DataError {
+                code: "PG_DATASTORE_MISSING".into(),
+                message: "is_postgres=true but pg_data_store() returned None".into(),
+            })?;
+            pg.run_vector_scan(
+                entity,
+                &parsed.field,
+                &parsed.vector,
+                parsed.metric,
+                limit,
+                &parsed.filter,
+            )
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?
+        } else {
+            let conn = self.lock_conn_pub().map_err(into_data_error)?;
+            pylon_storage::vector::scan_topk(
+                &conn,
+                entity,
+                &parsed.field,
+                &parsed.vector,
+                parsed.metric,
+                limit,
+                &parsed.filter,
+            )
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?
+        };
+
+        let mut hits = Vec::with_capacity(scored.len());
+        for (id, score) in scored {
+            // A row deleted between scan and fetch just drops out.
+            let Some(mut doc) = self.get_by_id(entity, &id).map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?
+            else {
+                continue;
+            };
+            pylon_storage::vector::strip_vector_fields(ent, &mut doc);
+            hits.push(serde_json::json!({ "id": id, "score": score, "doc": doc }));
+        }
+        Ok(serde_json::json!({
+            "hits": hits,
+            "tookMs": t0.elapsed().as_millis() as u64,
+        }))
+    }
+
     /// Return the binary CRDT snapshot for a row. `Ok(None)` for any
     /// entity with `crdt: false` (the LWW opt-out) — the router uses
     /// that to decide whether to ship a binary update over WebSocket
@@ -1024,7 +1111,12 @@ impl DataStore for Runtime {
                     continue;
                 }
                 set_clauses.push(format!("{} = ?{idx}", crate::quote_ident(key.as_str())));
-                values.push(crate::json_to_sql(val));
+                // Typed bind, not the raw shape-driven one: a `json`
+                // field's string value must land as JSON text (`"42"`,
+                // not bare `42`) or the read-side parse-back changes its
+                // shape. (Vector fields never appear here —
+                // `crdt_fields_for` excludes them from the doc.)
+                values.push(crate::json_to_sql_typed(&ent, key, val));
                 idx += 1;
             }
             if set_clauses.is_empty() {
@@ -2726,6 +2818,15 @@ impl<'a> DataStore for TxStore<'a> {
         // connection is fine for reads (SQLite serializes anyway).
         <Runtime as DataStore>::search(self.runtime, entity, query)
     }
+
+    fn vector_search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        // Read-only, same reasoning as `search` above.
+        <Runtime as DataStore>::vector_search(self.runtime, entity, query)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3113,6 +3214,14 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
         self.inner.search(entity, query)
     }
 
+    fn vector_search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        self.inner.vector_search(entity, query)
+    }
+
     fn crdt_snapshot(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
         self.inner.crdt_snapshot(entity, row_id)
     }
@@ -3191,7 +3300,27 @@ impl<'a> PgBufferedTxStore<'a> {
             .find(|e| e.name == entity)
         {
             crate::parse_json_fields_in_row(ent, row);
+            crate::parse_vector_fields_in_row(ent, row);
         }
+    }
+
+    /// Typed dims/finiteness check for vector fields — the BYTEA bind
+    /// arm downstream can't know the declared dims, so a wrong-length
+    /// embedding would land silently and never match a search.
+    fn validate_vectors(&self, entity: &str, data: &serde_json::Value) -> Result<(), DataError> {
+        if let Some(ent) = self
+            .inner
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+        {
+            crate::validate_vector_fields(ent, data).map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -3201,6 +3330,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     }
 
     fn insert(&self, entity: &str, data: &serde_json::Value) -> Result<String, DataError> {
+        self.validate_vectors(entity, data)?;
         let id = self.inner.insert(entity, data)?;
         // Re-read inside the same PG tx so the broadcast carries the
         // full materialized row (server-stamped fields included). See
@@ -3257,6 +3387,7 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
     }
 
     fn update(&self, entity: &str, id: &str, data: &serde_json::Value) -> Result<bool, DataError> {
+        self.validate_vectors(entity, data)?;
         // Snapshot pre-update so the buffered event carries
         // `prev_data` for the visibility-transition tombstone.
         // Matches the SQLite TxStore::update fix.
@@ -3447,6 +3578,26 @@ impl<'a> DataStore for PgBufferedTxStore<'a> {
         // pool today and would deadlock on the in-handler tx if we
         // tried to fan out from the same client.
         self.inner.search(entity, query)
+    }
+
+    fn vector_search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        // The k-NN scan is generic over PgConn, so unlike `search` it
+        // CAN run on the held transaction — PgTxStore implements it
+        // directly. Normalize each hit doc the same way reads are
+        // normalized (json parse-back + vector base64 decode).
+        let mut result = self.inner.vector_search(entity, query)?;
+        if let Some(hits) = result.get_mut("hits").and_then(|h| h.as_array_mut()) {
+            for hit in hits {
+                if let Some(doc) = hit.get_mut("doc") {
+                    self.normalize(entity, doc);
+                }
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -3876,6 +4027,14 @@ impl<'a> DataStore for AutoBroadcastStore<'a> {
         query: &serde_json::Value,
     ) -> Result<serde_json::Value, DataError> {
         self.inner.search(entity, query)
+    }
+
+    fn vector_search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        self.inner.vector_search(entity, query)
     }
 
     fn crdt_snapshot(&self, entity: &str, row_id: &str) -> Result<Option<Vec<u8>>, DataError> {
@@ -4648,6 +4807,56 @@ impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
         }
         Ok(result)
     }
+
+    fn filter_client_vector_search(
+        &self,
+        entity: &str,
+        auth: &pylon_functions::protocol::AuthInfo,
+        mut result: serde_json::Value,
+    ) -> Result<serde_json::Value, (String, String)> {
+        let auth_ctx = policy_auth_ctx(auth);
+        // Aggregate safety — top-k similarity ranks over EVERY row in the
+        // table, so even after per-hit filtering the k slots + scores would
+        // leak proximity information about rows the caller can't read.
+        // Same probe + code as faceted search.
+        if !matches!(
+            self.engine.check_entity_read(entity, &auth_ctx, None),
+            pylon_policy::PolicyResult::Allowed
+        ) {
+            return Err((
+                "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY".to_string(),
+                format!(
+                    "serverData.vectorSearch on \"{entity}\" has a row-dependent read policy; \
+                     top-k similarity would leak proximity of rows you can't read. Make the read \
+                     policy row-independent or use serverData.unsafe.vectorSearch from a trusted \
+                     server context."
+                ),
+            ));
+        }
+        // Per-hit fence + wire projection on each hit's `doc`.
+        let auth_user = &self.manifest.auth.user;
+        if let Some(hits) = result.get_mut("hits").and_then(|v| v.as_array_mut()) {
+            let projected: Vec<serde_json::Value> = std::mem::take(hits)
+                .into_iter()
+                .filter_map(|mut hit| {
+                    let doc = hit.get_mut("doc")?.take();
+                    if !matches!(
+                        self.engine.check_entity_read(entity, &auth_ctx, Some(&doc)),
+                        pylon_policy::PolicyResult::Allowed
+                    ) {
+                        return None;
+                    }
+                    let projected_doc =
+                        pylon_router::project_row_for_wire(&self.manifest, auth_user, entity, doc);
+                    hit.as_object_mut()?
+                        .insert("doc".to_string(), projected_doc);
+                    Some(hit)
+                })
+                .collect();
+            *hits = projected;
+        }
+        Ok(result)
+    }
 }
 
 /// Name of the matching `ctx.db.*` method for error messages.
@@ -4816,6 +5025,7 @@ pub fn try_spawn_functions(
     // allowed_models — env wins on conflict so operators rotate keys
     // without rebuilding the bundle.
     let llm_client = crate::llm::LlmClient::from_env_with_manifest(Some(&runtime.manifest().llm));
+    let embeddings_client = crate::llm::EmbeddingsClient::from_env();
     // ConnectionManager: per-app OAuth integrations. Built only
     // when the manifest declares connections — the auto-injected
     // `_Connection` entity is already present at this point.
@@ -4840,6 +5050,7 @@ pub fn try_spawn_functions(
         install_email_hook(runner, Arc::clone(&email_adapter));
         install_llm_hook(runner, llm_client.clone());
         install_llm_stream_hook(runner, llm_client.clone());
+        install_llm_embed_hook(runner, embeddings_client.clone());
         install_room_broadcast_hook(runner, Arc::clone(&rooms), Arc::clone(&notifier));
         install_connection_hook(runner, connection_mgr.clone(), Arc::clone(&runtime));
         runner.set_policy_gate(Arc::clone(&policy_gate));
@@ -5034,6 +5245,53 @@ fn install_llm_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::LlmClient
                 (
                     "SERIALIZE_FAILED".to_string(),
                     format!("Failed to serialize LLM response: {e}"),
+                )
+            })
+        },
+    ));
+}
+
+/// Wire `ctx.llm.embed` → the runtime's EmbeddingsClient on a single
+/// runner. Embeddings resolve their own provider + key
+/// (PYLON_EMBEDDINGS_PROVIDER openai|voyage), independent of chat —
+/// an Anthropic-chat app still embeds through OpenAI or Voyage.
+///
+/// Auth gate mirrors `llm_preflight`'s caller requirement; the model
+/// allowlist doesn't apply (embedding models cost fractions of a cent
+/// per call and the provider rejects unknown names).
+fn install_llm_embed_hook(runner: &Arc<FnRunner>, client: Option<crate::llm::EmbeddingsClient>) {
+    use pylon_functions::protocol::AuthInfo;
+    runner.set_llm_embed_hook(Box::new(
+        move |req: &serde_json::Value,
+              auth: &AuthInfo|
+              -> Result<serde_json::Value, (String, String)> {
+            if auth.user_id.is_none() && !auth.is_admin {
+                return Err((
+                    "LLM_REQUIRES_AUTH".to_string(),
+                    "ctx.llm.embed requires an authenticated caller. Public functions must elevate auth (ctx.auth.elevate) before calling ctx.llm.".to_string(),
+                ));
+            }
+            let client = client.as_ref().ok_or_else(|| {
+                (
+                    "EMBEDDINGS_NOT_CONFIGURED".to_string(),
+                    "ctx.llm.embed: no embeddings provider configured. Set OPENAI_API_KEY, or PYLON_EMBEDDINGS_PROVIDER=voyage + VOYAGE_API_KEY.".to_string(),
+                )
+            })?;
+            let parsed: crate::llm::LlmEmbedRequest = serde_json::from_value(req.clone())
+                .map_err(|e| {
+                    (
+                        "INVALID_REQUEST".to_string(),
+                        format!("Failed to parse embed request: {e}"),
+                    )
+                })?;
+            let resp = client.embed(parsed).map_err(|e| {
+                tracing::warn!("[llm] embed failed code={} detail={}", e.code, e.message);
+                (e.code, sanitized_llm_caller_message(&e.message))
+            })?;
+            serde_json::to_value(&resp).map_err(|e| {
+                (
+                    "SERIALIZE_FAILED".to_string(),
+                    format!("Failed to serialize embed response: {e}"),
                 )
             })
         },
@@ -8230,5 +8488,46 @@ mod ssr_client_read_fence_tests {
             .filter_client_search("Note", &user("u1"), result)
             .expect_err("row-dependent search must be rejected");
         assert_eq!(err.0, "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY");
+    }
+
+    #[test]
+    fn vector_search_rejects_row_dependent_policy() {
+        // Top-k similarity over a row-dependent policy leaks proximity of
+        // rows the caller can't read — same rejection as faceted search.
+        let m = note_manifest();
+        let gate = adapter(&m);
+        let result = serde_json::json!({"hits": [], "tookMs": 1});
+        let err = gate
+            .filter_client_vector_search("Note", &user("u1"), result)
+            .expect_err("row-dependent vector search must be rejected");
+        assert_eq!(err.0, "SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY");
+    }
+
+    #[test]
+    fn vector_search_filters_and_projects_hit_docs() {
+        // Row-INDEPENDENT read policy: authenticated users read all notes.
+        // The per-hit fence still strips serverOnly fields from each doc.
+        let mut m = note_manifest();
+        m.policies[0].allow_read = Some("auth.userId != null".into());
+        let gate = adapter(&m);
+        let result = serde_json::json!({
+            "hits": [
+                {"id": "1", "score": 0.9,
+                 "doc": {"id": "1", "owner": "u1", "secret": "s1"}},
+                {"id": "2", "score": 0.5,
+                 "doc": {"id": "2", "owner": "u2", "secret": "s2"}},
+            ],
+            "tookMs": 1
+        });
+        let out = gate
+            .filter_client_vector_search("Note", &user("u1"), result)
+            .unwrap();
+        let hits = out["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits[0]["doc"].get("secret").is_none(),
+            "serverOnly fields must be stripped from hit docs"
+        );
+        assert_eq!(hits[0]["score"], serde_json::json!(0.9));
     }
 }

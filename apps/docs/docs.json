@@ -46,7 +46,8 @@
               "concepts/live-queries",
               "concepts/reactive-queries",
               "concepts/optimistic-updates",
-              "concepts/search"
+              "concepts/search",
+              "concepts/vector-search"
             ]
           },
           {

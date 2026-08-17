@@ -440,6 +440,59 @@ impl<'a> DataStore for PgTxStore<'a> {
         self.with_tx(|tx| tx_get_by_id(tx, entity, id))
     }
 
+    /// In-transaction exact k-NN. Unlike `search` (whose PG path needs
+    /// a separate pooled connection and keeps its NOT_SUPPORTED
+    /// default here), the vector scan is generic over `PgConn`, so it
+    /// runs safely on the held transaction — a mutation handler can
+    /// embed-and-search in one atomic scope.
+    fn vector_search(
+        &self,
+        entity: &str,
+        query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        let t0 = std::time::Instant::now();
+        let ent = self
+            .manifest
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        let prepared = crate::vector::prepare_query(ent, query).map_err(|e| DataError {
+            code: e.code,
+            message: e.message,
+        })?;
+        let scored = self.with_tx(|tx| {
+            crate::pg_vector::scan_topk(
+                tx,
+                entity,
+                &prepared.field,
+                &prepared.vector,
+                prepared.metric,
+                prepared.limit,
+                &prepared.filter,
+            )
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })
+        })?;
+        let mut hits = Vec::with_capacity(scored.len());
+        for (id, score) in scored {
+            let Some(mut doc) = self.with_tx(|tx| tx_get_by_id(tx, entity, &id))? else {
+                continue;
+            };
+            crate::vector::strip_vector_fields(ent, &mut doc);
+            hits.push(serde_json::json!({ "id": id, "score": score, "doc": doc }));
+        }
+        Ok(serde_json::json!({
+            "hits": hits,
+            "tookMs": t0.elapsed().as_millis() as u64,
+        }))
+    }
+
     fn list(&self, entity: &str) -> Result<Vec<serde_json::Value>, DataError> {
         let sql = format!("SELECT * FROM {} ORDER BY id", quote_ident_pub(entity));
         self.with_tx(|tx| {

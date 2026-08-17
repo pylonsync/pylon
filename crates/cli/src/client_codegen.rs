@@ -13,6 +13,9 @@ fn ts_type(field_type: &str) -> &str {
         // use instead of lying with `any`.
         "json" => "unknown",
         _ if field_type.starts_with("id(") => "string",
+        // Server-only embedding; typed for completeness even though the
+        // field never reaches client reads.
+        _ if field_type.starts_with("vector(") => "number[]",
         _ => "unknown",
     }
 }

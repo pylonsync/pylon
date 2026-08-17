@@ -255,6 +255,25 @@ pub trait DataStore: Send + Sync {
         })
     }
 
+    /// Run an exact k-NN vector search over a `vector(dims)` field.
+    /// `query` is a JSON object shaped like `VectorQuery` in
+    /// `pylon_storage::vector` (`{ field, vector, limit?, metric?,
+    /// filter? }`); returns JSON shaped like `VectorSearchResult`
+    /// (`{ hits: [{id, score, doc}], tookMs }`), hits best-first.
+    ///
+    /// Same raw-JSON contract as `search()` — backends without a
+    /// pylon-storage dependency compile against the default.
+    fn vector_search(
+        &self,
+        _entity: &str,
+        _query: &serde_json::Value,
+    ) -> Result<serde_json::Value, DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "vector_search() is not implemented by this backend".into(),
+        })
+    }
+
     /// Return the binary CRDT snapshot for a row, used by the router
     /// to ship a binary update over WebSocket after every successful
     /// write.

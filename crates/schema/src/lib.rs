@@ -50,6 +50,10 @@ pub enum FieldType {
     /// serialized JSON TEXT; parsed back to the real value on every
     /// read path, so clients never see the string form.
     Json,
+    /// Fixed-dimension embedding (`vector(1536)`). Written as a JSON
+    /// number array; stored as a packed little-endian f32 array (BLOB
+    /// in SQLite, BYTEA in Postgres). Always server-only.
+    Vector(u32),
 }
 
 impl std::fmt::Display for FieldType {
@@ -63,6 +67,7 @@ impl std::fmt::Display for FieldType {
             FieldType::Id(target) => write!(f, "id({target})"),
             FieldType::Richtext => f.write_str("richtext"),
             FieldType::Json => f.write_str("json"),
+            FieldType::Vector(dims) => write!(f, "vector({dims})"),
         }
     }
 }
@@ -643,8 +648,24 @@ fn is_known_field_type(field_type: &str) -> bool {
     if VALID_SCALAR_TYPES.contains(&field_type) {
         return true;
     }
+    if extract_vector_dims(field_type).is_some() {
+        return true;
+    }
     // Accept well-formed id(X) — target validity is checked separately.
     extract_id_target(field_type).is_some()
+}
+
+/// Extract the dimension count from a `vector(N)` type string. Returns
+/// `None` for non-vector types, malformed patterns, or an out-of-range
+/// dimension (valid: 1..=8192 — matches the SDK-side guard).
+pub fn extract_vector_dims(field_type: &str) -> Option<u32> {
+    let s = field_type.strip_prefix("vector(")?;
+    let s = s.strip_suffix(')')?;
+    let dims: u32 = s.parse().ok()?;
+    if dims == 0 || dims > 8192 {
+        return None;
+    }
+    Some(dims)
 }
 
 /// Validate field type strings across the entire manifest.
@@ -686,7 +707,7 @@ pub fn validate_field_types(manifest: &AppManifest) -> Vec<Diagnostic> {
                     ),
                     span: None,
                     hint: Some(format!(
-                        "Valid types: {}, id(EntityName)",
+                        "Valid types: {}, id(EntityName), vector(dims)",
                         VALID_SCALAR_TYPES.join(", ")
                     )),
                 });
@@ -707,7 +728,7 @@ pub fn validate_field_types(manifest: &AppManifest) -> Vec<Diagnostic> {
                     ),
                     span: None,
                     hint: Some(format!(
-                        "Valid types: {}, id(EntityName)",
+                        "Valid types: {}, id(EntityName), vector(dims)",
                         VALID_SCALAR_TYPES.join(", ")
                     )),
                 });
@@ -728,7 +749,7 @@ pub fn validate_field_types(manifest: &AppManifest) -> Vec<Diagnostic> {
                     ),
                     span: None,
                     hint: Some(format!(
-                        "Valid types: {}, id(EntityName)",
+                        "Valid types: {}, id(EntityName), vector(dims)",
                         VALID_SCALAR_TYPES.join(", ")
                     )),
                 });

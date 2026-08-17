@@ -33,4 +33,5 @@ pub mod rooms;
 pub mod search;
 pub mod shards;
 pub mod sync;
+pub mod vector;
 pub mod workflows;

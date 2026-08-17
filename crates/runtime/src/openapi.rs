@@ -581,6 +581,11 @@ fn map_field_type(field_type: &str) -> Value {
         // mis-documenting it as a string.
         "json" => json!({ "description": "Arbitrary JSON value" }),
         t if t.starts_with("id(") => json!({ "type": "string" }),
+        // Server-only embedding; never serialized in HTTP responses, but
+        // document the write shape honestly.
+        t if t.starts_with("vector(") => {
+            json!({ "type": "array", "items": { "type": "number" } })
+        }
         _ => json!({ "type": "string" }),
     }
 }

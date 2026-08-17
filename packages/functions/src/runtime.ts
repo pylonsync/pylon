@@ -689,6 +689,16 @@ function buildReaderOps(
         ssr_read: ssrRead,
       })) as any;
     },
+    async vectorSearch(entity, query) {
+      return (await rpcDb(callId, {
+        type: "db",
+        op: "vector_search",
+        entity,
+        data: query,
+        unsafe_op: unsafeOp,
+        ssr_read: ssrRead,
+      })) as any;
+    },
   };
 }
 
@@ -914,6 +924,18 @@ export function buildLlm(callId: string): Llm {
         { type: "llm_stream", request },
         (event) => onEvent(event as LlmStreamEvent),
       )) as LlmCompleteResponse;
+    },
+
+    async embed(
+      input: string[],
+      opts?: { model?: string },
+    ): Promise<number[][]> {
+      // op_id-keyed rpc so concurrent embeds in one handler demux.
+      const resp = (await rpcDb(callId, {
+        type: "llm_embed",
+        request: { input, model: opts?.model },
+      })) as { embeddings: number[][] };
+      return resp.embeddings;
     },
   };
 }

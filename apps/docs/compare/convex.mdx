@@ -83,7 +83,7 @@ Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/tree
 - **Pure-TS dev loop** — Convex has invested heavily in DX polish. Type inference flows end-to-end without codegen. Pylon requires `pylon codegen` (one CLI call); Convex's TypeScript flow is a bit tighter.
 - **Larger team behind it** — well-funded YC company, more docs, more examples.
 - **Scheduled functions** — Convex has clean durable primitives for scheduled jobs. Pylon has a durable scheduler (`ctx.scheduler.runAfter`), background jobs with exponential retry back-off, and [durable multi-step workflows](/concepts/workflows) (steps run exactly once, sleeps span days, events resume paused runs). Convex's scheduler UI is more polished.
-- **Convex Vector Search** — first-class vector search; Pylon has the `vector_search` plugin but Convex's is more featureful.
+- **Convex Vector Search at scale** — Convex's vector indexes are approximate and built for large tables. Pylon's built-in [vector search](/concepts/vector-search) (`field.vector(dims)` + `ctx.llm.embed` + `ctx.db.vectorSearch`) is exact k-NN — perfect recall, zero index maintenance, right to ~100k rows per entity; past that Convex's ANN wins.
 
 ## Where Pylon is better
 
@@ -91,7 +91,7 @@ Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/tree
 - **Faceted search** — first-class with live counts. Convex requires custom queries.
 - **Game shards** — `Shard<S: SimState>` for tick-based authority (authored in Rust; `useShard` hook on the client).
 - **Open license** — MIT/Apache, not FSL.
-- **Plugin ecosystem** — 20+ built-in plugins (TOTP, audit log, webhooks, MCP, etc.) you flip on in the manifest.
+- **Batteries included** — TOTP, audit log, webhooks, rate limiting, file storage, faceted search, and vector search ship in the binary, configured from the manifest or env — no marketplace of third-party components.
 - **Self-host on day one** — Convex's self-host is recent and the OSS bundle hasn't reached the polish of their hosted offering yet.
 
 ## Migrating from Convex

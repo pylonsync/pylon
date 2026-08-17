@@ -198,6 +198,33 @@ impl PostgresDataStore {
         crate::pg_search::run_search(conn.client_mut(), entity, config, query)
     }
 
+    /// Exact k-NN scan over a `vector(dims)` column. Returns
+    /// `(id, score)` best-first; the runtime layer fetches + normalizes
+    /// the hit rows.
+    pub fn run_vector_scan(
+        &self,
+        entity: &str,
+        field: &str,
+        query_vec: &[f32],
+        metric: crate::vector::VectorMetric,
+        limit: usize,
+        filter: &std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<Vec<(String, f64)>, crate::StorageError> {
+        let mut conn = self.checkout().map_err(|e| crate::StorageError {
+            code: e.code,
+            message: e.message,
+        })?;
+        crate::pg_vector::scan_topk(
+            conn.client_mut(),
+            entity,
+            field,
+            query_vec,
+            metric,
+            limit,
+            filter,
+        )
+    }
+
     pub fn with_transaction<F, T, E>(&self, body: F) -> Result<T, E>
     where
         F: FnOnce(&dyn DataStore) -> Result<T, E>,

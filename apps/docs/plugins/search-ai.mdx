@@ -1,7 +1,7 @@
 ---
 title: "Search & AI"
 sidebarTitle: "Search & AI"
-description: "Full-text search (FTS5 + facets) and the built-in LLM proxy. Vector search and MCP are on the roadmap."
+description: "Full-text search (FTS5 + facets), vector search, and the built-in LLM proxy. MCP-as-a-plugin is on the roadmap."
 ---
 
 Two capabilities ship today: **full-text search** (configured per-entity) and a **built-in LLM proxy** (configured by env). Neither is enabled through a `manifest.plugins` list.
@@ -110,11 +110,12 @@ Why proxy:
 2. **Auth-gated** — both endpoints require a session.
 3. **Model allowlist** — cap which models clients can invoke.
 
+## Vector search
+
+Built in — not a plugin, a field type. Declare `embedding: field.vector(1536)` on an entity, fill it with `ctx.llm.embed(texts)` (OpenAI or Voyage), and query with `ctx.db.vectorSearch(entity, { field, vector, limit, filter })` or `POST /api/vector-search/<Entity>`. Exact k-NN, cosine by default, both backends. Full guide: [Vector Search](/concepts/vector-search).
+
 ## Not yet built in
 
-The roadmap catalog (`pylon plugins list`) names a few AI capabilities that are **not** implemented as built-ins today:
+- **MCP server** — exposing your entities/functions as Model Context Protocol tools as a manifest plugin is planned, not shipped. The CLI's `pylon mcp` (agent tooling) exists today.
 
-- **Vector / semantic search** — Pylon has no built-in embedding index. For RAG or similarity today, compute embeddings in a server function and store/query them yourself (a dedicated store like pgvector or Qdrant, or a table you scan), or wait for the built-in.
-- **MCP server** — exposing your entities/functions as Model Context Protocol tools is planned, not shipped.
-
-Don't build against these until they land.
+Don't build against unshipped plugins until they land.

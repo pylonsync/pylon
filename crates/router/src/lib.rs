@@ -1388,6 +1388,7 @@ fn route_inner(
     //   routes/actions.rs   (/api/actions/<name>)
     //   routes/admin_data.rs (export, import)
     //   routes/search.rs    (/api/search/<entity>)
+    //   routes/vector.rs    (/api/vector-search/<entity>)
     // -----------------------------------------------------------------------
     if let Some(r) = routes::queries::handle(ctx, method, url, body, auth_token) {
         return r;
@@ -1406,6 +1407,9 @@ fn route_inner(
         return r;
     }
     if let Some(r) = routes::search::handle(ctx, method, url, body, auth_token) {
+        return r;
+    }
+    if let Some(r) = routes::vector::handle(ctx, method, url, body, auth_token) {
         return r;
     }
 

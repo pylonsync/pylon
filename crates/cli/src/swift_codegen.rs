@@ -13,6 +13,9 @@ fn swift_type(field_type: &str) -> &str {
         // so it works as a stored property on the generated structs.
         "json" => "JSONValue",
         _ if field_type.starts_with("id(") => "String",
+        // Server-only embedding; typed for completeness even though the
+        // field never reaches client reads.
+        _ if field_type.starts_with("vector(") => "[Double]",
         _ => "JSONValue",
     }
 }

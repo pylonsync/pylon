@@ -90,7 +90,10 @@ fn parse_field_type(s: &str) -> FieldType {
         other if other.starts_with("id(") && other.ends_with(')') => {
             FieldType::Id(other[3..other.len() - 1].to_string())
         }
-        _ => FieldType::String,
+        other => match pylon_schema::extract_vector_dims(other) {
+            Some(dims) => FieldType::Vector(dims),
+            None => FieldType::String,
+        },
     }
 }
 

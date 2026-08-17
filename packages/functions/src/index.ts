@@ -63,6 +63,10 @@ export type {
   RequireMemberOptions,
   MemberRow,
   Workflows,
+  VectorSearchQuery,
+  VectorSearchResult,
+  SearchResult,
+  PaginationResult,
   // LLM + realtime surfaces. A handler writing an agent tool loop
   // builds its own message array and branches on stream events, so
   // these have to be nameable from app code.

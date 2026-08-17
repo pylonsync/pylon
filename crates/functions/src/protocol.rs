@@ -409,6 +409,12 @@ pub enum TsMessage {
     #[serde(rename = "llm_stream")]
     LlmStream(LlmStreamMessage),
 
+    /// `ctx.llm.embed(texts)` — batch-embed via the configured
+    /// embeddings provider (a separate axis from chat: openai|voyage).
+    /// Replied to with `{ embeddings: number[][], model, totalTokens }`.
+    #[serde(rename = "llm_embed")]
+    LlmEmbed(LlmEmbedMessage),
+
     /// `ctx.rooms.broadcast(room, topic, data)` — push an arbitrary
     /// event to every subscriber of a presence room, originating from
     /// the server rather than a member client.
@@ -492,6 +498,7 @@ impl TsMessage {
             TsMessage::SendEmail(m) => Some(&m.call_id),
             TsMessage::LlmComplete(m) => Some(&m.call_id),
             TsMessage::LlmStream(m) => Some(&m.call_id),
+            TsMessage::LlmEmbed(m) => Some(&m.call_id),
             TsMessage::RoomBroadcast(m) => Some(&m.call_id),
             TsMessage::Connection(m) => Some(&m.call_id),
             TsMessage::WorkflowOp(m) => Some(&m.call_id),
@@ -641,6 +648,10 @@ pub enum DbOp {
     /// facets, sort, page, pageSize. Carried on `data`.
     /// Response shape: `{ hits, facetCounts, total, tookMs }`.
     Search,
+    /// Exact k-NN over a `vector(dims)` field. Query body carried on
+    /// `data`: `{ field, vector, limit?, metric?, filter? }`.
+    /// Response shape: `{ hits: [{id, score, doc}], tookMs }`.
+    VectorSearch,
     /// Acquire a transaction-scoped advisory lock. Used to close
     /// TOCTOU races on quota / uniqueness checks. The lock key travels
     /// on `entity` (we reuse the field rather than carving a new
@@ -762,6 +773,17 @@ pub struct LlmCompleteMessage {
 /// handler runs more than one concurrently.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LlmStreamMessage {
+    pub call_id: String,
+    #[serde(default)]
+    pub op_id: Option<String>,
+    pub request: serde_json::Value,
+}
+
+/// Batch-embed request. `request` is `{ input: string[], model? }` —
+/// forwarded to `pylon_runtime::llm::EmbeddingsClient::embed` verbatim.
+/// Carries `op_id` so a handler can run several embeds concurrently.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LlmEmbedMessage {
     pub call_id: String,
     #[serde(default)]
     pub op_id: Option<String>,
@@ -999,6 +1021,37 @@ mod tests {
         let m: TsMessage =
             serde_json::from_str(r#"{"type":"llm_stream","call_id":"cX","request":{}}"#).unwrap();
         assert_eq!(m.call_id(), Some("cX"));
+    }
+
+    #[test]
+    fn vector_search_and_llm_embed_parse_from_ts() {
+        // Exact wire names the TS runtime emits — a serde rename drift
+        // here silently breaks ctx.db.vectorSearch / ctx.llm.embed.
+        let vs: TsMessage = serde_json::from_str(
+            r#"{"type":"db","call_id":"c1","op_id":"c1#1","op":"vector_search","entity":"Doc","data":{"field":"embedding","vector":[1.0,0.0],"limit":5}}"#,
+        )
+        .expect("vector_search db op must deserialize");
+        match vs {
+            TsMessage::Db(m) => {
+                assert_eq!(m.op, DbOp::VectorSearch);
+                assert_eq!(m.entity, "Doc");
+                assert!(m.data.unwrap().get("vector").is_some());
+            }
+            other => panic!("expected Db, got {other:?}"),
+        }
+
+        let embed: TsMessage = serde_json::from_str(
+            r#"{"type":"llm_embed","call_id":"c2","op_id":"c2#1","request":{"input":["hello"],"model":null}}"#,
+        )
+        .expect("llm_embed must deserialize");
+        match embed {
+            TsMessage::LlmEmbed(m) => {
+                assert_eq!(m.call_id, "c2");
+                assert_eq!(m.op_id.as_deref(), Some("c2#1"));
+                assert!(m.request.get("input").is_some());
+            }
+            other => panic!("expected LlmEmbed, got {other:?}"),
+        }
     }
 
     /// `llm_event` is fire-and-forget: the TS dispatcher keys it by

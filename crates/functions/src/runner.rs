@@ -202,6 +202,15 @@ pub type LlmStreamHook = Box<
         + Sync,
 >;
 
+/// Callback for `ctx.llm.embed(texts)`. Same contract as [`LlmHook`]
+/// but routed to the embeddings provider (a separate config axis:
+/// PYLON_EMBEDDINGS_PROVIDER openai|voyage).
+pub type LlmEmbedHook = Box<
+    dyn Fn(&serde_json::Value, &AuthInfo) -> Result<serde_json::Value, (String, String)>
+        + Send
+        + Sync,
+>;
+
 /// Callback for `ctx.rooms.broadcast(room, topic, data)`. Returns
 /// whether the event reached a live room — `false` means the room had
 /// no members, which is informational, not an error.
@@ -296,6 +305,22 @@ pub trait PolicyGate: Send + Sync {
     ) -> Result<serde_json::Value, (String, String)> {
         Ok(result)
     }
+
+    /// Fence a CLIENT-VISIBLE vector-search result (SSR
+    /// `serverData.vectorSearch`). Same aggregate-safety reasoning as
+    /// `filter_client_search`: top-k similarity ranks over EVERY row, so a
+    /// row-dependent read policy is rejected; then per-hit filter + project
+    /// the `doc` of each `{ id, score, doc }` hit.
+    ///
+    /// Default impl returns the result unchanged — stub gates don't filter.
+    fn filter_client_vector_search(
+        &self,
+        _entity: &str,
+        _auth: &crate::protocol::AuthInfo,
+        result: serde_json::Value,
+    ) -> Result<serde_json::Value, (String, String)> {
+        Ok(result)
+    }
 }
 
 /// Coarse action classification for the policy gate. Mirrors
@@ -352,6 +377,9 @@ pub struct FnRunner {
     /// Optional handler for `ctx.llm.stream(...)`. Unset behaves like
     /// `llm_hook` — an explicit LLM_NOT_CONFIGURED error.
     llm_stream_hook: Mutex<Option<LlmStreamHook>>,
+    /// Optional handler for `ctx.llm.embed(...)`. Unset returns an
+    /// explicit EMBEDDINGS_NOT_CONFIGURED error.
+    llm_embed_hook: Mutex<Option<LlmEmbedHook>>,
     /// Hook for `ctx.rooms.broadcast(...)`. Wires server-originated
     /// room events to the runtime's RoomManager + presence notifier.
     room_broadcast_hook: Mutex<Option<RoomBroadcastHook>>,
@@ -405,6 +433,7 @@ impl FnRunner {
             email_hook: Mutex::new(None),
             llm_hook: Mutex::new(None),
             llm_stream_hook: Mutex::new(None),
+            llm_embed_hook: Mutex::new(None),
             room_broadcast_hook: Mutex::new(None),
             workflow_op_hook: Mutex::new(None),
             connection_hook: Mutex::new(None),
@@ -537,6 +566,12 @@ impl FnRunner {
     /// events back to the handler as they arrive.
     pub fn set_llm_stream_hook(&self, hook: LlmStreamHook) {
         *self.llm_stream_hook.lock().unwrap() = Some(hook);
+    }
+
+    /// Install a callback for `ctx.llm.embed(texts)`. When unset, the
+    /// call rejects with `EMBEDDINGS_NOT_CONFIGURED`.
+    pub fn set_llm_embed_hook(&self, hook: LlmEmbedHook) {
+        *self.llm_embed_hook.lock().unwrap() = Some(hook);
     }
 
     /// Install a callback for `ctx.rooms.broadcast(room, topic, data)`.
@@ -1740,6 +1775,46 @@ impl FnRunner {
                     self.send(&reply)?;
                 }
 
+                TsMessage::LlmEmbed(req) if req.call_id == call_id => {
+                    // Embeddings share the reactive-purity refusal:
+                    // queries re-run on every dep change, which would
+                    // re-bill the provider each time. Embed in an
+                    // action, store the vector, query the stored rows.
+                    if matches!(fn_type, crate::protocol::FnType::Query) {
+                        let reply = DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            req.op_id.clone(),
+                            "LLM_NOT_AVAILABLE_IN_QUERY",
+                            "ctx.llm.embed is not available in query handlers (queries are reactive — embed in a mutation or action and store the result).",
+                        );
+                        self.send(&reply)?;
+                        continue;
+                    }
+                    let auth_snapshot = current_auth_snapshot(&gate_auth, caller_is_admin);
+                    let result: Result<serde_json::Value, (String, String)> = {
+                        let hook = self.llm_embed_hook.lock().unwrap();
+                        match *hook {
+                            Some(ref cb) => cb(&req.request, &auth_snapshot),
+                            None => Err((
+                                "EMBEDDINGS_NOT_CONFIGURED".into(),
+                                "ctx.llm.embed: no embeddings provider configured (set OPENAI_API_KEY, or PYLON_EMBEDDINGS_PROVIDER=voyage + VOYAGE_API_KEY)".into(),
+                            )),
+                        }
+                    };
+                    let reply = match result {
+                        Ok(value) => {
+                            DbResultMessage::ok_with_op(call_id.clone(), req.op_id.clone(), value)
+                        }
+                        Err((code, msg)) => DbResultMessage::err_with_op(
+                            call_id.clone(),
+                            req.op_id.clone(),
+                            &code,
+                            &msg,
+                        ),
+                    };
+                    self.send(&reply)?;
+                }
+
                 TsMessage::LlmStream(req) if req.call_id == call_id => {
                     // Same reactive-purity refusal as LlmComplete:
                     // a query re-runs on every dep change, which
@@ -2259,9 +2334,13 @@ impl TraceBuilder {
 ///   - AdvisoryLock: not a data op, no policy meaning.
 fn policy_op_for(op: DbOp) -> Option<PolicyOp> {
     match op {
-        DbOp::Get | DbOp::List | DbOp::Paginate | DbOp::Lookup | DbOp::Query | DbOp::Search => {
-            Some(PolicyOp::Read)
-        }
+        DbOp::Get
+        | DbOp::List
+        | DbOp::Paginate
+        | DbOp::Lookup
+        | DbOp::Query
+        | DbOp::Search
+        | DbOp::VectorSearch => Some(PolicyOp::Read),
         DbOp::Insert => Some(PolicyOp::Insert),
         DbOp::Update => Some(PolicyOp::Update),
         DbOp::Delete => Some(PolicyOp::Delete),
@@ -2448,6 +2527,20 @@ fn execute_db_op(
                 Err(e) => (Err(e), None),
             }
         }
+        DbOp::VectorSearch => {
+            let query = msg.data.as_ref().cloned().unwrap_or(serde_json::json!({}));
+            crate::deps::record_read(&msg.entity, None);
+            match store.vector_search(&msg.entity, &query) {
+                Ok(result) => {
+                    let count = result
+                        .get("hits")
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.len());
+                    (Ok(result), count)
+                }
+                Err(e) => (Err(e), None),
+            }
+        }
         DbOp::AdvisoryLock => {
             // The lock key rides on `entity`. SQLite path is a noop
             // (writers serialized); PG path issues
@@ -2534,6 +2627,13 @@ fn project_ssr_read(
         // Faceted search envelope: `{ hits, facetCounts, total }` — fence via
         // the dedicated search path (aggregate-safety gate + per-hit filter).
         DbOp::Search => match gate.filter_client_search(entity, auth, value) {
+            Ok(filtered) => (Ok(filtered), None),
+            Err((code, message)) => (Err(pylon_http::DataError { code, message }), None),
+        },
+        // Vector-search envelope: `{ hits: [{id, score, doc}], tookMs }` —
+        // same aggregate-safety gate + per-hit doc fence, via the dedicated
+        // vector path.
+        DbOp::VectorSearch => match gate.filter_client_vector_search(entity, auth, value) {
             Ok(filtered) => (Ok(filtered), None),
             Err((code, message)) => (Err(pylon_http::DataError { code, message }), None),
         },
@@ -3191,6 +3291,7 @@ mod tests {
         assert_eq!(policy_op_for(DbOp::Lookup), Some(PolicyOp::Read));
         assert_eq!(policy_op_for(DbOp::Query), Some(PolicyOp::Read));
         assert_eq!(policy_op_for(DbOp::Search), Some(PolicyOp::Read));
+        assert_eq!(policy_op_for(DbOp::VectorSearch), Some(PolicyOp::Read));
         assert_eq!(policy_op_for(DbOp::Insert), Some(PolicyOp::Insert));
         assert_eq!(policy_op_for(DbOp::Update), Some(PolicyOp::Update));
         assert_eq!(policy_op_for(DbOp::Delete), Some(PolicyOp::Delete));
@@ -3218,6 +3319,7 @@ mod tests {
             DbOp::Lookup,
             DbOp::Query,
             DbOp::Search,
+            DbOp::VectorSearch,
         ] {
             assert!(allowed(op), "{op:?} must be allowed during SSR");
         }

@@ -204,6 +204,9 @@ pub fn field_kind(
         "json" => CrdtFieldKind::LwwJson,
         // `id(EntityName)` — base_type strips the parens; the prefix is "id".
         "id" => CrdtFieldKind::LwwString,
+        // `vector(dims)` — the embedding is one LWW register (a number
+        // array); concurrent writers converge on one writer's value.
+        "vector" => CrdtFieldKind::LwwJson,
         other => {
             return Err(format!("unknown field type: {other}"));
         }

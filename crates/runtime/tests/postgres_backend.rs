@@ -1463,3 +1463,125 @@ fn schema_fingerprint_round_trips_and_tracks_real_changes() {
 
     let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_schema_state");
 }
+
+// ---------------------------------------------------------------------------
+// Vector integration — BYTEA storage + read-back decode + pg_vector scan
+// ---------------------------------------------------------------------------
+
+fn vector_runtime(url: &str) -> Runtime {
+    let field = |name: &str, ty: &str, optional: bool| ManifestField {
+        name: name.into(),
+        field_type: ty.into(),
+        optional,
+        unique: false,
+        crdt: None,
+        server_only: false,
+        readonly: false,
+        default: None,
+        enum_values: None,
+        encrypted: false,
+        sync_omit: false,
+    };
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "VecDoc".into(),
+            fields: vec![
+                field("title", "string", false),
+                field("kind", "string", false),
+                field("embedding", "vector(4)", true),
+            ],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            sync: true,
+            search: None,
+            ..Default::default()
+        }],
+        ..empty_manifest()
+    };
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
+        .expect("connect to test postgres");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"VecDoc\" CASCADE");
+    let plan = adapter
+        .plan_from_live(&manifest)
+        .expect("plan against fresh schema");
+    adapter.apply_plan(&plan).expect("apply schema");
+    Runtime::open_postgres(url, manifest).expect("open postgres runtime")
+}
+
+#[test]
+fn vector_field_round_trips_and_searches_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let rt = vector_runtime(&url);
+    let rows = vec![
+        ("d1", "a", serde_json::json!([1.0, 0.0, 0.0, 0.0])),
+        ("d2", "a", serde_json::json!([0.5, 0.5, 0.0, 0.0])),
+        ("d3", "b", serde_json::json!([0.0, 1.0, 0.0, 0.0])),
+    ];
+    let mut ids = Vec::new();
+    for (title, kind, emb) in &rows {
+        ids.push(
+            rt.insert(
+                "VecDoc",
+                &serde_json::json!({"title": title, "kind": kind, "embedding": emb}),
+            )
+            .unwrap(),
+        );
+    }
+
+    // Column really is BYTEA holding 16 packed bytes (4 × f32 LE).
+    let mut client = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+    let row = client
+        .query_one(
+            "SELECT octet_length(\"embedding\") FROM \"VecDoc\" WHERE \"title\" = 'd1'",
+            &[],
+        )
+        .expect("read embedding length");
+    let len: i32 = row.get(0);
+    assert_eq!(len, 16, "embedding must be stored as packed f32 bytes");
+
+    // Read-back decodes to a number array.
+    let doc = rt.get_by_id("VecDoc", &ids[0]).unwrap().unwrap();
+    assert_eq!(doc["embedding"], serde_json::json!([1.0, 0.0, 0.0, 0.0]));
+
+    // k-NN via the DataStore surface, with an equality filter.
+    use pylon_http::DataStore;
+    let result = DataStore::vector_search(
+        &rt,
+        "VecDoc",
+        &serde_json::json!({"field": "embedding", "vector": [1.0, 0.0, 0.0, 0.0]}),
+    )
+    .unwrap();
+    let hits = result["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 3);
+    assert_eq!(hits[0]["id"], serde_json::json!(ids[0]));
+    assert!(
+        hits[0]["doc"].get("embedding").is_none(),
+        "vector fields stripped from hit docs"
+    );
+
+    let result = DataStore::vector_search(
+        &rt,
+        "VecDoc",
+        &serde_json::json!({
+            "field": "embedding",
+            "vector": [1.0, 0.0, 0.0, 0.0],
+            "filter": {"kind": "b"}
+        }),
+    )
+    .unwrap();
+    let hits = result["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], serde_json::json!(ids[2]));
+
+    // Dims validation applies on the PG write path too.
+    let err = rt
+        .insert(
+            "VecDoc",
+            &serde_json::json!({"title": "bad", "kind": "a", "embedding": [1.0]}),
+        )
+        .unwrap_err();
+    assert_eq!(err.code, "VECTOR_INVALID");
+}

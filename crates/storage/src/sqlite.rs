@@ -32,6 +32,9 @@ fn sqlite_column_type(field_type: &str) -> &'static str {
         // Serialized JSON. TEXT (not a JSON1 column) — parse-back to the
         // real value happens at the read boundary, keyed off the manifest.
         "json" => "TEXT",
+        // Packed little-endian f32 array. Serialize/parse at the
+        // read/write boundary, keyed off the manifest, like `json`.
+        _ if field_type.starts_with("vector(") => "BLOB",
         _ if field_type.starts_with("id(") => "TEXT",
         _ => "TEXT",
     }
@@ -118,6 +121,8 @@ fn sqlite_add_column_null_default(field: &FieldSpec) -> String {
         "float" => Some("0"),
         // `''` is not valid serialized JSON; the JSON literal `null` is.
         "json" => Some("'null'"),
+        // No sensible zero-vector default — like id(X), require a backfill.
+        ref t if t.starts_with("vector(") => None,
         ref t if t.starts_with("id(") => None,
         _ => Some("''"),
     };

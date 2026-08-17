@@ -1141,7 +1141,9 @@ Built-ins, declared in `manifest.plugins`:
 - **Search & AI**: `search` (FTS5 + facets — configured on the entity via `.search({...})`, not the plugin list), `ai_proxy`
 - **Integrations**: `file_storage` (S3/R2/Stack0), `cache`, `cache_client` (Redis), `email`, `webhooks`, `stripe`, `feature_flags`, `audit_log`
 
-**Not implemented — do NOT declare these.** `vector_search` and `mcp` appear in the roadmap catalog (`pylon plugins list`) but have no implementation behind them; putting them in `manifest.plugins` does nothing. For embeddings/RAG today, compute them in a server function and store/query them yourself. For MCP, use the CLI's `pylon mcp` (see above) — it is not a manifest plugin.
+**Vector search is a field type, not a plugin.** Declare `embedding: field.vector(1536)` (always server-only; dims must match the embedding model), fill it with `ctx.llm.embed(texts)` (OpenAI `text-embedding-3-small` by default when `OPENAI_API_KEY` is set; `PYLON_EMBEDDINGS_PROVIDER=voyage` + `VOYAGE_API_KEY` for Voyage), and query with `ctx.db.vectorSearch("Doc", { field: "embedding", vector, limit, metric?, filter? })` — exact k-NN, cosine default, hits `{id, score, doc}` best-first with vector fields stripped from `doc`. HTTP: `POST /api/vector-search/<Entity>`. `embed` is not available in queries (reactive re-runs re-bill) — embed in a mutation/action and store the vector. Do NOT put `vector_search` in `manifest.plugins`; that key does nothing.
+
+**Not implemented — do NOT declare this.** `mcp` appears in the roadmap catalog (`pylon plugins list`) but has no implementation behind it; putting it in `manifest.plugins` does nothing. For MCP, use the CLI's `pylon mcp` (see above) — it is not a manifest plugin.
 
 ### Clients (`/clients/*` in the docs)
 - `@pylonsync/sdk` — schema DSL + manifest builder

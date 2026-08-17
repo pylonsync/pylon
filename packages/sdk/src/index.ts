@@ -16,7 +16,8 @@ export type FieldType =
   | "datetime"
   | "richtext"
   | "json"
-  | `id(${string})`;
+  | `id(${string})`
+  | `vector(${number})`;
 
 // ---------------------------------------------------------------------------
 // Field builder
@@ -318,6 +319,26 @@ export const field = {
    */
   json: () => createFieldBuilder("json"),
   id: (target: string) => createFieldBuilder(`id(${target})`),
+  /**
+   * `field.vector(1536)` — a fixed-dimension embedding, written as
+   * `number[]` and stored as a packed float array (BLOB in SQLite,
+   * BYTEA in Postgres). Query it with `ctx.db.vectorSearch(entity,
+   * { field, vector, limit })` — exact nearest-neighbor, cosine by
+   * default.
+   *
+   * Vector fields are always server-only: a 1536-dim embedding is
+   * 6KB+ per row and belongs to server-side retrieval, not client
+   * replicas or HTTP responses. Inserts/updates validate the exact
+   * dimension count and reject NaN/Infinity elements.
+   */
+  vector: (dims: number) => {
+    if (!Number.isInteger(dims) || dims < 1 || dims > 8192) {
+      throw new Error(
+        `field.vector(dims): dims must be an integer in 1..8192, got ${dims}`
+      );
+    }
+    return createFieldBuilder(`vector(${dims})`);
+  },
   /**
    * `field.enum(["pending", "paid", "failed"])` — stored as a string with
    * allowed-values metadata so codegen emits a precise literal union
@@ -970,7 +991,9 @@ export function entitiesToManifest(
         if (fb._def.crdt !== undefined) {
           f.crdt = fb._def.crdt;
         }
-        if (fb._def.serverOnly) {
+        if (fb._def.serverOnly || fb._def.type.startsWith("vector(")) {
+          // Vector fields are unconditionally server-only: multi-KB
+          // embeddings must never ride the sync stream or HTTP reads.
           f.serverOnly = true;
         }
         if (fb._def.syncOmit) {
