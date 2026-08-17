@@ -323,7 +323,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - name: swift build
-        run: swift build
+        # Retry with backoff: SwiftPM downloads the LoroFFI binary
+        # xcframework from GitHub releases on a cold cache, and that
+        # download times out whenever GitHub's release CDN degrades
+        # (three consecutive Linux-lane failures on 2026-08-17). The
+        # failure is pre-compilation, so a plain re-run is safe.
+        run: swift build || (sleep 30 && swift build) || (sleep 90 && swift build)
       - name: swift test
         run: swift test --parallel
 
