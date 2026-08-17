@@ -537,7 +537,7 @@ impl ReactiveRegistry {
             return HandlerResult::RuntimeUnavailable;
         };
         let guard = pylon_functions::deps::enter();
-        let result = fn_ops.call(fn_name, args, auth, None, None);
+        let result = fn_ops.call(fn_name, args, auth, None, None, None);
         let deps = guard.take();
         match result {
             Ok((value, _trace)) => {

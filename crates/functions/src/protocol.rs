@@ -26,6 +26,13 @@ pub struct CallMessage {
     /// raw headers/body the router would otherwise discard.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request: Option<RequestInfo>,
+    /// Resumable-stream id assigned by the host when this call arrived
+    /// over the SSE fn path. Surfaced to the handler as `ctx.stream.id`
+    /// so app code (e.g. the agent loop) can persist it and let other
+    /// devices attach via GET /api/fn-streams/<id>. Absent for
+    /// non-streaming invocations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<String>,
 }
 
 /// HTTP request metadata forwarded to TypeScript actions invoked via
@@ -63,6 +70,7 @@ impl CallMessage {
             args,
             auth,
             request: None,
+            stream_id: None,
         }
     }
 
@@ -70,6 +78,12 @@ impl CallMessage {
     /// `defineRoute` HTTP binding rather than a programmatic invocation).
     pub fn with_request(mut self, request: RequestInfo) -> Self {
         self.request = Some(request);
+        self
+    }
+
+    /// Attach the resumable-stream id (SSE fn path only).
+    pub fn with_stream_id(mut self, stream_id: String) -> Self {
+        self.stream_id = Some(stream_id);
         self
     }
 }

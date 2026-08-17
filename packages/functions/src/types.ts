@@ -323,6 +323,16 @@ export interface DbWriter extends DbReader {
  * client disconnects; it just keeps writing.
  */
 export interface Stream {
+  /**
+   * The host-assigned resumable-stream id for THIS call, present when
+   * the caller connected over SSE (`streamFn`). Persist it — e.g. on a
+   * run row — and any device can attach to the live stream (or fetch
+   * the buffered replay + final result) via `resumeStream(id)` /
+   * `GET /api/fn-streams/<id>`. Absent for non-streaming invocations
+   * (plain JSON calls, scheduled jobs).
+   */
+  readonly id?: string;
+
   /** Write a text chunk to the client (SSE). */
   write(data: string): void;
 

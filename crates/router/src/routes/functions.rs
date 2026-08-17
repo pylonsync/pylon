@@ -301,7 +301,7 @@ pub(crate) fn handle(
             let args = serde_json::json!({ "rawBody": body });
 
             return Some(
-                match fn_ops.call(action_name, args, auth, None, Some(request)) {
+                match fn_ops.call(action_name, args, auth, None, Some(request), None) {
                     Ok((value, _trace)) => (
                         200,
                         serde_json::to_string(&value).unwrap_or_else(|_| "null".into()),
@@ -463,7 +463,7 @@ pub(crate) fn handle(
             // for the next periodic poll. Kills the need for app
             // code to call `refetch()` after every mutation.
             let pre_seq = ctx.change_log.current_seq();
-            let result = fn_ops.call(fn_name, args, auth, None, Some(request_info));
+            let result = fn_ops.call(fn_name, args, auth, None, Some(request_info), None);
             let post_seq = ctx.change_log.current_seq();
             if post_seq > pre_seq {
                 ctx.add_response_header("X-Pylon-Change-Seq", post_seq.to_string());

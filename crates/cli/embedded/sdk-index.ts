@@ -579,6 +579,12 @@ export interface ActionDefinition {
   input?: InputFieldDefinition[];
   /** See `QueryDefinition.auth`. */
   auth?: string;
+  /** Set by `discoverFunctions` for `agent()` definitions —
+   *  `buildManifest` injects the AgentRun/AgentMessage entities when
+   *  any action carries it, so templates that pass `actions:
+   *  fns.actions` (rather than spreading the whole result) still get
+   *  the injection. Not serialized into the manifest. */
+  isAgent?: boolean;
   /**
    * Which write kind this was before the manifest's read/write split
    * collapsed mutations and actions into one bucket. Preserved so a
@@ -1449,6 +1455,9 @@ function argsToInput(
 export interface DiscoveredFunctions {
   queries: QueryDefinition[];
   actions: ActionDefinition[];
+  /** True when any discovered function is an `agent()` — buildManifest
+   *  then injects the AgentRun/AgentMessage entities + policies. */
+  hasAgents?: boolean;
 }
 
 /**
@@ -1519,6 +1528,7 @@ export async function discoverFunctions(opts?: {
 
   const queries: QueryDefinition[] = [];
   const actions: ActionDefinition[] = [];
+  let hasAgents = false;
 
   for (const file of files) {
     const name = file.replace(/\.(ts|js)$/, "");
@@ -1547,17 +1557,25 @@ export async function discoverFunctions(opts?: {
       continue;
     }
     if (shape.internal === true) continue;
+    const isAgent = shape.__pylonAgent === true;
+    if (isAgent) hasAgents = true;
 
     const input = argsToInput(definition!.args);
     const auth = typeof shape.auth === "string" ? shape.auth : undefined;
     if (definition!.type === "query") {
       queries.push({ name, input, auth });
     } else {
-      actions.push({ name, input, auth, fnType: definition!.type });
+      actions.push({
+        name,
+        input,
+        auth,
+        fnType: definition!.type,
+        ...(isAgent ? { isAgent: true } : {}),
+      });
     }
   }
 
-  return { queries, actions };
+  return { queries, actions, hasAgents };
 }
 
 export function queriesToManifest(queries: QueryDefinition[]): ManifestQuery[] {
@@ -1936,6 +1954,91 @@ function isManifestAuthConfig(
   return "trusted_origins" in cfg;
 }
 
+/** The framework entities behind `agent()`. Plain synced entities so
+ *  every existing surface (sync, policies, codegen, migrate) applies. */
+function agentEntities(): EntityDefinition[] {
+  return [
+    entity(
+      "AgentRun",
+      {
+        agent: field.string(),
+        status: field.string(),
+        // User-scoped, deliberately NOT tenantId-scoped: a tenantId
+        // field would trip TenantScopePlugin's auto-scoping and reject
+        // callers with no active organization. Apps needing org-scoped
+        // agent visibility declare their own AgentRun (injection
+        // defers to app-declared entities).
+        userId: field.string().optional(),
+        title: field.string().optional(),
+        // Resumable-stream id of the CURRENT generation — another
+        // device attaches to live tokens via resumeStream(streamId).
+        // Owner-scoped by policy, so it never leaks across users.
+        streamId: field.string().optional(),
+        error: field.string().optional(),
+        createdAt: field.datetime(),
+        updatedAt: field.datetime(),
+      },
+      {
+        indexes: [
+          { name: "by_user", fields: ["userId"], unique: false },
+        ],
+        // Replicate only the caller's own runs. The explicit
+        // null-guard matters: the policy engine evaluates null == null
+        // as TRUE, so without it an anonymous visitor could read any
+        // run that somehow ended up ownerless.
+        sync: { where: "auth.userId != null && data.userId == auth.userId" },
+      },
+    ),
+    entity(
+      "AgentMessage",
+      {
+        runId: field.id("AgentRun"),
+        userId: field.string().optional(),
+        seq: field.int(),
+        role: field.string(),
+        content: field.json(),
+        createdAt: field.datetime(),
+      },
+      {
+        indexes: [
+          // Unique: the loop is the only writer and single-writer per
+          // run; a racing duplicate fails loudly instead of garbling
+          // the transcript.
+          { name: "by_run", fields: ["runId", "seq"], unique: true },
+        ],
+        sync: { where: "auth.userId != null && data.userId == auth.userId" },
+      },
+    ),
+  ];
+}
+
+/** Owner-only reads; every client write denied — the agent loop's
+ *  internal mutations (server-side) are the only writer. */
+function agentPolicies(): PolicyDefinition[] {
+  const lockdown = {
+    allowInsert: "false",
+    allowUpdate: "false",
+    allowDelete: "false",
+  };
+  // The `auth.userId != null` guard is load-bearing: the policy
+  // engine evaluates null == null as TRUE, so a bare equality would
+  // hand ownerless rows to every anonymous caller.
+  return [
+    {
+      name: "agent_run_owner",
+      entity: "AgentRun",
+      allowRead: "auth.userId != null && data.userId == auth.userId",
+      ...lockdown,
+    },
+    {
+      name: "agent_message_owner",
+      entity: "AgentMessage",
+      allowRead: "auth.userId != null && data.userId == auth.userId",
+      ...lockdown,
+    },
+  ];
+}
+
 export function buildManifest(options: {
   name: string;
   version: string;
@@ -1949,6 +2052,11 @@ export function buildManifest(options: {
   connections?: ManifestConnection[];
   crons?: ManifestCron[];
   fonts?: ManifestFont[];
+  /** Set by `discoverFunctions()` (spread its result into this call).
+   *  When true, the framework's AgentRun/AgentMessage entities and
+   *  their owner-scoping policies are appended to the manifest —
+   *  unless the app already declares entities with those names. */
+  hasAgents?: boolean;
 }): AppManifest {
   // Pull policies attached via the fluent `e.entity().policies(...)`
   // chain onto the top-level policies list. Without this, fluent
@@ -1977,11 +2085,32 @@ export function buildManifest(options: {
     });
   }
   const allPolicies = [...(options.policies ?? []), ...attached];
+  // Agent run state: when any `agent()` exists, its durable state lives
+  // in two ORDINARY synced entities — owner-scoped reads, client writes
+  // denied (the loop's internal mutations are the only writer). Being
+  // plain entities means sync replication, codegen types, `pylon
+  // migrate`, and `db.useQuery("AgentMessage", ...)` all just work.
+  const allEntities = [...options.entities];
+  const hasAgents =
+    options.hasAgents ??
+    (options.actions ?? []).some((a) => a.isAgent === true);
+  if (hasAgents) {
+    const taken = new Set(allEntities.map((e) => e.name));
+    for (const ent of agentEntities()) {
+      if (!taken.has(ent.name)) allEntities.push(ent);
+    }
+    const declaredFor = new Set(
+      allPolicies.map((p) => p.entity).filter(Boolean),
+    );
+    for (const pol of agentPolicies()) {
+      if (!declaredFor.has(pol.entity)) allPolicies.push(pol);
+    }
+  }
   return {
     manifest_version: MANIFEST_VERSION,
     name: options.name,
     version: options.version,
-    entities: entitiesToManifest(options.entities),
+    entities: entitiesToManifest(allEntities),
     routes: routesToManifest(options.routes),
     queries: queriesToManifest(options.queries ?? []),
     actions: actionsToManifest(options.actions ?? []),

@@ -2455,7 +2455,14 @@ fn start_server(
                     roles: Vec::new(),
                 };
                 ops_for_wf
-                    .call("__pylon_workflow_run", request.clone(), auth, None, None)
+                    .call(
+                        "__pylon_workflow_run",
+                        request.clone(),
+                        auth,
+                        None,
+                        None,
+                        None,
+                    )
                     .map(|(value, _trace)| value)
                     .map_err(|e| format!("{}: {}", e.code, e.message))
             }));
@@ -6283,6 +6290,7 @@ fn start_server(
                 let ev_tx_call = ev_tx.clone();
                 let hub_call = Arc::clone(&stream_hub);
                 let entry_call = Arc::clone(&stream_entry);
+                let sid_for_call = stream_id.clone();
                 std::thread::spawn(move || {
                     // If FnOps::call panics after the first chunk, the
                     // negotiation channel is already detached and nobody
@@ -6334,6 +6342,10 @@ fn start_server(
                         auth,
                         Some(on_stream),
                         None, // streaming /api/fn/:name never carries HTTP request metadata
+                        // Surface the resumable-stream id to the handler
+                        // as ctx.stream.id so app code (the agent loop)
+                        // can persist it for cross-device attach.
+                        Some(sid_for_call),
                     );
                     // Buffer the terminal frame FIRST so a resume that
                     // races the finish still finds the outcome in the

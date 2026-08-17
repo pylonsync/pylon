@@ -835,12 +835,15 @@ impl FnRunner {
         auth: AuthInfo,
         on_stream: Option<StreamCallback>,
         request: Option<crate::protocol::RequestInfo>,
+        stream_id: Option<String>,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
         // Top-level calls MULTIPLEX over the one Bun connection (NDJSON is
         // demuxed by call_id), so there's no serializing lock. Each call —
         // including nested ones (action → query) — registers its own demux
         // route inside `call_inner`.
-        self.call_inner(store, fn_name, fn_type, args, auth, on_stream, request)
+        self.call_inner_with_caller_internal(
+            store, fn_name, fn_type, args, auth, on_stream, request, stream_id, false,
+        )
     }
 
     /// Render an SSR route — peer to `call()` but uses the
@@ -1332,6 +1335,7 @@ impl FnRunner {
         auth: AuthInfo,
         on_stream: Option<StreamCallback>,
         request: Option<crate::protocol::RequestInfo>,
+        stream_id: Option<String>,
         caller_internal: bool,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
         self.call_inner_with_caller_internal(
@@ -1342,6 +1346,7 @@ impl FnRunner {
             auth,
             on_stream,
             request,
+            stream_id,
             caller_internal,
         )
     }
@@ -1371,7 +1376,7 @@ impl FnRunner {
         // can't enqueue internal:true targets, but public-to-public
         // works as before).
         self.call_inner_with_caller_internal(
-            store, fn_name, fn_type, args, auth, on_stream, request, false,
+            store, fn_name, fn_type, args, auth, on_stream, request, None, false,
         )
     }
 
@@ -1388,6 +1393,7 @@ impl FnRunner {
         auth: AuthInfo,
         mut on_stream: Option<StreamCallback>,
         request: Option<crate::protocol::RequestInfo>,
+        stream_id: Option<String>,
         caller_internal: bool,
     ) -> Result<(serde_json::Value, crate::trace::FnTrace), FnCallError> {
         // Mutable so `ctx.auth.elevate({ admin: true, ... })` can
@@ -1444,6 +1450,9 @@ impl FnRunner {
             CallMessage::new(call_id.clone(), fn_name.to_string(), fn_type, args, auth);
         if let Some(r) = request {
             call_msg = call_msg.with_request(r);
+        }
+        if let Some(sid) = stream_id {
+            call_msg = call_msg.with_stream_id(sid);
         }
         self.send(&call_msg)?;
 

@@ -107,6 +107,14 @@ export type {
   UseSearchReturn,
 } from "./hooks";
 
+// Agent run hook — live transcript + status for agent() runs
+export { useAgentRun } from "./useAgentRun";
+export type {
+  AgentRunRow,
+  AgentMessageRow,
+  UseAgentRunReturn,
+} from "./useAgentRun";
+
 // Room hook
 export { useRoom, useRoomMessages } from "./useRoom";
 export type {

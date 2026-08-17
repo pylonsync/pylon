@@ -45,6 +45,7 @@ impl pylon_router::FnOps for StubFnOps {
         _auth: pylon_functions::protocol::AuthInfo,
         _on_stream: Option<pylon_functions::runner::StreamCallback>,
         _request: Option<pylon_functions::protocol::RequestInfo>,
+        _stream_id: Option<String>,
     ) -> Result<
         (serde_json::Value, pylon_functions::trace::FnTrace),
         pylon_functions::runner::FnCallError,

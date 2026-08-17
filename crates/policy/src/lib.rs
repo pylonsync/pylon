@@ -1929,6 +1929,47 @@ mod tests {
     }
 
     #[test]
+    fn null_equals_null_is_true_so_owner_policies_need_the_auth_guard() {
+        // values_eq(Null, Null) == true BY DESIGN, which makes a bare
+        // `data.userId == auth.userId` a footgun: an ANONYMOUS caller
+        // (auth.userId → Null) matches every row whose stored userId is
+        // null. Owner policies must carry the explicit
+        // `auth.userId != null &&` guard — as the framework-injected
+        // AgentRun/AgentMessage policies do. This test pins both halves
+        // so a future "fix" of either behavior is a conscious decision.
+        let anon = AuthContext::anonymous();
+        let ownerless = serde_json::json!({ "userId": null });
+
+        let bare = evaluate_allow("data.userId == auth.userId", &anon, Some(&ownerless), None);
+        assert!(
+            matches!(bare, PolicyResult::Allowed),
+            "documents the footgun: null == null evaluates Allowed"
+        );
+
+        let guarded = evaluate_allow(
+            "auth.userId != null && data.userId == auth.userId",
+            &anon,
+            Some(&ownerless),
+            None,
+        );
+        assert!(
+            matches!(guarded, PolicyResult::Denied { .. }),
+            "the guard closes the anonymous-reads-ownerless-rows hole"
+        );
+
+        // And the guarded form still admits the real owner.
+        let owner = AuthContext::authenticated("u1".into());
+        let owned = serde_json::json!({ "userId": "u1" });
+        let ok = evaluate_allow(
+            "auth.userId != null && data.userId == auth.userId",
+            &owner,
+            Some(&owned),
+            None,
+        );
+        assert!(matches!(ok, PolicyResult::Allowed));
+    }
+
+    #[test]
     fn conjunction_needs_both_sides() {
         let (auth, data) = alice_owns("alice");
         let r = evaluate_allow(

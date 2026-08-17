@@ -513,6 +513,7 @@ pub trait FnOps: Send + Sync {
         auth: pylon_functions::protocol::AuthInfo,
         on_stream: Option<pylon_functions::runner::StreamCallback>,
         request: Option<pylon_functions::protocol::RequestInfo>,
+        stream_id: Option<String>,
     ) -> Result<
         (serde_json::Value, pylon_functions::trace::FnTrace),
         pylon_functions::runner::FnCallError,

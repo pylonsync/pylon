@@ -788,8 +788,11 @@ function buildWriterOps(callId: string, unsafeOp: boolean): Omit<DbWriter, "unsa
   };
 }
 
-function buildStream(callId: string): Stream {
+function buildStream(callId: string, streamId?: string): Stream {
   return {
+    // Host-assigned resumable-stream id (SSE fn path only). Persist it
+    // to let other devices attach via GET /api/fn-streams/<id>.
+    id: streamId,
     write(data: string) {
       // Stream messages are fire-and-forget; they don't get a `result` reply.
       send({ type: "stream", call_id: callId, data });
@@ -1192,7 +1195,10 @@ async function handleCall(msg: CallMessage): Promise<void> {
   const abort = new AbortController();
   callAborts.set(msg.call_id, abort);
 
-  const stream = buildStream(msg.call_id);
+  const stream = buildStream(
+    msg.call_id,
+    (msg as { stream_id?: string }).stream_id,
+  );
   const scheduler = buildScheduler(msg.call_id);
   const email = buildEmail(msg.call_id);
   const llm = buildLlm(msg.call_id);
@@ -1405,6 +1411,8 @@ async function main() {
     files = [];
   }
 
+  const { isAgentDefinition, AGENT_MARKER } = await import("./agent");
+  let agentsPresent = false;
   for (const file of files) {
     const name = basename(file, file.endsWith(".ts") ? ".ts" : ".js");
     try {
@@ -1420,11 +1428,29 @@ async function main() {
         typeof anyDef.type === "string" &&
         typeof anyDef.handler === "function"
       ) {
+        if (isAgentDefinition(def)) {
+          // The agent loop needs its own registered name (for the
+          // AgentRun.agent column + continuation checks) but handlers
+          // don't know their filename — inject it post-validation.
+          agentsPresent = true;
+          const orig = anyDef.handler as (
+            ctx: unknown,
+            args: Record<string, unknown>,
+          ) => unknown;
+          anyDef.handler = (ctx: unknown, args: Record<string, unknown>) =>
+            orig(ctx, { ...args, __agentName: name });
+          void AGENT_MARKER;
+        }
         registry.set(name, def as FnDefinition);
       }
     } catch (err) {
       console.error(`[functions] Failed to load ${file}:`, err);
     }
+  }
+
+  if (agentsPresent) {
+    const { registerAgentInternals } = await import("./agent-internals");
+    registerAgentInternals(registry);
   }
 
   // Workflows: scan the app's workflows/ dir (sibling of functions/).

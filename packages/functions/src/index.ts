@@ -21,6 +21,18 @@
 export { query, mutation, action } from "./define";
 export { v } from "./validators";
 export { workflow } from "./workflows";
+export {
+  agent,
+  isAgentDefinition,
+  validatorToJsonSchema,
+  validatorSchemaToJsonSchema,
+} from "./agent";
+export type {
+  AgentDefinition,
+  AgentTool,
+  AgentCallArgs,
+  AgentResult,
+} from "./agent";
 export type {
   WorkflowDefinition,
   WorkflowRun,

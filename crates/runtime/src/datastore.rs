@@ -4247,6 +4247,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         auth: FnAuth,
         on_stream: Option<pylon_functions::runner::StreamCallback>,
         request: Option<pylon_functions::protocol::RequestInfo>,
+        stream_id: Option<String>,
     ) -> Result<(serde_json::Value, FnTrace), FnCallError> {
         let def = self.registry.get(fn_name).ok_or_else(|| FnCallError {
             code: "FN_NOT_FOUND".into(),
@@ -4331,6 +4332,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                             auth,
                             on_stream,
                             request,
+                            stream_id,
                             caller_internal,
                         )?;
                         Ok((value, trace, buffered.take_pending()))
@@ -4427,6 +4429,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                     auth,
                     on_stream,
                     request,
+                    stream_id,
                     def.internal,
                 );
 
@@ -4565,6 +4568,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                     auth,
                     on_stream,
                     request,
+                    stream_id,
                     def.internal,
                 )
             }
@@ -5797,7 +5801,7 @@ fn register_function_job_handlers(ops: &Arc<FnOpsImpl>, job_queue: &Arc<crate::j
                         roles: Vec::new(),
                     },
                 };
-                match ops.call(&fn_name, job.payload.clone(), auth, None, None) {
+                match ops.call(&fn_name, job.payload.clone(), auth, None, None, None) {
                     Ok(_) => crate::jobs::JobResult::Success,
                     Err(e) => crate::jobs::JobResult::Retry(format!("{}: {}", e.code, e.message)),
                 }
@@ -5879,7 +5883,7 @@ pub(crate) fn register_app_crons(
                 tenant_id: None,
                 roles: Vec::new(),
             };
-            match ops.call(&fn_name, serde_json::json!({}), auth, None, None) {
+            match ops.call(&fn_name, serde_json::json!({}), auth, None, None, None) {
                 Ok(_) => crate::jobs::JobResult::Success,
                 Err(e) => crate::jobs::JobResult::Retry(format!("{}: {}", e.code, e.message)),
             }
