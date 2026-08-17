@@ -511,7 +511,7 @@ pub trait FnOps: Send + Sync {
         fn_name: &str,
         args: serde_json::Value,
         auth: pylon_functions::protocol::AuthInfo,
-        on_stream: Option<Box<dyn FnMut(&str) + Send>>,
+        on_stream: Option<pylon_functions::runner::StreamCallback>,
         request: Option<pylon_functions::protocol::RequestInfo>,
     ) -> Result<
         (serde_json::Value, pylon_functions::trace::FnTrace),

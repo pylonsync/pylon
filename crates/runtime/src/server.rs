@@ -231,6 +231,138 @@ fn spawn_streaming_response<R: std::io::Read + Send + 'static>(
     Ok(())
 }
 
+/// Serve a hub-backed resumable stream as SSE over the raw socket.
+///
+/// Replays frames after `since`, then live-tails with heartbeats until
+/// the stream reaches its terminal frame or the client disconnects.
+/// Written via `Request::into_writer()` with an explicit flush per
+/// event — `request.respond()` sits behind an 8KB chunked-transfer
+/// buffer that would hold early tokens hostage (same fix as the dev
+/// live-reload SSE; see `frontend.rs::serve_dev_live_reload`).
+///
+/// The producer never blocks on this connection: frames come from the
+/// hub's ring, and a disconnect just drops the subscriber while the
+/// handler keeps filling the buffer for a later resume.
+///
+/// Holds a StreamLimiter slot for the connection's lifetime. Returns
+/// `Err(request)` when the limiter is at cap (caller answers 503).
+#[allow(clippy::too_many_arguments)]
+fn spawn_hub_sse(
+    request: tiny_http::Request,
+    hub: Arc<crate::stream_hub::StreamHub>,
+    entry: Arc<crate::stream_hub::StreamEntry>,
+    stream_id: String,
+    since: u64,
+    // Initial POST connections stay wire-compatible with pre-resume
+    // clients: no `retry:` prelude and no heartbeat comments (old
+    // parsers yield both as empty chunks). Resume connections are only
+    // ever opened by cursor-aware clients and get the full framing.
+    legacy_quiet: bool,
+    method: &'static str,
+    stream_limiter: &Arc<StreamLimiter>,
+    peer_ip: std::net::IpAddr,
+    metrics: Arc<Metrics>,
+    cors_origin: String,
+) -> Result<(), tiny_http::Request> {
+    let slot = match stream_limiter.acquire(peer_ip) {
+        Some(g) => g,
+        None => return Err(request),
+    };
+    let mut writer = request.into_writer();
+    let _ = std::thread::Builder::new()
+        .name("pylon-fn-stream".into())
+        .stack_size(256 * 1024)
+        .spawn(move || {
+            use std::io::Write as _;
+            let _slot = slot;
+            // Head + retry hint in one write. The stream id travels in
+            // the X-Pylon-Stream-Id header ONLY — an in-band frame
+            // would surface as a bogus data chunk in pre-resume
+            // clients, whereas an extra header and `id:` lines are
+            // ignored by every existing parser. The CORS expose header
+            // makes it readable from browser fetch.
+            let prelude = if legacy_quiet { "" } else { "retry: 1000\n\n" };
+            let head = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Connection: close\r\n\
+                 X-Accel-Buffering: no\r\n\
+                 X-Content-Type-Options: nosniff\r\n\
+                 X-Frame-Options: DENY\r\n\
+                 Referrer-Policy: strict-origin-when-cross-origin\r\n\
+                 X-Pylon-Stream-Id: {stream_id}\r\n\
+                 Access-Control-Expose-Headers: X-Pylon-Stream-Id\r\n\
+                 Access-Control-Allow-Origin: {cors_origin}\r\n\
+                 \r\n\
+                 {prelude}"
+            );
+            if writer.write_all(head.as_bytes()).is_err() || writer.flush().is_err() {
+                metrics.record_request(method, 200);
+                return;
+            }
+            let mut after = since;
+            loop {
+                match hub.wait_frames(&entry, after, std::time::Duration::from_secs(15)) {
+                    crate::stream_hub::WaitOutcome::Frames(frames, ended) => {
+                        let mut out = String::new();
+                        for f in &frames {
+                            out.push_str(&format!("id: {}\n", f.seq));
+                            if let Some(ev) = &f.event {
+                                out.push_str(&format!("event: {ev}\n"));
+                            }
+                            // SSE framing: each newline in the payload
+                            // becomes its own `data:` line; the client
+                            // rejoins with '\n'. (The old path emitted
+                            // one raw `data: <chunk>` line, so a chunk
+                            // containing a newline broke the frame.)
+                            for line in f.data.split('\n') {
+                                out.push_str("data: ");
+                                out.push_str(line);
+                                out.push('\n');
+                            }
+                            out.push('\n');
+                            after = f.seq;
+                        }
+                        if writer.write_all(out.as_bytes()).is_err() || writer.flush().is_err() {
+                            break; // client gone — buffer lives on
+                        }
+                        if ended {
+                            break;
+                        }
+                    }
+                    crate::stream_hub::WaitOutcome::Heartbeat => {
+                        if legacy_quiet {
+                            continue; // old parsers would yield "" per comment
+                        }
+                        if writer.write_all(b": hb\n\n").is_err() || writer.flush().is_err() {
+                            break;
+                        }
+                    }
+                    crate::stream_hub::WaitOutcome::Ended => break,
+                    crate::stream_hub::WaitOutcome::Gone(oldest) => {
+                        // The reader fell more than a full buffer behind
+                        // a fast producer. Tell it where the window
+                        // starts so it can decide to re-read from there.
+                        let frame = format!(
+                            "event: error\ndata: {}\n\n",
+                            serde_json::json!({
+                                "code": "STREAM_GONE",
+                                "message": "cursor fell below the stream's retention window",
+                                "oldestSeq": oldest,
+                            })
+                        );
+                        let _ = writer.write_all(frame.as_bytes());
+                        let _ = writer.flush();
+                        break;
+                    }
+                }
+            }
+            metrics.record_request(method, 200);
+        });
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Streaming body — bridges mpsc::Receiver to std::io::Read for SSE responses
 // ---------------------------------------------------------------------------
@@ -1877,6 +2009,11 @@ fn start_server(
         Arc::clone(&job_queue),
         scheduler_leadership,
     ));
+    // Resumable fn-stream buffers. Every SSE function stream is
+    // buffered + sequence-numbered here so a disconnected client can
+    // catch up via GET /api/fn-streams/<id>.
+    let stream_hub = Arc::new(crate::stream_hub::StreamHub::from_env());
+
     // Schedule built-in cleanup tasks. Pass the REAL handler to `schedule()`,
     // which registers it with the job queue itself — a separate
     // `job_queue.register(name, real)` BEFORE the schedule call is silently
@@ -1890,6 +2027,17 @@ fn start_server(
             "*/10 * * * *",
             Arc::new(move |_job| {
                 cache_ref.cleanup_expired();
+                JobResult::Success
+            }),
+        );
+        // Reap resumable-stream buffers: completed streams past their
+        // retention window (default 1h) and abandoned live ones.
+        let hub_ref = Arc::clone(&stream_hub);
+        let _ = scheduler.schedule(
+            "pylon.streams.cleanup",
+            "*/10 * * * *",
+            Arc::new(move |_job| {
+                hub_ref.cleanup_expired();
                 JobResult::Success
             }),
         );
@@ -2963,6 +3111,7 @@ fn start_server(
         let ai_rate_limiter = Arc::clone(&ai_rate_limiter);
         let llm_client_route = llm_client_route.clone();
         let stream_limiter = Arc::clone(&stream_limiter);
+        let stream_hub = Arc::clone(&stream_hub);
         let frontend_config = Arc::clone(&frontend_config);
 
         // Per-request handler thread. Each request runs on its own worker;
@@ -5720,6 +5869,142 @@ fn start_server(
             }
         }
 
+        // --- GET /api/fn-streams/:id — resume a buffered fn stream ---
+        // A client that lost its SSE connection mid-stream reconnects
+        // here with its last seen `id:` (Last-Event-ID header or
+        // ?since=) and replays from that cursor, then live-tails. The
+        // terminal result/error frame is buffered too, so a resume
+        // after completion still delivers the outcome.
+        if method == Method::Get && url.starts_with("/api/fn-streams/") {
+            let stream_id = url
+                .strip_prefix("/api/fn-streams/")
+                .unwrap_or("")
+                .split('?')
+                .next()
+                .unwrap_or("")
+                .trim_end_matches('/')
+                .to_string();
+
+            let respond_json = |request: tiny_http::Request, status: u16, body: String| {
+                let response = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(status)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes(
+                                "Access-Control-Allow-Origin",
+                                cors_origin.as_bytes().to_vec(),
+                            )
+                            .unwrap(),
+                        ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("GET", status);
+            };
+
+            let not_found = json_error("STREAM_NOT_FOUND", "Unknown or expired stream id");
+            let Some(entry) = stream_hub.get(&stream_id) else {
+                respond_json(request, 404, not_found);
+                return;
+            };
+
+            // Ownership: a stream started by a signed-in user is
+            // readable only by that user (admin bypasses, as with every
+            // framework gate). Tenant-scoped streams require the same
+            // active tenant. Anonymous-caller streams (public fns) are
+            // guarded by the unguessable 160-bit id alone. Denials are
+            // 404, not 403 — a 403 confirms the id exists.
+            let meta = stream_hub.meta(&entry);
+            if !auth_ctx.is_admin {
+                if let Some(owner) = &meta.user_id {
+                    if auth_ctx.user_id.as_deref() != Some(owner.as_str()) {
+                        respond_json(request, 404, not_found);
+                        return;
+                    }
+                }
+                if let Some(tenant) = &meta.tenant_id {
+                    if auth_ctx.tenant_id.as_deref() != Some(tenant.as_str()) {
+                        respond_json(request, 404, not_found);
+                        return;
+                    }
+                }
+            }
+
+            // Cursor: Last-Event-ID (what EventSource sends on its own
+            // reconnects) wins; explicit ?since= for fetch-based
+            // clients; default 0 = full replay.
+            let last_event_id = request
+                .headers()
+                .iter()
+                .find(|h| {
+                    h.field
+                        .as_str()
+                        .as_str()
+                        .eq_ignore_ascii_case("Last-Event-ID")
+                })
+                .and_then(|h| h.value.as_str().trim().parse::<u64>().ok());
+            let since = last_event_id
+                .or_else(|| {
+                    url.split('?').nth(1).and_then(|q| {
+                        q.split('&')
+                            .find_map(|kv| kv.strip_prefix("since="))
+                            .and_then(|v| v.parse::<u64>().ok())
+                    })
+                })
+                .unwrap_or(0);
+
+            // Cursor below the retention window → 410 with the oldest
+            // seq still served, mirroring the sync pull contract.
+            let oldest = stream_hub.oldest_seq(&entry);
+            if since + 1 < oldest {
+                respond_json(
+                    request,
+                    410,
+                    serde_json::json!({
+                        "error": {
+                            "code": "STREAM_GONE",
+                            "message": "cursor fell below the stream's retention window",
+                            "oldestSeq": oldest,
+                        }
+                    })
+                    .to_string(),
+                );
+                return;
+            }
+
+            if let Err(request) = spawn_hub_sse(
+                request,
+                Arc::clone(&stream_hub),
+                entry,
+                stream_id,
+                since,
+                false, // resume connections are cursor-aware by definition
+                "GET",
+                &stream_limiter,
+                dispatch_peer_ip,
+                Arc::clone(&mt),
+                cors_origin.clone(),
+            ) {
+                let body = json_error(
+                    "STREAM_OVERLOADED",
+                    "Server is at its streaming concurrency cap. Retry shortly.",
+                );
+                let resp = with_security_headers(
+                    Response::from_string(&body)
+                        .with_status_code(503u16)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/json").unwrap(),
+                        )
+                        .with_header(Header::from_bytes("Retry-After", "1").unwrap()),
+                );
+                let _ = request.respond(resp);
+                mt.record_request("GET", 503);
+            }
+            return;
+        }
+
         // --- POST /api/fn/:name with Accept: text/event-stream ---
         // The fast path for callers that can consume SSE. Whether the
         // response IS SSE is decided by the handler, not the header:
@@ -5925,20 +6210,122 @@ fn start_server(
                 // completes without streaming gets the same plain-JSON
                 // body as the non-SSE router path.
                 enum FnEvent {
-                    Chunk(String),
+                    Streamed,
                     Done(Result<serde_json::Value, pylon_functions::runner::FnCallError>),
                 }
+
+                // Register the resumable buffer BEFORE the call starts.
+                // Chunks flow into the hub (never blocking on this HTTP
+                // connection); the channel below only signals "the
+                // handler streamed" vs "it answered plain" for content
+                // negotiation. `None` from create means the hub is full
+                // of live streams — the StreamLimiter would refuse the
+                // connection anyway, so answer 503 the same way.
+                let stream_id = {
+                    // CSPRNG, not crate::generate_id(): row ids are
+                    // deliberately time-ordered (cursor pagination), which
+                    // makes them guessable — fine for rows behind policies,
+                    // fatal for a capability id that alone guards
+                    // anonymous-caller streams. 160 random bits.
+                    use ring::rand::SecureRandom as _;
+                    let mut bytes = [0u8; 20];
+                    if ring::rand::SystemRandom::new().fill(&mut bytes).is_err() {
+                        // No entropy, no capability id — refuse rather
+                        // than mint a guessable one.
+                        let body = json_error(
+                            "STREAM_ID_UNAVAILABLE",
+                            "Could not generate a secure stream id",
+                        );
+                        let resp = with_security_headers(
+                            Response::from_string(&body).with_status_code(500u16).with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            ),
+                        );
+                        let _ = request.respond(resp);
+                        mt.record_request("POST", 500);
+                        return;
+                    }
+                    use std::fmt::Write as _;
+                    let mut hex = String::with_capacity(43);
+                    hex.push_str("st_");
+                    for b in bytes {
+                        let _ = write!(hex, "{b:02x}");
+                    }
+                    hex
+                };
+                let Some(stream_entry) = stream_hub.create(
+                    stream_id.clone(),
+                    &fn_name,
+                    auth.user_id.as_deref(),
+                    auth.tenant_id.as_deref(),
+                ) else {
+                    let body = json_error(
+                        "STREAM_OVERLOADED",
+                        "Server is at its streaming buffer cap. Retry shortly.",
+                    );
+                    let resp = with_security_headers(
+                        Response::from_string(&body)
+                            .with_status_code(503u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(Header::from_bytes("Retry-After", "1").unwrap()),
+                    );
+                    let _ = request.respond(resp);
+                    mt.record_request("POST", 503);
+                    return;
+                };
 
                 let (ev_tx, ev_rx) =
                     std::sync::mpsc::sync_channel::<FnEvent>(FINITE_STREAM_BUFFER_CAPACITY);
 
                 let fn_ops_cl = Arc::clone(fn_ops);
                 let ev_tx_call = ev_tx.clone();
+                let hub_call = Arc::clone(&stream_hub);
+                let entry_call = Arc::clone(&stream_entry);
                 std::thread::spawn(move || {
+                    // If FnOps::call panics after the first chunk, the
+                    // negotiation channel is already detached and nobody
+                    // would ever terminate the stream — auto-resuming
+                    // clients would heartbeat forever on a Live stream.
+                    // The guard fails the stream on unwind; disarmed on
+                    // the normal path once complete/fail ran.
+                    struct FailOnUnwind {
+                        hub: Arc<crate::stream_hub::StreamHub>,
+                        entry: Arc<crate::stream_hub::StreamEntry>,
+                        armed: bool,
+                    }
+                    impl Drop for FailOnUnwind {
+                        fn drop(&mut self) {
+                            if self.armed {
+                                self.hub.fail(
+                                    &self.entry,
+                                    "{\"code\":\"FN_CRASHED\",\"message\":\"Function runner exited before returning a result\"}",
+                                );
+                            }
+                        }
+                    }
+                    let mut guard = FailOnUnwind {
+                        hub: Arc::clone(&hub_call),
+                        entry: Arc::clone(&entry_call),
+                        armed: true,
+                    };
                     let tx_cb = ev_tx_call.clone();
-                    let on_stream: Box<dyn FnMut(&str) + Send> = Box::new(move |chunk: &str| {
-                        let _ = tx_cb.send(FnEvent::Chunk(chunk.to_string()));
-                    });
+                    let hub_cb = Arc::clone(&hub_call);
+                    let entry_cb = Arc::clone(&entry_call);
+                    let on_stream: pylon_functions::runner::StreamCallback =
+                        Box::new(move |chunk: pylon_functions::runner::StreamChunk<'_>| {
+                            hub_cb.append(&entry_cb, chunk.event, chunk.data);
+                            // Fleet byte budget — enforced OUTSIDE the
+                            // entry lock (map→entry lock order).
+                            hub_cb.enforce_global_budget();
+                            // Negotiation signal only. After the SSE
+                            // upgrade the receiver is dropped and this
+                            // send errors harmlessly — the hub already
+                            // has the frame, so nothing can block or
+                            // be lost.
+                            let _ = tx_cb.send(FnEvent::Streamed);
+                        });
 
                     let result = pylon_router::FnOps::call(
                         fn_ops_cl.as_ref(),
@@ -5948,7 +6335,23 @@ fn start_server(
                         Some(on_stream),
                         None, // streaming /api/fn/:name never carries HTTP request metadata
                     );
-                    let _ = ev_tx_call.send(FnEvent::Done(result.map(|(value, _trace)| value)));
+                    // Buffer the terminal frame FIRST so a resume that
+                    // races the finish still finds the outcome in the
+                    // hub, then signal the (possibly dropped) channel.
+                    let result = result.map(|(value, _trace)| value);
+                    match &result {
+                        Ok(value) => hub_call.complete(
+                            &entry_call,
+                            &serde_json::to_string(value).unwrap_or_else(|_| "null".into()),
+                        ),
+                        Err(e) => hub_call.fail(
+                            &entry_call,
+                            &serde_json::json!({"code": e.code, "message": e.message})
+                                .to_string(),
+                        ),
+                    }
+                    guard.armed = false;
+                    let _ = ev_tx_call.send(FnEvent::Done(result));
                 });
                 drop(ev_tx);
 
@@ -5961,6 +6364,17 @@ fn start_server(
                 match ev_rx.recv() {
                     Err(_) => {
                         // Call thread died without reporting (panic).
+                        // Fail the buffered stream so a resume sees the
+                        // crash instead of hanging on a Live stream
+                        // that will never finish.
+                        stream_hub.fail(
+                            &stream_entry,
+                            &serde_json::json!({
+                                "code": "FN_CRASHED",
+                                "message": "Function runner exited before returning a result",
+                            })
+                            .to_string(),
+                        );
                         let err = json_error(
                             "FN_CRASHED",
                             "Function runner exited before returning a result",
@@ -5985,7 +6399,9 @@ fn start_server(
                     Ok(FnEvent::Done(result)) => {
                         // Never streamed — answer as plain JSON with the
                         // router path's exact shapes (raw value on 200,
-                        // json_error on 400).
+                        // json_error on 400). Nothing to resume; drop
+                        // the buffer.
+                        stream_hub.remove(&stream_id);
                         let (status, resp_body) = match result {
                             Ok(value) => (
                                 200u16,
@@ -6010,60 +6426,26 @@ fn start_server(
                         let _ = request.respond(response);
                         mt.record_request("POST", status);
                     }
-                    Ok(FnEvent::Chunk(first)) => {
-                        // The handler streams — SSE from here on.
-                        let (tx, streaming_body) = bounded_stream(FINITE_STREAM_BUFFER_CAPACITY);
-                        let _ = tx.send(format!("data: {first}\n\n").into_bytes());
-                        std::thread::spawn(move || {
-                            while let Ok(ev) = ev_rx.recv() {
-                                match ev {
-                                    FnEvent::Chunk(chunk) => {
-                                        let _ =
-                                            tx.send(format!("data: {chunk}\n\n").into_bytes());
-                                    }
-                                    FnEvent::Done(Ok(value)) => {
-                                        let done = format!(
-                                            "event: result\ndata: {}\n\n",
-                                            serde_json::to_string(&value)
-                                                .unwrap_or_else(|_| "null".into())
-                                        );
-                                        let _ = tx.send(done.into_bytes());
-                                    }
-                                    FnEvent::Done(Err(e)) => {
-                                        let err = format!(
-                                            "event: error\ndata: {}\n\n",
-                                            serde_json::json!({"code": e.code, "message": e.message})
-                                        );
-                                        let _ = tx.send(err.into_bytes());
-                                    }
-                                }
-                            }
-                        });
-
-                        let response = with_security_headers(Response::new(
-                            tiny_http::StatusCode(200),
-                            vec![
-                                Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
-                                Header::from_bytes("Cache-Control", "no-cache").unwrap(),
-                                Header::from_bytes("Connection", "keep-alive").unwrap(),
-                                Header::from_bytes(
-                                    "Access-Control-Allow-Origin",
-                                    cors_origin.as_bytes().to_vec(),
-                                )
-                                .unwrap(),
-                            ],
-                            streaming_body,
-                            None,
-                            None,
-                        ));
-                        if let Err(request) = spawn_streaming_response(
+                    Ok(FnEvent::Streamed) => {
+                        // The handler streams — SSE from here on, served
+                        // straight from the hub buffer (replay-from-0
+                        // covers the frames that landed during
+                        // negotiation, then live-tail). Dropping ev_rx
+                        // detaches the negotiation channel; the call
+                        // thread's sends error harmlessly.
+                        drop(ev_rx);
+                        if let Err(request) = spawn_hub_sse(
                             request,
-                            response,
+                            Arc::clone(&stream_hub),
+                            stream_entry,
+                            stream_id,
+                            0,
+                            true, // legacy_quiet: old clients read this path
+                            "POST",
                             &stream_limiter,
                             dispatch_peer_ip,
                             Arc::clone(&mt),
-                            "POST".to_string(),
-                            200,
+                            cors_origin.clone(),
                         ) {
                             let body = json_error(
                                 "STREAM_OVERLOADED",

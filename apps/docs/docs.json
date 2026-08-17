@@ -42,6 +42,7 @@
               "concepts/functions",
               "concepts/scheduling",
               "concepts/workflows",
+              "concepts/streaming",
               "concepts/realtime",
               "concepts/live-queries",
               "concepts/reactive-queries",

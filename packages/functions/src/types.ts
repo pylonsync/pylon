@@ -312,11 +312,21 @@ export interface DbWriter extends DbReader {
 // Streaming
 // ---------------------------------------------------------------------------
 
+/**
+ * Progressive output to the calling client (SSE). Every fn stream is
+ * RESUMABLE: the host buffers each chunk under a server-assigned
+ * stream id (the `X-Pylon-Stream-Id` response header) with a
+ * monotonically increasing sequence, so a client that loses its
+ * connection reconnects to `GET /api/fn-streams/<id>` from its last
+ * cursor and misses nothing — including the terminal result after the
+ * handler already returned. The handler never blocks on (or notices)
+ * client disconnects; it just keeps writing.
+ */
 export interface Stream {
   /** Write a text chunk to the client (SSE). */
   write(data: string): void;
 
-  /** Write a typed SSE event. */
+  /** Write a typed SSE event (`event: <name>` framing on the wire). */
   writeEvent(event: string, data: string): void;
 }
 
@@ -529,11 +539,16 @@ export type LlmStreamEvent =
  * `useRoom(roomId, userId)`, and the same delivery path a member's
  * `broadcast()` uses.
  *
- * This is the surface for streaming agent output that must survive a
- * closed tab or reach a second device: write tokens to the room, and
- * every watcher gets them, not just the caller holding the HTTP
- * response. `ctx.stream.write` reaches only the one client that made
- * the call.
+ * This is the surface for fanning agent output out to a second device
+ * or a second tab that is CONNECTED RIGHT NOW: write tokens to the
+ * room and every current watcher gets them, not just the caller
+ * holding the HTTP response. Delivery is live-only — a subscriber that
+ * reconnects does NOT replay messages sent during its gap. For output
+ * that must survive a closed tab or a dropped connection, rely on the
+ * fn stream itself: every `ctx.stream` stream is buffered server-side
+ * and resumable by stream id (`streamFn`'s `onStreamId` +
+ * `resumeStream` in the clients), including the final result after the
+ * handler finished.
  *
  * Not available in queries — a reactive handler re-runs on every dep
  * change, which would re-broadcast each time.

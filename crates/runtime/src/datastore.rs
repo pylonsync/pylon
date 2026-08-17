@@ -4245,7 +4245,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         fn_name: &str,
         args: serde_json::Value,
         auth: FnAuth,
-        on_stream: Option<Box<dyn FnMut(&str) + Send>>,
+        on_stream: Option<pylon_functions::runner::StreamCallback>,
         request: Option<pylon_functions::protocol::RequestInfo>,
     ) -> Result<(serde_json::Value, FnTrace), FnCallError> {
         let def = self.registry.get(fn_name).ok_or_else(|| FnCallError {

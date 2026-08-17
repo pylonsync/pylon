@@ -9,6 +9,10 @@ public final class MockTransport: PylonHTTPTransport, @unchecked Sendable {
 
     private let lock = NSLock()
     private var handler: Handler
+    /// Response headers applied to every canned response. Defaults to
+    /// plain JSON; SSE tests override with text/event-stream (+
+    /// X-Pylon-Stream-Id).
+    private var headers: [String: String] = ["Content-Type": "application/json"]
     public private(set) var requests: [URLRequest] = []
     public private(set) var bodies: [Data] = []
 
@@ -21,18 +25,24 @@ public final class MockTransport: PylonHTTPTransport, @unchecked Sendable {
         self.handler = handler
     }
 
+    public func setResponseHeaders(_ headers: [String: String]) {
+        lock.lock(); defer { lock.unlock() }
+        self.headers = headers
+    }
+
     public func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         lock.lock()
         requests.append(request)
         bodies.append(request.httpBody ?? Data())
         let h = handler
+        let hdrs = headers
         lock.unlock()
         let (status, data) = try await h(request)
         let resp = HTTPURLResponse(
             url: request.url ?? URL(string: "http://invalid")!,
             statusCode: status,
             httpVersion: "HTTP/1.1",
-            headerFields: ["Content-Type": "application/json"]
+            headerFields: hdrs
         )!
         return (data, resp)
     }

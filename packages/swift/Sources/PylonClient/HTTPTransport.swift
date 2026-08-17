@@ -16,6 +16,13 @@ public protocol PylonHTTPTransport: Sendable {
     /// the Linux path. The `URLSessionTransport` impl below overrides this
     /// on iOS 15+/macOS 12+ to deliver chunks as they arrive.
     func stream(_ request: URLRequest) -> AsyncThrowingStream<Data, Error>
+
+    /// Stream variant that also surfaces the response head, so callers can
+    /// read headers (`X-Pylon-Stream-Id`, `Content-Type`) before consuming
+    /// the body. Default implementation buffers like `stream`.
+    func streamWithResponse(
+        _ request: URLRequest
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>)
 }
 
 public extension PylonHTTPTransport {
@@ -35,6 +42,17 @@ public extension PylonHTTPTransport {
                 }
             }
         }
+    }
+
+    func streamWithResponse(
+        _ request: URLRequest
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+        let (data, http) = try await self.send(request)
+        let body = AsyncThrowingStream<Data, Error> { continuation in
+            if !data.isEmpty { continuation.yield(data) }
+            continuation.finish()
+        }
+        return (http, body)
     }
 }
 
@@ -110,6 +128,50 @@ public final class URLSessionTransport: PylonHTTPTransport, @unchecked Sendable 
                 }
             }
         }
+    }
+
+    public func streamWithResponse(
+        _ request: URLRequest
+    ) async throws -> (HTTPURLResponse, AsyncThrowingStream<Data, Error>) {
+        #if !canImport(FoundationNetworking)
+        if #available(iOS 15.0, macOS 12.0, tvOS 15.0, watchOS 8.0, *) {
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                throw PylonError.transport(URLError(.badServerResponse))
+            }
+            let body = AsyncThrowingStream<Data, Error> { continuation in
+                Task {
+                    do {
+                        // Flush on every newline (SSE lines are short) or
+                        // at 4KB, whichever first. A pure size threshold
+                        // withheld live tokens until ~4KB accumulated —
+                        // a heartbeat-only tail would never flush at all.
+                        var buffer = Data()
+                        buffer.reserveCapacity(4096)
+                        for try await b in bytes {
+                            buffer.append(b)
+                            if b == 0x0A || buffer.count >= 4096 {
+                                continuation.yield(buffer)
+                                buffer.removeAll(keepingCapacity: true)
+                            }
+                        }
+                        if !buffer.isEmpty { continuation.yield(buffer) }
+                        continuation.finish()
+                    } catch {
+                        continuation.finish(throwing: error)
+                    }
+                }
+            }
+            return (http, body)
+        }
+        #endif
+        // Linux / older Apple OSes: buffered fallback.
+        let (data, http) = try await self.send(request)
+        let body = AsyncThrowingStream<Data, Error> { continuation in
+            if !data.isEmpty { continuation.yield(data) }
+            continuation.finish()
+        }
+        return (http, body)
     }
 
     private func dataTask(for request: URLRequest) async throws -> (Data, URLResponse) {

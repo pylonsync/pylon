@@ -290,6 +290,10 @@ return value), exactly like a JSON-only call — `db.streamFn` handles both. Thi
 makes serving MCP from an action work: MCP clients advertise SSE support on every POST
 but expect a plain JSON body when the server doesn't stream.
 
+Every fn stream is **resumable**: the server buffers frames under a stream id, so a
+dropped connection reconnects from its cursor and misses nothing — including the final
+result after the handler finished. See [Resumable Streams](/concepts/streaming).
+
 ### Stream events
 
 `onEvent` receives one of four shapes:

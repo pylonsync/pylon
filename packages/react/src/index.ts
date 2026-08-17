@@ -517,8 +517,112 @@ export async function callFn<T = unknown>(
   );
 }
 
+/** Options for {@link streamFn}. */
+export interface StreamFnOptions {
+  token?: string;
+  /**
+   * Auto-resume on abrupt network failure (default true). The server
+   * buffers every fn stream server-side; when the connection drops
+   * mid-stream, the generator silently reconnects to
+   * `GET /api/fn-streams/<id>` from its last seen cursor and keeps
+   * yielding — no chunk is duplicated or lost, and the final result
+   * still arrives even if the reconnect lands after the handler
+   * finished. Set false to surface disconnects as errors instead.
+   */
+  resume?: boolean;
+  /** Reconnect attempts per silent gap (default 3). The budget resets
+   *  whenever a resumed connection makes progress. */
+  maxResumes?: number;
+  /**
+   * Called with the server-assigned stream id as soon as the response
+   * upgrades to SSE. Persist it (e.g. in your row for the agent run)
+   * to resume from a different tab or a full page reload via
+   * {@link resumeStream}.
+   */
+  onStreamId?: (streamId: string) => void;
+}
+
+interface SseCursor {
+  lastSeq: number;
+  /** Set once the terminal result/error frame was seen. */
+  terminal: boolean;
+  finalResult: unknown;
+}
+
+/** Parse one SSE response body, yielding data frames and tracking the
+ *  cursor. Multi-line payloads rejoin `data:` lines with '\n' per the
+ *  SSE spec (the server splits them the same way). */
+async function* consumeSseBody(
+  res: Response,
+  cursor: SseCursor,
+): AsyncGenerator<string, void, unknown> {
+  if (!res.body) throw new Error(`Stream failed: HTTP ${res.status}`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const events = buffer.split("\n\n");
+    buffer = events.pop() || "";
+
+    for (const evt of events) {
+      if (!evt.trim() || evt.startsWith(":")) continue; // heartbeat
+      let eventType = "message";
+      const dataLines: string[] = [];
+      for (const line of evt.split("\n")) {
+        if (line.startsWith("event: ")) eventType = line.slice(7);
+        else if (line.startsWith("data: ")) dataLines.push(line.slice(6));
+        else if (line.startsWith("data:")) dataLines.push(line.slice(5));
+        else if (line.startsWith("id: ")) {
+          const seq = Number.parseInt(line.slice(4), 10);
+          if (Number.isFinite(seq)) cursor.lastSeq = seq;
+        }
+      }
+      // Frames without any data line (the `retry:` prelude) carry
+      // nothing to deliver.
+      if (dataLines.length === 0) continue;
+      const data = dataLines.join("\n");
+      if (eventType === "result") {
+        cursor.terminal = true;
+        try {
+          cursor.finalResult = JSON.parse(data);
+        } catch {
+          cursor.finalResult = data;
+        }
+      } else if (eventType === "error") {
+        cursor.terminal = true;
+        let message = "Function error";
+        try {
+          const err = JSON.parse(data) as { message?: string };
+          if (err.message) message = err.message;
+        } catch {
+          // non-JSON error payload — keep the generic message
+        }
+        throw new Error(message);
+      } else {
+        yield data;
+      }
+    }
+  }
+  } finally {
+    // Runs on normal completion AND when the consumer breaks out of
+    // its for-await (generator return). Without the cancel, the fetch
+    // body stays locked and the connection pins a browser socket (and
+    // a server stream slot) until page unload.
+    reader.cancel().catch(() => {});
+  }
+}
+
 /**
  * Stream a server-side function's output as Server-Sent Events.
+ *
+ * Streams are resumable: the server buffers every frame under a stream
+ * id (see `X-Pylon-Stream-Id`), so a dropped connection reconnects and
+ * catches up transparently — including receiving the final result
+ * after the handler already finished. Disable with `resume: false`.
  *
  * @example
  * ```ts
@@ -530,23 +634,20 @@ export async function callFn<T = unknown>(
 export async function* streamFn(
   name: string,
   args: Record<string, unknown> = {},
-  options: { token?: string } = {}
+  options: StreamFnOptions = {}
 ): AsyncGenerator<string, unknown, unknown> {
+  const transport = {
+    baseUrl: getBaseUrl(),
+    getToken: () => options.token ?? currentAuthToken() ?? undefined,
+  };
   // Streaming response — use pylonFetchRaw so we can read .body
   // ourselves. URL + auth + credentials are centralized in the
   // transport.
-  const res = await pylonFetchRaw(
-    {
-      baseUrl: getBaseUrl(),
-      getToken: () => options.token ?? currentAuthToken() ?? undefined,
-    },
-    `/api/fn/${name}`,
-    {
-      method: "POST",
-      json: args,
-      accept: "text/event-stream",
-    },
-  );
+  const res = await pylonFetchRaw(transport, `/api/fn/${name}`, {
+    method: "POST",
+    json: args,
+    accept: "text/event-stream",
+  });
   // The server only upgrades to SSE once the handler actually calls
   // ctx.stream. A function that completes without streaming answers
   // with plain JSON (Content-Type: application/json) — the raw return
@@ -571,50 +672,123 @@ export async function* streamFn(
       return text;
     }
   }
-  if (!res.ok || !res.body) {
+  if (!res.ok) {
     throw new Error(`Stream failed: HTTP ${res.status}`);
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let finalResult: unknown = undefined;
+  const streamId = res.headers.get("x-pylon-stream-id");
+  if (streamId && options.onStreamId) options.onStreamId(streamId);
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() || "";
+  const cursor: SseCursor = { lastSeq: 0, terminal: false, finalResult: undefined };
+  const resume = options.resume !== false && Boolean(streamId);
+  let attemptsLeft = options.maxResumes ?? 3;
 
-    for (const evt of events) {
-      if (!evt.trim()) continue;
-      let eventType = "message";
-      let data = "";
-      for (const line of evt.split("\n")) {
-        if (line.startsWith("event: ")) eventType = line.slice(7);
-        else if (line.startsWith("data: ")) data += line.slice(6);
+  // First pass over the live connection, then (on silent disconnect)
+  // resume passes over /api/fn-streams until the terminal frame.
+  let body: AsyncGenerator<string, void, unknown> = consumeSseBody(res, cursor);
+  for (;;) {
+    let progressed = false;
+    try {
+      for await (const chunk of body) {
+        progressed = true;
+        yield chunk;
       }
-      if (eventType === "result") {
-        try {
-          finalResult = JSON.parse(data);
-        } catch {
-          finalResult = data;
-        }
-      } else if (eventType === "error") {
-        try {
-          const err = JSON.parse(data) as { message?: string };
-          throw new Error(err.message || "Function error");
-        } catch (e) {
-          throw e instanceof Error ? e : new Error(String(e));
-        }
-      } else {
-        yield data;
+    } catch (e) {
+      if (cursor.terminal) throw e; // server-sent error frame — real
+      if (!resume || attemptsLeft <= 0) throw e; // network error, no budget
+    }
+    if (cursor.terminal) return cursor.finalResult;
+    // Connection ended without a terminal frame — silent disconnect.
+    if (!resume || attemptsLeft <= 0) {
+      throw new Error("Stream disconnected before completing");
+    }
+    if (progressed) attemptsLeft = options.maxResumes ?? 3;
+    attemptsLeft -= 1;
+    const resumed = await pylonFetchRaw(
+      transport,
+      `/api/fn-streams/${streamId}?since=${cursor.lastSeq}`,
+      { method: "GET", accept: "text/event-stream" },
+    );
+    if (resumed.status === 503 && attemptsLeft > 0) {
+      // STREAM_OVERLOADED is transient by definition (Retry-After: 1) —
+      // failing here would kill exactly the stream resume exists to save.
+      await resumed.text().catch(() => {});
+      await new Promise((r) => setTimeout(r, 1000));
+      continue;
+    }
+    if (!resumed.ok) {
+      const text = await resumed.text().catch(() => "");
+      throw new Error(
+        `Stream resume failed: HTTP ${resumed.status}${text ? ` — ${text}` : ""}`,
+      );
+    }
+    body = consumeSseBody(resumed, cursor);
+  }
+}
+
+/**
+ * Attach to a buffered fn stream by id — from another tab, a page
+ * reload, or any time after the original `streamFn` call went away.
+ * Replays from `since` (default 0 = everything, including the final
+ * result if the handler already finished), then live-tails.
+ *
+ * Get the id from `streamFn`'s `onStreamId` callback and persist it
+ * wherever the run's state lives. Completed streams stay resumable for
+ * an hour (PYLON_STREAM_RETAIN_SECS).
+ */
+export async function* resumeStream(
+  streamId: string,
+  options: { token?: string; since?: number } = {}
+): AsyncGenerator<string, unknown, unknown> {
+  const transport = {
+    baseUrl: getBaseUrl(),
+    getToken: () => options.token ?? currentAuthToken() ?? undefined,
+  };
+  const cursor: SseCursor = {
+    lastSeq: options.since ?? 0,
+    terminal: false,
+    finalResult: undefined,
+  };
+  let attemptsLeft = 3;
+  for (;;) {
+    const res = await pylonFetchRaw(
+      transport,
+      `/api/fn-streams/${streamId}?since=${cursor.lastSeq}`,
+      { method: "GET", accept: "text/event-stream" },
+    );
+    if (res.status === 503 && attemptsLeft > 0) {
+      attemptsLeft -= 1;
+      await res.text().catch(() => {});
+      await new Promise((r) => setTimeout(r, 1000));
+      continue;
+    }
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      let message = `Stream resume failed: HTTP ${res.status}`;
+      try {
+        const err = JSON.parse(text) as { error?: { message?: string } };
+        if (err.error?.message) message = err.error.message;
+      } catch {
+        // keep the HTTP message
       }
+      throw new Error(message);
+    }
+    let progressed = false;
+    try {
+      for await (const chunk of consumeSseBody(res, cursor)) {
+        progressed = true;
+        yield chunk;
+      }
+    } catch (e) {
+      if (cursor.terminal || attemptsLeft <= 0) throw e;
+    }
+    if (cursor.terminal) return cursor.finalResult;
+    if (progressed) attemptsLeft = 3;
+    attemptsLeft -= 1;
+    if (attemptsLeft < 0) {
+      throw new Error("Stream disconnected before completing");
     }
   }
-
-  return finalResult;
 }
 
 /**

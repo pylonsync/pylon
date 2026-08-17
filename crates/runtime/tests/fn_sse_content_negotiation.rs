@@ -74,7 +74,7 @@ impl pylon_router::FnOps for StubFnOps {
         fn_name: &str,
         _args: serde_json::Value,
         _auth: pylon_functions::protocol::AuthInfo,
-        mut on_stream: Option<Box<dyn FnMut(&str) + Send>>,
+        mut on_stream: Option<pylon_functions::runner::StreamCallback>,
         _request: Option<pylon_functions::protocol::RequestInfo>,
     ) -> Result<
         (serde_json::Value, pylon_functions::trace::FnTrace),
@@ -87,8 +87,14 @@ impl pylon_router::FnOps for StubFnOps {
             )),
             "streamingFn" => {
                 if let Some(cb) = on_stream.as_mut() {
-                    cb("chunk-one");
-                    cb("chunk-two");
+                    cb(pylon_functions::runner::StreamChunk {
+                        data: "chunk-one",
+                        event: None,
+                    });
+                    cb(pylon_functions::runner::StreamChunk {
+                        data: "chunk-two",
+                        event: None,
+                    });
                 }
                 Ok((serde_json::json!({"done": true}), stub_trace(fn_name)))
             }

@@ -213,21 +213,196 @@ public actor PylonClient {
         try await request(.post, "/api/fn/\(percentEncode(name))", body: args)
     }
 
-    /// Invoke a function and stream the body as it arrives. Useful for AI
-    /// chat / live data. Each yielded chunk is one line (delimited by
-    /// `\n`) — works for NDJSON and SSE-flavored function outputs. For
-    /// raw byte streaming, use `streamFnBytes(_:args:)`.
-    public func streamFn<I: Encodable>(_ name: String, args: I) -> AsyncThrowingStream<String, Error> {
+    /// Invoke a function and stream its `ctx.stream` output. Yields the
+    /// DATA of each SSE frame (multi-line payloads rejoined with `\n`),
+    /// finishes when the server sends the terminal `result` frame, and
+    /// throws on the terminal `error` frame — parity with the TS
+    /// `streamFn`. For raw byte streaming, use `streamFnBytes(_:args:)`.
+    ///
+    /// Streams are resumable: the server buffers every frame under a
+    /// stream id, so a dropped connection reconnects to
+    /// `GET /api/fn-streams/<id>` from the last seen cursor and keeps
+    /// yielding — including the final result after the handler already
+    /// finished. `onStreamId` surfaces the id for cross-launch resumes
+    /// via `resumeStream(_:since:)`; `onResult` delivers the terminal
+    /// result's raw JSON.
+    public func streamFn<I: Encodable>(
+        _ name: String,
+        args: I,
+        resume: Bool = true,
+        onStreamId: (@Sendable (String) -> Void)? = nil,
+        onResult: (@Sendable (String) -> Void)? = nil
+    ) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
-            Task {
+            let task = Task {
                 do {
-                    let req = try await self.makeRequest(.post, "/api/fn/\(self.percentEncode(name))", body: args, accept: "text/event-stream, application/x-ndjson, application/octet-stream")
-                    try await self.streamLines(req: req, into: continuation)
+                    let req = try await self.makeRequest(.post, "/api/fn/\(self.percentEncode(name))", body: args, accept: "text/event-stream")
+                    let (http, body) = try await self.transport.streamWithResponse(req)
+                    if !(200..<300).contains(http.statusCode) {
+                        var data = Data()
+                        for try await chunk in body { data.append(chunk) }
+                        continuation.finish(throwing: self.makeHttpError(status: http.statusCode, data: data))
+                        return
+                    }
+                    let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+                    if !contentType.contains("text/event-stream") {
+                        // Non-streaming handler — plain JSON answer.
+                        // Deliver it via onResult and finish.
+                        var data = Data()
+                        for try await chunk in body { data.append(chunk) }
+                        if let text = String(data: data, encoding: .utf8) {
+                            onResult?(text)
+                        }
+                        continuation.finish()
+                        return
+                    }
+                    let streamId = http.value(forHTTPHeaderField: "X-Pylon-Stream-Id")
+                    if let id = streamId { onStreamId?(id) }
+                    let parser = SseParser()
+                    var lastSeq: UInt64 = 0
+                    var attemptsLeft = 3
+                    var currentBody = body
+                    while true {
+                        var progressed = false
+                        var transportError: Error? = nil
+                        do {
+                            for try await chunk in currentBody {
+                                for frame in parser.feed(chunk) {
+                                    if let seq = frame.seq { lastSeq = seq }
+                                    switch frame.event {
+                                    case "result":
+                                        onResult?(frame.data)
+                                        continuation.finish()
+                                        return
+                                    case "error":
+                                        continuation.finish(throwing: Self.errorFromFrame(frame.data))
+                                        return
+                                    default:
+                                        progressed = true
+                                        continuation.yield(frame.data)
+                                    }
+                                }
+                            }
+                        } catch {
+                            transportError = error
+                        }
+                        // Ended without a terminal frame — disconnect.
+                        guard resume, let id = streamId, attemptsLeft > 0 else {
+                            continuation.finish(throwing: transportError ?? PylonError.transport(URLError(.networkConnectionLost)))
+                            return
+                        }
+                        if progressed { attemptsLeft = 3 }
+                        attemptsLeft -= 1
+                        let resumeReq = try await self.makeRequest(.get, "/api/fn-streams/\(id)?since=\(lastSeq)", body: Optional<Int>.none, accept: "text/event-stream")
+                        let (resumedHttp, resumedBody) = try await self.transport.streamWithResponse(resumeReq)
+                        if resumedHttp.statusCode == 503, attemptsLeft > 0 {
+                            // STREAM_OVERLOADED is transient (Retry-After: 1).
+                            for try await _ in resumedBody {}
+                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                            continue
+                        }
+                        if !(200..<300).contains(resumedHttp.statusCode) {
+                            var data = Data()
+                            for try await chunk in resumedBody { data.append(chunk) }
+                            continuation.finish(throwing: self.makeHttpError(status: resumedHttp.statusCode, data: data))
+                            return
+                        }
+                        // Fresh connection — the dead one may have left a
+                        // partial frame in the parser; the replay re-sends
+                        // that frame whole.
+                        parser.reset()
+                        currentBody = resumedBody
+                    }
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
+            // A consumer that stops iterating must not leave the
+            // producer reconnecting until the stream ends — same
+            // lifecycle class as the weak-self Task fixes elsewhere.
+            continuation.onTermination = { _ in task.cancel() }
         }
+    }
+
+    /// Attach to a buffered fn stream by id — after an app relaunch or
+    /// from a different device session. Replays from `since` (0 = the
+    /// whole stream, including the final result when the handler already
+    /// finished), then live-tails. Same frame semantics as `streamFn`.
+    public func resumeStream(
+        _ streamId: String,
+        since: UInt64 = 0,
+        onResult: (@Sendable (String) -> Void)? = nil
+    ) -> AsyncThrowingStream<String, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task {
+                do {
+                    let parser = SseParser()
+                    var lastSeq = since
+                    var attemptsLeft = 3
+                    while true {
+                        let req = try await self.makeRequest(.get, "/api/fn-streams/\(streamId)?since=\(lastSeq)", body: Optional<Int>.none, accept: "text/event-stream")
+                        let (http, body) = try await self.transport.streamWithResponse(req)
+                        if http.statusCode == 503, attemptsLeft > 0 {
+                            attemptsLeft -= 1
+                            for try await _ in body {}
+                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                            continue
+                        }
+                        if !(200..<300).contains(http.statusCode) {
+                            var data = Data()
+                            for try await chunk in body { data.append(chunk) }
+                            continuation.finish(throwing: self.makeHttpError(status: http.statusCode, data: data))
+                            return
+                        }
+                        // Drop any partial frame from the previous
+                        // connection; the replay re-sends it whole.
+                        parser.reset()
+                        var progressed = false
+                        var transportError: Error? = nil
+                        do {
+                            for try await chunk in body {
+                                for frame in parser.feed(chunk) {
+                                    if let seq = frame.seq { lastSeq = seq }
+                                    switch frame.event {
+                                    case "result":
+                                        onResult?(frame.data)
+                                        continuation.finish()
+                                        return
+                                    case "error":
+                                        continuation.finish(throwing: Self.errorFromFrame(frame.data))
+                                        return
+                                    default:
+                                        progressed = true
+                                        continuation.yield(frame.data)
+                                    }
+                                }
+                            }
+                        } catch {
+                            transportError = error
+                        }
+                        if progressed { attemptsLeft = 3 }
+                        attemptsLeft -= 1
+                        if attemptsLeft < 0 {
+                            continuation.finish(throwing: transportError ?? PylonError.transport(URLError(.networkConnectionLost)))
+                            return
+                        }
+                    }
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    private static func errorFromFrame(_ data: String) -> PylonError {
+        if let parsed = try? JSONDecoder().decode([String: JSONValue].self, from: Data(data.utf8)),
+           case let .string(message)? = parsed["message"] {
+            let code: String?
+            if case let .string(c)? = parsed["code"] { code = c } else { code = nil }
+            return PylonError.http(status: 500, code: code, message: message)
+        }
+        return PylonError.http(status: 500, code: nil, message: data)
     }
 
     /// Lower-level streaming helper: yields each Data chunk as it arrives
@@ -243,23 +418,6 @@ public actor PylonClient {
                 }
             }
         }
-    }
-
-    private func streamLines(req: URLRequest, into continuation: AsyncThrowingStream<String, Error>.Continuation) async throws {
-        var pending = ""
-        for try await chunk in transport.stream(req) {
-            guard let text = String(data: chunk, encoding: .utf8) else { continue }
-            pending += text
-            while let nl = pending.firstIndex(of: "\n") {
-                let line = String(pending[pending.startIndex..<nl])
-                pending.removeSubrange(pending.startIndex...nl)
-                continuation.yield(line)
-            }
-        }
-        if !pending.isEmpty {
-            continuation.yield(pending)
-        }
-        continuation.finish()
     }
 
     private func streamBytes(req: URLRequest, into continuation: AsyncThrowingStream<Data, Error>.Continuation) async throws {
@@ -455,4 +613,71 @@ public final class SessionAutoRefreshHandle: @unchecked Sendable {
 
     public func cancel() { task.cancel() }
     deinit { task.cancel() }
+}
+
+// MARK: - SSE frame parser
+
+/// One parsed Server-Sent-Events frame from a Pylon fn stream.
+struct SseFrame {
+    /// Event type; "message" for plain `data:` frames.
+    let event: String
+    /// Frame payload — consecutive `data:` lines rejoined with `\n`.
+    let data: String
+    /// The frame's `id:` (Pylon's per-stream sequence number), if any.
+    let seq: UInt64?
+}
+
+/// Incremental SSE parser: feed raw body chunks, get complete frames.
+/// Comment frames (heartbeats, `: hb`) are dropped. Not thread-safe —
+/// use from a single consumer task.
+final class SseParser: @unchecked Sendable {
+    private var buffer = ""
+
+    /// Drop any partial frame. Call between connections — a resume
+    /// replays the interrupted frame whole, so carrying the dead
+    /// connection's tail would corrupt and duplicate it.
+    func reset() {
+        buffer = ""
+    }
+
+    func feed(_ chunk: Data) -> [SseFrame] {
+        guard let text = String(data: chunk, encoding: .utf8) else { return [] }
+        buffer += text
+        var frames: [SseFrame] = []
+        while let range = buffer.range(of: "\n\n") {
+            let raw = String(buffer[buffer.startIndex..<range.lowerBound])
+            buffer.removeSubrange(buffer.startIndex..<range.upperBound)
+            if let frame = Self.parse(raw) { frames.append(frame) }
+        }
+        return frames
+    }
+
+    private static func parse(_ raw: String) -> SseFrame? {
+        var event = "message"
+        var dataLines: [String] = []
+        var seq: UInt64? = nil
+        var sawField = false
+        for line in raw.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.hasPrefix(":") { continue } // comment / heartbeat
+            if line.hasPrefix("event: ") {
+                event = String(line.dropFirst(7))
+                sawField = true
+            } else if line.hasPrefix("data: ") {
+                dataLines.append(String(line.dropFirst(6)))
+                sawField = true
+            } else if line.hasPrefix("data:") {
+                dataLines.append(String(line.dropFirst(5)))
+                sawField = true
+            } else if line.hasPrefix("id: ") {
+                seq = UInt64(line.dropFirst(4).trimmingCharacters(in: .whitespaces))
+                sawField = true
+            } else if line.hasPrefix("retry:") {
+                sawField = true // consumed; reconnect pacing is ours
+            }
+        }
+        // Frames without any data line (the `retry:` prelude, id-only
+        // frames) carry nothing to deliver.
+        guard sawField, !dataLines.isEmpty else { return nil }
+        return SseFrame(event: event, data: dataLines.joined(separator: "\n"), seq: seq)
+    }
 }

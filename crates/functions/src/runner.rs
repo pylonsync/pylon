@@ -70,9 +70,20 @@ fn current_auth_snapshot(auth: &AuthInfo, is_admin: bool) -> AuthInfo {
 // Stream callback — receives SSE chunks during execution
 // ---------------------------------------------------------------------------
 
+/// One `ctx.stream` chunk as the handler emitted it. `event` carries
+/// the SSE event type from `ctx.stream.writeEvent(event, data)`; plain
+/// `ctx.stream.write(data)` leaves it `None`.
+#[derive(Debug, Clone, Copy)]
+pub struct StreamChunk<'a> {
+    pub data: &'a str,
+    pub event: Option<&'a str>,
+}
+
 /// Callback invoked for each stream chunk during function execution.
-/// The server layer converts these into SSE events on the HTTP response.
-pub type StreamCallback = Box<dyn FnMut(&str) + Send>;
+/// The server layer converts these into SSE events on the HTTP response
+/// (framing `event:` when present — pre-widening, `writeEvent`'s event
+/// type was silently dropped here).
+pub type StreamCallback = Box<dyn FnMut(StreamChunk<'_>) + Send>;
 
 /// Byte-flavored stream callback for SSR. Receives base64-decoded
 /// chunks of the rendered response body. Kept separate from
@@ -1548,7 +1559,10 @@ impl FnRunner {
                 TsMessage::Stream(chunk) if chunk.call_id == call_id => {
                     trace.record_stream_chunk(chunk.data.len());
                     if let Some(ref mut cb) = on_stream {
-                        cb(&chunk.data);
+                        cb(StreamChunk {
+                            data: &chunk.data,
+                            event: chunk.event.as_deref(),
+                        });
                     }
                 }
 

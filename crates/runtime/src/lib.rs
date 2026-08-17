@@ -44,6 +44,7 @@ pub mod session_backend;
 pub mod shard_ws;
 pub mod sse;
 pub mod ssr_cache;
+pub mod stream_hub;
 pub mod tinybird_logger;
 pub mod tls;
 pub mod trusted_device_backend;

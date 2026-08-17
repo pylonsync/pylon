@@ -61,7 +61,7 @@ impl pylon_router::FnOps for StubFnOps {
         _fn_name: &str,
         _args: serde_json::Value,
         _auth: pylon_functions::protocol::AuthInfo,
-        _on_stream: Option<Box<dyn FnMut(&str) + Send>>,
+        _on_stream: Option<pylon_functions::runner::StreamCallback>,
         _request: Option<pylon_functions::protocol::RequestInfo>,
     ) -> Result<
         (serde_json::Value, pylon_functions::trace::FnTrace),
