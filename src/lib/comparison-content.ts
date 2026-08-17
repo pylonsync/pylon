@@ -85,7 +85,7 @@ export const COMPARISONS: Comparison[] = [
 			},
 			{
 				title: "pgvector at million-scale",
-				body: "Supabase provides first-class vector search through pgvector. With Pylon, you would run pgvector yourself or use a dedicated vector database.",
+				body: "pgvector's approximate indexes (HNSW, IVFFlat) handle million-row vector tables. Pylon ships built-in vector search (field.vector + ctx.db.vectorSearch) as exact k-NN — perfect recall and zero index maintenance to roughly 100k rows per entity; past that, pgvector's ANN wins.",
 			},
 			{
 				title: "Larger ecosystem",
@@ -104,6 +104,10 @@ export const COMPARISONS: Comparison[] = [
 			{
 				title: "Native faceted search",
 				body: "Add search: to an entity and get full-text hits and live facet counts in one call. Supabase has tsvector for full-text search; facets require custom queries.",
+			},
+			{
+				title: "Vector search with zero setup",
+				body: "embedding: field.vector(1536) is one schema line; ctx.llm.embed and ctx.db.vectorSearch are built in. No extension to enable, no index DDL, no separate vector database until you genuinely outgrow exact search.",
 			},
 			{
 				title: "Functions share a transaction with writes",
@@ -172,8 +176,8 @@ export const COMPARISONS: Comparison[] = [
 				body: "Well-funded company, more docs, more examples, more StackOverflow answers, more job postings.",
 			},
 			{
-				title: "First-class vector search",
-				body: "Convex Vector Search is featureful and built in. Pylon requires a separate vector-search integration.",
+				title: "Vector search at million-scale",
+				body: "Convex's vector indexes are approximate and built for large tables. Pylon's built-in vector search (field.vector + ctx.llm.embed + ctx.db.vectorSearch) is exact k-NN — perfect recall to roughly 100k rows per entity; past that, Convex's ANN wins.",
 			},
 		],
 		pylonBetter: [
@@ -205,8 +209,9 @@ export const COMPARISONS: Comparison[] = [
 			{ competitor: 'ctx.db.insert("tasks", {...})', pylon: 'ctx.db.insert("Task", {...})' },
 			{ competitor: "Convex auth", pylon: "Magic-link / OAuth / OIDC" },
 			{ competitor: "Convex file storage", pylon: "presigned uploads (S3 / R2 / local)" },
-			{ competitor: "Convex scheduled functions", pylon: "ctx.scheduler.runAfter / runAt" },
+			{ competitor: "Convex scheduled functions", pylon: "ctx.scheduler + durable ctx.workflows" },
 			{ competitor: "Convex search index", pylon: "Per-entity search config" },
+			{ competitor: "Convex vector search", pylon: "field.vector + ctx.db.vectorSearch" },
 		],
 		honestWeakness:
 			"Convex has more developer mindshare today and more polish in reactive query batching, type-inference depth, and IDE integration. If you want the most polished pure-TS reactive backend and do not need single-process self-hosting, faceted search, or native SSR, Convex is a strong choice.",
@@ -355,7 +360,7 @@ export const COMPARISONS: Comparison[] = [
 			},
 			{
 				title: "Faceted search in the box",
-				body: "Add search: to an entity for full-text hits + live facet counts, in the same binary. Deferred and scheduled work runs through ctx.scheduler.runAfter / runAt.",
+				body: "Add search: to an entity for full-text hits + live facet counts, and field.vector for built-in vector search — same binary. Deferred work runs through ctx.scheduler; multi-step durable workflows through ctx.workflows.",
 			},
 			{
 				title: "Self-host as one binary",
