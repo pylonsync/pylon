@@ -2812,11 +2812,39 @@ impl<'a> DataStore for TxStore<'a> {
         entity: &str,
         query: &serde_json::Value,
     ) -> Result<serde_json::Value, DataError> {
-        // Search reads against the FTS shadow are read-only; route
-        // through the runtime's main `search` impl which already
-        // validates the entity + branches on backend. The held write
-        // connection is fine for reads (SQLite serializes anyway).
-        <Runtime as DataStore>::search(self.runtime, entity, query)
+        // MUST run on the transaction's own connection: the mutation
+        // handler executes while the Rust side holds the write-conn
+        // mutex, so forwarding to `Runtime::search` (which re-locks it)
+        // deadlocks the runner until the wedge-probe kills it. TxStore
+        // is SQLite-only, so the SQLite planner path is unconditional.
+        let ent = self
+            .runtime
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        let cfg = ent.search.as_ref().ok_or_else(|| DataError {
+            code: "SEARCH_NOT_CONFIGURED".into(),
+            message: format!("Entity {entity} has no `search:` config"),
+        })?;
+        let parsed: pylon_storage::search::SearchQuery = serde_json::from_value(query.clone())
+            .map_err(|e| DataError {
+                code: "INVALID_QUERY".into(),
+                message: format!("search query body: {e}"),
+            })?;
+        let result = pylon_storage::search_query::run_search(self.conn, entity, cfg, &parsed)
+            .map_err(|e| DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        serde_json::to_value(&result).map_err(|e| DataError {
+            code: "SEARCH_SERIALIZE_FAILED".into(),
+            message: e.to_string(),
+        })
     }
 
     fn vector_search(
@@ -2824,8 +2852,55 @@ impl<'a> DataStore for TxStore<'a> {
         entity: &str,
         query: &serde_json::Value,
     ) -> Result<serde_json::Value, DataError> {
-        // Read-only, same reasoning as `search` above.
-        <Runtime as DataStore>::vector_search(self.runtime, entity, query)
+        // Same held-connection rule as `search` above — re-locking the
+        // write conn through Runtime::vector_search would deadlock.
+        let t0 = std::time::Instant::now();
+        let ent = self
+            .runtime
+            .manifest()
+            .entities
+            .iter()
+            .find(|e| e.name == entity)
+            .ok_or_else(|| DataError {
+                code: "ENTITY_NOT_FOUND".into(),
+                message: format!("Unknown entity: {entity}"),
+            })?;
+        let prepared = pylon_storage::vector::prepare_query(ent, query).map_err(|e| DataError {
+            code: e.code,
+            message: e.message,
+        })?;
+        let scored = pylon_storage::vector::scan_topk(
+            self.conn,
+            entity,
+            &prepared.field,
+            &prepared.vector,
+            prepared.metric,
+            prepared.limit,
+            &prepared.filter,
+        )
+        .map_err(|e| DataError {
+            code: e.code,
+            message: e.message,
+        })?;
+        let mut hits = Vec::with_capacity(scored.len());
+        for (id, score) in scored {
+            let Some(mut doc) = self
+                .runtime
+                .get_by_id_with_conn(self.conn, entity, &id)
+                .map_err(|e| DataError {
+                    code: e.code,
+                    message: e.message,
+                })?
+            else {
+                continue;
+            };
+            pylon_storage::vector::strip_vector_fields(ent, &mut doc);
+            hits.push(serde_json::json!({ "id": id, "score": score, "doc": doc }));
+        }
+        Ok(serde_json::json!({
+            "hits": hits,
+            "tookMs": t0.elapsed().as_millis() as u64,
+        }))
     }
 }
 

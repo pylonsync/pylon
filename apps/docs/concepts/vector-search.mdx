@@ -30,21 +30,34 @@ Writes validate the shape: the value must be a number array of exactly `dims` fi
 
 ## Write embeddings
 
+`ctx.llm.embed` is available in mutations and actions. A mutation can embed and store in one transactional scope; the provider call does hold the write transaction open for its duration, so for high-write apps prefer the action shape (embed outside the transaction, store via a small mutation):
+
 ```ts
-// functions/indexDoc.ts
+// functions/indexDoc.ts — action: embed (external I/O), store via a mutation
 import { action, v } from "@pylonsync/functions";
 
 export default action({
   args: { docId: v.string() },
   handler: async (ctx, { docId }) => {
-    const doc = await ctx.db.get("Doc", docId);
+    const doc = await ctx.runQuery("getDoc", { docId });
     if (!doc) return { ok: false };
     const [embedding] = await ctx.llm.embed([`${doc.title}\n\n${doc.body}`]);
-    await ctx.db.update("Doc", docId, { embedding });
+    await ctx.runMutation("saveEmbedding", { docId, embedding });
     return { ok: true };
   },
 });
+
+// functions/saveEmbedding.ts — mutation: the transactional write
+import { mutation, v } from "@pylonsync/functions";
+
+export default mutation({
+  args: { docId: v.string(), embedding: v.array(v.number()) },
+  handler: (ctx, { docId, embedding }) =>
+    ctx.db.update("Doc", docId, { embedding }),
+});
 ```
+
+(Actions have no `ctx.db` — reads and writes from an action go through `ctx.runQuery` / `ctx.runMutation`.)
 
 `ctx.llm.embed` resolves its provider independently of chat:
 
@@ -62,14 +75,26 @@ Match `field.vector(dims)` to the model: 1536 for `text-embedding-3-small`, 3072
 
 ## Search
 
+`ctx.db.vectorSearch` lives on `ctx.db` — queries and mutations. The typical flow embeds the search text in an action, then searches from a query:
+
 ```ts
-// functions/searchDocs.ts
+// functions/searchDocs.ts — action: embed the text, delegate the search
 import { action, v } from "@pylonsync/functions";
 
 export default action({
   args: { q: v.string() },
   handler: async (ctx, { q }) => {
     const [vector] = await ctx.llm.embed([q]);
+    return ctx.runQuery("findSimilar", { vector });
+  },
+});
+
+// functions/findSimilar.ts — query: read-only vector search
+import { query, v } from "@pylonsync/functions";
+
+export default query({
+  args: { vector: v.array(v.number()) },
+  handler: async (ctx, { vector }) => {
     const { hits } = await ctx.db.vectorSearch("Doc", {
       field: "embedding",
       vector,
@@ -99,19 +124,16 @@ The scan is **exact k-NN, not an approximate index**: every non-NULL embedding i
 
 Rough guidance at 1536 dims: 10k rows score in a few milliseconds, 100k in the low hundreds. Past that, use the `filter` to shrink the candidate set (tenant, status, collection), or move that entity's retrieval to a dedicated vector store. An ANN index can land behind this same API later without changing your code.
 
-## RAG in one function
+## RAG in one action
 
 ```ts
 export default action({
   args: { question: v.string() },
   handler: async (ctx, { question }) => {
     const [vector] = await ctx.llm.embed([question]);
-    const { hits } = await ctx.db.vectorSearch("Doc", {
-      field: "embedding",
-      vector,
-      limit: 4,
-    });
-    const context = hits.map((h) => h.doc.body).join("\n---\n");
+    // findSimilar is the query from the Search section above.
+    const hits = await ctx.runQuery("findSimilar", { vector });
+    const context = hits.map((h) => h.body).join("\n---\n");
     const res = await ctx.llm.complete({
       messages: [{ role: "user", content: question }],
       system: `Answer from this context only:\n${context}`,

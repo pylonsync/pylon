@@ -281,6 +281,31 @@ fn vector_search_validates_request() {
 }
 
 #[test]
+fn vector_search_inside_mutation_tx_does_not_deadlock() {
+    // Regression: `ctx.db.vectorSearch` (and `ctx.db.search`) inside a
+    // MUTATION runs on TxStore while the Rust side already holds the
+    // write-connection mutex. Forwarding to the Runtime impl re-locks
+    // that mutex and deadlocks the runner. TxStore must run the scan
+    // on its own held connection. This test holds the write conn the
+    // way a mutation does; a regression hangs here instead of passing.
+    let rt = rt();
+    let ids = seed(&rt);
+
+    let conn = rt.lock_conn_pub().unwrap();
+    let store = pylon_runtime::datastore::TxStore::new(&rt, &conn);
+    let result = DataStore::vector_search(
+        &store,
+        "Doc",
+        &json!({"field": "embedding", "vector": [1.0, 0.0, 0.0, 0.0], "limit": 2}),
+    )
+    .unwrap();
+    let hits = result["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    assert_eq!(hits[0]["id"], json!(ids[0]));
+    assert!(hits[0]["doc"].get("embedding").is_none());
+}
+
+#[test]
 fn crdt_peer_merge_never_touches_embeddings() {
     // Regression for two review findings on `crdt: true` entities:
     //   1. A peer's CRDT push re-projects the whole doc into the SQL

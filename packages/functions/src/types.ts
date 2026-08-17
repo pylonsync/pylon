@@ -162,11 +162,15 @@ export interface DbReader {
    * hits come back best-first with the full row on `doc` (vector
    * fields stripped — re-fetch by id if you need the embedding).
    *
+   * Available wherever `ctx.db` is — queries and mutations. Actions
+   * have no `ctx.db`: embed there, then `ctx.runQuery` a query that
+   * searches with the vector.
+   *
    * ```ts
-   * const [embedding] = await ctx.llm.embed(["how do I reset my password?"]);
+   * // In a query: the vector arrives as an arg (an action embedded it).
    * const { hits } = await ctx.db.vectorSearch("Doc", {
    *   field: "embedding",
-   *   vector: embedding,
+   *   vector,
    *   limit: 5,
    *   filter: { status: "published" },   // equality / IN pre-filter
    * });
@@ -477,11 +481,12 @@ export interface Llm {
    * Batch-embed texts via the configured embeddings provider. One
    * embedding per input, in input order. Pair with a
    * `field.vector(dims)` field and `ctx.db.vectorSearch` for
-   * retrieval:
+   * retrieval. From an action (which has no `ctx.db`), store via a
+   * mutation:
    *
    * ```ts
    * const [vec] = await ctx.llm.embed([doc.body]);
-   * await ctx.db.update("Doc", doc.id, { embedding: vec });
+   * await ctx.runMutation("saveEmbedding", { docId: doc.id, embedding: vec });
    * ```
    *
    * The embeddings provider is a separate axis from chat: with
