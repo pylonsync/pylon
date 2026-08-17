@@ -58,8 +58,12 @@ public final class PylonQuery<T: Decodable>: ObservableObject {
         await engine.observeEntity(entity)
         let store = await engine.store
         let cancel = store.subscribe { [weak self] in
+            // Immutable copy of the weak binding — Swift 6 strict
+            // concurrency rejects capturing the mutable weak `self`
+            // var directly in the Task closure.
+            let observed = self
             Task { @MainActor in
-                self?.refresh()
+                observed?.refresh()
             }
         }
         self.unsubscribe = cancel
@@ -159,9 +163,10 @@ public final class PylonSession: ObservableObject {
     private func start() async {
         let store = await engine.store
         let cancel = store.subscribe { [weak self] in
+            let observed = self
             Task { @MainActor in
-                guard let self else { return }
-                self.session = await self.engine.currentResolvedSession()
+                guard let observed else { return }
+                observed.session = await observed.engine.currentResolvedSession()
             }
         }
         self.unsubscribe = cancel
