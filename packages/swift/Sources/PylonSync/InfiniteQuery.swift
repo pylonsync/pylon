@@ -57,7 +57,11 @@ public actor InfiniteQuery<T: Decodable & Sendable> {
         let id = UUID()
         listeners[id] = listener
         return { [weak self] in
-            Task { await self?.removeListener(id: id) }
+            // Immutable copy of the weak binding — Swift 6 strict
+            // concurrency rejects capturing the mutable weak `self`
+            // var directly in the Task closure.
+            let query = self
+            Task { await query?.removeListener(id: id) }
         }
     }
 

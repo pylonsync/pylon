@@ -1017,7 +1017,12 @@ public actor SyncEngine {
         let id = UUID()
         binaryHandlers[id] = handler
         return { [weak self] in
-            Task { await self?.removeBinaryHandler(id: id) }
+            // Copy the weak binding into an immutable local before the
+            // Task closure captures it — Swift 6 strict concurrency
+            // rejects capturing the (mutable) weak `self` var directly
+            // in concurrently-executing code.
+            let engine = self
+            Task { await engine?.removeBinaryHandler(id: id) }
         }
     }
 
