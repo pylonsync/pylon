@@ -49,13 +49,20 @@ final class LocalStoreTests: XCTestCase {
 
     func testListenerFiresOnApply() {
         let store = LocalStore()
-        var calls = 0
-        let unsubscribe = store.subscribe { calls += 1 }
+        // Reference-typed counter: a @Sendable listener can't mutate a
+        // captured local var under Swift 6 strict concurrency. The
+        // store fires listeners synchronously here, so no real race.
+        final class Counter: @unchecked Sendable {
+            private(set) var value = 0
+            func bump() { value += 1 }
+        }
+        let calls = Counter()
+        let unsubscribe = store.subscribe { calls.bump() }
         store.applyChanges([ChangeEvent(seq: 1, entity: "Todo", row_id: "t1", kind: .insert, data: ["title": "x"])])
-        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(calls.value, 1)
         unsubscribe()
         store.applyChanges([ChangeEvent(seq: 2, entity: "Todo", row_id: "t2", kind: .insert, data: ["title": "y"])])
-        XCTAssertEqual(calls, 1, "after unsubscribe, listener stops firing")
+        XCTAssertEqual(calls.value, 1, "after unsubscribe, listener stops firing")
     }
 
     func testClearAllDropsRowsAndTombstones() {
