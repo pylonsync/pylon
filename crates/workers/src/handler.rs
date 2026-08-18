@@ -139,6 +139,18 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
         return stub.fetch_with_request(req).await;
     }
 
+    // Relay-only deployment: with no `PYLON_DB` binding this worker only
+    // serves `/sync/*` (the sync relay). Every other path would fall
+    // through to the full-app D1 handler below and 500 on the missing
+    // binding — so answer non-sync requests cleanly. A human opening the
+    // root sees a plain note; anything else is a 404.
+    if env.d1("PYLON_DB").is_err() {
+        if url == "/" || url == "/health" {
+            return Response::ok("pylon sync relay — live sync uses /sync/*");
+        }
+        return Response::error("not found", 404);
+    }
+
     let body = req.text().await.unwrap_or_default();
 
     let auth_token = req
