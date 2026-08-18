@@ -20,6 +20,16 @@ name = "pylon-sync-relay"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-12-01"
 
+# Custom domain — the Pylon Cloud relay is reached at
+# relay.pylonsync.com (pylonsync.com is a Cloudflare zone on the same
+# account, so wrangler provisions the DNS record + edge cert on deploy).
+# This replaces the account's *.workers.dev address for clients and the
+# machine's PYLON_SYNC_RELAY_URL. Self-hosters on a different account
+# must change or remove this route.
+routes = [
+  { pattern = "relay.pylonsync.com", custom_domain = true },
+]
+
 # The fetch handler + PylonSync DO live behind the `workers` feature.
 # Without `--features workers` there is no `#[event(fetch)]` and the
 # build produces an empty worker. worker-build forwards everything
