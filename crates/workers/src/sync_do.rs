@@ -397,12 +397,15 @@ impl PylonSync {
         // NOT the URL query: a URL would land in CDN/proxy access logs,
         // and the blob is a live credential. Same envelope as the
         // machine WS's `bearer.<token>`, so TS and Swift reuse their
-        // existing bearer path unchanged. Browsers don't require the
-        // server to echo the protocol, so we read it and select none.
-        // Our blob charset (base64url + '.' + hex) needs no percent
-        // decoding, but the clients still encodeURIComponent it — a
-        // no-op here.
-        let token = req
+        // existing bearer path unchanged. Our blob charset (base64url +
+        // '.' + hex) needs no percent decoding, but the clients still
+        // encodeURIComponent it — a no-op here.
+        //
+        // Keep the FULL offered protocol string: a browser that offered
+        // a subprotocol fails the handshake unless the 101 response
+        // selects one, so we must echo it back below. (The machine WS
+        // echoes it for the same reason.)
+        let offered = req
             .headers()
             .get("Sec-WebSocket-Protocol")
             .ok()
@@ -410,11 +413,13 @@ impl PylonSync {
             .and_then(|hdr| {
                 hdr.split(',')
                     .map(|s| s.trim())
-                    .find_map(|p| p.strip_prefix("bearer.").map(str::to_string))
+                    .find(|p| p.starts_with("bearer."))
+                    .map(str::to_string)
             });
-        let Some(token) = token else {
+        let Some(offered) = offered else {
             return Response::error("missing relay subprotocol", 401);
         };
+        let token = offered["bearer.".len()..].to_string();
         let claims = match pylon_auth::relay_blob::verify(&secret, &app, &token, now_secs()) {
             Ok(c) => c,
             Err(e) => return Response::error(format!("relay token rejected: {e}"), 401),
@@ -447,7 +452,12 @@ impl PylonSync {
         if let Some(since) = since {
             self.replay_since(&pair.server, &claims, since);
         }
-        Response::from_websocket(pair.client)
+        // Echo the selected subprotocol on the 101 — browsers abort the
+        // handshake otherwise. Non-fatal if the header can't be set
+        // (native clients tolerate a missing echo).
+        let mut resp = Response::from_websocket(pair.client)?;
+        let _ = resp.headers_mut().set("Sec-WebSocket-Protocol", &offered);
+        Ok(resp)
     }
 
     /// Claims for a live socket, from the in-memory map or (after a
