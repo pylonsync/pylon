@@ -194,6 +194,47 @@ describe("WebSocketTransport", () => {
     expect(fakeSockets[0].protocols).toBe("bearer.tok_abc");
   });
 
+  test("relay mode dials the minted URL with the blob as a subprotocol", async () => {
+    let mints = 0;
+    const { host } = makeHost({
+      getToken: () => "tok_abc", // machine token must NOT reach the wire
+      getRelayTarget: async () => {
+        mints += 1;
+        return {
+          url: `wss://relay.invalid/sync/ws?app=demo&since=42`,
+          blob: `blob${mints}`,
+        };
+      },
+    });
+    t = new WebSocketTransport(host);
+    t.start();
+    // Resolution is async; nothing dialed synchronously, and a second
+    // start() during resolution must not stack a second mint.
+    expect(fakeSockets.length).toBe(0);
+    t.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(mints).toBe(1);
+    expect(fakeSockets.length).toBe(1);
+    // The blob is NOT in the URL (stays out of proxy logs) …
+    expect(fakeSockets[0].url).toBe("wss://relay.invalid/sync/ws?app=demo&since=42");
+    // … it rides the bearer subprotocol, and the machine token doesn't.
+    expect(fakeSockets[0].protocols).toBe("bearer.blob1");
+  });
+
+  test("relay mint failure backs off instead of dialing", async () => {
+    const { host } = makeHost({ getRelayTarget: async () => null });
+    t = new WebSocketTransport(host);
+    t.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fakeSockets.length).toBe(0);
+    // Backoff timer armed: a later fire re-attempts via reconnect pull.
+    await new Promise((r) => setTimeout(r, 30));
+    // Each retry re-mints (and fails) — no socket ever opens.
+    expect(fakeSockets.length).toBe(0);
+  });
+
   test("onopen flips status to connected and fires host.onConnected", () => {
     const { host, state } = makeHost();
     t = new WebSocketTransport(host);

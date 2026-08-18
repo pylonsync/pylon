@@ -104,7 +104,105 @@ pub(crate) fn handle(
     if url == "/api/sync/push" && method == HttpMethod::Post {
         return Some(handle_push(ctx, body));
     }
+    if url.starts_with("/api/sync/relay-token") && method == HttpMethod::Get {
+        return Some(handle_relay_token(ctx));
+    }
     None
+}
+
+// ---------------------------------------------------------------------------
+// Relay token
+// ---------------------------------------------------------------------------
+
+/// GET /api/sync/relay-token — mint a signed auth blob for the Durable
+/// Object sync relay (docs/SYNC_DURABLE_OBJECTS_DESIGN.md).
+///
+/// The relay filters change events per subscriber with `pylon-policy`
+/// but has no session store, so the machine authenticates + enriches
+/// ONCE here and signs the resulting context. Anonymous callers get an
+/// anonymous blob — same as connecting to the machine's own WS, where
+/// policies decide row visibility, not the transport.
+///
+/// 404 when no relay is configured (opt-in surface, mirrors
+/// trusted-mint): plain installs must not expose a signing oracle.
+fn handle_relay_token(ctx: &RouterContext) -> (u16, String) {
+    let secret = std::env::var("PYLON_SYNC_RELAY_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let base = std::env::var("PYLON_SYNC_RELAY_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let (Some(secret), Some(base)) = (secret, base) else {
+        return (
+            404,
+            json_error_safe(
+                "NOT_FOUND",
+                "No sync relay configured",
+                "PYLON_SYNC_RELAY_URL / PYLON_SYNC_RELAY_SECRET are unset",
+            ),
+        );
+    };
+    let manifest = ctx.store.manifest();
+    let app = std::env::var("PYLON_SYNC_RELAY_APP")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("PYLON_PROJECT_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| manifest.name.clone());
+    let ttl = std::env::var("PYLON_SYNC_RELAY_TOKEN_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(pylon_auth::relay_blob::DEFAULT_TTL_SECS);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let exp = now.saturating_add(ttl);
+    let token = match pylon_auth::relay_blob::mint(&secret, &app, ctx.auth_ctx, exp) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                500,
+                json_error_safe(
+                    "RELAY_MINT_FAILED",
+                    "Could not mint relay token",
+                    &e.to_string(),
+                ),
+            );
+        }
+    };
+    // The socket endpoint clients should dial. Override for split
+    // ingress; default derives ws(s):// from the relay base URL.
+    let ws_url = std::env::var("PYLON_SYNC_RELAY_PUBLIC_WS_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let ws_base = if let Some(rest) = base.strip_prefix("https://") {
+                format!("wss://{rest}")
+            } else if let Some(rest) = base.strip_prefix("http://") {
+                format!("ws://{rest}")
+            } else {
+                base.clone()
+            };
+            let mut enc = String::with_capacity(app.len());
+            for b in app.bytes() {
+                match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                        enc.push(b as char)
+                    }
+                    other => enc.push_str(&format!("%{other:02X}")),
+                }
+            }
+            format!("{}/sync/ws?app={enc}", ws_base.trim_end_matches('/'))
+        });
+    (
+        200,
+        serde_json::json!({ "token": token, "url": ws_url, "exp": exp }).to_string(),
+    )
 }
 
 // ---------------------------------------------------------------------------

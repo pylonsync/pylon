@@ -24,6 +24,7 @@ export class WebSocketTransport implements Transport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private stableTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private resolvingRelay = false;
   private readonly backoff: ReconnectBackoff;
 
   constructor(host: TransportHost) {
@@ -37,10 +38,39 @@ export class WebSocketTransport implements Transport {
     // the BroadcastChannel.
     if (!this.host.isLeader()) return;
     // Already connected / connecting? Don't stack a second socket.
-    if (this.ws) return;
+    if (this.ws || this.resolvingRelay) return;
 
-    const wsUrl = this.host.wsUrl ?? this.deriveWsUrl();
-    const token = this.host.getToken();
+    // Relay mode: the connect target is minted per-attempt (signed
+    // blob + since cursor). The blob travels in the `bearer.<blob>`
+    // subprotocol via connectTo, NOT the URL — keeping the live
+    // credential out of proxy/CDN access logs.
+    if (this.host.getRelayTarget) {
+      this.resolvingRelay = true;
+      this.host
+        .getRelayTarget()
+        .then((target) => {
+          this.resolvingRelay = false;
+          if (!this.host.isRunning() || this.ws) return;
+          if (!target) {
+            this.scheduleReconnect();
+            return;
+          }
+          this.connectTo(target.url, target.blob);
+        })
+        .catch(() => {
+          // getRelayTarget shouldn't reject (the engine's impl catches
+          // to null), but a custom host might — never wedge on a stuck
+          // resolvingRelay flag.
+          this.resolvingRelay = false;
+          this.scheduleReconnect();
+        });
+      return;
+    }
+
+    this.connectTo(this.host.wsUrl ?? this.deriveWsUrl(), this.host.getToken());
+  }
+
+  private connectTo(wsUrl: string, token: string | undefined): void {
     try {
       if (token) {
         const proto = `bearer.${encodeURIComponent(token)}`;
@@ -158,6 +188,8 @@ export class WebSocketTransport implements Transport {
       }
       this.ws = null;
     }
+    // A relay-target resolution in flight must not re-open after stop.
+    this.resolvingRelay = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

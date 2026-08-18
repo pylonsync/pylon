@@ -116,6 +116,29 @@ fn json_params_to_d1(params: &[serde_json::Value]) -> Vec<D1Type<'static>> {
 async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
     let method = HttpMethod::from_str(&req.method().to_string());
     let url = req.path();
+
+    // Sync-relay traffic goes to the app's PylonSync DO with the
+    // ORIGINAL request — this branch must run before the body is
+    // consumed below, and a WebSocket upgrade only survives when the
+    // untouched Request is forwarded. Awaited, never `block_on` (which
+    // deadlocks on wasm — see README).
+    if url.starts_with("/sync/") {
+        let app = req
+            .url()?
+            .query_pairs()
+            .find(|(k, _)| k == "app")
+            .map(|(_, v)| v.to_string())
+            .unwrap_or_default();
+        if app.is_empty() {
+            return Response::error("missing app parameter", 400);
+        }
+        let Ok(ns) = env.durable_object("PYLON_SYNC") else {
+            return Response::error("PYLON_SYNC binding not configured", 503);
+        };
+        let stub = ns.id_from_name(&app)?.get_stub()?;
+        return stub.fetch_with_request(req).await;
+    }
+
     let body = req.text().await.unwrap_or_default();
 
     let auth_token = req

@@ -70,6 +70,17 @@ export interface TransportHost {
    *  is picked up automatically. */
   getToken(): string | undefined;
 
+  /** Sync-relay mode (engine sets this only when `config.relay` is
+   *  on): resolve the relay socket target freshly for THIS connect
+   *  attempt — the ws `url` (with the `since` cursor) plus the signed
+   *  auth `blob`. The transport sends the blob in the `bearer.<blob>`
+   *  subprotocol, exactly like the machine token, so the credential
+   *  stays out of the URL (and out of proxy logs). `null` = the token
+   *  fetch failed; the transport backs off and retries like any failed
+   *  connect. When present, this replaces `wsUrl`/derivation and the
+   *  machine bearer token. */
+  getRelayTarget?(): Promise<{ url: string; blob: string } | null>;
+
   /** Is this tab the multi-tab leader. Followers don't open their own
    *  transport — they mirror the leader's broadcasts. Transports check
    *  this defensively at start() to avoid wasting socket budget. */

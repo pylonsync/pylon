@@ -15,6 +15,7 @@ pub mod email_templates;
 pub mod jwt;
 pub mod org;
 pub mod rate_limit;
+pub mod relay_blob;
 pub mod scim;
 pub mod trusted_device;
 pub mod trusted_mint;

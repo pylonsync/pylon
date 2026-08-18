@@ -1597,6 +1597,27 @@ pub(crate) fn build_persistent_change_log(runtime: &Arc<Runtime>) -> Arc<ChangeL
         }
     }
 
+    // Durable Object sync relay (Option C, docs/SYNC_DURABLE_OBJECTS_
+    // DESIGN.md): when PYLON_SYNC_RELAY_URL + _SECRET are set, every
+    // locally-committed event also ships to the relay. Dual-write —
+    // the machine's own WS/SSE fan-out is untouched.
+    {
+        let manifest = runtime.manifest();
+        if let Some(cfg) = crate::sync_relay::RelayConfig::from_env(&manifest.name) {
+            // `app` inside the signed manifest binds this policy payload
+            // to its target app so a captured manifest push can't be
+            // replayed to another app's DO to swap its policies.
+            let manifest_json = serde_json::json!({
+                "app": &cfg.app,
+                "manifest": &*manifest,
+                "auth_user": &manifest.auth.user,
+            })
+            .to_string();
+            let sink = crate::sync_relay::SyncRelaySink::start(cfg, manifest_json);
+            change_log_builder = change_log_builder.with_sink(sink);
+        }
+    }
+
     let change_log = Arc::new(change_log_builder);
 
     // Seed the change log with one synthetic insert per extant row so that

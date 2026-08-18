@@ -18,9 +18,22 @@ PYLON_DEV_MODE = "false"
 
 # Secrets (set via `wrangler secret put`):
 #   PYLON_ADMIN_TOKEN
+#   PYLON_RELAY_SECRET              (sync relay; same value as the
+#                                    machine's PYLON_SYNC_RELAY_SECRET)
 #   PYLON_AI_API_KEY                (optional)
 #   PYLON_EMAIL_WEBHOOK_URL         (optional; mail-provider HTTP endpoint)
 #   PYLON_EMAIL_WEBHOOK_BEARER      (optional; bearer for the above)
+
+# Sync relay (docs/SYNC_DURABLE_OBJECTS_DESIGN.md) — one PylonSync DO
+# per app, routed via /sync/*?app=<id>. The machine pushes committed
+# change events here; the DO holds hibernating client sockets and fans
+# out per-subscriber policy-filtered frames.
+[[durable_objects.bindings]]
+name = "PYLON_SYNC"
+class_name = "PylonSync"
+[[migrations]]
+tag = "v1"
+new_classes = ["PylonSync"]
 
 # Durable Objects for Rooms + PubSub (PylonRoom / PylonPubSub
 # adapters land in pylon-workers/src/{rooms_do,pubsub_do}.rs).

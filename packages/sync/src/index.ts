@@ -110,6 +110,14 @@ export interface SyncEngineConfig {
   transport?: TransportType;
   /** WebSocket URL. Default: derived from baseUrl (ws://). */
   wsUrl?: string;
+  /** Connect the live-event socket through the Durable Object sync
+   *  relay instead of the machine's own WS. The engine fetches a
+   *  signed connect target from `GET /api/sync/relay-token` before
+   *  each connect (fresh token every reconnect), so revoked sessions
+   *  converge on the token TTL. Pull/push/mutations still go to
+   *  `baseUrl` — the relay carries change events only; room, CRDT,
+   *  and reactive subscriptions require the direct machine WS. */
+  relay?: boolean;
   /** Poll interval in ms (only used when transport is "poll"). Default 1000. */
   pollInterval?: number;
   /** Reconnect delay in ms. Default 1000. */
@@ -2566,6 +2574,39 @@ export class SyncEngine {
     await this.refreshResolvedSession();
   }
 
+  /** Relay mode: fetch a fresh signed connect target from the machine
+   *  before each socket attempt. The machine authenticates + enriches
+   *  this caller and mints the blob the relay's policy filter runs
+   *  against — fetching per-connect is what bounds revoked-role
+   *  staleness to the token TTL. Returns null on any failure; the
+   *  transport treats that as a failed connect and backs off. */
+  private async fetchRelayTarget(): Promise<{ url: string; blob: string } | null> {
+    try {
+      const headers: Record<string, string> = {};
+      const token =
+        this.config.token ??
+        this.storage.get(this.tokenStorageKey()) ??
+        undefined;
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`${this.config.baseUrl}/api/sync/relay-token`, {
+        headers,
+        credentials: "include",
+      });
+      if (!res.ok) return null;
+      const body = (await res.json()) as { token?: string; url?: string };
+      if (!body.token || !body.url) return null;
+      const sep = body.url.includes("?") ? "&" : "?";
+      // `since` lets the relay replay its ring tail ahead of live
+      // frames; the engine's reconnect pull against the machine is
+      // still the correctness backstop for anything older. The token
+      // stays OUT of the URL — the transport sends it as a subprotocol.
+      const since = this.cursor.last_seq ?? 0;
+      return { url: `${body.url}${sep}since=${since}`, blob: body.token };
+    } catch {
+      return null;
+    }
+  }
+
   /** Shared transport for the auth helpers above. Same bearer/cookie
    *  policy as `request()` — keeps the auth flows on the same
    *  authentication footing as data sync. */
@@ -3277,6 +3318,7 @@ export class SyncEngine {
     return {
       baseUrl: this.config.baseUrl,
       wsUrl: this.config.wsUrl,
+      ...(this.config.relay ? { getRelayTarget: () => this.fetchRelayTarget() } : {}),
       pingIntervalMs: this.config.pingIntervalMs,
       reconnectDelayMs: this.config.reconnectDelay,
       pollIntervalMs: this.config.pollInterval,

@@ -1,0 +1,67 @@
+---
+title: "Sync relay (Durable Objects)"
+description: "Move live sync fan-out off your machine and onto a Cloudflare Durable Object — sockets survive deploys, idle machines can sleep."
+---
+
+The sync relay is an optional delivery tier for change events. Your Pylon machine keeps everything it has today — the change log, the `seq` counter, mutations, pulls, auth. What moves is the live WebSocket fan-out: a `PylonSync` Durable Object holds the client sockets (with Cloudflare's WebSocket hibernation), keeps a bounded ring of recent events, and filters every frame per subscriber with the same policy engine the machine uses.
+
+What that buys you:
+
+- **Sockets survive deploys and restarts.** Clients stay connected to the DO while the machine flips; the machine comes back and pushes, clients see catch-up instead of a disconnect.
+- **Idle machines can sleep.** Live sockets no longer pin the machine awake. The DO serves reconnect catch-up from its ring without waking the origin.
+- **Fan-out CPU leaves the machine.** Per-subscriber filtering and broadcast run at the edge.
+
+The machine's own WS keeps working unchanged — the relay is additive (dual-write). Roll out by attaching the sink first, comparing, then pointing clients at the relay.
+
+## Server setup
+
+Deploy the worker from `crates/workers` (the `PylonSync` class ships in the standard `wrangler.toml`):
+
+```bash
+cd crates/workers
+wrangler secret put PYLON_RELAY_SECRET   # any long random string
+wrangler deploy
+```
+
+Point the machine at it:
+
+```bash
+PYLON_SYNC_RELAY_URL=https://your-worker.workers.dev
+PYLON_SYNC_RELAY_SECRET=<same value as PYLON_RELAY_SECRET>
+# optional:
+PYLON_SYNC_RELAY_APP=<app id>            # default: PYLON_PROJECT_ID, then the manifest name
+PYLON_SYNC_RELAY_PUBLIC_WS_URL=<wss url> # default: derived from the relay URL
+PYLON_SYNC_RELAY_TOKEN_TTL_SECS=900      # relay auth blob lifetime
+```
+
+With both set, the machine:
+
+- pushes its manifest to the DO at boot (the DO compiles its `PolicyEngine` from it — until that arrives the DO delivers nothing, it fails closed),
+- pushes every committed change event (batched, HMAC-signed, fire-and-forget with one retry — the disk log stays the source of truth, so a dropped push degrades to a catch-up read, never data loss),
+- serves `GET /api/sync/relay-token`: it authenticates the caller, enriches org roles, and mints a signed auth blob the DO's filter runs against.
+
+## Client setup
+
+```ts
+init({ baseUrl, relay: true });
+```
+
+That is the whole client change (TS and Swift both take `relay: true`). Before each socket attempt the engine fetches a fresh token from `/api/sync/relay-token` and dials the relay with it, plus its current cursor — the DO replays the ring tail past that cursor before live frames. Everything else (pull, push, mutations, auth) still talks to `baseUrl`.
+
+## Security model
+
+- The subscriber's identity travels as a machine-minted, HMAC-signed blob carrying the **enriched** auth context (user, roles, active org). The DO verifies the signature with the shared secret and never touches a database. Tampering with the blob — or its expiry — fails verification.
+- Filtering matches the machine's WS hub decision-for-decision: policy evaluated on the raw row, `serverOnly`/`syncOmit` stripped before the wire, visibility flips synthesized as delete tombstones, unscoped admin bypass, default-deny for policy-less entities.
+- Blobs expire (15 minutes by default). The DO closes expired sockets with code `4401`; the client re-handshakes against the machine, which is how a revoked role converges.
+- Machine→DO pushes are HMAC-signed with a timestamp (±5 min replay window).
+
+## Limits
+
+- **Change events only.** Rooms, CRDT row subscriptions, and reactive queries ride the machine's own WS — apps using those keep the direct connection.
+- **`exists(...)` read policies deny at the relay.** The DO has no database to resolve them against, so it fails closed. Apps whose synced entities use `exists()` in read policies are not relay-eligible yet.
+- **Deep history stays on the machine.** A reconnect cursor older than the DO's ring closes with code `4410`; the engine's normal `/api/sync/pull` catch-up (which runs on every reconnect anyway) covers the gap.
+- Role changes mid-connection take effect on blob expiry, not instantly.
+
+## Design
+
+The full design — why the machine keeps `seq` and the change log, why the DO owns delivery and never truth, and the rejected alternatives — is in `docs/SYNC_DURABLE_OBJECTS_DESIGN.md` in the repo.

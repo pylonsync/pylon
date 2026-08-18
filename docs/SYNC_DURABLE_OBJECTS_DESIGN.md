@@ -1,6 +1,13 @@
 # Sync tier on Durable Objects — design
 
-Status: proposed. Nothing here is built.
+Status: Option C's building blocks shipped (v0.4.24) — `PylonSync` DO
+(`crates/workers/src/{sync_do,relay_core}.rs`), `ChangeLogSink` +
+machine push (`crates/runtime/src/sync_relay.rs`), signed auth blob
+(`crates/auth/src/relay_blob.rs`), `GET /api/sync/relay-token`, and
+`relay: true` client mode (TS + Swift). Setup docs:
+apps/docs/operations/sync-relay.mdx. Still open: a deployed wrangler
+integration test, the live dual-write diff on cloud traffic, and the
+autostop flip (steps 2–5 below — cloud-side rollout, not framework).
 
 ## Why
 

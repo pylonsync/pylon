@@ -292,6 +292,24 @@ pub struct ChangeLog {
     /// FIFO in sync. Two threads under capacity pressure could
     /// deadlock on the cycle. One mutex → one lock order → no cycle.
     op_tracker: Mutex<OpTracker>,
+    /// Post-commit fan-out sinks (e.g. the Durable Object sync relay).
+    /// Fired for every LOCALLY-minted event, after the in-memory push
+    /// and disk append, with the real seq + timestamp. Sinks own
+    /// delivery, never truth: implementations must be non-blocking
+    /// (enqueue-and-return) and may drop — the log is the source of
+    /// truth and a dropped push degrades to a catch-up read.
+    ///
+    /// `append_peer` does NOT fire sinks: a peer event was already
+    /// pushed to the relay by the machine that minted it.
+    sinks: Vec<std::sync::Arc<dyn ChangeLogSink>>,
+}
+
+/// A post-commit destination for locally-committed change events.
+/// See [`ChangeLog::with_sink`]. `push` runs on the mutation hot path
+/// under the change-log locks — implementations MUST NOT block
+/// (bounded-channel `try_send` and drop-on-full is the expected shape).
+pub trait ChangeLogSink: Send + Sync + std::fmt::Debug {
+    fn push(&self, event: &ChangeEvent);
 }
 
 /// Combined idempotency state: HashMap for O(1) lookup + VecDeque for
@@ -420,7 +438,15 @@ impl ChangeLog {
             seq_provider: None,
             store: None,
             op_tracker: Mutex::new(OpTracker::with_capacity(10_000)),
+            sinks: Vec::new(),
         }
+    }
+
+    /// Attach a post-commit sink. Builder-style, composes with
+    /// `with_store` / `with_seq`. Multiple sinks fire in attach order.
+    pub fn with_sink(mut self, sink: std::sync::Arc<dyn ChangeLogSink>) -> Self {
+        self.sinks.push(sink);
+        self
     }
 
     /// Attach an on-disk store and hydrate the in-memory ring buffer
@@ -627,6 +653,9 @@ impl ChangeLog {
         // (same behavior as non-persistent deployments today).
         if let Some(store) = self.store.as_ref() {
             store.append(&returned);
+        }
+        for sink in &self.sinks {
+            sink.push(&returned);
         }
         returned
     }
@@ -890,6 +919,61 @@ mod tests {
         let log = ChangeLog::new();
         assert!(log.is_empty());
         assert_eq!(log.len(), 0);
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingSink {
+        seen: Mutex<Vec<ChangeEvent>>,
+    }
+    impl ChangeLogSink for RecordingSink {
+        fn push(&self, event: &ChangeEvent) {
+            self.seen.lock().unwrap().push(event.clone());
+        }
+    }
+
+    #[test]
+    fn sinks_fire_for_local_appends_with_real_seq_and_prev_data() {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let log = ChangeLog::new().with_sink(sink.clone());
+        log.append(
+            "Todo",
+            "t1",
+            ChangeKind::Insert,
+            Some(serde_json::json!({"a": 1})),
+        );
+        log.append_with_prev(
+            "Todo",
+            "t1",
+            ChangeKind::Update,
+            Some(serde_json::json!({"a": 2})),
+            Some(serde_json::json!({"a": 1})),
+        );
+        let seen = sink.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].seq, 1);
+        assert_eq!(seen[1].seq, 2);
+        // prev_data reaches the sink (the relay needs it for the
+        // visibility-flip tombstone check) and timestamps are real.
+        assert_eq!(seen[1].prev_data, Some(serde_json::json!({"a": 1})));
+        assert!(!seen[1].timestamp.is_empty());
+    }
+
+    #[test]
+    fn sinks_do_not_fire_for_peer_events() {
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let log = ChangeLog::new().with_sink(sink.clone());
+        log.append_peer(ChangeEvent {
+            seq: 7,
+            entity: "Todo".into(),
+            row_id: "t9".into(),
+            kind: ChangeKind::Insert,
+            data: None,
+            prev_data: None,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+        });
+        assert!(sink.seen.lock().unwrap().is_empty());
+        // But the peer event is in the local log (existing invariant).
+        assert_eq!(log.current_seq(), 7);
     }
 
     #[test]

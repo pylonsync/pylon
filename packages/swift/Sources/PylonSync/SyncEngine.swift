@@ -30,6 +30,14 @@ public struct SyncEngineConfig: Sendable {
     /// (login/logout) always wipe regardless. Parity with the TS engine's
     /// `resetOnTenantFlip`.
     public var resetOnTenantFlip: Bool
+    /// Connect the live-event socket through the Durable Object sync
+    /// relay instead of the machine's own WS. The engine fetches a
+    /// signed connect target from `GET /api/sync/relay-token` before
+    /// each connect (fresh token every reconnect). Pull/push/mutations
+    /// still go to `baseURL`; the relay carries change events only —
+    /// room, CRDT, and reactive subscriptions need the direct machine
+    /// WS. Parity with the TS engine's `relay` config.
+    public var relay: Bool
 
     public enum TransportType: String, Sendable {
         case websocket
@@ -45,7 +53,8 @@ public struct SyncEngineConfig: Sendable {
         pollInterval: TimeInterval = 1.0,
         reconnectBaseDelay: TimeInterval = 1.0,
         appName: String = "default",
-        resetOnTenantFlip: Bool = true
+        resetOnTenantFlip: Bool = true,
+        relay: Bool = false
     ) {
         self.baseURL = baseURL
         self.wsURL = wsURL
@@ -55,6 +64,7 @@ public struct SyncEngineConfig: Sendable {
         self.reconnectBaseDelay = reconnectBaseDelay
         self.appName = appName
         self.resetOnTenantFlip = resetOnTenantFlip
+        self.relay = relay
     }
 }
 
@@ -682,6 +692,21 @@ public actor SyncEngine {
         return components.url ?? config.baseURL
     }
 
+    /// Relay mode: `GET /api/sync/relay-token` → the relay ws URL (with
+    /// the `since` cursor) plus the signed blob. `nil` on any failure
+    /// (the caller backs off like a failed connect). The blob is
+    /// returned separately, NOT baked into the URL — it travels in the
+    /// `bearer.<blob>` subprotocol so the credential stays out of
+    /// proxy/CDN access logs. Mirrors the TS transport's getRelayTarget.
+    private func fetchRelayTarget() async -> (url: URL, blob: String)? {
+        guard let minted = try? await client.syncRelayToken() else { return nil }
+        let sep = minted.url.contains("?") ? "&" : "?"
+        guard let url = URL(string: "\(minted.url)\(sep)since=\(cursor.last_seq)") else {
+            return nil
+        }
+        return (url, minted.token)
+    }
+
     private func connectWs() async {
         guard running else { return }
         // Re-auth before (re)opening the socket: detect a tenant/token change
@@ -689,8 +714,24 @@ public actor SyncEngine {
         // open with fresh credentials + a reset replica instead of streaming
         // the old identity's rows.
         await refreshResolvedSession()
-        let url = deriveWsURL()
-        let token = await client.currentToken()
+        let url: URL
+        let token: String?
+        if config.relay {
+            // Relay mode: mint a fresh signed connect target for THIS
+            // attempt. The blob rides the bearer subprotocol (the
+            // factory prefixes `bearer.`), so the machine session token
+            // never reaches the relay and the blob never hits the URL.
+            guard let target = await fetchRelayTarget() else {
+                wsConnected = false
+                scheduleReconnect()
+                return
+            }
+            url = target.url
+            token = target.blob
+        } else {
+            url = deriveWsURL()
+            token = await client.currentToken()
+        }
         let socket = webSocketFactory(url, token)
         ws = socket
         do {

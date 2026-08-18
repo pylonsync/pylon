@@ -125,6 +125,7 @@
               "operations/sst",
               "operations/sizing",
               "operations/scaling",
+              "operations/sync-relay",
               "operations/token-rotation",
               "operations/incident",
               "operations/workers-costs"

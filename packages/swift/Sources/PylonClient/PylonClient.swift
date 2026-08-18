@@ -498,6 +498,21 @@ public actor PylonClient {
         try await self.request(.post, "/api/sync/push", body: request)
     }
 
+    /// `GET /api/sync/relay-token` response — a machine-minted signed
+    /// auth blob + the Durable Object relay's socket URL. Parity with
+    /// the TS engine's relay mode.
+    public struct RelayTokenResponse: Decodable, Sendable {
+        public let token: String
+        public let url: String
+        public let exp: Int64
+    }
+
+    /// Mint a sync-relay connect target. 404s when the server has no
+    /// relay configured (`PYLON_SYNC_RELAY_URL` / `_SECRET` unset).
+    public func syncRelayToken() async throws -> RelayTokenResponse {
+        try await request(.get, "/api/sync/relay-token")
+    }
+
     // MARK: - Internal
 
     enum HTTPVerb: String, Sendable {

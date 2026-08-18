@@ -20,6 +20,7 @@
 pub mod d1_store;
 pub mod durable_object;
 pub mod noop_adapters;
+pub mod relay_core;
 
 pub use d1_store::{D1DataStore, D1Executor};
 pub use durable_object::{
@@ -56,3 +57,8 @@ pub use queue_jobs::WorkersJobs;
 pub use r2_files::R2Files;
 #[cfg(feature = "workers")]
 pub use rooms_do::{PylonRoom, WorkersRooms};
+
+#[cfg(feature = "workers")]
+pub mod sync_do;
+#[cfg(feature = "workers")]
+pub use sync_do::PylonSync;
