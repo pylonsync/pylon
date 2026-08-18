@@ -1,0 +1,64 @@
+# Sync relay worker — deploy unit for the PylonSync Durable Object only.
+#
+# This is NOT the kitchen-sink "run all of Pylon on Workers" config
+# (wrangler.toml). The relay worker serves one thing: /sync/*?app=<id>
+# WebSocket fan-out plus the machine's push/manifest posts. The Fly
+# machine still serves every HTTP/API route, keeps the change log, and
+# owns `seq`; this worker only holds hibernating client sockets and
+# fans out per-subscriber policy-filtered change frames.
+#
+# One relay worker serves every app. Per-app isolation comes from the
+# DO instance id (`id_from_name(app)`), not from separate workers.
+#
+# Deploy:
+#   wrangler secret put PYLON_RELAY_SECRET --config crates/workers/wrangler.relay.toml
+#   wrangler deploy --config crates/workers/wrangler.relay.toml
+#
+# The same HMAC secret goes on the machine as PYLON_SYNC_RELAY_SECRET.
+
+name = "pylon-sync-relay"
+main = "build/worker/shim.mjs"
+compatibility_date = "2024-12-01"
+
+# The fetch handler + PylonSync DO live behind the `workers` feature.
+# Without `--features workers` there is no `#[event(fetch)]` and the
+# build produces an empty worker. worker-build forwards everything
+# after `--` to cargo.
+#
+# worker-build is pinned to 0.1.2 — the release that shipped the same
+# day as worker 0.5.0 (2024-12-11). Newer worker-build (0.8.x) refuses
+# to build against worker < 0.8.5. The relay DO code targets the 0.5
+# API (accept_websocket_with_tags, Response::from_websocket), so the
+# tool is pinned to that API rather than migrating the crate mid-
+# rollout. Upgrading worker 0.5 -> 0.8 is tracked separately.
+[build]
+command = "cargo install -q --force worker-build@0.1.2 && worker-build --release -- --features workers"
+
+[vars]
+PYLON_DEV_MODE = "false"
+
+# One PylonSync instance per app, addressed by name (`?app=<id>`).
+[[durable_objects.bindings]]
+name = "PYLON_SYNC"
+class_name = "PylonSync"
+
+# The `workers` feature also compiles the PylonRoom / PylonPubSub DO
+# classes into the shim (rooms + pubsub adapters share the feature
+# gate). They carry no binding here, so they are inert on the relay
+# worker — but Cloudflare still needs every exported DO class named in
+# a migration. Declaring them alongside PylonSync creates the classes
+# without making them callable.
+#
+# new_sqlite_classes (not new_classes): SQLite-backed DO storage is
+# Cloudflare's default for new namespaces and the only option on the
+# Workers free plan. The DO uses the storage().get/put/list/delete KV
+# API, which works identically on SQLite-backed storage.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PylonSync", "PylonRoom", "PylonPubSub"]
+
+# Secret (set via `wrangler secret put`, never checked in):
+#   PYLON_RELAY_SECRET  — shared HMAC secret; same value as the
+#                         machine's PYLON_SYNC_RELAY_SECRET. The DO
+#                         verifies the machine's signed push/manifest
+#                         and the client auth blob with it.

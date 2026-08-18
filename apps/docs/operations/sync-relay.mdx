@@ -15,12 +15,21 @@ The machine's own WS keeps working unchanged — the relay is additive (dual-wri
 
 ## Server setup
 
-Deploy the worker from `crates/workers` (the `PylonSync` class ships in the standard `wrangler.toml`):
+Deploy the relay worker with its own config, `crates/workers/wrangler.relay.toml`. That config declares only the `PylonSync` Durable Object plus the shared secret — it is not the kitchen-sink `wrangler.toml` (which also wires D1, KV, and R2 for running all of Pylon on Workers).
 
 ```bash
 cd crates/workers
-wrangler secret put PYLON_RELAY_SECRET   # any long random string
-wrangler deploy
+wrangler deploy --config wrangler.relay.toml
+printf '%s' "$(openssl rand -hex 32)" | \
+  wrangler secret put PYLON_RELAY_SECRET --config wrangler.relay.toml
+```
+
+The worker's build pins `worker-build@0.1.2` (the release that matches the `worker` 0.5 crate the DO targets). The Durable Object uses SQLite-backed storage (`new_sqlite_classes`), which works on the Workers free plan and is Cloudflare's default for new namespaces.
+
+Verify the deploy with the smoke script — it checks routing and auth-gating without needing the secret:
+
+```bash
+crates/workers/scripts/relay-smoke.sh https://pylon-sync-relay.<subdomain>.workers.dev
 ```
 
 Point the machine at it:

@@ -2755,6 +2755,7 @@ dependencies = [
 name = "pylon-kernel"
 version = "0.4.25"
 dependencies = [
+ "js-sys",
  "serde",
  "serde_json",
 ]

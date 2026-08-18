@@ -20,14 +20,33 @@ pub fn quote_ident(name: &str) -> String {
 
 /// Current UTC time as an ISO-8601 string (second precision).
 ///
-/// Uses only `std::time::SystemTime` — no external date library required.
+/// No external date library required. The epoch seconds come from the
+/// platform clock via [`now_epoch_secs`].
 pub fn now_iso() -> String {
+    epoch_to_iso(now_epoch_secs())
+}
+
+/// Current Unix-epoch seconds from the platform clock.
+///
+/// `wasm32-unknown-unknown` (Cloudflare Workers, and the sync-relay
+/// Durable Object) has no `SystemTime` backend — `SystemTime::now()`
+/// panics there ("time not implemented on this platform"). The policy
+/// evaluator stamps `now` on every check, so that panic would kill the
+/// DO isolate the moment it filtered one event. On wasm the time comes
+/// from JS `Date.now()` instead; native targets use `SystemTime`.
+#[cfg(not(target_arch = "wasm32"))]
+fn now_epoch_secs() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    epoch_to_iso(secs)
+        .as_secs()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_epoch_secs() -> u64 {
+    // `Date.now()` is milliseconds since the Unix epoch.
+    (js_sys::Date::now() / 1000.0) as u64
 }
 
 /// Convert Unix-epoch seconds to an ISO-8601 string.

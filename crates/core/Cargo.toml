@@ -17,3 +17,10 @@ path = "src/lib.rs"
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+# wasm32-unknown-unknown (Cloudflare Workers / the sync-relay Durable
+# Object) has no std clock backend — `SystemTime::now()` panics there.
+# `now_iso()` reads the time from JS `Date.now()` instead on that target
+# so policy evaluation runs in the DO. Native builds never pull this.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+
