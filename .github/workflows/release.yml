@@ -427,11 +427,25 @@ jobs:
       # matters less here — Ubuntu's 1.2.x is fine for linkage. The
       # patch covers the compile-time bindgen mismatch.
       - if: runner.os == 'Linux'
+        # Hard cap + retry: a hung apt mirror once wedged this step for
+        # 4h with no timeout, blocking the whole release queue. Fail
+        # fast and retry a fresh mirror instead.
+        timeout-minutes: 15
         run: |
-          sudo apt-get update && sudo apt-get install -y \
-            libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
-            libclang-dev clang
+          for attempt in 1 2 3; do
+            if sudo timeout 300 apt-get update && \
+               sudo timeout 300 apt-get install -y \
+                 libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
+                 libclang-dev clang; then
+              exit 0
+            fi
+            echo "apt attempt ${attempt} failed or timed out; retrying in 15s"
+            sleep 15
+          done
+          echo "apt install failed after 3 attempts" >&2
+          exit 1
       - if: runner.os == 'macOS'
+        timeout-minutes: 15
         run: |
           brew install libxmlsec1 libxml2 pkg-config
           brew link --overwrite libxmlsec1 || true
