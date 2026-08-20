@@ -3,7 +3,7 @@ title: OAuth — 25+ providers + OIDC
 description: "Configure built-in OAuth providers or connect any OpenID Connect provider through discovery."
 ---
 
-Pylon ships native OAuth for **25 providers** out of the box, plus **OpenID Connect discovery** for any compliant IdP (Auth0, Okta, Keycloak, Cognito, Logto, Authentik, Zitadel...). Users click sign in, get redirected to the provider, come back with a session token. CSRF-protected via single-use state tokens that survive a server restart mid-handshake. PKCE for providers that require it (Twitter/X, Kick). `response_mode=form_post` for Apple. The provider-specific quirks are handled — you set two env vars per provider.
+Pylon ships native OAuth for 25 providers, plus OpenID Connect discovery for any compliant IdP (Auth0, Okta, Keycloak, Cognito, Logto, Authentik, Zitadel...). A user clicks sign in, goes to the provider, and returns with a session token. Single-use state tokens protect against CSRF and survive a server restart mid-handshake. Pylon uses PKCE for providers that require it (Twitter/X, Kick) and `response_mode=form_post` for Apple. Pylon handles the provider-specific details; you set two env vars per provider.
 
 ## Built-in providers
 
@@ -53,13 +53,13 @@ PYLON_OAUTH_MICROSOFT_TENANT=contoso.onmicrosoft.com  # Microsoft only
 
 Replace `<PROVIDER>` with `GOOGLE`, `GITHUB`, `APPLE`, etc. (the uppercase form of the table id above).
 
-If a provider's `CLIENT_ID` or `CLIENT_SECRET` is unset, that provider is silently disabled — `/api/auth/providers` won't list it.
+If a provider's `CLIENT_ID` or `CLIENT_SECRET` is unset, Pylon disables that provider. `/api/auth/providers` does not list it.
 
 On **Pylon Cloud**, set these in `Settings → Environment` per workspace.
 
 ### Apple
 
-Apple is special — `client_secret` is a JWT you sign with your developer ES256 key, not a static string. Pylon mints a fresh JWT on every token exchange so you don't manage rotation.
+Apple is different. Its `client_secret` is a JWT you sign with your developer ES256 key, not a static string. Pylon creates a fresh JWT on every token exchange, so you do not manage rotation.
 
 ```bash
 PYLON_OAUTH_APPLE_CLIENT_ID=com.example.app   # Service ID or bundle id
@@ -71,9 +71,9 @@ PYLON_OAUTH_APPLE_PRIVATE_KEY=/path/to/AuthKey_KEYID12345.p8
 PYLON_OAUTH_APPLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----..."
 ```
 
-Apple POSTs the callback (`response_mode=form_post`) instead of the usual GET — pylon's callback handler accepts both. The user's identity comes from the `id_token` JWT in the token response, not a userinfo endpoint.
+Apple POSTs the callback (`response_mode=form_post`) instead of the usual GET. Pylon's callback handler accepts both. The user's identity comes from the `id_token` JWT in the token response, not a userinfo endpoint.
 
-> **Note:** Apple sends the user's name only on the **first** sign-in for a given app. Subsequent logins return `sub` + `email` only. Pylon stores what it can and doesn't overwrite an existing `displayName`.
+> **Note:** Apple sends the user's name only on the first sign-in for an app. Later logins return `sub` and `email` only. Pylon stores what it can and does not overwrite an existing `displayName`.
 
 ### Microsoft
 
@@ -89,7 +89,7 @@ Default is `common` (any account — work, school, personal).
 
 ### Twitter / X
 
-Twitter requires PKCE — pylon generates the verifier/challenge automatically and stores them in the OAuth state record. No extra config needed. Twitter's userinfo doesn't include email by default; Pylon synthesizes `<username>@x.invalid` so account rows still have a value. Apps that require a real email should reject these accounts.
+Twitter requires PKCE. Pylon generates the verifier and challenge automatically and stores them in the OAuth state record. No extra config is needed. Twitter's userinfo does not include email by default, so Pylon synthesizes `<username>@x.invalid` to give account rows a value. Apps that require a real email should reject these accounts.
 
 ### Generic OIDC
 
@@ -127,18 +127,18 @@ server  →  validates state (CSRF check)                        │
 
 ## Profile pictures
 
-The provider's profile picture (OIDC `picture` claim, GitHub `avatar_url`) is
-captured on every OAuth login and stored on the account link — refreshed each
-sign-in, so rotated provider CDN URLs never go stale. It surfaces as
-`avatar_url` on:
+Pylon captures the provider's profile picture (OIDC `picture` claim, GitHub
+`avatar_url`) on every OAuth login and stores it on the account link. It
+refreshes each sign-in, so rotated provider CDN URLs stay current. It appears
+as `avatar_url` on:
 
 - `GET /api/auth/me` and `GET /api/auth/session` — for the signed-in user's
   own account chip (`useSession()` exposes it as `session.avatarUrl`);
 - `GET /api/auth/orgs/:id/members` — so team rosters can render real photos.
 
-The value is `null` for password and magic-link users (no provider picture) —
-render an initials fallback. Only `https://` URLs are stored. When a user has
-several linked providers, the most recently used one wins.
+The value is `null` for password and magic-link users (no provider picture),
+so render an initials fallback. Pylon stores only `https://` URLs. When a user
+has several linked providers, the most recently used one wins.
 
 ## Two ways to invoke
 
@@ -150,7 +150,7 @@ several linked providers, the most recently used one wins.
 <a href="/api/auth/login/google?callback=/dashboard&redirect=1">Sign in with Google</a>
 ```
 
-`callback` (and the optional `error_callback`) MUST have an origin listed in `manifest.auth.trustedOrigins` (or `PYLON_TRUSTED_ORIGINS`). Loopback (`http://localhost`, `127.0.0.1`, `[::1]` — any port) is always auto-trusted, so `pylon dev` works without config. See [Security plugins → Unified trustedOrigins](/plugins/security#unified-trustedorigins).
+`callback` (and the optional `error_callback`) MUST have an origin listed in `manifest.auth.trustedOrigins` (or `PYLON_TRUSTED_ORIGINS`). Loopback (`http://localhost`, `127.0.0.1`, `[::1]`, any port) is always auto-trusted, so `pylon dev` works without config. See [Security plugins → Unified trustedOrigins](/plugins/security#unified-trustedorigins).
 
 ### JSON flow (manual)
 
@@ -205,9 +205,9 @@ On first OAuth sign-in for a given email, Pylon creates a `User` row:
 }
 ```
 
-On subsequent sign-ins, Pylon looks up the user by `(provider, provider_account_id)` — NOT by email — so a renamed-email user keeps their account.
+On later sign-ins, Pylon looks up the user by `(provider, provider_account_id)`, not by email, so a user who renamed their email keeps their account.
 
-**Email verification is implicit** — the OAuth provider already verified the email, so Pylon stamps `emailVerified` immediately. Your `User` entity should have:
+Email verification is implicit. The OAuth provider already verified the email, so Pylon stamps `emailVerified` immediately. Your `User` entity should have:
 
 ```jsonc
 { "name": "email",         "type": "string",  "unique": true },
@@ -242,4 +242,4 @@ Use this in your sign-in UI to render only the buttons you've configured.
 | `OAUTH_TOKEN_EXCHANGE_FAILED` | 502 | Provider rejected the code exchange — common when client secret is wrong, redirect URI doesn't match, or PKCE verifier mismatch |
 | `UNTRUSTED_REDIRECT` | 403 | `?callback=` origin is not in `manifest.auth.trustedOrigins` (or `PYLON_TRUSTED_ORIGINS`). Loopback is auto-trusted. |
 
-Provider error messages are sanitized — `client_secret`, `code_verifier`, `refresh_token`, `id_token`, and `access_token` values are redacted before they end up in `oauth_error_message` redirect URLs or server logs.
+Pylon sanitizes provider error messages. It redacts `client_secret`, `code_verifier`, `refresh_token`, `id_token`, and `access_token` values before they reach `oauth_error_message` redirect URLs or server logs.

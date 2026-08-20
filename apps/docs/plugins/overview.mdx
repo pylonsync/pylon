@@ -3,18 +3,18 @@ title: Plugins overview
 description: "How Pylon composes: installable TS packages plus a small set of auto-wired runtime built-ins. There is no manifest plugin array."
 ---
 
-"Plugins" in Pylon means two concrete things — and neither is a `manifest.plugins: [...]` list. There is no such array today.
+"Plugins" in Pylon means two concrete things. Neither is a `manifest.plugins: [...]` list. There is no such array today.
 
-1. **TS packages** (`@pylonsync/*`) — installable npm packages that return a manifest **fragment** (entities, actions, queries, policies) plus handler factories. You compose the fragment into your `buildManifest()` call. Use these to add features the framework binary doesn't already cover.
-2. **Built-in runtime plugins** — a small set compiled into the `pylon` binary and wired **automatically** from your schema or environment. You don't name them anywhere; they activate when the relevant signal is present (a `tenantId` field, a `.owner()` annotation, an env var).
+1. **TS packages** (`@pylonsync/*`): installable npm packages that return a manifest fragment (entities, actions, queries, policies) plus handler factories. You compose the fragment into your `buildManifest()` call. Use these to add features the framework binary does not already cover.
+2. **Built-in runtime plugins**: a small set compiled into the `pylon` binary and wired automatically from your schema or environment. You do not name them anywhere. They activate when the relevant signal is present (a `tenantId` field, a `.owner()` annotation, an env var).
 
 Features that are built into the framework binary already (no package, no plugin needed):
 
-- **API keys** — `/api/auth/api-keys` routes for mint / list / revoke. See [Auth → API keys](/auth/api-keys).
-- **TOTP / 2FA** — `/api/auth/totp/*` routes for enroll / verify / disable + backup codes. See [Auth → TOTP](/auth/totp).
-- **Transactional email** — `PYLON_EMAIL_PROVIDER` env (sendgrid / resend / stack0 / webhook) + `ctx.email.send()`. See [Integrations → email](/plugins/integrations#email).
-- **Audit log** — `/api/auth/audit` + `/api/auth/audit/tenant` routes.
-- **Organizations** — `Org` / `OrgMember` / `OrgInvite` entities + `/api/auth/orgs/*` routes. See [Auth → Organizations](/auth/organizations).
+- **API keys:** `/api/auth/api-keys` routes for mint / list / revoke. See [Auth → API keys](/auth/api-keys).
+- **TOTP / 2FA:** `/api/auth/totp/*` routes for enroll / verify / disable + backup codes. See [Auth → TOTP](/auth/totp).
+- **Transactional email:** `PYLON_EMAIL_PROVIDER` env (sendgrid / resend / stack0 / webhook) + `ctx.email.send()`. See [Integrations → email](/plugins/integrations#email).
+- **Audit log:** `/api/auth/audit` + `/api/auth/audit/tenant` routes.
+- **Organizations:** `Org` / `OrgMember` / `OrgInvite` entities + `/api/auth/orgs/*` routes. See [Auth → Organizations](/auth/organizations).
 
 ## TS packages
 
@@ -26,11 +26,11 @@ Install with `bun add`, then spread the manifest fragment into `buildManifest()`
 | **[@pylonsync/feature-flags](/plugins/feature-flags)** | Local-eval flags — boolean + multivariate, percentage rollouts, targeting predicates, per-variant JSON payloads. |
 | **[@pylonsync/webhooks](/plugins/webhooks)** | Outbound webhook delivery — Svix-compatible HMAC signatures, retry schedule, secret rotation. |
 
-Each package exports a factory (e.g. `stripe({...})`, `webhooks({...})`) that returns `{ manifest, handlers, ... }`. Pylon loads function handlers one-per-file, so you also add one-line wrapper files under `functions/` — see each package's page for the exact list.
+Each package exports a factory (e.g. `stripe({...})`, `webhooks({...})`) that returns `{ manifest, handlers, ... }`. Pylon loads function handlers one-per-file, so you also add one-line wrapper files under `functions/`. See each package's page for the exact list.
 
 ## Built-in runtime plugins
 
-These live in `crates/plugin/src/builtin/` and are registered by the runtime at boot. They are **auto-wired**, not enabled through a manifest list.
+These live in `crates/plugin/src/builtin/`. The runtime registers them at boot. They are auto-wired, not enabled through a manifest list.
 
 | Built-in | How it turns on | Reference |
 | --- | --- | --- |
@@ -66,9 +66,9 @@ A built-in can inspect or reject a request (`on_request`), mutate or reject a wr
 
 ## There is no `plugins: []` array
 
-Older drafts of these docs described enabling plugins through a `pylon.manifest.json` `plugins` list with per-plugin `config`. **That mechanism does not exist.** Built-ins are automatic; you influence them through your schema (add a `tenantId` field, annotate a field `.owner()`) and environment variables. App-specific cross-cutting logic goes in [server functions](/concepts/functions) and [policies](/concepts/policies), not a plugin config block.
+Older drafts of these docs described enabling plugins through a `pylon.manifest.json` `plugins` list with per-plugin `config`. That mechanism does not exist. Built-ins are automatic. You influence them through your schema (add a `tenantId` field, annotate a field `.owner()`) and environment variables. App-specific cross-cutting logic goes in [server functions](/concepts/functions) and [policies](/concepts/policies), not a plugin config block.
 
-`pylon plugins list` prints a **roadmap catalog** of plugin names (validation, slugify, versioning, cascade, MCP, and more). These are planned, not installable today — treat the list as a preview, not an API.
+`pylon plugins list` prints a roadmap catalog of plugin names (validation, slugify, versioning, cascade, MCP, and more). These are planned, not installable today. Treat the list as a preview, not an API.
 
 ## Plugins vs functions
 
@@ -80,7 +80,7 @@ Older drafts of these docs described enabling plugins through a `pylon.manifest.
 | Cross-cutting concerns (tenant scope, owner stamp, rate limit) | Business logic |
 | Compiled into the binary, or shipped as a package | Hot-reloaded by the dev server |
 
-Use a built-in when the behavior should apply to **every** call. Use a function when callers opt in by name.
+Use a built-in when the behavior applies to every call. Use a function when callers opt in by name.
 
 ## Writing your own
 

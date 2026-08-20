@@ -31,13 +31,13 @@ type Session = {
 | Cookie SameSite | `lax` |
 | Cookie Secure | `true` in non-dev mode |
 
-Sessions live in memory by default — fine for development but **users get logged out on every restart**. For production, point Pylon at a SQLite file:
+Sessions live in memory by default. That is fine for development, but users get logged out on every restart. For production, point Pylon at a SQLite file:
 
 ```bash
 PYLON_SESSION_DB=/var/lib/pylon/sessions.db
 ```
 
-Now sessions survive restarts, deploys, and crashes. The SQLite file is a write-through cache — reads still hit memory, every save/remove writes to disk.
+Now sessions survive restarts, deploys, and crashes. The SQLite file is a write-through cache: reads still hit memory, and every save or remove writes to disk.
 
 On **Pylon Cloud**, persistent sessions are configured automatically.
 
@@ -115,7 +115,7 @@ Response:
 ]
 ```
 
-The full token is never returned — only the first 8 chars for display. Power users can use this to audit active sign-ins and revoke individual ones.
+The full token is never returned. The response shows only the first 8 chars for display. Power users can audit active sign-ins and revoke individual ones.
 
 ## Cookies vs bearer tokens
 
@@ -143,7 +143,7 @@ The cookie name is `pylon_session`. It's automatically set on:
 
 And cleared on `/api/auth/session` DELETE.
 
-When both a cookie and a `Authorization: Bearer` header are present on the same request, **the bearer header wins** — explicit beats implicit.
+When both a cookie and an `Authorization: Bearer` header are present on the same request, the bearer header wins.
 
 ## Multi-tenant: switching organizations
 
@@ -156,7 +156,7 @@ curl -X POST https://your-app/api/auth/select-org \
   -d '{"orgId": "org_xyz"}'
 ```
 
-The server **verifies membership** before committing — looks up an `OrgMember { userId, orgId }` row and returns 403 `NOT_A_MEMBER` if it doesn't exist. Clients can't impersonate an org they don't belong to.
+The server verifies membership before committing. It looks up an `OrgMember { userId, orgId }` row and returns 403 `NOT_A_MEMBER` if it does not exist. Clients cannot impersonate an org they do not belong to.
 
 Pass `null` to leave the org (drop back to the lobby):
 
@@ -187,9 +187,9 @@ Response:
 }
 ```
 
-Guests have a stable `user_id` (so their cart persists across page loads) but `is_authenticated()` returns false — `AuthMode::User` rejects them, so guests can't access user-only routes.
+Guests have a stable `user_id` (so their cart persists across page loads), but `is_authenticated()` returns false. `AuthMode::User` rejects them, so guests cannot access user-only routes.
 
-When the user signs in for real, **upgrade** the guest session in place:
+When the user signs in for real, upgrade the guest session in place:
 
 ```typescript
 // Sign-in flow that preserves the guest's cart:
@@ -226,7 +226,7 @@ curl -X POST https://your-app/api/auth/session \
   -d '{"user_id": "usr_xyz"}'
 ```
 
-This is the **back door** — never expose it without admin auth. In non-dev, non-admin requests get 403 `FORBIDDEN`. Use for:
+This is the admin-only path. Never expose it without admin auth. In non-dev mode, non-admin requests get 403 `FORBIDDEN`. Use it for:
 
 - Backfill scripts that need to sign in as a user
 - Tests
@@ -241,7 +241,7 @@ Background cleanup runs automatically — every authenticated request checks `ex
 sessionStore.sweepExpired();
 ```
 
-Cloud runs this hourly. Self-hosted, the on-demand check is usually enough — there's no harm in leaving expired rows in the table briefly.
+Cloud runs this hourly. Self-hosted, the on-demand check is usually enough. Leaving expired rows in the table briefly does no harm.
 
 ## Session storage backends
 
@@ -260,7 +260,7 @@ Pylon ships:
 - **In-memory** — default; lost on restart
 - **SQLite** — `PYLON_SESSION_DB=path` enables it
 
-Custom backends (Redis, DynamoDB, etc.) are a few lines of Rust — implement the trait, pass via `SessionStore::with_backend`. See `crates/runtime/src/session_backend.rs` for the SQLite reference impl.
+Custom backends (Redis, DynamoDB, etc.) are a few lines of Rust. Implement the trait and pass it via `SessionStore::with_backend`. See `crates/runtime/src/session_backend.rs` for the SQLite reference impl.
 
 ## Security defaults
 

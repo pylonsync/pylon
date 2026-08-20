@@ -3,7 +3,7 @@ title: Policies
 description: "Row-level access rules that live next to your schema."
 ---
 
-A **policy** is a boolean expression evaluated on every row access. It lives beside your entities, not buried in middleware.
+A policy is a boolean expression evaluated on every row access. It lives beside your entities.
 
 ```ts
 import { policy } from "@pylonsync/sdk";
@@ -30,20 +30,20 @@ const noteOwner = policy({
 | `now` | `string` | Current UTC time as an ISO-8601 string, for time windows |
 | `ago("30d")` | `string` | The instant that long before `now`, for rolling windows. Units `s`/`m`/`h`/`d`/`w`, compound allowed (`"1d12h"`). A malformed duration fails at boot, not silently at evaluation |
 
-Roles are checked with the `auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` **functions** (below) — there is no `auth.roles` array and no `auth.email` binding in policy expressions. (Email/roles live on the session and the SSR page `auth` prop, just not in the policy evaluator.)
+Roles are checked with the `auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` functions (below). There is no `auth.roles` array and no `auth.email` binding in policy expressions. (Email/roles live on the session and the SSR page `auth` prop, just not in the policy evaluator.)
 
 ## Each action
 
 - **`allowRead`** — runs on query results. If false, row is filtered out.
 - **`allowInsert`** — runs against the proposed `data` (the incoming row).
-- **`allowUpdate`** — runs against the **current stored row** (bound as both `data` and `existing`), so ownership checks see the truth, not the caller's patch.
+- **`allowUpdate`** — runs against the current stored row (bound as both `data` and `existing`), so ownership checks see the truth, not the caller's patch.
 - **`allowDelete`** — runs against the current row (`data` / `existing`).
 
 If a policy is omitted, that action is denied by default.
 
 ## Operators
 
-The policy language is deliberately tiny. The **complete** operator set is:
+The policy language is deliberately tiny. The complete operator set is:
 
 ```
 ==    !=                       // equality

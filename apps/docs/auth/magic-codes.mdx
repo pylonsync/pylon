@@ -3,7 +3,7 @@ title: Magic codes
 description: "Email a 6-digit code, exchange it for a session. Pylon's recommended sign-in flow."
 ---
 
-Magic codes are the simplest sign-in flow Pylon ships. The user types an email, gets a 6-digit code, types it back, and they're in. No passwords to remember, no OAuth credentials to obtain. Most apps should start here.
+Magic codes are the simplest sign-in flow Pylon ships. The user types an email, gets a 6-digit code, and types it back to sign in. There are no passwords to remember and no OAuth credentials to obtain. Most apps should start here.
 
 ## How it works
 
@@ -15,7 +15,7 @@ client            POST /api/auth/magic/verify { email, code }
    ←  { token, user_id, expires_at }
 ```
 
-If the user doesn't exist when the code is verified, Pylon **auto-creates** a `User` row with that email and stamps `emailVerified` — typing the code proves control of the address.
+If the user does not exist when the code is verified, Pylon creates a `User` row with that email and stamps `emailVerified`. Typing the code proves control of the address.
 
 ## Send a code
 
@@ -31,7 +31,7 @@ Response:
 { "sent": true, "email": "alice@example.com" }
 ```
 
-In **dev mode** (`PYLON_DEV_MODE=true`) the response also includes `dev_code` so you can sign in without configuring an email provider:
+In dev mode (`PYLON_DEV_MODE=true`), the response also includes `dev_code`. You can sign in without an email provider configured:
 
 ```json
 { "sent": true, "email": "alice@example.com", "dev_code": "428193" }
@@ -104,11 +104,11 @@ PYLON_EMAIL_API_KEY=sk_live_...
 PYLON_EMAIL_FROM=noreply@yourdomain.com
 ```
 
-If you're on **Pylon Cloud**, magic-link email is included — no provider config needed for the included sender. Configure your own domain in `Settings → Email` for production use to keep deliverability high.
+On Pylon Cloud, magic-link email is included. You need no provider config for the built-in sender. Configure your own domain in `Settings → Email` for production to keep deliverability high.
 
-If you set `PYLON_EMAIL_PROVIDER=webhook`, also set `PYLON_EMAIL_ENDPOINT` to your custom URL — Pylon POSTs `{ to, from, subject, body }` to it.
+If you set `PYLON_EMAIL_PROVIDER=webhook`, also set `PYLON_EMAIL_ENDPOINT` to your custom URL. Pylon POSTs `{ to, from, subject, body }` to it.
 
-To give auth email its own key and from-address — separate from your app's `ctx.email` — set the `PYLON_AUTH_EMAIL_*` family (`_PROVIDER`, `_API_KEY`, `_FROM`, `_ENDPOINT`); it overrides `PYLON_EMAIL_*` for auth flows only. See [Auth → Configuration](/auth/overview#configuration).
+To give auth email its own key and from-address, separate from your app's `ctx.email`, set the `PYLON_AUTH_EMAIL_*` family (`_PROVIDER`, `_API_KEY`, `_FROM`, `_ENDPOINT`). It overrides `PYLON_EMAIL_*` for auth flows only. See [Auth → Configuration](/auth/overview#configuration).
 
 See [Stack0](https://www.stack0.dev), [Resend](https://resend.com), [SendGrid](https://sendgrid.com) for transactional sending services.
 
@@ -122,7 +122,7 @@ Your sign-in code is: 428193
 This code will expire in 10 minutes.
 ```
 
-To customize, intercept the send by writing your own action that calls `magic/send` server-side and ships your own templated email instead. The plugin system also supports replacing the email transport — see [Plugins → Integrations](/plugins/integrations).
+To customize, write your own action that calls `magic/send` server-side and sends your own templated email. The plugin system also supports replacing the email transport. See [Plugins → Integrations](/plugins/integrations).
 
 ## Error responses
 
@@ -164,4 +164,4 @@ For integration tests, this is the fastest sign-in path — no SMTP mock needed.
 | ❌ Email deliverability matters | ✅ Works without email | ❌ Requires app registration with provider |
 | ❌ Slower than typing a password | ✅ Fast for repeat users | ✅ One click after first use |
 
-Most apps should ship magic codes first, then add OAuth for one-click sign-in once they have users. Password is the third option, useful when email isn't an option (e.g. shared device with no email access).
+Most apps should start with magic codes, then add OAuth for one-click sign-in once they have users. Password is the third option, useful when email is not available (for example a shared device with no email access).

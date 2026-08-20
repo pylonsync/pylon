@@ -1,0 +1,408 @@
+# Migrating from InstantDB to Pylon
+
+> Draft — for internal review. Not published.
+
+## What is happening
+
+On August 20, 2026, Instant announced the end of Instant Cloud. These are the
+facts from the announcement:
+
+- Instant closes new signups soon.
+- Instant Cloud apps stop on August 31, 2027.
+- Backups stay available until August 31, 2028.
+- Instant refunds subscriptions that started after July 31, 2026.
+- Instant is open source. Instant recommends that you self-host it.
+
+Public sources: the Hacker News thread [*Instant (Instantdb.com)
+Sunsetting*](https://news.ycombinator.com/item?id=49375277), plus Instant's
+[self-hosting](https://www.instantdb.com/docs/self-hosting) and
+[Cloud-to-self-host migration](https://www.instantdb.com/docs/self-hosting/migrate)
+docs.
+
+If your app runs on Instant Cloud, you have about one year to move it.
+
+## Your two options
+
+**1. Self-host Instant.** Instant is open source, so you can run it yourself. The
+stack is large. To self-host Instant, you operate:
+
+- a Clojure/JVM server on PostgreSQL 16 (with `wal_level = logical` and the
+  `pg_hint_plan` extension);
+- a reverse proxy;
+- an email provider (Postmark or SendGrid);
+- the Java heap, tuned with `JAVA_OPTS`.
+
+Instant quotes about $30 per month for a side-project VPS, and $600 or more per
+month for a business AWS setup. Self-host Instant if you have an operations team
+and you want the exact Instant stack.
+
+**2. Move to a managed backend.** You chose Instant Cloud because you did not
+want to run a database, a JVM, and an email provider. Self-hosting gives you all
+three. Pylon Cloud keeps the managed experience. It uses the same live-sync and
+permissions-as-code model. You deploy it with one command. Pylon also self-hosts
+as one Rust binary on SQLite or Postgres, which is much lighter than the Instant
+stack.
+
+This guide covers option 2.
+
+## Why Pylon fits
+
+Pylon shares Instant's model. Most of your app maps directly:
+
+- a schema of entities with typed fields and relations;
+- permissions as code (per-entity, per-action boolean expressions that run on
+  the server);
+- a live client with reactive queries against a local replica, plus optimistic
+  writes that reconcile;
+- built-in auth (email codes and OAuth) and presence/rooms for ephemeral state.
+
+Pylon adds four things:
+
+- Hosted server functions. Instant runs logic on the client behind permission
+  rules. For server logic, you run your own backend with the Admin SDK. Pylon
+  runs your `query`, `mutation`, and `action` functions for you, each in a
+  transaction.
+- Server-side rendering. Pylon uses file-based routes (`app/page.tsx`). One
+  binary serves the frontend and the API.
+- A wider auth set: password, magic code, about 25 OAuth providers, passkeys,
+  and TOTP.
+- Vector search and aggregates in the query layer.
+
+## Concept map
+
+| Concept | InstantDB | Pylon |
+|---|---|---|
+| Client init | `init({ appId, schema })` (`@instantdb/react`) | `init({ appName })` (`@pylonsync/react`) |
+| Schema | `i.schema({ entities, links })`, `i.entity({...})` | `entity("Name", {...}, {...})` + `buildManifest(...)` |
+| Field types | `i.string/number/boolean/date/json()` | `field.string/int/float/bool/datetime/json()` |
+| Relation | `links: { forward, reverse, has: 'one'\|'many' }` | `field.id("Target")` foreign key, or `relations` + `include` |
+| Unique / indexed | `.unique()`, `.indexed()` | `.unique()`, `indexes: [{ fields, unique }]` |
+| Create | `db.transact(db.tx.todos[id()].create({...}))` | `db.useEntity("Todo").insert({...})` / `ctx.db.insert(...)` |
+| Update | `db.tx.todos[id].update({...})` | `.update(id, {...})` / `ctx.db.update(...)` |
+| Delete | `db.tx.todos[id].delete()` | `.remove(id)` / `ctx.db.delete(...)` |
+| Link | `db.tx.a[id].link({ b: bId })` | set the `field.id` field, or `ctx.db.link(...)` |
+| Live read | `db.useQuery({ todos: { $: { where } } })` | `db.useQuery("Todo", { where, orderBy, include, limit })` |
+| Nested read | `{ goals: { todos: {} } }` | `{ include: { todos: {} } }` |
+| Filter ops | `$gt $lt $in $like $ilike`, `and` / `or` | `$gt $lt $in $like`, `where` object |
+| One-shot read | `db.queryOnce(...)`, admin `db.query(...)` | `ctx.db.query / list / get` (server) |
+| Aggregates | not in the client API | `db.useAggregate(...)` |
+| Permissions | `instant.perms.ts` — `view/create/update/delete`, default allow | `policy({ allowRead/Insert/Update/Delete })`, default deny |
+| Lock a field | `newData.x == data.x` in an `update` rule | `field.string().owner()` (built in), or `existing.*` |
+| Auth (email) | `db.auth.sendMagicCode` / `signInWithMagicCode` | `POST /api/auth/magic/send` + `/magic/verify` |
+| Auth (OAuth) | `db.auth.signInWithIdToken` / `createAuthorizationURL` | `GET /api/auth/login/:provider?callback=` |
+| Auth state | `db.useAuth()` → `{ user }` | `db.useUser()` (client), `ctx.auth` (server) |
+| Presence / rooms | `db.room().usePresence` / `useTopicEffect` | `useRoom(id, userId)` + `useRoomMessages`, `ctx.rooms.broadcast` |
+| Storage | `db.storage.uploadFile`, `$files` | Pylon files provider |
+| Bulk / admin | `@instantdb/admin` `db.query` / `db.transact` | `POST /api/batch` (admin token), or a seed `mutation` |
+| Server logic | none hosted; run your own backend | `query` / `mutation` / `action` functions, `ctx.db` |
+| SSR | none | file-based SSR, `app/page.tsx`, `serverData` |
+| Deploy | self-host only (after the sunset) | `pylon deploy` (cloud) or single-binary self-host |
+
+## Migrating your schema
+
+Instant declares entities and links separately. Pylon declares an entity with
+its fields, and it expresses a relation as a foreign-key field.
+
+**Instant** (`instant.schema.ts`):
+
+```typescript
+import { i } from '@instantdb/react';
+
+const _schema = i.schema({
+  entities: {
+    profiles: i.entity({ nickname: i.string(), createdAt: i.date() }),
+    posts: i.entity({
+      title: i.string(),
+      body: i.string(),
+      createdAt: i.date(),
+    }),
+  },
+  links: {
+    postAuthor: {
+      forward: { on: 'posts', has: 'one', label: 'author' },
+      reverse: { on: 'profiles', has: 'many', label: 'authoredPosts' },
+    },
+  },
+});
+```
+
+**Pylon** (`app.ts`):
+
+```typescript
+import { entity, field, buildManifest, discoverAppRoutes } from "@pylonsync/sdk";
+
+const Profile = entity("Profile", {
+  nickname: field.string(),
+  createdAt: field.datetime(),
+});
+
+const Post = entity("Post", {
+  authorId: field.id("Profile"),   // the postAuthor link becomes a foreign-key field
+  title: field.string(),
+  body: field.string(),
+  createdAt: field.datetime(),
+}, {
+  indexes: [{ name: "by_author", fields: ["authorId"], unique: false }],
+});
+
+export default buildManifest({
+  name: "my-app",
+  version: "0.1.0",
+  entities: [Profile, Post],
+  policies: [/* see below */],
+  routes: await discoverAppRoutes(),
+});
+```
+
+Notes:
+
+- Instant's `.unique()` and `.indexed()` map to Pylon's `.unique()` and the
+  `indexes` option.
+- A one-to-many link becomes a `field.id("Parent")` on the many side. Add an
+  index on that field for query speed.
+- Instant creates `id` automatically. Pylon does the same. Instant's `$users`
+  maps to a Pylon `User` entity. Instant's `$files` maps to Pylon's file storage.
+
+## Migrating your permissions
+
+Do this step carefully. It is a security change, not only a syntax change.
+
+Instant allows by default. A namespace or action with no rule is open. Pylon
+denies by default. An entity with no policy is fully blocked.
+
+So you write a `policy()` for every entity. This includes entities that had no
+Instant rule, because those were open. For each one, decide whether it is truly
+public (`allow: "true"`) or was open by accident.
+
+The rule shapes match almost one to one.
+
+**Instant** (`instant.perms.ts`):
+
+```typescript
+const rules = {
+  todos: {
+    allow: {
+      view: "auth.id != null",
+      create: "isOwner",
+      update: "isOwner && isStillOwner",
+      delete: "isOwner",
+    },
+    bind: {
+      isOwner: "auth.id != null && auth.id == data.creatorId",
+      isStillOwner: "auth.id != null && auth.id == newData.creatorId",
+    },
+  },
+} satisfies InstantRules;
+```
+
+**Pylon** (`policy(...)` in `app.ts`):
+
+```typescript
+policy({
+  name: "todo_owner",
+  entity: "Todo",
+  allowRead: "auth.userId != null",
+  allowInsert: "auth.userId == data.creatorId",
+  allowUpdate: "auth.userId == data.creatorId",
+  allowDelete: "auth.userId == data.creatorId",
+});
+```
+
+How to convert each rule:
+
+- `view/create/update/delete` map to `allowRead/allowInsert/allowUpdate/allowDelete`.
+- `auth.id` maps to `auth.userId`. Pylon policies have no `auth.email`. Gate on
+  `auth.userId`, `auth.roles`, `auth.hasAnyRole(...)`, or `auth.tenantId`.
+- `data.*` is the row in both systems. Inline Instant's `bind` macros.
+- To lock an immutable field, use `field.string().owner()` in Pylon. It stamps
+  `auth.userId` on insert. It rejects a false owner value. It locks the value on
+  update. You do not need Instant's `newData.x == data.x` rule.
+
+## Migrating reads and writes
+
+Reads. Instant nests linked namespaces in the query object. Pylon uses an
+`include` map.
+
+```typescript
+// Instant
+const { data } = db.useQuery({
+  posts: { author: {}, $: { where: { authorId }, order: { createdAt: 'desc' } } },
+});
+
+// Pylon
+const posts = db.useQuery<Post>("Post", {
+  where: { authorId },
+  include: { author: {} },
+  orderBy: { createdAt: "desc" },
+});
+```
+
+Writes. Instant's `db.transact(db.tx...)` becomes a client hook (optimistic) or
+a server function.
+
+```typescript
+// Instant
+db.transact(db.tx.todos[id()].create({ title, done: false, creatorId: user.id }));
+db.transact(db.tx.todos[todoId].update({ done: true }));
+db.transact(db.tx.todos[todoId].delete());
+
+// Pylon — client, optimistic
+const todos = db.useEntity("Todo");
+todos.insert({ title, done: false, creatorId: userId });
+todos.update(todoId, { done: true });
+todos.remove(todoId);
+
+// Pylon — server, in a transaction
+export default mutation({
+  args: { title: v.string() },
+  async handler(ctx, { title }) {
+    return ctx.db.insert("Todo", { title, done: false, creatorId: ctx.auth.userId });
+  },
+});
+```
+
+## Migrating your data
+
+Use Instant's export. Do not read the triple store directly.
+
+**1. Export from Instant.** The backup is a zip file. It contains one NDJSON
+file per entity, a `config.json` (schema and rules), and a `files/` folder.
+
+```bash
+npx instant-cli@latest backup download --latest
+```
+
+For a scripted dump, use the Admin SDK. `db.query({ profiles: {}, posts: {} })`
+reads everything, because the admin token bypasses permissions.
+
+**2. Convert ids and relationships.** Instant ids are UUIDs. Instant links are
+separate triples. Pylon ids are 40-character lowercase hex strings. So you
+cannot reuse Instant's ids directly, and Pylon rejects a UUID with `INVALID_ID`.
+Use one of two methods:
+
+- Derive the id (simplest). Convert each Instant UUID to a Pylon id with a fixed
+  function. Apply the same function to every foreign key. `sha1(uuid)` gives 40
+  lowercase hex characters, so it fits Pylon's format. It needs no lookup table,
+  and the relationships stay correct. Derived ids are not time-ordered, so sort
+  by your `createdAt` fields.
+- Map the id. Generate a new Pylon id per row with `generateId()` from
+  `@pylonsync/sync`. Keep an old-UUID-to-new-id map. Rewrite the foreign keys in
+  a second pass.
+
+In both methods, fold each Instant link onto the child row as its `field.id`
+field during the conversion.
+
+**3. Import into Pylon.** The admin batch endpoint loads rows quickly and
+bypasses per-entity policies. It needs an admin token. Send batches of a few
+hundred rows.
+
+```bash
+POST /api/batch
+Authorization: Bearer <PYLON_ADMIN_TOKEN>
+{
+  "operations": [
+    { "op": "insert", "entity": "Profile", "data": { "id": "...", "nickname": "eva", "createdAt": "..." } },
+    { "op": "insert", "entity": "Post", "data": { "id": "...", "authorId": "...", "title": "...", "body": "...", "createdAt": "..." } }
+  ]
+}
+```
+
+A sketch of the conversion:
+
+```javascript
+import { createHash } from "node:crypto";
+
+// Instant UUID -> valid Pylon id (40-char lowercase hex). Deterministic,
+// so foreign keys map the same way with no lookup table.
+const toPylonId = (uuid) => createHash("sha1").update(uuid).digest("hex");
+
+// read entities/posts.ndjson, one JSON object per line
+for (const batch of chunk(rows, 500)) {
+  const operations = batch.map((row) => ({
+    op: "insert",
+    entity: "Post",
+    data: {
+      id: toPylonId(row.id),
+      authorId: toPylonId(row.author),   // link folded into a foreign-key field
+      title: row.title,
+      body: row.body,
+      createdAt: row.createdAt,
+    },
+  }));
+  await fetch(`${PYLON_URL}/api/batch`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ operations }),
+  });
+}
+```
+
+**4. Files.** Download the files from the backup's `files/` folder. Upload them
+to Pylon's file storage. Rewrite the stored file paths.
+
+**5. Users.** Import each Instant `$users` row into your Pylon `User` entity. Key
+each user by email. Sessions do not transfer. Both systems use passwordless
+email auth, so each user signs in again with a magic code. The email links the
+user to the imported data. You do not migrate passwords.
+
+## Migrating auth
+
+Instant defaults to magic codes. Pylon has the same passwordless email flow, so
+the user experience stays the same.
+
+```typescript
+// Instant
+await db.auth.sendMagicCode({ email });
+await db.auth.signInWithMagicCode({ email, code });
+
+// Pylon
+await fetch("/api/auth/magic/send", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email }),
+});
+const res = await fetch("/api/auth/magic/verify", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email, code }),
+});
+const { token } = await res.json();
+setSessionToken(token);   // stores the token and re-syncs the replica for this user
+```
+
+OAuth also maps. Instant's `signInWithIdToken` and `createAuthorizationURL`
+become a redirect to `GET /api/auth/login/:provider?callback=<url>`. Pylon
+supports Google, GitHub, Apple, Microsoft, and about 20 more providers. Pylon
+also supports passkeys and TOTP if you want to add them.
+
+## What does not map cleanly
+
+Check these points before you commit:
+
+- Per-viewer field permissions. Instant's `fields` block shows a field to its
+  owner and hides it from others, while the row stays public. Pylon hides a field
+  from all clients (`field.serverOnly()` or `.syncOmit()`), not per viewer. To
+  keep per-viewer access, serve the field through a server function, or move it
+  to its own owner-scoped entity.
+- Schemaless data. Instant lets you add arbitrary attributes and deep-merge into
+  JSON with `merge()`. Pylon is schema-first. Freeform data goes in a
+  `field.json()` field. An update replaces the whole field, so there is no
+  per-key merge.
+- Sessions. Sessions do not transfer. Users sign in again. This is a non-issue
+  for passwordless email.
+- Instant-specific query features. Deep InstaQL nesting and `$users`/`$files`
+  tricks need a rewrite to Pylon's `include` and its `User` and files model.
+
+None of these blocks a typical app. Each one needs a decision, not a mechanical
+rewrite.
+
+## Get started
+
+1. Create a new Pylon app: `npm create @pylonsync/pylon@latest my-app`.
+2. Rewrite the schema (`entity` and `field`). Write a `policy()` for every
+   entity. Remember default-deny.
+3. Run the export, conversion, and `/api/batch` import against a staging app
+   first.
+4. Point the client at Pylon: `init`, the auth calls, `db.useQuery`, and
+   `db.useEntity`.
+5. Run `pylon deploy`, or self-host the single binary.
+
+Start early. Instant Cloud stops on August 31, 2027.

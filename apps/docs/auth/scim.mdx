@@ -3,11 +3,11 @@ title: SCIM 2.0
 description: "Provision Pylon users from Okta, Azure AD, and other identity providers through RFC 7644 SCIM."
 ---
 
-SCIM 2.0 is the standard "your IdP creates and deactivates users in your app automatically" protocol. Okta, Azure AD, OneLogin, JumpCloud, and others all speak it. Pylon ships a minimal SCIM 2.0 server in the binary — `Users` endpoint, bearer-token gated, soft-delete on `DELETE`.
+SCIM 2.0 is the standard protocol for an IdP to create and deactivate users in your app automatically. Okta, Azure AD, OneLogin, JumpCloud, and others support it. Pylon ships a minimal SCIM 2.0 server in the binary: a `Users` endpoint, bearer-token gated, with soft-delete on `DELETE`.
 
 ## What's implemented
 
-The implementation covers user provisioning and the `userName eq "..."` filter that identity providers use for lookup. It does not yet cover Groups, Bulk, or the full SCIM filter grammar. This surface supports the standard Okta and Azure AD provisioning flow for creating and deactivating users.
+The implementation covers user provisioning and the `userName eq "..."` filter that identity providers use for lookup. It does not yet cover Groups, Bulk, or the full SCIM filter grammar. It supports the standard Okta and Azure AD provisioning flow for creating and deactivating users.
 
 | Endpoint | Method | Behavior |
 | --- | --- | --- |
@@ -42,7 +42,7 @@ export const User = entity("User", {
 });
 ```
 
-`scimActive=false` is the soft-delete signal — your app code should refuse sign-in / hide the user when this flag is false. Pylon doesn't auto-revoke sessions on SCIM deactivate; if you want that behavior, watch the User entity for updates and revoke matching sessions in a plugin or scheduled job.
+`scimActive=false` is the soft-delete signal. Your app code should refuse sign-in or hide the user when this flag is false. Pylon does not auto-revoke sessions on SCIM deactivate. If you want that behavior, watch the User entity for updates and revoke matching sessions in a plugin or scheduled job.
 
 ## Authentication
 
@@ -52,7 +52,7 @@ Bearer-token gated:
 Authorization: Bearer <PYLON_SCIM_TOKEN>
 ```
 
-Token comparison is constant-time. Without `PYLON_SCIM_TOKEN` set, the env-var pull returns `None` and `check_bearer` returns false for every token — every SCIM request gets `401`.
+Token comparison is constant-time. Without `PYLON_SCIM_TOKEN` set, the env-var pull returns `None` and `check_bearer` returns false for every token. Every SCIM request gets `401`.
 
 ```bash
 PYLON_SCIM_TOKEN=<generate a high-entropy token, e.g. `openssl rand -hex 32`>
@@ -117,7 +117,7 @@ Response:
 }
 ```
 
-Only the `?filter=userName eq "..."` probe is supported (case-insensitive per RFC 7643). Pagination (`?startIndex=&count=`) is **not yet implemented** — an unfiltered list returns every row, bounded by your User table size. If you have 50k+ users provisioned via SCIM, plan accordingly.
+Only the `?filter=userName eq "..."` probe is supported (case-insensitive per RFC 7643). Pagination (`?startIndex=&count=`) is not yet implemented. An unfiltered list returns every row, bounded by your User table size. If you have 50k+ users provisioned via SCIM, plan accordingly.
 
 ## Soft delete
 
@@ -126,7 +126,7 @@ curl -X DELETE https://your-app/scim/v2/Users/usr_xyz \
   -H 'Authorization: Bearer <PYLON_SCIM_TOKEN>'
 ```
 
-Returns `204 No Content`. The row stays in the DB with `scimActive: false`. Hard delete is your app's call — typically a periodic job that hard-deletes rows that have been `scimActive: false` for N days.
+Returns `204 No Content`. The row stays in the DB with `scimActive: false`. Hard delete is your app's decision, typically a periodic job that hard-deletes rows that have been `scimActive: false` for N days.
 
 ## Security guarantees
 
@@ -140,7 +140,7 @@ Returns `204 No Content`. The row stays in the DB with `scimActive: false`. Hard
 PYLON_SCIM_TOKEN=<openssl rand -hex 32>     # required to enable SCIM
 ```
 
-Set this on the Pylon side, then paste it into your IdP's SCIM provisioning config alongside `https://your-app.com/scim/v2/`. The IdP discovers the endpoint by probing — it'll send a few test requests, see SCIM-shaped responses, and confirm.
+Set this on the Pylon side, then paste it into your IdP's SCIM provisioning config alongside `https://your-app.com/scim/v2/`. The IdP discovers the endpoint by probing. It sends a few test requests, sees SCIM-shaped responses, and confirms.
 
 ## Where to go next
 

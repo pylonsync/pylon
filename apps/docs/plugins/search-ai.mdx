@@ -4,13 +4,13 @@ sidebarTitle: "Search & AI"
 description: "Full-text search (FTS5 + facets), vector search, and the built-in LLM proxy. MCP-as-a-plugin is on the roadmap."
 ---
 
-Two capabilities ship today: **full-text search** (configured per-entity) and a **built-in LLM proxy** (configured by env). Neither is enabled through a `manifest.plugins` list.
+Two capabilities ship today: full-text search (configured per-entity) and a built-in LLM proxy (configured by env). Neither is enabled through a `manifest.plugins` list.
 
 ## `search`
 
-Full-text search backed by SQLite's FTS5 (or Postgres `tsvector` on Postgres). Configured on the **entity**, not as a plugin — the presence of a `search` config creates FTS5 + facet-bitmap shadow tables on schema push, maintained on every write.
+Full-text search backed by SQLite's FTS5 (or Postgres `tsvector` on Postgres). You configure it on the entity, not as a plugin. A `search` config creates FTS5 + facet-bitmap shadow tables on schema push. Pylon maintains them on every write.
 
-Declare it with the fluent builder's `.search({...})` (or the `search` key in the entity options):
+Declare it with the builder's `.search({...})` (or the `search` key in the entity options):
 
 ```ts
 import { e, field } from "@pylonsync/sdk";
@@ -43,22 +43,22 @@ const { hits, facetCounts, total, loading } = db.useSearch<Post>("Post", {
 });
 ```
 
-`facetCounts` is the live count per facet value over the current filtered hit set — enough to build Algolia-style faceted UIs without Algolia.
+`facetCounts` is the live count per facet value over the current filtered hit set. It is enough to build Algolia-style faceted UIs without Algolia.
 
 ## LLM proxy
 
-A built-in proxy to LLM providers so your API key stays server-side and clients never see it. It's configured by **environment variables**, not a plugin entry.
+A built-in proxy to LLM providers so your API key stays server-side and clients never see it. Environment variables configure it, not a plugin entry.
 
 Two endpoints, both requiring an authenticated session:
 
 - `POST /api/llm/complete` — non-streaming completion.
 - `POST /api/ai/stream` — SSE streaming completion.
 
-And, inside a **mutation** or **action**, `ctx.llm.complete(...)` / `ctx.llm.stream(...)` (server-only — the key never reaches the client; neither is available in queries).
+And, inside a mutation or action, `ctx.llm.complete(...)` / `ctx.llm.stream(...)` (server-only; the key never reaches the client, and neither is available in queries).
 
 ### `ctx.llm.stream`
 
-`complete` resolves when the model finishes. `stream` calls your handler for each event as the provider emits it, then resolves with the same assembled response — so you can push text to the client while it's generating and still branch on `stop_reason` afterwards:
+`complete` resolves when the model finishes. `stream` calls your handler for each event as the provider emits it, then resolves with the same assembled response. You can push text to the client while it generates and still branch on `stop_reason` afterwards:
 
 ```ts
 const res = await ctx.llm.stream(
@@ -70,9 +70,9 @@ const res = await ctx.llm.stream(
 if (res.stop_reason === "tool_use") { /* run the tools, loop */ }
 ```
 
-Events are `text_delta {text}`, `tool_use_start {id, name}`, `tool_input_delta {partial_json}`, and `done {stop_reason, usage}`. Tool arguments arrive as raw JSON fragments — concatenate them and parse once at the end.
+Events are `text_delta {text}`, `tool_use_start {id, name}`, `tool_input_delta {partial_json}`, and `done {stop_reason, usage}`. Tool arguments arrive as raw JSON fragments. Concatenate them and parse once at the end.
 
-Same auth gate and same model allowlist as `complete`: streaming can't reach a model `complete` would refuse. Streaming does **not** extend the call deadline (`PYLON_FN_CALL_TIMEOUT`, 30s default), so a long agent run has to declare `timeout: <seconds>` on the function.
+Same auth gate and same model allowlist as `complete`: streaming cannot reach a model `complete` would refuse. Streaming does not extend the call deadline (`PYLON_FN_CALL_TIMEOUT`, 30s default), so a long agent run must declare `timeout: <seconds>` on the function.
 
 To reach every client watching rather than only the caller, push the same deltas through [`ctx.rooms.broadcast`](/concepts/functions#server-push-to-a-room). Full walkthrough, including an agent tool loop: [Functions → Streaming LLM output](/concepts/functions#streaming-llm-output).
 
@@ -106,16 +106,16 @@ buildManifest({
 
 Why proxy:
 
-1. **API keys stay server-side** — browser / native clients never see them.
-2. **Auth-gated** — both endpoints require a session.
-3. **Model allowlist** — cap which models clients can invoke.
+1. **API keys stay server-side:** browser / native clients never see them.
+2. **Auth-gated:** both endpoints require a session.
+3. **Model allowlist:** cap which models clients can invoke.
 
 ## Vector search
 
-Built in — not a plugin, a field type. Declare `embedding: field.vector(1536)` on an entity, fill it with `ctx.llm.embed(texts)` (OpenAI or Voyage), and query with `ctx.db.vectorSearch(entity, { field, vector, limit, filter })` or `POST /api/vector-search/<Entity>`. Exact k-NN, cosine by default, both backends. Full guide: [Vector Search](/concepts/vector-search).
+Built in as a field type, not a plugin. Declare `embedding: field.vector(1536)` on an entity, fill it with `ctx.llm.embed(texts)` (OpenAI or Voyage), and query with `ctx.db.vectorSearch(entity, { field, vector, limit, filter })` or `POST /api/vector-search/<Entity>`. Exact k-NN, cosine by default, both backends. Full guide: [Vector Search](/concepts/vector-search).
 
 ## Not yet built in
 
-- **MCP server** — exposing your entities/functions as Model Context Protocol tools as a manifest plugin is planned, not shipped. The CLI's `pylon mcp` (agent tooling) exists today.
+- **MCP server:** exposing your entities/functions as Model Context Protocol tools as a manifest plugin is planned, not shipped. The CLI's `pylon mcp` (agent tooling) exists today.
 
-Don't build against unshipped plugins until they land.
+Do not build against unshipped plugins until they ship.

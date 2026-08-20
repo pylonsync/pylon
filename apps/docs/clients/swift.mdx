@@ -3,7 +3,7 @@ title: Swift SDK
 description: "Native Swift for iOS, macOS, tvOS, watchOS, and Linux. PylonClient, PylonSync, PylonRealtime, PylonSwiftUI."
 ---
 
-The Swift SDK gives you full TypeScript-equivalent functionality on Apple platforms (and Linux for server-side Swift). Auth, entity CRUD, optimistic mutations, real-time sync with offline replay, multiplayer shards, Loro CRDTs, SwiftUI hooks — all native, no JavaScript bridge.
+The Swift SDK gives you full TypeScript-equivalent functionality on Apple platforms (and Linux for server-side Swift). Auth, entity CRUD, optimistic mutations, real-time sync with offline replay, multiplayer shards, Loro CRDTs, and SwiftUI hooks are all native, with no JavaScript bridge.
 
 ## Modules
 
@@ -293,7 +293,7 @@ try textContainer.insert(pos: 0, s: "Hello, world!")
 // Local edits sync to other clients automatically via the binary CRDT channel.
 ```
 
-The CRDT logic isn't reimplemented in Swift — `loro-swift` wraps the same Rust core as the JS `loro-crdt` package, so convergence is identical across platforms by construction.
+The CRDT logic isn't reimplemented in Swift. `loro-swift` wraps the same Rust core as the JS `loro-crdt` package, so convergence is identical across platforms by construction.
 
 ## Codegen
 
@@ -358,11 +358,11 @@ let client = PylonClient(
 
 ## Differences from the React/JS clients
 
-- **Actor isolation** — `PylonClient` and `SyncEngine` are `actor`s, so calls into them require `await`
-- **Codable everywhere** — entities are decoded into your Swift structs at the boundary; no JSON-as-`Any` floating around
-- **Background sessions** — Apple's `URLSession.background` works seamlessly
-- **No bundler** — Swift Package Manager handles versioning, no webpack/esbuild
-- **Linux-compatible** — server-side Swift apps can use the same SDK
+- **Actor isolation:** `PylonClient` and `SyncEngine` are `actor`s, so calls into them require `await`
+- **Codable everywhere:** entities decode into your Swift structs at the boundary; no JSON-as-`Any` values
+- **Background sessions:** Apple's `URLSession.background` works
+- **No bundler:** Swift Package Manager handles versioning, no webpack/esbuild
+- **Linux-compatible:** server-side Swift apps can use the same SDK
 
 ## Tests
 
@@ -379,6 +379,6 @@ The package includes 43+ tests covering HTTP, sync engine, mutation queue, SQLit
 
 ## Where to next
 
-- **[Sync engine](/clients/sync)** — wire format, transport details
-- **[Loro CRDTs](/clients/loro)** — collaborative text/lists
-- **[Auth](/auth/overview)** — endpoint reference
+- **[Sync engine](/clients/sync):** wire format, transport details
+- **[Loro CRDTs](/clients/loro):** collaborative text/lists
+- **[Auth](/auth/overview):** endpoint reference

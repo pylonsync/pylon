@@ -3,7 +3,7 @@ title: "@pylonsync/feature-flags"
 description: "Evaluate boolean and multivariate flags locally with rollouts, targeting rules, and JSON payloads."
 ---
 
-Local-eval means flag checks are pure in-memory computations — no network call per request. Determinism comes from a stable hash of the bucketing key (default `userId`).
+Local-eval means flag checks are pure in-memory computations, with no network call per request. Determinism comes from a stable hash of the bucketing key (default `userId`).
 
 ## Install
 
@@ -55,14 +55,14 @@ Multiple predicates AND together within a `when` block. Multiple rules within a 
 
 ## Bucketing
 
-`hashBucket(key, percent)` is FNV-1a — fast (sub-microsecond on hot paths), well-distributed, deterministic. Same hash PostHog/LaunchDarkly use for local-eval.
+`hashBucket(key, percent)` is FNV-1a. It is fast (sub-microsecond per call), well-distributed, and deterministic. PostHog and LaunchDarkly use the same hash for local-eval.
 
 For per-tenant rollouts (every member of a tenant sees the same value), set `rollout.key = "orgId"`. For cohort experiments, supply a custom property key.
 
 ## SSR bootstrap
 
-`evaluateAll(flags, ctx)` resolves every flag's current value. Serialize the result into the SSR-rendered HTML so the client doesn't have to wait for a flag fetch — eliminates the "flicker" pattern where a flag-controlled UI flashes before the eval completes.
+`evaluateAll(flags, ctx)` resolves every flag's current value. Serialize the result into the SSR-rendered HTML. The client then does not wait for a flag fetch. This removes the "flicker" where a flag-controlled UI flashes before the eval completes.
 
 ## Editable flags
 
-When `cfg.editable === true`, the manifest fragment adds a `FeatureFlag` entity + `setFlag` / `deleteFlag` admin mutations. The runtime caches the catalog in-process and invalidates on mutation. Use this for kill switches ops needs to flip without a redeploy.
+When `cfg.editable === true`, the manifest fragment adds a `FeatureFlag` entity plus `setFlag` / `deleteFlag` admin mutations. The runtime caches the catalog in-process and invalidates on mutation. Use this for a switch ops must change without a redeploy.

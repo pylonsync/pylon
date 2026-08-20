@@ -3,7 +3,7 @@ title: Entities
 description: "Declare typed tables with fields, indexes, and relationships."
 ---
 
-An **entity** is a table. You declare one with `entity(name, fields, options)`.
+An entity is a table. You declare one with `entity(name, fields, options)`.
 
 ```ts
 import { entity, field } from "@pylonsync/sdk";
@@ -21,7 +21,7 @@ const User = entity(
 );
 ```
 
-Every entity gets an auto-generated `id` — a 40-char lowercase-hex, lexicographically-sortable string (timestamp + counter) — plus the column order you declared. (The runtime rejects non-conforming ids like ULIDs/UUIDs, because cursor pagination relies on the fixed 40-char width.)
+Every entity gets an auto-generated `id`, a 40-char lowercase-hex, lexicographically-sortable string (timestamp + counter), plus the column order you declared. (The runtime rejects non-conforming ids like ULIDs/UUIDs, because cursor pagination relies on the fixed 40-char width.)
 
 ## Field types
 
@@ -82,13 +82,13 @@ Current field behavior:
 | `.crdt("lww")` | Explicit LWW |
 
 All five CRDT kinds (`text`, `counter`, `list`, `movable-list`, `tree`) are
-implemented end-to-end as of v0.3.100 — broadcasts ship the full Loro snapshot
+fully implemented as of v0.3.100. Broadcasts ship the full Loro snapshot
 on first write per row, then incremental deltas (v0.3.105 SQLite, v0.3.107
 Postgres) keyed off the last-broadcast version vector.
 
 ## Field gates: serverOnly & readonly
 
-Two modifiers control how a field flows through the HTTP boundary. They're additive — the field type, optionality, and indexes still work the same.
+Two modifiers control how a field flows through the HTTP boundary. They are additive. The field type, optionality, and indexes still work the same.
 
 ```ts
 const Org = entity("Org", {
@@ -100,7 +100,7 @@ const Org = entity("Org", {
 
 **`.serverOnly()`** — the field is stripped from every public response shape: `GET /api/entities/<entity>`, `GET /api/entities/<entity>/<id>`, the session-projection `/api/auth/session`, and sync push deltas. It stays readable from inside server functions via `ctx.db.*` so your handler can do internal work with it (e.g. webhook receivers look up `stripeCustomerId` from the Stripe customer id without leaking the value to clients).
 
-**`.syncOmit()`** — the field is stripped from **replication only**: snapshot pulls, delta change events, WS fanout, and the reconcile's `sync=1` fetches. Direct reads — `db.get`, entity lists, queries, SSR `serverData` — keep it. Use it for heavy-but-not-secret columns (multi-KB JSON blobs, render plans, generated markdown) that would otherwise ride into every browser's replica on every sync:
+**`.syncOmit()`** — the field is stripped from replication only: snapshot pulls, delta change events, WS fanout, and the reconcile's `sync=1` fetches. Direct reads keep it: `db.get`, entity lists, queries, SSR `serverData`. Use it for heavy-but-not-secret columns (multi-KB JSON blobs, render plans, generated markdown) that would otherwise ride into every browser's replica on every sync:
 
 ```ts
 const Variant = entity("Variant", {
@@ -110,9 +110,9 @@ const Variant = entity("Variant", {
 });
 ```
 
-Replica rows simply never hold the column, so declare such fields `.optional()` and fetch by id in the detail view that needs them. Contrast `serverOnly`, which hides a field from *all* client surfaces — `syncOmit` is about weight, `serverOnly` is about secrecy.
+Replica rows simply never hold the column, so declare such fields `.optional()` and fetch by id in the detail view that needs them. Contrast `serverOnly`, which hides a field from every client surface. `syncOmit` limits weight; `serverOnly` protects secrecy.
 
-If you want the field exposed to a specific client, re-serialize it inside a function return — `ctx.db.unsafe.get` (post v0.3.160) skips the strip; the default `ctx.db.get` honors it.
+If you want the field exposed to a specific client, re-serialize it inside a function return. `ctx.db.unsafe.get` (post v0.3.160) skips the strip; the default `ctx.db.get` honors it.
 
 **`.readonly()`** — the field is settable on insert but rejected on update. Any `PATCH /api/entities/<entity>/<id>` payload that mentions the field returns `400 READONLY_FIELD` before the policy even runs. Closes the canonical IDOR-via-update-payload shape:
 
@@ -130,13 +130,13 @@ authorId: field.id("User").readonly()
 
 Admin contexts bypass both gates — ops scripts and migrations still rewrite the columns.
 
-Server-side writes via `ctx.db.update` inside a mutation/action are **not** blocked by `.readonly()`. Server code is trusted to enforce its own invariants; readonly is an HTTP-boundary defense, not a hard write-lock.
+Server-side writes via `ctx.db.update` inside a mutation/action are not blocked by `.readonly()`. Server code is trusted to enforce its own invariants; readonly is an HTTP-boundary defense, not a hard write-lock.
 
 ## Owned writes: `field.owner()`
 
 <Info>Requires pylon **0.3.261+**.</Info>
 
-`.owner()` marks a field as **the row's owner**, stamped from the session and unspoofable. It's what lets *optimistic, local-first writes be the default* for owned data — without a server function.
+`.owner()` marks a field as the row's owner, stamped from the session and unspoofable. It makes optimistic, local-first writes the default for owned data, without a server function.
 
 ```ts
 const Offer = entity("Offer", {
@@ -148,16 +148,16 @@ const Offer = entity("Offer", {
 
 `field.owner()` makes owned creates both optimistic and safe. The client inserts with its session id for immediate local feedback, and the server stamps and verifies that id before the row lands. Without it, a plain `db.insert` must trust a spoofable client-supplied owner id or move the write into a server function with a hand-written optimistic callback.
 
-On **insert**, the framework:
+On insert, the framework:
 
 - fills the field from `auth.userId` when it's omitted;
 - passes a value through unchanged when it equals the caller's own id, so the optimistic ghost and canonical row match;
-- rejects a different non-empty value from a non-admin caller with **`403 OWNER_MISMATCH`**;
-- rejects an anonymous caller with **`401 OWNER_REQUIRED`**. Guests count because they have a stable guest id.
+- rejects a different non-empty value from a non-admin caller with `403 OWNER_MISMATCH`;
+- rejects an anonymous caller with `401 OWNER_REQUIRED`. Guests count because they have a stable guest id.
 
-On **update**, `.owner()` behaves like [`.readonly()`](#field-gates-serveronly--readonly) — the owner can't be reassigned through the HTTP entity routes. Admin contexts may set an explicit value (migrations, tooling).
+On update, `.owner()` behaves like [`.readonly()`](#field-gates-serveronly--readonly). The owner can't be reassigned through the HTTP entity routes. Admin contexts may set an explicit value (migrations, tooling).
 
-Reach for `field.owner()` instead of writing a function whenever the only server-authoritative part of a create is *who made it*. Mechanically it's a dynamic default: `.owner()` serializes to a `{"$auth":"userId"}` marker that the auth-aware mutation pipeline fills — the storage layer never stamps it without a session, so there's no way to end up with a row "owned" by no one.
+Use `field.owner()` instead of writing a function whenever the only server-authoritative part of a create is who made it. Mechanically it's a dynamic default: `.owner()` serializes to a `{"$auth":"userId"}` marker that the auth-aware mutation pipeline fills. The storage layer never stamps it without a session, so there is no way to end up with a row "owned" by no one.
 
 ## Indexes
 
@@ -185,7 +185,7 @@ Indexes are created and maintained automatically. Live queries use them to stay 
 
 ## Relationships
 
-Pylon doesn't have a separate relation primitive — use `field.id("Other")` and query with filters. The typed client `db.query("Message", { roomId })` narrows by indexed columns.
+Pylon has no separate relation primitive. Use `field.id("Other")` and query with filters. The typed client `db.query("Message", { roomId })` narrows by indexed columns.
 
 ```ts
 // In a server function:
@@ -197,7 +197,7 @@ const { data: messages } = db.useQuery("Message", { where: { roomId } });
 
 ## Schema changes
 
-Edit `app.ts`, save — `pylon dev` picks up the change and runs a live migration. Pylon's storage layer plans the diff (add column, drop index, etc.) and applies it to your database, whether SQLite or Postgres. Destructive operations (dropping a column that has data) require you to bump `manifest.version`.
+Edit `app.ts` and save. `pylon dev` detects the change and runs a live migration. Pylon's storage layer plans the diff (add column, drop index, etc.) and applies it to your database, whether SQLite or Postgres. Destructive operations (dropping a column that has data) require you to bump `manifest.version`.
 
 ## Next
 

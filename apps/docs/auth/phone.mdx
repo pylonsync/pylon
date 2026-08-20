@@ -48,7 +48,7 @@ Response in dev mode OR if SMS send failed (so the user isn't blocked):
 { "sent": false, "phone": "+15551234567", "dev_code": "123456" }
 ```
 
-The `dev_code` field is returned whenever `PYLON_DEV_MODE=true` **or** the SMS transport returned an error — so a misconfigured Twilio account doesn't lock anyone out during early development. In production with a working Twilio config, `dev_code` is omitted and only the SMS itself carries the code.
+The `dev_code` field is returned whenever `PYLON_DEV_MODE=true` or the SMS transport returned an error. A misconfigured Twilio account then does not lock anyone out during early development. In production with a working Twilio config, `dev_code` is omitted and only the SMS carries the code.
 
 Errors:
 
@@ -82,7 +82,7 @@ Response on success:
 }
 ```
 
-`displayName` is optional — used when Pylon needs to create a new User row because no existing row has this `phone`. On subsequent sign-ins for the same number, `displayName` is ignored (the existing row's name stays).
+`displayName` is optional. Pylon uses it when it creates a new User row because no existing row has this `phone`. On later sign-ins for the same number, `displayName` is ignored (the existing row's name stays).
 
 Errors:
 
@@ -96,7 +96,7 @@ On first successful verify Pylon stamps `phoneVerified` to the current ISO 8601 
 
 ## Twilio transport (built-in)
 
-The default SMS transport is Twilio. Set three env vars and you're done:
+The default SMS transport is Twilio. Set three env vars:
 
 ```bash
 PYLON_TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxx
@@ -104,11 +104,11 @@ PYLON_TWILIO_AUTH_TOKEN=your_twilio_auth_token
 PYLON_TWILIO_FROM=+15551234567       # your Twilio phone number
 ```
 
-When all three are set, `/phone/send-code` ships an SMS via Twilio's REST API. When any are missing, `sent` is `false` and the `dev_code` is returned in the response.
+When all three are set, `/phone/send-code` sends an SMS via Twilio's REST API. When any are missing, `sent` is `false` and the `dev_code` is returned in the response.
 
 ## Custom SMS providers
 
-The `pylon-auth` crate exposes an `SmsSender` trait — the crate-level extension point for a non-Twilio provider (MessageBird, Vonage, Plivo, AWS SNS, an internal SMS gateway):
+The `pylon-auth` crate exposes an `SmsSender` trait. It is the crate-level extension point for a non-Twilio provider (MessageBird, Vonage, Plivo, AWS SNS, or an internal SMS gateway):
 
 ```rust
 use pylon_auth::phone::SmsSender;
@@ -123,17 +123,17 @@ impl SmsSender for MyProvider {
 }
 ```
 
-Note the shipped `pylon` binary only wires the built-in **Twilio** transport, invoked directly from the `/phone/send-code` route handler via `TwilioSmsTransport::from_env()` — there is no env-var switch or registration hook to swap in a custom `SmsSender` in the prebuilt binary. (`PhoneCodeStore` itself only generates + persists the 6-digit code — it returns the code to the caller, which is responsible for delivery; it does not hold an `SmsSender`.) To run a different provider today you build on the `pylon-auth` crate directly in your own Rust binary; env-configurable third-party transports for the shipped binary are not yet available.
+The shipped `pylon` binary wires only the built-in Twilio transport. The `/phone/send-code` route handler calls it directly via `TwilioSmsTransport::from_env()`. The prebuilt binary has no env-var switch or registration hook to swap in a custom `SmsSender`. (`PhoneCodeStore` only generates and persists the 6-digit code. It returns the code to the caller, which delivers it; it does not hold an `SmsSender`.) To run a different provider today, build on the `pylon-auth` crate directly in your own Rust binary. Env-configurable third-party transports for the shipped binary are not yet available.
 
 ## Security guarantees
 
-- **E.164 normalization** on `phone` before storage. `(555) 123-4567`, `555-123-4567`, and `+15551234567` collapse to the same canonical form — no two accounts for the same number.
+- **E.164 normalization** on `phone` before storage. `(555) 123-4567`, `555-123-4567`, and `+15551234567` collapse to the same canonical form. No two accounts share a number.
 - **6-digit code, 10-minute TTL** — same as magic codes.
 - **Code burns after wrong attempts** — `try_verify` increments an attempt counter; too many wrong attempts and the code is invalidated server-side. Status `429 INVALID_CODE`.
 - **Constant-time code comparison** — no timing leak on verify.
-- **Per-number rate limit** on `send-code` so a phone-number enumeration attack can't tie up SMS budget.
+- **Per-number rate limit** on `send-code` so a phone-number enumeration attack cannot exhaust the SMS budget.
 - **Optional CAPTCHA gate** — set `PYLON_CAPTCHA_PROVIDER` to require a captcha token before send. See [CAPTCHA](/auth/captcha).
-- **Twilio credentials never logged.** On transport failure only the provider error is logged at warn level (`[phone] twilio send failed: <error>`) — the SMS body and the code itself are never written to logs.
+- **Twilio credentials never logged.** On transport failure only the provider error is logged at warn level (`[phone] twilio send failed: <error>`). The SMS body and the code are never written to logs.
 
 ## Where to go next
 

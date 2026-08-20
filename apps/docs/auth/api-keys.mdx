@@ -49,7 +49,7 @@ curl -X POST https://your-app/api/auth/api-keys \
   }'
 ```
 
-`scopes` is an optional free-form string and `expires_at` is an optional unix timestamp (seconds). API-key auth can't create keys — a real session is required (`403 API_KEY_AUTH_FORBIDDEN` otherwise), so a leaked key can't mint more keys.
+`scopes` is an optional free-form string. `expires_at` is an optional unix timestamp (seconds). API-key auth cannot create keys; a real session is required (`403 API_KEY_AUTH_FORBIDDEN` otherwise). A leaked key cannot create more keys.
 
 Response (200):
 
@@ -65,11 +65,11 @@ Response (200):
 }
 ```
 
-**The `key` field is shown exactly once** — copy it now or revoke and re-create. The server stores only the hash.
+The `key` field is shown once. Copy it now, or revoke and re-create the key. The server stores only the hash.
 
 ## Use a key
 
-Just like a session — `Authorization: Bearer <key>`:
+Use it like a session, with `Authorization: Bearer <key>`:
 
 ```bash
 curl -X POST https://your-app/api/fn/processStripeEvent \
@@ -78,16 +78,16 @@ curl -X POST https://your-app/api/fn/processStripeEvent \
   -d '{ "event": {...} }'
 ```
 
-The runtime resolves the key via constant-time hash comparison and produces an `AuthContext` with the key owner's `userId`. The key's `scopes` are **not** interpreted or enforced by pylon — see below.
+The runtime resolves the key with a constant-time hash comparison. It produces an `AuthContext` with the key owner's `userId`. Pylon does not interpret or enforce the key's `scopes` (see below).
 
 ## Scopes
 
-Scopes are an **opaque, application-defined** label. Pylon stores whatever
-string you pass and shows it back when you list keys, but it does **not**
-parse or enforce it — there is no built-in scope vocabulary, no automatic
-"read vs write" gating, and the scope string is **not** surfaced to your
-function or policy code. Treat it as metadata for humans auditing the key
-list, not as an access-control mechanism.
+Scopes are an opaque, application-defined label. Pylon stores the string you
+pass and shows it back when you list keys. Pylon does not parse or enforce it.
+There is no built-in scope vocabulary and no automatic read/write gating.
+Pylon does not pass the scope string to your function or policy code. Treat it
+as metadata for a person who audits the key list, not as an access-control
+mechanism.
 
 Two things constrain what a key can do:
 
@@ -97,9 +97,9 @@ Two things constrain what a key can do:
   key-authenticated requests, so a key can't exercise role-gated policies its
   owner otherwise could.
 
-If you need finer per-key restriction, the reliable levers are minting the
-key under a narrowly-privileged service user, and checking `expires_at`.
-Don't rely on the `scopes` string to enforce anything on its own.
+For finer per-key restriction, create the key under a service user with few
+privileges, and check `expires_at`. Do not rely on the `scopes` string to
+enforce anything.
 
 ## List keys
 
@@ -124,11 +124,11 @@ Response:
 ]
 ```
 
-The full key is **not** returned. Only the prefix and metadata.
+Pylon does not return the full key. The response has only the prefix and metadata.
 
 ## Rotate
 
-There's no dedicated rotate endpoint — rotate by creating a fresh key and revoking the old one:
+There is no dedicated rotate endpoint. To rotate, create a new key and revoke the old one:
 
 ```bash
 # 1. Mint the replacement
@@ -150,7 +150,7 @@ curl -X DELETE https://your-app/api/auth/api-keys/key_a1b2c3d4... \
   -H 'Authorization: Bearer pylon_<session>'
 ```
 
-Ownership is checked first — you can only revoke your own keys (`404 NOT_FOUND` otherwise). Returns `{"revoked": true}`, and any subsequent request with that key gets `401 INVALID_API_KEY`.
+Pylon checks ownership first. You can only revoke your own keys (`404 NOT_FOUND` otherwise). The response is `{"revoked": true}`. Any later request with that key gets `401 INVALID_API_KEY`.
 
 ## Expiry
 
@@ -166,12 +166,12 @@ curl -X POST https://your-app/api/auth/api-keys \
   }'
 ```
 
-Once past `expires_at`, the key is rejected at resolution as `401 INVALID_API_KEY`. The `last_used_at` field updates on every successful request — list your keys and diff it against now to find dormant keys you can safely revoke.
+After `expires_at`, Pylon rejects the key as `401 INVALID_API_KEY`. The `last_used_at` field updates on every successful request. List your keys and compare `last_used_at` to the current time to find dormant keys you can revoke.
 
 ## Security
 
 - **Keys are CSPRNG-generated** — a 256-bit random secret, wire format `pk.key_<id>.<secret>`.
-- **Hashed with HMAC-SHA256** server-side. Unlike passwords (Argon2id), API-key secrets are full-entropy random, so a fast keyed hash is safe here and adds no per-request latency; a slow KDF would buy nothing.
+- **Hashed with HMAC-SHA256** server-side. Unlike passwords (Argon2id), API-key secrets are full-entropy random, so a fast keyed hash is safe here and adds no per-request latency. A slow KDF adds no benefit.
 - **Constant-time comparison** — no timing leak on key resolution.
 - **Shown once** — the plaintext key never touches the database; only the hash is stored.
 - **Owner-scoped management** — creating, listing, and revoking keys all require a real session, never an API key.
@@ -180,7 +180,7 @@ Once past `expires_at`, the key is rejected at resolution as `401 INVALID_API_KE
 
 ### Per-integration keys
 
-One key per third-party integration. Stripe, SendGrid, your CI pipeline, your monitoring agent — each gets a key scoped to exactly the functions it calls.
+One key per third-party integration. Stripe, SendGrid, your CI pipeline, and your monitoring agent each get a key scoped to the functions it calls.
 
 ### Per-environment keys
 
@@ -188,11 +188,11 @@ CI key for staging, separate key for prod. Rotate independently. If a CI build l
 
 ### Time-limited keys for handoffs
 
-A consultant needs access for two weeks? Mint a key with `expires_at` 14 days out (and enforce read-only in your functions if you tag it with a `read` scope). Auto-expires; no one needs to remember to revoke it.
+A consultant needs access for two weeks? Create a key with `expires_at` 14 days out. Enforce read-only in your functions if you tag it with a `read` scope. The key expires on its own, so no one must remember to revoke it.
 
 ### Webhook signature backup
 
-Even with HMAC-signed webhooks, requiring an API key on top means a leaked HMAC secret alone isn't enough. Defense in depth.
+Even with HMAC-signed webhooks, an added API-key requirement means a leaked HMAC secret alone is not enough. This adds a second layer of defense.
 
 ## Differences from sessions
 
@@ -208,4 +208,4 @@ Even with HMAC-signed webhooks, requiring an API key on top means a leaked HMAC 
 
 ## When to use a session instead
 
-You *can* do server-to-server auth with a long-lived session token — but you lose per-integration tracking, explicit expiry, and clean revocation. Prefer keys for any non-user caller.
+You can do server-to-server auth with a long-lived session token. You then lose per-integration tracking, explicit expiry, and clean revocation. Prefer keys for any non-user caller.

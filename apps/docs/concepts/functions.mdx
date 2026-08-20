@@ -3,7 +3,7 @@ title: Functions
 description: "Write server-side RPC with queries, mutations, and actions."
 ---
 
-A **function** is server TypeScript, RPC-callable from the client. Pylon runs them in a Bun process managed by the runtime.
+A function is server TypeScript, RPC-callable from the client. Pylon runs them in a Bun process managed by the runtime.
 
 Three flavors:
 
@@ -91,19 +91,19 @@ export default query({
 });
 ```
 
-The returned path (`/api/files/<id>?sig=<hmac>&exp=<unix>`) is anonymously fetchable until it expires — it works in `<img src>` and download links. `ttlSecs` defaults to 300 and is capped at 24 hours; a signed URL is a bearer capability, so keep lifetimes short. Invalid or expired signatures fall back to the ordinary owner check, so nothing new becomes enumerable.
+The returned path (`/api/files/<id>?sig=<hmac>&exp=<unix>`) is anonymously fetchable until it expires. It works in `<img src>` and download links. `ttlSecs` defaults to 300 and is capped at 24 hours; a signed URL is a bearer capability, so keep lifetimes short. Invalid or expired signatures fall back to the ordinary owner check, so nothing new becomes enumerable.
 
 The three flavors expose different context surfaces:
 
 - **Query** — `ctx.db` (read-only), `ctx.auth`, `ctx.env`, `ctx.requireMember`.
 - **Mutation** — the above plus writes on `ctx.db`, `ctx.scheduler`, `ctx.error`, `ctx.llm`, `ctx.connections`, `ctx.stream`, `ctx.rooms`.
-- **Action** — **no `ctx.db`.** Reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` (each runs as its own transaction). Actions also get `ctx.scheduler`, `ctx.error`, `ctx.email`, `ctx.llm`, `ctx.stream`, `ctx.rooms`, `ctx.connections`, and `ctx.request` (raw HTTP request — the only ctx that has it, so webhook signature checks live in actions).
+- **Action** — no `ctx.db`. Reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` (each runs as its own transaction). Actions also get `ctx.scheduler`, `ctx.error`, `ctx.email`, `ctx.llm`, `ctx.stream`, `ctx.rooms`, `ctx.connections`, and `ctx.request` (raw HTTP request, the only ctx that has it, so webhook signature checks live in actions).
 
-> A mutation handler IS the transaction — every `ctx.db.*` call inside the handler shares one BEGIN/COMMIT, and a thrown error rolls everything back atomically. There's no `ctx.db.transact([...])` because the handler already wraps your writes; if you need batch atomicity from outside a mutation, use the HTTP `/api/transact` endpoint or call `runMutation` from an action.
+> A mutation handler is the transaction: every `ctx.db.*` call inside the handler shares one BEGIN/COMMIT, and a thrown error rolls everything back atomically. There's no `ctx.db.transact([...])` because the handler already wraps your writes; if you need batch atomicity from outside a mutation, use the HTTP `/api/transact` endpoint or call `runMutation` from an action.
 
 ## Auth (secure by default)
 
-Every function declares **who can call it**. The framework enforces this *before* the handler runs — a missing `if (!ctx.auth.userId)` check no longer leaks data, because the runtime made the check first.
+Every function declares who can call it. The framework enforces this before the handler runs. A missing `if (!ctx.auth.userId)` check no longer leaks data, because the runtime made the check first.
 
 ```ts
 export default mutation({
@@ -121,12 +121,12 @@ Four modes:
 
 | Mode | Reaches the handler when… | Use it for |
 | --- | --- | --- |
-| `"user"` (**default**) | Real signed-in user. Guest sessions rejected. | Almost everything. |
+| `"user"` (default) | Real signed-in user. Guest sessions rejected. | Almost everything. |
 | `"public"` | Anyone, including unauthenticated callers. | Healthchecks, landing-form submits, webhook receivers that verify their own signature. |
 | `"guest"` | Guest session OR real user. | Cart-style pre-login state. |
 | `"admin"` | `ctx.auth.isAdmin === true`. | Ops endpoints, dangerous helpers exposed via `/api/fn/...`. |
 
-When the mode doesn't match the caller, the request is rejected before the handler runs — `401 AUTH_REQUIRED` for `"user"` / `"guest"`, `403 FORBIDDEN` for `"admin"`. Admin sessions bypass every mode (same convention as policies).
+When the mode doesn't match the caller, the request is rejected before the handler runs: `401 AUTH_REQUIRED` for `"user"` / `"guest"`, `403 FORBIDDEN` for `"admin"`. Admin sessions bypass every mode (same convention as policies).
 
 ```ts
 // Public endpoint — has to be explicit, never the default.
@@ -141,19 +141,19 @@ export default action({
 
 **Action authentication.** Policies gate `ctx.db.*` reads and writes, but they do not gate `action` handlers. An action that charges Stripe, sends email, or calls a private API relies on its `auth` setting, so Pylon requires authentication by default.
 
-`internal: true` functions ignore `auth` — they're unreachable over HTTP and inherit the wrapping handler's context.
+`internal: true` functions ignore `auth`. They're unreachable over HTTP and inherit the wrapping handler's context.
 
 ## `ctx.db` honors policies (strict mode)
 
 By default, `ctx.db.*` inside a function bypasses entity policies because server code is trusted. This remains the default for compatibility.
 
-**Strict mode** flips the default: every `ctx.db.get/query/insert/update/delete/lookup/search` runs through the policy engine using the function's caller auth, exactly as if the same operation came in through `/api/entities/*`. Enable per deploy:
+Strict mode flips the default: every `ctx.db.get/query/insert/update/delete/lookup/search` runs through the policy engine using the function's caller auth, exactly as if the same operation came in through `/api/entities/*`. Enable per deploy:
 
 ```sh
 PYLON_STRICT_FN_POLICIES=1 pylon dev
 ```
 
-When strict mode is on, the canonical Pylon-shaped IDOR — "I wrote `getRecording.ts` that does `ctx.db.get('Recording', args.id)` and forgot to check tenant ownership" — becomes impossible. The policy on Recording fires, sees that the caller isn't a member of the row's org, and the call returns `POLICY_DENIED` before the row leaves the database.
+When strict mode is on, the canonical Pylon-shaped IDOR ("I wrote `getRecording.ts` that does `ctx.db.get('Recording', args.id)` and forgot to check tenant ownership") becomes impossible. The policy on Recording fires, sees that the caller isn't a member of the row's org, and the call returns `POLICY_DENIED` before the row leaves the database.
 
 For the legitimate cross-tenant cases (admin tools, webhook receivers post signature verification, scheduled cron sweeps), use the explicit escape hatch:
 
@@ -188,13 +188,13 @@ export default mutation({
 });
 ```
 
-Rules of thumb:
+Guidelines:
 
 - **Plain `ctx.db.*`** — the default. Acts as the caller. Use for anything that should reflect the user's view of the data.
 - **`ctx.db.unsafe.*`** — explicit bypass. Use for webhooks, cron sweeps, admin tooling, and anything that genuinely needs cross-tenant reads. Every call should have a justifying comment.
 - **Admin contexts bypass strict mode** — `auth.isAdmin === true` skips the gate the same way it bypasses entity-route policies. Ops scripts and the `ctx.auth.elevate({ admin: true, reason: "..." })` path inside verified webhooks still work everywhere (the `reason` is mandatory and audited).
 
-Strict mode is **opt-in for now** (one minor cycle) so existing apps can migrate at their own pace. The rollout plan:
+Strict mode is opt-in for now (one minor cycle) so existing apps can migrate gradually. The rollout plan:
 
 1. **Now (v0.3.161+)** — `ctx.db.unsafe.*` is callable. Mark known cross-tenant paths with it. Plain `ctx.db.*` still bypasses policies (existing behavior); strict mode is opt-in via env.
 2. **v0.4** — strict mode default-on. Apps that didn't migrate get `POLICY_DENIED` on the calls that genuinely need cross-tenant access; the fix is to mark those `unsafe`.
@@ -226,7 +226,7 @@ export default query({
 });
 ```
 
-Queries are **live** by default — the React client subscribes and re-runs on relevant changes. See [Live queries](/concepts/live-queries).
+Queries are live by default. The React client subscribes and re-runs on relevant changes. See [Live queries](/concepts/live-queries).
 
 ## Actions
 
@@ -249,13 +249,13 @@ export default action({
 });
 ```
 
-Actions have no `ctx.db`. They reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` — each of those runs as its own transaction, but the action as a whole is **not** atomic. If a sequence of writes must commit or roll back together, do them inside a single mutation and have the action call it once.
+Actions have no `ctx.db`. They reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)`. Each of those runs as its own transaction, but the action as a whole is not atomic. If a sequence of writes must commit or roll back together, do them inside a single mutation and have the action call it once.
 
 ## Streaming LLM output
 
-`ctx.llm.complete(request)` sends a completion and resolves once the model has finished generating. `ctx.llm.stream(request, onEvent)` sends the same request but calls `onEvent` for each event as the provider emits it, then resolves with the **same assembled response** `complete` would have returned — so a handler can push text to the client as it arrives and still inspect `stop_reason` afterwards.
+`ctx.llm.complete(request)` sends a completion and resolves once the model has finished generating. `ctx.llm.stream(request, onEvent)` sends the same request but calls `onEvent` for each event as the provider emits it, then resolves with the same assembled response `complete` would have returned. A handler can push text to the client as it arrives and still inspect `stop_reason` afterwards.
 
-Both live on **mutation + action** ctx. Neither is on query ctx: a subscribed query re-runs whenever its `ctx.db` reads change, and a paid, non-deterministic call has no business re-running on every dep invalidation.
+Both live on mutation + action ctx. Neither is on query ctx: a subscribed query re-runs whenever its `ctx.db` reads change, and a paid, non-deterministic call should not re-run on every dep invalidation.
 
 ```ts
 // functions/ask.ts
@@ -286,12 +286,12 @@ for await (const chunk of db.streamFn("ask", { question: "why is the sky blue?" 
 
 The `Accept: text/event-stream` header alone does not force an SSE response. A handler
 that returns without ever calling `ctx.stream.write` answers with plain JSON (the raw
-return value), exactly like a JSON-only call — `db.streamFn` handles both. This is what
-makes serving MCP from an action work: MCP clients advertise SSE support on every POST
+return value), exactly like a JSON-only call. `db.streamFn` handles both. Serving MCP
+from an action relies on this: MCP clients advertise SSE support on every POST
 but expect a plain JSON body when the server doesn't stream.
 
-Every fn stream is **resumable**: the server buffers frames under a stream id, so a
-dropped connection reconnects from its cursor and misses nothing — including the final
+Every fn stream is resumable: the server buffers frames under a stream id, so a
+dropped connection reconnects from its cursor and misses nothing, including the final
 result after the handler finished. See [Resumable Streams](/concepts/streaming).
 
 ### Stream events
@@ -309,7 +309,7 @@ Everything else matches `complete`: same auth gating, same model allowlist (`PYL
 
 ### Streaming does not extend the deadline
 
-The call deadline is absolute wall clock from invocation — `PYLON_FN_CALL_TIMEOUT`, 30 seconds by default. Emitting events does not reset it. A multi-turn agent that runs tools will blow through 30s, so declare a timeout on the function:
+The call deadline is absolute wall clock from invocation: `PYLON_FN_CALL_TIMEOUT`, 30 seconds by default. Emitting events does not reset it. A multi-turn agent that runs tools will exceed 30s, so declare a timeout on the function:
 
 ```ts
 export default action({
@@ -380,29 +380,29 @@ export default action({
 });
 ```
 
-The loop bound matters: a model can keep requesting tools indefinitely, and without a cap the only thing that stops it is the call deadline killing the worker mid-turn.
+The loop bound matters: a model can keep requesting tools indefinitely. Without a cap, the only thing that stops it is the call deadline ending the worker during a turn.
 
 ## Server push to a room
 
-`ctx.stream.write` writes to the HTTP response of the call in flight. It reaches exactly one client — the one that made the request. Close the tab and the output is gone; a second device never sees it.
+`ctx.stream.write` writes to the HTTP response of the call in progress. It reaches exactly one client, the one that made the request. Close the tab and the output is gone; a second device never sees it.
 
-`ctx.rooms.broadcast(room, topic, data)` pushes to **every subscriber of a presence room** over the WebSocket, independent of who made the call. Same rooms clients join with `useRoom`, same delivery path a member's own `broadcast()` uses.
+`ctx.rooms.broadcast(room, topic, data)` pushes to every subscriber of a presence room over the WebSocket, independent of who made the call. Same rooms clients join with `useRoom`, same delivery path a member's own `broadcast()` uses.
 
 ```ts
 await ctx.rooms.broadcast("chat-42", "agent.delta", { text: "hi" });
 // => { delivered: true }
 ```
 
-It resolves `{ delivered: false }` when the room has no members. Broadcasting into an empty room is a no-op, not an error — an agent doesn't have to know whether anyone is watching.
+It resolves `{ delivered: false }` when the room has no members. Broadcasting into an empty room is a no-op, not an error. An agent doesn't have to know whether anyone is watching.
 
-Available on **mutation + action** ctx, not on queries: a reactive query re-runs on every dep change, which would re-broadcast each time.
+Available on mutation + action ctx, not on queries: a reactive query re-runs on every dep change, which would re-broadcast each time.
 
 Pick based on who needs the output:
 
 - **One caller, one screen** (a chat box waiting on its own response) — `ctx.stream.write`, read with `db.streamFn`.
 - **Everyone watching, including tabs that weren't the caller** (agent output that must survive a reload, a shared session on a second device, a job with no HTTP caller at all) — `ctx.rooms.broadcast`.
 
-Doing both in one handler is normal — write to the caller for the low-latency path, broadcast so every other watcher stays in sync:
+Doing both in one handler is normal. Write to the caller for the low-latency path, then broadcast so every other watcher stays in sync:
 
 ```ts
 await ctx.llm.stream({ messages }, (e) => {
@@ -426,7 +426,7 @@ useEffect(() => {
 }, []);
 ```
 
-Server broadcasts arrive with an empty `from` (no sender user id) — a member's own broadcasts carry theirs, so `m.from === userId` is how you filter your own echoes.
+Server broadcasts arrive with an empty `from` (no sender user id). A member's own broadcasts carry theirs, so `m.from === userId` is how you filter your own echoes.
 
 ## Calling functions from the client
 

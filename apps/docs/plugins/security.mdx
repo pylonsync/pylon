@@ -3,29 +3,29 @@ title: Security
 description: "Rate limiting, the unified trustedOrigins gate (CORS/CSRF/OAuth), built-in SSRF defense, and where auth hardening lives."
 ---
 
-Pylon's security defaults are on by default — you don't enable them through a `manifest.plugins` list. Rate limiting and CSRF are always-on built-ins tuned by env and your manifest; SSRF protection is built into the runtime; and the auth hardening (TOTP, API keys, Argon2, session lifetime) lives in the auth layer.
+Pylon's security defaults are on. You do not enable them through a `manifest.plugins` list. Rate limiting and CSRF are always-on built-ins tuned by env and your manifest. SSRF protection is built into the runtime. The auth hardening (TOTP, API keys, Argon2, session lifetime) lives in the auth layer.
 
 ## `rate_limit`
 
-Always-on, tiered per-window request budgets. Buckets authenticated callers by user id and anonymous callers by IP. Returns `429 RATE_LIMITED` when the budget is exhausted. It's tuned by env, **not** a per-plugin config block.
+Always-on, tiered per-window request budgets. Buckets authenticated callers by user id and anonymous callers by IP. Returns `429 RATE_LIMITED` when the budget is exhausted. Env tunes it, not a per-plugin config block.
 
 | Tier | Default | Override |
 | --- | --- | --- |
 | Authenticated (`user:<id>` bucket) | 1000 / min | `PYLON_RATE_LIMIT_MAX_AUTHED` |
 | Anonymous (`ip:<addr>` bucket) | 100 / min | `PYLON_RATE_LIMIT_MAX` |
 
-The window is 60s. In dev mode (`PYLON_DEV_MODE` truthy) both tiers are effectively off (100k/min). The anonymous cap is kept tight on purpose — anonymous traffic against `/api/auth/*` is the brute-force surface.
+The window is 60s. In dev mode (`PYLON_DEV_MODE` truthy) both tiers are effectively off (100k/min). The anonymous cap is deliberately low. Anonymous traffic against `/api/auth/*` is the brute-force surface.
 
-Beyond this global limiter, the runtime applies additional budgets on hot paths automatically:
+Beyond this global limiter, the runtime applies additional budgets automatically:
 
 - `/api/ai/stream` has its own per-user (per-IP for anon) rate limiter.
 - Webhook and function invocations (`/api/webhooks/<name>`, `/api/fn/<name>`) rate-limit unauthenticated callers by peer IP.
 
-**On Pylon Cloud**, per-IP rate limiting is also applied at the edge.
+On Pylon Cloud, the edge also applies per-IP rate limiting.
 
 ## Unified `trustedOrigins`
 
-Pylon has three browser-facing gates that each reject a request when the caller's origin isn't trusted:
+Pylon has three browser-facing gates. Each rejects a request when the caller's origin is not trusted:
 
 | Gate | What it protects | Error code |
 | --- | --- | --- |
@@ -52,11 +52,11 @@ const manifest = buildManifest({
 });
 ```
 
-That one list defaults CORS + CSRF + OAuth-redirect simultaneously. Loopback (`http://localhost`, `127.0.0.1`, `[::1]` — any port, http only) is **always auto-trusted at every gate**, so `pylon dev` works on whatever port you pick without manifest config. Bearer-authenticated requests (SPAs, native clients) don't trigger the CSRF gate at all — it only fires when a session cookie is attached.
+That one list defaults CORS + CSRF + OAuth-redirect simultaneously. Loopback (`http://localhost`, `127.0.0.1`, `[::1]`, any port, http only) is always auto-trusted at every gate. So `pylon dev` works on whatever port you pick without manifest config. Bearer-authenticated requests (SPAs, native clients) do not trigger the CSRF gate. It only fires when a session cookie is attached.
 
 ### Per-gate overrides
 
-Ops who need a different allowlist for one gate can split via env vars — each overrides its gate's default:
+Ops who need a different allowlist for one gate can split via env vars. Each overrides its gate's default:
 
 | Env var | Overrides | Notes |
 | --- | --- | --- |
@@ -64,20 +64,20 @@ Ops who need a different allowlist for one gate can split via env vars — each 
 | `PYLON_CSRF_ORIGINS` | CSRF allowlist | Comma-separated. |
 | `PYLON_TRUSTED_ORIGINS` | OAuth redirect allowlist | Comma-separated. Merged with manifest entries. |
 
-If none of the env vars are set, all three read from `manifest.auth.trustedOrigins`. In production with neither manifest entries nor env vars, the CORS gate fails to start with a clear error — there's no implicit wildcard fallback. `PYLON_DEV_MODE=true` relaxes that to `*` for local-only development.
+If none of the env vars are set, all three read from `manifest.auth.trustedOrigins`. In production with neither manifest entries nor env vars, the CORS gate fails to start with a clear error. There is no implicit wildcard fallback. `PYLON_DEV_MODE=true` relaxes that to `*` for local-only development.
 
 ## SSRF defense (built-in)
 
-Pylon guards its own server-side HTTP requests (image optimizer, OIDC discovery, and other outbound fetches) against SSRF by refusing to connect to private / link-local IP ranges (loopback, RFC 1918, `169.254.0.0/16` cloud metadata, and the IPv6 equivalents). This is **built into the runtime** — there is no `net_guard` plugin to enable and no per-app `allow_hosts` config. When you make outbound calls from your own server functions, validate user-supplied URLs before fetching them.
+Pylon guards its own server-side HTTP requests (image optimizer, OIDC discovery, and other outbound fetches) against SSRF. It refuses to connect to private / link-local IP ranges (loopback, RFC 1918, `169.254.0.0/16` cloud metadata, and the IPv6 equivalents). This is built into the runtime. There is no `net_guard` plugin to enable and no per-app `allow_hosts` config. When you make outbound calls from your own server functions, validate user-supplied URLs before fetching them.
 
 ## Auth hardening lives in the auth layer
 
-The following are real framework features, configured through `auth({...})` and the `/api/auth/*` routes — **not** plugins:
+The following are real framework features, configured through `auth({...})` and the `/api/auth/*` routes, not plugins:
 
-- **Password auth** — Argon2 hashing behind `/api/auth/password/*`. See [Auth → Password](/auth/password).
-- **TOTP / 2FA** — `/api/auth/totp/*` (enroll / verify / disable + backup codes). See [Auth → TOTP](/auth/totp).
-- **API keys** — long-lived bearer tokens via `/api/auth/api-keys`. See [Auth → API keys](/auth/api-keys).
-- **Session lifetime** — tune via `auth({ session: { expiresIn } })` (default 30 days):
+- **Password auth:** Argon2 hashing behind `/api/auth/password/*`. See [Auth → Password](/auth/password).
+- **TOTP / 2FA:** `/api/auth/totp/*` (enroll / verify / disable + backup codes). See [Auth → TOTP](/auth/totp).
+- **API keys:** long-lived bearer tokens via `/api/auth/api-keys`. See [Auth → API keys](/auth/api-keys).
+- **Session lifetime:** tune via `auth({ session: { expiresIn } })` (default 30 days):
 
 ```ts
 auth({
@@ -86,7 +86,7 @@ auth({
 });
 ```
 
-Pylon's session model is opaque-token by default; it can also mint short-lived HS256 JWTs from a session (see [Auth → JWT sessions](/auth/jwt)). Accepting JWTs minted by an external IdP (Auth0, Cognito, Clerk) is not built in today.
+Pylon's session model is opaque-token by default. It can also mint short-lived HS256 JWTs from a session (see [Auth → JWT sessions](/auth/jwt)). Accepting JWTs minted by an external IdP (Auth0, Cognito, Clerk) is not built in today.
 
 ## Recommended production posture
 

@@ -3,7 +3,7 @@ title: Account deletion
 description: "Delete an account and revoke its sessions, API keys, OAuth links, and trusted devices in one call."
 ---
 
-`DELETE /api/auth/account` is the "user clicked Delete Account" button. It wipes the user's auth state across every system Pylon owns — sessions, API keys, linked OAuth accounts, trusted-device records, and the User row itself — in one transactional sweep. App-owned tables that reference the user are **not** cascade-deleted (see below) — the host schema is the source of truth for what gets purged.
+`DELETE /api/auth/account` deletes a user account. It clears the user's auth state in every system Pylon owns: sessions, API keys, linked OAuth accounts, trusted-device records, and the User row. Pylon does this in one transaction. App-owned tables that reference the user are not deleted (see below). The host schema decides what gets purged.
 
 ## Endpoint
 
@@ -15,7 +15,7 @@ description: "Delete an account and revoke its sessions, API keys, OAuth links, 
 
 Pylon performs the following in order:
 
-1. **Revoke all sessions** for the user. The caller's current session is invalidated first so a slow user-row delete can't leave a usable session.
+1. **Revoke all sessions** for the user. Pylon revokes the caller's current session first, so a slow user-row delete cannot leave a usable session.
 2. **Revoke all API keys** owned by the user (`pk.*` bearer tokens).
 3. **Unlink all OAuth accounts** — Google, GitHub, Apple, etc. credentials that were linked to this user.
 4. **Revoke all trusted devices** — the `pylon_trusted_device` records for this user.
@@ -49,7 +49,7 @@ Errors:
 
 ## App-owned tables don't cascade
 
-This is the most important caveat: **Pylon does NOT cascade-delete your app's tables.** If the user has 47 Project rows pointing at their `user_id`, those rows survive the delete. The host schema is the source of truth — your app declares its own deletion semantics.
+Pylon does not delete your app's tables. If the user has 47 Project rows that point at their `user_id`, those rows survive the delete. Your app declares its own deletion rules.
 
 The canonical pattern is a plugin hook that fires before the user row is wiped:
 
@@ -69,11 +69,11 @@ export default plugin({
 });
 ```
 
-Or do it inside a mutation wrapper, or with a scheduled cleanup job after the delete. The framework leaves the policy decision to your app — some apps tombstone, some hard-delete, some anonymize the user_id and keep history.
+You can also purge inside a mutation wrapper, or with a scheduled cleanup job after the delete. The framework leaves the deletion rule to your app. Some apps tombstone the row, some hard-delete it, and some anonymize the user_id and keep the history.
 
 ## Confirming first
 
-Don't expose this endpoint without a confirmation step in your UI. Pylon doesn't require a password / TOTP re-prompt on the API itself — design the front-end flow to confirm:
+Do not expose this endpoint without a confirmation step in your UI. The API does not require a password or TOTP re-prompt. Design the frontend flow to confirm the action:
 
 ```typescript
 // Dashboard flow:
@@ -83,11 +83,11 @@ Don't expose this endpoint without a confirmation step in your UI. Pylon doesn't
 // 4. Only then calls /api/auth/account DELETE
 ```
 
-For high-stakes apps, gate the call on a fresh TOTP code or re-issued session within the last 5 minutes.
+For sensitive apps, gate the call on a fresh TOTP code or a session re-issued within the last 5 minutes.
 
 ## Audit trail
 
-The `AccountDelete` audit event is written **before** the user row is deleted, so the event row survives. Read via [`/api/auth/audit`](/auth/overview#endpoints) — gives operators a record of which users self-deleted and when, with counts of what was wiped.
+Pylon writes the `AccountDelete` audit event before it deletes the user row, so the event row survives. Read it via [`/api/auth/audit`](/auth/overview#endpoints). Operators get a record of which users deleted their account and when, with counts of what was cleared.
 
 ## Where to go next
 

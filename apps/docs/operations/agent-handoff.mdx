@@ -3,14 +3,14 @@ title: Agent handoff
 description: "Sign your coding agent into Pylon Cloud with a one-time paste."
 ---
 
-Pylon Cloud's dashboard can mint a one-time 8-character code that signs a coding agent (Claude Code, OpenAI Codex CLI, OpenCode, Cursor, Aider, grok build, anything that runs shell commands from a markdown prompt) into your account, installs the Pylon skill, and hands the agent an opening prompt to riff on. One paste, zero typing.
+The Pylon Cloud dashboard mints a one-time 8-character code. The code signs a coding agent into your account, installs the Pylon skill, and gives the agent an opening prompt. It works with any agent that runs shell commands from a markdown prompt (Claude Code, OpenAI Codex CLI, OpenCode, Cursor, Aider, grok build). You paste the code once and type nothing.
 
 ## Use it
 
 1. Sign in at [www.pylonsync.com](https://www.pylonsync.com/dashboard).
 2. Open an organization. The first card on the page is **Hand off to your coding agent**.
 3. Click **Generate prompt**. The dialog shows a short code (e.g. `ABCD-1234`) inside a paste-ready blurb.
-4. Click **Copy prompt**, paste into your coding agent, hit return.
+4. Click **Copy prompt**, paste into your coding agent, press return.
 
 The agent will:
 
@@ -22,26 +22,26 @@ The agent will:
 
 ## Short-code security
 
-The dashboard mints a real `pk.*` Pylon API key first (the same kind you'd create manually in `/dashboard/account/cli-tokens`), then stashes it on the server behind the short code. The blurb you paste into the agent only contains the code — the actual token never appears in the chat history, the model provider's logs, or any analytics surface that records the prompt.
+The dashboard mints a real `pk.*` Pylon API key first (the same kind you create manually in `/dashboard/account/cli-tokens`). It then stores the key on the server behind the short code. The prompt you paste into the agent contains only the code. The token never appears in the chat history, the model provider's logs, or any analytics that records the prompt.
 
-When the agent runs `pylon login --code ABCD-1234`, the CLI hits `/api/fn/exchangeCliAuthCode` on the cloud, which:
+When the agent runs `pylon login --code ABCD-1234`, the CLI calls `/api/fn/exchangeCliAuthCode` on the cloud, which:
 
-- atomically nulls the stored token + stamps `consumedAt`
+- atomically sets the stored token to null and stamps `consumedAt`
 - returns the token to the CLI in one round-trip
 - the CLI writes it to `~/.config/pylon/credentials.json` (mode 0600)
 
-If the code never gets redeemed, the token sits inert in the database for 5 minutes and then becomes unreachable. A revoke from `/dashboard/account/cli-tokens` cleans it up.
+If nobody redeems the code, the token stays inert in the database for 5 minutes and then becomes unreachable. A revoke from `/dashboard/account/cli-tokens` removes it.
 
 ## Properties
 
-- **Single-use.** A second `exchangeCliAuthCode` call with the same code hits `CODE_USED`.
+- **Single-use.** A second `exchangeCliAuthCode` call with the same code returns `CODE_USED`.
 - **Short TTL.** Five minutes. Past that the code returns `CODE_EXPIRED`.
-- **High entropy.** `XXXX-XXXX` over a 30-symbol confusable-pruned alphabet — about 40 bits. Combined with the 5-minute window + the framework's per-IP rate limit, brute-force-guessing a valid code in flight is infeasible.
-- **Revokeable like any other token.** The minted key shows up at `/dashboard/account/cli-tokens` as `Coding agent · MMM D`. Click trash to kill the agent's session immediately.
+- **High entropy.** `XXXX-XXXX` over a 30-symbol confusable-pruned alphabet gives about 40 bits. The 5-minute window and the per-IP rate limit make a brute-force guess in flight infeasible.
+- **Revokeable like any other token.** The minted key appears at `/dashboard/account/cli-tokens` as `Coding agent · MMM D`. Click trash to end the agent's session immediately.
 
 ## Working without the dashboard
 
-If you're scripting and don't want to click through the UI, the `--code` exchange endpoint is just a regular Pylon function. You can write your own pre-mint flow:
+If you script this and do not want to click through the UI, the `--code` exchange endpoint is a regular Pylon function. You can write your own pre-mint flow:
 
 ```bash
 # from a script holding an existing CLI token in PYLON_TOKEN
@@ -51,11 +51,11 @@ curl -s https://www.pylonsync.com/api/auth/api-keys \
   -d '{"name":"CI agent · '"$(date +%F)"'"}'
 ```
 
-Or use the regular `pylon login` paste flow when you already have a token handy. The code-exchange path is purely an agent-onboarding convenience.
+Or use the regular `pylon login` paste flow when you already have a token. The code-exchange path is an agent-onboarding convenience.
 
-## What the blurb contains
+## What the prompt contains
 
-For reference, the full prompt the dashboard generates:
+The full prompt the dashboard generates:
 
 ```
 I just signed up for Pylon Cloud and want you to help me build. Please run these steps in order:

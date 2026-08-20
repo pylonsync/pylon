@@ -3,21 +3,21 @@ title: Sync engine
 description: "Use @pylonsync/sync for a local replica, optimistic mutations, realtime transports, and offline writes."
 ---
 
-`@pylonsync/sync` is the engine the React, React Native, and Next.js clients all wrap. You can use it standalone in any JavaScript host — Vue, Svelte, Solid, vanilla JS, Node, Bun, Tauri, Electron, Cloudflare Workers.
+`@pylonsync/sync` is the engine the React, React Native, and Next.js clients all wrap. You can use it standalone in any JavaScript host: Vue, Svelte, Solid, vanilla JS, Node, Bun, Tauri, Electron, or Cloudflare Workers.
 
 This page covers the engine's mental model, configuration, and direct API. For React-specific hooks see [React](/clients/react).
 
 ## Mental model
 
-The sync engine maintains an **in-memory replica** of the rows the server has shown you. That replica is:
+The sync engine maintains an in-memory replica of the rows the server has shown you. That replica is:
 
-- **Server-authoritative** — every change has a `seq` number from the server's append-only change log
-- **Tombstone-aware** — deletes can't be resurrected by an out-of-order replay
-- **Optimistic** — local mutations update the replica immediately; a background queue ships them to the server with idempotency tokens
-- **Identity-flip-safe** — when the auth token or active tenant changes, the replica resets so you don't see stale rows from the previous identity
-- **Crash-safe** — the persistence layer (IndexedDB on web, an AsyncStorage-backed replica in `@pylonsync/react-native`, SQLite in the Swift SDK) writes through every change before advancing the cursor, so a crash mid-pull can never leave the cursor ahead of the durable replica
+- **Server-authoritative:** every change has a `seq` number from the server's append-only change log
+- **Tombstone-aware:** deletes can't be resurrected by an out-of-order replay
+- **Optimistic:** local mutations update the replica immediately; a background queue ships them to the server with idempotency tokens
+- **Identity-flip-safe:** when the auth token or active tenant changes, the replica resets so you don't see stale rows from the previous identity
+- **Crash-safe:** the persistence layer (IndexedDB on web, an AsyncStorage-backed replica in `@pylonsync/react-native`, SQLite in the Swift SDK) writes through every change before advancing the cursor, so a crash mid-pull can never leave the cursor ahead of the durable replica
 
-The engine subscribes to the server via one of three transports — **WebSocket** (primary), **SSE** (fallback), or **polling** (last resort) — all with full-jitter exponential reconnect.
+The engine subscribes to the server via one of three transports: WebSocket (primary), SSE (fallback), or polling (last resort). All use full-jitter exponential reconnect.
 
 ## Install
 
@@ -62,7 +62,7 @@ const unsubscribe = engine.store.subscribe(() => {
 // later: unsubscribe();
 ```
 
-The `store` always reflects the **post-merged state** — server pushes and optimistic mutations are both applied before listeners fire.
+The `store` always reflects the post-merged state. The engine applies server pushes and optimistic mutations before listeners fire.
 
 ## Optimistic mutations
 
@@ -78,7 +78,7 @@ await engine.update("Todo", id, { done: true });
 await engine.delete("Todo", id);
 ```
 
-If the server rejects a mutation, the engine marks it `failed` in the queue (`engine.mutations`, a `MutationQueue`) and keeps it there — it isn't silently dropped. Look one up by op id with `engine.mutations.get(id)` (its `.status` is `"pending" | "applied" | "failed"`, with `.error` set on failure), and drop it once resolved:
+If the server rejects a mutation, the engine marks it `failed` in the queue (`engine.mutations`, a `MutationQueue`) and keeps it there. It isn't silently dropped. Look one up by op id with `engine.mutations.get(id)` (its `.status` is `"pending" | "applied" | "failed"`, with `.error` set on failure), and drop it once resolved:
 
 ```typescript
 const m = engine.mutations.get(opId);
@@ -88,7 +88,7 @@ if (m?.status === "failed") {
 }
 ```
 
-For a per-call ergonomic surface, prefer the React [`db.useMutation`](/clients/react) hook — it exposes `loading` / `data` / `error` for the specific call without reaching into the queue.
+For a simpler per-call API, prefer the React [`db.useMutation`](/clients/react) hook. It exposes `loading` / `data` / `error` for the specific call, without reaching into the queue.
 
 ## Pagination
 
@@ -146,7 +146,7 @@ const engine = createSyncEngine("https://your-app.com", { storage });
 
 The server pushes a `session-changed` envelope over WS whenever the session is mutated (select-org, clear-org, session revoke, even from other tabs or admin tools), and the engine refreshes `/api/auth/me` automatically. Tab A switching tenant updates Tab B's `useSession` and Tab B's replica without Tab B's app code doing anything.
 
-If you mutate a session via a path that bypasses the framework's auth surface (rare — e.g. directly writing to SessionStore from a Rust plugin), call `engine.notifySessionChanged()` to force the refresh.
+If you mutate a session via a path that bypasses the framework's auth path (rare, e.g. writing directly to SessionStore from a Rust plugin), call `engine.notifySessionChanged()` to force the refresh.
 
 ## Multi-tenant: switching active org
 
@@ -174,7 +174,7 @@ All three throw on non-2xx with `.code` (e.g. `"NOT_A_MEMBER"`) and `.status` ca
 
 ### WebSocket (primary)
 
-URL is derived from `baseUrl` — defaults to `ws://host:port+1` for `pylon dev` (port + 1 is the WS port). Override via `wsUrl`:
+The engine derives the URL from `baseUrl`. It defaults to `ws://host:port+1` for `pylon dev` (port + 1 is the WS port). Override it via `wsUrl`:
 
 ```typescript
 createSyncEngine("https://your-app.com", {
@@ -186,11 +186,11 @@ The engine sends the auth token via the `bearer.<percent-encoded-token>` Sec-Web
 
 Each text frame is a JSON `ChangeEvent`; binary frames go to whichever consumer registered via `engine.onBinaryFrame(handler)`. The Loro CRDT integration uses this for binary CRDT updates.
 
-Reconnect uses **full-jitter exponential backoff** — `random(0, base * 2^attempts)`, capped at 30s. The backoff counter resets only after a connection has been stable for 5s, so an auth-failure-then-disconnect loop can't tight-loop reconnect.
+Reconnect uses full-jitter exponential backoff: `random(0, base * 2^attempts)`, capped at 30s. The backoff counter resets only after a connection has been stable for 5s, so an auth-failure-then-disconnect loop can't tight-loop reconnect.
 
 ### SSE (fallback)
 
-`transport: "sse"` — connects to `http://host:port+2/events` (port + 2). Server emits one JSON `ChangeEvent` per `data:` line.
+`transport: "sse"` connects to `http://host:port+2/events` (port + 2). The server emits one JSON `ChangeEvent` per `data:` line.
 
 Use SSE when:
 
@@ -201,7 +201,7 @@ The reconnect backoff matches the WebSocket path.
 
 ### Polling (last resort)
 
-`transport: "poll"` — calls `/api/sync/pull` every `pollInterval` ms. Use only when SSE and WebSocket are both unavailable.
+`transport: "poll"` calls `/api/sync/pull` every `pollInterval` ms. Use only when SSE and WebSocket are both unavailable.
 
 ## CRDT subscriptions
 

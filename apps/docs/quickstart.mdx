@@ -3,7 +3,7 @@ title: Quickstart
 description: "Run Pylon in five minutes with a schema, policy, server function, and live sync."
 ---
 
-This walkthrough gets a Pylon server running with a schema, one policy, and one server function. You'll then hit the API with `curl` to see it work end-to-end. Once you want a realtime UI on top, point the [React SDK](/clients/react), [Swift SDK](/clients/swift), or [React Native SDK](/clients/react-native) at the running server, or clone one of the [example apps](https://github.com/pylonsync/pylon/tree/main/examples).
+This walkthrough runs a Pylon server with a schema, one policy, and one server function. You then call the API with `curl` to see it work. For a realtime UI, point the [React SDK](/clients/react), [Swift SDK](/clients/swift), or [React Native SDK](/clients/react-native) at the running server. You can also clone one of the [example apps](https://github.com/pylonsync/pylon/tree/main/examples).
 
 <Tip>
   **Start from a working app:**
@@ -26,9 +26,9 @@ The rest of this page builds a minimal backend by hand so you can see each piece
 curl -fsSL https://www.pylonsync.com/install.sh | bash
 ```
 
-Downloads a prebuilt `pylon` binary to `~/.local/bin`. Linux and macOS, x86_64 and arm64. No Rust toolchain required. (The `npm create` scaffold above doesn't need this — it bundles the CLI. Install globally when you want `pylon` on your PATH for the from-scratch flow below.)
+Downloads a prebuilt `pylon` binary to `~/.local/bin`. Linux and macOS, x86_64 and arm64. No Rust toolchain required. (The `npm create` scaffold above doesn't need this. It bundles the CLI. Install globally when you want `pylon` on your PATH for the from-scratch flow below.)
 
-Bun ≥ 1.0 is needed at runtime to execute server functions and render SSR — Pylon runs your TypeScript on it.
+Pylon needs Bun ≥ 1.0 at runtime. It runs your server functions and SSR on Bun.
 
 Verify:
 
@@ -68,7 +68,7 @@ notes/
   README.md
 ```
 
-`pylon init` scaffolds the backend only — no frontend framework, because Pylon renders React on the server natively. To also generate a separate frontend, pass `--frontend react` (Vite), `--frontend tanstack`, or `--frontend nextjs`, or pick interactively when stdin is a TTY. For a full-stack app with SSR pages, use `npm create @pylonsync/pylon` (above) instead.
+`pylon init` scaffolds the backend only, with no frontend framework, because Pylon renders React on the server natively. To also generate a separate frontend, pass `--frontend react` (Vite), `--frontend tanstack`, or `--frontend nextjs`, or pick interactively when stdin is a TTY. For a full-stack app with SSR pages, use `npm create @pylonsync/pylon` (above) instead.
 
 You'll add a `functions/` directory under `apps/api/` by hand in step 4.
 
@@ -114,7 +114,7 @@ const manifest = buildManifest({
 console.log(JSON.stringify(manifest, null, 2));
 ```
 
-The trailing `console.log` is required — `pylon dev` captures stdout as the manifest.
+The trailing `console.log` is required. `pylon dev` captures stdout as the manifest.
 
 ## 4. Add a server function
 
@@ -145,9 +145,9 @@ export default mutation({
 });
 ```
 
-The filename becomes the RPC name — this will be callable at `POST /api/fn/createNote`.
+The filename becomes the RPC name. It is callable at `POST /api/fn/createNote`.
 
-`pylon init` already adds `@pylonsync/sdk` + `@pylonsync/functions` to `apps/api/package.json`. If you skipped init or stripped the deps, install them manually:
+`pylon init` already adds `@pylonsync/sdk` + `@pylonsync/functions` to `apps/api/package.json`. If you skipped init or removed the deps, install them manually:
 
 ```bash
 cd apps/api && bun add @pylonsync/sdk @pylonsync/functions
@@ -160,7 +160,12 @@ cd apps/api
 pylon dev
 ```
 
-`pylon dev` auto-discovers `app.ts` (and `schema.ts` for legacy projects), watches `app.ts` and `functions/*.ts`, auto-migrates the database (SQLite at `.pylon/dev.db` by default, Postgres if `DATABASE_URL` is set), and serves the API on `http://localhost:4321`.
+`pylon dev` does four things:
+
+- auto-discovers `app.ts` (and `schema.ts` for legacy projects).
+- watches `app.ts` and `functions/*.ts`.
+- auto-migrates the database (SQLite at `.pylon/dev.db` by default, Postgres if `DATABASE_URL` is set).
+- serves the API on `http://localhost:4321`.
 
 Expected output:
 
@@ -170,7 +175,7 @@ Expected output:
   Database: .pylon/dev.db
 ```
 
-## 6. Hit the API
+## 6. Call the API
 
 Create a guest session:
 
@@ -218,14 +223,14 @@ You now have a working Pylon backend with a typed schema, row-level policy, RPC 
   </Card>
 </CardGroup>
 
-Want a full UI on top?
+Want a full UI?
 
 - **React**: the [chat example](https://github.com/pylonsync/pylon/tree/main/examples/chat) — schema, functions, Vite app, live subscriptions
 - **Swift / SwiftUI**: the [swift-todo example](https://github.com/pylonsync/pylon/tree/main/examples/swift-todo) — minimal iOS/macOS app with optimistic mutations
 - **React Native**: the [chat example](https://github.com/pylonsync/pylon/tree/main/examples/chat) ports cleanly to RN with the [`@pylonsync/react-native`](/clients/react-native) bridge
 
-For all three, the same Pylon server backs the UI — wire format is identical across platforms.
+For all three, the same Pylon server backs the UI. The wire format is identical across platforms.
 
 ## Hand the rest to a coding agent
 
-Once your backend is running, the rest is shell. Pylon Cloud has a [one-paste handoff flow](/operations/agent-handoff) that signs your coding agent (Claude Code, Codex, OpenCode, Cursor, Aider, grok build) into your account, installs the Pylon skill, and asks what to build — no token in chat history. From there the agent can use the [full CLI surface](/operations/cli): `pylon secrets`, `pylon logs tail`, `pylon deploy`, `pylon domains add`, `pylon db backup`, `pylon data list <Entity>`, etc.
+Once your backend runs, the rest happens in the shell. Pylon Cloud has a [one-paste handoff flow](/operations/agent-handoff) that signs your coding agent (Claude Code, Codex, OpenCode, Cursor, Aider, grok build) into your account, installs the Pylon skill, and asks what to build. No token enters the chat history. From there the agent can use the [full CLI surface](/operations/cli): `pylon secrets`, `pylon logs tail`, `pylon deploy`, `pylon domains add`, `pylon db backup`, `pylon data list <Entity>`, etc.

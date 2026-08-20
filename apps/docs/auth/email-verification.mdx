@@ -3,9 +3,9 @@ title: Email verification
 description: "Verify an authenticated user's email with the same six-digit code primitive used for magic-code sign-in."
 ---
 
-After a user signs up (via password, OAuth-with-unverified-email, etc.), you usually want to confirm they own the email address. Pylon's email-verification flow is the same primitive as [magic-code sign-in](/auth/magic-codes), gated on an authenticated session — it sends a 6-digit code to the user's `email` field and stamps `emailVerified` on successful verify.
+After a user signs up (via password, OAuth with an unverified email, etc.), you usually want to confirm they own the email address. The email-verification flow uses the same primitive as [magic-code sign-in](/auth/magic-codes), but gated on an authenticated session. It sends a 6-digit code to the user's `email` field and stamps `emailVerified` on a successful verify.
 
-The OAuth + SSO sign-in paths automatically stamp `emailVerified` because the upstream IdP just vouched for the email. Use this flow when the email wasn't IdP-verified — manual signup, edit-email flow, etc.
+The OAuth and SSO sign-in paths stamp `emailVerified` automatically, because the upstream IdP already verified the email. Use this flow when the IdP did not verify the email (manual signup, edit-email flow, etc.).
 
 ## Endpoints
 
@@ -37,7 +37,7 @@ curl -X POST https://your-app/api/auth/email/send-verification \
   -H 'Authorization: Bearer pylon_token'
 ```
 
-Pylon looks up the caller's User row, reads `email`, mints a 6-digit code, and sends an email with subject `"Verify your email address"` via the configured email transport. Body: `"Your email verification code is: <code>\n\nThis code will expire in 10 minutes."`.
+Pylon looks up the caller's User row, reads `email`, creates a 6-digit code, and sends an email with subject `"Verify your email address"` through the configured email transport. Body: `"Your email verification code is: <code>\n\nThis code will expire in 10 minutes."`.
 
 Response in production:
 
@@ -61,7 +61,7 @@ Errors:
 | 429 | `RATE_LIMITED` | A code was requested within the throttle window |
 | 500 | `EMAIL_SEND_FAILED` | Email transport returned an error |
 
-The throttle is shared with magic-code sends — 1 code per email per minute. The 10-minute TTL is shared too.
+The throttle is shared with magic-code sends: 1 code per email per minute. The 10-minute TTL is shared too.
 
 ## Verifying
 
@@ -121,13 +121,13 @@ export const postsPolicy = policy({
 });
 ```
 
-Pylon doesn't bake an opinionated `auth.emailVerified` into the policy DSL today — the field lives on your User row and you reference it via your own handlers / queries.
+Pylon does not add `auth.emailVerified` to the policy DSL today. The field lives on your User row. You reference it through your own handlers or queries.
 
 ## Security guarantees
 
 - **Code generation, comparison, throttling shared with [magic-codes](/auth/magic-codes)** — 6-digit numeric, 10-minute TTL, burn-after-5-wrong-attempts, constant-time comparison.
-- **Session-gated** — only the authenticated user can request + verify their own email. There's no admin override here; if you need to mark a verified-via-out-of-band-process, write the User row directly with admin auth.
-- **ISO 8601 timestamp format** — `pylon_kernel::util::now_iso()` produces `2026-01-15T10:30:00Z`. The previous `<unix>Z` format was silently rejected by the storage adapter, leaving users in a perpetual unverified state. Fixed in framework — flag emails are verified iff `emailVerified` is non-null.
+- **Session-gated** — only the authenticated user can request and verify their own email. There is no admin override. To mark an email verified from another process, write the User row directly with admin auth.
+- **ISO 8601 timestamp format** — `pylon_kernel::util::now_iso()` produces `2026-01-15T10:30:00Z`. An email is verified only when `emailVerified` is non-null.
 
 ## Where to go next
 

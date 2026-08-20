@@ -3,11 +3,11 @@ title: OIDC provider
 description: "Run Pylon as an OpenID Connect provider with PKCE, RS256 ID tokens, JWKS, and userinfo."
 ---
 
-Pylon can be the **identity provider** other systems sign into through. Apps that ship with their own internal tools, microservices, or third-party SaaS that accepts "any OIDC IdP" point at Pylon's discovery doc and treat the id_tokens Pylon issues as the identity layer.
+Pylon can be the identity provider that other systems sign into. Internal tools, microservices, or third-party SaaS that accept any OIDC IdP point at Pylon's discovery doc. They treat the id_tokens Pylon issues as the identity layer.
 
 ## What ships
 
-The full auth-code + PKCE flow:
+The full auth-code and PKCE flow:
 
 | Endpoint | Method | Auth | Purpose |
 | --- | --- | --- | --- |
@@ -19,12 +19,12 @@ The full auth-code + PKCE flow:
 
 ## Security stance
 
-- **PKCE S256 is REQUIRED** for every authorize request — `plain` is rejected per OAuth 2.1, no-PKCE is rejected outright.
-- **redirect_uri** must match the client's registered list by **exact string compare** (no path coercion, suffix matching, or scheme upgrades — the textbook OIDC open-redirect footgun).
-- **client_id + client_secret** are constant-time compared. Public clients (no secret in registration) authenticate via PKCE alone.
+- **PKCE S256 is REQUIRED** for every authorize request. Pylon rejects `plain` per OAuth 2.1 and rejects a request with no PKCE.
+- **redirect_uri** must match the client's registered list by exact string compare. Pylon allows no path coercion, suffix matching, or scheme upgrades (a common OIDC open-redirect risk).
+- **client_id and client_secret** are constant-time compared. Public clients (no secret in registration) authenticate via PKCE alone.
 - **id_token claims**: `iss`, `sub`, `aud`, `exp` (10 min), `iat`, `nonce` (when supplied at /authorize), `email`, `email_verified`, `name` (subject to requested scopes).
 - **access_token** is opaque random (32-byte base64url), TTL 1 hour.
-- **refresh_token is NOT issued.** Clients re-do the auth code flow when the access_token expires — keeps the surface small and drops a class of long-lived bearer leak.
+- **refresh_token is not issued.** Clients redo the auth-code flow when the access_token expires. This keeps the surface small and removes a class of long-lived bearer leak.
 
 ## Configuration
 
@@ -43,7 +43,7 @@ PYLON_LOGIN_URL=/login
 
 ## Signing key
 
-On first start (with `PYLON_OIDC_ISSUER` set), Pylon generates a 2048-bit RSA key, persists it as PKCS#8 PEM at `PYLON_OIDC_KEY_PATH`, and chmods the file to **0600** so it isn't world-readable. Same key reused across restarts so issued id_tokens stay verifiable.
+On first start (with `PYLON_OIDC_ISSUER` set), Pylon generates a 2048-bit RSA key, persists it as PKCS#8 PEM at `PYLON_OIDC_KEY_PATH`, and chmods the file to 0600 so it is not world-readable. Pylon reuses the same key across restarts, so issued id_tokens stay verifiable.
 
 The JWKS endpoint publishes the matching public key with:
 - `kid` = first 16 hex chars of SHA-256(modulus) — stable across restarts, changes on rotation

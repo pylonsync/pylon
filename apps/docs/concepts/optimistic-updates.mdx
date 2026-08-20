@@ -3,7 +3,7 @@ title: Optimistic updates
 description: "Local-first UI without the flash."
 ---
 
-A mutation that paints its result into the UI **before** the server confirms is an **optimistic update**. Pylon's sync engine ships first-class support for the pattern — the optimistic ghost and the canonical row share an id, so the WebSocket broadcast lands as a field-level merge instead of a delete-then-replace flash.
+A mutation that paints its result into the UI before the server confirms is an optimistic update. Pylon's sync engine supports the pattern natively. The optimistic ghost and the canonical row share an id, so the WebSocket broadcast lands as a field-level merge instead of a delete-then-replace flash.
 
 ```tsx
 import { db } from "@pylonsync/react";
@@ -27,7 +27,7 @@ const send = db.useMutation<
 await send.mutate({ channelId, body });
 ```
 
-The user sees their message appear instantly. The canonical row arrives over the WebSocket a beat later and merges in place — no flash, no temp-row swap, no manual cleanup.
+The user sees their message appear instantly. The canonical row arrives over the WebSocket a moment later and merges in place: no flash, no temp-row swap, no manual cleanup.
 
 <Note>
 For an owned-row create, `db.insert("Entity", …)` is already optimistic. Mark the owner field [`field.owner()`](/concepts/entities#owned-writes-fieldowner) (0.3.261+) so the server stamps and verifies it from the session. Use the `optimistic` callback below when the write also runs server logic such as cross-entity validation, denormalization, or multi-row effects.
@@ -39,7 +39,7 @@ For an owned-row create, `db.insert("Entity", …)` is already optimistic. Mark 
 2. The hook paints the ghost into the local store via `optimisticInsertWithId`. Live queries re-render immediately.
 3. The hook calls the server function with the original args **plus** `_optimisticId: ctx.id`.
 4. The server function passes `args._optimisticId` into `ctx.db.insert("Entity", { id, ... })`. The runtime validates the id is well-formed and uses it verbatim.
-5. The change log emits a broadcast with `row_id = ctx.id`. It arrives at the client over the WebSocket and the local store treats it as an idempotent merge — same `row_id`, fields refreshed.
+5. The change log emits a broadcast with `row_id = ctx.id`. It arrives at the client over the WebSocket and the local store treats it as an idempotent merge, same `row_id`, fields refreshed.
 6. **On rejection**, the optimistic ghost is rolled back without leaving a tombstone, so retrying the mutation works.
 
 ## The server function
@@ -98,10 +98,10 @@ All ghosts use the same `ctx.id`, so they're rolled back together on rejection.
 
 ## When to skip it
 
-Optimistic updates are a UX win when the server almost always succeeds. Skip them when:
+Optimistic updates help when the server almost always succeeds. Skip them when:
 
 - The mutation can fail in ways the user must see immediately (e.g. payment, ID verification). Showing the ghost only to remove it 200ms later is worse than a small spinner.
-- The server transforms the data significantly (e.g. computes a slug, generates a thumbnail, runs through an AI). The ghost would be visibly different from the canonical, defeating the point.
+- The server transforms the data significantly (e.g. computes a slug, generates a thumbnail, runs through an AI). The ghost would be visibly different from the canonical row, so the optimistic update gives no benefit.
 - The feature is rarely-used (settings dialogs, admin pages). The complexity isn't worth the polish.
 
 Optimistic updates fit chat, comments, todos, likes, reactions, and drag-and-drop reordering where the server usually accepts the write.

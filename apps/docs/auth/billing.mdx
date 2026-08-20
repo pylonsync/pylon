@@ -7,7 +7,7 @@ description: "Hosted Checkout sessions and signed webhook verification for Strip
   For most apps, use [`@pylonsync/stripe`](/plugins/stripe): declarative `stripe({ plans, hooks })` config, a canonical Subscription entity, lifecycle hooks (onSubscriptionActivate/Cancel/etc.), and a URL allowlist derived from `PYLON_PUBLIC_URL`. This page documents the lower-level `/api/billing/*` routes.
 </Note>
 
-Pylon can mint a hosted Checkout Session for the current user and accept Stripe webhooks with full signature verification. Your plugin or app code still owns entitlements, plan limits, and dunning.
+Pylon creates a hosted Checkout Session for the current user. It accepts Stripe webhooks with full signature verification. Your plugin or app code still owns entitlements, plan limits, and dunning.
 
 ## What's implemented
 
@@ -68,7 +68,7 @@ Fields:
 - **`successUrl`** — defaults to `/billing/success`.
 - **`cancelUrl`** — defaults to `/billing/cancel`.
 
-On first `/checkout` for a given user, Pylon calls Stripe's API to create a Customer record using the user's email, then writes the new `cus_...` id to `User.stripeCustomerId`. Subsequent calls reuse that id.
+On the first `/checkout` for a user, Pylon calls Stripe's API to create a Customer record from the user's email. It then writes the new `cus_...` id to `User.stripeCustomerId`. Later calls reuse that id.
 
 Errors:
 
@@ -109,7 +109,7 @@ Errors:
 | 400 | `WEBHOOK_INVALID` | Signature verification failed (wrong secret, replayed timestamp, bad payload) |
 | 501 | `STRIPE_NOT_CONFIGURED` / `WEBHOOK_NOT_CONFIGURED` | One of the env vars is missing |
 
-**Plugin hook for app code** — Pylon's roadmap includes `plugin_hooks.on_billing_event` so apps can react to events (flip user's plan, schedule grace-period jobs, etc.) without forking the framework. Today, apps that need event reaction proxy the webhook through their own handler that verifies + dispatches.
+**Plugin hook for app code** — Pylon's roadmap includes `plugin_hooks.on_billing_event` so apps can react to events (change a user's plan, schedule grace-period jobs) without changing the framework. Today, apps that need to react proxy the webhook through their own handler that verifies and dispatches it.
 
 ## Configuration
 
@@ -122,8 +122,8 @@ Use `sk_test_...` and `whsec_test_...` in dev. Stripe's CLI (`stripe listen --fo
 
 ## Security guarantees
 
-- **Webhook signature verification is mandatory.** Pylon refuses to process unverified events — there's no `WEBHOOK_INSECURE_SKIP_SIGNATURE` flag. The `Stripe-Signature` header is HMAC-SHA256-verified using `PYLON_STRIPE_WEBHOOK_SECRET` and the request body's exact bytes.
-- **Replay protection** via the timestamp + tolerance check baked into Stripe's signature format.
+- **Webhook signature verification is mandatory.** Pylon refuses to process unverified events. There is no `WEBHOOK_INSECURE_SKIP_SIGNATURE` flag. The `Stripe-Signature` header is HMAC-SHA256-verified using `PYLON_STRIPE_WEBHOOK_SECRET` and the request body's exact bytes.
+- **Replay protection** comes from the timestamp and tolerance check in Stripe's signature format.
 - **Customer id binds to user_id** — checkout always pulls the Stripe customer from the caller's row, never accepts a caller-supplied `customerId`. A user can't trigger checkout against another user's Stripe customer.
 - **Failed Stripe API calls return 502, not 500** — the caller gets a clear "upstream issue" signal instead of a generic server error.
 

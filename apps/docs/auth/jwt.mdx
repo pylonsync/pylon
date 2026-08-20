@@ -5,7 +5,7 @@ description: "Exchange an opaque session for an optional short-lived, stateless 
 
 By default, Pylon sessions are opaque 256-bit tokens that the server resolves and can revoke immediately. Most apps should use them.
 
-When you need a **stateless** token format — to authenticate microservices that can verify without a session-store round-trip, or to ride through systems that expect "the JWT shape" — Pylon mints HS256 JWTs from an existing session. The opaque session stays the source of truth (revoke / refresh / list still hit it); the JWT is a short-lived projection that downstream services validate independently.
+You sometimes need a stateless token format. Two cases: to authenticate microservices that verify without a session-store round-trip, or to pass through systems that expect a JWT. For these, Pylon creates HS256 JWTs from an existing session. The opaque session stays the source of truth; revoke, refresh, and list still use it. The JWT is a short-lived projection that downstream services validate on their own.
 
 ## When to use JWTs (and when not to)
 
@@ -16,12 +16,12 @@ When you need a **stateless** token format — to authenticate microservices tha
 | Accept tokens minted elsewhere (e.g. Auth0, third-party SSO) | Use the `jwt` plugin instead of `/api/auth/jwt` |
 | Need to revoke a specific token before it expires | Opaque session, not JWT |
 
-JWTs **cannot be revoked before they expire**. That's why the default lifetime is short (1 hour) and the opaque session is still the canonical revoke target. If a JWT leaks, you have to wait it out or rotate `PYLON_JWT_SECRET` (which invalidates every JWT).
+You cannot revoke a JWT before it expires. So the default lifetime is short (1 hour), and the opaque session is still the revoke target. If a JWT leaks, you must wait for it to expire or rotate `PYLON_JWT_SECRET` (which invalidates every JWT).
 
 ## Algorithm
 
 - **HS256** (HMAC-SHA256). Symmetric — `PYLON_JWT_SECRET` is both signer and verifier.
-- No RS256 / EdDSA / asymmetric mode in `mint`. Symmetric is the right choice when one Pylon binary mints + verifies. If multiple services need to verify, share the secret over your existing secrets channel.
+- No RS256, EdDSA, or asymmetric mode in `mint`. Symmetric is correct when one Pylon binary creates and verifies the token. If multiple services must verify, share the secret over your existing secrets channel.
 - Standard JWT envelope: `<base64url-header>.<base64url-payload>.<base64url-signature>`.
 
 ## Endpoint
@@ -51,7 +51,7 @@ Errors:
 | 401 | `AUTH_REQUIRED` | Caller isn't signed in |
 | 501 | `JWT_NOT_CONFIGURED` | `PYLON_JWT_SECRET` is not set or empty |
 
-The JWT carries the caller's identity at mint time — `sub` (user id), `tenant_id`, `roles`. A `select-org` after minting **does not** retroactively update the JWT; the next call to `/api/auth/jwt` reflects the new active tenant.
+The JWT carries the caller's identity at mint time: `sub` (user id), `tenant_id`, and `roles`. A `select-org` after minting does not update the JWT. The next call to `/api/auth/jwt` reflects the new active tenant.
 
 ## Claims
 
@@ -68,14 +68,14 @@ type JwtClaims = {
 
 ## Bearer flow
 
-A request can carry **either** an opaque session token **or** a JWT in `Authorization: Bearer`. Pylon's token resolver tries in priority order:
+A request can carry either an opaque session token or a JWT in `Authorization: Bearer`. Pylon's token resolver tries in this order:
 
 1. Admin token (constant-time compare)
 2. `pk.*` API key
 3. JWT (when `PYLON_JWT_SECRET` is set AND the token's 3-segment shape looks like a JWT)
 4. Session token
 
-JWT verification runs on every request that carries a JWT-shaped bearer — signature, `alg=HS256`, `exp` not in the past, `iss` matches `PYLON_JWT_ISSUER` if set.
+JWT verification runs on every request that carries a JWT-shaped bearer. It checks the signature, `alg=HS256`, `exp` not in the past, and `iss` matches `PYLON_JWT_ISSUER` if set.
 
 If verification fails, Pylon returns `401` with one of:
 
@@ -94,13 +94,13 @@ PYLON_JWT_LIFETIME_SECS=3600              # 1 hour default
 
 ### Why `PYLON_JWT_ISSUER` is required
 
-Without an issuer pin, any JWT minted with the same HS256 secret for any issuer would verify. If you share `PYLON_JWT_SECRET` with another system (microservices, accept-third-party-tokens setup), a token minted for that system's `sub` could sign into Pylon as that user. Setting `PYLON_JWT_ISSUER` and requiring the `iss` claim to match closes that hole.
+Without an issuer pin, any JWT signed with the same HS256 secret would verify, whatever its issuer. If you share `PYLON_JWT_SECRET` with another system (microservices, a third-party-token setup), a token issued for that system's `sub` could sign into Pylon as that user. Set `PYLON_JWT_ISSUER` and require the `iss` claim to match to prevent this.
 
-If `PYLON_JWT_SECRET` is set but `PYLON_JWT_ISSUER` is missing, Pylon refuses to verify any JWT (`JWT_MISCONFIGURED`) — the safest default while the operator fixes the config. This caught a real audit finding (Wave-5 codex review).
+If `PYLON_JWT_SECRET` is set but `PYLON_JWT_ISSUER` is missing, Pylon refuses to verify any JWT (`JWT_MISCONFIGURED`). This is the safest default while the operator fixes the config.
 
 ## Accepting JWTs minted elsewhere
 
-`/api/auth/jwt` is for **issuing**. If you want Pylon to accept JWTs minted by another system (e.g., your Auth0 tenant, a homegrown SSO), use the `jwt` plugin instead:
+`/api/auth/jwt` is for issuing tokens. To accept JWTs from another system (for example your Auth0 tenant or a homegrown SSO), use the `jwt` plugin instead:
 
 ```typescript
 import { app } from "@pylonsync/sdk";
@@ -118,14 +118,14 @@ export default app({
 });
 ```
 
-That plugin validates inbound JWTs against the upstream issuer's JWKS (RS256 / ES256) without minting any of its own. See [plugins/integrations](/plugins/integrations).
+That plugin validates inbound JWTs against the upstream issuer's JWKS (RS256 / ES256). It does not issue any tokens of its own. See [plugins/integrations](/plugins/integrations).
 
 ## Security guarantees
 
 - **HS256 + 256-bit secret** — `openssl rand -hex 32` produces a 32-byte secret. Anything shorter and `PYLON_JWT_SECRET` validates but the security argument weakens.
 - **`alg=HS256` enforced** — the `alg=none` attack and HS256/RS256 algorithm-confusion attack don't apply; Pylon's verify rejects any header where `alg != "HS256"`.
 - **Issuer pin** — refuse-to-validate when `PYLON_JWT_SECRET` is set but `PYLON_JWT_ISSUER` is missing.
-- **No revoke story** — JWTs are valid until `exp`. Keep lifetimes short (1 hour default). The underlying opaque session is still revocable via `/api/auth/session` / `/sessions` DELETE.
+- **No revoke path** — JWTs are valid until `exp`. Keep lifetimes short (1 hour default). The underlying opaque session is still revocable via `/api/auth/session` / `/sessions` DELETE.
 - **Claims captured at mint time** — `tenant_id` and `roles` snapshot the session at issuance. Updating roles or running `/select-org` doesn't invalidate existing JWTs.
 
 ## Where to go next

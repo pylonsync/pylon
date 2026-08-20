@@ -5,10 +5,10 @@ description: "Use @pylonsync/react-native with an Expo SQLite offline replica an
 
 `@pylonsync/react-native` brings the React hooks to mobile. Same API as `@pylonsync/react` plus:
 
-- **AsyncStorage-backed durable replica** — the local sync replica survives app kills (via `AsyncStorageReplicaPersistence`, enabled by default)
-- **AsyncStorage bridge** — auth tokens + client id persist correctly on iOS / Android
+- **AsyncStorage-backed durable replica:** the local sync replica survives app kills (via `AsyncStorageReplicaPersistence`, enabled by default)
+- **AsyncStorage bridge:** auth tokens + client id persist correctly on iOS / Android
 - **`useNetworkStatus`** hook for offline-aware UI
-- **Foreground/background lifecycle handling** — sync pauses when backgrounded, catches up on resume
+- **Foreground/background lifecycle handling:** sync pauses when backgrounded, catches up on resume
 
 ## Install
 
@@ -34,7 +34,7 @@ await init({
 });
 ```
 
-`init()` reads existing pylon keys (`pylon:<app>:client_id`, `pylon:<app>:token`, etc.) into an in-memory cache and writes through to AsyncStorage. The sync engine's storage interface is synchronous — the bridge keeps it that way without making your call sites async. Pass `persist: false` to skip the durable replica, or your own `persistence` adapter.
+`init()` reads existing pylon keys (`pylon:<app>:client_id`, `pylon:<app>:token`, etc.) into an in-memory cache and writes through to AsyncStorage. The sync engine's storage interface is synchronous. The bridge keeps it that way without making your call sites async. Pass `persist: false` to skip the durable replica, or your own `persistence` adapter.
 
 ## Use the React hooks
 
@@ -90,7 +90,7 @@ Now:
 - The mutation queue is persisted (offline writes survive app kill)
 - App startup hydrates from the persisted replica first, then catches up via pull
 
-The RN replica persistence mirrors the crash-safety model of the web client's IndexedDB path — the replica is written before the cursor advances, so a crash mid-pull can't leave the cursor ahead of durable state.
+The RN replica persistence mirrors the crash-safety model of the web client's IndexedDB path. The engine writes the replica before the cursor advances. A crash mid-pull cannot leave the cursor ahead of durable state.
 
 ## Network status
 
@@ -135,10 +135,10 @@ Backed by AsyncStorage with `pylon:` prefix.
 
 ## Performance
 
-- **Use `FlatList`/`SectionList`** with `useQuery` results — they re-render fully on every store change, so list virtualization matters.
+- **Use `FlatList`/`SectionList`** with `useQuery` results. They re-render fully on every store change, so list virtualization matters.
 - **Memoize derived data** with `useMemo` to avoid re-computing on every store notify.
-- **Limit `useQuery` results** — for large entities, use `useInfiniteQuery` instead so the screen doesn't render thousands of rows.
-- **Backgrounded sync** uses zero CPU — the engine pauses cleanly.
+- **Limit `useQuery` results.** For large entities, use `useInfiniteQuery` instead, so the screen doesn't render thousands of rows.
+- **Backgrounded sync** uses zero CPU. The engine pauses cleanly.
 
 ## Push notifications
 

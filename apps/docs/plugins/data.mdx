@@ -3,11 +3,11 @@ title: Data hygiene
 description: "The data-layer automation Pylon ships today: automatic multi-tenancy, owner stamping, schema behaviors, and field-level constraints."
 ---
 
-Pylon's data-layer automation is deliberately small and mostly **automatic**. Two built-in plugins wire themselves from your schema — you never name them in a config block — and the SDK adds a few field- and entity-level helpers. Everything else (cascades, slugs, derived fields, versioning) is a [server function](/concepts/functions) or a [policy](/concepts/policies), not a plugin.
+Pylon's data-layer automation is deliberately small and mostly automatic. Two built-in plugins wire themselves from your schema (you never name them in a config block). The SDK adds a few field-level and entity-level helpers. Everything else (cascades, slugs, derived fields, versioning) is a [server function](/concepts/functions) or a [policy](/concepts/policies), not a plugin.
 
 ## `tenant_scope`
 
-Row-level multi-tenancy. **Automatic** — the signal is a `tenantId` field on the entity. No config entry.
+Row-level multi-tenancy. It is automatic. The signal is a `tenantId` field on the entity. No config entry.
 
 ```ts
 import { entity, field } from "@pylonsync/sdk";
@@ -20,15 +20,15 @@ export const Project = entity("Project", {
 
 Once an entity has a `tenantId` (or `tenant_id`) field:
 
-- **Inserts** auto-fill `tenantId = auth.tenantId` when the caller doesn't provide it, and **reject** a write whose `tenantId` doesn't match the caller's — you can't insert into another tenant.
+- **Inserts** auto-fill `tenantId = auth.tenantId` when the caller does not provide it. They reject a write whose `tenantId` does not match the caller's. You cannot insert into another tenant.
 - **Reads / updates / deletes** are scoped to the caller's tenant.
 - **Admin contexts** bypass scoping.
 
-This makes tenant isolation a default posture rather than a `where` clause you have to remember on every query. In your own `query`/`mutation` handlers you still have `auth.tenantId` available to scope further.
+This makes tenant isolation the default, not a `where` clause you must remember on every query. In your own `query`/`mutation` handlers you still have `auth.tenantId` to scope further.
 
 ## `owner_stamp`
 
-Per-row ownership. **Automatic** — the signal is `field.X().owner()` on the field.
+Per-row ownership. It is automatic. The signal is `field.X().owner()` on the field.
 
 ```ts
 export const Listing = entity("Listing", {
@@ -37,7 +37,7 @@ export const Listing = entity("Listing", {
 });
 ```
 
-On insert the runtime overwrites `sellerId` with `auth.userId` from the session and **rejects** any client attempt to set it to a different user. This is what makes optimistic, local-first writes safe for owned data: the client inserts with its own id for an instant local paint, and the server validates the owner from the session. Pair it with a policy like `allowUpdate: "data.sellerId == auth.userId"`.
+On insert the runtime overwrites `sellerId` with `auth.userId` from the session. It rejects any client attempt to set a different user. This makes optimistic local-first writes safe for owned data. The client inserts with its own id for an instant local render. The server validates the owner from the session. Pair it with a policy like `allowUpdate: "data.sellerId == auth.userId"`.
 
 ## Schema behaviors
 
@@ -60,12 +60,12 @@ export const Post = e.entity("Post", {
 Behaviors mutate the `EntityDefinition`'s fields, so the rest of the framework (storage, sync, policies) treats the injected columns as ordinary columns.
 
 <Note>
-Behaviors add the **columns**. Automatic value-stamping is driven by the `defaultNow()` marker and is still being wired end-to-end — until it lands, set the values in your function handler (or on the client) and the columns will persist normally. `softDelete` adds the `deletedAt` column; the DELETE-sets-`deletedAt` and list-filtering semantics are app-driven for now (filter `deletedAt == null` in your query).
+Behaviors add the columns. The `defaultNow()` marker drives automatic value-stamping, which is not fully wired yet. Until it ships, set the values in your function handler (or on the client). The columns persist normally. `softDelete` adds the `deletedAt` column. The DELETE-sets-`deletedAt` and list-filtering semantics are app-driven for now (filter `deletedAt == null` in your query).
 </Note>
 
 ## Field-level constraints & defaults
 
-The real "validation" surface is on the field builder — it's recorded in the manifest and enforced by the runtime + codegen:
+The field builder is the real "validation" surface. Pylon records it in the manifest. The runtime and codegen enforce it:
 
 ```ts
 export const User = entity("User", {
@@ -89,7 +89,7 @@ For richer validation (length limits, regex, cross-field rules), do the check in
 
 ## Where other data features live
 
-These features are implemented through fields, functions, policies, or auth rather than configurable plugins:
+Pylon implements these features through fields, functions, policies, or auth, not configurable plugins:
 
 | Was documented as | Reality |
 | --- | --- |
@@ -102,4 +102,4 @@ These features are implemented through fields, functions, policies, or auth rath
 
 ## Full-text search
 
-Search is configured per-entity (not as a data plugin) — see [Search & AI](/plugins/search-ai#search).
+You configure search per-entity, not as a data plugin. See [Search & AI](/plugins/search-ai#search).

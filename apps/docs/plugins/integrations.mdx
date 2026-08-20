@@ -3,11 +3,11 @@ title: Integrations
 description: "Configure file storage, transactional email, Stripe billing, outbound webhooks, and feature flags."
 ---
 
-Integrations connect Pylon to the rest of your stack. Some are **built-in subsystems** selected by environment variables (file storage, email); others are **installable TS packages** (Stripe, webhooks, feature flags). None of them are enabled through a `manifest.plugins` list.
+Integrations connect Pylon to the rest of your stack. Some are built-in subsystems selected by environment variables (file storage, email). Others are installable TS packages (Stripe, webhooks, feature flags). None of them are enabled through a `manifest.plugins` list.
 
 ## File storage
 
-File storage is a **built-in subsystem** selected by `PYLON_FILES_PROVIDER` — not a plugin entry.
+File storage is a built-in subsystem selected by `PYLON_FILES_PROVIDER`, not a plugin entry.
 
 ```bash
 # Local disk (default)
@@ -33,9 +33,9 @@ PYLON_S3_SESSION_TOKEN=...            # optional; STS/temporary credentials
 PYLON_S3_FOLDER=uploads               # optional prefix
 ```
 
-The server validates these at boot and **fails fast** if a provider is selected without its required vars (e.g. `PYLON_FILES_PROVIDER=s3` without the bucket or keys) — it never silently degrades to local disk. `local`, `stack0`, and `s3` are the providers that ship today.
+The server validates these at boot. It fails at boot if a provider is selected without its required vars (e.g. `PYLON_FILES_PROVIDER=s3` without the bucket or keys). It never silently degrades to local disk. `local`, `stack0`, and `s3` are the providers that ship today.
 
-The `s3` backend uses SigV4 **presigned URLs** for every operation: clients PUT/GET bytes straight to the bucket (never through pylon's memory), and — for a private bucket — pylon tracks per-file ownership so `GET /api/files/<id>` enforces the same owner check as local disk before 302-redirecting to a short-lived presigned URL. Set `PYLON_S3_PUBLIC_URL` to serve from a public bucket/CDN instead. Credentials come from env only (no automatic IAM-role discovery); pass `PYLON_S3_SESSION_TOKEN` alongside temporary credentials.
+The `s3` backend uses SigV4 presigned URLs for every operation. Clients PUT/GET bytes straight to the bucket (never through pylon's memory). For a private bucket, pylon tracks per-file ownership. `GET /api/files/<id>` then enforces the same owner check as local disk before it 302-redirects to a short-lived presigned URL. Set `PYLON_S3_PUBLIC_URL` to serve from a public bucket/CDN instead. Credentials come from env only (no automatic IAM-role discovery). Pass `PYLON_S3_SESSION_TOKEN` alongside temporary credentials.
 
 Uploads use a 3-step direct-to-storage flow so large files never transit the server's memory:
 
@@ -74,7 +74,7 @@ const stored = await fetch("/api/files/confirm", {
 //   - local:  url is /api/files/<id> (served by pylon)
 ```
 
-The shape is identical regardless of backend — clients don't special-case Stack0 vs local. Persist both `stored.url` (display) and `stored.id` (so you can `DELETE /api/files/<id>` later).
+The shape is identical for every backend. Clients do not special-case Stack0 vs local. Persist both `stored.url` (display) and `stored.id` (so you can `DELETE /api/files/<id>` later).
 
 - `GET /api/files/<id>` serves the bytes. For CDN backends pylon 302-redirects to the CDN URL; for local it streams from disk.
 - `DELETE /api/files/<id>` removes the asset. Owner-gated: only the user who confirmed the upload (or an admin).
@@ -85,7 +85,7 @@ The multipart `POST /api/files/upload` was removed in 0.3.91 — it now returns 
 
 ## Email
 
-Transactional email is a **built-in subsystem** selected by `PYLON_EMAIL_PROVIDER` — not a plugin entry.
+Transactional email is a built-in subsystem selected by `PYLON_EMAIL_PROVIDER`, not a plugin entry.
 
 ```bash
 PYLON_EMAIL_PROVIDER=sendgrid   # sendgrid | resend | stack0 | webhook
@@ -93,7 +93,7 @@ PYLON_EMAIL_API_KEY=...         # the provider's API key
 PYLON_EMAIL_FROM="Acme <noreply@acme.com>"   # optional; webhook also needs PYLON_EMAIL_ENDPOINT
 ```
 
-Send from an action via `ctx.email`. Both forms work — positional
+Send from an action via `ctx.email`. Both forms work. Use positional
 `send(to, subject, body)` for plain text, or an options object for HTML
 and attachments:
 
@@ -121,27 +121,27 @@ export default action({
 ```
 
 Limits: one recipient per send, at most 20 attachments and 15MB of
-base64 attachment data (≈11MB raw) per email — larger sends throw
+base64 attachment data (≈11MB raw) per email. Larger sends throw
 `EMAIL_TOO_LARGE` before any network I/O.
 
-Auth-flow email (magic codes, verification, invites) uses a separate channel read from `PYLON_AUTH_EMAIL_*`, falling back to `PYLON_EMAIL_*`. This keeps a shared platform auth key out of reach of app code. See [Auth → Email verification](/auth/email-verification).
+Auth-flow email (magic codes, verification, invites) uses a separate channel read from `PYLON_AUTH_EMAIL_*`. It falls back to `PYLON_EMAIL_*`. This keeps a shared platform auth key away from app code. See [Auth → Email verification](/auth/email-verification).
 
 ## Stripe billing
 
-Billing is the installable **[@pylonsync/stripe](/plugins/stripe)** package — plans, checkout, billing portal, signature-verified webhook, and a subscription entity. Full config, hooks, and the webhook endpoint are on its page.
+Billing is the installable [@pylonsync/stripe](/plugins/stripe) package. It provides plans, checkout, a billing portal, a signature-verified webhook, and a subscription entity. Full config, hooks, and the webhook endpoint are on its page.
 
 ## Outbound webhooks
 
-Firing webhooks at your customers' endpoints is the installable **[@pylonsync/webhooks](/plugins/webhooks)** package — Svix-compatible HMAC signatures, an exponential-backoff retry schedule, secret rotation, and a delivery-audit entity. See its page.
+Outbound webhooks to your customers' endpoints are the installable [@pylonsync/webhooks](/plugins/webhooks) package. It provides Svix-compatible HMAC signatures, an exponential-backoff retry schedule, secret rotation, and a delivery-audit entity. See its page.
 
 ## Feature flags
 
-Runtime feature flags are the installable **[@pylonsync/feature-flags](/plugins/feature-flags)** package — local-eval boolean + multivariate flags, percentage rollouts, targeting predicates. See its page.
+Runtime feature flags are the installable [@pylonsync/feature-flags](/plugins/feature-flags) package. It provides local-eval boolean and multivariate flags, percentage rollouts, and targeting predicates. See its page.
 
 ## Audit log
 
-Auditing is a **built-in framework feature**, not a plugin: `/api/auth/audit` and `/api/auth/audit/tenant` routes expose the log. Sensitive auth events are recorded automatically.
+Auditing is a built-in framework feature, not a plugin. The `/api/auth/audit` and `/api/auth/audit/tenant` routes expose the log. Pylon records sensitive auth events automatically.
 
 ## Caching
 
-Pylon keeps an in-process cache that backs SSR / ISR response caching. It's internal to the runtime today — there is no user-facing `ctx.cache` API. For app-level memoization, cache inside a server function's own logic or use an external store you call from a function.
+Pylon keeps an in-process cache that backs SSR / ISR response caching. It is internal to the runtime today. There is no user-facing `ctx.cache` API. For app-level memoization, cache inside a server function's own logic, or use an external store you call from a function.

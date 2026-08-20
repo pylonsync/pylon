@@ -3,7 +3,7 @@ title: React SDK
 description: "Use @pylonsync/react hooks for queries, mutations, sessions, search, presence, and multiplayer."
 ---
 
-`@pylonsync/react` is the React client. The `db.*` namespace exposes hooks that read from a local sync replica — every component using a hook re-renders automatically when a row changes (your own mutation, a server push, a write from another tab).
+`@pylonsync/react` is the React client. The `db.*` namespace exposes hooks that read from a local sync replica. Every component using a hook re-renders automatically when a row changes (your own mutation, a server push, a write from another tab).
 
 ## Install
 
@@ -79,7 +79,7 @@ const { data: feed, loading } = db.useReactiveQuery<FeedItem[]>("getFeed", {
 
 The server records every `ctx.db.*` read inside your `query()` handler and re-runs the handler when any of those rows mutate. See [Reactive queries](/concepts/reactive-queries).
 
-### `db.useMutation` — server function w/ optimistic updates
+### `db.useMutation` — server function with optimistic updates
 
 ```tsx
 const send = db.useMutation<
@@ -229,11 +229,11 @@ for await (const chunk of db.streamFn("chat", { prompt: "hi" })) {
 }
 ```
 
-These hit the local store optimistically (where applicable) and the server in the background — the same path as the hooks.
+These hit the local store optimistically (where applicable) and the server in the background. They use the same path as the hooks.
 
 ## Auth helpers
 
-For sign-in flows that the framework owns end-to-end (cookie + storage update + session refresh), use the [`@pylonsync/next/auth`](/clients/next#6-auth-flows---pylonsyncnextauth) helpers (works outside Next.js too — the auth module has no Next-specific deps despite the package path):
+For sign-in flows that the framework owns end-to-end (cookie + storage update + session refresh), use the [`@pylonsync/next/auth`](/clients/next#6-auth-flows---pylonsyncnextauth) helpers (works outside Next.js too; the auth module has no Next-specific deps despite the package path):
 
 ```ts
 import {

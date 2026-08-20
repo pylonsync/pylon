@@ -3,7 +3,7 @@ title: Auth overview
 description: "Choose among Pylon sessions, magic codes, passwords, OAuth, RBAC, and API keys."
 ---
 
-Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk, or NextAuth — sign-in flows, sessions, RBAC, and OAuth callbacks are all native HTTP endpoints. This page is the map; the rest of this section drills into each method.
+Pylon ships a complete auth system in the binary. You do not add Auth0, Clerk, or NextAuth. Sign-in flows, sessions, RBAC, and OAuth callbacks are all native HTTP endpoints. This page maps the methods. The rest of this section covers each one.
 
 ## What's included
 
@@ -15,7 +15,7 @@ Pylon ships a complete auth system in the binary. You don't bolt on Auth0, Clerk
 | Sessions | Opaque 256-bit tokens, 30-day default expiry, refresh + revoke |
 | Multi-tenant | Active org per session; row-scoped policies via `auth.tenantId` |
 | Roles (RBAC) | `auth.hasRole('admin')` in policies; multi-role aware |
-| API keys | First-class — `pk.…` bearer tokens, optional scopes + expiry, server-issued at `/api/auth/api-keys` |
+| API keys | `pk.…` bearer tokens, optional scopes + expiry, server-issued at `/api/auth/api-keys` |
 | HIBP password check | Argon2 + Pwned Passwords k-anonymity check at register/change. Disable with `PYLON_DISABLE_HIBP=1` (tests) |
 | Password change/reset | `/api/auth/password/change` (requires current password); forgot-password via `/api/auth/password/reset/request` + `/reset/complete` (emailed single-use link) |
 | Account deletion | `DELETE /api/auth/account` — revokes sessions, API keys, OAuth links + deletes user row |
@@ -109,7 +109,7 @@ Pylon supports both:
 - **Bearer tokens** — pass via `Authorization: Bearer <token>` header. Used by every SDK, native clients, and curl. Tokens are 256-bit opaque strings prefixed `pylon_`.
 - **Cookies** — when configured (see [Sessions](/auth/sessions)), the same token can ride in an `HttpOnly` cookie for browser apps. Set automatically on successful sign-in.
 
-Both resolve to the same `Session` server-side. No JWT, no signing key to rotate, no refresh-token dance — opaque tokens you can revoke.
+Both resolve to the same `Session` server-side. There is no JWT, no signing key to rotate, and no refresh-token exchange. The tokens are opaque and you can revoke them.
 
 ## Auth context
 
@@ -208,11 +208,10 @@ PYLON_EMAIL_FROM=noreply@yourdomain.com
 ```
 
 Auth flows (magic codes, password reset, invitations) fall back to this
-`PYLON_EMAIL_*` provider, so a single config covers both auth and your
-app's own `ctx.email`. To give auth its **own** sending identity —
-separate key, separate from-address, separate sending domain/reputation —
-set the `PYLON_AUTH_EMAIL_*` family, which takes precedence for auth email
-only:
+`PYLON_EMAIL_*` provider, so one config covers both auth and your
+app's own `ctx.email`. To give auth its own sending identity (separate
+key, separate from-address, separate sending domain), set the
+`PYLON_AUTH_EMAIL_*` family. It takes precedence for auth email only:
 
 ```bash
 PYLON_AUTH_EMAIL_PROVIDER=stack0
@@ -220,11 +219,11 @@ PYLON_AUTH_EMAIL_API_KEY=sk_live_...
 PYLON_AUTH_EMAIL_FROM=noreply@auth.yourdomain.com
 ```
 
-When `PYLON_AUTH_EMAIL_*` is set, app code's `ctx.email` does **not** see
-it — it reads only `PYLON_EMAIL_*`. That separation lets a host back auth
-email with a shared, locked-down key (e.g. on a dedicated sending
-subdomain) without exposing it to arbitrary app sends. (This is exactly
-how Pylon Cloud configures auth email.)
+When `PYLON_AUTH_EMAIL_*` is set, app code's `ctx.email` does not see
+it. It reads only `PYLON_EMAIL_*`. That separation lets a host back auth
+email with a shared, locked-down key (for example, on a dedicated sending
+subdomain) without exposing it to app sends. Pylon Cloud configures auth
+email this way.
 
 Cookie auth (browser apps):
 

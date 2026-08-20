@@ -5,14 +5,14 @@ description: "Use @pylonsync/next for server helpers, an edge proxy, and cookie 
 
 `@pylonsync/next` is the Next.js-specific layer on top of `@pylonsync/react`. It provides:
 
-- **`createPylonServer`** — server-side fetch helpers (`pylon.requireAuth()`, `pylon.getMe()`, `pylon.json()`) that forward the user's session cookie
-- **`createPylonClient`** — a same-origin client fetcher for Client Components that respects Next's request lifecycle
-- **`createPylonProxy`** — middleware that gates protected routes on session presence so the UI doesn't flash before redirect
-- **`@pylonsync/next/auth`** — cookie-aware sign-up / sign-in / OAuth flows
+- **`createPylonServer`:** server-side fetch helpers (`pylon.requireAuth()`, `pylon.getMe()`, `pylon.json()`) that forward the user's session cookie
+- **`createPylonClient`:** a same-origin client fetcher for Client Components that respects Next's request lifecycle
+- **`createPylonProxy`:** middleware that gates protected routes on session presence so the UI doesn't flash before redirect
+- **`@pylonsync/next/auth`:** cookie-aware sign-up / sign-in / OAuth flows
 
 Requires the App Router on Next.js 16+ (the package's peer-dependency floor); Pages Router users can still use [`@pylonsync/react`](/clients/react) directly.
 
-The fastest path to a Next.js + Pylon project is `npm create @pylonsync/pylon` — pick the `todo` (or any) template with `--platforms web` and you get a working App Router setup with all of this wired up. The rest of this page documents the pieces so you can integrate Pylon into an existing Next.js app.
+The fastest way to start a Next.js + Pylon project is `npm create @pylonsync/pylon`. Pick the `todo` (or any) template with `--platforms web`. You get a working App Router setup with all of this configured. The rest of this page documents the pieces, so you can add Pylon to an existing Next.js app.
 
 ## Install
 
@@ -156,7 +156,7 @@ export default function PostsPage() {
 }
 ```
 
-`db.useQuery` subscribes to the local sync replica — server-pushed inserts, your own optimistic mutations, and cross-tab updates all re-render automatically.
+`db.useQuery` subscribes to the local sync replica. Server-pushed inserts, your own optimistic mutations, and cross-tab updates all re-render automatically.
 
 ## 5. Middleware gate — `createPylonProxy`
 
@@ -174,7 +174,7 @@ const { proxy, config } = createPylonProxy({
 export { proxy as middleware, config };
 ```
 
-The proxy only checks for the cookie's presence — forged values still fail server-side at `pylon.requireAuth()` inside the page. It's a UX optimization, not a security boundary.
+The proxy only checks for the cookie's presence. Forged values still fail server-side at `pylon.requireAuth()` inside the page. It is a UX optimization. It is not a security boundary.
 
 ## 6. Auth flows — `@pylonsync/next/auth`
 
@@ -208,7 +208,7 @@ export default function LoginPage() {
 }
 ```
 
-The session cookie is set by the Pylon backend — your Next.js layer just makes the call. After login, `await pylon.requireAuth()` in any Server Component resolves to the freshly-authenticated user.
+The Pylon backend sets the session cookie. Your Next.js layer only makes the call. After login, `await pylon.requireAuth()` in any Server Component resolves to the freshly-authenticated user.
 
 OAuth providers follow the same pattern via `startOAuthLogin({ provider: "google", returnTo: "/dashboard" })`.
 
@@ -218,7 +218,7 @@ OAuth providers follow the same pattern via `startOAuthLogin({ provider: "google
 | --- | --- | --- |
 | `PYLON_TARGET` | Server (`process.env`) | Origin of your Pylon backend. Used by `createPylonServer` and the `next.config.js` rewrite. |
 
-There is intentionally no `NEXT_PUBLIC_PYLON_URL` — the client always talks same-origin via the Next rewrite, so the browser doesn't need to know the backend URL. If you don't want the rewrite, pass an explicit `baseUrl` to `configureClient` in your `Providers`.
+There is intentionally no `NEXT_PUBLIC_PYLON_URL`. The client always talks same-origin via the Next rewrite, so the browser doesn't need to know the backend URL. If you don't want the rewrite, pass an explicit `baseUrl` to `configureClient` in your `Providers`.
 
 ## Common pitfalls
 

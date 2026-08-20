@@ -3,9 +3,9 @@ title: CAPTCHA
 description: "Gate magic-code send, password register, phone send-code, and magic-link send with hCaptcha, Cloudflare Turnstile, or reCAPTCHA."
 ---
 
-Magic-code and password sign-in are abuse magnets — bot networks send-code-spam every known email to phish, run credential-stuffing dictionaries against `/password/login`, or burn through SMS quotas via `/phone/send-code`. Pylon's built-in CAPTCHA gate sits in front of those endpoints; configure one env var pair and unauthenticated bots get bounced before they reach the rate limiter.
+Magic-code and password sign-in attract abuse. Bot networks spam send-code to every known email to phish, run credential-stuffing dictionaries against `/password/login`, or use up SMS quotas through `/phone/send-code`. Pylon's built-in CAPTCHA gate protects those endpoints. Set one env var pair, and Pylon blocks unauthenticated bots before they reach the rate limiter.
 
-Three providers ship in the box:
+Three providers are built in:
 
 - **hCaptcha** — independent, privacy-focused, free up to ~1M/month
 - **Cloudflare Turnstile** — invisible challenge, free for any volume
@@ -22,7 +22,7 @@ When `PYLON_CAPTCHA_PROVIDER` + `PYLON_CAPTCHA_SECRET` are both set, these endpo
 | `/api/auth/phone/send-code` | POST | Burns Twilio (or other SMS provider) quotas |
 | `/api/auth/magic-link/send` | POST | Same as magic/send but for password-reset links |
 
-When the env vars are unset, the gate is skipped entirely — existing apps keep working unchanged.
+When the env vars are unset, Pylon skips the gate. Existing apps keep working unchanged.
 
 ## Configuration
 
@@ -36,7 +36,7 @@ Provider aliases:
 - `turnstile` and `cloudflare` both select Turnstile.
 - `recaptcha` and `google` both select reCAPTCHA.
 
-The framework calls each provider's `siteverify` endpoint with the supplied token + the request's peer IP:
+The framework calls each provider's `siteverify` endpoint with the supplied token and the request's peer IP:
 
 - hCaptcha: `https://api.hcaptcha.com/siteverify`
 - Turnstile: `https://challenges.cloudflare.com/turnstile/v0/siteverify`
@@ -71,7 +71,7 @@ The client-side public site key lives in your frontend; the server-side secret l
 </script>
 ```
 
-For Turnstile, the form input is `cf-turnstile-response`; for reCAPTCHA it's `g-recaptcha-response`. All three resolve to a single `captchaToken` field on the wire to Pylon.
+For Turnstile, the form input is `cf-turnstile-response`; for reCAPTCHA it's `g-recaptcha-response`. All three map to a single `captchaToken` field in the request to Pylon.
 
 ## Verify behavior
 
@@ -86,9 +86,9 @@ Missing or invalid token returns `400 CAPTCHA_FAILED`:
 }
 ```
 
-The actual provider response (error codes like `missing-input-response`, `invalid-input-response`) is logged server-side with `tracing::warn!` so operators can debug from logs without leaking which check failed back to the client.
+Pylon logs the provider response (error codes like `missing-input-response`, `invalid-input-response`) server-side with `tracing::warn!`. Operators can debug from logs. The client does not learn which check failed.
 
-The gate runs **before** the rate limiter and **before** any DB / email work — bots that fail the challenge don't consume rate-limit budget or trigger downstream actions.
+The gate runs before the rate limiter and before any DB or email work. Bots that fail the challenge do not consume rate-limit budget or trigger later actions.
 
 ## Where to go next
 
