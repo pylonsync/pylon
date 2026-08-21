@@ -182,9 +182,9 @@ await ctx.db.update("Post", id, { title: "New" });
 await ctx.db.delete("Post", id);
 ```
 
-On the client, `useQuery(api.posts.list, args)` becomes `db.useQuery("Post",
-{...})`, and `useMutation(api.posts.create)` becomes `db.useMutation("create")`
-or the optimistic `db.useEntity("Post")`.
+On the client, `useQuery(api.posts.list, args)` becomes
+`db.useQuery("Post", {...})`, and `useMutation(api.posts.create)` becomes
+`db.useMutation("create")` or the optimistic `db.useEntity("Post")`.
 
 ## Migrating your data
 
