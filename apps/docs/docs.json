@@ -146,6 +146,7 @@
           {
             "group": "Migrate",
             "pages": [
+              "migrate/firebase",
               "migrate/instantdb"
             ]
           }

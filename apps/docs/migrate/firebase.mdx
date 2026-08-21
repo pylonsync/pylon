@@ -1,0 +1,352 @@
+---
+title: "Migrating from Firebase"
+description: "Move a Firestore app to Pylon: the concept map, schemaless-to-typed schema, security rules to policies, data export and import, and the parts that need a decision."
+---
+
+This guide covers **Firestore** (collections and documents). Firebase's older
+**Realtime Database** is a different model, a single JSON tree, and needs its own
+mapping. If your app is on the Realtime Database, most of the auth and functions
+sections still apply, but the data model does not.
+
+## Why Pylon fits
+
+Firebase and Pylon share the shape of a backend: a data store, auth, server
+functions, file storage, and access rules. Most of your app maps directly:
+
+- documents with fields and references map to entities with typed fields and
+  foreign keys;
+- security rules map to per-entity policies, and both **deny by default**;
+- `onSnapshot` live listeners map to reactive queries against a local replica;
+- Firebase Auth maps to Pylon auth (email/password, email link, OAuth,
+  anonymous).
+
+The one real shift: **Firestore is schemaless; Pylon is schema-first.** In
+Firestore a document is any shape. In Pylon you declare each entity's fields and
+types once, and get types everywhere. The main migration work is writing that
+schema for data that never had one.
+
+What Pylon adds:
+
+- Hosted server functions in TypeScript (`query` / `mutation` / `action`), each
+  in a transaction, instead of deploying Cloud Functions.
+- Server-side rendering: file-based routes, one binary serving frontend and API.
+- Relational queries with `include`, plus aggregates and vector search.
+- A single Rust binary you can self-host, or one-command Pylon Cloud.
+
+## Concept map
+
+| Concept | Firebase (Firestore) | Pylon |
+|---|---|---|
+| Client init | `initializeApp(...)`, `getFirestore`, `getAuth` | `init({ appName })` |
+| Data unit | collection + document (schemaless) | `entity("Name", {...})` (typed) + `buildManifest(...)` |
+| Field types | string, number, boolean, Timestamp, Map, Array, Reference, Geopoint | `field.string/int/float/bool/datetime/json` |
+| Relation | reference field or an id string (no enforcement) | `field.id("Target")` + `include` |
+| Document id | auto 20-char base62, or a custom id | auto 40-char hex, or a valid custom id |
+| Read one | `getDoc(doc(db, "c", "id"))` | `db.useQueryOne("E", id)` / `ctx.db.get("E", id)` |
+| Query | `getDocs(query(collection(db,"posts"), where(...), orderBy(...), limit(...)))` | `db.useQuery("Post", { where, orderBy, limit })` |
+| Live read | `onSnapshot(q, cb)` | `db.useQuery(...)` (reactive by default) |
+| Create | `setDoc(...)` / `addDoc(...)` | `db.useEntity("E").insert({...})` / `ctx.db.insert(...)` |
+| Update | `updateDoc(...)` | `.update(id, {...})` / `ctx.db.update(...)` |
+| Delete | `deleteDoc(...)` | `.remove(id)` / `ctx.db.delete(...)` |
+| Atomic multi-write | `writeBatch` / `runTransaction` | a `mutation` handler (one transaction), or `POST /api/batch` |
+| Server time | `serverTimestamp()` | `field.datetime().defaultNow()`, or set an ISO string |
+| Rules | `firestore.rules`, deny by default | `policy({...})`, deny by default |
+| Rule: current row | `resource.data.*` | `data.*` / `existing.*` |
+| Rule: incoming write | `request.resource.data.*` | `data.*` |
+| Rule: user id | `request.auth.uid` | `auth.userId` |
+| Rule: cross-doc | `get()` / `exists()` | `exists(Entity where ...)` |
+| Auth (email/password) | `createUser/signInWithEmailAndPassword` | `POST /api/auth/password/register` + `/password/login` |
+| Auth (email link) | `sendSignInLinkToEmail` / `signInWithEmailLink` | `POST /api/auth/magic/send` + `/magic/verify` |
+| Auth (OAuth) | `signInWithPopup(new GoogleAuthProvider())` | `GET /api/auth/login/:provider?callback=` |
+| Auth (anonymous) | `signInAnonymously` | `POST /api/auth/guest` |
+| Auth state | `onAuthStateChanged` → `user.uid` | `db.useUser()` (client), `ctx.auth.userId` (server) |
+| Server logic | Cloud Functions `onCall` | `query` / `mutation` / `action` functions |
+| Write trigger | `onDocumentWritten` | do the work in the mutation (see the gaps) |
+| Storage | `ref` / `uploadBytes` / `getDownloadURL` | Pylon files provider |
+| Deploy | `firebase deploy` | `pylon deploy` (cloud) or single-binary self-host |
+
+## Migrating your schema
+
+Firestore has no schema, so first read your data and write one. For each
+collection, declare a Pylon entity with typed fields. Turn a reference (or an id
+string) into a `field.id("Target")` foreign key.
+
+**Firestore** — a `posts` collection, documents shaped like:
+
+```json
+{ "title": "Hello", "body": "...", "authorId": "u1", "createdAt": "<Timestamp>" }
+```
+
+**Pylon** (`app.ts`):
+
+```typescript
+import { entity, field, buildManifest, discoverAppRoutes } from "@pylonsync/sdk";
+
+const Profile = entity("Profile", {
+  nickname: field.string(),
+  createdAt: field.datetime(),
+});
+
+const Post = entity("Post", {
+  authorId: field.id("Profile"),   // a Firestore reference / id string becomes an FK field
+  title: field.string(),
+  body: field.string(),
+  createdAt: field.datetime(),
+}, {
+  indexes: [{ name: "by_author", fields: ["authorId"], unique: false }],
+});
+
+export default buildManifest({
+  name: "my-app",
+  version: "0.1.0",
+  entities: [Profile, Post],
+  policies: [/* see below */],
+  routes: await discoverAppRoutes(),
+});
+```
+
+Notes:
+
+- Map Firestore field types to Pylon: string, number, boolean, and Timestamp map
+  to `field.string/int/float/bool/datetime`. A Map (nested object) or Array maps
+  to `field.json()`. Geopoint and Bytes have no direct type: store a Geopoint as
+  `field.json()` (`{ lat, lng }`) and Bytes as a base64 `field.string()`.
+- A **subcollection** (`posts/{id}/comments`) has no direct equivalent. Flatten
+  it to a top-level `Comment` entity with a `postId: field.id("Post")` field.
+- Firestore's composite-index requirements become `indexes` on the entity.
+
+## Migrating your security rules
+
+Both systems **deny by default**, so this is a translation, not a change of
+posture. Write a `policy()` for every entity, because an entity with no policy is
+blocked.
+
+**Firestore** (`firestore.rules`):
+
+```
+match /posts/{postId} {
+  allow read: if resource.data.published == true
+    || (request.auth != null && request.auth.uid == resource.data.author);
+  allow write: if request.auth != null && request.auth.uid == resource.data.author;
+}
+```
+
+**Pylon** (`policy(...)` in `app.ts`):
+
+```typescript
+policy({
+  name: "post_access",
+  entity: "Post",
+  allowRead: "data.published == true || auth.userId == data.author",
+  allowInsert: "auth.userId == data.author",
+  allowUpdate: "auth.userId == data.author",
+  allowDelete: "auth.userId == data.author",
+});
+```
+
+How to convert each rule:
+
+- `request.auth.uid` maps to `auth.userId`. `request.auth != null` maps to
+  `auth.userId != null`.
+- `resource.data.*` (the current row) maps to `data.*` on reads, and to
+  `existing.*` on update and delete.
+- `request.resource.data.*` (the incoming write) maps to `data.*` in the insert
+  and update policy.
+- `get()` / `exists()` cross-document checks map to `exists(Entity where field ==
+  auth.userId)`.
+- To lock an immutable field (Firestore's `request.resource.data.author ==
+  resource.data.author`), declare the column `field.string().owner()`. It stamps
+  `auth.userId` on insert, rejects a false owner, and locks the value on update.
+
+## Migrating reads and writes
+
+Reads. A Firestore query becomes `db.useQuery`, which is reactive by default (no
+separate `onSnapshot`).
+
+```typescript
+// Firestore
+import { getDocs, collection, query, where, orderBy, limit } from "firebase/firestore";
+const q = query(
+  collection(db, "posts"),
+  where("authorId", "==", authorId),
+  orderBy("createdAt", "desc"),
+  limit(10),
+);
+const snap = await getDocs(q);
+
+// Pylon (live)
+const posts = db.useQuery<Post>("Post", {
+  where: { authorId },
+  orderBy: { createdAt: "desc" },
+  limit: 10,
+});
+```
+
+Writes. `setDoc`/`addDoc`/`updateDoc`/`deleteDoc` become the client entity hook
+or a server function.
+
+```typescript
+// Firestore
+import { collection, addDoc, doc, updateDoc, deleteDoc, serverTimestamp } from "firebase/firestore";
+await addDoc(collection(db, "posts"), { title, authorId, createdAt: serverTimestamp() });
+await updateDoc(doc(db, "posts", id), { title: "New" });
+await deleteDoc(doc(db, "posts", id));
+
+// Pylon — client, optimistic
+const posts = db.useEntity("Post");
+posts.insert({ title, authorId, createdAt: new Date().toISOString() });
+posts.update(id, { title: "New" });
+posts.remove(id);
+
+// Pylon — server, in a transaction
+export default mutation({
+  args: { title: v.string() },
+  async handler(ctx, { title }) {
+    return ctx.db.insert("Post", { title, authorId: ctx.auth.userId, createdAt: new Date().toISOString() });
+  },
+});
+```
+
+A `writeBatch` or `runTransaction` becomes one `mutation` handler (the whole
+handler is a transaction) or a `POST /api/batch` call.
+
+## Migrating your data
+
+Use the Admin SDK to read your data out. The managed `gcloud firestore export`
+writes a LevelDB format meant for restore into Firestore or BigQuery, not for
+loading into another database, so it is the wrong tool here.
+
+**1. Export with the Admin SDK.** Firestore has no single "dump everything" call,
+so enumerate collections and recurse into subcollections.
+
+```javascript
+const admin = require("firebase-admin");
+admin.initializeApp();
+const db = admin.firestore();
+
+const snap = await db.collection("posts").get();
+const rows = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+// For subcollections, list them per document and recurse:
+//   for (const d of snap.docs) { const subs = await d.ref.listCollections(); ... }
+```
+
+**2. Convert ids, references, and timestamps.** Firestore ids are 20-character
+base62 strings. Pylon ids are 40-character lowercase hex, so you cannot reuse
+Firestore ids directly (Pylon rejects a bad id with `INVALID_ID`). Use one of two
+methods:
+
+- Derive the id (simplest). Convert each Firestore id to a Pylon id with a fixed
+  function, and apply the same function to every reference. `sha1(firestoreId)`
+  gives 40 lowercase hex characters, so it fits Pylon's format and needs no
+  lookup table. Derived ids are not time-ordered, so sort by your `createdAt`
+  fields.
+- Map the id. Generate a new Pylon id per row with `generateId()` from
+  `@pylonsync/sync`, keep an old-to-new map, and rewrite references in a second
+  pass.
+
+Also convert a Firestore Timestamp to an ISO string, and a reference to its
+target id in a `field.id` column.
+
+**3. Import into Pylon.** The admin batch endpoint loads rows quickly and
+bypasses per-entity policies. It needs an admin token. Send batches of a few
+hundred rows.
+
+```javascript
+import { createHash } from "node:crypto";
+
+// Firestore id -> valid Pylon id (40-char lowercase hex). Deterministic, so
+// references map the same way with no lookup table.
+const toPylonId = (id) => createHash("sha1").update(id).digest("hex");
+
+for (const batch of chunk(rows, 500)) {
+  const operations = batch.map((row) => ({
+    op: "insert",
+    entity: "Post",
+    data: {
+      id: toPylonId(row.id),
+      authorId: toPylonId(row.authorId),        // reference -> FK field
+      title: row.title,
+      body: row.body,
+      createdAt: row.createdAt.toDate().toISOString(), // Timestamp -> ISO string
+    },
+  }));
+  await fetch(`${PYLON_URL}/api/batch`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ operations }),
+  });
+}
+```
+
+**4. Files.** Download each object from Firebase Storage and upload it to Pylon's
+file storage, then rewrite the stored paths and URLs.
+
+**5. Users.** Export your Firebase Auth users (`firebase auth:export users.json`)
+and import each into your Pylon `User` entity, keyed by email. Sessions do not
+transfer, so users sign in again. Password hashes do not transfer either; move
+users to Pylon's magic-code or OAuth sign-in, where email is the stable key.
+
+## Migrating auth
+
+Firebase's providers each have a Pylon equivalent.
+
+```typescript
+// Firebase — email + password
+await createUserWithEmailAndPassword(auth, email, password);
+await signInWithEmailAndPassword(auth, email, password);
+
+// Pylon — email + password
+await fetch("/api/auth/password/register", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email, password }),
+});
+const res = await fetch("/api/auth/password/login", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email, password }),
+});
+const { token } = await res.json();
+setSessionToken(token);   // stores the token and re-syncs the replica for this user
+```
+
+- Email link (`sendSignInLinkToEmail` / `signInWithEmailLink`) maps to Pylon's
+  magic code: `POST /api/auth/magic/send` then `/magic/verify`.
+- OAuth (`signInWithPopup(new GoogleAuthProvider())`) maps to a redirect to `GET
+  /api/auth/login/:provider?callback=<url>`. Pylon supports Google, GitHub,
+  Apple, Microsoft, and about 20 more providers.
+- Anonymous (`signInAnonymously`) maps to a Pylon guest session (`POST
+  /api/auth/guest`).
+- `onAuthStateChanged` → `user.uid` maps to `db.useUser()` on the client and
+  `ctx.auth.userId` on the server.
+
+## What does not map cleanly
+
+Decide on these before you commit:
+
+- Schemaless documents. Firestore lets each document be any shape. Pylon is
+  schema-first, so you define the fields. Keep genuinely freeform data in a
+  `field.json()` column, but an update replaces the whole field (there is no
+  per-key merge like `updateDoc`'s dotted paths).
+- Subcollections. Flatten each subcollection to a top-level entity with a parent
+  `field.id` column. There is no nested-collection path in Pylon.
+- Document references. A Firestore `Reference` field becomes a plain id string in
+  a `field.id` column. You resolve it with `include`, not a second `getDoc`.
+- Write triggers. Firestore's `onDocumentWritten` reacts to any write on a path.
+  Pylon has no per-write trigger. Do the derived work inside the `mutation` that
+  makes the write, or use a reactive query or a scheduled job.
+- Field types with no Pylon equivalent: Geopoint (`field.json()` as `{lat,lng}`)
+  and Bytes (base64 in a `field.string()`).
+- Realtime Database. Its JSON-tree model is out of scope for this guide.
+
+None of these blocks a typical app. Each one needs a decision, not a mechanical
+rewrite.
+
+## Get started
+
+1. Create a new Pylon app: `npm create @pylonsync/pylon@latest my-app`.
+2. Write a schema (`entity` and `field`) for each Firestore collection, and a
+   `policy()` for every entity.
+3. Run the Admin SDK export, the conversion, and the `/api/batch` import against
+   a staging app first.
+4. Point the client at Pylon: `init`, the auth calls, `db.useQuery`, and
+   `db.useEntity`.
+5. Run `pylon deploy`, or self-host the single binary.
