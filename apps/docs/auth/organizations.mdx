@@ -3,13 +3,13 @@ title: Organizations
 description: "Model multi-tenant organizations, roles, invites, and active-tenant sessions as customizable manifest entities."
 ---
 
-Pylon ships a complete org / workspace / team layer in the binary. Users create orgs, invite teammates by email, change member roles, select an active tenant per session, and policies see the active tenant as `auth.tenantId`. No external "teams" service to bolt on.
+Pylon ships a complete org, workspace, and team layer in the binary. Users create orgs, invite teammates by email, and change member roles. Users select an active tenant per session, and policies read the active tenant as `auth.tenantId`. You do not need an external teams service.
 
-**Apps customize the org / member / invite schema.** As of v0.3.74, the framework's `/api/auth/orgs/*` surface reads + writes through manifest-declared entities (`Org`, `OrgMember`, `OrgInvite` by default — names configurable). Add `logo`, `industry`, `billingEmail`, `plan`, anything you want — the framework reads the required fields it needs and leaves your custom fields alone.
+Apps can customize the org, member, and invite schema. As of v0.3.74, the framework's `/api/auth/orgs/*` surface reads and writes through manifest-declared entities (`Org`, `OrgMember`, `OrgInvite` by default; names are configurable). Add `logo`, `industry`, `billingEmail`, `plan`, or any field you want. The framework reads only the fields it needs and leaves your custom fields alone.
 
 ## Declaring the entities
 
-Add three entities to your schema. Required fields per entity are listed; apps add any others freely.
+Add three entities to your schema. Required fields per entity are listed below. Add any other fields you want.
 
 ```typescript
 import { entity, field } from "@pylonsync/sdk";
@@ -83,7 +83,7 @@ auth: auth({
 }),
 ```
 
-With `disabled: true`, the routes return `501 ORG_NOT_CONFIGURED` and the framework's `OrgStore` is a no-op. Use this when you want full control of the schema + flow.
+With `disabled: true`, the routes return `501 ORG_NOT_CONFIGURED` and the framework's `OrgStore` is a no-op. Use this when you want full control of the schema and flow.
 
 ## Roles
 
@@ -93,7 +93,7 @@ With `disabled: true`, the routes return `501 ORG_NOT_CONFIGURED` and the framew
 | Admin | Yes | No | No |
 | Member | No | No | No |
 
-Multiple owners are allowed — the convention is to promote a successor before stepping down.
+Multiple owners are allowed. The convention is to promote a successor before stepping down.
 
 Apps can declare additional least-privilege roles directly in `buildManifest`:
 
@@ -106,13 +106,13 @@ const manifest = buildManifest({
 });
 ```
 
-The equivalent helper form is `auth: auth({ orgRoles: [...] })`. Role slugs must match `[a-z][a-z0-9_-]{0,63}`. Built-ins are always available and must not be redeclared.
+The equivalent helper form is `auth: auth({ orgRoles: [...] })`. Role slugs must match `[a-z][a-z0-9_-]{0,63}`. Built-in roles are always available. Do not redeclare them.
 
-Custom roles are exact-match labels: they do **not** inherit `member`, `admin`, or any other permission. The framework still reserves member management for owners/admins. Grant application permissions explicitly with `auth.hasRole("reviewer")` in policies or `ctx.requireMember(orgId, { role: ["reviewer"] })` in functions.
+Custom roles are exact-match labels. They do not inherit `member`, `admin`, or any other permission. The framework still reserves member management for owners or admins. Grant application permissions explicitly with `auth.hasRole("reviewer")` in policies or `ctx.requireMember(orgId, { role: ["reviewer"] })` in functions.
 
 ## Endpoints
 
-All under `/api/auth/`. **Org management requires a session.** API-key auth is refused with `403 API_KEY_AUTH_FORBIDDEN` — a leaked `pk.*` key can't create orgs or change member roles.
+All endpoints are under `/api/auth/`. Org management requires a session. API-key auth is refused with `403 API_KEY_AUTH_FORBIDDEN`. A leaked `pk.*` key cannot create orgs or change member roles.
 
 | Endpoint | Method | Role | Purpose |
 | --- | --- | --- | --- |
@@ -129,7 +129,7 @@ All under `/api/auth/`. **Org management requires a session.** API-key auth is r
 | `/invites/:token/accept` | POST | invited user | Accept an invite |
 | `/select-org` | POST | any session | Switch the session's active tenant |
 
-Non-member callers get `404 ORG_NOT_FOUND` on `/orgs/:id/*` — by design, so probing can't enumerate org ids.
+Non-member callers get `404 ORG_NOT_FOUND` on `/orgs/:id/*`. This is by design, so probing cannot enumerate org ids.
 
 ## Creating an org
 
@@ -151,7 +151,7 @@ Response:
 }
 ```
 
-The caller is auto-added as `Owner`. `created_by` is set to the caller's user id and is immutable.
+Pylon adds the caller as `Owner` automatically. `created_by` is set to the caller's user id and cannot change.
 
 ## Listing user's orgs
 
@@ -169,7 +169,7 @@ Response:
 ]
 ```
 
-A user can belong to as many orgs as they like; orgs are not exclusive.
+A user can belong to any number of orgs. Orgs are not exclusive.
 
 ## Inviting a teammate
 
@@ -193,18 +193,18 @@ Response:
 }
 ```
 
-Pylon sends the email automatically using the configured `EMAIL_PROVIDER` (or `ctx.email`). The plaintext token is **only returned in the response in dev mode**; in production the inviter sees the invite in their dashboard and the invitee gets the email.
+Pylon sends the email automatically using the configured `EMAIL_PROVIDER` (or `ctx.email`). The plaintext token appears in the response only in dev mode. In production, the inviter sees the invite in their dashboard, and the invitee gets the email.
 
 Invites are:
 
-- **Argon2-hashed at rest** — a DB read can't extract active invite links.
-- **Single-use** — `accepted_at` is CAS-stamped before the membership is created so two parallel accepts can't both succeed.
-- **Email-bound** — the accepting user's account email must match the invite's `email`, lowercase compare. Wrong account signed in → `400 WRONG_EMAIL`.
-- **7-day TTL** — `created_at + 7 * 24 * 60 * 60`. Expired invites return `400 INVITE_EXPIRED` on accept.
+- **Argon2-hashed at rest:** a database read cannot extract active invite links.
+- **Single-use:** `accepted_at` is CAS-stamped before the membership is created, so two parallel accepts cannot both succeed.
+- **Email-bound:** the accepting user's account email must match the invite's `email` (case-insensitive). Signing in with the wrong account returns `400 WRONG_EMAIL`.
+- **7-day TTL:** `created_at + 7 * 24 * 60 * 60`. Expired invites return `400 INVITE_EXPIRED` on accept.
 
 ## Accepting an invite
 
-The invitee signs into Pylon (any method — magic code, password, OAuth), then:
+The invitee signs into Pylon (any method: magic code, password, or OAuth), then makes this request:
 
 ```bash
 curl -X POST https://your-app/api/auth/invites/<token>/accept \
@@ -227,7 +227,7 @@ Error cases (all `400` except `401` for unauthenticated):
 | `WRONG_EMAIL` | Signed-in account's email doesn't match the invite |
 | `ALREADY_MEMBER` | Caller is already a member of the org |
 
-The original invite row is **kept** (not deleted) with `accepted_at` stamped — preserves the audit trail.
+Pylon keeps the original invite row (it does not delete it) and stamps `accepted_at`. This preserves the audit trail.
 
 ## Managing roles
 
@@ -241,15 +241,15 @@ curl -X PUT https://your-app/api/auth/orgs/org_a1b2/members/usr_alice \
 
 Guardrails enforced server-side:
 
-- **Only Owners can promote to Owner.** Admins can't self-promote. `400 BAD_ROLE` lists the built-in and manifest-declared roles when a role is unknown; `403 FORBIDDEN` is returned when a non-owner tries to promote a member to owner.
-- **The last Owner cannot be demoted.** Demote attempt that would leave 0 owners returns `400 LAST_OWNER`. Promote someone else to Owner first, then demote.
-- **The last Owner cannot be removed.** Same `400 LAST_OWNER` on `DELETE /members/:user_id`.
+- **Only Owners can promote to Owner.** Admins cannot self-promote. `400 BAD_ROLE` lists the built-in and manifest-declared roles when a role is unknown. `403 FORBIDDEN` is returned when a non-owner tries to promote a member to owner.
+- **The last Owner cannot be demoted.** A demotion that would leave zero owners returns `400 LAST_OWNER`. Promote someone else to Owner first, then demote.
+- **The last Owner cannot be removed.** `DELETE /members/:user_id` returns the same `400 LAST_OWNER` error.
 
-Self-removal is allowed for any role except a last-Owner without successor.
+Any member can remove themselves, except a last Owner with no successor.
 
-## Active tenant — `auth.tenantId`
+## Active tenant (`auth.tenantId`)
 
-A session can have an active org. The active tenant is what policies, change-event filters, and `ctx.auth.tenantId` see. Its exact membership role is exposed consistently by `/api/auth/me`, SSR `PageAuth.roles`, policy `auth.hasRole(...)`, and function `ctx.auth.roles`:
+A session can have an active org. The active tenant is what policies, change-event filters, and `ctx.auth.tenantId` see. The caller's exact membership role in that org appears consistently in `/api/auth/me`, SSR `PageAuth.roles`, policy `auth.hasRole(...)`, and function `ctx.auth.roles`:
 
 ```bash
 curl -X POST https://your-app/api/auth/select-org \
@@ -258,7 +258,7 @@ curl -X POST https://your-app/api/auth/select-org \
   -d '{"orgId": "org_a1b2"}'
 ```
 
-The server **verifies membership** before committing — if the caller isn't a member of `org_a1b2`, it returns `403 NOT_A_MEMBER`. Clients can't impersonate an org they don't belong to.
+The server verifies membership before committing. If the caller is not a member of `org_a1b2`, it returns `403 NOT_A_MEMBER`. Clients cannot impersonate an org they do not belong to.
 
 Pass `null` to leave the org (drop back to the "no active tenant" state):
 
@@ -271,10 +271,10 @@ curl -X POST https://your-app/api/auth/select-org \
 
 `tenantId` flows through:
 
-- **Policies** — `data.orgId == auth.tenantId` row-scopes reads + writes.
-- **TenantScopePlugin** — auto-stamps `tenantId` on insert; rejects non-admin cross-tenant inserts at `before_insert`.
-- **`ctx.auth.tenantId`** in TypeScript functions.
-- **WS / SSE change-event broadcasts** — per-client filtered by `policy.check_entity_read(entity, &client.auth, &row)` so subscribers only see events for rows they can read.
+- **Policies:** `data.orgId == auth.tenantId` row-scopes reads and writes.
+- **TenantScopePlugin:** stamps `tenantId` automatically on insert, and rejects non-admin cross-tenant inserts at `before_insert`.
+- **`ctx.auth.tenantId`:** available in TypeScript functions.
+- **WS and SSE change-event broadcasts:** filtered per client by `policy.check_entity_read(entity, &client.auth, &row)`, so subscribers see only events for rows they can read.
 
 See [RBAC](/auth/rbac) for the policy-DSL side.
 
@@ -300,11 +300,11 @@ export const documentPolicy = policy({
 });
 ```
 
-A non-admin caller who tries `ctx.db.insert("Document", { tenantId: "other-org", ... })` gets `403 CROSS_TENANT_INSERT` from the plugin before the row hits the DB.
+A non-admin caller who tries `ctx.db.insert("Document", { tenantId: "other-org", ... })` gets `403 CROSS_TENANT_INSERT` from the plugin before the row reaches the database.
 
 ## Per-org SSO
 
-Each org can have its own SSO IdP. See [SSO](/auth/sso) for OIDC + SAML configuration.
+Each org can have its own SSO IdP. See [SSO](/auth/sso) for OIDC and SAML configuration.
 
 | Endpoint | Method | Role | Purpose |
 | --- | --- | --- | --- |
@@ -317,15 +317,15 @@ Each org can have its own SSO IdP. See [SSO](/auth/sso) for OIDC + SAML configur
 
 ## Security guarantees
 
-- **Membership-check on every `/orgs/:id/*` route** — non-members see `404 ORG_NOT_FOUND` regardless of role.
-- **API-key auth refused** for all org-management routes. Real session required.
+- **Membership check on every `/orgs/:id/*` route:** non-members see `404 ORG_NOT_FOUND` regardless of role.
+- **API-key auth refused** for all org-management routes. Pylon requires a real session.
 - **Invites are Argon2-hashed at rest** with single-use CAS on accept.
-- **Email-bound invites** — accepting user's email must match the invite.
-- **Last-Owner protection** — demote/remove that would orphan the org is rejected.
-- **Object-level auth on `DELETE /orgs/:id/invites/:invite_id`** — the URL's `org_id` is matched against the invite row before revoke, so an admin of org A can't revoke an invite from org B even if they know the id.
+- **Email-bound invites:** the accepting user's email must match the invite.
+- **Last-Owner protection:** Pylon rejects a demotion or removal that would orphan the org.
+- **Object-level auth on `DELETE /orgs/:id/invites/:invite_id`:** Pylon matches the URL's `org_id` against the invite row before revoke, so an admin of org A cannot revoke an invite from org B, even with the id.
 
 ## Where to go next
 
-- **[Sessions](/auth/sessions)** — `select-org`, multi-tenant session state
-- **[RBAC](/auth/rbac)** — policies that read `auth.tenantId` and `auth.hasRole(...)`
-- **[SSO](/auth/sso)** — per-org OIDC + SAML
+- [Sessions](/auth/sessions): `select-org`, multi-tenant session state
+- [RBAC](/auth/rbac): policies that read `auth.tenantId` and `auth.hasRole(...)`
+- [SSO](/auth/sso): per-org OIDC and SAML

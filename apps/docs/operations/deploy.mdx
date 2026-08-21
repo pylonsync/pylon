@@ -3,7 +3,7 @@ title: Deploy
 description: "Deploy Pylon to a single VPS, AWS ECS, Cloudflare Workers, or Pylon Cloud."
 ---
 
-Pylon runs as a Rust binary (plus Bun, which runs your TypeScript and SSR) behind a TLS-terminating reverse proxy. This page covers the supported self-hosted deploy shapes plus the experimental Workers path. If you'd rather not run any of this yourself, [Pylon Cloud](/cloud) hosts the same binary.
+Pylon runs as a Rust binary (plus Bun, which runs your TypeScript and SSR) behind a TLS-terminating reverse proxy. This page covers the supported self-hosted deploy shapes and the experimental Workers path. To skip self-hosting, [Pylon Cloud](/cloud) hosts the same binary.
 
 ## Required environment
 
@@ -80,11 +80,11 @@ Pylon uses up to four adjacent ports, depending on which transports you enable:
 | `PYLON_PORT + 2` | SSE (`/events`) | When clients use `transport: sse` fallback |
 | `PYLON_PORT + 3` | Realtime shards | When apps use `useShard` / `PylonRealtime` |
 
-Your reverse proxy needs to forward all relevant ports. For deployments with a single public port (Fly.io, Cloud Run), path-route the WebSocket/SSE/shard upgrades through that one port at the proxy (see the Caddy/nginx examples below) and point the client's sync `wsUrl` at the public origin — there's no server-side WS-URL env var; the client is told where to connect via its transport config.
+Your reverse proxy must forward all relevant ports. For deployments with a single public port (Fly.io, Cloud Run), path-route the WebSocket, SSE, and shard upgrades through that one port at the proxy (see the Caddy and nginx examples below), then point the client's sync `wsUrl` at the public origin. There is no server-side WS-URL environment variable; the client's transport config tells it where to connect.
 
 ## Shape 1: single VPS (SSH + systemd)
 
-Simplest and cheapest. The pylon binary plus Bun, one systemd unit, one reverse proxy. `pylon deploy --target systemd` generates this unit (plus step-by-step install commands) for your app; the shape looks like:
+This is the simplest and cheapest shape: the pylon binary plus Bun, one systemd unit, and one reverse proxy. `pylon deploy --target systemd` generates this unit, plus step-by-step install commands, for your app. The shape looks like this:
 
 ```ini
 # /etc/systemd/system/pylon.service
@@ -117,7 +117,7 @@ Reverse proxy (Caddy or nginx) forwards `:443` → `:4321` plus WebSocket upgrad
 systemctl enable --now pylon
 ```
 
-Backups: cron `pylon backup /var/backups/pylon/$(date +%F)` nightly. Test restore quarterly per the test at `crates/runtime/tests/backup_restore.rs`.
+For backups, run `pylon backup /var/backups/pylon/$(date +%F)` nightly with cron. Test the restore quarterly, using the test at `crates/runtime/tests/backup_restore.rs`.
 
 ### Caddy example
 
@@ -148,23 +148,29 @@ your-app.com {
 
 Minimum bill: ~$25/mo for a production deployment.
 
-Compiled with `--features postgres-live` and `DATABASE_URL=postgres://...`.
+Compile Pylon with `--features postgres-live` and set `DATABASE_URL=postgres://...`.
 
 ## Shape 3: AWS via SST (TypeScript IaC)
 
-For TypeScript-first infrastructure, [SST v3](https://sst.dev) provisions the same AWS shape from a single `sst.config.ts`. Same components (Aurora, Fargate, ALB, EFS, CloudFront), one CLI for deploys + secrets + per-PR preview environments.
+For TypeScript-first infrastructure, [SST v3](https://sst.dev) provisions the same AWS shape from a single `sst.config.ts`. It uses the same components (Aurora, Fargate, ALB, EFS, CloudFront) and one CLI for deploys, secrets, and per-PR preview environments.
 
 ```bash
 sst deploy --stage production
 ```
 
-See **[Deploy with SST](/operations/sst)** for the full walkthrough — secrets, custom domains, multi-port load balancer config, EFS vs S3 storage, horizontal scaling.
+See **[Deploy with SST](/operations/sst)** for the full walkthrough:
+
+- secrets
+- custom domains
+- multi-port load balancer config
+- EFS vs S3 storage
+- horizontal scaling
 
 ## Shape 4: Cloudflare Workers (edge, experimental)
 
-`crates/workers/` builds a WASM bundle (`worker-build --release`) that runs on Workers with a D1 binding. See `crates/workers/README.md` for current limitations. Scale-to-zero: idle apps cost $0. Cost rises with actual request volume. See [Workers costs](/operations/workers-costs).
+`crates/workers/` builds a WASM bundle (`worker-build --release`) that runs on Workers with a D1 binding. See `crates/workers/README.md` for current limitations. Idle apps cost $0, because Workers scales to zero. Cost rises with request volume. See [Workers costs](/operations/workers-costs).
 
-Realtime shards (tick-based sims) are not yet supported on Workers — they need persistent state that Workers-only can't hold efficiently. Use shape 1 or 2 for game shards.
+Workers does not yet support realtime shards (tick-based sims). They need persistent state that Workers alone cannot hold efficiently. Use shape 1 or 2 for game shards.
 
 ## Shape 5: Pylon Cloud
 
@@ -181,7 +187,7 @@ Done. See [Cloud](/cloud) for full details.
 pylon dev
 ```
 
-Starts on port 4321 with `PYLON_DEV_MODE=true` defaults. Studio at `/studio`, hot-reload, permissive CORS. **Not for production.**
+This starts on port 4321 with `PYLON_DEV_MODE=true` defaults: Studio at `/studio`, hot-reload, and permissive CORS. Do not use this mode in production.
 
 ## Health checks
 
@@ -189,50 +195,39 @@ Starts on port 4321 with `PYLON_DEV_MODE=true` defaults. Studio at `/studio`, ho
 - `GET /metrics` returns Prometheus text when `Accept: text/plain`
 - `GET /readyz` checks DB connectivity
 
-Hook these into your load balancer — unhealthy instances should drain.
+Hook these into your load balancer so it drains unhealthy instances.
 
 ## Shutdown and rolling deploys
 
-`SIGTERM` terminates the process. The runtime does **not** currently install a
-signal handler, so SIGTERM does not run an in-process drain — the drain path
-exists in the runtime but isn't yet wired to a signal. Two things make an
-abrupt stop safe in practice:
+`SIGTERM` terminates the process. The runtime does not yet install a signal handler, so SIGTERM does not run an in-process drain. The drain path exists in the runtime, but it is not wired to a signal yet. Two things make an abrupt stop safe in practice:
 
-- **SQLite (WAL mode) is crash-consistent.** An abrupt stop won't corrupt the
-  database; the next start recovers the WAL. There's no "flush on exit" to lose.
-- **Drain at the load balancer, not in the process.** For rolling deploys with
-  zero dropped requests: stop routing new traffic to the old instance, wait out
-  your load balancer's connection-drain / deregistration delay so in-flight
-  requests finish, then stop the process.
+- **SQLite (WAL mode) is crash-consistent.** An abrupt stop does not corrupt the database. The next start recovers the WAL, so there is no unflushed data to lose.
+- **Drain at the load balancer, not in the process.** For a rolling deploy with zero dropped requests, stop routing new traffic to the old instance. Wait out your load balancer's connection-drain (deregistration) delay so in-flight requests finish. Then stop the process.
 
-Rolling deploy sequence: start the new instance, let the load balancer
-health-check promote it, stop routing traffic to the old one, wait for the
-drain window, then `SIGTERM` it.
+For a rolling deploy: start the new instance, let the load balancer health check promote it, stop routing traffic to the old one, wait for the drain window, then send `SIGTERM`.
 
-(`PYLON_DRAIN_SECS`, default 10s, bounds the drain loop for the paths that *do*
-invoke the runtime's shutdown — e.g. programmatic shutdown; it is not a SIGTERM
-grace period.)
+`PYLON_DRAIN_SECS` (default 10s) bounds the drain loop for paths that do invoke the runtime's shutdown, such as a programmatic shutdown. It is not a SIGTERM grace period.
 
 ## Native clients (iOS, macOS, Android)
 
-Native clients hit the same HTTP + WebSocket endpoints as browsers, with two notes:
+Native clients hit the same HTTP and WebSocket endpoints as browsers. Keep these points in mind:
 
-- **CORS doesn't apply** — native HTTP clients skip CORS entirely. Don't worry about `PYLON_CORS_ORIGIN` for them.
-- **TLS is mandatory on iOS** — App Transport Security rejects `ws://` and `http://` to non-localhost hosts. Always use `wss://` and `https://` in production. Self-signed certs work in dev with an ATS exception in `Info.plist`.
-- **Background sessions** — for large file uploads/downloads that should continue when the app is backgrounded, configure `URLSessionConfiguration.background(...)` in your transport. See [Swift SDK](/clients/swift).
+- **CORS does not apply.** Native HTTP clients skip CORS entirely. `PYLON_CORS_ORIGIN` does not affect them.
+- **TLS is required on iOS.** App Transport Security rejects `ws://` and `http://` to non-localhost hosts. Always use `wss://` and `https://` in production. Self-signed certificates work in dev with an ATS exception in `Info.plist`.
+- **Background sessions.** For large file uploads or downloads that should continue when the app is backgrounded, configure `URLSessionConfiguration.background(...)` in your transport. See [Swift SDK](/clients/swift).
 
 ## Scale-out
 
-Single-process by design. For higher throughput:
+Pylon is single-process by design. For higher throughput:
 
-- **Reads**: cache + rely on the 4-connection read pool (already in)
-- **Writes**: move to Postgres (`postgres-live` feature)
-- **WS fanout**: workers + Durable Objects; shape 3 amortizes edge
-- **Shards**: run one process per game region; load-balance by match id
+- **Reads**: cache results and rely on the built-in 4-connection read pool.
+- **Writes**: move to Postgres (`postgres-live` feature).
+- **WS fanout**: use Workers and Durable Objects; shape 3 moves this cost to the edge.
+- **Shards**: run one process per game region and load-balance by match ID.
 
-Horizontal HA isn't a first-class shape yet. If you need multi-master SQLite, you don't want SQLite — switch to Postgres.
+Horizontal high availability is not a built-in shape yet. If you need multi-master SQLite, use Postgres instead.
 
-For multi-region, on Pylon Cloud, set the workspace region during signup. Self-hosted multi-region is a manual exercise (one Pylon per region, app-level routing).
+For multi-region on Pylon Cloud, set the workspace region during signup. Self-hosted multi-region is a manual setup: one Pylon process per region, with app-level routing.
 
 ## What about Docker?
 
@@ -250,4 +245,4 @@ docker run -d \
 
 Same env vars apply. Mount the data volume so it survives container restarts.
 
-For a self-contained image (no runtime mount) or a docker-compose setup with a Postgres sidecar, run `pylon deploy --target docker` or `pylon deploy --target compose` in your project — both generate a Dockerfile that copies your app onto the runtime image and serves it with `pylon start`.
+For a self-contained image (no runtime mount) or a docker-compose setup with a Postgres sidecar, run `pylon deploy --target docker` or `pylon deploy --target compose` in your project. Both commands generate a Dockerfile that copies your app onto the runtime image and serves it with `pylon start`.

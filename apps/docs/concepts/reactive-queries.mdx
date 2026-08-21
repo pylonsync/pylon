@@ -5,19 +5,20 @@ description: "Write a server query once and re-render clients when its dependenc
 
 # Reactive queries
 
-A reactive query is a server-side `query()` handler that automatically
-re-runs whenever the data it reads changes. The client subscribes once;
-the server pushes a new result every time a mutation touches anything
-in the handler's dependency set.
+A reactive query is a server-side `query()` handler that re-runs
+automatically whenever the data it reads changes. The client subscribes
+once. The server pushes a new result every time a mutation touches
+anything in the handler's dependency set.
 
-This is the "live joined query" shape Convex made famous. Pylon ships
-the same model with native auth, multi-tenant policies, and self-host.
+This pattern is called a live joined query. Convex introduced it. Pylon
+uses the same model, with native auth, multi-tenant policies, and
+self-hosting built in.
 
 ## Writing a reactive query
 
-Any `query()` handler is eligible — no opt-in flag, no special
-decorator. The reactivity is unlocked at the call site by using
-`db.useReactiveQuery` instead of a one-shot `useFn` / fetch.
+Any `query()` handler is eligible. It needs no opt-in flag and no
+special decorator. Call `db.useReactiveQuery` instead of a one-shot
+`useFn` call or fetch to enable it at the call site.
 
 ```ts
 // functions/getFeed.ts
@@ -40,9 +41,9 @@ export default query({
 });
 ```
 
-The runtime watches every `ctx.db.*` call this handler makes and
-records the set of entities + row ids it touched. In the example
-above the dep set is `{ Post: *, User: { authorId1, authorId2, ... } }`.
+The runtime watches every `ctx.db.*` call this handler makes and records
+the set of entities and row ids it touched. In the example above, the
+dependency set is `{ Post: *, User: { authorId1, authorId2, ... } }`.
 
 ## Subscribing from React
 
@@ -60,60 +61,59 @@ function Feed({ userId }: { userId: string }) {
 }
 ```
 
-On mount: the hook sends `reactive-subscribe` over the WebSocket; the
-server runs `getFeed`, captures deps, registers the sub, and pushes
-the initial result.
+On mount, the hook sends `reactive-subscribe` over the WebSocket. The
+server runs `getFeed`, captures dependencies, registers the subscription,
+and pushes the initial result.
 
-After that, every server-side mutation touching `Post` or a `User`
-row in the captured set triggers a re-run. The server hashes the new
-result and pushes only when it differs from the last value sent — so
-a mutation that doesn't change the rendered output costs one re-run
-on the server but no client re-render.
+After that, every server-side mutation touching `Post` or a `User` row in
+the captured set triggers a re-run. The server hashes the new result and
+pushes it only when it differs from the last value sent. A mutation that
+does not change the rendered output still costs one re-run on the
+server, but causes no client re-render.
 
-On unmount: the hook sends `reactive-unsubscribe`. The server drops
-the subscription and stops re-running.
+On unmount, the hook sends `reactive-unsubscribe`. The server drops the
+subscription and stops re-running.
 
 ## Auth context across re-runs
 
-The handler runs under the **subscriber's** auth context on every
-re-run — never the mutating user's. A policy like
-`auth.userId == row.ownerId` applied at first run applies on every
-subsequent re-run.
+The handler always runs under the subscriber's auth context on every
+re-run, never the mutating user's. A policy like
+`auth.userId == row.ownerId` applied at first run applies on every later
+re-run.
 
-This is the only correct semantic. If re-runs used the mutating
-user's auth, a Stripe webhook (running as an elevated admin) would
-re-evaluate `getFeed` with admin privileges and push the unfiltered
-result to a logged-in user — a silent read-policy bypass.
+This is the only correct behavior. If re-runs used the mutating user's
+auth, a Stripe webhook (running as an elevated admin) would re-evaluate
+`getFeed` with admin privileges and push the unfiltered result to a
+logged-in user. That would be a silent read-policy bypass.
 
 ## Dependency tracking granularity
 
 The runtime tracks two levels:
 
-- **Entity-level**: any read of `ctx.db.list("Post")` or
-  `ctx.db.query("Post", {...})` marks the dep as "entity `Post`,
-  any row". Mutations to any Post row dirty the sub.
-- **Row-level**: `ctx.db.get("User", "u_123")` marks the dep as
-  "entity `User`, row `u_123`". Mutations to other User rows do
-  NOT dirty the sub.
+- Entity-level: any read of `ctx.db.list("Post")` or
+  `ctx.db.query("Post", {...})` marks the dependency as "entity `Post`,
+  any row". Mutations to any Post row dirty the subscription.
+- Row-level: `ctx.db.get("User", "u_123")` marks the dependency as
+  "entity `User`, row `u_123`". Mutations to other User rows do not
+  dirty the subscription.
 
-The dep set is precise for `get` + `lookup`, coarse for `list` +
-`query` + `search`. Handlers that mix both get the union — list
-reads contribute entity-level deps; targeted reads contribute
-row-level deps on top.
+The dependency set is precise for `get` and `lookup`, and coarse for
+`list`, `query`, and `search`. Handlers that mix both get the union: list
+reads add entity-level dependencies, and targeted reads add row-level
+dependencies on top.
 
-Row-level deps are capped per subscription (default 256). Beyond
-the cap, the sub falls back to entity-level matching. Prevents
-runaway queries from bloating the registry.
+Row-level dependencies are capped per subscription (default 256). Beyond
+the cap, the subscription falls back to entity-level matching. This cap
+stops runaway queries from bloating the registry.
 
-## Coalescing + re-run cadence
+## Coalescing and re-run cadence
 
-Multiple change events touching the same sub within one tick
-coalesce to a single re-run. The re-runner thread drains the dirty
-set on a notify-driven cadence (no fixed interval — wakes
-immediately when work arrives). Bursts of writes don't cause
-per-event re-runs.
+Multiple change events touching the same subscription within one tick
+coalesce to a single re-run. The re-runner thread drains the dirty set
+on a notify-driven cadence, with no fixed interval; it wakes immediately
+when work arrives. Bursts of writes do not cause per-event re-runs.
 
-## When to use reactive queries vs entity queries
+## When to use a reactive query instead of an entity query
 
 | Use case | Reactive query | Entity query (useQuery) |
 | --- | --- | --- |
@@ -124,33 +124,32 @@ per-event re-runs.
 | Fully cached IndexedDB replica | ❌ | ✅ |
 | Offline-first writes | Server roundtrip required | Optimistic UI works offline |
 
-Use **reactive queries** when the value rendered on screen is the
-output of a function that touches multiple entities or computes
-something the client couldn't easily derive from cached rows. Use
-**entity queries** (`db.useQuery`) when the screen is a list of
-rows from one entity and the client can filter / sort / paginate
-locally for free.
+Use a reactive query when the value rendered on screen comes from a
+function that touches multiple entities, or computes something the
+client cannot easily derive from cached rows. Use an entity query
+(`db.useQuery`) when the screen shows a list of rows from one entity and
+the client can filter, sort, or paginate locally for free.
 
 ## Cross-machine support
 
-Reactive queries work on multi-machine deployments — the runtime
-forwards change events into the registry from both the local
-mutation path AND the cluster bus subscriber (see [horizontal
+Reactive queries work on multi-machine deployments. The runtime forwards
+change events into the registry from both the local mutation path and
+the cluster bus subscriber (see [horizontal
 scaling](/operations/scaling)). A mutation on machine A dirties
-subs on machine B; B's re-runner runs the handler and pushes the
-result to its connected client.
+subscriptions on machine B. B's re-runner runs the handler and pushes
+the result to its connected client.
 
 ## Limits
 
-- One handler call per re-run. There's no incremental dataflow
-  (Materialize / differential dataflow). For very expensive
-  handlers, the re-run cost is the full handler cost — design with
-  pagination / `limit` to keep handlers fast.
-- The hash check skips client pushes when the result hashes
-  identical. It doesn't skip the re-run itself. A handler that
-  reads 1k rows but produces a small derived value runs the full
-  query on every dirty event.
-- Reactive subs require the TS function runtime (Bun process). When
-  the runtime isn't available (no `functions/` directory), the
-  hook receives a `REACTIVE_UNAVAILABLE` error push and the
-  consumer can fall back to a one-shot fetch.
+- One handler call per re-run. There is no incremental dataflow
+  (Materialize or differential dataflow). For expensive handlers, the
+  re-run cost equals the full handler cost. Use pagination or a `limit`
+  to keep handlers fast.
+- The hash check skips the client push when the new result hash matches
+  the last one sent. It does not skip the re-run itself. A handler that
+  reads 1,000 rows but produces a small derived value still runs the
+  full query on every dirty event.
+- Reactive subscriptions require the TS function runtime (Bun process).
+  When the runtime is not available (no `functions/` directory), the
+  hook receives a `REACTIVE_UNAVAILABLE` error push, and the consumer
+  can fall back to a one-shot fetch.

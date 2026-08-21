@@ -4,19 +4,19 @@ sidebarTitle: "SST"
 description: "Define a stateless Pylon deployment on AWS with Fargate, Aurora Postgres, S3, ALB, and CloudFront."
 ---
 
-[SST](https://sst.dev) is a TypeScript framework for defining AWS (and other cloud) infrastructure. It's the cleanest way to deploy Pylon to AWS without writing Terraform — one `sst.config.ts` provisions Aurora Postgres, an S3 bucket for uploads, an ECS Fargate cluster, a load balancer with WebSocket + SSE + shard ports forwarded, and a CloudFront CDN.
+[SST](https://sst.dev) is a TypeScript framework for defining AWS (and other cloud) infrastructure. It is the cleanest way to deploy Pylon to AWS without writing Terraform. One `sst.config.ts` provisions Aurora Postgres, an S3 bucket for uploads, an ECS Fargate cluster, and a CloudFront CDN. The load balancer forwards WebSocket, SSE, and shard ports.
 
-The default shape is **stateless**: Postgres holds app data + sessions, S3 holds files. The container can scale horizontally without losing state. A working reference config ships in [`deploy/sst/sst.config.ts`](https://github.com/pylonsync/pylon/blob/main/deploy/sst/sst.config.ts).
+The default shape is stateless. Postgres holds app data and sessions, and S3 holds files. The container can scale horizontally without losing state. A working reference config ships in [`deploy/sst/sst.config.ts`](https://github.com/pylonsync/pylon/blob/main/deploy/sst/sst.config.ts).
 
 ## What you get
 
 - **Aurora Serverless v2 Postgres** for app data and sessions (auto-scaling 0.5–2 ACU, ~$15/mo minimum)
 - **S3 bucket** for file uploads (linked to the service for IAM)
 - **ECS Fargate** running the Pylon container (0.25 vCPU / 512 MB ~ $9/mo, horizontally scalable)
-- **Application Load Balancer** with WebSocket + SSE + shard port forwarding and sticky sessions
-- **AWS Secrets Manager** for the admin token + OAuth credentials
+- **Application Load Balancer** with WebSocket, SSE, and shard port forwarding, and sticky sessions
+- **AWS Secrets Manager** for the admin token and OAuth credentials
 - **CloudFront CDN** in front of the ALB
-- **Route 53 + ACM** for custom domains and TLS
+- **Route 53 and ACM** for custom domains and TLS
 
 Total minimum bill: ~$25/mo for a production deployment.
 
@@ -36,7 +36,7 @@ curl -fsSL https://www.pylonsync.com/install.sh | bash
 # Already installed if you've used Docker Desktop / OrbStack
 ```
 
-You'll need an AWS account with permissions to create VPCs, ECS services, RDS, ALB, ACM, Route 53, S3, and Secrets Manager. SST's default IAM role assumes broad permissions; lock down per your org's standards.
+You will need an AWS account with permissions to create VPCs, ECS services, RDS, ALB, ACM, Route 53, S3, and Secrets Manager. SST's default IAM role assumes broad permissions. Lock it down to match your organization's standards.
 
 ## Project layout
 
@@ -52,15 +52,15 @@ my-pylon-app/
 ```
 
 <Note>
-  The container image must bundle the **Pylon binary + Bun** — the binary spawns
+  The container image must bundle the Pylon binary and Bun. The binary spawns
   Bun to run your TypeScript functions and SSR. Pylon's published image
   (`ghcr.io/pylonsync/pylon`, which `pylon deploy --target docker` builds on)
   already includes both. If you write your own Dockerfile, install Bun (`curl
-  -fsSL https://bun.sh/install | bash`) or your app's functions/SSR will fail at
-  runtime.
+  -fsSL https://bun.sh/install | bash`), or your app's functions and SSR will
+  fail at runtime.
 </Note>
 
-## The default config — Aurora + S3
+## The default config: Aurora and S3
 
 ```typescript
 /// <reference path="./.sst/platform/config.d.ts" />
@@ -171,24 +171,24 @@ export default $config({
 ```
 
 <Note>
-  **Credentials are read from env only.** Pylon's S3 backend signs requests
-  with `PYLON_S3_ACCESS_KEY` / `PYLON_S3_SECRET_KEY` (plus an optional
-  `PYLON_S3_SESSION_TOKEN` for temporary/STS credentials). It does **not**
-  auto-discover the ECS task role from the container credentials endpoint or
-  EC2 IMDS, so `link: [uploads]` alone isn't enough — provision a
-  bucket-scoped IAM user's static key as shown above, or inject the task
-  role's temporary credentials (access key + secret + session token) into env
-  via your entrypoint.
+  **Credentials are read from environment variables only.** Pylon's S3
+  backend signs requests with `PYLON_S3_ACCESS_KEY` and `PYLON_S3_SECRET_KEY`
+  (plus an optional `PYLON_S3_SESSION_TOKEN` for temporary or STS
+  credentials). It does not auto-discover the ECS task role from the
+  container credentials endpoint or EC2 IMDS, so `link: [uploads]` alone is
+  not enough. Provision a bucket-scoped IAM user's static key as shown above,
+  or inject the task role's temporary credentials (access key, secret, and
+  session token) into the environment through your entrypoint.
 
-  The server validates the S3 env at boot and **fails fast** if
-  `PYLON_FILES_PROVIDER=s3` but a required var is missing — it never silently
-  falls back to local disk (which on a stateless Fargate container would lose
-  uploads on every redeploy).
+  The server validates the S3 environment at boot and fails fast if
+  `PYLON_FILES_PROVIDER=s3` but a required variable is missing. It never
+  silently falls back to local disk, which on a stateless Fargate container
+  would lose uploads on every redeploy.
 </Note>
 
 ## Local development
 
-Mirror the production stack locally so SQL queries, indexes, and policies behave identically. The cheapest way is Postgres in Docker + local-disk file storage — no MinIO needed for dev unless your code exercises S3-specific behavior.
+Mirror the production stack locally so SQL queries, indexes, and policies behave the same way. The cheapest setup is Postgres in Docker plus local-disk file storage. You do not need MinIO for dev unless your code exercises S3-specific behavior.
 
 `docker-compose.dev.yml`:
 
@@ -227,7 +227,7 @@ DATABASE_URL=postgres://pylon:pylon@localhost:5432/pylon
 PYLON_FILES_DIR=./.pylon/uploads
 ```
 
-`pylon dev` reads `.env` automatically; restart the dev server when you change it.
+`pylon dev` reads `.env` automatically. Restart the dev server when you change it.
 
 To also test against S3 locally, point `PYLON_FILES_PROVIDER=s3` at [MinIO](https://min.io) running in the same docker-compose:
 
@@ -251,11 +251,11 @@ PYLON_S3_ACCESS_KEY=minioadmin
 PYLON_S3_SECRET_KEY=minioadmin
 ```
 
-The `file_storage` plugin treats MinIO as a drop-in S3 — same wire protocol.
+The `file_storage` plugin treats MinIO as a drop-in S3 replacement. It uses the same wire protocol.
 
 ## Set secrets
 
-Before the first deploy, set the secret values via the SST CLI:
+Before the first deploy, set the secret values with the SST CLI:
 
 ```bash
 # Generate a random admin token (256 bits)
@@ -278,7 +278,7 @@ sst deploy --stage production
 sst deploy --stage production
 ```
 
-Once the deploy finishes, SST prints the ALB URL. Hit it:
+Once the deploy finishes, SST prints the ALB URL. Test it:
 
 ```bash
 curl https://api.your-app.com/health
@@ -287,7 +287,7 @@ curl https://api.your-app.com/health
 
 ## Custom domain
 
-The `domain` block under `loadBalancer` provisions an ACM certificate and points Route 53 at the ALB. If your DNS lives elsewhere, swap the `dns` provider:
+The `domain` block under `loadBalancer` provisions an ACM certificate and points Route 53 at the ALB. If you use a different DNS provider, swap the `dns` provider:
 
 ```typescript
 domain: {
@@ -304,7 +304,7 @@ sst deploy --stage production    # → api.your-app.com
 sst deploy --stage pr-42         # → pr-42.preview.your-app.com (per-PR previews)
 ```
 
-Each stage gets its own Aurora cluster, S3 bucket, and ALB. Use the `removal` config to make non-prod environments tear down cleanly:
+Each stage gets its own Aurora cluster, S3 bucket, and ALB. Use the `removal` config so non-production environments tear down cleanly:
 
 ```typescript
 app(input) {
@@ -315,9 +315,9 @@ app(input) {
 }
 ```
 
-## Alternative: single-replica with local state (EFS + SQLite)
+## Alternative: single-replica with local state (EFS and SQLite)
 
-If you genuinely want to run Pylon as a single replica with SQLite + local files (e.g. an internal tool, a hobby app, or a hard requirement to avoid Postgres + S3), you can mount EFS instead of using Aurora and S3:
+If you want to run Pylon as a single replica with SQLite and local files (for example, an internal tool, a hobby app, or a hard requirement to avoid Postgres and S3), mount EFS instead of using Aurora and S3:
 
 ```typescript
 const efs = new sst.aws.Efs("PylonEfs", { vpc: { id: cluster.nodes.vpc.id } });
@@ -340,13 +340,13 @@ new sst.aws.Service("PylonService", {
 
 Trade-offs:
 
-- ✅ ~$10/mo cheaper (no Aurora minimum)
+- ✅ About $10/mo cheaper (no Aurora minimum)
 - ✅ One backing service to think about
-- ❌ Cannot scale horizontally (SQLite is single-writer; mounting EFS into multiple containers corrupts the DB)
-- ❌ EFS latency (~5ms) is meaningfully slower than Aurora (~1ms in-VPC)
-- ❌ Backups are your responsibility (Aurora has them built-in)
+- ❌ Cannot scale horizontally: SQLite is single-writer, and mounting EFS into multiple containers corrupts the database
+- ❌ EFS latency (about 5ms) is noticeably slower than Aurora (about 1ms in-VPC)
+- ❌ Backups are your responsibility (Aurora has them built in)
 
-Use the default Aurora + S3 shape unless you have a specific reason not to.
+Use the default Aurora and S3 shape unless you have a specific reason not to.
 
 ## CDN in front of the ALB
 
@@ -359,7 +359,7 @@ const cdn = new sst.aws.Cdn("PylonCdn", {
 });
 ```
 
-CloudFront caches GET responses with appropriate `Cache-Control` headers. WebSocket and SSE traffic should bypass the CDN — point your sync engine's `wsUrl` directly at the ALB:
+CloudFront caches GET responses with appropriate `Cache-Control` headers. WebSocket and SSE traffic should bypass the CDN. Point your sync engine's `wsUrl` directly at the ALB:
 
 ```typescript
 createSyncEngine("https://your-app.com", {
@@ -369,7 +369,7 @@ createSyncEngine("https://your-app.com", {
 
 ## Horizontal scale
 
-The default config already scales horizontally (`scaling: { min: 1, max: 4 }`). Bump it for read-heavy apps:
+The default config already scales horizontally (`scaling: { min: 1, max: 4 }`). Increase it for read-heavy apps:
 
 ```typescript
 scaling: {

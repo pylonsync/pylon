@@ -3,17 +3,17 @@ title: TOTP / 2FA
 description: "Enroll and verify RFC 6238 one-time passwords with backup codes and encrypted seeds."
 ---
 
-Pylon ships RFC 6238 TOTP in the binary — works with Google Authenticator, 1Password, Authy, Apple's Passwords, Bitwarden, and every other authenticator app. Plus single-use backup codes (SHA-256 hashed at rest), per-account rate limiting on verify, and at-rest encryption of the TOTP seed.
+Pylon ships RFC 6238 TOTP in the binary. It works with Google Authenticator, 1Password, Authy, Apple's Passwords, Bitwarden, and every other authenticator app. Pylon also ships single-use backup codes (SHA-256 hashed at rest), per-account rate limiting on verify, and at-rest encryption of the TOTP seed.
 
 ## Algorithm
 
-- **HOTP** (RFC 4226) with SHA-1 HMAC, 6 digits — the universal mode every authenticator app implements.
-- **TOTP** (RFC 6238) with a 30-second step and ±1 step tolerance window on verify (so codes near the rollover boundary still validate).
+- **HOTP** (RFC 4226) uses SHA-1 HMAC with 6 digits. Every authenticator app implements this mode.
+- **TOTP** (RFC 6238) uses a 30-second step with a ±1 step tolerance window on verify. Codes near the rollover boundary still validate.
 - **160-bit secret**, base32-encoded for the provisioning URL.
 
 ## Endpoints
 
-All under `/api/auth/`. Enrollment + management require a real session — API-key auth is refused with `403 API_KEY_AUTH_FORBIDDEN`.
+All endpoints are under `/api/auth/`. Enrollment and management require a real session. Pylon refuses API-key auth with `403 API_KEY_AUTH_FORBIDDEN`.
 
 | Endpoint | Method | Auth | Purpose |
 | --- | --- | --- | --- |
@@ -55,9 +55,9 @@ Response:
 
 The client renders `url` as a QR code (or shows `secret` for manual entry). The user scans, opens their authenticator app, then calls `/totp/verify` with the current 6-digit code to finalize enrollment.
 
-The secret is persisted **immediately** in `totpVerified=false` state. Until `/totp/verify` succeeds for the first time, the secret is "pending". Re-calling `/totp/enroll` while pending rotates the secret freely.
+Pylon persists the secret immediately, in `totpVerified=false` state. The secret stays "pending" until `/totp/verify` succeeds for the first time. Calling `/totp/enroll` again while pending rotates the secret freely.
 
-**Re-enrollment when already verified** requires the current TOTP code in the body so an attacker with only the session cookie can't silently rotate the secret to one they control:
+Re-enrollment when already verified requires the current TOTP code in the body. This stops an attacker with only the session cookie from silently rotating the secret to one they control:
 
 ```bash
 curl -X POST https://your-app/api/auth/totp/enroll \
@@ -66,7 +66,7 @@ curl -X POST https://your-app/api/auth/totp/enroll \
   -d '{"code": "123456"}'
 ```
 
-Wrong code → `401 INVALID_TOTP_CODE`. Same posture as `/password/change` requiring the current password.
+A wrong code returns `401 INVALID_TOTP_CODE`. This matches `/password/change`, which also requires the current password.
 
 ## Verifying
 
@@ -83,7 +83,7 @@ Response:
 { "verified": true, "enrolled": true, "trust_device": false }
 ```
 
-- `enrolled: true` is set only on the **first** successful verify (when `totpVerified` flipped from `false` to `true`).
+- `enrolled: true` is set only on the first successful verify (when `totpVerified` flips from `false` to `true`).
 - `trust_device: true` is set when the request body included `trust_device: true` and Pylon minted a `pylon_trusted_device` cookie. See [Trusted devices](/auth/trusted-devices).
 
 Failure modes:
@@ -98,7 +98,7 @@ Failure modes:
 
 ## Backup codes
 
-If `totpBackupCodes` is populated on the user row, `/totp/verify` accepts a backup code as an alternative to the live TOTP code. Backup codes are SHA-256-hashed at rest (hex-encoded) — the plaintext is shown to the user **once** at generation time.
+If `totpBackupCodes` is populated on the user row, `/totp/verify` accepts a backup code as an alternative to the live TOTP code. Pylon hashes backup codes with SHA-256 at rest (hex-encoded) and shows the plaintext to the user once, at generation time.
 
 Generating a fresh set invalidates the previous one:
 
@@ -109,7 +109,7 @@ curl -X POST https://your-app/api/auth/totp/backup-codes/regenerate \
   -d '{"code": "123456"}'
 ```
 
-The current TOTP code is required. Response includes the plaintext codes (one-shot — not persisted plaintext server-side):
+The current TOTP code is required. The response includes the plaintext codes. Pylon does not persist the plaintext codes server-side; it shows them once.
 
 ```json
 {
@@ -117,7 +117,7 @@ The current TOTP code is required. Response includes the plaintext codes (one-sh
 }
 ```
 
-Consumption is single-use. Pylon does a CAS-style "consume the matching index, re-read the row, fail with `409 TOTP_RACE` if a parallel verify swapped in a version where the consumed code came back" check so two concurrent verifies with the same backup code can't both succeed.
+Each backup code is single-use. Pylon uses a compare-and-swap check: it consumes the matching index, re-reads the row, and fails with `409 TOTP_RACE` if a parallel verify already consumed that code. This stops two concurrent verifies from consuming the same backup code.
 
 ## Disabling
 
@@ -128,19 +128,19 @@ curl -X POST https://your-app/api/auth/totp/disable \
   -d '{"code": "123456"}'
 ```
 
-Requires a current code. Wipes `totpSecret`, `totpVerified`, and `totpBackupCodes` from the user row.
+Disabling requires the current code. Pylon wipes `totpSecret`, `totpVerified`, and `totpBackupCodes` from the user row.
 
 ## At-rest encryption
 
-The TOTP seed is sensitive — anyone with the bytes can generate codes forever. When `PYLON_TOTP_ENCRYPTION_KEY` is set, Pylon seals the seed with an HMAC-SHA256 stream cipher (counter mode, 16-byte CSPRNG nonce) keyed off the env var before persisting:
+The TOTP seed is sensitive. Anyone with the bytes can generate codes forever. When you set `PYLON_TOTP_ENCRYPTION_KEY`, Pylon seals the seed before persisting it, using an HMAC-SHA256 stream cipher in counter mode, keyed off the env var, with a 16-byte CSPRNG nonce:
 
 ```bash
 PYLON_TOTP_ENCRYPTION_KEY=<any 32+ byte value, e.g. `openssl rand -hex 32`>
 ```
 
-Stored shape: `enc:<nonce-hex>:<ciphertext-hex>`. The construction is not AEAD — there's no integrity tag — but a flipped bit just produces a TOTP code that doesn't verify, prompting the user to re-enroll. Acceptable trade-off vs pulling in an AEAD dep.
+Stored shape: `enc:<nonce-hex>:<ciphertext-hex>`. This construction is not AEAD, so there is no integrity tag. A flipped bit just produces a TOTP code that fails to verify, and the user re-enrolls. This trade-off avoids adding an AEAD dependency.
 
-Without the key, Pylon stores the plaintext base32 and logs a loud warning at boot:
+Without the key, Pylon stores the plaintext base32 value and logs a warning at boot:
 
 ```
 [totp] PYLON_TOTP_ENCRYPTION_KEY is not set — 2FA seeds stored unencrypted.
@@ -152,11 +152,11 @@ Generate a key:
 openssl rand -hex 32
 ```
 
-Rotation: set the new key, leave the old one in place — `unseal_secret` accepts both `enc:...` blobs (decrypts with current key) and plaintext (legacy). Walk the user table and rotate seeds by re-sealing with the new key during a deploy.
+To rotate the key, set the new key and leave the old one in place. `unseal_secret` accepts both `enc:...` blobs (decrypted with the current key) and plaintext (the legacy format). Walk the user table during a deploy and re-seal each seed with the new key.
 
 ## Rate limiting
 
-Verify is per-account rate-limited via the shared `AuthRateLimiter` (the same one that gates password login). Hit the limit and the response is `429 RATE_LIMITED` with `retry_after_secs`. Defends against an attacker who guesses the live code (~1 in a million per try) **or** tries to churn through backup codes.
+Pylon rate-limits verify per account through the shared `AuthRateLimiter`, the same limiter that gates password login. When a caller hits the limit, the response is `429 RATE_LIMITED` with `retry_after_secs`. This defends against an attacker who guesses the live code (about 1 in a million per try) or tries to churn through backup codes.
 
 ## Configuration
 
@@ -167,6 +167,6 @@ PYLON_TOTP_ENCRYPTION_KEY=<openssl rand -hex 32>  # at-rest seed encryption (HMA
 
 ## Where to go next
 
-- **[Passkeys](/auth/passkeys)** — phishing-resistant FIDO2 instead of (or alongside) TOTP
-- **[Trusted devices](/auth/trusted-devices)** — `trust_device: true` on `/totp/verify` to skip the prompt for 30 days
-- **[Password](/auth/password)** — TOTP usually pairs with email/password sign-in
+- [Passkeys](/auth/passkeys): a phishing-resistant FIDO2 method, as an alternative to TOTP or alongside it.
+- [Trusted devices](/auth/trusted-devices): set `trust_device: true` on `/totp/verify` to skip the prompt for 30 days.
+- [Password](/auth/password): TOTP usually pairs with email and password sign-in.

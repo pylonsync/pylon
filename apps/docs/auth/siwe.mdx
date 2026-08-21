@@ -3,20 +3,20 @@ title: SIWE (Sign-In With Ethereum)
 description: "Verify EIP-4361 wallet sign-in with secp256k1 ECDSA and Keccak-256 recovery."
 ---
 
-Pylon ships a complete [EIP-4361](https://eips.ethereum.org/EIPS/eip-4361) (Sign-In With Ethereum) implementation in the binary. Users prove ownership of their Ethereum address by signing a structured message; Pylon recovers the address from the signature and mints a session. No Magic.link, no WalletConnect server, no third-party SIWE service.
+Pylon ships a complete [EIP-4361](https://eips.ethereum.org/EIPS/eip-4361) (Sign-In With Ethereum) implementation in the binary. Users prove ownership of their Ethereum address by signing a structured message. Pylon recovers the address from the signature and mints a session. You do not need Magic.link, a WalletConnect server, or a third-party SIWE service.
 
 ## What it does
 
 1. Frontend asks Pylon for a fresh nonce for the user's address.
 2. Frontend builds an EIP-4361 message (`Sign in to acme.com\n\nAddress: 0x...\n...nonce: ...\n...`) and asks the user's wallet to sign it via `personal_sign`.
-3. Pylon recovers the address from the signature using secp256k1 ECDSA + Keccak-256 (Ethereum's variant), validates the message's domain + nonce + expiry, and mints a session keyed on the wallet.
+3. Pylon recovers the address from the signature using secp256k1 ECDSA and Keccak-256 (Ethereum's variant). It validates the message's domain, nonce, and expiry, then mints a session keyed on the wallet.
 
 ## Endpoints
 
 | Endpoint | Method | Auth | Purpose |
 | --- | --- | --- | --- |
 | `/api/auth/siwe/nonce` | GET | none | Mint a single-use nonce for `?address=0x...` |
-| `/api/auth/siwe/verify` | POST | none | Verify the signed message; mint session |
+| `/api/auth/siwe/verify` | POST | none | Verify the signed message and mint a session |
 
 ## Schema
 
@@ -33,7 +33,7 @@ export const User = entity("User", {
 });
 ```
 
-`unique` so two accounts can't claim the same address.
+The `unique` constraint stops two accounts from claiming the same address.
 
 ## Sign-in flow
 
@@ -49,7 +49,7 @@ Response:
 { "nonce": "abc123def456..." }
 ```
 
-The nonce is bound to the address — using a nonce minted for one address against a different address fails verify. Single-use, short-lived.
+The nonce is bound to the address. Using a nonce minted for one address against a different address fails verification. The nonce is single-use and short-lived.
 
 Errors:
 
@@ -57,7 +57,7 @@ Errors:
 | --- | --- | --- |
 | 400 | `INVALID_ADDRESS` | Not `0x` + exactly 40 hex chars |
 
-### 2. Build + sign the message
+### 2. Build and sign the message
 
 The frontend constructs an EIP-4361 message and asks the wallet to sign it (MetaMask, WalletConnect, Coinbase Wallet, etc.):
 
@@ -109,7 +109,7 @@ Response on success:
 }
 ```
 
-`displayName` is optional — used only when Pylon creates a new User row for a first-time address. Default is the short-form `0x742d…beb0`.
+`displayName` is optional. Pylon uses it only when it creates a new User row for a first-time address. The default is the short form `0x742d…beb0`.
 
 Errors:
 
@@ -122,23 +122,23 @@ Errors:
 
 Pylon validates:
 
-- **Signature recovery** — secp256k1 ECDSA + Keccak-256 hash of the EIP-191 prefix (`\x19Ethereum Signed Message:\n<len>` + message) recovers a 20-byte address. Must match `message.address` case-insensitively.
-- **Nonce** — must exist in the nonce store, must be bound to `message.address`, single-use (consumed on first verify).
-- **Domain** — `message.domain` must match the request's `Host` header. Prevents replay across deployments.
-- **Issued / expiration** — if `message.expirationTime` is set, must be in the future. If `message.notBefore` is set, must be in the past.
+- **Signature recovery:** secp256k1 ECDSA and a Keccak-256 hash of the EIP-191 prefix (`\x19Ethereum Signed Message:\n<len>`) followed by the message recover a 20-byte address. It must match `message.address`, case-insensitive.
+- **Nonce:** the nonce must exist in the nonce store, bind to `message.address`, and be single-use. Pylon consumes it on first verify.
+- **Domain:** `message.domain` must match the request's `Host` header. This stops replay across deployments.
+- **Issued and expiration:** if `message.expirationTime` is set, it must be in the future. If `message.notBefore` is set, it must be in the past.
 
-The recovered address is **lowercased** before lookup and storage so checksummed `0x742d35Cc...` and lowercase `0x742d35cc...` collapse to the same User row.
+Pylon lowercases the recovered address before lookup and storage. This makes checksummed `0x742d35Cc...` and lowercase `0x742d35cc...` addresses resolve to the same User row.
 
 ## Security guarantees
 
-- **secp256k1 + Keccak-256** via the `k256` crate — same primitives Ethereum uses, audited.
-- **Nonce binding to address** — using `nonce-for-A` to sign-in-as-B fails verify.
-- **Single-use nonces** — consumed on first verify regardless of success.
-- **Domain pinning** — `message.domain` validated against `Host` header; replay across deployments rejected.
-- **Expiration enforcement** — `expirationTime` and `notBefore` honored.
-- **EIP-191 prefix** properly applied — defeats signature reuse from any other Ethereum-signed payload.
+- **secp256k1 and Keccak-256:** Pylon uses the `k256` crate, the same audited primitives Ethereum uses.
+- **Nonce binding to address:** using `nonce-for-A` to sign in as B fails verification.
+- **Single-use nonces:** Pylon consumes each nonce on first verify, regardless of success.
+- **Domain pinning:** Pylon validates `message.domain` against the `Host` header and rejects replay across deployments.
+- **Expiration enforcement:** Pylon honors `expirationTime` and `notBefore`.
+- **EIP-191 prefix:** Pylon applies it correctly, which defeats signature reuse from any other Ethereum-signed payload.
 
 ## Where to go next
 
-- **[Sessions](/auth/sessions)** — what `/siwe/verify` mints
-- **[OAuth](/auth/oauth)** — other identity providers for the same user (link multiple sign-in methods to one account)
+- [Sessions](/auth/sessions): what `/siwe/verify` mints.
+- [OAuth](/auth/oauth): other identity providers for the same user. Link multiple sign-in methods to one account.

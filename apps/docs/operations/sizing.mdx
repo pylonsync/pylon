@@ -6,7 +6,7 @@ description: "Measured throughput numbers, capacity planning, and when to switch
 Numbers are per-process throughput. SQLite is single-writer, so vertical scaling of writes is bounded. Reads scale across a connection pool.
 
 <Note>
-  The values below were measured on earlier reference hardware (a 2024 Apple M-series laptop, 16 GB RAM) and are pending re-measurement on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB). Treat them as a lower bound until refreshed.
+  The values below were measured on earlier reference hardware (a 2024 Apple M-series laptop, 16 GB RAM). They are pending re-measurement on the current reference machine (2025 Mac Studio M3 Ultra, 96 GB). Treat them as a lower bound until refreshed.
 </Note>
 
 Re-run with:
@@ -39,7 +39,7 @@ cargo bench -p pylon-runtime --bench realtime_bench
 | `change_log.pull(100)` | 85,000 | 11.7µs |
 | `ws_hub.broadcast` (enqueue) | 30,000 | 32.5µs |
 
-The WS hub `broadcast` number is enqueue-side: it fans out to 16 shard worker threads that each push to connected clients. Real delivery rate depends on client count, message size, and TCP send buffers.
+The WS hub `broadcast` number measures the enqueue side. It fans out to 16 shard worker threads, and each thread pushes to its connected clients. The real delivery rate depends on client count, message size, and TCP send buffers.
 
 ## What these numbers mean for deploy sizing
 
@@ -47,22 +47,22 @@ The WS hub `broadcast` number is enqueue-side: it fans out to 16 shard worker th
 
 - Up to ~20k writes/minute sustained, or bursts to 30k/minute
 - Up to ~10k concurrent WS connections (64 KB stack per reader thread)
-- Good for a few thousand active users at webapp levels of chattiness
+- Good for a few thousand active users at typical web app request rates
 
 ### Medium (2 vCPU, 4 GB RAM, ~$25/mo VPS)
 
 - Up to ~50k writes/minute sustained
 - Up to ~40k concurrent WS connections
-- Good for 50k active users; room for complex queries without eviction
+- Good for 50k active users, with room for complex queries without cache eviction
 
 ### Large (4+ vCPU, 8+ GB RAM)
 
-- Write ceiling is still single-writer SQLite (~70k inserts/sec peak). If you're pinned on writes, move to Postgres (`postgres-live` feature) or shard the app across databases.
+- The write ceiling is still single-writer SQLite (about 70k inserts/sec peak). If writes are your bottleneck, move to Postgres (`postgres-live` feature) or shard the app across databases.
 - Reads scale with the read-connection pool. 4 pool connections × 500k reads/sec = 2M reads/sec ceiling.
 
 ## When to switch backends
 
-### You're on SQLite and need Postgres when
+### Switch from SQLite to Postgres when
 
 - Sustained write rate > 50k/sec (you're at SQLite's single-writer limit)
 - Multiple processes need to write (replicas, HA failover)
@@ -77,15 +77,15 @@ The WS hub `broadcast` number is enqueue-side: it fans out to 16 shard worker th
 
 ## On Pylon Cloud
 
-Cloud autoscales the HTTP, WebSocket, and shard tiers separately. You don't pre-provision — you pay for what you use. The numbers above are useful for self-hosted capacity planning; on Cloud you don't think about them.
+Cloud autoscales the HTTP, WebSocket, and shard tiers separately. You do not pre-provision; you pay for what you use. The numbers above are useful for self-hosted capacity planning. On Cloud, you do not need to think about them.
 
-For multiplayer apps with sticky shard connections, latency to your players matters — set the workspace region accordingly when signing up.
+For multiplayer apps with sticky shard connections, latency to your players matters. Set the workspace region accordingly when you sign up.
 
 ## Benchmark gaps
 
 - Multi-client read contention (connection-pool fair-share)
 - TLS handshake cost (reverse proxy terminates TLS)
-- Network RTT — production numbers will be bounded by network first
-- Shard tick budget for realtime game state — depends on `SimState::tick`
+- Network round-trip time: production numbers will be bounded by the network first
+- Shard tick budget for realtime game state: depends on `SimState::tick`
 
-For a real capacity estimate under your workload, run `cargo bench -p pylon-runtime` (see the commands at the top of this page) against a representative fixture and the manifest you'll ship with.
+For a real capacity estimate under your workload, run `cargo bench -p pylon-runtime` (see the commands at the top of this page) against a representative fixture and the manifest you will ship with.

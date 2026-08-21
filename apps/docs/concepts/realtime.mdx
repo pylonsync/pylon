@@ -3,10 +3,11 @@ title: Realtime
 description: "Choose among Pylon's live queries, presence, sync, and multiplayer primitives."
 ---
 
-Pylon is realtime end to end: one WebSocket from the same binary that serves your
-app powers live data, presence, and multiplayer. There isn't one "realtime API" —
-there are a few, each tuned for a different shape of live state. This page is the
-map; each primitive has its own deep-dive.
+Pylon handles realtime everywhere in the stack. One WebSocket, opened by
+the same binary that serves your app, carries live data, presence, and
+multiplayer updates. There is no single realtime API. Pylon offers a few
+primitives, each suited to a different kind of live state. This page
+maps the options, and each primitive has its own page with full detail.
 
 ## Pick the right primitive
 
@@ -22,39 +23,46 @@ map; each primitive has its own deep-dive.
 | Authoritative multiplayer sim (game / MMO tick loop) | `useShard` | ❌ in-memory sim | [React client](/clients/react#multiplayer-shards) |
 | A connection / sync status indicator | `useSyncStatus` | — | [React client](/clients/react) |
 
-## Two layers: synced data vs. ephemeral signals
+## Two layers: synced data and ephemeral signals
 
-The first four rows above are **synced data** — they flow through the entity store,
-respect [policies](/concepts/policies), and land in the local replica so they survive
-reload and work offline.
+The first four rows above are synced data. They flow through the entity
+store, respect [policies](/concepts/policies), and land in the local
+replica, so they survive reload and work offline.
 
-The remaining rows — `useRoom` (presence/broadcast), the two server-push primitives,
-and `useShard` (simulation) — are **ephemeral signals**. A cursor position or a game
-tick has no business in your database; it's broadcast to the room's current members
-and forgotten. Don't model presence as an entity, and don't try to drive a 60fps game
-loop through `db.useQuery`.
+The remaining rows are ephemeral signals: `useRoom` (presence and
+broadcast), the two server-push primitives, and `useShard` (simulation).
+A cursor position or a game tick does not belong in your database. The
+server broadcasts it to the room's current members and then forgets it.
+Do not model presence as an entity, and do not drive a 60fps game loop
+through `db.useQuery`.
 
 ## Streaming server output: one client, or all of them
 
-Both server-push rows above run inside a mutation or action (neither exists on query
-ctx). They differ in who receives the output:
+Both server-push rows above run inside a mutation or action (neither
+exists on query ctx). They differ in who receives the output:
 
-- **`ctx.stream.write(text)`** writes to the HTTP response of the call in flight. It
-  reaches exactly one client — whoever made the request, reading it back with
-  `db.streamFn(fn, args)`. Close the tab and the output is gone.
-- **`ctx.rooms.broadcast(room, topic, data)`** pushes over the WebSocket to every
-  subscriber of a presence room, whether or not they made the call. It resolves
-  `{ delivered: false }` when the room has no members — an empty room is a no-op, not
-  an error.
+- **`ctx.stream.write(text)`** writes to the HTTP response of the call
+  in flight. It reaches exactly one client: whoever made the request,
+  using `db.streamFn(fn, args)` to read it back. If you close the tab,
+  the output is gone.
+- **`ctx.rooms.broadcast(room, topic, data)`** pushes over the
+  WebSocket to every subscriber of a presence room, whether or not they
+  made the call. It resolves `{ delivered: false }` when the room has
+  no members. An empty room causes no error.
 
 Use `ctx.stream.write` for a chat box waiting on its own answer. Use
-`ctx.rooms.broadcast` when the output has to reach more than the caller: an agent whose
-tokens must survive a reload, a second device following the same session, or a
-scheduled job that has no HTTP caller at all. Handlers commonly do both — write to the
-caller for the lowest-latency path, broadcast so every other watcher stays in sync.
+`ctx.rooms.broadcast` when the output has to reach more than the
+caller:
 
-Clients join with `useRoom(roomId, userId)` and read pushed messages off the sync
-engine:
+- an agent whose tokens must survive a reload
+- a second device following the same session
+- a scheduled job that has no HTTP caller at all
+
+Handlers commonly do both: write to the caller for the lowest-latency
+path, and broadcast so every other watcher stays in sync.
+
+Clients join with `useRoom(roomId, userId)` and read pushed messages off
+the sync engine:
 
 ```tsx
 import { useRoom, getSync } from "@pylonsync/react";
@@ -72,18 +80,18 @@ See [Functions → Server push to a room](/concepts/functions#server-push-to-a-r
 
 ## Best practice: cross-tab live state goes through `db.useQuery`
 
-The most common realtime feature is a shared scalar that must update everywhere at
-once — a live counter, remaining capacity, "12 people viewing". The reliable way to
-build it is a **public, PII-free projection entity** subscribed with `db.useQuery`,
-*not* a reactive query.
+The most common realtime feature is a shared scalar that must update
+everywhere at once: a live counter, remaining capacity, or "12 people
+viewing." Build it with a public, PII-free projection entity subscribed
+with `db.useQuery`, not with a reactive query.
 
-Reactive server queries (`db.useReactiveQuery`) behave as leader-tab-only in
-practice: a follower tab's reactive subscription may never deliver its initial
-result. Entity sync (`db.useQuery`) reaches every tab. So:
+Reactive server queries (`db.useReactiveQuery`) behave as leader-tab-only
+in practice: a follower tab's reactive subscription may never deliver
+its initial result. Entity sync (`db.useQuery`) reaches every tab. So:
 
 1. Keep the sensitive table deny-all: `allowRead: "false"`.
-2. Have the mutation also maintain a tiny projection entity with `allowRead: "true"`
-   and client writes denied.
+2. Have the mutation also maintain a tiny projection entity with
+   `allowRead: "true"` and client writes denied.
 3. Subscribe the UI to the projection with `db.useQuery`.
 
 ```ts
@@ -115,23 +123,25 @@ const { data: stat } = db.useQuery("WaitlistStat");
 return <span>{stat[0]?.count ?? 0} signed up</span>;
 ```
 
-Use `db.useReactiveQuery` where it shines — a server-side join or rollup rendered in a
-single (leader) view, like a feed that joins `Post → User`. Just don't lean on it for
-cross-tab fan-out of a shared value.
+Use `db.useReactiveQuery` for its strength: a server-side join or rollup
+rendered in a single leader view, like a feed that joins `Post` to
+`User`. Do not rely on it for cross-tab fan-out of a shared value.
 
 ## How it works
 
-Under the hood every subscription rides one WebSocket per client. The server keeps an
-index of active subscriptions keyed by entity + indexed filter fields, so a write
-fans out in O(matching subs), not O(all subs). On multi-machine deployments a cluster
-bus forwards change events between nodes — a mutation on machine A updates subscribers
-on machine B. See [horizontal scaling](/operations/scaling) for the architecture.
+Internally, each subscription rides one WebSocket per client. The
+server keeps an index of active subscriptions keyed by entity and
+indexed filter fields, so a write fans out in O(matching subscriptions),
+not O(all subscriptions). On multi-machine deployments, a cluster bus
+forwards change events between nodes. A mutation on machine A updates
+subscribers on machine B. See [horizontal scaling](/operations/scaling)
+for the architecture.
 
 ## Next
 
 <CardGroup cols={2}>
   <Card title="Live queries" icon="radio" href="/concepts/live-queries">
-    The `db.useQuery` workhorse and how fan-out scales.
+    The `db.useQuery` hook and how fan-out scales.
   </Card>
   <Card title="React client" icon="react" href="/clients/react">
     Every realtime hook the client exposes, including presence and shards.

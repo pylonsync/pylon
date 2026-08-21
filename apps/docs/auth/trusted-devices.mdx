@@ -3,9 +3,11 @@ title: Trusted devices
 description: "Remember-this-browser cookie that lets a user skip the TOTP prompt for 30 days from the same device."
 ---
 
-After a user completes a second factor (TOTP today; passkey assertion can wire to the same surface), the client can ask Pylon to **remember this browser** so the second factor is skipped for 30 days on this device. The trust is bound to the user — a stale cookie from a previous account on the same browser quietly degrades to untrusted, never elevates a different user.
+After a user completes a second factor (TOTP today; a passkey assertion can use the same mechanism), the client can ask Pylon to remember this browser. Pylon then skips the second factor for 30 days on this device.
 
-The trust flows through `auth.isTrustedDevice` so policies can gate sensitive flows on it ("require fresh TOTP unless trusted device").
+The trust binds to the user. A stale cookie from a previous account on the same browser becomes untrusted; it never grants trust to a different user.
+
+The trust flag flows through `auth.isTrustedDevice`. Policies can use it to gate sensitive flows, for example to require a fresh TOTP code unless the device is trusted.
 
 ## Endpoints
 
@@ -15,11 +17,11 @@ The trust flows through `auth.isTrustedDevice` so policies can gate sensitive fl
 | `/api/auth/trusted-devices` | DELETE | session | Revoke ALL of the user's trusted devices |
 | `/api/auth/trusted-devices/:id` | DELETE | session | Revoke one trusted device |
 
-All three require a real session — API-key auth is refused with `403 API_KEY_AUTH_FORBIDDEN`.
+All three require a real session. API-key auth is refused with `403 API_KEY_AUTH_FORBIDDEN`.
 
 ## Minting trust
 
-There's no dedicated "trust this device" endpoint. Trust is minted as a side effect of a successful second-factor verify, on opt-in:
+There is no dedicated endpoint to trust a device. Pylon mints trust as a side effect of a successful second-factor verify, when the user opts in:
 
 ```bash
 curl -X POST https://your-app/api/auth/totp/verify \
@@ -47,7 +49,7 @@ The response includes `trust_device: true` to confirm:
 }
 ```
 
-The cookie is bound to the user via the underlying record — stealing the cookie alone doesn't help; Pylon validates `record.user_id == session.user_id` on every request.
+The cookie is bound to the user through the underlying record. Stealing the cookie alone does not help an attacker: Pylon validates `record.user_id == session.user_id` on every request.
 
 ## Listing devices
 
@@ -71,7 +73,7 @@ Response:
 }
 ```
 
-Notably absent: the **token**. The cookie value stays server-side and is never exposed to the dashboard — XSS that reads this endpoint can't exfiltrate trust tokens.
+The response does not include the token. The cookie value stays on the server and never reaches the dashboard, so XSS that reads this endpoint cannot extract trust tokens.
 
 The `label` is parsed from the request's User-Agent header at mint time. Browsers display it in the "active devices" account settings page.
 
@@ -84,20 +86,20 @@ curl -X DELETE https://your-app/api/auth/trusted-devices/td_xyz \
   -H 'Authorization: Bearer pylon_token'
 ```
 
-Object-level auth: Pylon verifies the record's `user_id` matches the caller. Cross-user revoke attempts return `404 NOT_FOUND` — identical to "device doesn't exist" — so a curious admin can't enumerate trust-device ids via response timing.
+Pylon checks object-level authorization: it verifies that the record's `user_id` matches the caller. A cross-user revoke attempt returns `404 NOT_FOUND`, the same code as a missing device, so an admin cannot enumerate trusted-device ids from response timing.
 
-Revoke all devices (the "log everything else out of TOTP" button):
+Revoke all devices at once:
 
 ```bash
 curl -X DELETE https://your-app/api/auth/trusted-devices \
   -H 'Authorization: Bearer pylon_token'
 ```
 
-Both responses include `revoked: <count>` of records removed. The current request's trust cookie is also cleared via `Set-Cookie` on the response so the browser drops it immediately.
+Both responses include `revoked: <count>` for the number of records removed. Pylon also clears the current request's trust cookie with `Set-Cookie`, so the browser drops it immediately.
 
 ## Gating in your policies / handlers
 
-The trust flag rides on `AuthContext.is_trusted_device`. Use it in TS handlers:
+The trust flag is available on `AuthContext.is_trusted_device`. Use it in TypeScript handlers:
 
 ```typescript
 import { action } from "@pylonsync/functions";
@@ -117,24 +119,24 @@ export default action({
 });
 ```
 
-In policies it's `auth.isTrustedDevice` (bool). Combine with role checks to gate sensitive entity reads/writes.
+In policies, the field is `auth.isTrustedDevice` (a boolean). Combine it with role checks to gate sensitive entity reads and writes.
 
 ## Lifetime + cookie attributes
 
 - **Lifetime:** 30 days from mint (`DEFAULT_TRUST_LIFETIME_SECS = 30 * 24 * 60 * 60`).
 - **Cookie name:** `pylon_trusted_device`.
-- **Attributes:** built from the framework's existing `CookieConfig` — same `Secure` / `SameSite` / `Path` as the session cookie. Operators don't have to configure two sets.
+- **Attributes:** set from the framework's `CookieConfig`, the same `Secure`, `SameSite`, and `Path` values as the session cookie. Operators do not configure two separate cookie policies.
 
 ## Security guarantees
 
-- **Token stays server-side.** Listing trusted devices returns the `id` (public handle) but never the cookie value. XSS that reaches `/trusted-devices` can't exfiltrate trust tokens; it would have to read `document.cookie` (HttpOnly defends).
-- **Bound to user.** Every verify checks `record.user_id == session.user_id`. Stealing the cookie alone doesn't help — you need both the trust cookie and the matching session.
-- **Object-level auth on revoke** with timing parity — cross-user revoke attempts and "doesn't exist" return the same `404` from the same code path.
-- **Auto-cleared on full revoke.** `DELETE /trusted-devices` (all) wipes the cookie on the response so the browser drops it without a refresh.
-- **HttpOnly + Secure + SameSite=Lax** — same posture as the session cookie.
+- **Token stays on the server.** Listing trusted devices returns the `id` (a public handle) but never the cookie value. XSS that reaches `/trusted-devices` cannot extract trust tokens; it would need to read `document.cookie`, and HttpOnly blocks that.
+- **Bound to the user.** Every verify checks `record.user_id == session.user_id`. Stealing the cookie alone does not work; an attacker needs both the trust cookie and the matching session.
+- **Object-level auth on revoke, with timing parity.** A cross-user revoke attempt and a nonexistent device return the same `404` from the same code path.
+- **Cleared automatically on full revoke.** `DELETE /trusted-devices` (revoke all) clears the cookie on the response, so the browser drops it without a refresh.
+- **HttpOnly, Secure, and SameSite=Lax**, the same settings as the session cookie.
 
 ## Where to go next
 
-- **[TOTP / 2FA](/auth/totp)** — the verify endpoint that mints trust via `trust_device: true`
-- **[Sessions](/auth/sessions)** — base cookie attribute config that trusted-device cookies inherit
-- **[Passkeys](/auth/passkeys)** — phishing-resistant alternative; usually you DON'T need a remember-device gate when the user uses a passkey
+- [TOTP / 2FA](/auth/totp): the verify endpoint that mints trust via `trust_device: true`.
+- [Sessions](/auth/sessions): the base cookie attribute config that trusted-device cookies inherit.
+- [Passkeys](/auth/passkeys): a phishing-resistant alternative. A passkey user usually does not need a remember-device gate.
