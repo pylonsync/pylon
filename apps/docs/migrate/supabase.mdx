@@ -1,0 +1,329 @@
+---
+title: "Migrating from Supabase"
+description: "Move a Supabase app to Pylon: Postgres schema to typed entities, RLS to policies, the pg_dump export path, auth, and the parts that need a decision."
+---
+
+Supabase and Pylon share the most: a relational store with a real schema and
+foreign keys, per-row access policies, auth, functions, and file storage. This
+is the closest migration of the set. The main work is turning your SQL schema
+into Pylon entities and your RLS policies into Pylon policies.
+
+## Why Pylon fits
+
+- Postgres tables with typed columns and foreign keys map to Pylon entities with
+  typed fields and `field.id` relations.
+- Row Level Security policies map to per-entity policies, and Pylon evaluates them
+  the same way (an existing-row read side and an incoming-write side).
+- Supabase Realtime maps to reactive queries against a local replica.
+- Supabase Auth (email/password, magic link, OAuth, anonymous) maps one-to-one to
+  Pylon auth.
+
+What Pylon adds or does differently:
+
+- Your schema and policies live in **TypeScript**, next to your app, not in SQL
+  migration files and a separate RLS layer.
+- Hosted server functions (`query` / `mutation` / `action`) in TypeScript,
+  instead of Deno Edge Functions and `plpgsql`.
+- Server-side rendering: file-based routes, one binary serving frontend and API.
+- Pylon runs on SQLite or Postgres and deploys with one command, or self-hosts as
+  a single binary.
+
+## Concept map
+
+| Concept | Supabase | Pylon |
+|---|---|---|
+| Client init | `createClient(url, anonKey)` | `init({ appName })` |
+| Schema | SQL migrations / dashboard (Postgres) | `entity("Name", {...})` + `buildManifest(...)` |
+| Field types | `text`, `int`, `timestamptz`, `jsonb`, `uuid`, `bool` | `field.string/int/float/datetime/json/bool` |
+| Relation | Postgres FK (`references`) | `field.id("Target")` + `include` |
+| Primary key | `uuid default gen_random_uuid()` / bigint identity | auto 40-char hex, or a custom id |
+| Read | `.from('posts').select().eq(...).order(...).limit(...)` | `db.useQuery("Post", { where, orderBy, limit })` |
+| Embedded join | `.select('*, author:profiles(*)')` | `{ include: { author: {} } }` |
+| Single row | `.single()` | `db.useQueryOne("Post", id)` / `ctx.db.get(...)` |
+| Live read | `.channel(...).on('postgres_changes', ...)` | `db.useQuery(...)` (reactive by default) |
+| Insert | `.insert({...}).select()` | `db.useEntity("Post").insert({...})` / `ctx.db.insert(...)` |
+| Update | `.update({...}).eq('id', id)` | `.update(id, {...})` / `ctx.db.update(...)` |
+| Delete | `.delete().eq('id', id)` | `.remove(id)` / `ctx.db.delete(...)` |
+| Upsert | `.upsert({...}, { onConflict })` | insert-or-update in a `mutation` |
+| Access control | RLS: `enable`, then `create policy` | `policy({...})` (deny by default, no enable step) |
+| Policy: existing row | `using (...)` | `allowRead`, and `existing.*` on update/delete |
+| Policy: incoming write | `with check (...)` | `allowInsert` / `allowUpdate` on `data.*` |
+| Policy: user id | `auth.uid()` | `auth.userId` |
+| Auth (email/password) | `signInWithPassword(...)` | `POST /api/auth/password/login` |
+| Auth (magic link) | `signInWithOtp({ email })` | `POST /api/auth/magic/send` + `/magic/verify` |
+| Auth (OAuth) | `signInWithOAuth({ provider })` | `GET /api/auth/login/:provider?callback=` |
+| Auth (anonymous) | `signInAnonymously()` | `POST /api/auth/guest` |
+| Auth state | `onAuthStateChange` / `getUser()` → `user.id` | `db.useUser()` (client), `ctx.auth.userId` (server) |
+| Server logic | Edge Functions (Deno) + `plpgsql` | `query` / `mutation` / `action` (TypeScript) |
+| DB triggers | `plpgsql` triggers | do the work in the `mutation` |
+| Storage | `storage.from('b').upload(...)` / `getPublicUrl(...)` | Pylon files provider |
+| Deploy | Supabase (managed) | `pylon deploy` (cloud) or single-binary self-host |
+
+## Migrating your schema
+
+Each Postgres table becomes a Pylon entity. Columns become typed fields, and a
+foreign key becomes a `field.id`.
+
+**Supabase** (SQL):
+
+```sql
+create table public.posts (
+  id uuid primary key default gen_random_uuid(),
+  author_id uuid not null references auth.users(id),
+  title text not null,
+  body text,
+  created_at timestamptz not null default now()
+);
+```
+
+**Pylon** (`app.ts`):
+
+```typescript
+import { entity, field, buildManifest, discoverAppRoutes } from "@pylonsync/sdk";
+
+const Post = entity("Post", {
+  authorId: field.id("User"),   // references auth.users(id) becomes an FK field
+  title: field.string(),
+  body: field.string().optional(),
+  createdAt: field.datetime().defaultNow(),
+}, {
+  indexes: [{ name: "by_author", fields: ["authorId"], unique: false }],
+});
+
+export default buildManifest({
+  name: "my-app",
+  version: "0.1.0",
+  entities: [Post],
+  policies: [/* see below */],
+  routes: await discoverAppRoutes(),
+});
+```
+
+Notes:
+
+- Map Postgres types to Pylon: `text` → `field.string`, `int`/`bigint` →
+  `field.int`, `numeric`/`float` → `field.float`, `timestamptz` →
+  `field.datetime`, `jsonb` → `field.json`, `bool` → `field.bool`.
+- A `references auth.users(id)` foreign key becomes `field.id("User")`. Other
+  table references become `field.id("ThatEntity")`.
+- Postgres check constraints and defaults map to field modifiers (`.optional()`,
+  `.unique()`, `.default(...)`, `.defaultNow()`).
+
+## Migrating your policies
+
+Supabase Row Level Security and Pylon policies are the same idea: a per-table
+read side and a per-table write side. One difference to audit: **RLS is off by
+default on a new Supabase table**, so any table where you never enabled it is
+fully open through the API. Pylon denies by default with no enable step, so every
+entity needs an explicit `policy()`. List your tables and check which ones never
+had RLS enabled, then decide whether each should be public or locked down.
+
+**Supabase** (RLS):
+
+```sql
+alter table public.posts enable row level security;
+
+create policy "owner read"   on posts for select using ( auth.uid() = author_id );
+create policy "owner insert" on posts for insert with check ( auth.uid() = author_id );
+create policy "owner update" on posts for update using ( auth.uid() = author_id )
+                                                  with check ( auth.uid() = author_id );
+create policy "owner delete" on posts for delete using ( auth.uid() = author_id );
+```
+
+**Pylon** (`policy(...)`):
+
+```typescript
+policy({
+  name: "post_owner",
+  entity: "Post",
+  allowRead: "auth.userId == data.authorId",
+  allowInsert: "auth.userId == data.authorId",
+  allowUpdate: "auth.userId == data.authorId",
+  allowDelete: "auth.userId == data.authorId",
+});
+```
+
+How to convert each policy:
+
+- `auth.uid()` maps to `auth.userId`. `auth.jwt()` claims (roles) map to
+  `auth.roles` / `auth.hasAnyRole(...)`.
+- `using (...)` is the existing-row side. It maps to `allowRead`, and to
+  `existing.*` in the update and delete policy.
+- `with check (...)` is the incoming-write side. It maps to `allowInsert` and
+  `allowUpdate`, evaluated on `data.*` (the row being written).
+- To lock an immutable field, use `field.string().owner()` instead of a `with
+  check` that compares the new value to the old one.
+- A cross-table check (`exists (select 1 from members ...)`) maps to
+  `exists(Member where orgId == data.orgId and userId == auth.userId)`.
+
+## Migrating reads and writes
+
+Reads. A `supabase-js` query becomes `db.useQuery`, which is reactive by default,
+so you do not wire up a separate realtime channel.
+
+```typescript
+// Supabase
+const { data } = await supabase
+  .from("posts")
+  .select("*, author:profiles(*)")
+  .eq("author_id", authorId)
+  .order("created_at", { ascending: false })
+  .limit(10);
+
+// Pylon (live)
+const posts = db.useQuery<Post>("Post", {
+  where: { authorId },
+  include: { author: {} },
+  orderBy: { createdAt: "desc" },
+  limit: 10,
+});
+```
+
+Writes. `.insert`/`.update`/`.delete` become the client entity hook or a server
+function.
+
+```typescript
+// Supabase
+await supabase.from("posts").insert({ title, author_id: uid }).select();
+await supabase.from("posts").update({ title: "New" }).eq("id", id);
+await supabase.from("posts").delete().eq("id", id);
+
+// Pylon — client, optimistic
+const posts = db.useEntity("Post");
+posts.insert({ title, authorId: userId });
+posts.update(id, { title: "New" });
+posts.remove(id);
+
+// Pylon — server, in a transaction
+export default mutation({
+  args: { title: v.string() },
+  async handler(ctx, { title }) {
+    return ctx.db.insert("Post", { title, authorId: ctx.auth.userId });
+  },
+});
+```
+
+One Supabase quirk to remember: `.insert`/`.update`/`.delete` do not return the
+affected rows unless you chain `.select()`. Pylon's `ctx.db.insert` returns the
+new id, and `db.useEntity` paints the change locally.
+
+## Migrating your data
+
+Supabase is Postgres, so export is standard SQL tooling. This is the easy part.
+
+**1. Export with `pg_dump`.** Use the connection string from Dashboard → Connect.
+
+```bash
+# data only, as COPY statements
+pg_dump "$SUPABASE_DB_URL" --data-only --use-copy -f data.sql
+# or per-table CSV for a scripted transform
+psql "$SUPABASE_DB_URL" -c "\copy (select * from posts) to 'posts.csv' csv header"
+```
+
+**2. Convert ids.** Supabase ids are usually UUIDs. Pylon ids are 40-character
+lowercase hex, so you cannot reuse a UUID directly (Pylon rejects a bad id with
+`INVALID_ID`). Use one of two methods:
+
+- Derive the id (simplest). Convert each UUID to a Pylon id with a fixed
+  function, and apply the same function to every foreign key. `sha1(uuid)` gives
+  40 lowercase hex characters. Derived ids are not time-ordered, so sort by your
+  `created_at` fields.
+- Map the id. Generate a new Pylon id per row with `generateId()` from
+  `@pylonsync/sync`, keep an old-to-new map, and rewrite foreign keys in a second
+  pass.
+
+**3. Import into Pylon.** The admin batch endpoint loads rows quickly and bypasses
+per-entity policies. It needs an admin token. Send batches of a few hundred rows.
+
+```javascript
+import { createHash } from "node:crypto";
+
+const toPylonId = (uuid) => createHash("sha1").update(uuid).digest("hex");
+
+for (const batch of chunk(rows, 500)) {
+  const operations = batch.map((row) => ({
+    op: "insert",
+    entity: "Post",
+    data: {
+      id: toPylonId(row.id),
+      authorId: toPylonId(row.author_id),   // FK converted the same way
+      title: row.title,
+      body: row.body,
+      createdAt: row.created_at,
+    },
+  }));
+  await fetch(`${PYLON_URL}/api/batch`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ operations }),
+  });
+}
+```
+
+**4. Files.** Download each object from Supabase Storage and upload it to Pylon's
+file storage, then rewrite the stored paths and URLs.
+
+**5. Users.** Supabase users live in `auth.users`. Import each into your Pylon
+`User` entity, keyed by email, and map the old user UUID to the new Pylon id the
+same way you map foreign keys. Sessions and password hashes do not transfer, so
+users sign in again with magic code or OAuth, where email is the stable key.
+
+## Migrating auth
+
+Each Supabase auth method has a Pylon equivalent.
+
+```typescript
+// Supabase — email + password
+await supabase.auth.signInWithPassword({ email, password });
+
+// Pylon — email + password
+const res = await fetch("/api/auth/password/login", {
+  method: "POST", headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ email, password }),
+});
+const { token } = await res.json();
+setSessionToken(token);   // stores the token and re-syncs the replica for this user
+```
+
+- Magic link (`signInWithOtp({ email })`) maps to `POST /api/auth/magic/send`
+  then `/magic/verify`.
+- OAuth (`signInWithOAuth({ provider })`) maps to a redirect to `GET
+  /api/auth/login/:provider?callback=<url>`. Pylon supports Google, GitHub,
+  Apple, Microsoft, and about 20 more providers.
+- Anonymous (`signInAnonymously()`) maps to a Pylon guest session (`POST
+  /api/auth/guest`).
+- `getUser()` / `onAuthStateChange` → `user.id` maps to `db.useUser()` on the
+  client and `ctx.auth.userId` on the server.
+
+## What does not map cleanly
+
+Decide on these before you commit:
+
+- Raw SQL and `rpc`. Supabase lets the client run stored procedures and, through
+  the SQL editor, arbitrary SQL. Pylon's data access is through entities and
+  server functions, not arbitrary SQL from the client. Move `plpgsql` functions
+  and complex queries into a Pylon `query` or `mutation`.
+- Database triggers. A `plpgsql` trigger that runs on write becomes logic inside
+  the `mutation` that makes the write, or a scheduled job.
+- Postgres-only features. Views, materialized views, and extensions do not carry
+  over as-is. Pylon has its own vector search, so `pgvector` maps to
+  `field.vector` and `ctx.db.vectorSearch`.
+- RLS defaults. A table where RLS was never enabled was open; in Pylon it needs
+  an explicit policy. Audit every table.
+- Realtime scope. Supabase realtime subscribes to a table and a filter string.
+  Pylon's reactive queries subscribe to the query itself, so you do not re-derive
+  relevance on the client.
+
+None of these blocks a typical app. Each one needs a decision, not a mechanical
+rewrite.
+
+## Get started
+
+1. Create a new Pylon app: `npm create @pylonsync/pylon@latest my-app`.
+2. Turn each table into an `entity`, and each RLS policy into a `policy()`.
+   Audit tables that had RLS off.
+3. Run the `pg_dump` export, the conversion, and the `/api/batch` import against
+   a staging app first.
+4. Point the client at Pylon: `init`, the auth calls, `db.useQuery`, and
+   `db.useEntity`.
+5. Run `pylon deploy`, or self-host the single binary.

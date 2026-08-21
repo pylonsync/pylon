@@ -1,0 +1,301 @@
+---
+title: "Migrating from Convex"
+description: "Move a Convex app to Pylon: a near-identical typed schema and function model, plus the big change — declarative policies replace per-function auth checks."
+---
+
+Convex is the closest model to Pylon of any backend here. Both give you a typed
+schema, server functions (`query` / `mutation` / `action`), and reactive queries.
+Most of your code moves with small edits.
+
+The one real change is access control. Convex has no policy layer: you write the
+auth check by hand inside every function. Pylon has declarative policies with
+default-deny. Moving to Pylon means writing each rule once per entity instead of
+in every function, and an entity with no policy is blocked rather than open.
+
+## Why Pylon fits
+
+- `defineTable` with `v` validators maps almost one-to-one to `entity()` with
+  `field`.
+- `query` and `mutation` handlers with `ctx.db` map to Pylon `query` and
+  `mutation` handlers with `ctx.db`.
+- `useQuery` reactive hooks map to `db.useQuery`.
+- Scheduling, actions, and file storage all have direct equivalents.
+
+What Pylon adds or changes:
+
+- **Declarative policies.** In Convex, an unguarded function is a potential IDOR:
+  it is open unless its author remembered the check. In Pylon you write a
+  `policy()` per entity, it is enforced on every read and write, and the default
+  is deny. This is the main reason the move is worth it.
+- Server-side rendering: file-based routes, one binary serving frontend and API.
+- Auth built in (email/password, magic code, OAuth, guest), so you do not wire up
+  a separate provider.
+
+## Concept map
+
+| Concept | Convex | Pylon |
+|---|---|---|
+| Schema | `defineSchema({ posts: defineTable({...}) })` | `entity("Post", {...})` + `buildManifest(...)` |
+| Field types | `v.string/number/boolean/object/array` | `field.string/int/float/bool/json` |
+| Relation | `v.id("authors")` | `field.id("Author")` |
+| Document id | `_id: Id<"table">` (opaque string) | auto 40-char hex, or a custom id |
+| Created time | `_creationTime` (automatic) | add a `createdAt: field.datetime()` |
+| Index | `.index("by_author", ["authorId"])` | `indexes: [{ name, fields }]` |
+| Read (server) | `ctx.db.query("posts").withIndex(...).order(...).take(10)` | `ctx.db.query("Post", {...})` / `list` / `get` |
+| Get one | `ctx.db.get("posts", id)` | `ctx.db.get("Post", id)` |
+| Read (client) | `useQuery(api.posts.list, args)` | `db.useQuery("Post", {...})` |
+| Insert | `ctx.db.insert("posts", {...})` | `ctx.db.insert("Post", {...})` |
+| Update | `ctx.db.patch("posts", id, {...})` | `ctx.db.update("Post", id, {...})` |
+| Replace | `ctx.db.replace("posts", id, {...})` | `ctx.db.update(...)` with the full row |
+| Delete | `ctx.db.delete("posts", id)` | `ctx.db.delete("Post", id)` |
+| Write (client) | `useMutation(api.posts.create)` | `db.useMutation("create")` / `db.useEntity("Post")` |
+| Function types | `query` / `mutation` / `action` | `query` / `mutation` / `action` |
+| Access control | code in every function (`getUserIdentity` + throw) | `policy({...})` — declarative, default-deny |
+| Auth identity | `ctx.auth.getUserIdentity()` → `subject` | `ctx.auth.userId` |
+| Auth (built in) | `@convex-dev/auth` | Pylon auth (password / magic / OAuth / guest) |
+| Scheduling | `ctx.scheduler.runAfter/runAt`, `crons.ts` | `ctx.scheduler`, crons |
+| Storage | `ctx.storage.generateUploadUrl` / `getUrl` | Pylon files provider |
+| Export | `npx convex export` (JSONL per table) | source for the migration below |
+| Deploy | `convex deploy` | `pylon deploy` (cloud) or single-binary self-host |
+
+## Migrating your schema
+
+`defineTable` becomes `entity`, and the `v` validators become `field` builders.
+
+**Convex** (`schema.ts`):
+
+```typescript
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  authors: defineTable({ name: v.string() }),
+  posts: defineTable({
+    title: v.string(),
+    body: v.string(),
+    authorId: v.id("authors"),
+    published: v.boolean(),
+  }).index("by_author", ["authorId"]),
+});
+```
+
+**Pylon** (`app.ts`):
+
+```typescript
+import { entity, field, buildManifest, discoverAppRoutes } from "@pylonsync/sdk";
+
+const Author = entity("Author", { name: field.string() });
+
+const Post = entity("Post", {
+  title: field.string(),
+  body: field.string(),
+  authorId: field.id("Author"),
+  published: field.bool(),
+  createdAt: field.datetime().defaultNow(),   // replaces the automatic _creationTime
+}, {
+  indexes: [{ name: "by_author", fields: ["authorId"], unique: false }],
+});
+
+export default buildManifest({
+  name: "my-app",
+  version: "0.1.0",
+  entities: [Author, Post],
+  policies: [/* see below */],
+  routes: await discoverAppRoutes(),
+});
+```
+
+Notes:
+
+- `v.id("table")` becomes `field.id("Entity")`.
+- Convex's automatic `_creationTime` has no equivalent, so add an explicit
+  `createdAt: field.datetime().defaultNow()`.
+- `v.union(v.literal("draft"), v.literal("live"))` becomes
+  `field.enum(["draft", "live"])`. A complex `v.object`/`v.union` becomes
+  `field.json()`.
+
+## Access control: from per-function checks to policies
+
+This is the migration's real work, and its payoff. In Convex you check the
+identity and throw by hand in every function.
+
+**Convex** (in each function):
+
+```typescript
+export const getPost = query({
+  args: { postId: v.id("posts") },
+  handler: async (ctx, args) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity === null) throw new Error("Unauthenticated");
+    const post = await ctx.db.get("posts", args.postId);
+    if (post && post.authorId !== identity.subject && !post.published) {
+      throw new Error("Not authorized");   // repeated in every function that reads a post
+    }
+    return post;
+  },
+});
+```
+
+**Pylon** — write the rule once, enforced on every read and write:
+
+```typescript
+policy({
+  name: "post_access",
+  entity: "Post",
+  allowRead: "data.published == true || auth.userId == data.authorId",
+  allowInsert: "auth.userId == data.authorId",
+  allowUpdate: "auth.userId == data.authorId",
+  allowDelete: "auth.userId == data.authorId",
+});
+```
+
+With the policy in place, `db.useQuery("Post", ...)` and `ctx.db` reads return
+only the rows the caller may see, and writes are checked, without a per-function
+guard. Because Pylon is default-deny, an entity with no policy is fully blocked,
+so a forgotten rule fails closed instead of leaking.
+
+Keep in a function only the checks a policy cannot express: multi-step business
+rules, or gates on data the policy engine does not resolve. For an org-membership
+gate, use `ctx.requireMember(orgId, { role: [...] })` inside the function.
+
+## Migrating reads and writes
+
+The server API is nearly the same shape.
+
+```typescript
+// Convex — server read
+await ctx.db.query("posts").withIndex("by_author", q => q.eq("authorId", a)).order("desc").take(10);
+
+// Pylon — server read
+await ctx.db.query("Post", { authorId: a, $order: { createdAt: "desc" }, $limit: 10 });
+```
+
+```typescript
+// Convex — server write
+await ctx.db.insert("posts", { title, authorId, published: false });
+await ctx.db.patch("posts", id, { title: "New" });
+await ctx.db.delete("posts", id);
+
+// Pylon — server write
+await ctx.db.insert("Post", { title, authorId, published: false });
+await ctx.db.update("Post", id, { title: "New" });
+await ctx.db.delete("Post", id);
+```
+
+On the client, `useQuery(api.posts.list, args)` becomes `db.useQuery("Post",
+{...})`, and `useMutation(api.posts.create)` becomes `db.useMutation("create")`
+or the optimistic `db.useEntity("Post")`.
+
+## Migrating your data
+
+**1. Export.** `npx convex export --path ./out` writes a `snapshot_<ts>.zip`. Each
+table is a `<table>/documents.jsonl` file, one JSON document per line, including
+`_id` and `_creationTime`.
+
+```bash
+npx convex export --path ./out --include-file-storage
+```
+
+**2. Convert ids.** Convex `_id` values are opaque strings. Pylon ids are
+40-character lowercase hex, so you cannot reuse them directly (Pylon rejects a bad
+id with `INVALID_ID`). Use one of two methods:
+
+- Derive the id (simplest). Convert each `_id` to a Pylon id with a fixed
+  function, and apply the same function to every `v.id` reference. `sha1(_id)`
+  gives 40 lowercase hex characters.
+- Map the id. Generate a new Pylon id per row with `generateId()` from
+  `@pylonsync/sync`, keep an old-to-new map, and rewrite references in a second
+  pass.
+
+Convert `_creationTime` (a millisecond number) to your `createdAt` field with
+`new Date(row._creationTime).toISOString()`.
+
+**3. Import into Pylon.** Read each `documents.jsonl` line by line and send batches
+to the admin batch endpoint (admin token; bypasses per-entity policies).
+
+```javascript
+import { createHash } from "node:crypto";
+
+const toPylonId = (id) => createHash("sha1").update(id).digest("hex");
+
+for (const batch of chunk(rows, 500)) {
+  const operations = batch.map((row) => ({
+    op: "insert",
+    entity: "Post",
+    data: {
+      id: toPylonId(row._id),
+      authorId: toPylonId(row.authorId),   // v.id reference converted the same way
+      title: row.title,
+      body: row.body,
+      published: row.published,
+      createdAt: new Date(row._creationTime).toISOString(),
+    },
+  }));
+  await fetch(`${PYLON_URL}/api/batch`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${ADMIN_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ operations }),
+  });
+}
+```
+
+**4. Files.** The export's `_storage/` folder holds each blob. Upload each to
+Pylon's file storage and rewrite the stored ids.
+
+**5. Users.** How users are stored depends on your Convex auth. With Convex Auth,
+users are a `users` table you export like any other. With a third-party provider,
+export the users from that provider. Import each into your Pylon `User` entity,
+keyed by email. Sessions do not transfer, so users sign in again.
+
+## Migrating auth
+
+In a Convex function you read `ctx.auth.getUserIdentity()` and use
+`identity.subject`. In Pylon you read `ctx.auth.userId`.
+
+For sign-in, Pylon has the flows built in:
+
+- Email and password: `POST /api/auth/password/register` and `/password/login`.
+- Magic code: `POST /api/auth/magic/send` then `/magic/verify`.
+- OAuth: `GET /api/auth/login/:provider?callback=<url>` (Google, GitHub, Apple,
+  Microsoft, and about 20 more).
+- Guest: `POST /api/auth/guest`.
+
+Store the returned token with `setSessionToken(token)`, which also re-syncs the
+replica for the new user.
+
+## Scheduling, actions, and storage
+
+- `ctx.scheduler.runAfter(ms, fn, args)` and `runAt` map to Pylon's scheduler.
+  A `crons.ts` `cronJobs()` table maps to Pylon crons.
+- `action({...})` for external I/O maps to a Pylon `action`, which also calls
+  `ctx.runQuery` / `ctx.runMutation`.
+- `ctx.storage.generateUploadUrl()` and `getUrl(id)` map to the Pylon files
+  provider.
+
+## What does not map cleanly
+
+Decide on these before you commit:
+
+- Business-logic authorization. Simple ownership checks become policies. A
+  multi-step rule that a policy cannot express stays as an explicit check inside
+  the Pylon function.
+- Discriminated unions. `v.union(v.literal(...))` maps to `field.enum([...])`; a
+  richer union maps to `field.json()` and you validate it in a function.
+- The automatic `_creationTime`. Pylon has no automatic creation timestamp, so
+  add a `createdAt` field.
+- Opaque ids in client code. Convex `Id<"table">` values become plain Pylon
+  string ids after the conversion above.
+
+None of these blocks a typical app. Each one needs a decision, not a mechanical
+rewrite.
+
+## Get started
+
+1. Create a new Pylon app: `npm create @pylonsync/pylon@latest my-app`.
+2. Turn each `defineTable` into an `entity`, and write a `policy()` for every
+   entity to replace the per-function checks.
+3. Run `npx convex export`, the conversion, and the `/api/batch` import against a
+   staging app first.
+4. Point the client at Pylon: `init`, the auth calls, `db.useQuery`, and
+   `db.useEntity`.
+5. Run `pylon deploy`, or self-host the single binary.

@@ -147,6 +147,8 @@
             "group": "Migrate",
             "pages": [
               "migrate/firebase",
+              "migrate/supabase",
+              "migrate/convex",
               "migrate/instantdb"
             ]
           }
