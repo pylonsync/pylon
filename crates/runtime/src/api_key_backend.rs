@@ -174,15 +174,14 @@ pub use pg::PostgresApiKeyBackend;
 
 mod pg {
     use super::*;
-    use pylon_storage::postgres::live::ReconnectingPgClient;
+    use pylon_storage::pg_datastore::PgPool;
 
     pub struct PostgresApiKeyBackend {
-        conn: ReconnectingPgClient,
+        conn: std::sync::Arc<PgPool>,
     }
 
     impl PostgresApiKeyBackend {
-        pub fn connect(url: &str) -> Result<Self, String> {
-            let conn = ReconnectingPgClient::connect(url)?;
+        pub fn with_pool(conn: std::sync::Arc<PgPool>) -> Result<Self, String> {
             conn.with_client(|c| {
                 c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (

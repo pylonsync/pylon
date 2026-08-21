@@ -1839,7 +1839,11 @@ fn start_server(
             panic!("PYLON_SECRET is set but invalid: {msg}");
         }
     }
-    let auth_stores = build_auth_stores(runtime.db_path().as_deref(), session_lifetime)?;
+    let auth_stores = build_auth_stores(
+        runtime.db_path().as_deref(),
+        session_lifetime,
+        runtime.pg_shared_pool(),
+    )?;
     let session_store = auth_stores.session_store;
     let magic_codes = auth_stores.magic_codes;
     let oauth_state = auth_stores.oauth_state;
@@ -8971,6 +8975,7 @@ fn jwt_issuer() -> Option<&'static String> {
 fn build_auth_stores(
     app_db_path: Option<&str>,
     session_lifetime: u64,
+    pg_pool: Option<std::sync::Arc<pylon_storage::pg_datastore::PgPool>>,
 ) -> Result<AuthStores, String> {
     // Forced in-memory escape hatch — used by integration tests that
     // never want to touch disk.
@@ -8978,19 +8983,41 @@ fn build_auth_stores(
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
 
-    // Postgres path — wins over PYLON_SESSION_DB when both are set so the
-    // multi-replica deploy doesn't silently fall back to per-replica SQLite.
+    // Postgres path — the auth stores share the runtime's OWN entity-store
+    // pool when it is Postgres-backed, so the whole app opens one pool of
+    // connections instead of the pool PLUS one per auth backend. `pylon
+    // start` opens the runtime on DATABASE_URL, so a set-and-PG DATABASE_URL
+    // always yields Some here. Wins over PYLON_SESSION_DB so a multi-replica
+    // deploy doesn't fall back to per-replica SQLite.
+    if let Some(pool) = pg_pool {
+        if force_in_memory {
+            // Tests that explicitly opt out of persistence shouldn't be
+            // overridden by an ambient DATABASE_URL in CI.
+            return Ok(in_memory_auth_stores(session_lifetime));
+        }
+        return build_pg_auth_stores(pool, session_lifetime);
+    }
+
+    // Fallback: DATABASE_URL is Postgres but the runtime is not PG-backed.
+    // This does not happen via `pylon start` (it opens the runtime on
+    // DATABASE_URL), but keep it so no caller silently loses Postgres auth.
+    // Open a small dedicated pool the auth backends still SHARE among
+    // themselves — not one connection each.
     let pg_url = std::env::var("DATABASE_URL")
         .ok()
         .filter(|u| u.starts_with("postgres://") || u.starts_with("postgresql://"));
 
     if let Some(url) = pg_url {
         if force_in_memory {
-            // Tests that explicitly opt out of persistence shouldn't be
-            // overridden by an ambient DATABASE_URL in CI.
             return Ok(in_memory_auth_stores(session_lifetime));
         }
-        return build_pg_auth_stores(&url, session_lifetime);
+        let pool = pylon_storage::pg_datastore::PgPool::connect(
+            &url,
+            4,
+            std::time::Duration::from_secs(10),
+        )
+        .map_err(|e| format!("[pylon] auth Postgres pool connect failed: {}", e.message))?;
+        return build_pg_auth_stores(pool, session_lifetime);
     }
 
     let sqlite_path = std::env::var("PYLON_SESSION_DB")
@@ -9141,72 +9168,77 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
     })
 }
 
-/// Connect every Postgres-backed auth store. Fail-fast at boot if
-/// any connection fails — pre-0.3.93 we silently fell back to
-/// in-memory backends per-store, which is exactly the OAUTH_INVALID_STATE
-/// failure pylon-cloud hit: PG connection error at boot → state lives
-/// in-process → machine auto-stop + cold boot wipes state → every
-/// OAuth callback fails with "Invalid, expired, or already-consumed
-/// state" and the operator has no signal that PG was never reachable.
+/// Connect every Postgres-backed auth store on the runtime's SHARED
+/// connection pool. Fail-fast at boot if any backend's schema bootstrap
+/// fails — pre-0.3.93 we silently fell back to in-memory backends per-store,
+/// which is exactly the OAUTH_INVALID_STATE failure pylon-cloud hit: PG error
+/// at boot → state lives in-process → machine auto-stop + cold boot wipes
+/// state → every OAuth callback fails with "Invalid, expired, or
+/// already-consumed state" and the operator has no signal.
 ///
-/// Each backend opens its own connection. Sessions/oauth-state/magic-codes/
-/// accounts are low-frequency relative to entity CRUD — keeping them on
-/// separate connections avoids a "oauth lookup blocks an entity write"
-/// false-sharing scenario at the cost of a few idle PG connections.
-fn build_pg_auth_stores(url: &str, session_lifetime: u64) -> Result<AuthStores, String> {
-    // Never log/return the raw DSN — it carries the DB password. Redact
-    // once and use the masked form in both the error string and the
-    // boot log below.
-    let url_safe = pylon_kernel::util::redact_dsn(url);
+/// Every backend checks a connection out of `pool` per operation instead of
+/// holding its own dedicated one. So an app's steady-state Postgres footprint
+/// is the pool size plus the scheduler-leader session — not the pool size
+/// plus one connection per auth backend (~10). On a small managed Postgres
+/// (PlanetScale PS_5, ~25 connections) that headroom is what lets a redeploy
+/// or burst get a connection instead of being refused.
+fn build_pg_auth_stores(
+    pool: std::sync::Arc<pylon_storage::pg_datastore::PgPool>,
+    session_lifetime: u64,
+) -> Result<AuthStores, String> {
     let map_err = |what: &str, e: String| {
         format!(
-            "[pylon] {what} Postgres backend at {url_safe}: {e}. \
-             DATABASE_URL is set but the connection failed — pylon refuses \
-             to boot rather than silently fall back to in-memory state \
-             that would lose every OAuth flow on restart."
+            "[pylon] {what} Postgres backend: {e}. The shared connection pool \
+             is up but this backend's schema bootstrap failed — pylon refuses \
+             to boot rather than silently fall back to in-memory state that \
+             would lose every OAuth flow on restart."
         )
     };
 
     let session_store = SessionStore::with_backend(Box::new(
-        crate::session_backend::PostgresSessionBackend::connect(url)
+        crate::session_backend::PostgresSessionBackend::with_pool(pool.clone())
             .map_err(|e| map_err("session", e))?,
     ))
     .with_lifetime(session_lifetime);
-    tracing::info!("[pylon] Auth state (Postgres): {url_safe}");
+    tracing::info!(
+        "[pylon] Auth state (Postgres): sharing the entity-store pool ({} conns)",
+        pool.max_size()
+    );
     let magic_codes = pylon_auth::MagicCodeStore::with_backend(Box::new(
-        crate::magic_code_backend::PostgresMagicCodeBackend::connect(url)
+        crate::magic_code_backend::PostgresMagicCodeBackend::with_pool(pool.clone())
             .map_err(|e| map_err("magic-code", e))?,
     ));
     let oauth_state = pylon_auth::OAuthStateStore::with_backend(Box::new(
-        crate::oauth_backend::PostgresOAuthBackend::connect(url)
+        crate::oauth_backend::PostgresOAuthBackend::with_pool(pool.clone())
             .map_err(|e| map_err("OAuth state", e))?,
     ));
     let account_store = pylon_auth::AccountStore::with_backend(Box::new(
-        crate::account_backend::PostgresAccountBackend::connect(url)
+        crate::account_backend::PostgresAccountBackend::with_pool(pool.clone())
             .map_err(|e| map_err("account-link", e))?,
     ));
     let api_keys = pylon_auth::api_key::ApiKeyStore::with_backend(Box::new(
-        crate::api_key_backend::PostgresApiKeyBackend::connect(url)
+        crate::api_key_backend::PostgresApiKeyBackend::with_pool(pool.clone())
             .map_err(|e| map_err("api-key", e))?,
     ));
     let verification = pylon_auth::verification::VerificationStore::with_backend(Box::new(
-        crate::verification_backend::PostgresVerificationBackend::connect(url)
+        crate::verification_backend::PostgresVerificationBackend::with_pool(pool.clone())
             .map_err(|e| map_err("verification", e))?,
     ));
     let audit = pylon_auth::audit::AuditStore::with_backend(Box::new(
-        crate::audit_backend::PostgresAuditBackend::connect(url)
+        crate::audit_backend::PostgresAuditBackend::with_pool(pool.clone())
             .map_err(|e| map_err("audit", e))?,
     ));
     let trusted_devices: Arc<dyn pylon_auth::trusted_device::TrustedDeviceStore> = Arc::new(
-        crate::trusted_device_backend::PostgresTrustedDeviceBackend::connect(url)
+        crate::trusted_device_backend::PostgresTrustedDeviceBackend::with_pool(pool.clone())
             .map_err(|e| map_err("trusted-device", e))?,
     );
     let org_sso: Arc<dyn pylon_auth::org_sso::OrgSsoStore> = Arc::new(
-        crate::org_sso_backend::PostgresOrgSsoBackend::connect(url)
+        crate::org_sso_backend::PostgresOrgSsoBackend::with_pool(pool.clone())
             .map_err(|e| map_err("org-SSO", e))?,
     );
     let saml: Arc<dyn pylon_auth::saml::SamlStore> = Arc::new(
-        crate::saml_backend::PostgresSamlBackend::connect(url).map_err(|e| map_err("SAML", e))?,
+        crate::saml_backend::PostgresSamlBackend::with_pool(pool.clone())
+            .map_err(|e| map_err("SAML", e))?,
     );
     Ok(AuthStores {
         session_store: Arc::new(session_store),

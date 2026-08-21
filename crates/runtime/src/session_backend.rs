@@ -148,7 +148,7 @@ pub use pg::PostgresSessionBackend;
 
 mod pg {
     use super::*;
-    use pylon_storage::postgres::live::ReconnectingPgClient;
+    use pylon_storage::pg_datastore::PgPool;
 
     const PG_TABLE: &str = "_pylon_sessions";
 
@@ -157,12 +157,11 @@ mod pg {
     /// `DATABASE_URL` from a local SQLite file to a managed PG cluster
     /// only changes WHERE the rows live, not what the rows mean.
     pub struct PostgresSessionBackend {
-        conn: ReconnectingPgClient,
+        conn: std::sync::Arc<PgPool>,
     }
 
     impl PostgresSessionBackend {
-        pub fn connect(url: &str) -> Result<Self, String> {
-            let conn = ReconnectingPgClient::connect(url)?;
+        pub fn with_pool(conn: std::sync::Arc<PgPool>) -> Result<Self, String> {
             conn.with_client(|c| {
                 c.batch_execute(&format!(
                     "CREATE TABLE IF NOT EXISTS {PG_TABLE} (

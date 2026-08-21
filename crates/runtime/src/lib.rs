@@ -1471,6 +1471,19 @@ impl Runtime {
         conn.path().filter(|p| !p.is_empty()).map(String::from)
     }
 
+    /// The shared Postgres connection pool, when this runtime is
+    /// Postgres-backed. The auxiliary auth backends check connections out of
+    /// this same pool instead of each opening a dedicated one, so an app's
+    /// steady-state footprint is the pool size plus the scheduler-leader
+    /// session, not the pool size plus one connection per auth backend.
+    /// `None` for SQLite / in-memory runtimes.
+    pub fn pg_shared_pool(&self) -> Option<std::sync::Arc<pylon_storage::pg_datastore::PgPool>> {
+        match &self.backend {
+            RuntimeBackend::Postgres(pg) => Some(pg.store.shared_pool()),
+            RuntimeBackend::Sqlite(_) => None,
+        }
+    }
+
     /// Drop every row from every entity table. Intended for test harnesses
     /// that call `/api/__test__/reset` between cases; refuses to run on
     /// anything but an in-memory database.

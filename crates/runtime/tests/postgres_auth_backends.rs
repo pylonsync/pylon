@@ -12,12 +12,26 @@ use pylon_auth::{
     SessionBackend,
 };
 use pylon_runtime::{
-    account_backend::PostgresAccountBackend, magic_code_backend::PostgresMagicCodeBackend,
-    oauth_backend::PostgresOAuthBackend, session_backend::PostgresSessionBackend,
+    account_backend::PostgresAccountBackend, api_key_backend::PostgresApiKeyBackend,
+    audit_backend::PostgresAuditBackend, magic_code_backend::PostgresMagicCodeBackend,
+    oauth_backend::PostgresOAuthBackend, org_sso_backend::PostgresOrgSsoBackend,
+    saml_backend::PostgresSamlBackend, session_backend::PostgresSessionBackend,
+    trusted_device_backend::PostgresTrustedDeviceBackend,
+    verification_backend::PostgresVerificationBackend,
 };
+use pylon_storage::pg_datastore::PgPool;
+use std::sync::Arc;
+use std::time::Duration;
 
 fn pg_url() -> Option<String> {
     std::env::var("PYLON_TEST_PG_URL").ok()
+}
+
+/// A shared pool the auth backends check connections out of, mirroring
+/// production where every backend holds an `Arc` to the entity store's
+/// pool instead of opening its own dedicated connection.
+fn pool(url: &str) -> Arc<PgPool> {
+    PgPool::connect(url, 4, Duration::from_secs(10)).expect("pool connect")
 }
 
 #[test]
@@ -25,7 +39,7 @@ fn session_backend_roundtrip() {
     let Some(url) = pg_url() else {
         return;
     };
-    let b = PostgresSessionBackend::connect(&url).expect("connect");
+    let b = PostgresSessionBackend::with_pool(pool(&url)).expect("with_pool");
     let s = Session::new("user_pg_session".into());
     b.save(&s);
     let all = b.load_all();
@@ -40,7 +54,7 @@ fn oauth_state_backend_take_is_atomic_single_use() {
     let Some(url) = pg_url() else {
         return;
     };
-    let b = PostgresOAuthBackend::connect(&url).expect("connect");
+    let b = PostgresOAuthBackend::with_pool(pool(&url)).expect("with_pool");
     let s = pylon_auth::OAuthState {
         provider: "google".into(),
         callback_url: "https://app/dash".into(),
@@ -63,7 +77,7 @@ fn magic_code_backend_put_get_bump_remove() {
     let Some(url) = pg_url() else {
         return;
     };
-    let b = PostgresMagicCodeBackend::connect(&url).expect("connect");
+    let b = PostgresMagicCodeBackend::with_pool(pool(&url)).expect("with_pool");
     let mc = MagicCode {
         email: "mc_pg@example.com".into(),
         code: "654321".into(),
@@ -89,7 +103,7 @@ fn account_backend_better_auth_schema_full_roundtrip() {
     let Some(url) = pg_url() else {
         return;
     };
-    let b = PostgresAccountBackend::connect(&url).expect("connect");
+    let b = PostgresAccountBackend::with_pool(pool(&url)).expect("with_pool");
 
     let now: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -146,7 +160,7 @@ fn account_backend_credential_provider_stores_password() {
     let Some(url) = pg_url() else {
         return;
     };
-    let b = PostgresAccountBackend::connect(&url).expect("connect");
+    let b = PostgresAccountBackend::with_pool(pool(&url)).expect("with_pool");
     let now = 42u64;
     let cred = Account {
         id: "acct_pg_cred".into(),
@@ -175,7 +189,7 @@ fn account_backend_find_for_user_lists_multi_provider() {
     let Some(url) = pg_url() else {
         return;
     };
-    let b = PostgresAccountBackend::connect(&url).expect("connect");
+    let b = PostgresAccountBackend::with_pool(pool(&url)).expect("with_pool");
     let now = 1u64;
     let user = "user_pg_multi";
     for (provider, sub) in [("google", "g_sub_multi"), ("github", "gh_sub_multi")] {
@@ -203,4 +217,68 @@ fn account_backend_find_for_user_lists_multi_provider() {
 
     assert!(b.unlink("github", "gh_sub_multi"));
     assert_eq!(b.find_for_user(user).len(), 1);
+}
+
+/// The consolidation invariant: every auth backend checks connections out of
+/// ONE shared pool, so building all ten opens ZERO new Postgres connections.
+/// Before this, each backend held its own dedicated connection — the datastore
+/// pool PLUS ~10 — which pinned an app at a small managed Postgres's cap
+/// (PlanetScale PS_5, ~25) and got the next redeploy refused.
+///
+/// We tag this run's connections with a unique `application_name` and count
+/// them in `pg_stat_activity`. The count after building all ten backends must
+/// equal the count right after the pool opens. A backend that regressed to a
+/// dedicated `connect(url)` would raise the count and fail here.
+#[test]
+fn auth_backends_share_one_pool_not_one_conn_each() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let app = format!("pylon_share_test_{}", std::process::id());
+    let sep = if url.contains('?') { '&' } else { '?' };
+    let tagged = format!("{url}{sep}application_name={app}");
+
+    let p = PgPool::connect(&tagged, 3, Duration::from_secs(10)).expect("pool connect");
+    let count = |p: &Arc<PgPool>| -> i64 {
+        p.with_client(|c| {
+            c.query_one(
+                "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
+                &[&app],
+            )
+            .map(|r| r.get::<_, i64>(0))
+        })
+        .expect("count our connections")
+    };
+
+    // Baseline: the pool's eager connections, tagged with our app_name.
+    let baseline = count(&p);
+    assert!(
+        baseline >= 1,
+        "pool should hold at least one tagged connection"
+    );
+
+    // Build every auth backend on the SAME pool. Each runs its schema
+    // bootstrap through a checked-out pooled connection.
+    let _session = PostgresSessionBackend::with_pool(p.clone()).expect("session");
+    let _oauth = PostgresOAuthBackend::with_pool(p.clone()).expect("oauth");
+    let _magic = PostgresMagicCodeBackend::with_pool(p.clone()).expect("magic");
+    let _account = PostgresAccountBackend::with_pool(p.clone()).expect("account");
+    let _api_key = PostgresApiKeyBackend::with_pool(p.clone()).expect("api_key");
+    let _verification = PostgresVerificationBackend::with_pool(p.clone()).expect("verification");
+    let _audit = PostgresAuditBackend::with_pool(p.clone()).expect("audit");
+    let _trusted = PostgresTrustedDeviceBackend::with_pool(p.clone()).expect("trusted_device");
+    let _org_sso = PostgresOrgSsoBackend::with_pool(p.clone()).expect("org_sso");
+    let _saml = PostgresSamlBackend::with_pool(p.clone()).expect("saml");
+
+    // The whole point: ten backends, zero new connections.
+    let after = count(&p);
+    assert_eq!(
+        after, baseline,
+        "building the auth backends must not open new connections — they share the pool"
+    );
+    assert!(
+        after <= p.max_size() as i64,
+        "tagged connection count {after} must not exceed the pool size {}",
+        p.max_size()
+    );
 }

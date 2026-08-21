@@ -173,17 +173,16 @@ pub use pg::PostgresOAuthBackend;
 
 mod pg {
     use super::*;
-    use pylon_storage::postgres::live::ReconnectingPgClient;
+    use pylon_storage::pg_datastore::PgPool;
 
     const PG_TABLE: &str = "_pylon_oauth_state";
 
     pub struct PostgresOAuthBackend {
-        conn: ReconnectingPgClient,
+        conn: std::sync::Arc<PgPool>,
     }
 
     impl PostgresOAuthBackend {
-        pub fn connect(url: &str) -> Result<Self, String> {
-            let conn = ReconnectingPgClient::connect(url)?;
+        pub fn with_pool(conn: std::sync::Arc<PgPool>) -> Result<Self, String> {
             // Same shape as the SQLite version — declare the columns
             // up front for new installs, and idempotent ALTER TABLEs
             // for ones that predate the callback URL fields. Postgres'

@@ -16,6 +16,7 @@
 
 #![cfg(feature = "postgres-live")]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use pylon_http::{DataError, DataStore};
@@ -31,39 +32,46 @@ const DEFAULT_POOL_SIZE: usize = 8;
 /// `PG_POOL_TIMEOUT` error, when `PYLON_PG_CHECKOUT_TIMEOUT_MS` is unset.
 const DEFAULT_CHECKOUT_TIMEOUT_MS: u64 = 10_000;
 
-/// Wrapper that implements `DataStore` around a pool of
-/// `LivePostgresAdapter` connections.
+fn map_storage_err(e: crate::StorageError) -> DataError {
+    DataError {
+        code: e.code.to_string(),
+        message: e.message,
+    }
+}
+
+/// A shareable pool of live Postgres connections.
 ///
-/// Each `DataStore` read checks out its own connection, so N reads run on
-/// N connections concurrently. Transactions (`with_transaction*`, `transact`)
-/// pin ONE connection for the closure body — different transactions take
-/// different connections, so they don't serialize behind a global lock;
-/// Postgres' own row locking arbitrates conflicts. Pool size is governed by
-/// `PYLON_PG_POOL_SIZE` (default 8).
-pub struct PostgresDataStore {
+/// Owns the connection pool, the DSN (to heal a dropped slot in place), and
+/// the checkout timeout. The entity store AND every auxiliary auth backend
+/// (sessions, OAuth state, accounts, API keys, magic codes, ...) hold an
+/// `Arc<PgPool>` and check a connection out per operation. So one app opens
+/// ONE pool of connections instead of the datastore pool PLUS a dedicated
+/// connection per backend. On a small managed Postgres (PlanetScale PS_5,
+/// ~25 connections) that is the difference between fitting with headroom and
+/// sitting at the cap, where the next redeploy is refused.
+pub struct PgPool {
     pool: ConnectionPool<LivePostgresAdapter>,
     /// Held so `checkout` can reconnect a dropped slot in place.
     url: String,
     /// How long a checkout blocks before timing out.
     checkout_timeout: Duration,
-    manifest: AppManifest,
 }
 
-impl PostgresDataStore {
-    pub fn connect(url: &str, manifest: AppManifest) -> Result<Self, DataError> {
-        let size = pool_size_from_env();
+impl PgPool {
+    /// Open `size` connections eagerly. The first must succeed — a dead
+    /// database fails boot loudly. Later failures are non-fatal: the pool
+    /// runs with fewer connections (still correct, just less parallel) and
+    /// `checkout` heals slots over time. We keep going rather than `break` so
+    /// one transient failure doesn't cap the pool below what the database can
+    /// actually serve.
+    pub fn connect(
+        url: &str,
+        size: usize,
+        checkout_timeout: Duration,
+    ) -> Result<Arc<Self>, DataError> {
         let pool = ConnectionPool::new(size);
-
-        // The first connection must succeed — a dead database should fail
-        // boot loudly.
-        let first = LivePostgresAdapter::connect(url).map_err(Self::map_err)?;
+        let first = LivePostgresAdapter::connect(url).map_err(map_storage_err)?;
         pool.add(first);
-
-        // Open the remaining connections eagerly. A later failure is
-        // non-fatal: the pool runs with fewer connections (still correct,
-        // just less parallel) and `checkout` heals slots over time. We keep
-        // going rather than `break` so one transient failure doesn't cap the
-        // pool below what the database can actually serve.
         for i in 1..size {
             match LivePostgresAdapter::connect(url) {
                 Ok(conn) => pool.add(conn),
@@ -78,13 +86,11 @@ impl PostgresDataStore {
                 }
             }
         }
-
-        Ok(Self {
+        Ok(Arc::new(Self {
             pool,
             url: url.to_string(),
-            checkout_timeout: checkout_timeout_from_env(),
-            manifest,
-        })
+            checkout_timeout,
+        }))
     }
 
     /// Acquire a live connection from the pool, blocking up to
@@ -92,7 +98,7 @@ impl PostgresDataStore {
     /// idle timeout), reconnect it in place so the caller always receives a
     /// usable client and the slot stays in rotation — a dropped connection
     /// heals on next use instead of permanently shrinking the pool.
-    fn checkout(&self) -> Result<PooledConnection<'_, LivePostgresAdapter>, DataError> {
+    pub(crate) fn checkout(&self) -> Result<PooledConnection<'_, LivePostgresAdapter>, DataError> {
         let mut conn = self
             .pool
             .get(self.checkout_timeout)
@@ -101,16 +107,82 @@ impl PostgresDataStore {
                 message: e.to_string(),
             })?;
         if conn.is_closed() {
-            *conn = LivePostgresAdapter::connect(&self.url).map_err(Self::map_err)?;
+            *conn = LivePostgresAdapter::connect(&self.url).map_err(map_storage_err)?;
         }
         Ok(conn)
     }
 
-    fn map_err(e: crate::StorageError) -> DataError {
-        DataError {
-            code: e.code.to_string(),
-            message: e.message,
+    /// Run `op` against a pooled client, matching `ReconnectingPgClient`'s
+    /// contract so the auxiliary auth backends can share this pool without
+    /// changing their call sites. `checkout` heals a slot that was dead at
+    /// entry (the common idle-timeout case). If the statement then fails
+    /// because the connection died mid-flight, reconnect that slot and retry
+    /// the op exactly once. A SQL-level error on a live connection is
+    /// returned as-is — retrying those would double-execute a valid-but-
+    /// rejected statement.
+    pub fn with_client<T>(
+        &self,
+        mut op: impl FnMut(&mut postgres::Client) -> Result<T, postgres::Error>,
+    ) -> Result<T, String> {
+        let mut conn = self.checkout().map_err(|e| e.message)?;
+        match op(conn.client_mut()) {
+            Ok(v) => Ok(v),
+            Err(first_err) => {
+                if conn.is_closed() {
+                    *conn = LivePostgresAdapter::connect(&self.url).map_err(|e| e.message)?;
+                    op(conn.client_mut()).map_err(|e| format!("PG statement failed: {e}"))
+                } else {
+                    Err(format!("PG statement failed: {first_err}"))
+                }
+            }
         }
+    }
+
+    /// Idle connections currently in the pool (for diagnostics/tests).
+    pub fn available_count(&self) -> usize {
+        self.pool.available_count()
+    }
+
+    /// Pool capacity — the app's steady-state Postgres connection footprint
+    /// (plus the scheduler-leader session, which stays dedicated).
+    pub fn max_size(&self) -> usize {
+        self.pool.max_size()
+    }
+}
+
+/// Wrapper that implements `DataStore` around a shared [`PgPool`].
+///
+/// Each `DataStore` read checks out its own connection, so N reads run on
+/// N connections concurrently. Transactions (`with_transaction*`, `transact`)
+/// pin ONE connection for the closure body — different transactions take
+/// different connections, so they don't serialize behind a global lock;
+/// Postgres' own row locking arbitrates conflicts. Pool size is governed by
+/// `PYLON_PG_POOL_SIZE` (default 8). The pool is `Arc`-shared with the
+/// auxiliary auth backends via [`shared_pool`](Self::shared_pool).
+pub struct PostgresDataStore {
+    pool: Arc<PgPool>,
+    manifest: AppManifest,
+}
+
+impl PostgresDataStore {
+    pub fn connect(url: &str, manifest: AppManifest) -> Result<Self, DataError> {
+        let pool = PgPool::connect(url, pool_size_from_env(), checkout_timeout_from_env())?;
+        Ok(Self { pool, manifest })
+    }
+
+    /// Hand out an `Arc` to the underlying connection pool so the auxiliary
+    /// auth backends share it instead of each opening a dedicated connection.
+    pub fn shared_pool(&self) -> Arc<PgPool> {
+        Arc::clone(&self.pool)
+    }
+
+    /// Acquire a live connection from the shared pool. See [`PgPool::checkout`].
+    fn checkout(&self) -> Result<PooledConnection<'_, LivePostgresAdapter>, DataError> {
+        self.pool.checkout()
+    }
+
+    fn map_err(e: crate::StorageError) -> DataError {
+        map_storage_err(e)
     }
 
     /// Borrow one pooled postgres client for the duration of the closure.
