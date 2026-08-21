@@ -14,25 +14,25 @@ version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.4.27" }
-pylon-http = { path = "../http", version = "0.4.27" }
-pylon-router = { path = "../router", version = "0.4.27" }
-pylon-auth = { path = "../auth", version = "0.4.27" }
-pylon-policy = { path = "../policy", version = "0.4.27" }
-pylon-plugin = { path = "../plugin", version = "0.4.27" }
-pylon-sync = { path = "../sync", version = "0.4.27" }
-pylon-studio-api = { path = "../studio_api", version = "0.4.27" }
-pylon-storage = { path = "../storage", version = "0.4.27", features = ["postgres-live"] }
-pylon-crdt = { path = "../crdt", version = "0.4.27" }
-pylon-functions = { path = "../functions", version = "0.4.27" }
-pylon-migrate = { path = "../migrate", version = "0.4.27" }
-pylon-observability = { path = "../observability", version = "0.4.27" }
-pylon-realtime = { path = "../realtime", version = "0.4.27" }
+pylon-kernel = { path = "../core", version = "0.4.28" }
+pylon-http = { path = "../http", version = "0.4.28" }
+pylon-router = { path = "../router", version = "0.4.28" }
+pylon-auth = { path = "../auth", version = "0.4.28" }
+pylon-policy = { path = "../policy", version = "0.4.28" }
+pylon-plugin = { path = "../plugin", version = "0.4.28" }
+pylon-sync = { path = "../sync", version = "0.4.28" }
+pylon-studio-api = { path = "../studio_api", version = "0.4.28" }
+pylon-storage = { path = "../storage", version = "0.4.28", features = ["postgres-live"] }
+pylon-crdt = { path = "../crdt", version = "0.4.28" }
+pylon-functions = { path = "../functions", version = "0.4.28" }
+pylon-migrate = { path = "../migrate", version = "0.4.28" }
+pylon-observability = { path = "../observability", version = "0.4.28" }
+pylon-realtime = { path = "../realtime", version = "0.4.28" }
 # Cross-machine fanout. Default build links the Noop bus only; the
 # `redis-bus` feature pulls the Redis impl so operators running
 # horizontally-scaled deploys can enable PYLON_CLUSTER_BUS=redis://...
 # without a separate build.
-pylon-cluster = { path = "../cluster", version = "0.4.27", features = ["redis-bus"] }
+pylon-cluster = { path = "../cluster", version = "0.4.28", features = ["redis-bus"] }
 postgres = { workspace = true }
 rusqlite = { workspace = true }
 # Raw accept() with a null address — see `accept_tcp` (panic-proof accept
@@ -90,6 +90,15 @@ webp = "0.3"
 ravif = { version = "0.11", default-features = false, features = ["threading"] }
 # CSPRNG for studio-ticket tokens (server.rs). Workspace-pinned.
 rand = { workspace = true }
+# HTML → markdown for the `Accept: text/markdown` and `<path>.md` page variants
+# (src/markdown.rs). `htmd` is a turndown-equivalent converter over html5ever;
+# `markup5ever_rcdom` is the DOM it hands back, pinned to the SAME 0.38 htmd
+# builds against so the `Node` type unifies across the two crates. A real
+# parser rather than tag-scanning is not optional here: SSR output carries `<`
+# inside text nodes, inline JSON hydration payloads, and quoted attribute
+# values that any regex mis-slices.
+htmd = "0.5"
+markup5ever_rcdom = "0.38"
 
 [dev-dependencies]
 rand = { workspace = true }

@@ -23,6 +23,7 @@ pub mod log;
 pub mod log_ring;
 pub mod loro_store;
 pub mod magic_code_backend;
+pub mod markdown;
 pub mod metrics;
 pub mod oauth_backend;
 pub mod openapi;
