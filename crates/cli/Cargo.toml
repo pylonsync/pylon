@@ -15,15 +15,15 @@ name = "pylon"
 path = "src/main.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.4.26" }
-pylon-plugin = { path = "../plugin", version = "0.4.26" }
-pylon-schema = { path = "../schema", version = "0.4.26" }
-pylon-storage = { path = "../storage", version = "0.4.26", features = ["postgres-live"] }
-pylon-runtime = { path = "../runtime", version = "0.4.26" }
-pylon-staticgen = { path = "../staticgen", version = "0.4.26" }
-pylon-migrate = { path = "../migrate", version = "0.4.26" }
-pylon-policy = { path = "../policy", version = "0.4.26" }
-pylon-auth = { path = "../auth", version = "0.4.26" }
+pylon-kernel = { path = "../core", version = "0.4.27" }
+pylon-plugin = { path = "../plugin", version = "0.4.27" }
+pylon-schema = { path = "../schema", version = "0.4.27" }
+pylon-storage = { path = "../storage", version = "0.4.27", features = ["postgres-live"] }
+pylon-runtime = { path = "../runtime", version = "0.4.27" }
+pylon-staticgen = { path = "../staticgen", version = "0.4.27" }
+pylon-migrate = { path = "../migrate", version = "0.4.27" }
+pylon-policy = { path = "../policy", version = "0.4.27" }
+pylon-auth = { path = "../auth", version = "0.4.27" }
 rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
