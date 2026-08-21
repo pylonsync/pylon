@@ -1975,6 +1975,19 @@ function agentEntities(): EntityDefinition[] {
         // Owner-scoped by policy, so it never leaks across users.
         streamId: field.string().optional(),
         error: field.string().optional(),
+        // Steering queue: messages sent while a generation was in
+        // flight. The loop drains them at its next turn boundary and
+        // folds them into the transcript in a replayable position.
+        // Writes here deliberately leave updatedAt alone — that column
+        // is the liveness clock the staleness takeover reads.
+        pendingInput: field.json().optional(),
+        // Cooperative cancel. The loop clears it when it acts, and a
+        // new turn's claim clears one left by a generation that died
+        // before honouring it.
+        cancelRequested: field.boolean().optional(),
+        // Cumulative model↔tool round-trips across every invocation of
+        // this run. `maxSteps` bounds one invocation, not this.
+        steps: field.int().optional(),
         createdAt: field.datetime(),
         updatedAt: field.datetime(),
       },

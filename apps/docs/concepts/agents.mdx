@@ -44,12 +44,12 @@ const { runId } = (await gen.next()).value as { runId: string };
 
 Every invocation creates (or continues) an `AgentRun` with an ordered `AgentMessage` transcript. Both are ordinary synced entities. The framework injects them into your manifest when any agent exists:
 
-- `AgentRun` — `agent`, `status` (`idle | running | completed | failed`), `title`, `streamId` (the resumable stream of the current generation), `error`, timestamps. Owner-scoped: readable only by the user who started it.
+- `AgentRun` — `agent`, `status` (`idle | running | completed | failed | cancelled`), `title`, `streamId` (the resumable stream of the current generation), `error`, `pendingInput` (messages queued mid-generation), `cancelRequested`, `steps` (cumulative round-trips), timestamps. Owner-scoped: readable only by the user who started it.
 - `AgentMessage` — `runId`, `seq`, `role`, `content` (a string for user turns; content blocks for assistant turns, including `tool_use` and `tool_result` records).
 
 They are plain synced entities, so the usual rules apply: they replicate into the owner's local replica live, `pylon codegen` types them, `pylon migrate` creates them on Postgres, and policies fence them (clients can never write them; the loop's server-side mutations are the only writer).
 
-If your app declares its own `AgentRun` or `AgentMessage` entity (to add columns), yours wins, but the loop still writes through it, so keep the framework's columns intact: `AgentRun` needs `agent`, `status`, `userId`, `title`, `streamId`, `error`, `createdAt`, `updatedAt`; `AgentMessage` needs `runId`, `userId`, `seq`, `role`, `content`, `createdAt`. The same goes for policies: declaring your own `AgentRun` policy replaces the injected one, so keep reads owner-scoped with the `auth.userId != null &&` guard (bare `data.userId == auth.userId` matches anonymous callers against null-owner rows).
+If your app declares its own `AgentRun` or `AgentMessage` entity (to add columns), yours wins, but the loop still writes through it, so keep the framework's columns intact: `AgentRun` needs `agent`, `status`, `userId`, `title`, `streamId`, `error`, `pendingInput`, `cancelRequested`, `steps`, `createdAt`, `updatedAt`; `AgentMessage` needs `runId`, `userId`, `seq`, `role`, `content`, `createdAt`. The same goes for policies: declaring your own `AgentRun` policy replaces the injected one, so keep reads owner-scoped with the `auth.userId != null &&` guard (bare `data.userId == auth.userId` matches anonymous callers against null-owner rows).
 
 ```tsx
 import { useAgentRun } from "@pylonsync/react";
@@ -71,9 +71,40 @@ for await (const chunk of streamFn("researcher", { input: followUp, runId })) {
 }
 ```
 
-The loop reloads the transcript, appends the new user turn, and the model sees everything, including its own earlier tool calls. A run mid-generation rejects a second turn with `RUN_BUSY` (the claim happens inside a transaction, so two simultaneous turns can't both win). A run stuck in `running` longer than the agent's `timeout` is a dead generation; the next turn takes it over. A run belonging to another user is indistinguishable from a missing one (`RUN_NOT_FOUND`).
+The loop reloads the transcript, appends the new user turn, and the model sees everything, including its own earlier tool calls. A run stuck in `running` longer than the agent's `timeout` is a dead generation; the next turn takes it over. A run belonging to another user is indistinguishable from a missing one (`RUN_NOT_FOUND`).
 
 Runs always have an owner: an unauthenticated or system caller gets `AGENT_REQUIRES_USER`. To invoke an agent from a cron job or another server-side path, run it under a service user's auth.
+
+## Steering a run in progress
+
+Sending to a run that is already generating queues the message instead of refusing it, so a chat UI never has to disable its composer:
+
+```ts
+// The agent is mid-turn. This returns immediately with queued: true.
+const { queued } = await callFn("researcher", { runId, input: "check the tests too" });
+```
+
+The loop drains the queue at its next turn boundary and folds the text into the transcript where it stays replayable: behind the `tool_result` blocks of the turn it is answering, or as a fresh user turn if the model had already stopped. A message that arrives just as the model stops still extends the same run — the drain and the terminal status write happen in one transaction, so nothing is stranded on a completed run.
+
+Queued text lives on `run.pendingInput` until it is drained. Render it as pending below the last message. The queue is capped (32 messages, 32KB); past that, `AGENT_INPUT_QUEUE_FULL`.
+
+## Stopping a run
+
+```tsx
+import { cancelAgentRun, useAgentRun } from "@pylonsync/react";
+
+const { run } = useAgentRun(runId);
+<button
+  disabled={run?.cancelRequested === true}
+  onClick={() => cancelAgentRun("researcher", runId)}
+>Stop</button>
+```
+
+Cancel is durable state on the run row, not a stream teardown. That matters twice: dropping the SSE connection is **not** a cancel (a detached run is supposed to survive the window closing), and the request reaches a loop running on a different machine than the one serving the click.
+
+The loop honours it at its next boundary and settles the run as `cancelled`. Between tool calls that is within `CANCEL_POLL_MS` (2s) — the loop polls while handlers run, and a running handler sees `ctx.signal` abort, so a handler that threads `ctx.signal` into `fetch` stops with the run. A tool that ignores the signal finishes first. **A model response already in flight is not interrupted**: the host blocks its per-call read loop for the whole of `ctx.llm.stream`, so cancel takes effect once that response completes. Every `tool_use` still receives a `tool_result` when a batch stops early, so the transcript stays replayable.
+
+Cancelling a run that is not generating settles it as `cancelled` immediately and drops anything queued. Starting a new turn on a cancelled run works like any continuation.
 
 ## Watching from another device
 
@@ -94,16 +125,19 @@ While generating, the SSE stream carries:
 
 - plain data frames — the assistant's text deltas,
 - `event: tool` frames — `{ name, input, isError }` as each tool executes, so a UI can render "searching docs…" without waiting for the message row,
-- the terminal `event: result` — `{ runId, text, steps, usage }`.
+- `event: queued` frames — `{ runId, queued }` when the call steered a generation already in flight instead of starting a turn,
+- the terminal `event: result` — `{ runId, text, steps, usage }`, plus `cancelled: true` when the run was stopped.
 
 ## Tools
 
 Tool `args` are the same `v.*` validators as functions, converted to JSON Schema for the model. The model's arguments are validated before your handler runs; invalid input, a thrown handler error, or an unknown tool all become `is_error` tool results the model can react to. A bad tool call never ends the run. Handlers get the full action ctx: `runQuery`/`runMutation` for data, `ctx.llm` for sub-calls, `ctx.email`, `ctx.workflows`, everything.
 
-Options: `model` (subject to the server's allowlist), `maxSteps` (default 16; reaching the cap fails the run instead of looping forever), `maxTokens`, `auth` (`"user"` default; agents require a signed-in caller so runs always have an owner), `timeout` (default 600s idle).
+Options: `model` (subject to the server's allowlist), `maxSteps` (default 64; reaching the cap fails the run instead of looping forever), `maxTokens`, `auth` (`"user"` default; agents require a signed-in caller so runs always have an owner), `timeout` (default 600s idle).
+
+`maxSteps` bounds one invocation, including the extra turns steering adds to it. The run row's `steps` counts every invocation and is not capped — read it to budget a long-lived conversation.
 
 ## Failure semantics
 
-A provider error, a `maxSteps` overrun, or a crash marks the run `failed` with the error message on the row, visible to the UI through the same sync channel as every other change. Completed and failed runs are permanent history; start a new turn on the same `runId` to continue after a failure. If a crash interrupted a tool call in progress, the next turn repairs the transcript with an `is_error` tool result ("tool execution was interrupted") so the model's history stays replayable. Tool results are capped at 64KB per result; anything longer persists with a `[truncated]` suffix.
+A provider error, a `maxSteps` overrun, or a crash marks the run `failed` with the error message on the row, visible to the UI through the same sync channel as every other change. Completed and failed runs are permanent history; start a new turn on the same `runId` to continue after a failure. If a crash interrupted a tool call in progress, the next turn repairs the transcript with an `is_error` tool result ("tool execution was interrupted") so the model's history stays replayable. The repair rides in the same user message as that turn's input, because two user messages in a row are rejected by the Messages API just as a dangling `tool_use` is. Tool results are capped at 64KB per result; anything longer persists with a `[truncated]` suffix.
 
 For work that must survive a server restart in progress, wrap the agent call in a [workflow](/concepts/workflows). Runs are durable state, but a generation in progress lives with the process, exactly like any action.

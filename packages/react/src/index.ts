@@ -525,6 +525,41 @@ export async function callFn<T = unknown>(
   );
 }
 
+/**
+ * Ask an `agent()` run to stop.
+ *
+ * Cancel is durable, not a stream teardown: it lands on the run row,
+ * so it reaches a loop running on a different machine, and abandoning
+ * the SSE connection is NOT a cancel (a detached cloud run is supposed
+ * to survive the window closing).
+ *
+ * The call returns as soon as the request is recorded. A live
+ * generation stops at its next turn boundary — between tool calls
+ * within seconds, or after the current model response finishes.
+ * `run.cancelRequested` is true in that window; drive the stop
+ * button's pending state from it and treat `run.status === "cancelled"`
+ * as the confirmation.
+ *
+ * ```ts
+ * const { run } = useAgentRun(runId);
+ * <button
+ *   disabled={run?.cancelRequested === true}
+ *   onClick={() => cancelAgentRun("helper", runId)}
+ * >Stop</button>
+ * ```
+ */
+export async function cancelAgentRun(
+  agentName: string,
+  runId: string,
+  options: { token?: string } = {},
+): Promise<{ runId: string; cancelled: boolean }> {
+  return callFn<{ runId: string; cancelled: boolean }>(
+    agentName,
+    { runId, cancel: true },
+    options,
+  );
+}
+
 /** Options for {@link streamFn}. */
 export interface StreamFnOptions {
   token?: string;
