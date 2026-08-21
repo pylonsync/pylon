@@ -212,9 +212,8 @@ pub fn negotiate(accept: Option<&str>) -> Negotiation {
     for cand in candidates.into_iter().skip(1) {
         let ((q, spec, index), _) = cand;
         let ((bq, bspec, bindex), _) = best;
-        let better = q > bq
-            || (q == bq && spec > bspec)
-            || (q == bq && spec == bspec && index < bindex);
+        let better =
+            q > bq || (q == bq && spec > bspec) || (q == bq && spec == bspec && index < bindex);
         if better {
             best = cand;
         }
@@ -478,7 +477,10 @@ mod tests {
     #[test]
     fn html_is_the_default() {
         assert_eq!(negotiate(None), Negotiation::Serve(Representation::Html));
-        assert_eq!(negotiate(Some("")), Negotiation::Serve(Representation::Html));
+        assert_eq!(
+            negotiate(Some("")),
+            Negotiation::Serve(Representation::Html)
+        );
         // curl's default, and every crawler that doesn't care.
         assert_eq!(served("*/*"), Representation::Html);
         assert_eq!(served("text/*"), Representation::Html);
@@ -498,13 +500,22 @@ mod tests {
         assert_eq!(served("text/x-markdown"), Representation::Markdown);
         // More specific than the wildcard it rides with.
         assert_eq!(served("text/markdown, */*"), Representation::Markdown);
-        assert_eq!(served("text/markdown;q=1.0, text/html;q=0.9"), Representation::Markdown);
+        assert_eq!(
+            served("text/markdown;q=1.0, text/html;q=0.9"),
+            Representation::Markdown
+        );
     }
 
     #[test]
     fn q_values_decide_before_specificity() {
-        assert_eq!(served("text/markdown;q=0.5, text/html"), Representation::Html);
-        assert_eq!(served("text/html;q=0.1, text/markdown;q=0.2"), Representation::Markdown);
+        assert_eq!(
+            served("text/markdown;q=0.5, text/html"),
+            Representation::Html
+        );
+        assert_eq!(
+            served("text/html;q=0.1, text/markdown;q=0.2"),
+            Representation::Markdown
+        );
     }
 
     #[test]
@@ -516,13 +527,19 @@ mod tests {
 
     #[test]
     fn q_zero_is_a_refusal() {
-        assert_eq!(served("text/html;q=0, text/markdown"), Representation::Markdown);
+        assert_eq!(
+            served("text/html;q=0, text/markdown"),
+            Representation::Markdown
+        );
         assert_eq!(
             negotiate(Some("text/html;q=0, text/markdown;q=0, text/plain;q=0")),
             Negotiation::NotAcceptable
         );
         assert_eq!(negotiate(Some("image/png")), Negotiation::NotAcceptable);
-        assert_eq!(negotiate(Some("application/json")), Negotiation::NotAcceptable);
+        assert_eq!(
+            negotiate(Some("application/json")),
+            Negotiation::NotAcceptable
+        );
     }
 
     #[test]
@@ -536,7 +553,10 @@ mod tests {
     #[test]
     fn malformed_ranges_are_ignored_not_fatal() {
         assert_eq!(served("garbage,, text/markdown"), Representation::Markdown);
-        assert_eq!(served("text/markdown;q=notanumber"), Representation::Markdown);
+        assert_eq!(
+            served("text/markdown;q=notanumber"),
+            Representation::Markdown
+        );
     }
 
     #[test]
