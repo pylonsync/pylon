@@ -135,13 +135,18 @@
             "group": "Compare",
             "pages": [
               "compare/overview",
-              "compare/instantdb",
               "compare/convex",
               "compare/supabase",
               "compare/firebase",
               "compare/colyseus",
               "compare/playroom",
               "compare/nakama"
+            ]
+          },
+          {
+            "group": "Migrate",
+            "pages": [
+              "migrate/instantdb"
             ]
           }
         ]
