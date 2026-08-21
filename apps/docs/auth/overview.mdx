@@ -118,7 +118,7 @@ What every authenticated request gets:
 ```typescript
 type AuthContext = {
   userId: string | null;       // null = anonymous
-  isAdmin: boolean;            // bypasses every policy
+  isAdmin: boolean;            // bypasses writes; reads bypass only with no tenantId
   isGuest: boolean;            // stable anonymous id (cart/preferences)
   roles: string[];             // ["admin", "owner", ...]
   tenantId: string | null;     // active organization

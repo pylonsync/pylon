@@ -22,7 +22,7 @@ Once an entity has a `tenantId` (or `tenant_id`) field:
 
 - **Inserts** auto-fill `tenantId = auth.tenantId` when the caller does not provide it. They reject a write whose `tenantId` does not match the caller's. You cannot insert into another tenant.
 - **Reads / updates / deletes** are scoped to the caller's tenant.
-- **Admin contexts** bypass scoping.
+- **Admin contexts** bypass scoping on writes. On reads, an admin with no active tenant bypasses scoping; an admin with an active tenant is scoped to that tenant.
 
 This makes tenant isolation the default, not a `where` clause you must remember on every query. In your own `query`/`mutation` handlers you still have `auth.tenantId` to scope further.
 

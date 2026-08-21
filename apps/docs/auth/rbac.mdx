@@ -40,9 +40,11 @@ When the user calls `/api/auth/select-org`, the runtime loads the matching `OrgM
 
 | Name | What it does |
 | --- | --- |
-| `admin` admin context | Bypasses every policy — `auth.hasRole('x')` returns true for any `x` |
+| `admin` admin context | Bypasses writes. Bypasses reads only with no active org (see the note). `auth.hasRole('x')` returns true for any `x`. |
 
-Organization owners/admins receive only their exact org role in `roles`; framework org-management routes separately authorize those built-ins. Custom roles have no implicit inheritance: a `reviewer` does not satisfy `member` or `admin`. Requests authenticated with `PYLON_ADMIN_TOKEN` are global admin contexts and retain the documented policy bypass.
+Organization owners and admins receive only their exact org role in `roles`. The framework org-management routes authorize those built-ins separately. Custom roles have no inheritance: a `reviewer` does not satisfy `member` or `admin`.
+
+An admin context with an active org is a special case. Its writes still bypass every policy. Its reads do not. Pylon scopes an admin read to the active org, and the read policy runs. So the admin sees only that org's rows, like a member. An admin context with no active org (an operator, `PYLON_ADMIN_TOKEN`, or Studio) bypasses reads too.
 
 ## Policy syntax
 
@@ -229,7 +231,7 @@ For finer-grained access, build a permission table and check it in policies with
 
 ## Admin token
 
-`PYLON_ADMIN_TOKEN` is set in the environment. Requests that pass it as `Authorization: Bearer <token>` resolve to `AuthContext::admin()`: `isAdmin: true`, every `hasRole(...)` returns true, and every policy is bypassed.
+`PYLON_ADMIN_TOKEN` is set in the environment. A request that passes it as `Authorization: Bearer <token>` resolves to `AuthContext::admin()`: `isAdmin: true`, and every `hasRole(...)` returns true. This context has no active org, so it bypasses every policy, including reads.
 
 This is for:
 
