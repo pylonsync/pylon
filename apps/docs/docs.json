@@ -135,6 +135,7 @@
             "group": "Compare",
             "pages": [
               "compare/overview",
+              "compare/instantdb",
               "compare/convex",
               "compare/supabase",
               "compare/firebase",
