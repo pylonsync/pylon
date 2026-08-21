@@ -38,7 +38,7 @@ What Pylon adds or changes:
 | Schema | `defineSchema({ posts: defineTable({...}) })` | `entity("Post", {...})` + `buildManifest(...)` |
 | Field types | `v.string/number/boolean/object/array` | `field.string/int/float/bool/json` |
 | Relation | `v.id("authors")` | `field.id("Author")` |
-| Document id | `_id: Id<"table">` (opaque string) | auto 40-char hex, or a custom id |
+| Document id | `_id`, an opaque string | auto 40-char hex, or a custom id |
 | Created time | `_creationTime` (automatic) | add a `createdAt: field.datetime()` |
 | Index | `.index("by_author", ["authorId"])` | `indexes: [{ name, fields }]` |
 | Read (server) | `ctx.db.query("posts").withIndex(...).order(...).take(10)` | `ctx.db.query("Post", {...})` / `list` / `get` |
