@@ -3,18 +3,18 @@ title: Pylon Cloud
 description: "Hosted Pylon on Smallware."
 ---
 
-Pylon is fully self-hostable, but if you'd rather not run it yourself, **Smallware** at [www.usesmallware.com](https://www.usesmallware.com) hosts the same app you'd run on a VPS. Connect a GitHub repo, push to your default branch, and the project is live at `https://your-app.smallware.run`.
+Pylon is fully self-hostable, but if you would rather not run it yourself, Smallware at [www.usesmallware.com](https://www.usesmallware.com) hosts the same app you would run on a VPS. Connect a GitHub repo and push to your default branch. The project goes live at `https://your-app.smallware.run`.
 
 ## When to use it
 
 | You should use Cloud if... | You should self-host if... |
 | --- | --- |
-| You want to ship today, not learn ops | You have strict data residency / on-prem requirements |
-| You don't want to manage Postgres backups, TLS, scaling | You already operate Kubernetes / Nomad / your own VPS fleet |
-| You'd rather pay a flat platform fee + per-machine compute than per-server | Your workload spikes hard enough that reserved capacity is cheaper |
-| You want managed magic-link email + OAuth credentials out of the box | You need to run an air-gapped deployment |
+| You want to ship today, not learn operations | You have strict data residency or on-premises requirements |
+| You do not want to manage Postgres backups, TLS, and scaling | You already operate Kubernetes, Nomad, or your own VPS fleet |
+| You would rather pay a flat platform fee and per-machine compute than pay per server | Your workload spikes hard enough that reserved capacity is cheaper |
+| You want managed magic-link email and OAuth credentials built in | You need to run an air-gapped deployment |
 
-Both targets run the same binary. You can start on Cloud and migrate to self-hosted (or back) without touching client code — only the `baseUrl` changes.
+Both targets run the same binary. You can start on Cloud and migrate to self-hosted (or back) without touching client code. Only the `baseUrl` changes.
 
 ## Sign up
 
@@ -28,7 +28,7 @@ There are two ways to deploy to Cloud:
 
 ### 1. Push to GitHub (recommended)
 
-Install the Pylon Cloud GitHub App on your repo from the project settings page. Every push to your project's default branch triggers a build + deploy. Pull-request pushes get a preview environment that tears down on merge.
+Install the Pylon Cloud GitHub App on your repo from the project settings page. Every push to your project's default branch triggers a build and deploy. Pull-request pushes get a preview environment that tears down on merge.
 
 ```sh
 git push origin main
@@ -38,7 +38,7 @@ git push origin main
 # → live at https://your-app.smallware.run
 ```
 
-You can also trigger a manual deploy of any branch from the project's dashboard (useful for redeploying without a fresh push, or shipping a feature branch to the project's machine for testing).
+You can also trigger a manual deploy of any branch from the project's dashboard. Use this to redeploy without a fresh push, or to ship a feature branch to the project's machine for testing.
 
 ### 2. Manual deploy from the dashboard
 
@@ -46,46 +46,46 @@ Project page → **Deploy** → pick a branch. The control plane resolves the br
 
 ### Custom domains
 
-From the project's **Domains** tab, add `app.example.com`. Cloud provisions a TLS certificate automatically. Add the displayed `CNAME` record to your DNS, wait for verification, and you're live on the custom domain. Both the platform `*.smallware.run` URL and your custom domain stay valid.
+From the project's **Domains** tab, add `app.example.com`. Cloud provisions a TLS certificate automatically. Add the displayed `CNAME` record to your DNS. Wait for verification. The custom domain then goes live, and the platform `*.smallware.run` URL stays valid alongside it.
 
 ### Environment variables
 
-Project page → **Settings** → **Environment**. Set per-project secrets without committing them to git. They show up in your TypeScript functions as `process.env.STRIPE_SECRET_KEY`, are encrypted at rest, and never appear in logs.
+Project page → **Settings** → **Environment**. Set per-project secrets without committing them to git. They appear in your TypeScript functions as `process.env.STRIPE_SECRET_KEY`. Pylon encrypts them at rest and never logs them.
 
 ### Hand off to a coding agent
 
-Every org page in Pylon Cloud has a **Hand off to your coding agent** card. Click it, paste the generated prompt into Claude Code (or Codex / OpenCode / Cursor / Aider / grok build), and the agent installs the CLI, signs in, loads the Pylon skill, and asks what you want to build. The session token is exchanged via a 5-minute single-use code — your `pk.*` API key never lands in the chat history. See [Agent handoff](/operations/agent-handoff) for the full flow.
+Every org page in Pylon Cloud has a **Hand off to your coding agent** card. Click it and paste the generated prompt into Claude Code (or Codex, OpenCode, Cursor, Aider, or grok build). The agent installs the CLI, signs in, loads the Pylon skill, and asks what you want to build. Pylon exchanges the session token through a 5-minute single-use code, so your `pk.*` API key never appears in the chat history. See [Agent handoff](/operations/agent-handoff) for the full flow.
 
 ### Pair with Vercel for the frontend
 
-The canonical Pylon production stack is **frontend on Vercel**, **backend on Pylon Cloud**. Vercel handles your Next.js / SvelteKit / etc. build + global edge; Pylon Cloud owns the realtime backend, database, and auth.
+The standard Pylon production stack runs the frontend on Vercel and the backend on Pylon Cloud. Vercel builds and serves your Next.js, SvelteKit, or other frontend on its global edge network. Pylon Cloud runs the realtime backend, database, and auth.
 
-Set `PYLON_TARGET=https://your-app.smallware.run` (your project's Cloud URL) in Vercel's project env vars and the Next.js template's rewrite forwards `/api/*` to your Pylon backend — the browser talks same-origin, session cookies ride along, no CORS needed.
+Set `PYLON_TARGET=https://your-app.smallware.run` (your project's Cloud URL) in Vercel's project environment variables. The Next.js template's rewrite then forwards `/api/*` to your Pylon backend. The browser talks to one origin, so session cookies work with no CORS setup needed.
 
 Full checklist: [Deploying to Vercel](/operations/vercel).
 
 ## What's included
 
-- **Same binary as `pylon dev`** — no runtime hooks, no vendor proxies.
-- **Postgres or SQLite** — choose at project creation. SQLite ships on a Fly volume; Postgres is provisioned as a managed sibling service.
-- **TLS** — automatic certificates on `*.smallware.run` and your custom domains.
-- **Magic-link email** — managed transactional sender; no SendGrid / Resend account required.
-- **OAuth** — bring your own Google / GitHub / etc. OAuth credentials.
-- **WebSocket + SSE + shard ports** — exposed automatically; clients connect to the public URL.
-- **File storage** — S3-backed, sized by plan.
-- **Studio** — every project has the inspector available at `https://your-app.smallware.run/studio`.
-- **Logs + metrics** — request logs, function traces, latency / error charts in the dashboard.
-- **On-demand backups** — Fly volume snapshots from the project's **Backups** tab. Pro and Team plans get more frequent retention.
+- **Same binary as `pylon dev`:** no runtime hooks, no vendor proxies.
+- **Postgres or SQLite:** choose at project creation. SQLite ships on a Fly volume. Pylon provisions Postgres as a managed sibling service.
+- **TLS:** automatic certificates on `*.smallware.run` and your custom domains.
+- **Magic-link email:** managed transactional sender. No SendGrid or Resend account required.
+- **OAuth:** bring your own Google, GitHub, or other OAuth credentials.
+- **WebSocket, SSE, and shard ports:** exposed automatically. Clients connect to the public URL.
+- **File storage:** stored in Amazon S3, sized by your plan.
+- **Studio:** every project has the inspector available at `https://your-app.smallware.run/studio`.
+- **Logs and metrics:** request logs, function traces, and latency and error charts in the dashboard.
+- **On-demand backups:** Fly volume snapshots from the project's **Backups** tab. Pro and Team plans store backups longer.
 
 ## Scaling
 
-Pylon Cloud runs on Fly Machines under the hood. Every dashboard knob maps to a real infrastructure call:
+Pylon Cloud runs on Fly Machines. Every dashboard setting maps to a real infrastructure call:
 
-- **Machine size** — `shared-cpu-1x · 512 MB` baseline; resize up to 4 GB on Pro, 8 GB on Team.
-- **Replicas** — 1–3 on Pro, 1–10 on Team.
-- **Volume size** — up to 100 GB on Pro, 500 GB on Team.
-- **Autostop** — locked on for free tier (machine sleeps when idle, wakes on next request). Toggleable on Pro+ if you need always-warm WebSockets.
-- **Multi-region** — pick from any of 13 regions:
+- **Machine size:** `shared-cpu-1x · 512 MB` baseline. Resize up to 4 GB on Pro, 8 GB on Team.
+- **Replicas:** 1–3 on Pro, 1–10 on Team.
+- **Volume size:** up to 100 GB on Pro, 500 GB on Team.
+- **Autostop:** locked on for the free tier (the machine sleeps when idle and wakes on the next request). You can toggle it on Pro and higher if you need always-warm WebSockets.
+- **Multi-region:** pick from any of 13 regions:
 
 | Region | Code |
 | --- | --- |
@@ -103,15 +103,15 @@ Pylon Cloud runs on Fly Machines under the hood. Every dashboard knob maps to a 
 | South America (São Paulo) | `gru` |
 | Canada (Toronto) | `yyz` |
 
-Pricing is per-machine — multi-region equals one machine per region.
+Pricing is per machine. Multi-region deployment counts as one machine per region.
 
 ## Pricing
 
-Each tier has a flat platform fee plus per-machine compute. Hard quotas (requests, CPU-hours, egress) cap monthly usage; projects pause at the quota until the calendar month rolls over or you upgrade.
+Each tier has a flat platform fee plus per-machine compute. Hard quotas (requests, CPU-hours, egress) cap monthly usage. Projects pause at the quota until the calendar month rolls over or you upgrade.
 
-### Hobby — $0
+### Hobby ($0)
 
-Locked free shape:
+The Hobby plan has fixed limits:
 
 - 1 project per organization
 - `shared-cpu-1x · 512 MB · 3 GB` volume, 1 replica, autostop forced on
@@ -121,7 +121,7 @@ Locked free shape:
 - Single region, SQLite only
 - Community support
 
-### Pro — $20 / org / month
+### Pro ($20 / org / month)
 
 Includes one baseline 512 MB machine, 10 GB volume, 50 GB egress, all features (custom domains, OIDC SSO, audit log, autostop toggle).
 
@@ -135,7 +135,7 @@ Includes one baseline 512 MB machine, 10 GB volume, 50 GB egress, all features (
 - Volume above 10 GB: $0.25 / GB-month
 - Egress above 250 GB: $0.06 / GB
 
-### Team — $99 / org / month
+### Team ($99 / org / month)
 
 Includes one baseline 1 GB machine, 50 GB volume, 250 GB egress.
 
@@ -152,13 +152,13 @@ Includes one baseline 1 GB machine, 50 GB volume, 250 GB egress.
 
 ### Enterprise
 
-Bespoke quotas, single-tenant Fly org or BYOC (AWS, GCP), custom regions, SLA + on-call escalation, migration assistance. Email `cloud@pylonsync.com`.
+Custom quotas, single-tenant Fly org or BYOC (AWS, GCP), custom regions, SLA and on-call escalation, migration assistance. Email `cloud@pylonsync.com`.
 
 Live pricing on the [pricing page](https://www.pylonsync.com/#pricing).
 
 ## Migrating from self-hosted
 
-`pylon backup` and `pylon restore` (in the framework CLI) snapshot the SQLite database + uploads on a local Fly volume. To migrate into Cloud:
+`pylon backup` and `pylon restore` (in the framework CLI) snapshot the SQLite database and uploads on a local Fly volume. To migrate into Cloud:
 
 ```sh
 # 1. Snapshot your local data
@@ -174,7 +174,7 @@ pylon backup ./snapshot/
 #    project's Backups tab to upload ./snapshot/.
 ```
 
-Then point your clients at the new `baseUrl` (your project's `smallware.run` URL or custom domain). Sessions are preserved — the session store is part of the snapshot — so users stay signed in.
+Then point your clients at the new `baseUrl` (your project's `smallware.run` URL or custom domain). The session store is part of the snapshot, so sessions carry over and users stay signed in.
 
 ## Migrating to self-hosted
 
@@ -186,19 +186,19 @@ Then point your clients at the new `baseUrl` (your project's `smallware.run` URL
 pylon restore ./snapshot/
 ```
 
-No lock-in. The binary is the same; the data format is the same.
+There is no lock-in. The binary and the data format are the same either way.
 
 ## Troubleshooting
 
-**Push didn't trigger a deploy** — Confirm the Pylon Cloud GitHub App is installed on the repo (Project Settings → GitHub) and the push is to the configured default branch. The Deployments tab shows webhook receipt; if nothing arrived, the webhook never fired.
+**Push did not trigger a deploy.** Confirm the Pylon Cloud GitHub App is installed on the repo (Project Settings → GitHub) and the push is to the configured default branch. The Deployments tab shows webhook receipt. If nothing arrived there, the webhook never fired.
 
-**Custom domain stuck on "verifying"** — DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show `customers.smallware.run`.
+**Custom domain stuck on "verifying".** DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show `customers.smallware.run`.
 
-**Magic-link emails not arriving** — Check the spam folder for the first send (Cloud uses a shared sender domain that warms up over time). For production, configure your own sender domain in **Settings → Email** to authenticate with SPF / DKIM / DMARC under your domain.
+**Magic-link emails not arriving.** Check the spam folder for the first send (Cloud uses a shared sender domain that warms up over time). For production, configure your own sender domain in **Settings → Email** to authenticate with SPF, DKIM, and DMARC under your domain.
 
-**WebSocket disconnects** — Cloud's load balancer holds connections for up to 4 hours; the sync engine handles reconnects automatically with full-jitter backoff. If you see frequent drops, check **Connections** in the project dashboard.
+**WebSocket disconnects.** Cloud's load balancer holds connections for up to 4 hours. The sync engine reconnects automatically, using full-jitter backoff. If you see frequent drops, check **Connections** in the project dashboard.
 
-**Hit a monthly quota** — The project pauses at the limit until the calendar month rolls over (UTC) or you upgrade the organization's plan. The dashboard shows current usage on the project's overview page.
+**Hit a monthly quota.** The project pauses at the limit until the calendar month rolls over (UTC) or you upgrade the organization's plan. The dashboard shows current usage on the project's overview page.
 
 ## Status
 

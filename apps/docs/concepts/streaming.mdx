@@ -1,9 +1,9 @@
 ---
 title: "Resumable Streams"
-description: "Every fn stream is buffered and sequence-numbered server-side. A dropped connection reconnects and misses nothing — including the final result."
+description: "Every fn stream is buffered and sequence-numbered on the server. A dropped connection reconnects and misses nothing, including the final result."
 ---
 
-`ctx.stream.write` streams progressive output — agent tokens, build logs, progress ticks — to the client that called the function. What makes Pylon's version different: **every stream is resumable**. The server buffers each frame under a stream id with a monotonically increasing sequence, so a closed laptop, a flaky mobile network, or a proxy idle-timeout costs nothing. The client reconnects with its last cursor and catches up, and the handler never notices — it keeps writing whether anyone is connected or not.
+`ctx.stream.write` streams progressive output (agent tokens, build logs, progress ticks) to the client that called the function. Every stream in Pylon is resumable. The server buffers each frame under a stream id with a steadily increasing sequence number, so a closed laptop, an unreliable mobile network, or a proxy idle timeout costs nothing. The client reconnects at its last cursor and catches up. The handler never notices the gap. It keeps writing whether or not anyone is connected.
 
 ## Server side: nothing changes
 
@@ -23,7 +23,7 @@ export default action({
 });
 ```
 
-The same `ctx.stream` you already use — buffering, sequencing, and resume are host-side. `ctx.stream.writeEvent(event, data)` emits a typed SSE frame (`event: <name>` on the wire).
+You use the same `ctx.stream` as before. Buffering, sequencing, and resume all happen on the server. `ctx.stream.writeEvent(event, data)` emits a typed SSE frame (`event: <name>` on the wire).
 
 ## Client side: resume is automatic
 
@@ -35,11 +35,11 @@ for await (const chunk of streamFn("ask", { question })) {
 }
 ```
 
-`streamFn` tracks the stream's `id:` cursor as frames arrive. If the connection drops before the terminal frame, it silently reconnects to `GET /api/fn-streams/<id>?since=<cursor>` and keeps yielding from exactly where it left off — no duplicated chunks, no gap. The generator still returns the function's final result, even when the reconnect lands after the handler already finished. Pass `resume: false` to opt out.
+`streamFn` tracks the stream's `id:` cursor as frames arrive. If the connection drops before the terminal frame, it reconnects on its own to `GET /api/fn-streams/<id>?since=<cursor>` and keeps yielding from exactly where it left off, with no duplicate chunks and no gap. The generator still returns the function's final result, even when the reconnect happens after the handler has already finished. Pass `resume: false` to opt out.
 
 ## Surviving a page reload
 
-Auto-resume covers network failures within one page's lifetime. To survive a full reload — or to watch the same run from another device — persist the stream id:
+Auto-resume covers network failures within one page's lifetime. To survive a full reload, or to watch the same run from another device, persist the stream id:
 
 ```ts
 const gen = streamFn("ask", { question }, {
@@ -61,26 +61,26 @@ Swift mirrors both: `client.streamFn(name, args:, onStreamId:, onResult:)` auto-
 
 ## The wire contract
 
-`POST /api/fn/<name>` with `Accept: text/event-stream` upgrades to SSE when the handler first streams (a handler that returns without streaming answers plain JSON — unchanged). The SSE response carries:
+`POST /api/fn/<name>` with `Accept: text/event-stream` upgrades to SSE when the handler first streams (a handler that returns without streaming still answers with plain JSON, unchanged). The SSE response carries:
 
-- `X-Pylon-Stream-Id` — the stream id, on the initial response and every resume.
-- `id: <seq>` on every frame — the resume cursor. Native `EventSource` sends it back automatically as `Last-Event-ID`.
-- data frames (multi-line payloads split across `data:` lines per the SSE spec), typed frames from `writeEvent`, and a terminal `event: result` or `event: error` frame. Resume connections additionally carry a `retry:` hint and a heartbeat comment every 15s; the initial connection stays byte-compatible with pre-0.4.22 client parsers.
+- `X-Pylon-Stream-Id`: the stream id, sent on the initial response and every resume.
+- `id: <seq>` on every frame: the resume cursor. The native `EventSource` API sends it back automatically as `Last-Event-ID`.
+- data frames (multi-line payloads split across `data:` lines per the SSE spec), typed frames from `writeEvent`, and a terminal `event: result` or `event: error` frame. Resume connections also carry a `retry:` hint and a heartbeat comment every 15 seconds. The initial connection stays byte-compatible with client parsers older than 0.4.22.
 
-`GET /api/fn-streams/<id>` accepts `Last-Event-ID` or `?since=<seq>`, replays everything after the cursor, then live-tails. Errors: `404` unknown/expired id, `410 STREAM_GONE` (with `oldestSeq`) when the cursor fell below the buffer's retention window.
+`GET /api/fn-streams/<id>` accepts `Last-Event-ID` or `?since=<seq>`, replays everything after the cursor, then continues streaming new frames as they arrive. Errors: `404` for an unknown or expired id, and `410 STREAM_GONE` (with `oldestSeq`) when the cursor falls below the buffer's retention window.
 
-Access control: a stream started by a signed-in user is readable by that user only (plus admins); tenant-scoped calls require the same active tenant. Streams from public functions are guarded by the id alone — 160 bits from the system CSPRNG, deliberately not the time-ordered row-id generator.
+Access control: a stream started by a signed-in user is readable by that user only, plus admins. Tenant-scoped calls require the same active tenant. Streams from public functions are guarded by the id alone: 160 bits from the system CSPRNG, not from the time-ordered row-id generator.
 
-## Scope and knobs
+## Scope and settings
 
-Buffers are **in-memory and bounded** — resume survives any transport failure, not a server restart. That's the honest boundary: the producing handler wouldn't survive a restart either; restart-durable execution is what [workflows](/concepts/workflows) are for. Completed streams stay resumable for an hour, then a sweeper reclaims them.
+Buffers are in-memory and bounded. Resume survives any transport failure, but not a server restart. The producing handler would not survive a restart either. Restart-durable execution is what [workflows](/concepts/workflows) are for. Completed streams stay resumable for an hour, then a sweeper reclaims them.
 
 | Env | Default | Meaning |
 | --- | --- | --- |
-| `PYLON_STREAM_BUFFER_MAX_BYTES` | 4 MB | Per-stream buffer; oldest frames evict first (a resume below the window gets `410`) |
+| `PYLON_STREAM_BUFFER_MAX_BYTES` | 4 MB | Per-stream buffer, oldest frames evict first (a resume below the window gets `410`) |
 | `PYLON_STREAM_RETAIN_SECS` | 3600 | How long completed streams stay resumable |
 | `PYLON_STREAM_MAX` | 2000 | Concurrently buffered streams |
 
-## Streams vs rooms
+## Streams versus rooms
 
-`ctx.rooms.broadcast` fans output out to every **currently-connected** subscriber of a presence room — the second tab, the second device, live. It does not replay: a subscriber that reconnects missed whatever was sent during its gap. Use rooms for live fan-out, and the stream id for anything that must survive a disconnect. Doing both in one handler is normal.
+`ctx.rooms.broadcast` sends output to every currently connected subscriber of a presence room: the second tab, the second device, live. It does not replay. A subscriber that reconnects misses whatever was sent during the gap. Use rooms for live fan-out, and the stream id for anything that must survive a disconnect. Doing both in one handler is normal.

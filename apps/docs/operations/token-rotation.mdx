@@ -13,7 +13,11 @@ description: "Rotate PYLON_ADMIN_TOKEN without downtime, or in an emergency afte
 - Jobs / workflows / scheduler control planes
 - `/studio` in non-dev
 
-Treat it like an SSH key: minimum 32 bytes of randomness, never in git, rotate on any suspicion of compromise.
+Treat the token like an SSH key:
+
+- minimum 32 bytes of randomness
+- never commit it to git
+- rotate it on any suspicion of compromise
 
 ## Without downtime (two-token rotation)
 
@@ -25,24 +29,24 @@ The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires a restar
    openssl rand -hex 32 > /etc/pylon/admin_token.new
    ```
 
-2. **Deploy side-by-side**. Start a new instance with the new token, let the load balancer health-check promote it, stop routing traffic to the old one, and let your load balancer's connection drain finish so mid-request admin calls complete before you `SIGTERM` it. (SIGTERM itself is not graceful — see [Deploy → Shutdown and rolling deploys](/operations/deploy#shutdown-and-rolling-deploys) — so the drain has to happen at the load balancer.)
+2. **Deploy side-by-side**. Start a new instance with the new token and let the load balancer health check promote it. Stop routing traffic to the old instance, then let your load balancer's connection drain finish so mid-request admin calls complete before you send `SIGTERM`. (SIGTERM itself is not graceful; see [Deploy → Shutdown and rolling deploys](/operations/deploy#shutdown-and-rolling-deploys). The drain must happen at the load balancer.)
 
-3. **Update clients**. Any automation (CI, runbooks, cron, admin UIs) that hardcodes the old token must update. Grep for the old token prefix in Vault, 1Password, GitHub Actions secrets, Cloudflare environment, etc. before deleting the value.
+3. **Update clients**. Update any automation (CI, runbooks, cron, admin UIs) that hardcodes the old token. Search Vault, 1Password, GitHub Actions secrets, Cloudflare environment variables, and other secret stores for the old token prefix before you delete the value.
 
-4. **Verify + scrub**. Hit one admin endpoint with the new token; if it works, delete the old one from your secret store.
+4. **Verify and clean up**. Test one admin endpoint with the new token. If it works, delete the old token from your secret store.
 
 ## Emergency (suspected compromise)
 
-1. **Generate a new token** — skip no-downtime, it's not worth the risk:
+1. **Generate a new token.** Skip the no-downtime rotation process. In an emergency, the delay is not worth the risk:
 
    ```sh
    openssl rand -hex 32 > /etc/pylon/admin_token.new
    ```
 
 2. **Revoke every active session and force re-login.** There is no global
-   session-purge endpoint — invalidate all sessions by clearing the session
-   DB and restarting. Every user signs back in on their next request (sessions
-   are recoverable; only the login is lost):
+   session-purge endpoint. Invalidate all sessions by clearing the session
+   database and restarting. Every user signs back in on their next request.
+   Sessions are recoverable; only the login is lost:
 
    ```sh
    systemctl stop pylon
@@ -50,7 +54,7 @@ The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires a restar
    systemctl start pylon
    ```
 
-3. **Rotate OAuth secrets too** — same blast radius if the admin account was used to configure them.
+3. **Rotate OAuth secrets too.** They share the same exposure if the admin account was used to configure them.
 
 4. **Audit `audit_log`** for the period the old token was valid. The [`audit_log` plugin](/plugins/integrations) records who did what and when.
 
@@ -58,14 +62,14 @@ The server only reads `PYLON_ADMIN_TOKEN` at startup. Rotation requires a restar
 
 ## On Pylon Cloud
 
-Admin tokens are scoped per-workspace and managed via the dashboard. Rotation is a one-click operation with no downtime — Cloud handles the side-by-side restart for you. Old tokens stop working immediately on rotation.
+Admin tokens are scoped per workspace and managed through the dashboard. Rotation is a one-click operation with no downtime; Cloud handles the side-by-side restart for you. Old tokens stop working immediately on rotation.
 
 ## Avoid
 
-- **Don't use the admin token as a session token.** Admin is not "a user", it's a break-glass credential.
-- **Don't commit the token to git, even in a test fixture.** The pre-commit hook rejects 32+ hex strings in tracked files.
-- **Don't pass it as a URL query parameter.** `Authorization: Bearer` only. URL params leak into proxy logs and browser history.
-- **Don't reuse the token across environments.** Staging ≠ prod.
+- **Do not use the admin token as a session token.** Reserve it as a break-glass credential for emergencies.
+- **Do not commit the token to git, even in a test fixture.** The pre-commit hook rejects 32+ character hex strings in tracked files.
+- **Do not pass it as a URL query parameter.** Use `Authorization: Bearer` only. URL parameters leak into proxy logs and browser history.
+- **Do not reuse the token across environments.** A staging token and a production token must differ.
 
 ## Rotation cadence
 

@@ -16,7 +16,7 @@ import { Image } from "@pylonsync/react";
 
 `<Image>` renders a plain `<img>` pointing at Pylon's built-in optimizer endpoint. The browser fetches an AVIF or WebP (or JPEG, depending on `Accept`) sized for the user's viewport, served from disk cache on every subsequent request.
 
-The pipeline is pure Rust: `image` for decode, `fast_image_resize` (SIMD) for the actual resize, and `ravif` / `rav1e` (AVIF), `libwebp`, and `mozjpeg` for encode. No Sharp install, no libvips on the host, no Node child-process. It all lives in the Pylon binary.
+The pipeline is written in Rust: `image` decodes the source, `fast_image_resize` (SIMD) resizes it, and `ravif` / `rav1e` (AVIF), `libwebp`, and `mozjpeg` encode the output. It needs no Sharp install, no libvips on the host, and no Node child process. Everything runs inside the Pylon binary.
 
 ## What it does
 
@@ -26,7 +26,7 @@ For a single `<Image src="/hero.jpg" width={1200} height={800} />`:
 - Each candidate points at `/_pylon/image?src=/hero.jpg&w=<width>&q=<quality>`.
 - Browser picks the smallest candidate that satisfies the viewport DPR.
 - Server decodes once, resizes with SIMD (Lanczos3), encodes as AVIF, WebP, or JPEG depending on `Accept`.
-- Result is hashed by (src, width, quality, format) and cached at `.pylon/.cache/images/<hash>.<ext>`. Cache hits skip decode + encode entirely — just a file serve.
+- Result is hashed by (src, width, quality, format) and cached at `.pylon/.cache/images/<hash>.<ext>`. A cache hit skips decode and encode. It serves the file directly.
 - Response carries `Cache-Control: public, max-age=31536000, immutable`.
 
 ## API
@@ -90,7 +90,7 @@ interface ImageProps {
 </ul>
 ```
 
-The `sizes` attribute is the most important knob — it tells the browser how wide the image will actually render at each breakpoint, so it picks the smallest viable srcset candidate. Without it, the browser assumes `100vw` and downloads a 4K image for a 200px thumbnail.
+The `sizes` attribute matters most. It tells the browser how wide the image renders at each breakpoint, so the browser picks the smallest viable srcset candidate. Without it, the browser assumes `100vw` and downloads a 4K image for a 200px thumbnail.
 
 ### Custom srcset
 
@@ -105,15 +105,15 @@ The `sizes` attribute is the most important knob — it tells the browser how wi
 />
 ```
 
-Useful for avatar grids where you know the exact DPR multipliers you care about.
+Useful for avatar grids where you know the exact DPR multipliers you need.
 
 ## Safety & configuration
 
-The optimizer is opinionated about what it'll process. Every knob has a safe default, and you tune them via env. The same defaults apply across `pylon dev` and production.
+The optimizer only processes images that match its safety rules. Every setting has a safe default, and you tune each one through an environment variable. The same defaults apply in `pylon dev` and in production.
 
 ### Allowed widths
 
-The server rejects requests whose `w` isn't in its width set. This prevents cache-fill DoS where an attacker requests thousands of slightly-different widths to balloon your disk.
+The server rejects requests whose `w` value is not in its width set. This stops a cache-fill denial-of-service attack, where an attacker requests thousands of slightly different widths to fill your disk.
 
 ```bash
 # Defaults (mirror Next.js):
@@ -121,17 +121,17 @@ PYLON_IMAGE_DEVICE_SIZES=640,750,828,1080,1200,1920,2048,3840
 PYLON_IMAGE_IMAGE_SIZES=16,32,48,64,96,128,256,384
 ```
 
-`<Image>` generates srcset URLs only with widths from this combined set, so default-config usage just works. If you customize the env, also pass `widths={[...]}` on each `<Image>` to keep srcset URLs in range.
+`<Image>` only generates srcset URLs with widths from this combined set, so it works with the default configuration. If you customize the environment variables, also pass `widths={[...]}` on each `<Image>` to keep the srcset URLs in range.
 
 ### Allowed qualities
 
-Same defense, applied to the `q` parameter.
+The server applies the same defense to the `q` parameter.
 
 ```bash
 PYLON_IMAGE_QUALITIES=50,75,90   # default
 ```
 
-If you need finer-grained quality control, append it: `PYLON_IMAGE_QUALITIES=50,65,75,85,90,95`.
+For finer control over quality, add more values: `PYLON_IMAGE_QUALITIES=50,65,75,85,90,95`.
 
 ### Allowed formats
 
@@ -139,7 +139,7 @@ If you need finer-grained quality control, append it: `PYLON_IMAGE_QUALITIES=50,
 PYLON_IMAGE_FORMATS=avif,webp,jpeg   # default
 ```
 
-Locks the optimizer to a specific output set. The server picks the best match for the request's `Accept` header from this list. `<Image>` lets the server pick by default; pass `format=` in your own URLs if you want explicit control.
+This locks the optimizer to a specific output set. The server picks the best match for the request's `Accept` header from this list. `<Image>` lets the server pick by default. Pass `format=` in your own URLs for explicit control.
 
 ### Remote source allowlist
 
@@ -153,9 +153,9 @@ Each entry is `host` or `host/pathPrefix`:
 |---|---|
 | `cdn.example.com` | any path on this exact host |
 | `cdn.example.com/users/` | only paths starting with `/users/` |
-| `*.example.com` | one-level wildcard — `foo.example.com`, not `foo.bar.example.com` |
+| `*.example.com` | one-level wildcard: matches `foo.example.com`, not `foo.bar.example.com` |
 
-Without this env, any `src` starting with `http://` or `https://` returns 400. This prevents SSRF — random visitors can't make your server fetch arbitrary internal URLs.
+Without this environment variable, any `src` starting with `http://` or `https://` returns 400. This prevents SSRF. It stops random visitors from making your server fetch arbitrary internal URLs.
 
 ### Source size cap
 
@@ -163,7 +163,7 @@ Without this env, any `src` starting with `http://` or `https://` returns 400. T
 PYLON_IMAGE_MAX_BYTES=26214400   # 25MB default
 ```
 
-Applies to both local files and remote fetches. Remote responses that exceed it are rejected mid-stream.
+This cap applies to both local files and remote fetches. The server rejects remote responses that exceed it mid-stream.
 
 ### Pixel-bomb protection
 
@@ -171,7 +171,7 @@ Applies to both local files and remote fetches. Remote responses that exceed it 
 PYLON_IMAGE_MAX_PIXELS=40000000   # 40M px (~24MP camera photo) default
 ```
 
-A tiny PNG can declare a 100000×100000 canvas. Decoding that would allocate 40GB of RGBA. Pylon reads the image header BEFORE decoding and rejects any source whose declared `width × height` exceeds this cap. The default (40M px, ~160MB peak decode) is tuned so a burst of concurrent requests can't OOM a small machine; operators serving genuinely huge sources raise it explicitly.
+A tiny PNG can declare a 100000×100000 canvas. Decoding it would allocate 40GB of RGBA data. Pylon reads the image header before decoding and rejects any source whose declared `width × height` exceeds this cap. The default (40M px, about 160MB peak decode) is tuned so a burst of concurrent requests cannot exhaust the memory of a small machine. Operators serving huge sources raise the cap explicitly.
 
 ### Fetch timeout
 
@@ -179,17 +179,17 @@ A tiny PNG can declare a 100000×100000 canvas. Decoding that would allocate 40G
 PYLON_IMAGE_FETCH_TIMEOUT_MS=15000   # 15s default
 ```
 
-Applies to remote source fetches.
+This timeout applies to remote source fetches.
 
 ### SVG handling
 
-SVG is **always rejected**, both as input and output. SVG can carry inline `<script>` and CSS — letting users serve arbitrary SVG through an optimization endpoint would be an XSS vector. There's no `dangerouslyAllowSVG` toggle by design: if you need SVGs, render them with plain `<img src="/icon.svg">` (not through `<Image>`), serve them with `Content-Security-Policy: script-src 'none'`, and you're fine.
+SVG is always rejected, both as input and as output. SVG can carry inline `<script>` tags and CSS. Serving arbitrary SVG through an optimization endpoint would create an XSS vector. There is no `dangerouslyAllowSVG` toggle. This is intentional. If you need SVGs, render them with a plain `<img src="/icon.svg">` (not through `<Image>`) and serve them with `Content-Security-Policy: script-src 'none'`.
 
-For embedded `<Image unoptimized>` use, see below.
+See the `unoptimized` prop below.
 
 ### Local file source
 
-`src` starting with `/` resolves under the frontend dir (`PYLON_FRONTEND_DIR` or `<app>/web/dist`). Path traversal is hard-rejected — canonicalize + prefix-check, so `..` segments and symlinks pointing outside the dir return 400.
+A `src` starting with `/` resolves under the frontend directory (`PYLON_FRONTEND_DIR` or `<app>/web/dist`). Pylon always rejects path traversal: it canonicalizes the path and checks the prefix, so `..` segments and symlinks that point outside the directory return 400.
 
 ### Bypassing the optimizer per-image
 
@@ -197,7 +197,7 @@ For embedded `<Image unoptimized>` use, see below.
 <Image src="/icon.svg" alt="" width={32} height={32} unoptimized />
 ```
 
-Renders a plain `<img src="/icon.svg">` with no srcset and no optimizer round-trip. Useful for SVGs, animated GIFs, or images where the source is already pre-sized.
+This renders a plain `<img src="/icon.svg">` with no srcset and no optimizer round trip. It is useful for SVGs, animated GIFs, or images where the source is already sized correctly.
 
 ## Format selection
 
@@ -209,7 +209,7 @@ Renders a plain `<img src="/icon.svg">` with no srcset and no optimizer round-tr
 | `png` | Always PNG (lossless). |
 | `(omitted)` | AVIF when `Accept` explicitly advertises `image/avif`; otherwise WebP when the client accepts it or sends no `Accept` (the universal fallback); otherwise JPEG. |
 
-AVIF is served automatically to browsers that advertise `image/avif` (Chrome, Firefox, Safari 16+) — it's the smallest of the three formats. The tradeoff is a slower cold encode (`rav1e` at speed 8), which the on-disk cache amortizes to a one-time cost per (src, width, quality) tuple. Browsers that don't advertise AVIF fall back to WebP, still ~30% smaller than mozjpeg at the same perceptual quality; unknown clients (curl, bots that send no `Accept`) also get WebP.
+Pylon serves AVIF automatically to browsers that advertise `image/avif` (Chrome, Firefox, Safari 16+). AVIF is the smallest of the three formats. The tradeoff is a slower cold encode (`rav1e` at speed 8), which the on-disk cache reduces to a one-time cost per (src, width, quality) combination. Browsers that do not advertise AVIF fall back to WebP, still about 30% smaller than mozjpeg at the same perceptual quality. Unknown clients (curl, or bots that send no `Accept` header) also get WebP.
 
 ## Performance
 
@@ -223,7 +223,7 @@ Benchmarks on a 2400×1600 source JPEG (~250KB) on Apple Silicon:
 | WebP output size @ q=75 | 35KB (7.7× smaller than source) |
 | JPEG output size @ q=75 | 51KB (5.4× smaller than source) |
 
-Tail latency is bounded by the encoder; cache hits are bounded by your disk. For high-traffic surfaces, put a CDN in front and Pylon never re-processes anything — the `immutable` URL takes care of the rest.
+Tail latency is bounded by the encoder. Cache hits are bounded by your disk. For high-traffic sites, put a CDN in front of Pylon. Pylon never reprocesses an image once its `immutable` URL is cached.
 
 ## Env reference
 
@@ -239,7 +239,7 @@ Tail latency is bounded by the encoder; cache hits are bounded by your disk. For
 | `PYLON_IMAGE_MAX_PIXELS` | `40000000` (40M, ~24MP) | Decoded pixel cap. Pixel-bomb protection. |
 | `PYLON_IMAGE_FETCH_TIMEOUT_MS` | `15000` | Remote-source fetch timeout. |
 
-The cache lives at `<cwd>/.pylon/.cache/images/`. Delete it to force regeneration. There's no LRU eviction yet — content-addressed entries are append-only, so the cache grows with the variety of (src, width, quality, format) tuples you serve. For production this is rarely a problem; the entire long-tail of a site's images is usually < 1GB. A `pylon cache clean` command will arrive when it actually matters.
+The cache lives at `<cwd>/.pylon/.cache/images/`. Delete it to force regeneration. There is no LRU eviction yet. Content-addressed entries are append-only, so the cache grows with the variety of (src, width, quality, format) combinations you serve. In production this is rarely a problem: the full set of a site's images is usually under 1GB. A `pylon cache clean` command will arrive when it matters.
 
 ## Differences from Next.js's `<Image>`
 
@@ -258,4 +258,4 @@ The cache lives at `<cwd>/.pylon/.cache/images/`. Delete it to force regeneratio
 | Placeholder | Pass a CSS color or data URI yourself | Built-in `placeholder="blur"` with auto-generated blur data |
 | Static import | Not yet | Yes (resolves intrinsic dims at compile time) |
 
-`placeholder="blur"` is on the roadmap. SVG support is deliberately off the roadmap — render SVG with a plain `<img>` tag, not through `<Image>`.
+`placeholder="blur"` is on the roadmap. SVG support is deliberately off the roadmap. Render SVG with a plain `<img>` tag, not through `<Image>`.

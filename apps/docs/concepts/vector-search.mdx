@@ -1,15 +1,15 @@
 ---
 title: "Vector Search"
-description: "Embeddings as a field type, exact k-NN as a query. field.vector(dims) + ctx.llm.embed + ctx.db.vectorSearch."
+description: "Embeddings as a field type and exact k-NN as a query, using field.vector(dims), ctx.llm.embed, and ctx.db.vectorSearch."
 ---
 
 Pylon ships vector search as three pieces that compose:
 
-1. **`field.vector(dims)`** — an embedding column on an entity.
-2. **`ctx.llm.embed(texts)`** — batch embeddings from OpenAI or Voyage.
-3. **`ctx.db.vectorSearch(entity, query)`** — exact k-nearest-neighbor over the stored vectors.
+1. **`field.vector(dims)`**: an embedding column on an entity.
+2. **`ctx.llm.embed(texts)`**: batch embeddings from OpenAI or Voyage.
+3. **`ctx.db.vectorSearch(entity, query)`**: exact k-nearest-neighbor over the stored vectors.
 
-No extension, no sidecar, no separate vector database. The embedding is a regular column (a packed float array — BLOB on SQLite, BYTEA on Postgres) and the search is an exact scan scored in Rust.
+Pylon needs no extension, no sidecar, and no separate vector database. The embedding is a regular column: a packed float array stored as BLOB on SQLite and BYTEA on Postgres. The search itself is an exact scan, scored in Rust.
 
 ## Declare the field
 
@@ -24,13 +24,13 @@ export const Doc = entity("Doc", {
 });
 ```
 
-`field.vector(dims)` fields are **always server-only**: a 1536-dim embedding is 6KB+ per row, so it never rides the sync stream, never appears in HTTP entity reads, and is stripped from search hits. Server functions read it via `ctx.db.get`.
+`field.vector(dims)` fields are always server-only. A 1536-dimension embedding is over 6KB per row, so it never travels over the sync stream, never appears in HTTP entity reads, and is stripped from search hits. Server functions read it via `ctx.db.get`.
 
 Writes validate the shape: the value must be a number array of exactly `dims` finite elements (or `null` to clear an optional field). Anything else fails with `VECTOR_INVALID`.
 
 ## Write embeddings
 
-`ctx.llm.embed` is available in mutations and actions. A mutation can embed and store in one transactional scope; the provider call does hold the write transaction open for its duration, so for high-write apps prefer the action shape (embed outside the transaction, store via a small mutation):
+`ctx.llm.embed` is available in mutations and actions. A mutation can embed and store in one transactional scope. The provider call holds the write transaction open for its duration, so for high-write apps, prefer the action shape: embed outside the transaction, then store with a small mutation:
 
 ```ts
 // functions/indexDoc.ts — action: embed (external I/O), store via a mutation
@@ -57,13 +57,13 @@ export default mutation({
 });
 ```
 
-(Actions have no `ctx.db` — reads and writes from an action go through `ctx.runQuery` / `ctx.runMutation`.)
+(Actions have no `ctx.db`. Reads and writes from an action go through `ctx.runQuery` or `ctx.runMutation`.)
 
 `ctx.llm.embed` resolves its provider independently of chat:
 
 | Env | Effect |
 | --- | --- |
-| `OPENAI_API_KEY` | Default: OpenAI `text-embedding-3-small` (1536 dims) — even when chat runs Anthropic |
+| `OPENAI_API_KEY` | Default: OpenAI `text-embedding-3-small` (1536 dims), even when chat runs Anthropic |
 | `PYLON_EMBEDDINGS_PROVIDER=voyage` + `VOYAGE_API_KEY` | Voyage `voyage-3.5` (1024 dims) |
 | `PYLON_EMBEDDINGS_MODEL` | Model override |
 | `PYLON_EMBEDDINGS_API_KEY` | Key override (either provider) |
@@ -71,11 +71,11 @@ export default mutation({
 
 Match `field.vector(dims)` to the model: 1536 for `text-embedding-3-small`, 3072 for `text-embedding-3-large`, 1024 for `voyage-3.5`.
 
-`embed` is not available in queries — a reactive query re-runs on every dependency change and would re-bill the provider each time. Embed in a mutation or action and store the vector.
+`embed` is not available in queries. A reactive query re-runs on every dependency change and would re-bill the provider each time. Embed in a mutation or action, then store the vector.
 
 ## Search
 
-`ctx.db.vectorSearch` lives on `ctx.db` — queries and mutations. The typical flow embeds the search text in an action, then searches from a query:
+`ctx.db.vectorSearch` lives on `ctx.db`, available from queries and mutations. The typical flow embeds the search text in an action, then searches from a query:
 
 ```ts
 // functions/searchDocs.ts — action: embed the text, delegate the search
@@ -108,21 +108,21 @@ export default query({
 
 The query shape:
 
-- `field` — which `vector(dims)` field to search (an entity may have several).
-- `vector` — the query embedding; length must match the declared dims.
-- `limit` — max hits, default 10, capped at 200.
-- `metric` — `"cosine"` (default, higher = closer), `"dot"`, or `"l2"` (Euclidean distance, lower = closer).
-- `filter` — equality pre-filter applied in SQL before scoring. A plain value means equality, an array means `IN`, `null` means `IS NULL`.
+- `field`: which `vector(dims)` field to search (an entity may have several).
+- `vector`: the query embedding. Its length must match the declared dims.
+- `limit`: the maximum number of hits, default 10, capped at 200.
+- `metric`: `"cosine"` (default, higher means closer), `"dot"`, or `"l2"` (Euclidean distance, lower means closer).
+- `filter`: an equality pre-filter applied in SQL before scoring. A plain value means equality, an array means `IN`, and `null` means `IS NULL`.
 
-Hits come back best-first as `{ id, score, doc }`. `doc` is the full row with vector fields stripped — re-fetch by id if you need the embedding itself.
+Hits come back best-first as `{ id, score, doc }`. `doc` is the full row with vector fields stripped. Re-fetch by id if you need the embedding itself.
 
-The same query works over HTTP: `POST /api/vector-search/Doc` with the query as the JSON body. The route enforces read policies: entities whose read policy depends on row data are refused (`SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY`), because top-k ranking over every row would leak proximity of rows the caller can't read — the same stance as faceted search aggregates.
+The same query works over HTTP: `POST /api/vector-search/Doc` with the query as the JSON body. The route enforces read policies. Entities whose read policy depends on row data are refused (`SEARCH_REQUIRES_ROW_INDEPENDENT_POLICY`), because top-k ranking over every row would leak the proximity of rows the caller cannot read. This is the same rule faceted search aggregates follow.
 
-## Scale honestly
+## Scaling limits
 
-The scan is **exact k-NN, not an approximate index**: every non-NULL embedding is decoded and scored on each search. That's the right trade until your table is large — exact search has perfect recall, zero index maintenance, and no extra infrastructure.
+The scan is an exact k-NN search, not an approximate index. Every non-NULL embedding is decoded and scored on each search. That is the right trade-off until your table grows large: exact search gives perfect recall, needs no index maintenance, and adds no extra infrastructure.
 
-Rough guidance at 1536 dims: 10k rows score in a few milliseconds, 100k in the low hundreds. Past that, use the `filter` to shrink the candidate set (tenant, status, collection), or move that entity's retrieval to a dedicated vector store. An ANN index can land behind this same API later without changing your code.
+Rough guidance at 1536 dimensions: 10,000 rows score in a few milliseconds, and 100,000 rows score in the low hundreds of milliseconds. Past that point, use `filter` to shrink the candidate set (by tenant, status, or collection), or move that entity's retrieval to a dedicated vector store. An approximate nearest-neighbor (ANN) index can land behind this same API later, without changing your code.
 
 ## RAG in one action
 

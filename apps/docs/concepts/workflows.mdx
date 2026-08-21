@@ -4,14 +4,18 @@ description: "Multi-step processes that survive restarts: steps run exactly once
 ---
 
 A workflow is a TypeScript function that composes `step`, `sleep`, and
-`waitForEvent` calls. The engine persists every step result, so a workflow
-survives server restarts and deploys: completed steps never re-run, a
-7-day `sleep` costs nothing while it waits, and an external event wakes a
-paused run exactly where it stopped.
+`waitForEvent` calls. The engine persists every step result, so a
+workflow survives server restarts and deploys. Completed steps never
+re-run. A 7-day `sleep` costs nothing while it waits. An external event
+wakes a paused run exactly where it stopped.
 
 Use a workflow when a process spans more time than one function call
-should hold: onboarding sequences, agent pipelines with human approval
-gates, billing dunning, report generation with retries.
+should hold:
+
+- onboarding sequences
+- agent pipelines with human approval gates
+- billing dunning
+- report generation with retries
 
 ## Writing a workflow
 
@@ -47,15 +51,15 @@ export default workflow("onboarding", async (wf, ctx) => {
 });
 ```
 
-Each step's closure runs with a full action `ctx` — `ctx.runQuery` /
-`ctx.runMutation`, `ctx.llm`, `ctx.email`, `ctx.scheduler` — under the
-same idle timeout and cancellation semantics as any action.
+Each step's closure runs with a full action `ctx`: `ctx.runQuery`,
+`ctx.runMutation`, `ctx.llm`, `ctx.email`, and `ctx.scheduler`. It runs
+under the same idle timeout and cancellation semantics as any action.
 
 ## Starting and driving
 
-Start a workflow from any mutation or action — `ctx.workflows.start`
-returns the instance id immediately and the engine's background driver
-takes it from there:
+Start a workflow from any mutation or action. `ctx.workflows.start`
+returns the instance id immediately, and the engine's background driver
+takes over from there:
 
 ```ts
 // functions/onSignup.ts
@@ -70,7 +74,7 @@ export default mutation({
 });
 ```
 
-Deliver an event to a run paused on `waitForEvent` the same way — for
+Deliver an event to a run paused on `waitForEvent` the same way, for
 example from the webhook action that received the confirmation:
 
 ```ts
@@ -83,36 +87,37 @@ restarts. The admin API drives the same engine for operators:
 `POST /api/workflows/start`, `POST /api/workflows/<id>/event` (both
 with `Authorization: Bearer $PYLON_ADMIN_TOKEN`).
 
-Inspect runs at `GET /api/workflows` / `GET /api/workflows/<id>`
-(step-by-step results, timings, retry counts), or cancel with
+Inspect runs at `GET /api/workflows` or `GET /api/workflows/<id>`
+(step-by-step results, timings, retry counts), or cancel a run with
 `POST /api/workflows/<id>/cancel`.
 
 ## The determinism contract
 
-On every advance, the whole workflow function re-runs from the top —
-completed steps replay from their recorded outputs. That gives you plain
-TypeScript control flow (branches, loops, early returns) with one rule:
+On every advance, the whole workflow function re-runs from the top.
+Completed steps replay from their recorded outputs. This gives you plain
+TypeScript control flow (branches, loops, early returns), with one rule:
 
-**The sequence of `step` / `sleep` / `waitForEvent` calls must be
-identical on every replay for the same input and step outputs.**
+**The sequence of `step`, `sleep`, or `waitForEvent` calls must be
+identical on every replay, for the same input and step outputs.**
 
-- Branch on `wf.input` and on step outputs freely — both are stable.
+- Branch on `wf.input` and on step outputs freely. Both are stable.
 - Never branch on wall-clock time, randomness, or external state read
-  outside a step. Put those READS inside a step, then branch on its
+  outside a step. Put those reads inside a step, then branch on its
   recorded output.
-- Step names must be unique within a run — the replay cache is
-  name-keyed, and a mismatch fails the run loudly rather than reusing
+- Step names must be unique within a run. The replay cache is
+  name-keyed, so a mismatch fails the run loudly rather than reusing
   the wrong output.
 
 ## Retries and failure
 
-A throwing step fails the current advance; the engine retries the same
+A throwing step fails the current advance. The engine retries the same
 step (default 3 attempts, configurable per workflow):
 
 ```ts
 export default workflow("sync-crm", handler, { maxRetries: 5 });
 ```
 
-Retries exhausted → the run lands in `failed` with the error and the
-step that caused it, inspectable via the API. Code between steps should
-be side-effect free; anything that must happen once belongs in a step.
+Once retries are exhausted, the run lands in `failed` with the error and
+the step that caused it, inspectable via the API. Code between steps
+should be side-effect free. Anything that must happen once belongs in a
+step.

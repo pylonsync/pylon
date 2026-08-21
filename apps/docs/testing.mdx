@@ -3,7 +3,7 @@ title: Testing
 description: "Test Pylon logic, React components, and functions over HTTP with `pylon test`."
 ---
 
-Pylon apps test with **Bun's test runner** (`import { test, expect } from "bun:test"`). The `pylon test` command discovers your test files and runs them; new projects scaffold with a `test` script, a starter test, and React component testing wired up.
+Pylon apps test with Bun's test runner (`import { test, expect } from "bun:test"`). The `pylon test` command discovers your test files and runs them. New projects scaffold with a `test` script, a starter test, and React component testing already set up.
 
 ```bash
 pylon test            # run every *.test.ts / *.test.tsx under tests/ (or functions/)
@@ -11,19 +11,19 @@ pylon test credits    # only files whose path contains "credits"
 npm test              # the scaffolded script — same as `pylon test`
 ```
 
-`pylon test` discovers every `*.test.ts` / `*.test.tsx` (and `.js`/`.jsx`) file under `tests/` (or `functions/`) and runs each with Bun against an in-memory Pylon.
+`pylon test` discovers every `*.test.ts` / `*.test.tsx` (and `.js`/`.jsx`) file under `tests/` (or `functions/`) and runs each with Bun against an in-memory Pylon instance.
 
 <Note>
-  New apps created with `npm create @pylonsync/pylon@latest` already include `bunfig.toml` + `tests/setup.ts` (which registers [happy-dom](https://github.com/capricorn86/happy-dom) so component tests render), the `@testing-library/react` devDeps, and a starter test under `tests/`.
+  New apps created with `npm create @pylonsync/pylon@latest` already include `bunfig.toml` and `tests/setup.ts` (which registers [happy-dom](https://github.com/capricorn86/happy-dom) so component tests render), the `@testing-library/react` package as a dev dependency, and a starter test under `tests/`.
 </Note>
 
 ## Three tiers
 
 Reach for the cheapest tier that proves what you need. Most of your coverage should be Tier 1.
 
-### Tier 1 — pure logic (do this most)
+### Tier 1: pure logic
 
-Keep the decisions that matter — access and plan gating, pricing, credit math, validation, formatting — in **pure functions** in `lib/`, and test them exhaustively. No server, instant, and it's where the bugs that matter live. Keep your `query` / `mutation` / `action` handlers as thin wrappers around these so the logic is testable without a running app.
+Keep the decisions that matter in pure functions under `lib/`: access and plan gating, pricing, credit math, validation, and formatting. Test them exhaustively. These tests need no server, run instantly, and cover the code where bugs matter most. Keep your `query`, `mutation`, and `action` handlers as thin wrappers around these functions, so you can test the logic without a running app.
 
 ```ts tests/credits.test.ts
 import { expect, test } from "bun:test";
@@ -39,9 +39,9 @@ test("CREDIT_COST matches the spec", () => {
 });
 ```
 
-### Tier 2 — React components
+### Tier 2: React components
 
-`@testing-library/react` + happy-dom are wired via `tests/setup.ts`. Render a component and assert on the DOM. The templates use the classic JSX transform, so add `import React from "react"` in `.tsx` tests.
+`@testing-library/react` and happy-dom are set up in `tests/setup.ts`. Render a component. Assert on the DOM. The templates use the classic JSX transform, so add `import React from "react"` in `.tsx` tests.
 
 ```tsx tests/button.test.tsx
 import { afterEach, expect, test } from "bun:test";
@@ -57,7 +57,7 @@ test("Button renders its label", () => {
 });
 ```
 
-For a component that reads Pylon data hooks (`db.useQuery`, `callFn`), **mock the boundary** with `mock.module`, then dynamic-`import` the component so the mock is in place first:
+For a component that reads Pylon data hooks (`db.useQuery`, `callFn`), mock the boundary with `mock.module`. Then dynamic-`import` the component, so the mock is in place first:
 
 ```tsx
 import { test, expect, mock } from "bun:test";
@@ -75,9 +75,9 @@ test("renders orgs from the query", () => {
 });
 ```
 
-### Tier 3 — functions over HTTP
+### Tier 3: functions over HTTP
 
-A handler's full behavior — policies, `ctx.db`, auth — only exists in the running app. When Tier 1 can't cover it, run `pylon dev` in another terminal and call the API the way a client would. `resetDb()` from `@pylonsync/functions` clears the in-memory database between cases (it no-ops if the server isn't up, and refuses to run against production).
+A handler's full behavior (policies, `ctx.db`, auth) only exists in the running app. When Tier 1 cannot cover a case, run `pylon dev` in another terminal. Call the API the way a client would. `resetDb()` from `@pylonsync/functions` clears the in-memory database between test cases. It does nothing if the server is not running, and it refuses to run against production.
 
 ```ts tests/things.test.ts
 import { afterEach, expect, test } from "bun:test";
@@ -99,12 +99,12 @@ test("createThing then read it back", async () => {
 ```
 
 <Note>
-  These calls are unauthenticated, so they only pass if the surface is reachable by an anonymous client: server functions default to `auth: "user"` (a call with no session gets a `401`), and an entity with no read policy is default-denied (`403`). Mark the function `auth: "guest"` and give the entity a read policy to exercise it this way — otherwise authenticate the request first (`POST /api/auth/guest` for a guest session, then send the token as `Authorization: Bearer <token>`).
+  These calls are unauthenticated. They pass only if the surface is reachable by an anonymous client. Server functions default to `auth: "user"`, so a call with no session gets a `401`. An entity with no read policy is default-denied (`403`). To test this way, mark the function `auth: "guest"` and give the entity a read policy. Otherwise, authenticate the request first: call `POST /api/auth/guest` for a guest session, then send the token as `Authorization: Bearer <token>`.
 </Note>
 
 ## Adding tests to an existing project
 
-If your project predates the test scaffolding, add the on-ramp by hand:
+If your project predates the test scaffolding, add the setup by hand:
 
 <CodeGroup>
 ```json package.json
@@ -131,11 +131,11 @@ GlobalRegistrator.register();
 ```
 </CodeGroup>
 
-(The `bunfig.toml` + `tests/setup.ts` are only needed for Tier 2 component tests — pure-logic tests run without them.)
+(`bunfig.toml` and `tests/setup.ts` are only needed for Tier 2 component tests. Pure-logic tests run without them.)
 
 ## Security probe
 
-`pylon test:security` is a separate adversarial probe, not a unit-test runner. It hits a **running** app and reports auth/policy holes (unguarded functions, policies that allow what they shouldn't). Start the app, then run it:
+`pylon test:security` is a separate adversarial probe. It hits a running app and reports auth and policy holes (unguarded functions, policies that allow what they should not). Start the app, then run it:
 
 ```bash
 pylon dev &
@@ -145,10 +145,10 @@ pylon test:security --target https://api.example.com --json
 
 ## CI
 
-`pylon test` exits non-zero on any failure, so it drops straight into CI:
+`pylon test` exits with a non-zero code on failure, so it runs directly in CI:
 
 ```yaml
 - run: pylon test
 ```
 
-For end-to-end coverage that includes Tier 3 (functions over HTTP), start `pylon dev` in the background first, then run `pylon test`.
+For end-to-end coverage that includes Tier 3 (functions over HTTP), start `pylon dev` in the background first. Then run `pylon test`.

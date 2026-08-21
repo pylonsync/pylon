@@ -64,7 +64,7 @@ The WS hub `broadcast` number measures the enqueue side. It fans out to 16 shard
 
 ### Switch from SQLite to Postgres when
 
-- Sustained write rate > 50k/sec (you're at SQLite's single-writer limit)
+- Sustained write rate > 50k/sec (you are at SQLite's single-writer limit)
 - Multiple processes need to write (replicas, HA failover)
 - You need online DDL / zero-downtime migrations at scale
 - Storage > 100 GB (not a hard limit, but WAL checkpoints get painful)

@@ -5,15 +5,15 @@ description: "Sign a user into Pylon from a trusted server (Stripe Checkout succ
 
 `POST /api/auth/sessions/trusted-mint` lets a server you control mint a Pylon session after another trusted system has verified the user's identity. It skips the password, magic-link, and OAuth flows.
 
-Stripe Checkout is the canonical use case. After Stripe verifies the buyer's email and collects payment, trusted mint can land the buyer in the dashboard without another sign-in step.
+Stripe Checkout is the standard use case. After Stripe verifies the buyer's email and collects payment, trusted mint can sign the buyer into the dashboard without another sign-in step.
 
 <Warning>
-The endpoint is **HMAC-gated**, not session-gated. Anyone who knows `PYLON_TRUSTED_SECRET` can sign in as any user. Treat the secret like a database password — env-only, rotated when it leaks, never logged.
+The endpoint checks an HMAC signature, not a session. Anyone who knows `PYLON_TRUSTED_SECRET` can sign in as any user. Give the secret the same protection as a database password: store it only in environment variables, rotate it after any leak, and never log it.
 </Warning>
 
 ## Enabling the endpoint
 
-The endpoint is **off by default**. Until you set `PYLON_TRUSTED_SECRET`, requests get a plain `404` so plain Pylon installs don't ship a signing surface that does nothing.
+The endpoint is off by default. Until you set `PYLON_TRUSTED_SECRET`, requests receive a plain `404`. This keeps a default Pylon install from shipping a signing surface that does nothing.
 
 ```sh
 # 32+ bytes of CSPRNG. macOS / Linux:
@@ -26,7 +26,7 @@ pylon secrets set PYLON_TRUSTED_SECRET=2f1e...
 # Self-hosted: set the env var on your Pylon server.
 ```
 
-The same secret has to be available to whatever code is *signing* requests (your Next.js route handler, your Worker, your CLI tool). Use whatever secret-management approach you already use for `STRIPE_SECRET_KEY` — the threat models are identical.
+The same secret must be available to whatever code signs the requests: your Next.js route handler, your Worker, or your CLI tool. Use the same secret-management approach you already use for `STRIPE_SECRET_KEY`. The two secrets need the same level of protection.
 
 ## Wire format
 
@@ -58,7 +58,7 @@ signed_value = "<timestamp>.<raw_request_body>"
 signature    = hex(HMAC_SHA256(PYLON_TRUSTED_SECRET, signed_value))
 ```
 
-Hex output is lowercase. Timestamps are Unix seconds; requests outside ±5 minutes of the server clock return `401 STALE_TIMESTAMP`. The format mirrors Stripe webhook signatures intentionally — if you've shipped a Stripe webhook handler, you've shipped this.
+Hex output is lowercase. Timestamps are Unix seconds. A request outside ±5 minutes of the server clock returns `401 STALE_TIMESTAMP`. The format matches Stripe's webhook signature scheme, so it will look familiar if you have built a Stripe webhook handler before.
 
 ## Response
 
@@ -71,7 +71,7 @@ Hex output is lowercase. Timestamps are Unix seconds; requests outside ±5 minut
 }
 ```
 
-On `2xx`, the endpoint also emits the same `Set-Cookie` header that `/api/auth/magic/verify` would emit, so a browser-facing proxy can forward the response directly and the user lands signed in. The Pylon `Session` is created identically to a magic-link sign-in — revocable from `/api/auth/sessions`, listed under the user's devices, etc.
+On a `2xx` response, the endpoint also sends the same `Set-Cookie` header that `/api/auth/magic/verify` sends. A browser-facing proxy can forward the response directly, and the user ends up signed in. Pylon creates the `Session` the same way it creates a magic-link session: revocable from `/api/auth/sessions` and listed under the user's devices.
 
 ## Failure modes
 
@@ -83,8 +83,8 @@ On `2xx`, the endpoint also emits the same `Set-Cookie` header that `/api/auth/m
 | `400` | `USER_NOT_FOUND` | Email is unknown and `createIfMissing` is `false`. |
 | `401` | `MISSING_TIMESTAMP` | `X-Pylon-Trusted-Timestamp` header missing or not a u64. |
 | `401` | `MISSING_SIGNATURE` | `X-Pylon-Trusted-Signature` header missing. |
-| `401` | `STALE_TIMESTAMP` | Timestamp outside ±5min window — clock skew or replay. |
-| `401` | `BAD_SIGNATURE` | HMAC mismatch — wrong secret or tampered body. |
+| `401` | `STALE_TIMESTAMP` | Timestamp outside ±5min window (clock skew or replay). |
+| `401` | `BAD_SIGNATURE` | HMAC mismatch (wrong secret or tampered body). |
 | `403` | `ACCOUNT_LOCKED` | User row has a non-null `disabledAt`, `bannedAt`, `lockedAt`, or `_deletedAt` column. |
 | `404` | — | `PYLON_TRUSTED_SECRET` is unset on this server. |
 | `500` | `USER_INSERT_FAILED` | Backend couldn't insert the new user row (schema constraint, DB error). |
@@ -146,15 +146,11 @@ export async function GET(req: NextRequest) {
 
 ## Edge cases
 
-**Multi-tenant orgs.** The minted session is exactly what `/api/auth/magic/verify` would produce — no tenant is auto-selected. Apps that need a tenant should call `/api/auth/select-org` after the user lands (the dashboard typically does this automatically based on a stored "last org" hint).
-
-**Locked / banned users.** If the User row has a non-null `disabledAt`, `bannedAt`, `lockedAt`, or `_deletedAt` column, the endpoint returns `403 ACCOUNT_LOCKED` and audits a `sign_in_failed` event. These are conventions, not framework-enforced columns — apps that don't model lockouts can ignore them.
-
-**Email already in use under a guest cookie.** Trusted-mint does **not** automatically merge guest data. That behavior is specific to magic-link verify (where the user explicitly proves email control). If you need anonymous-cart-merge on Stripe success, do it explicitly in your handler after the mint succeeds.
-
-**Cookie pass-through to the browser.** The endpoint always emits `Set-Cookie` even when called server-to-server. If you're not going to forward the header to a browser, ignore it — the `token` in the response body is the same session and works as `Authorization: Bearer pylon_…`.
-
-**Rate limiting.** The standard `PYLON_RATE_LIMIT_MAX` per-IP anonymous bucket applies. A bot that captures the endpoint URL but doesn't have the secret will hit the limit within seconds and won't make meaningful progress; the secret is the actual security boundary.
+- **Multi-tenant orgs.** The minted session matches what `/api/auth/magic/verify` produces. No tenant is auto-selected. Apps that need a tenant should call `/api/auth/select-org` after the user lands (the dashboard typically does this automatically, based on a stored "last org" hint).
+- **Locked or banned users.** If the User row has a non-null `disabledAt`, `bannedAt`, `lockedAt`, or `_deletedAt` column, the endpoint returns `403 ACCOUNT_LOCKED` and logs a `sign_in_failed` audit event. These are conventions, not framework-enforced columns. Apps that do not model lockouts can ignore them.
+- **Email already in use under a guest cookie.** Trusted-mint does not merge guest data automatically. That behavior is specific to magic-link verify, where the user explicitly proves control of the email. If you need anonymous-cart merging on Stripe success, do it explicitly in your handler after the mint succeeds.
+- **Cookie pass-through to the browser.** The endpoint always sends `Set-Cookie`, even when called server-to-server. If you do not forward the header to a browser, ignore it. The `token` in the response body is the same session, and it works as `Authorization: Bearer pylon_…`.
+- **Rate limiting.** The standard `PYLON_RATE_LIMIT_MAX` per-IP anonymous bucket applies. A bot that finds the endpoint URL but does not have the secret hits the rate limit within seconds and cannot get further. The secret is the real security boundary.
 
 ## Audit log
 
@@ -166,41 +162,41 @@ Every call writes one of three event shapes to the audit log:
 | `sign_up` | `method: trusted_mint`, `intent: <intent>` | New user was provisioned via `createIfMissing: true`. |
 | `sign_in` | `method: trusted_mint`, `intent: <intent>` | Session minted (always, after success). |
 
-The `intent` field is the free-form string from the request body — use it to discriminate "Stripe checkout success" from "internal SSO bridge" from "BYOC migration backfill" without parsing audit reasons.
+The `intent` field is the free-form string from the request body. Use it to tell apart "Stripe checkout success," "internal SSO bridge," and "BYOC migration backfill" without parsing audit reasons.
 
 ## Replay window
 
-The signature scheme protects against **tamper** (an attacker can't change the email in a captured request without invalidating the sig) and **stale replay** (a signature is dead after 5 minutes). It does NOT protect against **fresh replay**.
+The signature scheme defends against two things. First, tampering: an attacker cannot change the email in a captured request without invalidating the signature. Second, stale replay: a signature stops working after 5 minutes. It does not defend against a fresh replay, a captured request resent within that same window.
 
-A captured signed request, replayed within 5 minutes by anyone who can reach the Pylon ingress, mints another session for the same email — and the response body includes a long-lived `token`. So:
+Anyone who can reach the Pylon ingress and replays a captured signed request within 5 minutes mints another session for the same email. The response body includes a long-lived `token`. This creates two risks:
 
-- A TLS-MITM in the path (corporate proxy, "log everything" CDN that captures bodies) within the 5-min window can extract a usable session token.
-- An attacker who steals one signed request from server logs that capture the URL + headers (rare — sigs are headers, bodies aren't usually logged) can replay it once per minute for up to 5 minutes.
+- A TLS man-in-the-middle in the request path (a corporate proxy, or a CDN that logs full bodies) can extract a usable session token within the 5-minute window.
+- An attacker who steals one signed request from server logs that capture the URL and headers can replay it, once per minute, for up to 5 minutes. This is rare, since signatures live in headers and bodies are not usually logged.
 
 Mitigations:
 
-- Don't log signed requests with their headers.
-- Use HTTPS end-to-end; the HMAC is not a substitute for TLS.
-- If your threat model requires single-use semantics, include a `nonce` in the request body and enforce uniqueness in your own backend before issuing the trusted-mint call. The trusted-mint endpoint itself does not de-duplicate; Pylon's audit log will show every replay.
+- Do not log signed requests together with their headers.
+- Use HTTPS end-to-end. The HMAC signature does not replace TLS.
+- If your threat model needs single-use requests, add a `nonce` to the request body and enforce uniqueness in your own backend before calling trusted-mint. The trusted-mint endpoint does not de-duplicate requests on its own; Pylon's audit log shows every replay.
 
-The trade-off is deliberate: a per-request nonce store would add complexity and a failure mode (nonce-store unavailable → endpoint fails). For Stripe-Checkout-style use cases, the 5-min window is fine — the user is actively in the flow, not someone else.
+Pylon accepts this trade-off. A per-request nonce store would add complexity and a new failure mode: if the nonce store is unavailable, the endpoint fails. For Stripe Checkout style use cases, the 5-minute window works well, because the user is actively in the flow at that moment.
 
 ## Security checklist
 
 - [ ] `PYLON_TRUSTED_SECRET` is 32+ bytes of CSPRNG output (`openssl rand -hex 32`).
-- [ ] The secret is set only on machines that need to **sign** or **verify** — sign-only frontends do not need to know it.
-- [ ] The endpoint is reachable only from your trusted server-side environments (most production Pylon deployments are public, so the secret is the only thing keeping attackers out — accept that).
-- [ ] Server clocks are within a few seconds of NTP. ±5 min sounds generous, but a 7-min clock skew bricks the endpoint.
-- [ ] Rotation playbook: set a new `PYLON_TRUSTED_SECRET`, redeploy the signing service, wait for in-flight signed requests to flush (~10 min), then rotate the Pylon side. Pylon currently accepts one active secret; multi-key rotation is on the roadmap.
-- [ ] Audit log shipped somewhere queryable (Tinybird, Loki, Datadog) so a `sign_in_failed` spike on the `trusted_mint` method is alertable. Every post-signature rejection (invalid JSON, missing/invalid email, USER_NOT_FOUND, INVALID_USER_ROW, USER_INSERT_FAILED, ACCOUNT_LOCKED) emits one with the matching `meta.reason`.
-- [ ] Signed-request payloads aren't logged at the TLS-terminator (Cloudflare, Fly proxy, etc.) — bodies are sensitive even though headers usually aren't.
+- [ ] Set the secret only on machines that need to sign or verify requests. A sign-only frontend does not need to know it.
+- [ ] Restrict the endpoint to your trusted server-side environments where possible. Most production Pylon deployments are public, so the secret is the only barrier against attackers.
+- [ ] Keep server clocks within a few seconds of NTP. The ±5 minute window is not as wide as it looks: a 7-minute clock skew makes the endpoint stop working.
+- [ ] To rotate the secret: set a new `PYLON_TRUSTED_SECRET`, redeploy the signing service, wait about 10 minutes for in-flight signed requests to flush, then update the Pylon side. Pylon accepts only one active secret today; multi-key rotation is planned.
+- [ ] Send the audit log somewhere queryable (Tinybird, Loki, Datadog), so you can alert on a `sign_in_failed` spike for the `trusted_mint` method. Every post-signature rejection (invalid JSON, missing or invalid email, USER_NOT_FOUND, INVALID_USER_ROW, USER_INSERT_FAILED, ACCOUNT_LOCKED) emits one, with the matching `meta.reason`.
+- [ ] Confirm the TLS terminator (Cloudflare, the Fly proxy, or similar) does not log signed-request payloads. Bodies are sensitive, even though headers usually are not.
 
 ## HMAC requests vs. service tokens
 
-A long-lived service bearer token would work for the same use case, but:
+A long-lived service bearer token could work for the same use case, but it has three drawbacks:
 
-- Service tokens leak. Once leaked, the attacker can sign in as anyone forever — same blast radius as `PYLON_TRUSTED_SECRET`, but **the secret never travels with the request**, so observability tools that log headers don't accidentally capture it.
-- Service tokens don't bind to the request body. An attacker who captures one signed request can replay it. HMAC + timestamp kills that.
-- Token rotation requires a coordinated cutover on both sides. Secret rotation is a single env-var change on each side; you don't have to deploy a new long-lived credential.
+- Service tokens leak. Once leaked, the attacker can sign in as anyone, indefinitely. This is the same blast radius as `PYLON_TRUSTED_SECRET`, except the secret never travels with the request, so observability tools that log headers do not capture it by accident.
+- Service tokens do not bind to the request body. An attacker who captures one signed request can replay it. The HMAC signature plus timestamp stops that.
+- Token rotation needs a coordinated cutover on both sides. Secret rotation is a single environment-variable change on each side; you do not deploy a new long-lived credential.
 
-If your use case is "this trusted server should be able to talk to Pylon as a specific user," `pk.*` API keys are the right primitive. Trusted-mint is for "this trusted server should be able to **sign in any user**" — a deliberately different threat model.
+Use `pk.*` API keys when the trusted server needs to act as one specific user. Use trusted-mint when the trusted server needs to sign in as any user. These are deliberately different threat models.

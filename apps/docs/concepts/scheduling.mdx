@@ -3,7 +3,9 @@ title: Scheduling
 description: "Run recurring cron jobs and one-shot deferred functions without extra infrastructure."
 ---
 
-Pylon runs background work with the **same functions** you already write — no separate worker process, queue service, or cron daemon. There are two shapes: **recurring** (cron) and **one-shot** (deferred).
+Pylon runs background work with the same functions you already write.
+It needs no separate worker process, queue service, or cron daemon.
+There are two shapes: recurring (cron) and one-shot (deferred).
 
 ## Recurring: `cron(...)`
 
@@ -25,7 +27,7 @@ export default buildManifest({
 });
 ```
 
-The second argument is the name of a function in `functions/` — a normal `query` / `mutation` / `action`:
+The second argument is the name of a function in `functions/`: a normal `query`, `mutation`, or `action`:
 
 ```ts functions/hourlyRollup.ts
 import { mutation } from "@pylonsync/functions";
@@ -42,10 +44,10 @@ export default mutation({
 ```
 
 <Note>
-  **Make cron functions `internal: true`.** A cron function is also a regular function, so without `internal: true` it's reachable at `/api/fn/<name>`. Marking it internal means only the scheduler (and `ctx.runMutation`) can invoke it.
+  **Make cron functions `internal: true`.** A cron function is also a regular function, so without `internal: true`, it is reachable at `/api/fn/<name>`. Marking it internal means only the scheduler (and `ctx.runMutation`) can invoke it.
 </Note>
 
-**Auth.** A cron has no caller, so it runs with **anonymous** auth — the same as Pylon's own built-in maintenance jobs. You usually don't need to do anything about that: a function's own `ctx.db.*` calls run server-side and aren't subject to entity policies (those gate client sync, not trusted server code), so a maintenance cron reads and writes its entities directly.
+**Auth.** A cron has no caller, so it runs with anonymous auth, the same as Pylon's own built-in maintenance jobs. You usually do not need to do anything about that. A function's own `ctx.db.*` calls run server-side and are not subject to entity policies (those gate client sync, not trusted server code), so a maintenance cron reads and writes its entities directly.
 
 Elevate only in two cases, and always with an audit `reason`:
 
@@ -56,14 +58,14 @@ ctx.auth.elevate({ admin: true, reason: "nightly rollup" });
 await ctx.scheduler.runAfter(0, "rebuildSearchIndex", {});
 ```
 
-`reason` is mandatory — every elevation is logged so an operator can audit who elevated and why. Pylon never grants admin to a cron implicitly.
+`reason` is mandatory. Every elevation is logged, so an operator can audit who elevated and why. Pylon never grants admin to a cron implicitly.
 
-**Schedule format.** Standard 5-field cron: `minute hour day-of-month month day-of-week`. A schedule that doesn't parse, or a `function` name that isn't registered, is logged loudly at boot and skipped — so a typo fails visibly in `pylon dev` instead of silently never running.
+**Schedule format.** Standard 5-field cron: `minute hour day-of-month month day-of-week`. A schedule that does not parse, or a `function` name that is not registered, is logged loudly at boot and skipped. A typo fails visibly in `pylon dev` instead of silently never running.
 
-**Durability.** Cron jobs are backed by a persistent job store, so a fire that's in flight survives a restart, and the schedule resumes after a redeploy.
+**Durability.** Cron jobs are backed by a persistent job store. A fire that is in flight survives a restart, and the schedule resumes after a redeploy.
 
 <Warning>
-  **Multiple replicas.** Each running Pylon process schedules crons independently. On a **shared datastore** (Postgres — the Pylon Cloud default), the runtime takes a per-minute lease so each cron fires **exactly once per tick** across all replicas — no extra work on your part. On **per-replica SQLite** there's no shared lease, so each replica fires every tick; keep those handlers **idempotent** (guard on a row you write — most maintenance is naturally idempotent) or run the scheduled work on a single machine. A single-machine app always fires exactly once.
+  **Multiple replicas.** Each running Pylon process schedules crons independently. On a shared datastore (Postgres, the Pylon Cloud default), the runtime takes a per-minute lease, so each cron fires exactly once per tick across all replicas. This costs no extra work on your part. On per-replica SQLite, there is no shared lease, so each replica fires every tick. Keep those handlers idempotent (guard on a row you write, since most maintenance is naturally idempotent already), or run the scheduled work on a single machine. A single-machine app always fires exactly once.
 </Warning>
 
 ## One-shot: `ctx.scheduler`
@@ -81,8 +83,8 @@ await ctx.scheduler.runAt(dueDate.getTime(), "expireHold", { holdId });
 await ctx.scheduler.cancel(scheduleId);
 ```
 
-The scheduled function runs with the **auth identity of the caller** that scheduled it (the chain-of-custody is enforced at schedule time), and the `args` you pass are delivered verbatim. Like crons, these are durable across restarts.
+The scheduled function runs with the auth identity of the caller that scheduled it. Pylon enforces this identity at schedule time. The `args` you pass are delivered verbatim. Like crons, these scheduled calls are durable across restarts.
 
 <Tip>
-  Before `cron(...)` existed, the idiom for recurring work was a **self-perpetuating** function — one that re-armed itself with `ctx.scheduler.runAfter(...)` at the end. That still works, but `cron(...)` is clearer and can't silently stop if a re-arm is missed.
+  Before `cron(...)` existed, the common pattern for recurring work was a self-perpetuating function: one that re-armed itself with `ctx.scheduler.runAfter(...)` at the end. That still works, but `cron(...)` is clearer and cannot silently stop if a re-arm is missed.
 </Tip>

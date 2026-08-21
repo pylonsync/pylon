@@ -20,7 +20,7 @@ Operators on multi-tenant Pylon deployments should set `PYLON_SSO_ALLOWED_DOMAIN
 
 ## Endpoints
 
-All under `/api/auth/`.
+All endpoints are under `/api/auth/`.
 
 | Endpoint | Method | Auth | Purpose |
 | --- | --- | --- | --- |
@@ -33,7 +33,7 @@ All under `/api/auth/`.
 | `/orgs/:id/saml` | PUT | Owner | Configure SAML |
 | `/orgs/:id/saml` | DELETE | Owner | Remove SAML |
 | `/orgs/:id/saml/start` | GET | none | Begin SAML sign-in (302 to IdP) |
-| `/orgs/:id/saml/acs` | POST | none | SAML ACS — IdP POSTs the SAMLResponse here |
+| `/orgs/:id/saml/acs` | POST | none | SAML ACS, where the IdP posts the SAMLResponse |
 | `/sso/discover` | GET | none | Resolve `?email=user@acme.com` → org's start URL |
 
 ## Configuring OIDC SSO

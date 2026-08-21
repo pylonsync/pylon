@@ -110,7 +110,7 @@ stops runaway queries from bloating the registry.
 
 Multiple change events touching the same subscription within one tick
 coalesce to a single re-run. The re-runner thread drains the dirty set
-on a notify-driven cadence, with no fixed interval; it wakes immediately
+on a notify-driven cadence, with no fixed interval. It wakes immediately
 when work arrives. Bursts of writes do not cause per-event re-runs.
 
 ## When to use a reactive query instead of an entity query

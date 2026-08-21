@@ -4,12 +4,12 @@ sidebarTitle: "vs. Convex"
 description: "Compare Pylon and Convex as TypeScript-first reactive backends."
 ---
 
-[Convex](https://convex.dev) is the closest sibling to Pylon. Both offer a TypeScript backend with reactive queries and managed sync, but their deployment, licensing, search, and game-server models differ.
+[Convex](https://convex.dev) is the product most similar to Pylon. Both offer a TypeScript backend with reactive queries and managed sync. They differ in deployment, licensing, search, and game-server support.
 
 ## TL;DR
 
-- **Choose Convex** if you want a polished pure-TS experience, you'll stay on their cloud (or accept their FSL-licensed self-host), and you don't need game shards or facets.
-- **Choose Pylon** if you want a single-binary self-host, FOSS license, native faceted search, or in-process functions that share a transaction with your writes.
+- **Choose Convex** if you want a polished, pure-TypeScript experience, you will stay on their cloud (or accept their FSL-licensed self-host), and you do not need game shards or facets.
+- **Choose Pylon** if you want a single-binary self-host, an open-source license, native faceted search, or in-process functions that share a transaction with your writes.
 
 ## Same shape
 
@@ -33,7 +33,7 @@ Both ship:
 | Multi-service docker-compose | n/a | ✅ |
 | Default backing store | SQLite/Postgres | SQLite, Postgres, or another configured store |
 
-Pylon ships as one Rust binary. Convex's self-hosted product can run from Docker or a prebuilt backend binary, with the dashboard and CLI included. For a hobby project on a $5 VPS, Pylon installs in 30 seconds with no Docker. For a production deployment, both work; the operational story is different.
+Pylon ships as one Rust binary. Convex's self-hosted product can run from Docker or a prebuilt backend binary, with the dashboard and CLI included. For a hobby project on a $5 VPS, Pylon installs in 30 seconds with no Docker. Both work for a production deployment, but the operational details differ.
 
 ### License
 
@@ -42,17 +42,17 @@ Pylon ships as one Rust binary. Convex's self-hosted product can run from Docker
 | Pylon | MIT OR Apache-2.0 |
 | Convex | [FSL (Functional Source License)](https://convex.dev/blog/announcing-self-hosted-convex) — converts to Apache 2.0 after 2 years |
 
-Convex's license bars you from offering a competing managed Convex service for the first 2 years after each release. For 99% of users this is irrelevant; it matters if you're building a BaaS-on-top-of-a-BaaS. Pylon's MIT/Apache means you can do anything.
+Convex's license bars you from offering a competing managed Convex service for the first two years after each release. This does not matter for most users. It matters only if you are building a backend-as-a-service on top of Convex. Pylon's MIT/Apache license has no such limit.
 
 ### Search
 
-Convex has [full-text search](https://docs.convex.dev/search/text-search) — keyword + prefix matching. It does **not** have native facets — you'd build them with regular queries on top.
+Convex has [full-text search](https://docs.convex.dev/search/text-search): keyword and prefix matching. It has no native facets. You build facets yourself with regular queries on top of Convex.
 
-Pylon ships SQLite FTS5 + roaring-bitmap facets out of the box. `useSearch("Post", { facets: ["tags", "authorId"] })` returns hits + live `facetCounts` in one call. For an Algolia-style faceted UI without paying Algolia, Pylon is the cleaner story.
+Pylon ships SQLite FTS5 and roaring-bitmap facets, built in. `useSearch("Post", { facets: ["tags", "authorId"] })` returns hits and live `facetCounts` in one call. For an Algolia-style faceted UI without paying for Algolia, Pylon is the simpler option.
 
 ### Game shards
 
-Convex has no concept of authoritative tick-based game state. If you're building a Slack-like app, you don't need it. If you're building a multiplayer game or a Figma-style cursor-presence app, Pylon's `Shard<S: SimState>` primitive is a real thing Convex doesn't replicate. One caveat to be clear about: that shard simulation is authored in **Rust** (the `pylon_realtime` crate), with a `useShard` React hook to connect from the client — there's no TypeScript API for the server-side shard logic today.
+Convex has no concept of authoritative tick-based game state. If you are building a Slack-like app, you do not need it. If you are building a multiplayer game or a Figma-style cursor-presence app, Pylon's `Shard<S: SimState>` primitive is a real feature that Convex does not have. The shard simulation is authored in Rust (the `pylon_realtime` crate), and a `useShard` React hook connects it to the client. Pylon has no TypeScript API for the server-side shard logic today.
 
 ### Pricing
 
@@ -72,27 +72,27 @@ Pylon Cloud pricing is based on a platform plan plus machine compute and include
 | Built-in inspector | ✅ Pylon Studio at `/studio` | ✅ Convex dashboard |
 | Self-hosted | Studio ships with the binary | Dashboard is included in the self-hosted product |
 
-Both have web-based inspectors. Pylon's runs against your local binary by default; Convex's hosted dashboard is the default for cloud projects, and the self-hosted product includes its own dashboard.
+Both have web-based inspectors. Pylon's runs against your local binary by default. Convex's hosted dashboard is the default for cloud projects, and the self-hosted product includes its own dashboard.
 
 ### CRDTs
 
-Pylon integrates [Loro](https://loro.dev) for collaborative text/lists/maps/trees — true CRDTs with conflict-free convergence. Convex has reactive queries that automatically reconcile updates, but does not ship a CRDT library; for collaborative editing you'd integrate Yjs or Loro yourself.
+Pylon integrates [Loro](https://loro.dev) for collaborative text, lists, maps, and trees. Loro provides true CRDTs with conflict-free convergence. Convex has reactive queries that automatically reconcile updates, but it does not ship a CRDT library. For collaborative editing, you would integrate Yjs or Loro yourself.
 
 ## Where Convex is better
 
 - **Pure-TS dev loop** — Convex has invested heavily in DX polish. Type inference flows end-to-end without codegen. Pylon requires `pylon codegen` (one CLI call); Convex's TypeScript flow is a bit tighter.
 - **Larger team behind it** — well-funded YC company, more docs, more examples.
 - **Scheduled functions** — Convex has clean durable primitives for scheduled jobs. Pylon has a durable scheduler (`ctx.scheduler.runAfter`), background jobs with exponential retry back-off, and [durable multi-step workflows](/concepts/workflows) (steps run exactly once, sleeps span days, events resume paused runs). Convex's scheduler UI is more polished.
-- **Convex Vector Search at scale** — Convex's vector indexes are approximate and built for large tables. Pylon's built-in [vector search](/concepts/vector-search) (`field.vector(dims)` + `ctx.llm.embed` + `ctx.db.vectorSearch`) is exact k-NN — perfect recall, zero index maintenance, right to ~100k rows per entity; past that Convex's ANN wins.
+- **Convex Vector Search at scale** — Convex's vector indexes are approximate and built for large tables. Pylon's built-in [vector search](/concepts/vector-search) (`field.vector(dims)` + `ctx.llm.embed` + `ctx.db.vectorSearch`) is exact k-NN, with perfect recall and zero index maintenance, good up to about 100k rows per entity. Past that, Convex's ANN indexes win.
 
 ## Where Pylon is better
 
 - **Small footprint** — install the pylon binary + Bun on a VPS, or `pylon deploy`. No Docker daemon.
-- **Faceted search** — first-class with live counts. Convex requires custom queries.
+- **Faceted search** — built in, with live counts. Convex requires custom queries.
 - **Game shards** — `Shard<S: SimState>` for tick-based authority (authored in Rust; `useShard` hook on the client).
 - **Open license** — MIT/Apache, not FSL.
-- **Batteries included** — TOTP, audit log, webhooks, rate limiting, file storage, faceted search, and vector search ship in the binary, configured from the manifest or env — no marketplace of third-party components.
-- **Self-host on day one** — Convex's self-host is recent and the OSS bundle hasn't reached the polish of their hosted offering yet.
+- **Built-in features** — TOTP, audit log, webhooks, rate limiting, file storage, faceted search, and vector search ship in the binary, configured from the manifest or env. No marketplace of third-party components is required.
+- **Self-host on day one** — Convex's self-host is recent, and the OSS bundle has not reached the polish of their hosted offering yet.
 
 ## Migrating from Convex
 
@@ -111,8 +111,8 @@ Most of the development surface maps directly. Pylon adds a code-generation step
 
 ## Pylon tradeoffs
 
-Convex has more developer-mindshare and more polish on edge cases (reactive query batching, type inference depth, IDE integration). If you want the most-polished pure-TS reactive backend and don't need single-binary self-host, faceted search, or Rust game shards, Convex is a great choice.
+Convex has a larger developer community and more polish on edge cases (reactive query batching, type inference depth, IDE integration). If you want the most polished pure-TypeScript reactive backend and do not need single-binary self-host, faceted search, or Rust game shards, Convex is a great choice.
 
 ## Using both
 
-Convex on web + Pylon for game shards is a legitimate combo if your team prefers Convex's TS surface for app data and you need authoritative tick-based simulation for a multiplayer feature — bearing in mind that the shard simulation itself is written in Rust. The wire formats are different — you'd be running both backends — but it's a real option.
+Using Convex on the web and Pylon for game shards is a legitimate combination if your team prefers Convex's TypeScript surface for app data and needs authoritative tick-based simulation for a multiplayer feature. Keep in mind that the shard simulation itself is written in Rust. The wire formats differ, so you would run both backends side by side, but it is a real option.

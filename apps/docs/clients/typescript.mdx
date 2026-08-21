@@ -3,12 +3,12 @@ title: TypeScript SDK
 description: "Define schemas, build manifests, and generate types with @pylonsync/sdk."
 ---
 
-`@pylonsync/sdk` is the foundation every other JS package depends on. It's two things in one package:
+`@pylonsync/sdk` is the foundation every other JS package depends on. It is two things in one package:
 
 1. **A schema DSL** for declaring entities, queries, actions, policies in TypeScript instead of editing `pylon.manifest.json` by hand.
 2. **The codegen runtime** that compiles your TS schema into the manifest the Pylon server reads.
 
-There's no HTTP client in this package — for that, use `@pylonsync/react` (browser) or `@pylonsync/sync` (any JS host).
+This package has no HTTP client. For that, use `@pylonsync/react` (browser) or `@pylonsync/sync` (any JS host).
 
 ## Install
 
@@ -125,7 +125,7 @@ field.string().crdt("text")    // LoroText — collaborative text (or field.rich
 field.int().crdt("counter")    // LoroCounter — multi-writer increments
 ```
 
-`"text"` and `"counter"` are wired end-to-end; the `"list"`, `"movable-list"`, and `"tree"` annotations are reserved (wire format locked in, server-side projection still landing). CRDT-backed fields don't go through normal LWW merge; they sync via the binary CRDT broadcast channel. See [Loro](/clients/loro) for the full picture.
+`"text"` and `"counter"` are wired end-to-end; the `"list"`, `"movable-list"`, and `"tree"` annotations are reserved (wire format locked in, server-side projection still landing). CRDT-backed fields do not go through normal LWW merge; they sync via the binary CRDT broadcast channel. See [Loro](/clients/loro) for the full picture.
 
 ## Indexes
 
@@ -208,7 +208,7 @@ const todosByAuthor = query("todosByAuthor", {
 });
 ```
 
-`query` / `action` register the name + input contract; the handler lives in a `functions/<name>.ts` file. Use a `query()` handler for reads and a `mutation()` / `action()` handler for writes and computed results.
+`query` / `action` register the name and input contract; the handler lives in a `functions/<name>.ts` file. Use a `query()` handler for reads and a `mutation()` / `action()` handler for writes and computed results.
 
 ## Actions
 
@@ -251,11 +251,11 @@ policy({
 })
 ```
 
-Each rule is a per-operation gate: `allowRead`, `allowInsert`, `allowUpdate`, `allowDelete`. `allowWrite` is a shared fallback for the three write ops, and `allow` is the fallback for all four. Expression syntax in [RBAC](/auth/rbac).
+Each rule is a per-operation gate: `allowRead`, `allowInsert`, `allowUpdate`, `allowDelete`. `allowWrite` is a shared fallback for the three write operations, and `allow` is the fallback for all four. See [RBAC](/auth/rbac) for the expression syntax.
 
 ## Plugins
 
-`definePlugin({ name, hooks })` returns a `PluginDefinition` — a named set of server-side entity lifecycle hooks:
+`definePlugin({ name, hooks })` returns a `PluginDefinition`, a named set of server-side entity lifecycle hooks:
 
 ```typescript
 import { definePlugin } from "@pylonsync/sdk";
@@ -272,7 +272,7 @@ const audit = definePlugin({
 
 Available hooks: `beforeInsert`, `afterInsert`, `beforeUpdate`, `afterUpdate`, `beforeDelete`, `afterDelete`.
 
-Many capabilities don't need a plugin at all — they're declarative: full-text search is an entity's `search:` option (above), and auth / scheduled jobs are configured with the `auth()` / `cron()` helpers passed to `buildManifest`.
+Many capabilities do not need a plugin at all. They are declarative: full-text search is an entity's `search:` option (above), and auth / scheduled jobs are configured with the `auth()` / `cron()` helpers passed to `buildManifest`.
 
 ## Manifest output
 
@@ -293,7 +293,7 @@ Many capabilities don't need a plugin at all — they're declarative: full-text 
 }
 ```
 
-The Pylon server reads only the JSON — your TS source isn't needed at runtime. This is what lets the same backend serve clients in any language.
+The Pylon server reads only the JSON. Your TypeScript source is not needed at runtime. This is what lets the same backend serve clients in any language.
 
 ## Where to next
 

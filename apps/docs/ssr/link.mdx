@@ -9,23 +9,23 @@ import { Link } from "@pylonsync/react";
 <Link href="/hello">Hello</Link>
 ```
 
-`<Link>` renders a plain `<a>` server-side, so it works with JavaScript off, on slow links, and during the brief moment before hydration completes. Once Pylon's runtime is live, clicks get intercepted and Pylon does a client-side navigation instead of a full page reload.
+`<Link>` renders a plain `<a>` server-side, so it works with JavaScript off, on slow links, and during the brief moment before hydration completes. Once Pylon's runtime is live, it intercepts clicks and does a client-side navigation instead of a full page reload.
 
 ## What it does
 
 | Phase | Behavior |
 |---|---|
 | SSR / no JS | Renders `<a href data-pylon-link>...</a>`. Same as a regular anchor. |
-| In viewport | IntersectionObserver `modulepreload`s the destination's **client chunks** — its own route entry plus what it imports. Deferred until the page's `load` event, so warming a screenful of links never competes with the current page's own render. |
-| Hover / touchstart / focus | Also fetches the **page payload**, and holds it in memory for the click. `focus` is included so a keyboard user tabbing to a link gets the same warm path as a cursor. |
+| In viewport | IntersectionObserver `modulepreload`s the destination's client chunks: its own route entry plus what it imports. This is deferred until the page's `load` event, so warming many links never competes with the current page's own render. |
+| Hover / touchstart / focus | This also fetches the page payload and holds it in memory for the click. `focus` is included so a keyboard user tabbing to a link gets the same warm path as a mouse cursor. |
 | Click | `preventDefault()`, consume the prefetched payload (or fetch it), render the new route, and re-render the React root in place. |
-| Modifier keys / target="_blank" | Falls through to the browser's default behavior — open in new tab, etc. |
+| Modifier keys / target="_blank" | Falls through to the browser's default behavior, such as opening a new tab. |
 
-**Why the two stages differ.** Chunks are content-hashed and served `immutable`, so warming one costs its bytes once per browser and makes every later visit instant — cheap enough to do on sight. The page payload costs a **server render** every time, so it waits for a real signal of intent. Warming payloads on sight instead would spend one render per visible link on every page load and throw nearly all of them away.
+The two stages differ because of cost. Chunks are content-hashed and served as `immutable`, so warming one costs its bytes once per browser and makes every later visit instant. It is cheap enough to do as soon as a link appears. The page payload costs a server render every time, so it waits for a real signal of intent. Warming payloads on sight would spend one render per visible link on every page load and throw away nearly all of them.
 
-The payload is held in memory only, never in a disk cache, so a reload always re-renders. It's single-use and short-lived, and dropped when a navigation commits.
+The payload is held in memory only, never in a disk cache, so a reload always re-renders. It is single-use and short-lived, and it is dropped when a navigation commits.
 
-The React root persists across navigations, so any layout that's shared between the old and new route keeps its instance. State, scroll position, video playback — all survive the nav.
+The React root persists across navigations, so a layout shared between the old and new route keeps its instance. State, scroll position, and video playback all survive the navigation.
 
 <Note>
 A page that takes longer than ~100ms to arrive shows the nearest [`loading.tsx`](/ssr/overview) over the page area while it loads. Faster navigations swap straight to content, so the skeleton never flashes.
@@ -44,7 +44,7 @@ interface LinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
 }
 ```
 
-Any other anchor prop (`className`, `target`, `rel`, `onClick`, etc.) passes through.
+Any other anchor prop, such as `className`, `target`, `rel`, or `onClick`, passes through.
 
 ## Examples
 
@@ -66,8 +66,7 @@ export default function Nav() {
 
 ### Disable prefetch
 
-`prefetch={false}` turns off both stages. Reach for it when a link is unlikely
-to be followed and you would rather not warm anything for it:
+`prefetch={false}` turns off both stages. Use it when a link is unlikely to be followed and you do not want to warm anything for it:
 
 ```tsx
 <Link href={`/posts?page=${page + 1}`} prefetch={false}>
@@ -75,10 +74,7 @@ to be followed and you would rather not warm anything for it:
 </Link>
 ```
 
-You rarely need it for *weight*. A heavy destination is best fixed at the
-source with [`dynamic()`](/ssr/overview#code-splitting), which keeps the heavy
-component out of the route's chunk entirely — `prefetch={false}` only delays
-the download to the click, where the user is waiting on it.
+You rarely need it for *weight*. A heavy destination is best fixed at the source with [`dynamic()`](/ssr/overview#code-splitting), which keeps the heavy component out of the route's chunk entirely. `prefetch={false}` only delays the download until the click, where the user is waiting for it.
 
 ### Open in a new tab
 
@@ -88,40 +84,40 @@ the download to the click, where the user is waiting on it.
 </Link>
 ```
 
-Modifier keys + middle-click also fall through automatically — no special handling needed.
+Modifier keys and middle-click also fall through automatically. No special handling is needed.
 
 ### Programmatic navigation
 
-`<Link>` is the prop-based API. For imperative nav (after a form submit, post-login redirect, etc.), call the global runtime:
+`<Link>` is the prop-based API. For imperative navigation, for example after a form submit or a post-login redirect, call the global runtime:
 
 ```tsx
 window.__pylon?.navigate("/welcome");
 ```
 
-The runtime is loaded as part of the shared chunk; `window.__pylon` is defined as soon as hydration completes. Use the `?.` form to be safe on the first render. (Pylon has no RSC boundary, so there's no `"use client"` directive — every page component already hydrates on the client.)
+The runtime loads as part of the shared chunk. `window.__pylon` is defined as soon as hydration completes. Use the `?.` form to stay safe on the first render. Pylon has no RSC boundary, so there is no `"use client"` directive. Every page component already hydrates on the client.
 
-## How nav actually works
+## How navigation works
 
-1. User clicks a `<Link>`. The runtime's delegated handler picks it off `a[data-pylon-link]` clicks.
-2. Runtime uses the payload a hover already fetched, or fetches the target URL now. Either way the request carries `X-Pylon-Nav: 1`, which tells the server this is a navigation rather than a document load.
-3. The server still runs the render — that's what resolves the page's `serverData` reads — but replies with only the head metadata and the `__PYLON_DATA__` JSON (component, layouts, props, data), not the rendered markup, which the client is about to re-render from that data anyway. Roughly half the bytes of a full page on a typical route.
-4. Runtime looks up the new component in the bundle manifest and dynamically imports its entry chunk.
+1. The user clicks a `<Link>`. The runtime's delegated handler listens for `a[data-pylon-link]` clicks.
+2. The runtime uses the payload a hover already fetched, or it fetches the target URL now. Either way, the request carries `X-Pylon-Nav: 1`, which tells the server this is a navigation, not a document load.
+3. The server still runs the render. This is what resolves the page's `serverData` reads. But the server replies with only the head metadata and the `__PYLON_DATA__` JSON (component, layouts, props, data), not the rendered markup, since the client re-renders from that data anyway. This is roughly half the bytes of a full page on a typical route.
+4. The runtime looks up the new component in the bundle manifest and dynamically imports its entry chunk.
 5. The entry chunk's `hydrate(component, Page, Layouts)` populates the route cache without re-rendering (the cache is keyed on component path).
-6. Runtime calls `root.render(buildTree(Page, Layouts, newProps))`. React's reconciler diffs against the existing tree — shared layouts get reused, the page subtree swaps.
-7. `history.pushState`, scroll to top, done.
+6. The runtime calls `root.render(buildTree(Page, Layouts, newProps))`. React's reconciler diffs against the existing tree. It reuses shared layouts and swaps only the page subtree.
+7. The runtime calls `history.pushState` and scrolls to top. Navigation is done.
 
-If anything fails (fetch errored, response wasn't HTML, manifest didn't know the component), the runtime falls back to `window.location.href = href` so the browser handles it the old-fashioned way.
+If anything fails, for example the fetch errored, the response was not HTML, or the manifest did not know the component, the runtime falls back to `window.location.href = href`. The browser then handles the navigation as a normal document load.
 
 ## Differences from Next.js's `<Link>`
 
 | | Pylon `<Link>` | Next.js `<Link>` |
 |---|---|---|
 | Prefetch trigger | Two stages: chunks on viewport (256px rootMargin), payload on intent | IntersectionObserver |
-| Hover escalation | Hover, touch **and focus** — keyboard gets the warm path too | Hover |
+| Hover escalation | Hover, touch, and focus (keyboard gets the warm path too) | Hover |
 | Prefetch payload | Route's own chunks; page payload only on intent | RSC payload + per-route JS |
-| Component splitting | `dynamic()` — `ssr: false` by default | `next/dynamic` — `ssr: true` by default |
+| Component splitting | `dynamic()` (`ssr: false` by default) | `next/dynamic` (`ssr: true` by default) |
 | Nav model | Re-render in place, layouts preserved | App router preserves layouts the same way |
 | `scroll={false}` prop | Not yet | Yes |
 | Hash-only links (`#section`) | Falls through to browser | Smooth-scrolls in app router |
 
-The hash-link + `scroll` props are on the roadmap.
+The hash-link and `scroll` props are on the roadmap.

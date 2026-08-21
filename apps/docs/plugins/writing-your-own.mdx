@@ -3,27 +3,27 @@ title: Writing your own plugin
 description: "The Rust Plugin trait, built-in registration, and the current extension model."
 ---
 
-Pylon's plugin system is a Rust trait registered inside the runtime at boot. It's how the built-ins (`rate_limit`, `tenant_scope`, `owner_stamp`, `csrf`) are wired.
+Pylon's plugin system is a Rust trait that the runtime registers at boot. It wires the built-ins (`rate_limit`, `tenant_scope`, `owner_stamp`, `csrf`).
 
-Be clear about the current state before you reach for it:
+Understand the current state before you use it:
 
 - **There is no dynamic plugin loading and no `manifest.plugins` array.** Built-ins are registered in the runtime's Rust code. To ship your own, you build a custom runtime that registers it.
-- **Most needs don't require a plugin.** App logic belongs in [server functions](/concepts/functions) + [policies](/concepts/policies); schema-level automation is covered by [tenant_scope / owner_stamp / behaviors](/plugins/data).
-- The SDK exports a `definePlugin({ name, entities, hooks })` helper, but the runtime does **not** consume its output yet — TS-authored plugins aren't wired. Treat it as a placeholder, not a supported path.
+- **Most needs do not require a plugin.** App logic belongs in [server functions](/concepts/functions) and [policies](/concepts/policies). Schema-level automation is covered by [tenant_scope / owner_stamp / behaviors](/plugins/data).
+- The SDK exports a `definePlugin({ name, entities, hooks })` helper, but the runtime does not consume its output yet. TS-authored plugins are not wired. Treat it as a placeholder, not a supported path.
 
 ## When to write one
 
 | Need | Plugin? |
 | --- | --- |
-| One-off business logic | No — write a function |
-| Auth-stamped ownership / tenant scoping | No — use `.owner()` / a `tenantId` field |
-| Timestamp / soft-delete columns | No — use `behaviors([...])` |
-| Cross-cutting behavior on **every** write, in the binary | Yes — write a Rust plugin |
-| A new server-side HTTP route in the binary | Yes — write a Rust plugin |
+| One-off business logic | No: write a function |
+| Auth-stamped ownership / tenant scoping | No: use `.owner()` / a `tenantId` field |
+| Timestamp / soft-delete columns | No: use `behaviors([...])` |
+| Cross-cutting behavior on every write, in the binary | Yes: write a Rust plugin |
+| A new server-side HTTP route in the binary | Yes: write a Rust plugin |
 
 ## The `Plugin` trait
 
-The real trait (`pylon_plugin::Plugin`). Every method has a default no-op impl — override only what you need:
+This is the real trait, `pylon_plugin::Plugin`. Every method has a default no-op implementation. Override only what you need:
 
 ```rust
 use pylon_plugin::{Plugin, PluginError, PluginContext, PluginRoute, RequestMeta};
@@ -74,11 +74,11 @@ pub trait Plugin: Send + Sync {
 }
 ```
 
-Note there is **no** unified `before_write`/`after_write` with a `WriteOp` enum — insert / update / delete are separate hooks.
+There is no unified `before_write` or `after_write` method with a `WriteOp` enum. Insert, update, and delete are separate hooks.
 
 ### `PluginError`
 
-Rejections carry a code, message, and HTTP status (it's a struct, not an enum):
+Rejections carry a code, message, and HTTP status (it is a struct, not an enum):
 
 ```rust
 return Err(PluginError {
@@ -90,7 +90,7 @@ return Err(PluginError {
 
 ## Example: a before-insert plugin
 
-The pattern the built-ins use — mutate `data` before it lands:
+This is the pattern the built-ins use: change `data` before it is written.
 
 ```rust
 use pylon_plugin::{Plugin, PluginError};
@@ -122,7 +122,7 @@ impl Plugin for Timestamps {
 
 ## Example: a per-request gate
 
-`on_request_with_meta` runs before dispatch and receives the peer IP — this is how `rate_limit` buckets anonymous callers:
+`on_request_with_meta` runs before dispatch and receives the peer IP. This is how `rate_limit` buckets anonymous callers:
 
 ```rust
 use pylon_plugin::{Plugin, PluginError, RequestMeta};
@@ -149,7 +149,7 @@ impl Plugin for MyLimiter {
 
 ## Example: adding an HTTP route
 
-`routes()` returns `PluginRoute`s; the router matches them after its built-in routes by method + path prefix. The handler receives `(body, path, auth)` and returns `(status, body)`:
+`routes()` returns a list of `PluginRoute`s. The router matches them after its built-in routes, by method and path prefix. The handler receives `(body, path, auth)` and returns `(status, body)`:
 
 ```rust
 use pylon_plugin::{Plugin, PluginRoute};
@@ -172,7 +172,7 @@ impl Plugin for MyWebhookReceiver {
 
 ## Registering with the runtime
 
-Plugins are added to a `PluginRegistry` at boot — the same place the built-ins are registered:
+Plugins are added to a `PluginRegistry` at boot. This is the same place the built-ins are registered:
 
 ```rust
 use std::sync::Arc;
@@ -183,7 +183,7 @@ reg.register(Arc::new(Timestamps));
 // The default runtime also registers rate_limit, tenant_scope, owner_stamp here.
 ```
 
-The runtime has no manifest lookup or dynamically loaded plugin bundle. **To ship your own today, fork the runtime** (`crates/runtime`), add your `reg.register(...)` call, and build a custom `pylon` binary. Dynamic plugin loading and a wired `definePlugin` remain on the roadmap.
+The runtime has no manifest lookup and no dynamically loaded plugin bundle. To ship your own today, fork the runtime (`crates/runtime`), add a `reg.register(...)` call, and build a custom `pylon` binary. Dynamic plugin loading and a wired `definePlugin` remain on the roadmap.
 
 ## Testing
 
@@ -206,8 +206,8 @@ fn timestamps_stamps_on_insert() {
 
 Read the real built-ins in `crates/plugin/src/builtin/` as templates:
 
-- **Before-write data mutation** — `tenant_scope.rs`, `owner_stamp.rs`
-- **Per-request gate** — `rate_limit.rs`, `csrf.rs`
-- **External-service integration** — `ai_proxy.rs`
+- **Before-write data mutation**: `tenant_scope.rs`, `owner_stamp.rs`
+- **Per-request gate**: `rate_limit.rs`, `csrf.rs`
+- **External-service integration**: `ai_proxy.rs`
 
 Pick the closest match and adapt.

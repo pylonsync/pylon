@@ -3,7 +3,11 @@ title: Cloudflare Workers costs
 description: "Cloudflare Workers pricing, runaway request patterns, budget alerts, and kill switches."
 ---
 
-Idle Workers apps cost $0 because deployments scale to zero. This page covers the cases that cost money: scale-to-zero tradeoffs, runaway request patterns, and bill caps.
+Idle Workers apps cost $0 because deployments scale to zero. This page covers the cases that cost money:
+
+- scale-to-zero tradeoffs
+- runaway request patterns
+- bill caps
 
 ## The pricing dimensions that matter
 
@@ -28,43 +32,52 @@ As of 2026, the Workers Paid plan ($5/mo base) includes:
 - Every DO invocation
 - WASM execution time (GB-seconds)
 
-## Patterns that blow up a free tier
+## Patterns that exceed a free tier
 
 ### Polling loops without backoff
 
-A client that polls `/api/sync/pull` every 500ms is 172,800 requests/day per client. 100 such clients = 17M/day → $5/day.
+A client that polls `/api/sync/pull` every 500ms sends 172,800 requests/day. With 100 such clients, that is 17M requests/day, or about $5/day.
 
 **Fix**: use WebSocket push (Durable Objects on Workers), or widen the polling interval with jitter. Pylon's sync protocol supports cursor-based pulls, so clients pay only for deltas.
 
 ### Loops inside a worker handler
 
-Scheduled cron Worker triggers a function that writes to D1 in a loop, gets rate-limited, retries the whole batch, blows through D1 write quota.
+A scheduled cron Worker triggers a function that writes to D1 in a loop. It gets rate-limited, retries the whole batch, and exceeds the D1 write quota.
 
-**Fix**: paginate writes; circuit-break on retry count; use `ctx.waitUntil` for fire-and-forget; measure before you ship.
+**Fix**:
+
+- paginate writes
+- circuit-break on retry count
+- use `ctx.waitUntil` for fire-and-forget work
+- measure before you ship
 
 ### Durable Object hot-spotting
 
-One room with 10k concurrent WS clients all pinned to one DO = 1M+ DO requests/hour per room.
+One room with 10k concurrent WS clients, all pinned to one DO, generates 1M+ DO requests/hour.
 
-**Fix**: shard rooms. On Workers each Pylon room maps to one (sticky) Durable Object, so split a hot "global chat" room into many smaller rooms (e.g. per-region) to spread load across DOs instead of pinning everyone to one.
+**Fix**: shard rooms. On Workers, each Pylon room maps to one (sticky) Durable Object. Split a hot "global chat" room into many smaller rooms (for example, per region) to spread load across DOs instead of pinning everyone to one.
 
 ### Crawlers / bots
 
-A `/api/entities/Todo` that isn't gated hits 404 for bots forever but still costs a Worker request per hit.
+A `/api/entities/Todo` route that is not gated returns 404 to bots endlessly, but each hit still costs a Worker request.
 
-**Fix**: Cloudflare's bot-fight mode + WAF rules for unauthenticated traffic on admin paths. Pylon's router returns 401/403 quickly for unauthenticated non-public routes, but Cloudflare can block at the edge before the Worker even runs.
+**Fix**: use Cloudflare's bot-fight mode and WAF rules for unauthenticated traffic on admin paths. Pylon's router returns 401 or 403 quickly for unauthenticated non-public routes, but Cloudflare can block at the edge before the Worker even runs.
 
 ### Errors in tight loops
 
-A TypeScript function throws, the client retries immediately without backoff, every retry costs a Worker + D1 round-trip.
+A TypeScript function throws. The client retries immediately without backoff. Every retry costs a Worker and D1 round-trip.
 
-**Fix**: client-side exponential backoff; server-side circuit breaker for degraded paths; alert on 5xx rate rather than request rate.
+**Fix**:
+
+- client-side exponential backoff
+- a server-side circuit breaker for degraded paths
+- alerts on the 5xx rate rather than the request rate
 
 ## Setting a budget cap
 
-Cloudflare supports per-worker budget alerts but **not** automatic cutoff. You have to write the cutoff yourself. Two patterns:
+Cloudflare supports per-worker budget alerts, but not automatic cutoff. You have to write the cutoff yourself. Two patterns:
 
-### Soft cap (recommended): alert + throttle
+### Soft cap (recommended): alert and throttle
 
 ```
 Email alert at 50% of monthly budget → team investigates.
@@ -84,7 +97,7 @@ if env.kv("BUDGET")?.get("enabled").text().await? != Some("1".into()) {
 }
 ```
 
-A GitHub Action watches billing and flips the flag. Users see 503 until you re-enable; your bill stops growing.
+A GitHub Action watches billing and turns off the flag when needed. Users see a 503 response until you re-enable it. Your bill stops growing.
 
 ## Monitoring
 
@@ -95,28 +108,28 @@ Cloudflare's analytics dashboard shows:
 - Subrequest count (every D1 or DO call counts)
 - Wall-clock time
 
-Plug these into your own dashboard. For Pylon specifically, watch:
+Add these metrics to your own dashboard. For Pylon specifically, watch:
 
-- `/api/sync/pull` rate — anything > 10 req/sec/client is suspicious
-- `/api/entities/*` error rate — 403 spike = policy regression, 5xx = bug
-- WS connection count vs. rejection rate (IP cap) — rejections = attack
-- D1 write volume vs. change_log append rate — these should match
+- `/api/sync/pull` rate: anything above 10 req/sec/client is suspicious
+- `/api/entities/*` error rate: a 403 spike signals a policy regression, and a 5xx spike signals a bug
+- WS connection count versus rejection rate (IP cap): rejections signal an attack
+- D1 write volume versus `change_log` append rate: these should match
 
 ## When a server is a better fit
 
-Workers scale-to-zero doesn't help if:
+Workers scale-to-zero does not help if:
 
-- You have steady ≥100 req/sec — a $25/mo AWS deploy will be cheaper
-- You need shards / long-lived game simulations — Durable Object hibernation costs add up fast
-- Your p99 matters and cold starts aren't acceptable — a warm VPS is more predictable
-- You need Postgres (`postgres-live` feature) — Workers is D1-only
-- You need large file uploads — Workers has 100 MB request cap
+- You have steady traffic of 100 or more req/sec: a $25/mo AWS deploy will be cheaper
+- You need shards or long-lived game simulations: Durable Object hibernation costs add up fast
+- Your p99 latency matters and cold starts are not acceptable: a warm VPS is more predictable
+- You need Postgres (`postgres-live` feature): Workers supports D1 only
+- You need large file uploads: Workers has a 100 MB request cap
 
-For those cases, see [Deploy](/operations/deploy) shape 2 (AWS ECS + Aurora) or [Pylon Cloud](/cloud).
+For those cases, see [Deploy](/operations/deploy) shape 2 (AWS ECS and Aurora) or [Pylon Cloud](/cloud).
 
-## TL;DR
+## Checklist
 
 1. Enable Cloudflare budget alerts the day you deploy.
-2. Add a kill switch KV before you care about users (easier to remove than add under pressure).
-3. Client-side: always backoff, always jitter, always cursor pagination.
-4. Server-side: gate anon traffic at the edge, not in the Worker.
+2. Add a kill switch KV namespace before problems start. It is easier to remove than to add under pressure.
+3. Client-side: always use backoff, jitter, and cursor pagination.
+4. Server-side: gate anonymous traffic at the edge, not in the Worker.

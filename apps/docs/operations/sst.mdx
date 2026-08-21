@@ -381,10 +381,10 @@ scaling: {
 
 Requirements for a correct multi-replica deploy:
 
-1. **Postgres backend** ✅ — `DATABASE_URL` set, no SQLite. The default config satisfies this.
-2. **Externalized file storage** ⚠️ — the default config points at S3, which isn't wired yet (see the warning under *The default config*). Use `PYLON_FILES_PROVIDER=stack0` for externalized files, or keep a single replica on the EFS + SQLite shape.
-3. **Sticky WebSocket sessions** ✅ — `stickySessions: true` on the load balancer. The default config satisfies this.
-4. **Cross-replica live fanout** ❌ — WebSocket broadcasts are in-process by default, so a mutation handled by replica A never reaches clients on replica B until their next `reconcile()`. The default config does **not** address this; set the cluster bus before scaling past one replica.
+1. **Postgres backend** ✅: `DATABASE_URL` is set, with no SQLite. The default config satisfies this requirement.
+2. **Externalized file storage** ⚠️: the default config points at S3, which is not wired yet (see the warning under *The default config*). Use `PYLON_FILES_PROVIDER=stack0` for externalized files, or keep a single replica on the EFS and SQLite shape.
+3. **Sticky WebSocket sessions** ✅: `stickySessions: true` on the load balancer. The default config satisfies this requirement.
+4. **Cross-replica live fanout** ❌: WebSocket broadcasts are in-process by default, so a mutation handled by replica A never reaches clients on replica B until their next `reconcile()`. The default config does not address this. Set the cluster bus before scaling past one replica.
 
 For cross-replica fanout, run ElastiCache Redis and point every replica at it with `PYLON_CLUSTER_BUS`. Pylon refuses to boot if the bus is set but unreachable (loud failure beats silent split-brain). See [Horizontal scaling](/operations/scaling).
 
@@ -402,7 +402,7 @@ new sst.aws.Service("PylonService", {
 });
 ```
 
-For shard-based multiplayer, prefer dedicated single-replica services per region — shards don't horizontally scale within a region.
+For shard-based multiplayer, prefer dedicated single-replica services per region. Shards do not scale horizontally within a region.
 
 ## Observability
 
@@ -418,31 +418,31 @@ new sst.aws.Service("PylonService", {
 Logs ship to CloudWatch automatically. For richer observability:
 
 - **Metrics**: Pylon exposes `/metrics` in Prometheus format. Scrape with [AWS Managed Prometheus](https://aws.amazon.com/prometheus/) or [Grafana Cloud](https://grafana.com/products/cloud/).
-- **Traces**: Add OpenTelemetry exporter env vars and SST will inject the right IAM permissions for X-Ray.
+- **Traces**: add OpenTelemetry exporter environment variables, and SST injects the right IAM permissions for X-Ray.
 
 ## Compared to Pylon Cloud
 
-If you're not committed to AWS, [Pylon Cloud](/cloud) gives you the same managed Postgres + S3 + TLS + WebSocket-aware load balancing with one CLI command (`pylon deploy --target cloud`) and per-use pricing. SST is the right choice when:
+If you are not committed to AWS, [Pylon Cloud](/cloud) gives you the same managed Postgres, S3, TLS, and WebSocket-aware load balancing with one CLI command (`pylon deploy --target cloud`) and per-use pricing. SST is the right choice when:
 
-- You need to live in AWS (compliance, existing infra, RI commitments)
+- You must run in AWS (compliance, existing infrastructure, reserved instance commitments)
 - You want to compose Pylon with other AWS services (Bedrock, SageMaker, IoT Core, Kinesis)
-- You want full IaC control over networking, IAM, secrets
+- You want full infrastructure-as-code control over networking, IAM, and secrets
 
 Both are valid. Pylon's wire protocol is identical regardless of how you host it.
 
 ## Troubleshooting
 
-**WebSocket connections fail with 504** — ALB idle timeout defaults to 60s. The default config bumps it to 1 hour via `idleTimeout: "3600 seconds"`.
+**WebSocket connections fail with 504.** The ALB idle timeout defaults to 60s. The default config bumps it to 1 hour with `idleTimeout: "3600 seconds"`.
 
-**Cold start takes 10+ minutes the first time** — Aurora Serverless v2's first cold start provisions storage. Subsequent deploys are `<2 min`.
+**Cold start takes 10+ minutes the first time.** Aurora Serverless v2's first cold start provisions storage. Subsequent deploys take under 2 minutes.
 
-**Uploads don't land in S3** — expected: the runtime's storage selector doesn't wire the S3 backend yet (see the warning under *The default config*), so `PYLON_FILES_PROVIDER=s3` writes to local container disk. Use `PYLON_FILES_PROVIDER=stack0` for externalized storage, or the single-replica EFS + SQLite shape. (The `link: [uploads]` IAM grant is still correct for when S3 lands.)
+**Uploads do not land in S3.** This is expected: the runtime's storage selector does not wire the S3 backend yet (see the warning under *The default config*), so `PYLON_FILES_PROVIDER=s3` writes to local container disk. Use `PYLON_FILES_PROVIDER=stack0` for externalized storage, or use the single-replica EFS and SQLite shape instead. (The `link: [uploads]` IAM grant is still correct for when S3 support lands.)
 
-**Local dev errors `connection refused`** — Postgres isn't running. `docker compose -f docker-compose.dev.yml ps` should show the `db` service `Up`. If not: `docker compose up -d db`.
+**Local dev errors with `connection refused`.** Postgres is not running. `docker compose -f docker-compose.dev.yml ps` should show the `db` service as `Up`. If it does not, run `docker compose up -d db`.
 
-**Local dev sessions disappear on restart** — sessions are stored in Postgres now (the same `DATABASE_URL`), so they persist as long as the Postgres volume does. If you `docker compose down -v` (note `-v`), the volume is destroyed and sessions clear.
+**Local dev sessions disappear on restart.** Sessions are stored in Postgres now (the same `DATABASE_URL`), so they persist as long as the Postgres volume does. If you run `docker compose down -v` (note the `-v` flag), the volume is destroyed and sessions clear.
 
-**Secrets aren't visible in the container** — make sure you ran `sst secret set` in the same stage you're deploying to. Secrets are per-stage.
+**Secrets are not visible in the container.** Make sure you ran `sst secret set` in the same stage you are deploying to. Secrets are set per stage.
 
 ## Cost optimization
 
@@ -456,7 +456,7 @@ Both are valid. Pylon's wire protocol is identical regardless of how you host it
 | CloudWatch logs | ~$0.50/GB | Set `retention: "7 days"` for non-prod |
 | Secrets Manager | $0.40/secret/mo | Few secrets; minor cost |
 
-A bare-bones non-prod stack runs ~$30/mo; production with NAT + multi-AZ runs ~$80–150/mo depending on traffic. For low-traffic apps, [Pylon Cloud](/cloud) is often cheaper than the AWS minimums.
+A bare-bones non-production stack runs about $30/mo. Production with NAT and multi-AZ runs about $80 to $150/mo, depending on traffic. For low-traffic apps, [Pylon Cloud](/cloud) is often cheaper than the AWS minimums.
 
 ## Reference config
 

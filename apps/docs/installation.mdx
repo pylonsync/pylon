@@ -6,12 +6,12 @@ description: "Install the Pylon CLI and runtime."
 ## Requirements
 
 - **Bun** ≥ 1.0 is a runtime dependency. The `pylon` server binary spawns Bun as a child process to run TypeScript functions and render React SSR. Every install path below except Pylon Cloud needs Bun on the host.
-- **Rust** — a recent stable toolchain (edition 2021). Only needed if you build the CLI from source; the prebuilt binary and Docker image need no Rust.
+- **Rust:** a recent stable toolchain (edition 2021). You need it only if you build the CLI from source. The prebuilt binary and Docker image need no Rust.
 - **Node.js** ≥ 18 (optional, for client tooling)
 
-## Fastest start — scaffold an app
+## Fastest start: scaffold an app
 
-The quickest path to a running full-stack app is the project scaffolder — no global install required, because it wires `@pylonsync/cli` in as a dev dependency:
+The quickest path to a running full-stack app is the project scaffolder. It needs no global install, because it adds `@pylonsync/cli` as a dev dependency:
 
 ```bash
 npm create @pylonsync/pylon@latest my-app
@@ -19,18 +19,18 @@ cd my-app
 npm run dev
 ```
 
-That scaffolds a full-stack SSR app (schema, policies, functions, and file-based React routes under `app/`) and `npm run dev` runs the bundled CLI. Install the standalone CLI below if you want `pylon` on your `PATH` for other projects or CI.
+This scaffolds a full-stack SSR app (schema, policies, functions, and file-based React routes under `app/`). `npm run dev` runs the bundled CLI. Install the standalone CLI below if you want `pylon` on your `PATH` for other projects or CI.
 
-## Skip the install — use Pylon Cloud
+## Skip the install: use Pylon Cloud
 
-If you don't want to manage a binary or a server, [Pylon Cloud](/cloud) hosts the same backend you'd run yourself. Sign up at [www.pylonsync.com/dashboard](https://www.pylonsync.com/dashboard), then:
+If you do not want to manage a binary or a server, [Pylon Cloud](/cloud) hosts the same backend you would run yourself. Sign up at [www.pylonsync.com/dashboard](https://www.pylonsync.com/dashboard), then:
 
 ```bash
 pylon login
 pylon deploy --target cloud
 ```
 
-You'll still want the CLI for local development and deploys; install it below.
+You will still want the CLI for local development and deploys. Install it below.
 
 ## Install the CLI
 
@@ -48,7 +48,7 @@ cargo install --git https://github.com/pylonsync/pylon pylon-cli
 ```
 </CodeGroup>
 
-The one-line installer downloads a prebuilt binary to `~/.local/bin`. Linux and macOS, x86_64 and arm64. No Rust toolchain required.
+The one-line installer downloads a prebuilt binary to `~/.local/bin`. It supports Linux and macOS, on x86_64 and arm64. It needs no Rust toolchain.
 
 Verify:
 
@@ -61,7 +61,7 @@ pylon doctor
 
 ## Install Bun
 
-Pylon uses Bun to run TypeScript server functions and to bundle the client code generator. If you don't have it:
+Pylon uses Bun to run TypeScript server functions and to bundle the client code generator. If you do not have it:
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
@@ -134,7 +134,7 @@ my-app/
   pylon.client.ts        # generated
 ```
 
-`pylon dev app.ts` watches `app.ts` + `functions/` and regenerates `pylon.manifest.json` + `pylon.client.ts` on every change.
+`pylon dev app.ts` watches `app.ts` and `functions/`, and regenerates `pylon.manifest.json` and `pylon.client.ts` on every change.
 
 ## Environment variables
 
@@ -146,9 +146,9 @@ my-app/
 | `PYLON_CORS_ORIGIN` | from `manifest.auth.trustedOrigins` | CORS allowlist override (comma-separated). `*` only in dev. Loopback always auto-trusted. |
 | `PYLON_DEV_MODE` | `true` | Dev-only behavior (generous rate limits, CORS `*` fallback when neither manifest nor env is set) |
 | `PYLON_PORT` | `4321` | HTTP port |
-| `PYLON_RATE_LIMIT_MAX` | `100` | Max **anonymous** requests per window (per IP). Kept tight — anon traffic is the brute-force surface. |
-| `PYLON_RATE_LIMIT_MAX_AUTHED` | `1000` | Max **authenticated** requests per window (per user id). Higher than anon because polling dashboards routinely exceed 100/min for a single legit user. |
-| `PYLON_RATE_LIMIT_WINDOW` | `60` | Window in seconds (applies to both anon + authed limits). |
+| `PYLON_RATE_LIMIT_MAX` | `100` | Max anonymous requests per window (per IP). Kept low, because anonymous traffic is the main target for repeated login attempts. |
+| `PYLON_RATE_LIMIT_MAX_AUTHED` | `1000` | Max authenticated requests per window (per user id). Higher than the anonymous limit, because polling dashboards routinely exceed 100 requests/min for one legitimate user. |
+| `PYLON_RATE_LIMIT_WINDOW` | `60` | Window in seconds. Applies to both the anonymous and authenticated limits. |
 | `PYLON_FN_RATE_LIMIT_MAX` | `30` | Function calls per window |
 
 See the [CLI reference](/operations/cli) for the full list.

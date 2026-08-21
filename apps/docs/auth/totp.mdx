@@ -94,7 +94,7 @@ Failure modes:
 | 401 | `INVALID_TOTP_CODE` | Wrong code (or wrong backup code) |
 | 429 | `RATE_LIMITED` | Per-account rate limit hit; `retry_after_secs` in the response |
 | 500 | `TOTP_BAD_SECRET` | Stored seed corrupt or `PYLON_TOTP_ENCRYPTION_KEY` missing |
-| 409 | `TOTP_RACE` | Two parallel verifies tried to consume the same backup code — only one wins |
+| 409 | `TOTP_RACE` | Two parallel verifies tried to consume the same backup code. Only one wins |
 
 ## Backup codes
 

@@ -4,11 +4,11 @@ sidebarTitle: "vs. Supabase"
 description: "Compare Supabase's Postgres platform with Pylon's single-server model."
 ---
 
-[Supabase](https://supabase.com) is a well-known open-source Firebase alternative. It's a managed Postgres + GoTrue + PostgREST + Realtime + Storage stack with web/mobile SDKs. Pylon hits the same problem space with a different shape.
+[Supabase](https://supabase.com) is a well-known open-source Firebase alternative. It is a managed stack of Postgres, GoTrue, PostgREST, Realtime, and Storage, with web and mobile SDKs. Pylon solves the same problems with a different architecture.
 
 ## TL;DR
 
-- **Choose Supabase** if you want full Postgres SQL surface, you're comfortable with multi-service deployments, or you need pgvector + edge functions + storage in one place.
+- **Choose Supabase** if you want full Postgres SQL surface, you are comfortable with multi-service deployments, or you need pgvector, edge functions, and storage in one place.
 - **Choose Pylon** if you want one binary on a VPS, native faceted search, or a tighter integration between sync and policies.
 
 ## Architecture
@@ -20,7 +20,7 @@ description: "Compare Supabase's Postgres platform with Pylon's single-server mo
 | Backed by | Rust server + a bundled Bun runtime for your TS | Postgres + Go + Elixir + Deno |
 | Self-host | binary + Bun + `systemctl` | Docker Compose stack |
 
-Supabase is a curated stack of best-in-class single-purpose services. Pylon is one binary that does many of those things itself. Both are valid; pick the trade-off.
+Supabase is a curated stack of dedicated single-purpose services. Pylon is one binary that does many of those things itself. Both are valid choices with different trade-offs.
 
 ## Same shape
 
@@ -38,7 +38,7 @@ Both ship:
 
 - **Full Postgres** — every Postgres feature works: CTEs, window functions, JSONB operators, materialized views, foreign data wrappers, GIST indexes, partitioning. Pylon's query layer is intentionally limited.
 - **pgvector at scale** — approximate indexes (HNSW/IVFFlat) for million-row vector tables. Pylon ships built-in [vector search](/concepts/vector-search) (`field.vector(dims)` + `ctx.db.vectorSearch`, exact k-NN with perfect recall) which is the simpler answer to ~100k rows per entity; past that, pgvector's ANN indexes win.
-- **PostgREST auto-API** — every table becomes a REST endpoint automatically. Pylon also auto-generates these (`/api/entities/<name>`) but PostgREST has 8 years of battle-testing.
+- **PostgREST auto-API** — every table becomes a REST endpoint automatically. Pylon also auto-generates these (`/api/entities/<name>`), but PostgREST has 8 years of production use behind it.
 - **Edge Functions** — globally distributed Deno runtime; nice for latency-sensitive endpoints. Pylon functions run in your single binary's region.
 - **Larger ecosystem** — more libraries, more tutorials, more StackOverflow answers, more job postings.
 - **Database UI** — Supabase Studio is excellent for SQL exploration. Pylon Studio is more focused on entity inspection.
@@ -47,10 +47,10 @@ Both ship:
 
 - **One service** — one binary plus Bun, one port, one config file. Compare to a Docker Compose stack.
 - **Faceted search** — Supabase has Postgres `tsvector` for FTS but no native facets ([docs](https://supabase.com/docs/guides/database/full-text-search)). Pylon ships FTS5 + roaring-bitmap facet counts.
-- **Game shards** — `Shard<S: SimState>` for tick-based multiplayer (authored in Rust, with a `useShard` client hook; there's no TypeScript shard-authoring API yet). Supabase has nothing equivalent.
+- **Game shards** — `Shard<S: SimState>` for tick-based multiplayer (authored in Rust, with a `useShard` client hook; there is no TypeScript shard-authoring API yet). Supabase has nothing equivalent.
 - **In-process mutations** — Pylon mutations run as typed handler-level transactions in the app process. Supabase Edge Functions are separate Deno functions that call Postgres over HTTP or a database client, so you manage transaction boundaries explicitly.
 - **CRDTs** — Pylon integrates Loro for collaborative editing. Supabase Realtime gives you Postgres Changes, Broadcast, and Presence; CRDT-backed collaborative data is still something you bring yourself.
-- **Plugin system** — built-in plugins for cross-cutting concerns such as search, files, presence, audit logs, and payments. Supabase has extensions, but they're Postgres extensions, not framework-level.
+- **Plugin system** — built-in plugins for cross-cutting concerns such as search, files, presence, audit logs, and payments. Supabase has extensions, but they are Postgres extensions, not framework-level.
 - **TypeScript declarative schema** — `entity("User", {...})` in TS. Supabase uses SQL migrations; you can codegen TS types from them but the source of truth is SQL.
 
 ## Functions
@@ -63,7 +63,7 @@ Both ship:
 | Atomic with caller transaction | ✅ for mutations | Manual transaction management |
 | Latency | In-process for app logic | Region and network dependent |
 
-Pylon's "mutation = transaction" model is a meaningful difference. Throw inside a `mutation` and everything rolls back. Supabase Edge Functions can do this with explicit transaction handling, but it's not the default shape.
+Pylon's "mutation = transaction" model is a meaningful difference. Throw inside a `mutation` and everything rolls back. Supabase Edge Functions can do this with explicit transaction handling, but it is not the default shape.
 
 ## Pricing
 
@@ -78,7 +78,7 @@ Supabase's free tier is generous for prototypes and includes managed Postgres. P
 
 ## Migrating from Supabase
 
-If you're moving an existing Supabase app:
+If you are moving an existing Supabase app:
 
 | Supabase | Pylon |
 | --- | --- |
@@ -94,13 +94,13 @@ If you're moving an existing Supabase app:
 Pylon's entity API is currently its only in-process data API. Apps that rely on raw Postgres queries such as CTEs, window functions, materialized views, or pgvector have two options:
 
 1. **Express the logic in a Pylon `action`** in TypeScript — for joins and aggregates this is usually fine, and you keep the type-safe entity model.
-2. **Run a sidecar against the same Postgres** — Pylon doesn't lock the DB; you can connect any tool that speaks Postgres for analytics, BI, or specialized queries.
+2. **Run a sidecar against the same Postgres** — Pylon does not lock the database; you can connect any tool that speaks Postgres for analytics, BI, or specialized queries.
 
-Raw SQL exposure from inside `action` handlers (e.g. `ctx.pg.query(sql, params)` in `postgres-live` builds) is on the roadmap; there's no architectural reason to gate-keep it. For now, most app workloads fit the entity API; if yours needs more Postgres surface, Supabase has a head start.
+Raw SQL exposure from inside `action` handlers (for example `ctx.pg.query(sql, params)` in `postgres-live` builds) is on the roadmap; there is no architectural reason to withhold it. For now, most app workloads fit the entity API. If yours needs more Postgres surface, Supabase has a head start.
 
 ## Pylon tradeoffs
 
-Supabase's Postgres-native data layer is more flexible than Pylon's for analytics, complex queries, and integrations with tools that speak SQL (Metabase, Hex, Mode, Retool). If your data model needs to interop with a wider data ecosystem, Supabase's "it's just Postgres" is genuinely valuable.
+Supabase's Postgres-native data layer is more flexible than Pylon's for analytics, complex queries, and integrations with tools that speak SQL (Metabase, Hex, Mode, Retool). If your data model needs to work with a wider data ecosystem, Supabase's "it is just Postgres" advantage is genuinely valuable.
 
 ## Both / and
 

@@ -3,9 +3,9 @@ title: Deploying to Vercel
 description: "Deploy a Next.js and Pylon app to Vercel with the required env, cookie, and CORS settings."
 ---
 
-One supported production shape is a **Next.js frontend on Vercel** with the **Pylon backend on Pylon Cloud** (Fly Machines under the hood). This guide takes you from a scaffolded Next.js + Pylon monorepo to a live production URL. (If you don't need a separate Next.js app, Pylon's default scaffold serves server-rendered React and the API from one port — see [Deploy](/operations/deploy) — and you can skip Vercel entirely.)
+One supported production shape puts the Next.js frontend on Vercel and the Pylon backend on Pylon Cloud (Fly Machines internally). This guide takes you from a scaffolded Next.js and Pylon monorepo to a live production URL. If you do not need a separate Next.js app, Pylon's default scaffold serves server-rendered React and the API from one port (see [Deploy](/operations/deploy)), and you can skip Vercel entirely.
 
-If you haven't scaffolded yet, generate the Next.js + Pylon monorepo:
+If you have not scaffolded yet, generate the Next.js and Pylon monorepo:
 
 ```bash
 pylon init my-app --frontend nextjs
@@ -13,7 +13,7 @@ cd my-app
 bun install && bun dev
 ```
 
-That gives you `apps/api` (Pylon backend) and `apps/web` (Next.js frontend) ready to deploy — `apps/web/next.config.js` already proxies `/api/*` to the backend on `:4321`.
+That gives you `apps/api` (Pylon backend) and `apps/web` (Next.js frontend), ready to deploy. `apps/web/next.config.js` already proxies `/api/*` to the backend on `:4321`.
 
 ## 1. Deploy the backend to Pylon Cloud
 
@@ -23,9 +23,9 @@ Sign in at [www.pylonsync.com](https://www.pylonsync.com), create an organizatio
 https://pylon-<your-project-slug>.fly.dev
 ```
 
-Push to the branch you configured (default: `main`) and the cloud auto-deploys.
+Push to the branch you configured (default: `main`), and Pylon Cloud deploys it automatically.
 
-You can also add a custom domain (`api.example.com`) in the project's **Domains** tab. Recommended once you go live — keeps the URL stable across project renames.
+You can also add a custom domain (`api.example.com`) in the project's **Domains** tab. We recommend this once you go live, because it keeps the URL stable across project renames.
 
 ## 2. Deploy the frontend to Vercel
 
@@ -33,10 +33,10 @@ Create a Vercel project pointed at the same GitHub repo. In **Project Settings �
 
 - **Framework Preset**: Next.js (auto-detected)
 - **Root Directory**: `apps/web`
-- **Install Command**: `bun install` (or your PM)
+- **Install Command**: `bun install` (or your package manager)
 - **Build Command**: `next build`
 
-Vercel will pick up `apps/web/next.config.js` automatically.
+Vercel picks up `apps/web/next.config.js` automatically.
 
 ## 3. Set the backend URL
 
@@ -46,17 +46,17 @@ In **Project Settings → Environment Variables**, add:
 | --- | --- | --- |
 | `PYLON_TARGET` | `https://pylon-<your-slug>.fly.dev` | Production, Preview |
 
-The Next.js template's `next.config.js` rewrites `/api/*` to `${PYLON_TARGET}/api/*`, so the browser always talks same-origin to Vercel and Vercel forwards to your Pylon backend. **This is the recommended pattern** — it sidesteps CORS preflights and lets the session cookie ride natively.
+The Next.js template's `next.config.js` rewrites `/api/*` to `${PYLON_TARGET}/api/*`, so the browser always talks same-origin to Vercel, and Vercel forwards the request to your Pylon backend. This is the recommended pattern: it avoids CORS preflight requests and lets the session cookie work without cross-site cookie settings.
 
 For local dev (`bun run dev`), `PYLON_TARGET` defaults to `http://localhost:4321` so no `.env.local` is required when your backend is `pylon dev` on the same machine.
 
 <Tip>
-  If you'd rather skip the rewrite and have the browser talk to your Pylon backend directly, set `Domain=.example.com` on the session cookie + `allowed-origins` in your Pylon manifest to your Vercel hostname. See the [cookie checklist](#cookie-checklist) below.
+  If you would rather skip the rewrite and have the browser talk to your Pylon backend directly, set `Domain=.example.com` on the session cookie, and set `allowed-origins` in your Pylon manifest to your Vercel hostname. See the [cookie checklist](#cookie-checklist) below.
 </Tip>
 
 ## 4. Configure CORS (only if you skipped the rewrite)
 
-If your Next.js rewrite proxies `/api/*`, **you don't need CORS** — the browser only sees the Vercel origin.
+If your Next.js rewrite proxies `/api/*`, you do not need CORS. The browser only sees the Vercel origin.
 
 If your frontend talks to Pylon Cloud directly (`fetch("https://api.example.com/api/fn/...")` from the browser), open your project's **Settings → CORS** tab on Pylon Cloud and add your Vercel deployment URLs:
 
@@ -74,19 +74,19 @@ Vercel mints a unique preview URL per deployment, so use the wildcard pattern fo
 git push origin main
 ```
 
-- **Vercel build**: should take ~30s. Watch the deploy log for the build step.
-- **Pylon Cloud deploy**: parallel; check the project's **Deployments** tab.
+- **Vercel build**: takes about 30 seconds. Watch the deploy log for the build step.
+- **Pylon Cloud deploy**: runs in parallel. Check the project's **Deployments** tab.
 
 Once both finish, open your Vercel URL. You should see your app, and the Network tab should show `/api/*` requests succeeding (status 200, `Set-Cookie` header on auth endpoints).
 
 ## Cookie checklist {#cookie-checklist}
 
-If session cookies aren't sticking, work through this list:
+If session cookies are not sticking, work through this list:
 
-- **Cookie name matches.** Pylon emits `${app_name}_session`. Your `createPylonServer({ cookieName })` and `createPylonProxy({ cookieName })` must pass the same name. Mismatch = silent 401s.
-- **Same-site = Lax.** Pylon defaults to `SameSite=Lax`, which works with Next.js's same-origin pattern. If you must use cross-site (skipping the rewrite), set `PYLON_COOKIE_SAME_SITE=None` and `PYLON_COOKIE_SECURE=true`.
-- **Domain matches.** If frontend is `app.example.com` and backend is `api.example.com`, set `PYLON_COOKIE_DOMAIN=.example.com` so the cookie applies to both subdomains. Don't set this if you're using the rewrite pattern — host-only cookies are tighter.
-- **iOS Chrome / Safari.** iOS browsers reject domain-scoped cookies when a host-only cookie of the same name is present. Pylon v0.3.140+ handles this by pairing every domain-scoped set with a host-only `Max-Age=0` clear. Make sure your Pylon backend is on a recent framework version.
+- **Cookie name matches.** Pylon emits `${app_name}_session`. Your `createPylonServer({ cookieName })` and `createPylonProxy({ cookieName })` must pass the same name. A mismatch causes silent 401 errors.
+- **Same-site defaults to Lax.** Pylon defaults to `SameSite=Lax`, which works with Next.js's same-origin pattern. If you must use cross-site cookies (skipping the rewrite), set `PYLON_COOKIE_SAME_SITE=None` and `PYLON_COOKIE_SECURE=true`.
+- **Domain matches.** If the frontend is `app.example.com` and the backend is `api.example.com`, set `PYLON_COOKIE_DOMAIN=.example.com` so the cookie applies to both subdomains. Do not set this if you are using the rewrite pattern; host-only cookies are tighter.
+- **iOS Chrome and Safari.** iOS browsers reject domain-scoped cookies when a host-only cookie of the same name is present. Pylon v0.3.140+ handles this by pairing every domain-scoped set with a host-only `Max-Age=0` clear. Make sure your Pylon backend is on a recent framework version.
 
 ## Custom domain end-to-end
 
@@ -102,17 +102,17 @@ With this layout you set:
 - Vercel env var: `PYLON_TARGET=https://api.example.com`
 - Your `next.config.js` rewrite continues to forward `/api/*` to `${PYLON_TARGET}/api/*`
 
-No CORS config needed; the browser only ever talks to `app.example.com`.
+No CORS configuration is needed. The browser only ever talks to `app.example.com`.
 
 ## Troubleshooting
 
-**Build fails: "Module not found: @pylonsync/next".** You're probably building from the repo root instead of `apps/web`. Set Vercel's **Root Directory** to `apps/web`.
+**Build fails: "Module not found: @pylonsync/next".** You are probably building from the repo root instead of `apps/web`. Set Vercel's **Root Directory** to `apps/web`.
 
-**`Too many requests. Limit: 100 per 60s` from the dashboard.** Pylon defaults to 100 requests/min per authenticated user. Bump it via `PYLON_RATE_LIMIT_MAX_AUTHED` (default 1000 since v0.3.148) on your Pylon Cloud project.
+**`Too many requests. Limit: 100 per 60s` from the dashboard.** Pylon defaults to 100 requests/min per authenticated user. Raise it with `PYLON_RATE_LIMIT_MAX_AUTHED` (default 1000 since v0.3.148) on your Pylon Cloud project.
 
-**`PYLON_BACKEND_UNREACHABLE` errors in Next.js logs.** Your Pylon Cloud machine is stopped (autostop after idle) or restarting. The server helpers time out after 5s; an `error.tsx` boundary makes this graceful. Restart the machine from the project's **Overview** tab.
+**`PYLON_BACKEND_UNREACHABLE` errors in Next.js logs.** Your Pylon Cloud machine is stopped (autostop after idle) or restarting. The server helpers time out after 5s, and an `error.tsx` boundary makes this graceful. Restart the machine from the project's **Overview** tab.
 
-**Live queries don't update across tabs.** The sync engine WebSocket may be misrouted. Check that `PYLON_TARGET` resolves and that your browser's WebSocket connection (DevTools → Network → WS) connects to `wss://<your-target>/api/sync` successfully.
+**Live queries do not update across tabs.** The sync engine WebSocket may be misrouted. Check that `PYLON_TARGET` resolves, and that your browser's WebSocket connection (DevTools → Network → WS) connects to `wss://<your-target>/api/sync` successfully.
 
 ## Next steps
 

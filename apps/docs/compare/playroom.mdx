@@ -4,11 +4,11 @@ sidebarTitle: "vs. Playroom Kit"
 description: "Compare Playroom Kit's managed web multiplayer model with Pylon's self-hosted server authority."
 ---
 
-[Playroom Kit](https://playroomkit.com) is a managed multiplayer SDK aimed at web games and collaborative apps (HTML5, Unity WebGL, browser puzzles). It optimizes hard for "ship a working multiplayer game in an afternoon" — at the cost of being managed-only infrastructure.
+[Playroom Kit](https://playroomkit.com) is a managed multiplayer SDK aimed at web games and collaborative apps (HTML5, Unity WebGL, browser puzzles). It is built to ship a working multiplayer game in an afternoon, at the cost of being managed-only infrastructure.
 
 ## TL;DR
 
-- **Choose Playroom** if you're shipping a casual web game this week, you don't want to operate any backend, and you accept managed-only deployment.
+- **Choose Playroom** if you are shipping a casual web game this week, you do not want to operate any backend, and you accept managed-only deployment.
 - **Choose Pylon** if you want self-hosting, full server authority, persistent domain data, or a dedicated server runtime.
 
 ## Big picture
@@ -28,16 +28,16 @@ description: "Compare Playroom Kit's managed web multiplayer model with Pylon's 
 
 ## Architecture
 
-Playroom uses a **host-authoritative** room-state model: when players join a room, one participant is elected host and is responsible for authoritative state changes. Other participants send changes through that model. For unreliable state updates, Playroom can use WebRTC; reliable updates go through its WebSocket server.
+Playroom uses a host-authoritative room-state model: when players join a room, one participant is elected host and is responsible for authoritative state changes. Other participants send changes through that model. For unreliable state updates, Playroom can use WebRTC; reliable updates go through its WebSocket server.
 
 This model fits a four-player trivia game with no custom server code. It becomes harder to use when:
 
-- The host has a slow phone and tanks the room
+- A host with a slow phone slows the whole room
 - The host disconnects mid-game and state has to be re-synced from peers
 - You need server-side validation (anti-cheat, scoring authority)
 - Concurrent players exceed what the elected host and room model can comfortably simulate
 
-Pylon, Colyseus, and Nakama use a **server-authoritative** model: the server runs the tick loop, all state lives on the server, and clients send inputs and receive state. It costs more to operate but tolerates unreliable or hostile clients better.
+Pylon, Colyseus, and Nakama use a server-authoritative model: the server runs the tick loop, all state lives on the server, and clients send inputs and receive state. It costs more to operate but tolerates unreliable or hostile clients better.
 
 Pylon's authoritative tick loop is written in Rust with the `Shard<S: SimState>` crate, and clients connect through the `useShard` React hook. App data, auth, and functions stay in TypeScript, but the shard simulation itself requires Rust.
 
@@ -47,13 +47,13 @@ Pylon's authoritative tick loop is written in Rust with the `Shard<S: SimState>`
 - **Web/mobile cross-play** — handles different platforms invisibly.
 - **Fast prototypes** — the hosted model is excellent for hobby projects and throwaway experiments.
 - **No backend to deploy** — at all. Add the SDK, ship.
-- **Phone-as-controller** — Playroom has a slick "stream from your laptop, control from your phone" pattern.
+- **Phone-as-controller** — Playroom has a polished "stream from your laptop, control from your phone" pattern.
 
 ## Where Pylon is better
 
 - **You own your backend** — no vendor outage takes down your game.
-- **Server authority** — players can't hack the host. Critical for competitive games or anything with persistent rewards.
-- **Persistent player data** — every player has a real account with stable identity, not a per-room guest. Inventory, progress, friends, leaderboards, cosmetics — all first-class.
+- **Server authority** — players cannot hack the host. Critical for competitive games or anything with persistent rewards.
+- **Persistent player data** — every player has a real account with stable identity, not a per-room guest. Inventory, progress, friends, leaderboards, and cosmetics are all built in.
 - **Higher authority ceiling** — server tick loops scale beyond what one elected client can safely simulate.
 - **Backend logic** — server-side validation, anti-cheat, complex matchmaking, fraud detection.
 - **Self-host** — no per-player pricing as you grow.
@@ -84,7 +84,7 @@ Pylon self-hosting costs the underlying infrastructure. Pylon Cloud uses plan qu
 
 If you started with Playroom and outgrew it:
 
-1. **Move authority to the server** — port your "host" logic into a `SimState::tick` impl on the Pylon side (this is Rust — Pylon's shard authority isn't a TypeScript API today, so budget for that rewrite)
+1. **Move authority to the server** — port your "host" logic into a `SimState::tick` impl on the Pylon side (this is Rust; Pylon's shard authority is not a TypeScript API today, so budget for that rewrite)
 2. **Convert room state from key-value to entities** — Playroom's `getState`/`setState` pattern maps to Pylon's entity CRUD
 3. **Add real auth** — replace guest sessions with magic-code sign-in (or keep guest sessions for "just play" via `/api/auth/guest`)
 4. **Persist player data** — move from Playroom's volatile state to Pylon entities
@@ -95,8 +95,8 @@ The hardest part is the mental shift from peer-state to server-authoritative. Th
 
 Playroom has a better developer experience for shipping a party game in a weekend than any server-authoritative option, including Pylon. Its web-game SDK, room-code flow, and phone-as-controller support are more polished.
 
-If you're building a hackathon project or an MVP to validate a multiplayer game idea, **start with Playroom**. Migrate to Pylon (or Colyseus, or Nakama) when you outgrow the host-authoritative client model.
+If you are building a hackathon project or an MVP to validate a multiplayer game idea, start with Playroom. Migrate to Pylon (or Colyseus, or Nakama) when you outgrow the host-authoritative client model.
 
 ## Using both
 
-You can use Playroom for the lightweight lobby UX and Pylon for persistent player data + leaderboards + matchmaking, with the clients pulling from both. This is unusual but valid — Playroom's strength is the realtime party-game shape; Pylon's strength is everything else around it.
+You can use Playroom for the lightweight lobby UX and Pylon for persistent player data, leaderboards, and matchmaking, with the clients pulling from both. This is unusual but valid. Playroom's strength is the realtime party-game shape; Pylon's strength is everything else around it.

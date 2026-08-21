@@ -65,7 +65,7 @@ PYLON_COOKIE_SECURE=true
 Hard requirements that fail to start:
 
 - `PYLON_CORS_ORIGIN=*` in non-dev mode is refused
-- In non-dev mode, the CORS gate refuses to start with no trusted origins — declare in `manifest.auth.trustedOrigins` or set `PYLON_CORS_ORIGIN`
+- In non-dev mode, the CORS gate refuses to start with no trusted origins. Declare them in `manifest.auth.trustedOrigins`, or set `PYLON_CORS_ORIGIN`
 - `PYLON_DEV_MODE=true` with `PYLON_ADMIN_TOKEN` unset is refused
 - `/api/__test__/reset` is disabled unless dev + in-memory + loopback
 

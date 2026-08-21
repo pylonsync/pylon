@@ -3,7 +3,7 @@ title: "@pylonsync/webhooks"
 description: "Deliver outbound webhooks with Svix-compatible signatures, retries, and overlapping secret rotation."
 ---
 
-For SaaS apps that want to fire webhooks at their CUSTOMERS' endpoints when domain events happen ("invoice.paid" → customer's URL). Svix-style HMAC-SHA256 signatures so receivers using Svix's reference verifier work unchanged.
+`@pylonsync/webhooks` sends outbound webhooks to your customers' endpoints when domain events happen, for example `invoice.paid` to a customer's URL. It signs each webhook with Svix-style HMAC-SHA256, so receivers that use Svix's reference verifier work without changes.
 
 ## Install
 
@@ -47,7 +47,7 @@ export default action({
 });
 ```
 
-The plugin enqueues delivery jobs to every matching endpoint via Pylon's `ctx.scheduler.runAfter`. Failed deliveries retry on the configured schedule (default: 5s → 5m → 30m → 2h → 5h → 10h → 14h → dead).
+The plugin enqueues delivery jobs to every matching endpoint through Pylon's `ctx.scheduler.runAfter`. Failed deliveries retry on the configured schedule: 5s, 5m, 30m, 2h, 5h, 10h, 14h, then dead (the default).
 
 ## Receiver verification
 
@@ -83,7 +83,7 @@ Customers register webhook URLs by inserting into the `WebhookEndpoint` entity:
 | `headers` | Optional extra headers to attach on each delivery. |
 | `disabled` | Skip delivery without deleting. |
 
-Tenant-scoped policy: `auth.tenantId == data.applicationId or auth.is_admin`. Apps that want a stricter ACL (e.g. only owner role) override this in their manifest.
+Tenant-scoped policy: `auth.tenantId == data.applicationId or auth.is_admin`. Apps that need a stricter policy (for example, only the owner role) override this in their manifest.
 
 ## Delivery audit
 
@@ -96,7 +96,7 @@ Every attempt writes a `WebhookAttempt` row:
 | `failed` | HTTP 4xx/5xx or network error. Retry scheduled. |
 | `dead` | All retries exhausted. Manual reprocess required. |
 
-Read-only entity — customers can view their endpoint's delivery history but can't mutate it.
+This is a read-only entity. Customers can view their endpoint's delivery history, but they cannot change it.
 
 ## Secret rotation
 
@@ -107,4 +107,4 @@ await signWebhook({
 });
 ```
 
-Both signatures appear in the `webhook-signature` header (`v1,<sig-old> v1,<sig-new>`). Receivers accept either — gives customers a window to rotate their stored secret without dropping deliveries.
+Both signatures appear in the `webhook-signature` header (`v1,<sig-old> v1,<sig-new>`). Receivers accept either signature. This gives customers a window to rotate their stored secret without dropping deliveries.
