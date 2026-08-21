@@ -88,6 +88,8 @@ fast_image_resize = { version = "5", features = ["image"] }
 mozjpeg = { version = "0.10", default-features = false }
 webp = "0.3"
 ravif = { version = "0.11", default-features = false, features = ["threading"] }
+# CSPRNG for studio-ticket tokens (server.rs). Workspace-pinned.
+rand = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }

@@ -74,6 +74,7 @@ fn run() -> ExitCode {
         match positional.first().copied() {
             Some("logs") => return commands::cloud_logs::run(&args, json_mode),
             Some("restart") => return commands::cloud_restart::run(&args, json_mode),
+            Some("studio") => return commands::studio::run(&args, json_mode),
             Some("upgrade") => return commands::self_update::run(&args, json_mode),
             Some("whoami") => return commands::whoami::run(&args, json_mode),
             // Commands with focused, flag-level help print it here. Help
@@ -125,6 +126,7 @@ fn run() -> ExitCode {
         Some("runtime") => commands::cloud_runtime::run(&args, json_mode),
         Some("secrets") => commands::cloud_secrets::run(&args, json_mode),
         Some("status") => commands::cloud_status::run(&args, json_mode),
+        Some("studio") => commands::studio::run(&args, json_mode),
         Some("plugins") => commands::plugins::run(&args, json_mode),
         Some("schema") => match positional.get(1).copied() {
             Some("check") => commands::schema::run_check(&args, json_mode),
@@ -183,7 +185,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 44] = [
+const TOP_LEVEL_COMMANDS: [&str; 45] = [
     "backup",
     "billing",
     "build",
@@ -223,6 +225,7 @@ const TOP_LEVEL_COMMANDS: [&str; 44] = [
     "seed",
     "start",
     "status",
+    "studio",
     "test",
     "test:security",
     "version",

@@ -3716,6 +3716,65 @@ fn start_server(
         // What it changes is what happens afterwards. The token stops being
         // something a human carries into a browser, each operator is a
         // separate revocable credential, and actions get a name attached.
+        // Mint a single-use studio ticket. The control plane calls this with
+        // the app's admin token and hands the ticket to `pylon studio`, which
+        // opens /studio/enter?ticket=<t> in the browser. The operator never
+        // sees the admin token.
+        if url == "/admin/studio-ticket" && method == Method::Post {
+            if !dev_admin_open
+                && !verify_admin_or_metrics_auth(
+                    &request,
+                    admin_token.as_deref(),
+                    &cookie_config,
+                    &session_store,
+                    &account_store,
+                    runtime.as_ref(),
+                )
+            {
+                let body = json_error(
+                    "UNAUTHORIZED",
+                    "/admin/studio-ticket requires PYLON_ADMIN_TOKEN or an admin session",
+                );
+                let response = with_security_headers(
+                    Response::from_string(body).with_status_code(401u16).with_header(
+                        Header::from_bytes("Content-Type", "application/json").unwrap(),
+                    ),
+                );
+                let _ = request.respond(response);
+                mt.record_request("POST", 401);
+                return;
+            }
+            let (status, body) = match ensure_studio_ticket_operator(&account_store) {
+                Some(uid) => {
+                    let ticket = mint_studio_ticket(&uid);
+                    (
+                        200u16,
+                        serde_json::json!({
+                            "ticket": ticket,
+                            "path": "/studio/enter",
+                            "expiresInSecs": STUDIO_TICKET_TTL_SECS,
+                        })
+                        .to_string(),
+                    )
+                }
+                None => (
+                    500u16,
+                    json_error(
+                        "STUDIO_TICKET_FAILED",
+                        "could not provision the studio operator",
+                    ),
+                ),
+            };
+            let response = with_security_headers(
+                Response::from_string(body).with_status_code(status).with_header(
+                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                ),
+            );
+            let _ = request.respond(response);
+            mt.record_request("POST", status);
+            return;
+        }
+
         if url == "/admin/operators" || url.starts_with("/admin/operators/") {
             if !dev_admin_open
                 && !verify_admin_or_metrics_auth(
@@ -7300,6 +7359,55 @@ fn start_server(
         // Apps that point `studio.config.ts -> loginUrl` at their own sign-in
         // never send anyone here; this is for deployments whose operators
         // aren't app users, which includes every API-only backend.
+        // Consume a studio ticket and sign in. `pylon studio` opens this URL
+        // after the control plane mints the ticket. A valid ticket mints an
+        // operator session and redirects to /studio; a bad or expired one
+        // redirects to the login page without saying why.
+        if method == Method::Get && url.split('?').next() == Some("/studio/enter") {
+            let ticket = url
+                .split_once('?')
+                .map(|(_, q)| q)
+                .and_then(|q| {
+                    q.split('&')
+                        .filter_map(|p| p.split_once('='))
+                        .find(|(k, _)| *k == "ticket")
+                        .map(|(_, v)| percent_decode_str(&v.replace('+', " ")))
+                })
+                .unwrap_or_default();
+            match consume_studio_ticket(&ticket) {
+                Some(user_id) => {
+                    let session = session_store.create(user_id);
+                    tracing::info!(target: "pylon::auth", "[studio] ticket sign-in");
+                    let response = with_security_headers(
+                        Response::from_string("")
+                            .with_status_code(303u16)
+                            .with_header(Header::from_bytes("Location", "/studio").unwrap())
+                            .with_header(
+                                Header::from_bytes(
+                                    "Set-Cookie",
+                                    cookie_config.set_value(&session.token),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 303);
+                }
+                None => {
+                    let response = with_security_headers(
+                        Response::from_string("")
+                            .with_status_code(303u16)
+                            .with_header(
+                                Header::from_bytes("Location", "/studio/login").unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("GET", 303);
+                }
+            }
+            return;
+        }
+
         if url == "/studio/login" && method == Method::Get {
             // Already an admin? Nothing to do here.
             if studio_access(&rt, &account_store, &auth_ctx) == StudioAccess::Granted {
@@ -8402,6 +8510,122 @@ pub(crate) enum StudioAccess {
 
 /// Resolve [`StudioAccess`] for a request whose `auth_ctx` has already been
 /// through [`lift_admin`].
+// ---------------------------------------------------------------------------
+// Studio access tickets — one-command owner sign-in (`pylon studio`)
+//
+// The operator never sees the app's admin token. The control plane (which
+// holds the token) POSTs /admin/studio-ticket to mint a single-use,
+// short-lived ticket; the browser then GETs /studio/enter?ticket=<t>, which
+// consumes it and mints an operator session. The ticket is bound to a
+// reserved `cloud-owner` operator, so the existing studio_access() operator
+// grant applies unchanged — no new grant path in the security-critical gate.
+// ---------------------------------------------------------------------------
+
+/// Username of the reserved operator that studio tickets sign in as. It is
+/// created on first ticket mint. Its password is random and never surfaced,
+/// so it is a ticket-only identity, not a standing password login.
+const STUDIO_TICKET_OPERATOR: &str = "cloud-owner";
+
+/// A minted ticket's lifetime. The control plane mints it and opens the
+/// browser at once, so two minutes is ample and keeps the window tight.
+const STUDIO_TICKET_TTL_SECS: u64 = 120;
+
+fn studio_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+#[allow(clippy::type_complexity)]
+fn studio_ticket_store(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (String, u64)>> {
+    static STORE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
+    > = std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Mint a single-use studio ticket bound to `operator_user_id`. Returns the
+/// opaque ticket string (64 hex chars from the platform CSPRNG).
+fn mint_studio_ticket(operator_user_id: &str) -> String {
+    use rand::RngCore as _;
+    let mut raw = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let ticket: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    let now = studio_epoch_secs();
+    let mut store = studio_ticket_store().lock().unwrap();
+    // Prune expired entries so unclaimed tickets can't grow the map unbounded.
+    store.retain(|_, (_, exp)| *exp > now);
+    store.insert(
+        ticket.clone(),
+        (operator_user_id.to_string(), now + STUDIO_TICKET_TTL_SECS),
+    );
+    ticket
+}
+
+/// Consume a studio ticket. Returns the bound operator user id when the ticket
+/// is present and unexpired, and removes it so it works only once.
+fn consume_studio_ticket(ticket: &str) -> Option<String> {
+    if ticket.is_empty() {
+        return None;
+    }
+    let mut store = studio_ticket_store().lock().unwrap();
+    let (user_id, expiry) = store.remove(ticket)?;
+    if expiry <= studio_epoch_secs() {
+        return None;
+    }
+    Some(user_id)
+}
+
+/// Find or create the reserved studio-ticket operator, returning its user id.
+fn ensure_studio_ticket_operator(accounts: &pylon_auth::AccountStore) -> Option<String> {
+    let find = || {
+        pylon_auth::operator::list(accounts)
+            .into_iter()
+            .find(|o| o.username == STUDIO_TICKET_OPERATOR)
+            .map(|o| o.user_id)
+    };
+    if let Some(uid) = find() {
+        return Some(uid);
+    }
+    // First mint: create it with a random, never-returned password. On a lost
+    // race with a concurrent mint, `create` errors and we look it up instead.
+    use rand::RngCore as _;
+    let mut raw = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut raw);
+    let pw: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+    match pylon_auth::operator::create(accounts, STUDIO_TICKET_OPERATOR, &pw) {
+        Ok(op) => Some(op.user_id),
+        Err(_) => find(),
+    }
+}
+
+#[cfg(test)]
+mod studio_ticket_tests {
+    use super::*;
+
+    #[test]
+    fn ticket_is_single_use() {
+        let uid = "op_single_use".to_string();
+        let t = mint_studio_ticket(&uid);
+        assert_eq!(consume_studio_ticket(&t), Some(uid)); // first use signs in
+        assert_eq!(consume_studio_ticket(&t), None); // reuse is rejected
+    }
+
+    #[test]
+    fn ticket_rejects_empty_unknown_and_expired() {
+        assert_eq!(consume_studio_ticket(""), None);
+        assert_eq!(consume_studio_ticket("not-a-real-ticket"), None);
+        // An already-expired entry is rejected, not signed in.
+        studio_ticket_store()
+            .lock()
+            .unwrap()
+            .insert("stale".into(), ("op_x".into(), 1));
+        assert_eq!(consume_studio_ticket("stale"), None);
+    }
+}
+
 pub(crate) fn studio_access(
     runtime: &Runtime,
     accounts: &pylon_auth::AccountStore,

@@ -38,6 +38,7 @@ pub mod schema;
 pub mod seed;
 pub mod self_update;
 pub mod start;
+pub mod studio;
 pub mod test;
 pub mod test_security;
 pub mod update;
