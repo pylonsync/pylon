@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 		title: "Pylon for Claude Code: a drop-in skill",
 		description:
 			"Drop in one file and Claude writes Pylon that compiles, from schema and policies through functions and deployment.",
-		url: "https://pylonsync.com/skill",
+		url: "https://www.pylonsync.com/skill",
 		type: "article",
 	},
 	twitter: {

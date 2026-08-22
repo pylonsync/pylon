@@ -9,8 +9,10 @@
   "scripts": {
     "dev": "pylon dev app.ts",
     "start": "pylon start app.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test": "bun test web"
   },
+  "//pylonsync": "PINNED TO 0.4.17, WHICH IS BEHIND WHAT THIS APP NOW USES. web/app/llms.ts (the /llms.txt convention), the raw-body + raw-response route handlers behind web/app/mcp/route.ts, and the Accept: text/markdown page variants all landed in the framework after 0.4.17. Until the release that carries them is on npm, `bun run check` reports missing types for LlmsTxt / FormRequest.body / RouteHandler's RawResponse return, and /llms.txt is not routed. The bump is three lines: these @pylonsync/* pins, the same pins in the devDependency below, and PYLON_IMAGE in the Dockerfile.",
   "dependencies": {
     "@pylon-cloud/ui": "workspace:*",
     "@pylonsync/functions": "0.4.17",

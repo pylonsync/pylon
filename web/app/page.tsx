@@ -1,5 +1,7 @@
 import type { Metadata } from "@pylonsync/react";
 import { MarketingPage } from "@pylon-cloud/ui/components/marketing-home";
+import { JsonLd } from "../lib/agent/json-ld";
+import { homepageGraph } from "../lib/agent/jsonld";
 
 // Auth-bucketed output cache: the runtime keeps TWO identity-free shells
 // (signed-in / signed-out) keyed on the binary `session.exists` bit and picks
@@ -39,5 +41,14 @@ export default function HomePage({
 }: {
 	session?: { exists: boolean };
 }) {
-	return <MarketingPage initialSignedIn={Boolean(session?.exists)} />;
+	return (
+		<>
+			{/* Machine-readable identity: the site, the organization that
+			    publishes it, and the framework itself, as one linked graph. A
+			    parser that reads only this block can answer "what is this, who
+			    makes it, what does it cost, how do I contact them". */}
+			<JsonLd graph={homepageGraph()} />
+			<MarketingPage initialSignedIn={Boolean(session?.exists)} />
+		</>
+	);
 }

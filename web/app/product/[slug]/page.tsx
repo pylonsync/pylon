@@ -20,7 +20,7 @@ interface ProductPageProps {
 export function generateMetadata({ params }: ProductPageProps): Metadata {
 	const p = getProduct(params.slug);
 	if (!p) return { title: "Product — Pylon" };
-	const url = `https://pylonsync.com/product/${p.slug}`;
+	const url = `https://www.pylonsync.com/product/${p.slug}`;
 	return {
 		title: p.metaTitle,
 		description: p.metaDescription,

@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 		title: "Pylon Solutions: local-first, collaboration, AI, mobile",
 		description:
 			"How teams put Pylon's primitives to work across very different products.",
-		url: "https://pylonsync.com/solutions",
+		url: "https://www.pylonsync.com/solutions",
 		type: "website",
 	},
 	twitter: {

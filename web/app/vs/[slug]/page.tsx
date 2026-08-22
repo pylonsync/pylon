@@ -20,7 +20,7 @@ export function generateMetadata({ params }: VsPageProps): Metadata {
 	const c = getComparison(params.slug);
 	if (!c) return { title: "Compare — Pylon" };
 	const title = `${c.keyword}: Pylon — full-stack framework for coding agents`;
-	const url = `https://pylonsync.com/vs/${c.slug}`;
+	const url = `https://www.pylonsync.com/vs/${c.slug}`;
 	return {
 		title,
 		description: c.metaDescription,

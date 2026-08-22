@@ -16,7 +16,7 @@ interface SolutionPageProps {
 export function generateMetadata({ params }: SolutionPageProps): Metadata {
 	const s = getSolution(params.slug);
 	if (!s) return { title: "Solutions — Pylon" };
-	const url = `https://pylonsync.com/solutions/${s.slug}`;
+	const url = `https://www.pylonsync.com/solutions/${s.slug}`;
 	return {
 		title: s.metaTitle,
 		description: s.metaDescription,

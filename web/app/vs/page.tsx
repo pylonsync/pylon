@@ -19,7 +19,7 @@ export const metadata: Metadata = COMPARISONS_ENABLED
 				title: "How Pylon compares — Supabase, Convex, Firebase, InstantDB",
 				description:
 					"Side-by-side comparisons of Pylon against the realtime backends it overlaps with.",
-				url: "https://pylonsync.com/vs",
+				url: "https://www.pylonsync.com/vs",
 				type: "website",
 			},
 			twitter: {

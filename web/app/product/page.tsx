@@ -14,7 +14,7 @@ export const metadata: Metadata = {
 		title: "Pylon: one framework, every primitive",
 		description:
 			"Database, sync, auth, functions, realtime, storage, search, and SSR.",
-		url: "https://pylonsync.com/product",
+		url: "https://www.pylonsync.com/product",
 		type: "website",
 	},
 	twitter: {

@@ -15,7 +15,7 @@ export const metadata: Metadata = {
 		title: "Pylon examples: starter apps and live demos",
 		description:
 			"Full-stack starters, business websites, AI apps, and a live marketplace demo built from real create-pylon templates.",
-		url: "https://pylonsync.com/developers/examples",
+		url: "https://www.pylonsync.com/developers/examples",
 		type: "website",
 	},
 	twitter: {
