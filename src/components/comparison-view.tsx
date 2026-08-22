@@ -293,7 +293,7 @@ function structuredDataJson(data: Comparison): string {
 }
 
 function buildStructuredData(data: Comparison) {
-	const pageUrl = `https://pylonsync.com/vs/${data.slug}`;
+	const pageUrl = `https://www.pylonsync.com/vs/${data.slug}`;
 	return {
 		"@context": "https://schema.org",
 		"@graph": [
@@ -304,13 +304,13 @@ function buildStructuredData(data: Comparison) {
 						"@type": "ListItem",
 						position: 1,
 						name: "Pylon",
-						item: "https://pylonsync.com/",
+						item: "https://www.pylonsync.com/",
 					},
 					{
 						"@type": "ListItem",
 						position: 2,
 						name: "Compare",
-						item: "https://pylonsync.com/vs",
+						item: "https://www.pylonsync.com/vs",
 					},
 					{
 						"@type": "ListItem",

@@ -109,6 +109,21 @@ export function SiteFooter() {
 				<div className="mt-14 flex flex-col items-start gap-3 border-t border-[var(--color-rule)] pt-6 font-mono text-[11px] text-[var(--color-ink-4)] sm:flex-row sm:items-center sm:justify-between">
 					<div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
 						<span>© 2026 Pylon · Built in Dallas</span>
+						{/* About + Contact are trust anchors: the pages a person — or an
+						    agent answering for one — checks before depending on a
+						    project. They belong on every page, not just in a sitemap. */}
+						<Link
+							href="/about"
+							className="transition-colors hover:text-[var(--color-ink)]"
+						>
+							About
+						</Link>
+						<Link
+							href="/contact"
+							className="transition-colors hover:text-[var(--color-ink)]"
+						>
+							Contact
+						</Link>
 						<Link
 							href="/privacy"
 							className="transition-colors hover:text-[var(--color-ink)]"

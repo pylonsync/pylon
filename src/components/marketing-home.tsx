@@ -138,6 +138,12 @@ export function MarketingPage({
 		<div className="relative min-h-screen bg-[var(--color-paper)] text-[var(--color-ink)]">
 			<MarketingNav signedIn={signedIn} />
 
+			{/* The <main> landmark is load-bearing, not decoration: Pylon's
+			    markdown representation of a page (Accept: text/markdown, or
+			    /index.md) reads this element. Without it the converter falls
+			    back to <body> and an agent gets the page bracketed by chrome. */}
+			<main>
+
 			{/* HERO: one subject.
 			    Centred headline, one line of copy, one focal diagram. The nine
 			    bento cards used to open the page: the reader met nine small
@@ -553,6 +559,8 @@ const { data } = db.useQuery("Order");`}
 					</div>
 				</div>
 			</section>
+
+			</main>
 
 			<SiteFooter />
 		</div>

@@ -201,6 +201,12 @@ export const DEVELOPERS: NavLink[] = [
 		icon: FileCode2,
 	},
 	{
+		label: "Developer resources",
+		href: "/developers",
+		desc: "Docs, the CLI, templates, the MCP server, and the agent API spec.",
+		icon: Braces,
+	},
+	{
 		label: "Changelog",
 		href: "https://github.com/pylonsync/pylon/releases",
 		desc: "What shipped, release by release.",
