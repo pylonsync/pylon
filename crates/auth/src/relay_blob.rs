@@ -33,6 +33,29 @@ use crate::AuthContext;
 
 type HmacSha256 = Hmac<Sha256>;
 
+const APP_SECRET_CONTEXT: &[u8] = b"pylon-relay-app-v1\0";
+
+/// Derive the relay secret for one app from the worker's root secret.
+///
+/// Pylon Cloud runs one relay worker for many customer apps. Customer
+/// machines must never receive the worker root secret because app code can
+/// read its own environment. The control plane gives each machine this
+/// derived value instead. The worker derives the same value from the routed
+/// app id before it verifies a request or auth blob.
+pub fn derive_app_secret(root_secret: &str, app: &str) -> String {
+    let mut mac =
+        HmacSha256::new_from_slice(root_secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(APP_SECRET_CONTEXT);
+    mac.update(app.as_bytes());
+    let bytes = mac.finalize().into_bytes();
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes.iter() {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 /// Default blob lifetime. Long enough that reconnect churn doesn't
 /// hammer the machine, short enough that a revoked role converges
 /// within minutes.
@@ -219,6 +242,21 @@ mod tests {
         c.roles = vec!["member".into(), "admin:org_1".into()];
         c.tenant_id = Some("org_1".into());
         c
+    }
+
+    #[test]
+    fn app_secrets_are_stable_and_isolated() {
+        let a1 = derive_app_secret("root-secret", "project-a");
+        let a2 = derive_app_secret("root-secret", "project-a");
+        let b = derive_app_secret("root-secret", "project-b");
+        assert_eq!(a1, a2);
+        assert_eq!(a1.len(), 64);
+        assert_ne!(a1, b);
+        assert_ne!(a1, derive_app_secret("other-root", "project-a"));
+        assert_eq!(
+            a1,
+            "eaee1121c4e3190c850c809f87fbf72999a16f6efcbfc364daac6f29134d1bc1"
+        );
     }
 
     #[test]

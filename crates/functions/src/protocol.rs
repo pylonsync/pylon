@@ -194,6 +194,14 @@ pub struct HandleFormMessage {
     /// for repeated fields). `application/x-www-form-urlencoded` + multipart
     /// TEXT fields.
     pub form: serde_json::Value,
+    /// The raw request body, decoded as UTF-8 (lossy).
+    ///
+    /// `form` only carries PARSED fields, which exists for
+    /// `application/x-www-form-urlencoded` and nothing else. A route handler
+    /// answering a machine — a JSON API, a webhook that must verify a
+    /// signature over the exact bytes, a JSON-RPC endpoint like MCP — needs
+    /// the body as sent. Empty for a GET.
+    pub body: String,
     pub headers: std::collections::HashMap<String, String>,
     pub cookies: std::collections::HashMap<String, String>,
     pub auth: AuthInfo,
@@ -210,6 +218,7 @@ impl HandleFormMessage {
         params: serde_json::Value,
         search_params: serde_json::Value,
         form: serde_json::Value,
+        body: String,
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: AuthInfo,
@@ -224,6 +233,7 @@ impl HandleFormMessage {
             params,
             search_params,
             form,
+            body,
             headers,
             cookies,
             auth,

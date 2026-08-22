@@ -70,6 +70,18 @@ impl ScheduleBufferGuard {
     pub(crate) fn take(&self) -> Vec<PendingSchedule> {
         std::mem::take(&mut *self.current.borrow_mut())
     }
+
+    /// Drain the active buffer without capturing its guard. Postgres mutation
+    /// closures use this before commit so scheduled jobs join the same SQL
+    /// transaction as the application writes.
+    pub(crate) fn take_current() -> Vec<PendingSchedule> {
+        MUTATION_SCHEDULE_BUFFER.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|current| std::mem::take(&mut *current.borrow_mut()))
+                .unwrap_or_default()
+        })
+    }
 }
 
 impl Drop for ScheduleBufferGuard {
@@ -4221,6 +4233,46 @@ impl FnOpsImpl {
             }
         }
     }
+
+    fn persist_pending_schedules_in_tx(
+        job_queue: &crate::jobs::JobQueue,
+        store: &dyn DataStore,
+        pending: Vec<PendingSchedule>,
+    ) -> Result<(), FnCallError> {
+        for schedule in pending {
+            let delay_secs = pending_schedule_delay_secs(&schedule);
+            job_queue
+                .try_enqueue_with_auth_in_transaction(
+                    store,
+                    &schedule.fn_name,
+                    schedule.args,
+                    crate::jobs::Priority::Normal,
+                    delay_secs,
+                    3,
+                    "functions",
+                    schedule.auth,
+                )
+                .map_err(|message| FnCallError {
+                    code: "SCHEDULE_PERSIST_FAILED".into(),
+                    message,
+                })?;
+        }
+        Ok(())
+    }
+}
+
+fn pending_schedule_delay_secs(schedule: &PendingSchedule) -> u64 {
+    match (schedule.delay_ms, schedule.run_at) {
+        (Some(ms), _) => ms / 1000,
+        (None, Some(timestamp)) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            timestamp.saturating_sub(now) / 1000
+        }
+        _ => 0,
+    }
 }
 
 impl pylon_router::FnOps for FnOpsImpl {
@@ -4312,6 +4364,7 @@ impl pylon_router::FnOps for FnOpsImpl {
 
                     let pg = &pg_backend.store;
                     let plugins = Arc::clone(&self.plugins);
+                    let tx_job_queue = Arc::clone(&self.job_queue);
                     let tx_result: Result<
                         (serde_json::Value, FnTrace, Vec<pylon_sync::ChangeEvent>),
                         FnCallError,
@@ -4334,6 +4387,11 @@ impl pylon_router::FnOps for FnOpsImpl {
                             request,
                             stream_id,
                             caller_internal,
+                        )?;
+                        Self::persist_pending_schedules_in_tx(
+                            tx_job_queue.as_ref(),
+                            inner_store,
+                            ScheduleBufferGuard::take_current(),
                         )?;
                         Ok((value, trace, buffered.take_pending()))
                     });
@@ -4632,6 +4690,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         params: serde_json::Value,
         search_params: serde_json::Value,
         form: serde_json::Value,
+        body: String,
         headers: std::collections::HashMap<String, String>,
         cookies: std::collections::HashMap<String, String>,
         auth: FnAuth,
@@ -4656,6 +4715,7 @@ impl pylon_router::FnOps for FnOpsImpl {
             params,
             search_params,
             form,
+            body,
             headers,
             cookies,
             auth,
@@ -6392,6 +6452,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                             manifest: ops.runtime.manifest_arc(),
                         });
                         let plugins = Arc::clone(&ops.plugins);
+                        let tx_job_queue = Arc::clone(&ops.job_queue);
                         let tx_result: Result<
                             (serde_json::Value, Vec<pylon_sync::ChangeEvent>),
                             FnCallError,
@@ -6414,6 +6475,11 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                 auth,
                                 None,
                                 None,
+                            )?;
+                            FnOpsImpl::persist_pending_schedules_in_tx(
+                                tx_job_queue.as_ref(),
+                                inner_store,
+                                ScheduleBufferGuard::take_current(),
                             )?;
                             Ok((value, buffered.take_pending()))
                         });

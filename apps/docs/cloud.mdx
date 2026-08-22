@@ -82,10 +82,10 @@ Full checklist: [Deploying to Vercel](/operations/vercel).
 Pylon Cloud runs on Fly Machines. Every dashboard setting maps to a real infrastructure call:
 
 - **Machine size:** `shared-cpu-1x · 512 MB` baseline. Resize up to 4 GB on Pro, 8 GB on Team.
-- **Replicas:** 1–3 on Pro, 1–10 on Team.
 - **Volume size:** up to 100 GB on Pro, 500 GB on Team.
 - **Autostop:** locked on for the free tier (the machine sleeps when idle and wakes on the next request). You can toggle it on Pro and higher if you need always-warm WebSockets.
-- **Multi-region:** pick from any of 13 regions:
+- **HA replicas:** available for Postgres projects on paid plans. Cloud configures the built-in PylonSync relay. You do not need Redis. Autostop is off while a project has more than one application machine.
+- **Region:** pick from any of 13 regions:
 
 | Region | Code |
 | --- | --- |
@@ -103,7 +103,14 @@ Pylon Cloud runs on Fly Machines. Every dashboard setting maps to a real infrast
 | South America (São Paulo) | `gru` |
 | Canada (Toronto) | `yyz` |
 
-Pricing is per machine. Multi-region deployment counts as one machine per region.
+Cloud copies each release and secret update to all application machines.
+The managed relay sends changes, presence, session changes, and CRDT frames
+between them. See [Horizontal scaling](/operations/scaling) for the data and
+runtime model.
+
+Jobs and workflows use the project's shared Postgres database. A replica
+can recover work after another replica stops. Job execution is at least once,
+so handlers must be idempotent.
 
 ## Pricing
 
@@ -114,7 +121,7 @@ Each tier has a flat platform fee plus per-machine compute. Hard quotas (request
 The Hobby plan has fixed limits:
 
 - 1 project per organization
-- `shared-cpu-1x · 512 MB · 3 GB` volume, 1 replica, autostop forced on
+- `shared-cpu-1x · 512 MB · 3 GB` volume, one machine, autostop forced on
 - 100k requests / month
 - 1 CPU-hour / month
 - 5 GB egress / month
@@ -131,7 +138,6 @@ Includes one baseline 512 MB machine, 10 GB volume, 50 GB egress, all features (
   - 1 GB always-warm: $14 / month
   - 2 GB always-warm: $25 / month
   - 4 GB always-warm: $50 / month (max)
-- Each replica bills at the machine rate × count
 - Volume above 10 GB: $0.25 / GB-month
 - Egress above 250 GB: $0.06 / GB
 
@@ -148,7 +154,7 @@ Includes one baseline 1 GB machine, 50 GB volume, 250 GB egress.
   - 8 GB always-warm: $110 / month (max)
 - Volume above 50 GB: $0.20 / GB-month
 - Egress above 2 TB: $0.04 / GB
-- Multi-region replication, SAML SSO, audit log, role-based access
+- SAML SSO, audit log, role-based access
 
 ### Enterprise
 

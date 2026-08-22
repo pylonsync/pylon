@@ -2796,11 +2796,14 @@ name = "pylon-cluster"
 version = "0.4.29"
 dependencies = [
  "base64",
+ "pylon-auth",
  "pylon-sync",
  "redis",
  "serde",
  "serde_json",
  "tracing",
+ "tungstenite",
+ "ureq",
  "uuid",
 ]
 
@@ -3035,6 +3038,7 @@ dependencies = [
  "getrandom 0.2.17",
  "js-sys",
  "pylon-auth",
+ "pylon-cluster",
  "pylon-http",
  "pylon-kernel",
  "pylon-policy",
@@ -4325,9 +4329,12 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 1.0.69",
  "utf-8",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]

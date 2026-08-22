@@ -17,11 +17,13 @@
 //! because the rendered HTML is the only stage that sees the final page —
 //! layouts, metadata, and every `<Suspense>` boundary already resolved. It
 //! reads the page's main landmark (`<main>`, then `[role=main]`, then
-//! `<article>`, then `<body>`) so navigation and footer chrome never lands in
-//! the output, and it parses with html5ever rather than scanning for tags,
+//! `<body>`) and drops `nav`/`footer`/`script`/`style`/`svg` wherever they
+//! appear, so chrome never lands in the output. It parses with html5ever
+//! rather than scanning for tags, because
 //! because SSR output contains `<`-bearing text, inline JSON, and attribute
 //! values that no regex survives.
 
+use htmd::options::{BulletListMarker, HrStyle, Options};
 use htmd::{HtmlToMarkdown, Node};
 use markup5ever_rcdom::NodeData;
 use std::rc::Rc;
@@ -221,6 +223,21 @@ pub fn negotiate(accept: Option<&str>) -> Negotiation {
     Negotiation::Serve(best.1)
 }
 
+/// Would this client accept HTML at all? Used to decide what to do when a page
+/// opts out of its markdown variant: fall back to HTML when the client can read
+/// it, 406 when it explicitly can't.
+pub fn accepts_html(accept: Option<&str>) -> bool {
+    let header = match accept {
+        Some(h) if !h.trim().is_empty() => h,
+        _ => return true,
+    };
+    let ranges = parse_accept(header);
+    if ranges.is_empty() {
+        return true;
+    }
+    best_match(&ranges, "text", "html").is_some_and(|(q, _, _)| q > 0.0)
+}
+
 /// Strip a `.md` suffix from a URL path, returning the page path it names.
 ///
 /// `/about.md` → `/about`, `/product/sync.md` → `/product/sync`, and
@@ -269,6 +286,16 @@ struct HeadMeta {
 /// frontmatter so an agent that stored the markdown can cite it.
 pub fn html_to_markdown(html: &str, url: Option<&str>) -> String {
     let converter = HtmlToMarkdown::builder()
+        // CommonMark-conventional output: `- item`, `---` rules, one space
+        // after the marker. The defaults (`*` bullets, three spaces) are valid
+        // markdown but read as machine output.
+        .options(Options {
+            bullet_list_marker: BulletListMarker::Dash,
+            ul_bullet_spacing: 1,
+            ol_number_spacing: 1,
+            hr_style: HrStyle::Dashes,
+            ..Options::default()
+        })
         .skip_tags(SKIP_TAGS.to_vec())
         // `<noscript>` content is markup, not text: parse it as DOM so the skip
         // above actually drops it instead of dumping raw tags into the body.
@@ -334,7 +361,14 @@ fn yaml_quote(s: &str) -> String {
 }
 
 /// The element whose subtree holds the page's content: `<main>`, then
-/// `[role=main]`, then `<article>`, then `<body>`.
+/// `[role=main]`, then `<body>`.
+///
+/// `<article>` is deliberately NOT in this chain. It reads like the right
+/// fallback and is not: component libraries use it for cards, so the first
+/// `<article>` in a landing page is usually one tile of a feature grid — which
+/// is exactly what a first attempt produced for pylonsync.com, a 700-byte
+/// document starting halfway down the page with no H1. `<body>` minus the
+/// skipped chrome is worse-formatted but never wrong.
 fn content_root(tree: &Rc<Node>) -> Option<Rc<Node>> {
     if let Some(n) = find_element(tree, &|name, attrs| {
         name == "main"
@@ -342,9 +376,6 @@ fn content_root(tree: &Rc<Node>) -> Option<Rc<Node>> {
                 .iter()
                 .any(|(k, v)| k == "role" && v.eq_ignore_ascii_case("main"))
     }) {
-        return Some(n);
-    }
-    if let Some(n) = find_element(tree, &|name, _| name == "article") {
         return Some(n);
     }
     find_element(tree, &|name, _| name == "body")
@@ -560,6 +591,17 @@ mod tests {
     }
 
     #[test]
+    fn html_acceptability_is_tracked_separately() {
+        assert!(accepts_html(None));
+        assert!(accepts_html(Some("*/*")));
+        // Prefers markdown, but would still read HTML.
+        assert!(accepts_html(Some("text/markdown, text/html;q=0.5")));
+        // Refuses HTML outright.
+        assert!(!accepts_html(Some("text/markdown")));
+        assert!(!accepts_html(Some("text/html;q=0, */*;q=0")));
+    }
+
+    #[test]
     fn md_suffix_maps_to_its_page() {
         assert_eq!(strip_md_suffix("/about.md").as_deref(), Some("/about"));
         assert_eq!(
@@ -632,6 +674,20 @@ mod tests {
             <body><main><p>x</p></main></body></html>";
         let md = html_to_markdown(html, None);
         assert!(md.contains("title: \"Pylon: the framework\""), "{md}");
+    }
+
+    #[test]
+    fn an_article_card_never_becomes_the_content_root() {
+        // Card components are `<article>` all over the ecosystem. Treating the
+        // first one as the page root drops the hero, the H1, and everything
+        // above it.
+        let html = "<html><head><title>T</title></head><body>\
+            <header><h1>Hero</h1></header>\
+            <section><article><h3>Card one</h3></article>\
+            <article><h3>Card two</h3></article></section></body></html>";
+        let md = html_to_markdown(html, None);
+        assert!(md.contains("# Hero"), "{md}");
+        assert!(md.contains("Card one") && md.contains("Card two"), "{md}");
     }
 
     #[test]

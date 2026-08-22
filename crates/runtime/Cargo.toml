@@ -32,7 +32,7 @@ pylon-realtime = { path = "../realtime", version = "0.4.29" }
 # `redis-bus` feature pulls the Redis impl so operators running
 # horizontally-scaled deploys can enable PYLON_CLUSTER_BUS=redis://...
 # without a separate build.
-pylon-cluster = { path = "../cluster", version = "0.4.29", features = ["redis-bus"] }
+pylon-cluster = { path = "../cluster", version = "0.4.29", features = ["redis-bus", "relay-bus"] }
 postgres = { workspace = true }
 rusqlite = { workspace = true }
 # Raw accept() with a null address — see `accept_tcp` (panic-proof accept
@@ -122,4 +122,3 @@ harness = false
 [[bench]]
 name = "realtime_bench"
 harness = false
-

@@ -1,0 +1,178 @@
+---
+title: Agent-readable pages
+description: "Every SSR page is also readable as markdown, through Accept negotiation or a .md URL. Add app/llms.ts to tell agents what your site is."
+---
+
+An agent that fetches your page gets the same HTML a browser gets: Tailwind class
+names, inline hydration payloads, and SVG icon paths. It must strip all of that
+before it reads the two paragraphs it came for.
+
+Pylon serves the same page as markdown when the client asks for markdown. No
+code, no second route, no build step.
+
+## Two ways to ask
+
+Send an `Accept` header:
+
+```bash
+curl -H "Accept: text/markdown" https://example.com/pricing
+```
+
+Or add `.md` to the path:
+
+```bash
+curl https://example.com/pricing.md
+```
+
+Both render the same page and return the same markdown. The home page is at
+`/index.md`.
+
+## What the response looks like
+
+The runtime converts the rendered page and adds YAML frontmatter from the
+page's own metadata:
+
+```markdown
+---
+title: "Pricing — Acme"
+description: "Usage-based pricing. No monthly minimum."
+url: "https://example.com/pricing"
+---
+
+# Pricing
+
+Pay for what you use. The first 10,000 requests each month are free.
+
+- No monthly minimum
+- No seat licence
+```
+
+The `url` field is the page's `metadata.canonical` when it declares one, and the
+request URL when it does not.
+
+## What the converter reads
+
+The converter reads the page's main landmark:
+
+1. `<main>`, if the page has one.
+2. An element with `role="main"`.
+3. `<body>`.
+
+It drops `<nav>`, `<footer>`, `<script>`, `<style>`, `<svg>`, `<noscript>`,
+`<iframe>`, and `<canvas>` wherever they are.
+
+Give your layout a `<main>` element. The output is then exactly your page
+content, with no menu or footer text in front of it.
+
+```tsx app/layout.tsx
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>
+        <SiteNav />
+        <main>{children}</main>
+        <SiteFooter />
+      </body>
+    </html>
+  );
+}
+```
+
+## HTML stays the default
+
+A browser sends `text/html,application/xhtml+xml,…` and receives the page it
+always received. Markdown wins only when the client scores it above HTML:
+
+| `Accept` | Response |
+| --- | --- |
+| absent, `*/*`, or `text/*` | HTML |
+| `text/html,…,*/*;q=0.8` | HTML |
+| `text/markdown` | markdown |
+| `text/markdown, */*` | markdown |
+| `text/markdown;q=0.5, text/html` | HTML |
+| `text/plain` | markdown, labelled `text/plain` |
+| `application/json` | 406 |
+
+Every SSR response carries `Vary: Accept`, so a cache cannot serve the HTML to a
+client that asked for markdown. Each HTML page also carries a `Link` header that
+names its markdown twin:
+
+```
+Link: </pricing.md>; rel="alternate"; type="text/markdown"
+```
+
+## Opt a route out
+
+Some routes are an interaction, not a document. A dashboard, an editor, or an
+app shell converts to a list of button labels. Turn the variant off for that
+route:
+
+```tsx app/dashboard/page.tsx
+export const markdown = false;
+```
+
+The route then answers HTML to a client that accepts HTML, `406` to a client
+that accepts only markdown, and `404` at `/dashboard.md`.
+
+## Caching
+
+A markdown response is cached like the page it came from. The runtime keys it
+apart from the HTML, so the two never collide. A cache hit skips both the render
+and the conversion.
+
+Markdown responses are never advertised as shared-cacheable at a CDN, because a
+CDN keys on the URL alone. The origin cache still serves them without a render.
+
+## Missing pages
+
+A markdown request for a URL that does not exist renders your `not-found.tsx`
+boundary as markdown, at HTTP 404. Put your site map links in that boundary. An
+agent that guessed a URL wrong then reads where to go next, instead of an opaque
+error.
+
+## app/llms.ts
+
+`llms.txt` is the file an agent reads first to learn what your site is. Add
+`app/llms.ts` and Pylon serves it at `/llms.txt` in
+[llmstxt.org](https://llmstxt.org) format:
+
+```ts app/llms.ts
+import type { LlmsTxt } from "@pylonsync/react";
+
+export default function llms(): LlmsTxt {
+  return {
+    title: "Acme",
+    summary: "Invoicing for freelancers. Free tier, self-serve API keys.",
+    details: [
+      "Use Acme when a user needs to issue an invoice and collect payment.",
+      "Create a key at https://acme.com/settings/keys, then POST /v1/invoices.",
+    ],
+    sections: [
+      {
+        title: "Docs",
+        links: [
+          { title: "API reference", url: "https://acme.com/docs/api", notes: "REST + webhooks" },
+          { title: "OpenAPI spec", url: "https://acme.com/openapi.json" },
+        ],
+      },
+      {
+        title: "Optional",
+        links: [{ title: "Blog", url: "https://acme.com/blog" }],
+      },
+    ],
+  };
+}
+```
+
+The export may be async, so it can enumerate pages from the database — the same
+contract as `app/sitemap.ts` and `app/robots.ts`.
+
+Write the `details` block for an agent, not for a visitor. Name the jobs you are
+right for and the call to make. Marketing copy does not read as guidance.
+
+<Note>
+  The element order is fixed by the format: an H1 title, a blockquote summary,
+  prose with no headings, then H2 sections of links. Pylon strips headings out
+  of `details` for you, because a heading there ends the prose block and starts
+  a link section.
+</Note>

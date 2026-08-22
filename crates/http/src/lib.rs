@@ -236,6 +236,18 @@ pub trait DataStore: Send + Sync {
         Ok(())
     }
 
+    /// Insert a runtime-owned durable job into the current transaction.
+    ///
+    /// This is an internal commit hook. Postgres mutation handlers use it so
+    /// application writes and `ctx.scheduler.runAfter` become durable in one
+    /// commit. Stores outside a held Postgres mutation transaction reject it.
+    fn enqueue_internal_job(&self, _job: &serde_json::Value) -> Result<(), DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "durable job insertion requires a Postgres mutation transaction".into(),
+        })
+    }
+
     /// Run a faceted full-text search against a searchable entity. `query`
     /// is a JSON object with the keys defined by `SearchQuery` in
     /// `pylon_storage::search`; returns a JSON object shaped like

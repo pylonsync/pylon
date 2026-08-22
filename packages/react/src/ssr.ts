@@ -320,6 +320,50 @@ export interface Robots {
   host?: string;
 }
 
+/** One link in an `llms.txt` section. */
+export interface LlmsLink {
+  title: string;
+  url: string;
+  /** Short note after the link — what an agent finds there. */
+  notes?: string;
+}
+
+/** An H2-delimited section of file links in `llms.txt`. */
+export interface LlmsSection {
+  title: string;
+  links: LlmsLink[];
+}
+
+/**
+ * Return type for an `app/llms.ts` default export. The runtime serializes it
+ * to `/llms.txt` in <https://llmstxt.org> format — the file an agent reads
+ * first to decide what this site is and which pages are worth its context.
+ * Sync or async, like `sitemap`/`robots`.
+ *
+ *   export default function llms(): LlmsTxt {
+ *     return {
+ *       title: "Acme",
+ *       summary: "Invoicing for freelancers. Free tier, self-serve API keys.",
+ *       details: "Use Acme when you need to issue an invoice and collect payment.",
+ *       sections: [
+ *         { title: "Docs", links: [{ title: "API", url: "https://acme.com/docs/api", notes: "REST + webhooks" }] },
+ *       ],
+ *     };
+ *   }
+ *
+ * The element order is the spec's, and it matters: an H1 title, a blockquote
+ * summary, prose with NO headings, then H2 sections of links.
+ */
+export interface LlmsTxt {
+  /** H1 — the site or project name. The one required element. */
+  title: string;
+  /** The blockquote under it: what this is, in one or two sentences. */
+  summary?: string;
+  /** Prose paragraphs before the first section. Headings are not allowed. */
+  details?: string | string[];
+  sections?: LlmsSection[];
+}
+
 /**
  * Per-route configuration, declared as top-level `export const` in a
  * `page.tsx` (Next-shaped). All optional. The runtime reads these statically
@@ -352,6 +396,20 @@ export interface RouteSegmentConfig {
   revalidate?: number;
   dynamic?: "force-static" | "force-dynamic";
   streaming?: boolean;
+  /**
+   * Opt this route OUT of its markdown representation.
+   *
+   * Every SSR page is readable as markdown by default — through
+   * `Accept: text/markdown` on its own URL, or at `<path>.md`. Set `false` for
+   * a route whose value is the interaction rather than the prose (a dashboard,
+   * an editor, an app shell): a client that also accepts HTML then gets the
+   * HTML, one that accepts only markdown gets a 406, and the `.md` URL 404s.
+   *
+   * ```ts
+   * export const markdown = false;
+   * ```
+   */
+  markdown?: boolean;
 }
 
 /**
@@ -442,6 +500,14 @@ export interface FormRequest<
   TSearchParams extends Record<string, string> = Record<string, string>,
 > {
   form: FormFields;
+  /**
+   * The raw request body, exactly as sent. Empty for GET.
+   *
+   * `form` only carries PARSED fields, which the runtime produces for
+   * `application/x-www-form-urlencoded` bodies. Read `body` for a JSON API, a
+   * JSON-RPC endpoint, or a webhook whose signature covers the exact bytes.
+   */
+  body: string;
   params: TParams;
   searchParams: TSearchParams;
   auth: PageAuth;
@@ -451,11 +517,30 @@ export interface FormRequest<
   response: SsrResponse;
 }
 
-/** Signature of a `route.ts` method handler export (POST/PUT/PATCH/DELETE). */
+/**
+ * Signature of a `route.ts` method handler export (POST/PUT/PATCH/DELETE).
+ *
+ * Return nothing to keep POST-redirect-GET: the handler's status (303 by
+ * default) plus any cookies it set, with `Location` back to the route path.
+ *
+ * Return a {@link RawResponse} to answer with a body — a JSON API, a webhook
+ * receiver that must echo a challenge, a JSON-RPC endpoint. The status then
+ * defaults to 200 rather than 303.
+ *
+ * ```ts
+ * export const POST: RouteHandler = async ({ form }) => ({
+ *   status: 201,
+ *   contentType: "application/json; charset=utf-8",
+ *   body: JSON.stringify({ id: await create(form.get("name")) }),
+ * });
+ * ```
+ */
 export type RouteHandler<
   TParams extends Record<string, string> = Record<string, string>,
   TSearchParams extends Record<string, string> = Record<string, string>,
-> = (req: FormRequest<TParams, TSearchParams>) => void | Promise<void>;
+> = (
+  req: FormRequest<TParams, TSearchParams>,
+) => RawResponse | void | Promise<RawResponse | void>;
 
 /**
  * What a `route.ts` `GET` (raw) handler returns. The body is streamed verbatim

@@ -161,10 +161,17 @@ pub struct JobQueue {
     failed_count: AtomicU64,
     /// Monotonic ID counter.
     next_id: AtomicU64,
+    /// Per-process prefix for globally unique job and lease ids.
+    instance_id: String,
     /// Optional persistent backing store. When set, every state transition is
     /// mirrored to SQLite so jobs survive restart. Failures to persist are
     /// logged but not surfaced — durability is best-effort, never blocking.
     store: Mutex<Option<std::sync::Arc<crate::job_store::JobStore>>>,
+    /// Shared Postgres store. When present, Postgres is the queue itself.
+    /// Pending jobs are not copied into every process.
+    pg_store: Mutex<Option<std::sync::Arc<crate::pg_job_store::PgJobStore>>>,
+    /// Lease token for each job this process currently executes.
+    lease_tokens: Mutex<HashMap<String, String>>,
     /// First-retry back-off in seconds (doubles per attempt, capped at
     /// [`MAX_RETRY_BACKOFF_SECS`]). Default 1. Tests set 0 to keep the
     /// fail→dequeue→fail loop synchronous.
@@ -184,7 +191,10 @@ impl JobQueue {
             completed_count: AtomicU64::new(0),
             failed_count: AtomicU64::new(0),
             next_id: AtomicU64::new(1),
+            instance_id: pylon_cluster::new_instance_id(),
             store: Mutex::new(None),
+            pg_store: Mutex::new(None),
+            lease_tokens: Mutex::new(HashMap::new()),
             retry_backoff_base_secs: AtomicU64::new(1),
         }
     }
@@ -199,6 +209,20 @@ impl JobQueue {
     /// terminal event is mirrored to the store. Call once at startup.
     pub fn attach_store(&self, store: std::sync::Arc<crate::job_store::JobStore>) {
         *self.store.lock().unwrap() = Some(store);
+    }
+
+    /// Attach the shared Postgres queue. A distributed queue never restores
+    /// rows into process memory. Workers claim rows directly from Postgres.
+    pub fn attach_pg_store(&self, store: std::sync::Arc<crate::pg_job_store::PgJobStore>) {
+        *self.pg_store.lock().unwrap() = Some(store);
+    }
+
+    fn pg_store(&self) -> Option<std::sync::Arc<crate::pg_job_store::PgJobStore>> {
+        self.pg_store.lock().unwrap().clone()
+    }
+
+    pub fn is_distributed(&self) -> bool {
+        self.pg_store.lock().unwrap().is_some()
     }
 
     /// Best-effort persist. Never panics, never propagates errors — durability
@@ -222,6 +246,12 @@ impl JobQueue {
     /// boot (the store is read + WAL-recovered before the HTTP listener binds).
     /// `JobStore::cleanup_completed` existed but nothing called it.
     pub fn cleanup_completed_jobs(&self, max_age_secs: u64) -> usize {
+        if let Some(store) = self.pg_store() {
+            return store.cleanup_completed(max_age_secs).unwrap_or_else(|e| {
+                tracing::warn!("[jobs] Postgres cleanup failed: {e}");
+                0
+            });
+        }
         if let Some(store) = self.store.lock().unwrap().as_ref() {
             store.cleanup_completed(max_age_secs)
         } else {
@@ -303,9 +333,72 @@ impl JobQueue {
         queue: &str,
         auth: Option<JobAuth>,
     ) -> Result<String, String> {
-        let id = format!("job_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
+        let job = self.new_job(
+            name,
+            payload,
+            priority,
+            delay_secs,
+            max_retries,
+            queue,
+            auth,
+        );
+        self.try_enqueue_job(job)
+    }
+
+    /// Insert a scheduled function job through the mutation's held Postgres
+    /// transaction. The task and the application writes then commit or roll
+    /// back together.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_enqueue_with_auth_in_transaction(
+        &self,
+        tx_store: &dyn pylon_http::DataStore,
+        name: &str,
+        payload: serde_json::Value,
+        priority: Priority,
+        delay_secs: u64,
+        max_retries: u32,
+        queue: &str,
+        auth: Option<JobAuth>,
+    ) -> Result<String, String> {
+        if !self.is_distributed() {
+            return Err("transactional durable enqueue requires the Postgres job store".into());
+        }
+        let job = self.new_job(
+            name,
+            payload,
+            priority,
+            delay_secs,
+            max_retries,
+            queue,
+            auth,
+        );
+        let encoded = serde_json::to_value(&job)
+            .map_err(|e| format!("failed to encode scheduled job: {e}"))?;
+        tx_store
+            .enqueue_internal_job(&encoded)
+            .map_err(|e| format!("{}: {}", e.code, e.message))?;
+        Ok(job.id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_job(
+        &self,
+        name: &str,
+        payload: serde_json::Value,
+        priority: Priority,
+        delay_secs: u64,
+        max_retries: u32,
+        queue: &str,
+        auth: Option<JobAuth>,
+    ) -> Job {
+        let sequence = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = if self.is_distributed() {
+            format!("job_{}_{sequence}", self.instance_id)
+        } else {
+            format!("job_{sequence}")
+        };
         let now = now_iso();
-        let job = Job {
+        Job {
             id: id.clone(),
             name: name.to_string(),
             payload,
@@ -321,11 +414,15 @@ impl JobQueue {
             ready_at: 0,
             queue: queue.to_string(),
             auth,
-        };
-        self.try_enqueue_job(job)
+        }
     }
 
     fn try_enqueue_job(&self, job: Job) -> Result<String, String> {
+        if let Some(store) = self.pg_store() {
+            store.enqueue(&job)?;
+            self.notify.notify_one();
+            return Ok(job.id);
+        }
         // Write-ahead: persist BEFORE the in-memory queue accepts the job, so
         // a crash between the two states can't lose an accepted job.
         if let Some(store) = self.store.lock().unwrap().as_ref() {
@@ -352,6 +449,28 @@ impl JobQueue {
     /// Dequeue the highest-priority pending job whose `delay_secs` has
     /// elapsed. Blocks up to `timeout` if nothing is ready.
     pub fn dequeue(&self, timeout: Duration) -> Option<Job> {
+        if let Some(store) = self.pg_store() {
+            let handlers: Vec<String> = self.handlers.lock().unwrap().keys().cloned().collect();
+            match store.claim(None, &handlers, DISTRIBUTED_LEASE_SECS) {
+                Ok(Some((job, token))) => {
+                    self.lease_tokens
+                        .lock()
+                        .unwrap()
+                        .insert(job.id.clone(), token);
+                    self.running
+                        .lock()
+                        .unwrap()
+                        .insert(job.id.clone(), job.clone());
+                    return Some(job);
+                }
+                Ok(None) => self.wait_for_work(timeout),
+                Err(e) => {
+                    tracing::warn!("[jobs] Postgres claim failed: {e}");
+                    self.wait_for_work(timeout);
+                }
+            }
+            return None;
+        }
         let mut pending = self.pending.lock().unwrap();
         let now = now_secs();
         if !pending.iter().any(|j| is_ready(j, now)) {
@@ -379,6 +498,28 @@ impl JobQueue {
     /// Dequeue from a specific queue. Blocks up to `timeout` if nothing
     /// in the queue is ready (delay-respecting).
     pub fn dequeue_from(&self, queue: &str, timeout: Duration) -> Option<Job> {
+        if let Some(store) = self.pg_store() {
+            let handlers: Vec<String> = self.handlers.lock().unwrap().keys().cloned().collect();
+            match store.claim(Some(queue), &handlers, DISTRIBUTED_LEASE_SECS) {
+                Ok(Some((job, token))) => {
+                    self.lease_tokens
+                        .lock()
+                        .unwrap()
+                        .insert(job.id.clone(), token);
+                    self.running
+                        .lock()
+                        .unwrap()
+                        .insert(job.id.clone(), job.clone());
+                    return Some(job);
+                }
+                Ok(None) => self.wait_for_work(timeout),
+                Err(e) => {
+                    tracing::warn!("[jobs] Postgres queue claim failed: {e}");
+                    self.wait_for_work(timeout);
+                }
+            }
+            return None;
+        }
         let mut pending = self.pending.lock().unwrap();
         let now = now_secs();
         if !pending.iter().any(|j| j.queue == queue && is_ready(j, now)) {
@@ -409,6 +550,22 @@ impl JobQueue {
     pub fn complete(&self, job_id: &str) {
         let job = self.running.lock().unwrap().remove(job_id);
         if let Some(mut job) = job {
+            if let Some(store) = self.pg_store() {
+                let token = self.lease_tokens.lock().unwrap().remove(job_id);
+                match token {
+                    Some(token) => match store.complete(job_id, &token) {
+                        Ok(true) => {
+                            self.completed_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(false) => tracing::warn!(
+                            "[jobs] completion rejected for {job_id}: lease is no longer owned"
+                        ),
+                        Err(e) => tracing::warn!("[jobs] completion failed for {job_id}: {e}"),
+                    },
+                    None => tracing::warn!("[jobs] completion missing lease token for {job_id}"),
+                }
+                return;
+            }
             job.status = JobStatus::Completed;
             job.completed_at = Some(now_iso());
             self.completed_count.fetch_add(1, Ordering::Relaxed);
@@ -425,6 +582,28 @@ impl JobQueue {
     pub fn fail(&self, job_id: &str, error: &str) {
         let job = self.running.lock().unwrap().remove(job_id);
         if let Some(mut job) = job {
+            if let Some(store) = self.pg_store() {
+                let token = self.lease_tokens.lock().unwrap().remove(job_id);
+                let next_retry = job.retry_count.saturating_add(1);
+                let ready_at = now_secs().saturating_add(retry_backoff_secs(
+                    self.retry_backoff_base_secs.load(Ordering::Relaxed),
+                    next_retry,
+                ));
+                match token {
+                    Some(token) => match store.fail(&job, &token, error, ready_at) {
+                        Ok(Some(JobStatus::Dead)) => {
+                            self.failed_count.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Ok(Some(_)) => self.notify.notify_one(),
+                        Ok(None) => tracing::warn!(
+                            "[jobs] failure update rejected for {job_id}: lease is no longer owned"
+                        ),
+                        Err(e) => tracing::warn!("[jobs] failure update failed for {job_id}: {e}"),
+                    },
+                    None => tracing::warn!("[jobs] failure missing lease token for {job_id}"),
+                }
+                return;
+            }
             job.error = Some(error.to_string());
 
             if job.retry_count < job.max_retries {
@@ -462,28 +641,36 @@ impl JobQueue {
     /// Process the next available job using registered handlers.
     /// Returns true if a job was processed.
     pub fn process_one(&self) -> bool {
-        let job = match self.dequeue(Duration::from_millis(100)) {
+        self.process_one_with_timeout(Duration::from_millis(WORKER_MIN_POLL_MS))
+    }
+
+    fn process_one_with_timeout(&self, timeout: Duration) -> bool {
+        let job = match self.dequeue(timeout) {
             Some(j) => j,
             None => return false,
         };
 
+        let heartbeat = self.start_heartbeat(&job.id);
         let handler = {
             let handlers = self.handlers.lock().unwrap();
             handlers.get(&job.name).cloned()
         };
 
-        match handler {
+        let result = match handler {
             Some(h) => match h(&job) {
-                JobResult::Success => self.complete(&job.id),
-                JobResult::Failure(e) => self.fail(&job.id, &e),
-                JobResult::Retry(reason) => self.fail(&job.id, &reason),
+                JobResult::Success => JobResult::Success,
+                JobResult::Failure(e) => JobResult::Failure(e),
+                JobResult::Retry(reason) => JobResult::Retry(reason),
             },
-            None => {
-                self.fail(
-                    &job.id,
-                    &format!("No handler registered for '{}'", job.name),
-                );
-            }
+            None => JobResult::Failure(format!("No handler registered for '{}'", job.name)),
+        };
+        if let Some((stop, handle)) = heartbeat {
+            let _ = stop.send(());
+            let _ = handle.join();
+        }
+        match result {
+            JobResult::Success => self.complete(&job.id),
+            JobResult::Failure(e) | JobResult::Retry(e) => self.fail(&job.id, &e),
         }
 
         true
@@ -491,6 +678,12 @@ impl JobQueue {
 
     /// Get job by ID (searches pending, running, history, dead letters).
     pub fn get_job(&self, id: &str) -> Option<Job> {
+        if let Some(store) = self.pg_store() {
+            return store.load(id).unwrap_or_else(|e| {
+                tracing::warn!("[jobs] Postgres get failed for {id}: {e}");
+                None
+            });
+        }
         // Check running first (most common lookup).
         if let Some(j) = self.running.lock().unwrap().get(id) {
             return Some(j.clone());
@@ -519,6 +712,19 @@ impl JobQueue {
     /// Get queue statistics.
     pub fn stats(&self) -> QueueStats {
         let handler_names: Vec<String> = self.handlers.lock().unwrap().keys().cloned().collect();
+        if let Some(store) = self.pg_store() {
+            return store.stats(handler_names.clone()).unwrap_or_else(|e| {
+                tracing::warn!("[jobs] Postgres stats failed: {e}");
+                QueueStats {
+                    pending: 0,
+                    running: 0,
+                    completed: 0,
+                    failed: 0,
+                    dead: 0,
+                    handlers: handler_names,
+                }
+            });
+        }
         QueueStats {
             pending: self.pending.lock().unwrap().len(),
             running: self.running.lock().unwrap().len(),
@@ -531,21 +737,39 @@ impl JobQueue {
 
     /// Get pending job count.
     pub fn pending_count(&self) -> usize {
+        if self.is_distributed() {
+            return self.stats().pending;
+        }
         self.pending.lock().unwrap().len()
     }
 
     /// Get running job count.
     pub fn running_count(&self) -> usize {
+        if self.is_distributed() {
+            return self.stats().running;
+        }
         self.running.lock().unwrap().len()
     }
 
     /// Get dead letter queue contents.
     pub fn dead_letters(&self) -> Vec<Job> {
+        if let Some(store) = self.pg_store() {
+            return store.list(Some("dead"), None, 1000).unwrap_or_else(|e| {
+                tracing::warn!("[jobs] Postgres dead-letter list failed: {e}");
+                Vec::new()
+            });
+        }
         self.dead_letters.lock().unwrap().iter().cloned().collect()
     }
 
     /// Retry a dead letter by moving it back to pending.
     pub fn retry_dead(&self, job_id: &str) -> bool {
+        if let Some(store) = self.pg_store() {
+            return store.retry_dead(job_id).unwrap_or_else(|e| {
+                tracing::warn!("[jobs] Postgres dead-letter retry failed for {job_id}: {e}");
+                false
+            });
+        }
         let mut dead = self.dead_letters.lock().unwrap();
         let pos = dead.iter().position(|j| j.id == job_id);
         if let Some(idx) = pos {
@@ -583,6 +807,12 @@ impl JobQueue {
 
     /// List pending jobs with optional status/queue filters.
     pub fn list_jobs(&self, status: Option<&str>, queue: Option<&str>, limit: usize) -> Vec<Job> {
+        if let Some(store) = self.pg_store() {
+            return store.list(status, queue, limit).unwrap_or_else(|e| {
+                tracing::warn!("[jobs] Postgres list failed: {e}");
+                Vec::new()
+            });
+        }
         let mut result = Vec::new();
 
         // Gather from all collections.
@@ -630,6 +860,40 @@ impl JobQueue {
         while history.len() > self.max_history {
             history.pop_front();
         }
+    }
+
+    fn start_heartbeat(
+        &self,
+        job_id: &str,
+    ) -> Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)> {
+        let store = self.pg_store()?;
+        let token = self.lease_tokens.lock().unwrap().get(job_id).cloned()?;
+        let id = job_id.to_string();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let handle = std::thread::Builder::new()
+            .name("pylon-job-heartbeat".into())
+            .spawn(move || loop {
+                match stop_rx.recv_timeout(Duration::from_secs(DISTRIBUTED_HEARTBEAT_SECS)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        match store.heartbeat(&id, &token, DISTRIBUTED_LEASE_SECS) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::warn!("[jobs] lease lost while {id} was running");
+                                break;
+                            }
+                            Err(e) => tracing::warn!("[jobs] heartbeat failed for {id}: {e}"),
+                        }
+                    }
+                }
+            })
+            .ok()?;
+        Some((stop_tx, handle))
+    }
+
+    fn wait_for_work(&self, timeout: Duration) {
+        let pending = self.pending.lock().unwrap();
+        let _ = self.notify.wait_timeout(pending, timeout);
     }
 
     // -----------------------------------------------------------------------
@@ -751,8 +1015,16 @@ impl Worker {
     pub fn start(self) -> WorkerHandle {
         let running = Arc::clone(&self.running);
         let handle = std::thread::spawn(move || {
+            let mut poll_ms = WORKER_MIN_POLL_MS;
             while self.running.load(Ordering::Relaxed) {
-                self.queue.process_one();
+                if self
+                    .queue
+                    .process_one_with_timeout(Duration::from_millis(poll_ms))
+                {
+                    poll_ms = WORKER_MIN_POLL_MS;
+                } else {
+                    poll_ms = poll_ms.saturating_mul(2).min(WORKER_MAX_POLL_MS);
+                }
             }
         });
         WorkerHandle {
@@ -788,6 +1060,13 @@ fn now_iso() -> String {
 /// keeps a long-failing job from parking itself for hours while still
 /// giving a flapping dependency real room to recover.
 const MAX_RETRY_BACKOFF_SECS: u64 = 300;
+
+/// A live worker renews this lease every ten seconds. A failed machine's job
+/// becomes claimable by another replica within thirty seconds.
+const DISTRIBUTED_LEASE_SECS: u64 = 30;
+const DISTRIBUTED_HEARTBEAT_SECS: u64 = 10;
+const WORKER_MIN_POLL_MS: u64 = 100;
+const WORKER_MAX_POLL_MS: u64 = 2_000;
 
 /// base × 2^(attempt−1), capped. `attempt` is the retry_count AFTER the
 /// increment (first retry = 1). A base of 0 disables back-off entirely.

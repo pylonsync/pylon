@@ -1990,26 +1990,45 @@ fn start_server(
     let jobs_in_memory = std::env::var("PYLON_JOBS_IN_MEMORY")
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false);
+    let cluster_required = std::env::var("PYLON_CLUSTER_REQUIRED")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    if runtime.pg_data_store_pub().is_some() && jobs_in_memory && cluster_required {
+        return Err(
+            "PYLON_JOBS_IN_MEMORY cannot be enabled when PYLON_CLUSTER_REQUIRED is set. Horizontal scaling requires the shared Postgres job and workflow stores."
+                .into(),
+        );
+    }
     if !jobs_in_memory {
-        let jobs_db_path = std::env::var("PYLON_JOBS_DB").ok().unwrap_or_else(|| {
-            runtime
-                .db_path()
-                .map(|p| format!("{p}.jobs.db"))
-                .unwrap_or_else(|| "pylon.jobs.db".into())
-        });
-        match crate::job_store::JobStore::open(&jobs_db_path) {
-            Ok(store) => {
-                let store = Arc::new(store);
-                let restored = job_queue.restore_from(&store);
-                if restored > 0 {
-                    tracing::info!("[jobs] Restored {restored} pending job(s) from {jobs_db_path}");
+        if let Some(pg) = runtime.pg_data_store_pub() {
+            let owner = pylon_cluster::new_instance_id();
+            let store = crate::pg_job_store::PgJobStore::open(pg.shared_pool(), owner)
+                .map_err(|e| format!("Failed to initialize shared Postgres job store: {e}"))?;
+            job_queue.attach_pg_store(Arc::new(store));
+            tracing::info!("[jobs] Shared Postgres queue enabled");
+        } else {
+            let jobs_db_path = std::env::var("PYLON_JOBS_DB").ok().unwrap_or_else(|| {
+                runtime
+                    .db_path()
+                    .map(|p| format!("{p}.jobs.db"))
+                    .unwrap_or_else(|| "pylon.jobs.db".into())
+            });
+            match crate::job_store::JobStore::open(&jobs_db_path) {
+                Ok(store) => {
+                    let store = Arc::new(store);
+                    let restored = job_queue.restore_from(&store);
+                    if restored > 0 {
+                        tracing::info!(
+                            "[jobs] Restored {restored} pending job(s) from {jobs_db_path}"
+                        );
+                    }
+                    job_queue.attach_store(store);
                 }
-                job_queue.attach_store(store);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "[jobs] Could not open job store at {jobs_db_path}: {e} — running without persistence"
-                );
+                Err(e) => {
+                    tracing::warn!(
+                        "[jobs] Could not open job store at {jobs_db_path}: {e} — running without persistence"
+                    );
+                }
             }
         }
     }
@@ -2109,27 +2128,35 @@ fn start_server(
 
     // Workflow persistence: colocated with the app DB like the job store.
     if !jobs_in_memory {
-        let wf_db_path = std::env::var("PYLON_WORKFLOWS_DB").ok().unwrap_or_else(|| {
-            runtime
-                .db_path()
-                .map(|p| format!("{p}.workflows.db"))
-                .unwrap_or_else(|| "pylon.workflows.db".into())
-        });
-        match crate::workflow_store::WorkflowStore::open(&wf_db_path) {
-            Ok(store) => {
-                let store = Arc::new(store);
-                let restored = workflow_engine.restore_from(&store);
-                if restored > 0 {
-                    tracing::info!(
-                        "[workflows] Restored {restored} active workflow(s) from {wf_db_path}"
+        if let Some(pg) = runtime.pg_data_store_pub() {
+            let owner = pylon_cluster::new_instance_id();
+            let store = crate::pg_workflow_store::PgWorkflowStore::open(pg.shared_pool(), owner)
+                .map_err(|e| format!("Failed to initialize shared Postgres workflow store: {e}"))?;
+            workflow_engine.attach_pg_store(Arc::new(store));
+            tracing::info!("[workflows] Shared Postgres persistence enabled");
+        } else {
+            let wf_db_path = std::env::var("PYLON_WORKFLOWS_DB").ok().unwrap_or_else(|| {
+                runtime
+                    .db_path()
+                    .map(|p| format!("{p}.workflows.db"))
+                    .unwrap_or_else(|| "pylon.workflows.db".into())
+            });
+            match crate::workflow_store::WorkflowStore::open(&wf_db_path) {
+                Ok(store) => {
+                    let store = Arc::new(store);
+                    let restored = workflow_engine.restore_from(&store);
+                    if restored > 0 {
+                        tracing::info!(
+                            "[workflows] Restored {restored} active workflow(s) from {wf_db_path}"
+                        );
+                    }
+                    workflow_engine.attach_store(store);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[workflows] Could not open workflow store at {wf_db_path}: {e} — running without persistence"
                     );
                 }
-                workflow_engine.attach_store(store);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "[workflows] Could not open workflow store at {wf_db_path}: {e} — running without persistence"
-                );
             }
         }
     }
@@ -2192,14 +2219,8 @@ fn start_server(
                 // the instance map + workflows DB grow without bound
                 // otherwise.
                 let _ = we_tick.prune_terminal(24 * 3600);
-                for inst in we_tick.list(None) {
-                    if matches!(
-                        inst.status,
-                        crate::workflows::WorkflowStatus::Pending
-                            | crate::workflows::WorkflowStatus::Running
-                    ) {
-                        we_tick.kick(&inst.id);
-                    }
+                for workflow_id in we_tick.runnable_ids() {
+                    we_tick.kick(&workflow_id);
                 }
                 JobResult::Success
             }),
@@ -2297,7 +2318,8 @@ fn start_server(
     // reconcile() backstop is the only mechanism that eventually
     // closes the gap (on next reconnect / tab-refocus). Live UX
     // requires the bus.
-    let cluster_bus: Arc<dyn pylon_cluster::ClusterBus> = build_cluster_bus();
+    let cluster_bus: Arc<dyn pylon_cluster::ClusterBus> =
+        build_cluster_bus(&runtime.manifest().name);
     // Reactive query registry — backs useReactiveQuery hooks. Created
     // before the notifier so the notifier can hold a strong ref and
     // forward every change event into the registry's `on_change`.
@@ -8071,6 +8093,8 @@ fn json_error(code: &str, message: &str) -> String {
 ///
 /// Resolution order:
 ///  - `PYLON_CLUSTER_BUS=redis://...` → [`pylon_cluster::RedisBus`].
+///  - `PYLON_CLUSTER_BUS=relay` → [`pylon_cluster::RelayBus`] using the
+///    existing PylonSync Durable Object.
 ///  - unset or empty → [`pylon_cluster::NoopBus`].
 ///
 /// `PYLON_CLUSTER_NAMESPACE` optionally prefixes the Redis channel —
@@ -8082,16 +8106,46 @@ fn json_error(code: &str, message: &str) -> String {
 /// you ask for cluster fanout but Redis is unreachable. Better to
 /// surface the misconfiguration loudly than to silently degrade to
 /// single-machine mode where peer machines stay deaf.
-fn build_cluster_bus() -> Arc<dyn pylon_cluster::ClusterBus> {
+fn build_cluster_bus(manifest_name: &str) -> Arc<dyn pylon_cluster::ClusterBus> {
     let url = std::env::var("PYLON_CLUSTER_BUS").unwrap_or_default();
     if url.is_empty() {
+        let required = std::env::var("PYLON_CLUSTER_REQUIRED")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        if required {
+            tracing::error!(
+                "[cluster] PYLON_CLUSTER_REQUIRED is set but PYLON_CLUSTER_BUS is empty. Refusing to boot."
+            );
+            std::process::exit(1);
+        }
         tracing::info!(
             "[cluster] PYLON_CLUSTER_BUS unset — running with single-machine fanout (NoopBus)"
         );
         return Arc::new(pylon_cluster::NoopBus::new());
     }
     let namespace = std::env::var("PYLON_CLUSTER_NAMESPACE").ok();
-    if url.starts_with("redis://") || url.starts_with("rediss://") {
+    if url == "relay" || url == "durable-object" {
+        let relay_url = std::env::var("PYLON_SYNC_RELAY_URL").unwrap_or_default();
+        let relay_secret = std::env::var("PYLON_SYNC_RELAY_SECRET").unwrap_or_default();
+        let relay_app = std::env::var("PYLON_SYNC_RELAY_APP")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .or_else(|| {
+                std::env::var("PYLON_PROJECT_ID")
+                    .ok()
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or_else(|| manifest_name.to_string());
+        match pylon_cluster::RelayBus::connect(&relay_url, &relay_secret, &relay_app) {
+            Ok(bus) => Arc::new(bus),
+            Err(error) => {
+                tracing::error!(
+                    "[cluster] durable relay failed to connect: {error}. Refusing to boot."
+                );
+                std::process::exit(1);
+            }
+        }
+    } else if url.starts_with("redis://") || url.starts_with("rediss://") {
         match pylon_cluster::RedisBus::connect(&url, namespace.as_deref()) {
             Ok(bus) => Arc::new(bus),
             Err(e) => {
@@ -8106,7 +8160,7 @@ fn build_cluster_bus() -> Arc<dyn pylon_cluster::ClusterBus> {
         }
     } else {
         tracing::error!(
-            "[cluster] PYLON_CLUSTER_BUS=\"{url}\" — only redis:// and rediss:// URLs are supported. \
+            "[cluster] PYLON_CLUSTER_BUS=\"{url}\" — use relay, redis://, or rediss://. \
              Refusing to boot."
         );
         std::process::exit(1);

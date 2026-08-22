@@ -46,6 +46,8 @@ command = "cargo install -q --force worker-build@0.1.2 && worker-build --release
 
 [vars]
 PYLON_DEV_MODE = "false"
+# Customer machines receive HMAC(root, app), never this worker root secret.
+PYLON_RELAY_DERIVE_APP_SECRETS = "true"
 
 # One PylonSync instance per app, addressed by name (`?app=<id>`).
 [[durable_objects.bindings]]

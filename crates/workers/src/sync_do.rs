@@ -23,6 +23,9 @@
 //!   for a different app. `since` replays the ring tail after that seq
 //!   before live frames; a cursor older than the ring closes with 4410
 //!   so the client falls back to `/api/sync/pull`.
+//! - `POST /sync/cluster/push` + `GET /sync/cluster/ws` (machines,
+//!   HMAC) — raw origin-to-origin cluster envelopes. This is the managed
+//!   Pylon Cloud transport for changes, presence, sessions, and CRDT frames.
 //!
 //! Auth blobs expire (default 15 min): the fan-out path closes expired
 //! sockets with 4401 so clients re-handshake against the machine —
@@ -42,13 +45,18 @@ use worker::{
     WebSocketPair,
 };
 
-use crate::relay_core::{event_key, parse_event_key, EventRing, RelayFilter, RING_CAPACITY};
+use crate::relay_core::{
+    cluster_event_key, event_key, parse_cluster_event_key, parse_event_key, ClusterRing, EventRing,
+    RelayFilter, CLUSTER_RING_CAPACITY, RING_CAPACITY,
+};
 use pylon_auth::relay_blob::RelayAuthClaims;
+use pylon_cluster::{Envelope, RelayFrame};
 use pylon_sync::ChangeEvent;
 
 /// Socket close codes (application range 4000-4999).
 const CLOSE_TOKEN_EXPIRED: u16 = 4401;
 const CLOSE_RESYNC_REQUIRED: u16 = 4410;
+const CLOSE_CLUSTER_RESYNC_REQUIRED: u16 = 4411;
 
 const MANIFEST_KEY: &str = "mf";
 
@@ -61,6 +69,7 @@ pub struct PylonSync {
     /// [`Self::hydrate`] restores it from storage.
     filter: RefCell<Option<RelayFilter>>,
     ring: RefCell<EventRing>,
+    cluster_ring: RefCell<ClusterRing>,
     /// Per-connection verified claims, keyed by the connection id
     /// carried in the socket's hibernation tag (`c:<id>`). Mirrored in
     /// storage under `conn:<id>` so a wake can re-resolve a socket.
@@ -77,6 +86,7 @@ impl DurableObject for PylonSync {
             env,
             filter: RefCell::new(None),
             ring: RefCell::new(EventRing::default()),
+            cluster_ring: RefCell::new(ClusterRing::default()),
             conns: RefCell::new(HashMap::new()),
             conn_counter: RefCell::new(0),
             hydrated: RefCell::new(false),
@@ -91,6 +101,8 @@ impl DurableObject for PylonSync {
         match (method, path.as_str()) {
             (Method::Post, "/sync/manifest") => self.handle_manifest(&mut req).await,
             (Method::Post, "/sync/push") => self.handle_push(&mut req).await,
+            (Method::Post, "/sync/cluster/push") => self.handle_cluster_push(&mut req).await,
+            (Method::Get, "/sync/cluster/ws") => self.handle_cluster_ws(&req).await,
             (Method::Get, "/sync/ws") => self.handle_ws(&req).await,
             (Method::Get, "/sync/status") => self.handle_status(&mut req).await,
             _ => Response::error("not found", 404),
@@ -161,6 +173,13 @@ fn conn_id_of(state: &State, ws: &worker::WebSocket) -> Option<String> {
         .find_map(|t| t.strip_prefix("c:").map(str::to_string))
 }
 
+fn origin_id_of(state: &State, ws: &worker::WebSocket) -> Option<String> {
+    state
+        .get_tags(ws)
+        .into_iter()
+        .find_map(|t| t.strip_prefix("o:").map(str::to_string))
+}
+
 /// The app this request was routed to (the worker's `?app=` param).
 /// Every signed payload and every auth blob is bound to an app; the DO
 /// rejects a mismatch, which is what stops a cross-app replay on a
@@ -177,7 +196,7 @@ fn routed_app(req: &Request) -> String {
 }
 
 impl PylonSync {
-    /// Restore filter + ring + connection claims after a hibernation
+    /// Restore filter, rings, and connection claims after a hibernation
     /// wake. Storage layout: `mf` (manifest payload string),
     /// `e:{seq:020}` (event JSON), `conn:{id}` (claims JSON).
     async fn hydrate(&self) {
@@ -200,6 +219,7 @@ impl PylonSync {
             return;
         };
         let events: RefCell<Vec<ChangeEvent>> = RefCell::new(Vec::new());
+        let cluster_frames: RefCell<Vec<RelayFrame>> = RefCell::new(Vec::new());
         let conns: RefCell<Vec<(String, RelayAuthClaims)>> = RefCell::new(Vec::new());
         map.for_each(&mut |value, key| {
             let Some(key_str) = key.as_string() else {
@@ -211,6 +231,12 @@ impl PylonSync {
                         events.borrow_mut().push(ev);
                     }
                 }
+            } else if parse_cluster_event_key(&key_str).is_some() {
+                if let Ok(s) = serde_wasm_bindgen::from_value::<String>(value) {
+                    if let Ok(frame) = serde_json::from_str::<RelayFrame>(&s) {
+                        cluster_frames.borrow_mut().push(frame);
+                    }
+                }
             } else if let Some(id) = key_str.strip_prefix("conn:") {
                 if let Ok(s) = serde_wasm_bindgen::from_value::<String>(value) {
                     if let Ok(claims) = serde_json::from_str::<RelayAuthClaims>(&s) {
@@ -220,6 +246,7 @@ impl PylonSync {
             }
         });
         *self.ring.borrow_mut() = EventRing::hydrate(events.into_inner());
+        *self.cluster_ring.borrow_mut() = ClusterRing::hydrate(cluster_frames.into_inner());
         {
             let mut conn_map = self.conns.borrow_mut();
             for (id, claims) in conns.into_inner() {
@@ -229,7 +256,7 @@ impl PylonSync {
         *self.hydrated.borrow_mut() = true;
     }
 
-    fn secret(&self) -> Option<String> {
+    fn root_secret(&self) -> Option<String> {
         self.env
             .secret("PYLON_RELAY_SECRET")
             .map(|s| s.to_string())
@@ -243,14 +270,37 @@ impl PylonSync {
             .filter(|s| !s.is_empty())
     }
 
+    fn app_secrets(&self, app: &str) -> Vec<String> {
+        let Some(root) = self.root_secret() else {
+            return Vec::new();
+        };
+        let derive = self
+            .env
+            .var("PYLON_RELAY_DERIVE_APP_SECRETS")
+            .map(|v| matches!(v.to_string().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        if derive {
+            // Keep the root key valid for existing self-hosted relay users.
+            // Pylon Cloud customer machines receive only the derived key.
+            vec![pylon_auth::relay_blob::derive_app_secret(&root, app), root]
+        } else {
+            vec![root]
+        }
+    }
+
     /// Verify the machine's HMAC on a signed request and return the
     /// body. 401 on any failure — same verification primitive as the
     /// machine (`pylon_auth::trusted_mint`).
-    async fn verified_body(&self, req: &mut Request) -> std::result::Result<String, Response> {
-        let Some(secret) = self.secret() else {
+    async fn verified_body(
+        &self,
+        req: &mut Request,
+        app: &str,
+    ) -> std::result::Result<String, Response> {
+        let secrets = self.app_secrets(app);
+        if secrets.is_empty() {
             return Err(Response::error("PYLON_RELAY_SECRET not configured", 503)
                 .unwrap_or_else(|_| Response::empty().unwrap()));
-        };
+        }
         let ts: u64 = req
             .headers()
             .get("X-Pylon-Relay-Timestamp")
@@ -265,22 +315,56 @@ impl PylonSync {
             .flatten()
             .unwrap_or_default();
         let body = req.text().await.unwrap_or_default();
-        match pylon_auth::trusted_mint::verify_signature(
-            &secret,
-            ts,
-            body.as_bytes(),
-            &sig,
-            now_secs(),
-        ) {
-            Ok(()) => Ok(body),
-            Err(e) => Err(Response::error(format!("relay auth failed: {e}"), 401)
-                .unwrap_or_else(|_| Response::empty().unwrap())),
+        let now = now_secs();
+        if secrets.iter().any(|secret| {
+            pylon_auth::trusted_mint::verify_signature(secret, ts, body.as_bytes(), &sig, now)
+                .is_ok()
+        }) {
+            Ok(body)
+        } else {
+            Err(Response::error("relay auth failed", 401)
+                .unwrap_or_else(|_| Response::empty().unwrap()))
+        }
+    }
+
+    fn verify_signed_payload(
+        &self,
+        req: &Request,
+        app: &str,
+        payload: &[u8],
+    ) -> std::result::Result<(), Response> {
+        let secrets = self.app_secrets(app);
+        if secrets.is_empty() {
+            return Err(Response::error("PYLON_RELAY_SECRET not configured", 503)
+                .unwrap_or_else(|_| Response::empty().unwrap()));
+        }
+        let ts: u64 = req
+            .headers()
+            .get("X-Pylon-Relay-Timestamp")
+            .ok()
+            .flatten()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let sig = req
+            .headers()
+            .get("X-Pylon-Relay-Signature")
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let now = now_secs();
+        if secrets.iter().any(|secret| {
+            pylon_auth::trusted_mint::verify_signature(secret, ts, payload, &sig, now).is_ok()
+        }) {
+            Ok(())
+        } else {
+            Err(Response::error("relay auth failed", 401)
+                .unwrap_or_else(|_| Response::empty().unwrap()))
         }
     }
 
     async fn handle_manifest(&self, req: &mut Request) -> Result<Response> {
         let app = routed_app(req);
-        let body = match self.verified_body(req).await {
+        let body = match self.verified_body(req, &app).await {
             Ok(b) => b,
             Err(resp) => return Ok(resp),
         };
@@ -310,7 +394,7 @@ impl PylonSync {
 
     async fn handle_push(&self, req: &mut Request) -> Result<Response> {
         let app = routed_app(req);
-        let body = match self.verified_body(req).await {
+        let body = match self.verified_body(req, &app).await {
             Ok(b) => b,
             Err(resp) => return Ok(resp),
         };
@@ -383,11 +467,126 @@ impl PylonSync {
         }))
     }
 
-    async fn handle_ws(&self, req: &Request) -> Result<Response> {
-        let Some(secret) = self.secret() else {
-            return Response::error("PYLON_RELAY_SECRET not configured", 503);
-        };
+    async fn handle_cluster_push(&self, req: &mut Request) -> Result<Response> {
         let app = routed_app(req);
+        let body = match self.verified_body(req, &app).await {
+            Ok(body) => body,
+            Err(resp) => return Ok(resp),
+        };
+        #[derive(serde::Deserialize)]
+        struct Push {
+            #[serde(default)]
+            app: String,
+            #[serde(default)]
+            message_id: String,
+            envelope: Envelope,
+        }
+        let push: Push = match serde_json::from_str(&body) {
+            Ok(push) => push,
+            Err(e) => return Response::error(format!("bad cluster push payload: {e}"), 400),
+        };
+        if push.app != app {
+            return Response::error("cluster push app mismatch", 403);
+        }
+
+        if push.message_id.is_empty() || push.message_id.len() > 128 {
+            return Response::error("missing or invalid cluster message_id", 400);
+        }
+        let (frame, inserted, evicted) = self
+            .cluster_ring
+            .borrow_mut()
+            .push(push.envelope, push.message_id);
+        if !inserted {
+            return Response::from_json(&serde_json::json!({
+                "accepted": 0,
+                "duplicate": true,
+                "relay_seq": frame.relay_seq,
+            }));
+        }
+        if let Ok(json) = serde_json::to_string(&frame) {
+            let _ = self
+                .state
+                .storage()
+                .put(&cluster_event_key(frame.relay_seq), json.clone())
+                .await;
+            let mut delivered = 0usize;
+            for ws in self.state.get_websockets() {
+                let Some(origin_id) = origin_id_of(&self.state, &ws) else {
+                    continue;
+                };
+                if origin_id == frame.envelope.instance_id {
+                    continue;
+                }
+                if ws.send_with_str(&json).is_ok() {
+                    delivered += 1;
+                }
+            }
+            for seq in evicted {
+                let _ = self.state.storage().delete(&cluster_event_key(seq)).await;
+            }
+            return Response::from_json(&serde_json::json!({
+                "accepted": 1,
+                "relay_seq": frame.relay_seq,
+                "delivered": delivered,
+            }));
+        }
+        Response::error("cluster frame serialization failed", 500)
+    }
+
+    async fn handle_cluster_ws(&self, req: &Request) -> Result<Response> {
+        let app = routed_app(req);
+        let url = req.url()?;
+        let instance_id = url
+            .query_pairs()
+            .find(|(key, _)| key == "instance")
+            .map(|(_, value)| value.to_string())
+            .unwrap_or_default();
+        if instance_id.is_empty() || instance_id.len() > 128 {
+            return Response::error("missing or invalid instance", 400);
+        }
+        let signed_payload = format!("{app}.{instance_id}");
+        if let Err(resp) = self.verify_signed_payload(req, &app, signed_payload.as_bytes()) {
+            return Ok(resp);
+        }
+        let since = url
+            .query_pairs()
+            .find(|(key, _)| key == "since")
+            .and_then(|(_, value)| value.parse::<u64>().ok());
+
+        let pair = WebSocketPair::new()?;
+        self.state
+            .accept_websocket_with_tags(&pair.server, &[&format!("o:{instance_id}")]);
+        if let Some(since) = since {
+            self.replay_cluster_since(&pair.server, since);
+        }
+        Response::from_websocket(pair.client)
+    }
+
+    fn replay_cluster_since(&self, ws: &worker::WebSocket, since: u64) {
+        let ring = self.cluster_ring.borrow();
+        match ring.since(since) {
+            Some(frames) => {
+                for frame in frames {
+                    if let Ok(json) = serde_json::to_string(frame) {
+                        let _ = ws.send_with_str(&json);
+                    }
+                }
+            }
+            None => {
+                let _ = ws.close(
+                    Some(CLOSE_CLUSTER_RESYNC_REQUIRED),
+                    Some("cluster cursor older than relay ring"),
+                );
+            }
+        }
+    }
+
+    async fn handle_ws(&self, req: &Request) -> Result<Response> {
+        let app = routed_app(req);
+        let secrets = self.app_secrets(&app);
+        if secrets.is_empty() {
+            return Response::error("PYLON_RELAY_SECRET not configured", 503);
+        }
         let url = req.url()?;
         let since: Option<u64> = url
             .query_pairs()
@@ -420,9 +619,12 @@ impl PylonSync {
             return Response::error("missing relay subprotocol", 401);
         };
         let token = offered["bearer.".len()..].to_string();
-        let claims = match pylon_auth::relay_blob::verify(&secret, &app, &token, now_secs()) {
-            Ok(c) => c,
-            Err(e) => return Response::error(format!("relay token rejected: {e}"), 401),
+        let now = now_secs();
+        let claims = secrets
+            .iter()
+            .find_map(|secret| pylon_auth::relay_blob::verify(secret, &app, &token, now).ok());
+        let Some(claims) = claims else {
+            return Response::error("relay token rejected", 401);
         };
 
         // Connection id: wall-millis + per-instance counter. DOs are
@@ -505,17 +707,31 @@ impl PylonSync {
     /// watermarks and connection counts to any caller on a shared
     /// worker.
     async fn handle_status(&self, req: &mut Request) -> Result<Response> {
-        if let Err(resp) = self.verified_body(req).await {
+        let app = routed_app(req);
+        if let Err(resp) = self.verified_body(req, &app).await {
             return Ok(resp);
         }
         let ring = self.ring.borrow();
+        let cluster_ring = self.cluster_ring.borrow();
+        let sockets = self.state.get_websockets();
+        let origin_sockets = sockets
+            .iter()
+            .filter(|ws| origin_id_of(&self.state, ws).is_some())
+            .count();
         Response::from_json(&serde_json::json!({
             "has_manifest": self.filter.borrow().is_some(),
             "ring_len": ring.len(),
             "oldest_seq": ring.oldest_seq(),
             "latest_seq": ring.latest_seq(),
             "ring_capacity": RING_CAPACITY,
-            "sockets": self.state.get_websockets().len(),
+            "sockets": sockets.len(),
+            "cluster": {
+                "ring_len": cluster_ring.len(),
+                "oldest_seq": cluster_ring.oldest_seq(),
+                "latest_seq": cluster_ring.latest_seq(),
+                "ring_capacity": CLUSTER_RING_CAPACITY,
+                "origin_sockets": origin_sockets,
+            },
         }))
     }
 }

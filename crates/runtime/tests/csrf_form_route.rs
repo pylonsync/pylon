@@ -66,6 +66,7 @@ impl pylon_router::FnOps for StubFnOps {
         _params: serde_json::Value,
         _search_params: serde_json::Value,
         _form: serde_json::Value,
+        _body: String,
         _headers: HashMap<String, String>,
         _cookies: HashMap<String, String>,
         _auth: pylon_functions::protocol::AuthInfo,

@@ -332,6 +332,10 @@ fn content_type_for(path: &Path) -> &'static str {
         Some("mp3") => "audio/mpeg",
         Some("ogg") => "audio/ogg",
         Some("txt") => "text/plain; charset=utf-8",
+        // RFC 7763. Without this a committed `public/llms.md` or agent skill
+        // file served as `application/octet-stream`, which agents download
+        // instead of read.
+        Some("md") | Some("markdown") => "text/markdown; charset=utf-8",
         Some("xml") => "application/xml",
         Some("pdf") => "application/pdf",
         Some("mp4") => "video/mp4",
@@ -903,6 +907,156 @@ fn serve_dev_file_write(
 /// should record metrics and exit the worker. `Err(request)` = path was
 /// API-bound or unhandled; the caller continues to existing routing
 /// with the same request restored.
+/// A page requested as markdown — either through `Accept: text/markdown` or
+/// through its `<path>.md` URL. Threaded into the render so the page renders
+/// under its own path (a `.md` URL must not leak into `canonical`/`og:url`)
+/// and the response comes back converted.
+#[derive(Debug, Clone)]
+pub(crate) struct MarkdownRequest {
+    /// Markdown, or markdown labelled `text/plain` — whichever the client asked
+    /// for.
+    representation: crate::markdown::Representation,
+    /// True when the client named the `.md` URL. Such a request has no HTML
+    /// fallback: the resource it asked for either exists or doesn't.
+    explicit_url: bool,
+    /// The page's own URL (path + query), with any `.md` suffix removed.
+    render_url: String,
+    /// Whether the client would also read HTML — the fallback when a page opts
+    /// out of markdown.
+    html_acceptable: bool,
+}
+
+/// Which representation of a page this request wants.
+pub(crate) enum PageVariant {
+    Html,
+    Markdown(MarkdownRequest),
+    /// The client ruled out every representation this server can produce.
+    NotAcceptable,
+}
+
+/// Routes whose representation is fixed by the file convention that declares
+/// them, not by the request: `app/sitemap.ts` is XML, `app/robots.ts` and
+/// `app/llms.ts` are plain text, `opengraph-image` is a PNG.
+fn is_data_route_kind(kind: Option<&str>) -> bool {
+    matches!(
+        kind,
+        Some("sitemap") | Some("robots") | Some("llms") | Some("og-image")
+    )
+}
+
+/// Read one request header, lower-cased name match.
+fn header_value(request: &Request, name: &str) -> Option<String> {
+    request.headers().iter().find_map(|h| {
+        if h.field.as_str().as_str().eq_ignore_ascii_case(name) {
+            Some(h.value.as_str().to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// Decide which representation of an SSR page to serve.
+///
+/// HTML wins in every ambiguous case — see `markdown::negotiate`. Two things
+/// short-circuit the negotiation entirely:
+///   - a client-router navigation (`x-pylon-nav`), which wants the hydration
+///     payload for the URL, not a document at all; and
+///   - a real file under `public/` at the requested `.md` path, which keeps
+///     `public/pylon-skill.md` beating a `/pylon-skill` page's variant.
+fn page_variant(request: &Request, url: &str, accept: Option<&str>) -> PageVariant {
+    let path_only = url.split('?').next().unwrap_or(url);
+    page_variant_for(
+        is_nav_request(request),
+        url,
+        accept,
+        resolve_safe(&public_dir(), path_only).is_some(),
+    )
+}
+
+/// The decision behind [`page_variant`], with the two request-derived facts
+/// passed in — so the routing rules are unit-testable without a live socket.
+fn page_variant_for(
+    nav: bool,
+    url: &str,
+    accept: Option<&str>,
+    public_file_exists: bool,
+) -> PageVariant {
+    use crate::markdown::{Negotiation, Representation};
+    if nav {
+        return PageVariant::Html;
+    }
+    let (path_only, query) = match url.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (url, None),
+    };
+    let html_acceptable = crate::markdown::accepts_html(accept);
+    if let Some(page_path) = crate::markdown::strip_md_suffix(path_only) {
+        if public_file_exists {
+            return PageVariant::Html;
+        }
+        let render_url = match query {
+            Some(q) if !q.is_empty() => format!("{page_path}?{q}"),
+            _ => page_path,
+        };
+        return PageVariant::Markdown(MarkdownRequest {
+            representation: Representation::Markdown,
+            explicit_url: true,
+            render_url,
+            html_acceptable,
+        });
+    }
+    match crate::markdown::negotiate(accept) {
+        Negotiation::Serve(Representation::Html) => PageVariant::Html,
+        Negotiation::Serve(representation) => PageVariant::Markdown(MarkdownRequest {
+            representation,
+            explicit_url: false,
+            render_url: url.to_string(),
+            html_acceptable,
+        }),
+        Negotiation::NotAcceptable => PageVariant::NotAcceptable,
+    }
+}
+
+/// RFC 9110 §15.5.7. The body names what this URL can produce, so an agent that
+/// guessed a media type can correct itself without a second discovery step.
+fn not_acceptable_response(
+    path: &str,
+    markdown_available: bool,
+    cors_origin: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let body = if markdown_available {
+        format!(
+            "# 406 Not Acceptable\n\n\
+             `{path}` can be served as:\n\n\
+             - `text/html` — the rendered page\n\
+             - `text/markdown` — the same page as markdown (also at `{}`)\n\
+             - `text/plain` — the markdown body, labelled as plain text\n",
+            crate::markdown::md_url_for(path)
+        )
+    } else {
+        format!(
+            "# 406 Not Acceptable\n\n\
+             `{path}` can be served as `text/html` only. This route declines its \
+             markdown representation (`export const markdown = false`).\n"
+        )
+    };
+    let mut resp = Response::from_data(body.into_bytes()).with_status_code(406);
+    for (name, value) in [
+        ("Content-Type", "text/markdown; charset=utf-8"),
+        ("Vary", "Accept"),
+        ("Cache-Control", "no-store"),
+        ("X-Content-Type-Options", "nosniff"),
+    ] {
+        if let Ok(h) = Header::from_bytes(name, value) {
+            resp = resp.with_header(h);
+        }
+    }
+    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+        resp = resp.with_header(h);
+    }
+    resp
+}
+
 pub fn try_handle(
     cfg: &FrontendConfig,
     request: Request,
@@ -947,6 +1101,30 @@ pub fn try_handle(
 
     let url = request.url().to_string();
     if !is_spa_eligible(&url) {
+        // `/.well-known/*` is deliberately not SPA-eligible — the framework
+        // answers `/.well-known/openid-configuration` there. But an app still
+        // has to publish its OWN well-known documents (security.txt, an
+        // apple-app-site-association, an MCP manifest), and before this every
+        // one of them 404'd with no way around it. Serve them off
+        // `public/.well-known/`; anything else falls through to the framework
+        // router, which keeps its own endpoint unshadowable.
+        let path_only = url.split('?').next().unwrap_or(&url);
+        if path_only.starts_with("/.well-known/")
+            && path_only != "/.well-known/openid-configuration"
+        {
+            if let Some(file_path) = resolve_safe(&public_dir(), path_only) {
+                if let Ok(bytes) = std::fs::read(&file_path) {
+                    let ct = content_type_for(&file_path);
+                    let cache = if is_dev_mode() {
+                        "no-cache, must-revalidate"
+                    } else {
+                        "public, max-age=3600"
+                    };
+                    respond_static_file(request, bytes, ct, cache, cors_origin);
+                    return Ok(());
+                }
+            }
+        }
         return Err(request);
     }
 
@@ -1036,10 +1214,43 @@ pub fn try_handle(
     // shell, masking the SSR'd output). Falls through to proxy/disk
     // when no SSR route matches.
     if !cfg.ssr_routes.is_empty() && cfg.fn_ops.is_some() {
-        if let Some(matched) = match_ssr_route(&url, &cfg.ssr_routes) {
+        // Which representation does this client want? A markdown request routes
+        // to the SAME page — matched on the path with any `.md` suffix removed
+        // — and is converted after the render (see `serve_via_ssr_rpc`).
+        let accept = header_value(&request, "accept");
+        let variant = page_variant(&request, &url, accept.as_deref());
+        let match_url: String = match &variant {
+            PageVariant::Markdown(m) => m.render_url.clone(),
+            _ => url.clone(),
+        };
+        let md_request: Option<MarkdownRequest> = match &variant {
+            PageVariant::Markdown(m) => Some(m.clone()),
+            _ => None,
+        };
+        // Data routes (`sitemap.ts`, `robots.ts`, `llms.ts`, `opengraph-image`)
+        // each have exactly ONE representation, chosen by the convention rather
+        // than by the client: XML, plain text, a PNG. There is nothing to
+        // negotiate, so `Accept` never converts them — and `/sitemap.xml.md`
+        // names nothing at all, so it falls through to the 404 boundary.
+        let explicit_md = md_request.as_ref().is_some_and(|m| m.explicit_url);
+        let matched_page = match_ssr_route(&match_url, &cfg.ssr_routes)
+            .filter(|m| !(explicit_md && is_data_route_kind(m.route.kind.as_deref())));
+        let md_request = match matched_page.as_ref().map(|m| m.route.kind.as_deref()) {
+            Some(kind) if is_data_route_kind(kind) => None,
+            _ => md_request,
+        };
+        if let Some(matched) = matched_page {
+            // 406 only once we know this URL really is a page — an unmatched
+            // URL is a 404 regardless of what the client would have accepted.
+            if matches!(variant, PageVariant::NotAcceptable) {
+                let path = match_url.split('?').next().unwrap_or(&match_url);
+                let _ = request.respond(not_acceptable_response(path, true, cors_origin));
+                return Ok(());
+            }
             tracing::debug!(
                 url = %url,
                 route = %matched.route.path,
+                variant = if md_request.is_some() { "markdown" } else { "html" },
                 "SSR match"
             );
             // A dynamic-segment match yields to a real `public/` file
@@ -1085,26 +1296,40 @@ pub fn try_handle(
             // cookie-anonymous requests (defense-in-depth).
             let bucket_eligible = !is_dev_mode()
                 && matches!(request.method(), Method::Get)
-                && url
+                && match_url
                     .split_once('?')
                     .map(|(_, q)| q.is_empty())
                     .unwrap_or(true);
             let cacheable_eligible = bucket_eligible && !session_cookie_present(cfg, &request);
             if bucket_eligible {
-                let (path_only, _) = url.split_once('?').unwrap_or((url.as_str(), ""));
+                let (cache_path, _) = match_url
+                    .split_once('?')
+                    .unwrap_or((match_url.as_str(), ""));
                 let host = request_host(&request);
                 // HTML and the navigation payload are different answers to the
                 // same URL, so they key apart (see `ssr_cache_vary`).
                 let nav = is_nav_request(&request);
+                // …and so is the markdown representation. Both markdown types
+                // (`text/markdown` / `text/plain`) share ONE entry: the body is
+                // identical and only the Content-Type differs, which the serve
+                // path applies per request.
+                let md_key = md_request.as_ref().map(|_| ());
                 // Anon entry (`export const revalidate`) — cookie-anonymous only.
                 if cacheable_eligible {
-                    let cache_vary = ssr_cache_vary(host.as_deref(), nav);
+                    let cache_vary = ssr_cache_vary(host.as_deref(), nav, md_key.is_some());
                     if let Some(entry) =
-                        crate::ssr_cache::get(&matched.route.path, path_only, &cache_vary)
+                        crate::ssr_cache::get(&matched.route.path, cache_path, &cache_vary)
                     {
                         if entry.fresh {
                             tracing::debug!(url = %url, "SSR cache hit (disk, anon)");
-                            return serve_cached_ssr(entry, cors_origin, nav, request);
+                            return serve_cached_ssr(
+                                entry,
+                                cors_origin,
+                                nav,
+                                md_request.as_ref(),
+                                matched.route.kind.as_deref(),
+                                request,
+                            );
                         }
                     }
                 }
@@ -1113,13 +1338,21 @@ pub fn try_handle(
                 // expired/invalid cookie resolves to not-signed-in → sess=0, the
                 // same bit the render path stores under.
                 let session_present = session_authenticated(cfg, &request);
-                let bucket_vary = ssr_cache_bucket_vary(host.as_deref(), session_present, nav);
+                let bucket_vary =
+                    ssr_cache_bucket_vary(host.as_deref(), session_present, nav, md_key.is_some());
                 if let Some(entry) =
-                    crate::ssr_cache::get(&matched.route.path, path_only, &bucket_vary)
+                    crate::ssr_cache::get(&matched.route.path, cache_path, &bucket_vary)
                 {
                     if entry.fresh {
                         tracing::debug!(url = %url, session = session_present, "SSR cache hit (disk, bucket)");
-                        return serve_cached_bucket_ssr(entry, cors_origin, nav, request);
+                        return serve_cached_bucket_ssr(
+                            entry,
+                            cors_origin,
+                            nav,
+                            md_request.as_ref(),
+                            matched.route.kind.as_deref(),
+                            request,
+                        );
                     }
                 }
             }
@@ -1131,6 +1364,7 @@ pub fn try_handle(
                 None,
                 cacheable_eligible,
                 bucket_eligible,
+                md_request,
             );
         }
         // Raw GET routes: a `route.ts` exporting `GET` (kind:"route") matched
@@ -1166,8 +1400,13 @@ pub fn try_handle(
         // render the boundary at HTTP 404 instead of silently SPA-falling-
         // back to the home shell at 200. Asset 404s and apps without a
         // not-found boundary keep the existing fallthrough (proxy / disk).
-        if looks_like_document_nav(&url) {
-            if let Some(nf) = find_not_found_route(&url, &cfg.ssr_routes) {
+        //
+        // Judged on `match_url`, so a markdown request for a missing page
+        // (`/nope.md`, or `/nope` with `Accept: text/markdown`) gets the same
+        // 404 boundary — as markdown. An agent that guessed a URL wrong reads
+        // the recovery links instead of an opaque JSON error.
+        if looks_like_document_nav(&match_url) {
+            if let Some(nf) = find_not_found_route(&match_url, &cfg.ssr_routes) {
                 tracing::debug!(url = %url, boundary = %nf.path, "SSR not-found");
                 let matched = SsrMatch {
                     route: nf.clone(),
@@ -1182,6 +1421,7 @@ pub fn try_handle(
                     Some(404),
                     false,
                     false,
+                    md_request,
                 );
             }
         }
@@ -1788,6 +2028,11 @@ fn serve_via_ssr_rpc(
     // this render's body is teed + stored under its session-presence BUCKET key
     // if it emits the `x-pylon-bucket` proof. Superset of `cacheable_eligible`.
     bucket_eligible: bool,
+    // Set when the client asked for markdown (`Accept: text/markdown` or a
+    // `<path>.md` URL). The render runs unchanged — same page, same props, same
+    // auth — and the finished HTML is converted before it goes out. Buffered
+    // rather than streamed, because the converter needs a whole document.
+    md: Option<MarkdownRequest>,
 ) -> Result<(), Request> {
     let fn_ops = match cfg.fn_ops.as_ref() {
         Some(f) => f.clone(),
@@ -1823,7 +2068,14 @@ fn serve_via_ssr_rpc(
         }
     };
 
-    let url = request.url().to_string();
+    // A `.md` request renders the PAGE's URL, not the `.md` one: the page's
+    // `metadata.canonical`, its og:url, and its own `props.url` must all read
+    // as the canonical page, or the markdown would advertise a URL that exists
+    // only as a variant.
+    let url = match md.as_ref() {
+        Some(m) => m.render_url.clone(),
+        None => request.url().to_string(),
+    };
     let (path_only, query) = match url.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (url.clone(), String::new()),
@@ -1862,7 +2114,11 @@ fn serve_via_ssr_rpc(
         .get("x-pylon-nav")
         .map(|v| v.trim() == "1")
         .unwrap_or(false);
-    let cache_vary = ssr_cache_vary(headers_map.get("host").map(String::as_str), nav);
+    let cache_vary = ssr_cache_vary(
+        headers_map.get("host").map(String::as_str),
+        nav,
+        md.is_some(),
+    );
 
     let params_json =
         serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
@@ -1884,6 +2140,7 @@ fn serve_via_ssr_rpc(
         headers_map.get("host").map(String::as_str),
         session_present,
         nav,
+        md.is_some(),
     );
 
     // Cold-start robustness: the Rust HTTP listener accepts connections the
@@ -1915,6 +2172,7 @@ fn serve_via_ssr_rpc(
             &bucket_vary,
             cors_origin,
             nav,
+            md.as_ref(),
             request,
         ) {
             Ok(()) => Ok(()),
@@ -1946,7 +2204,6 @@ fn serve_via_ssr_rpc(
     let (rs_tx, rs_rx) =
         std::sync::mpsc::sync_channel::<(u16, std::collections::HashMap<String, String>)>(1);
     let (body_tx, body_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
-    let streaming_body = crate::server::StreamingBody::new(body_rx);
     // Carries the render error (code, message) from the render thread to the
     // main thread for the dev error overlay. Separate from rs_tx because the
     // failure path is exactly "rs_tx dropped without a response_start" — we
@@ -1954,6 +2211,12 @@ fn serve_via_ssr_rpc(
     // err_rx blocks until the render thread reaches the send (error) or drops
     // err_tx (success), so it's race-free.
     let (err_tx, err_rx) = std::sync::mpsc::sync_channel::<(String, String)>(1);
+
+    // Absolute URL of the page, for the markdown frontmatter — captured before
+    // `headers_map` moves into the render thread. A page that sets its own
+    // `<link rel="canonical">` overrides this during conversion.
+    let absolute_page_url: Option<String> =
+        md.as_ref().map(|_| absolute_url(&headers_map, &path_only));
 
     let fn_ops_for_render = std::sync::Arc::clone(&fn_ops);
     let component_owned = component.clone();
@@ -1965,11 +2228,15 @@ fn serve_via_ssr_rpc(
     // every body byte here (push BEFORE the channel send, so the buffer is
     // complete once respond() drains the stream to EOF). None for non-eligible
     // renders → zero extra allocation.
-    let tee_buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> = if bucket_eligible {
-        Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
-    } else {
-        None
-    };
+    // A markdown response is buffered + converted on THIS thread (see below),
+    // so the chunk tee would only collect HTML we are about to throw away — the
+    // markdown path builds its own cache buffer from the converted bytes.
+    let tee_buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> =
+        if bucket_eligible && md.is_none() {
+            Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
+        } else {
+            None
+        };
     let tee_for_chunk = tee_buf.clone();
     // Gate the tee on the response actually advertising a cache proof (the anon
     // `x-pylon-cacheable` or the Phase 0 `x-pylon-bucket`). The header arrives in
@@ -2093,6 +2360,7 @@ fn serve_via_ssr_rpc(
                 &bucket_vary,
                 cors_origin,
                 nav,
+                md.as_ref(),
                 request,
             ) {
                 Ok(()) => Ok(()),
@@ -2110,24 +2378,52 @@ fn serve_via_ssr_rpc(
     // still serves it fast) so a cookie-blind shared cache can't mis-serve a
     // signed-in shell to a signed-out visitor or vice versa.
     let bucket_shareable = bucket_eligible && bucket_cdn_sharing_enabled() && !nav;
-    let response = Response::new(
-        tiny_http::StatusCode(status),
-        build_ssr_response_headers(
+    // The markdown path replaces the streamed HTML with a converted body, and
+    // hands back the bytes to cache under the markdown key (the chunk tee is
+    // off for these requests).
+    let md_cache_body: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> = match md.as_ref() {
+        Some(md) => respond_markdown(
+            md,
+            status,
             &page_headers,
+            body_rx,
             cors_origin,
-            // A navigation payload answers the same URL as the page with
-            // different content. The origin keys them apart; a CDN keys on URL
-            // alone, so this must never advertise `public`.
-            cacheable_eligible && !nav,
-            bucket_shareable,
+            absolute_page_url.as_deref(),
+            request,
         ),
-        streaming_body,
-        None, // content-length unknown → tiny_http uses chunked transfer
-        None,
-    );
-    // request.respond drains StreamingBody chunk-by-chunk as HTTP
-    // chunked-transfer frames; returns at EOF (render thread done).
-    let _ = request.respond(response);
+        None => {
+            // Data routes (sitemap/robots/llms/og-image) have no markdown
+            // twin to point at — `/llms.txt.md` names nothing.
+            let md_url = if nav || is_data_route_kind(matched.route.kind.as_deref()) {
+                None
+            } else {
+                Some(crate::markdown::md_url_for(&path_only))
+            };
+            let response = Response::new(
+                tiny_http::StatusCode(status),
+                build_ssr_response_headers(
+                    &page_headers,
+                    cors_origin,
+                    // A navigation payload answers the same URL as the page with
+                    // different content. The origin keys them apart; a CDN keys on URL
+                    // alone, so this must never advertise `public`.
+                    cacheable_eligible && !nav,
+                    bucket_shareable,
+                    VariantHeaders {
+                        content_type: None,
+                        alternate_md: md_url.as_deref(),
+                    },
+                ),
+                crate::server::StreamingBody::new(body_rx),
+                None, // content-length unknown → tiny_http uses chunked transfer
+                None,
+            );
+            // request.respond drains StreamingBody chunk-by-chunk as HTTP
+            // chunked-transfer frames; returns at EOF (render thread done).
+            let _ = request.respond(response);
+            None
+        }
+    };
 
     // Dev diagnostics: record this render's verdict (from the dev-only
     // `x-pylon-dev` header the runtime emitted) + the Rust-measured render time
@@ -2156,7 +2452,7 @@ fn serve_via_ssr_rpc(
     // proof (`x-pylon-cacheable`) stores under `cache_vary`; the bucket proof
     // (`x-pylon-bucket`) stores under the session-keyed `bucket_vary`. Off the
     // hot path; best-effort. When not eligible the handle is simply dropped.
-    if let Some(buf) = tee_buf {
+    if let Some(buf) = tee_buf.or(md_cache_body) {
         maybe_cache_render(
             &matched.route.path,
             &path_only,
@@ -2171,6 +2467,145 @@ fn serve_via_ssr_rpc(
         );
     }
     Ok(())
+}
+
+/// Absolute URL for `path`, from the request's forwarding headers. Used only
+/// for the markdown frontmatter, so a missing/odd Host degrades to a
+/// path-relative value rather than failing the response.
+fn absolute_url(headers: &std::collections::HashMap<String, String>, path: &str) -> String {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get("host"))
+        .map(|h| h.trim())
+        .filter(|h| !h.is_empty());
+    let host = match host {
+        Some(h) => h,
+        None => return path.to_string(),
+    };
+    // Behind a proxy the client's scheme is the forwarded one; direct-to-Pylon
+    // in dev is plain HTTP on localhost.
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .map(|p| p.split(',').next().unwrap_or("https").trim().to_string())
+        .unwrap_or_else(|| {
+            if is_loopback_host(host) {
+                "http".to_string()
+            } else {
+                "https".to_string()
+            }
+        });
+    format!("{scheme}://{host}{path}")
+}
+
+/// Buffer a finished render, convert it to markdown, and send it.
+///
+/// Returns the bytes to store in the SSR cache under the markdown key — the
+/// CONVERTED body, so a cache hit skips both the render and the conversion.
+/// `None` when this response must not be cached (an opt-out fallback, a 406, or
+/// a page that answered with its own non-HTML content type).
+#[allow(clippy::too_many_arguments)]
+fn respond_markdown(
+    md: &MarkdownRequest,
+    status: u16,
+    page_headers: &std::collections::HashMap<String, String>,
+    body_rx: std::sync::mpsc::Receiver<Vec<u8>>,
+    cors_origin: &str,
+    absolute_url: Option<&str>,
+    request: Request,
+) -> Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> {
+    // Drain the render to EOF. The converter needs a whole document — there is
+    // no partial-markdown state to stream, and an agent reading a page is not
+    // waiting on first-paint.
+    let mut html = Vec::new();
+    while let Ok(chunk) = body_rx.recv() {
+        html.extend_from_slice(&chunk);
+    }
+
+    // A page can decline to be read as markdown (`export const markdown =
+    // false`) — an app shell whose value is the interaction, not the prose.
+    let opted_out = page_headers
+        .iter()
+        .any(|(k, v)| k.eq_ignore_ascii_case("x-pylon-md") && v.trim() == "0");
+    // A page that set its own non-HTML content type already answered in a
+    // format of its choosing; converting that would be destroying data.
+    let page_content_type = page_headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.to_ascii_lowercase());
+    let page_answered_non_html = page_content_type
+        .as_deref()
+        .is_some_and(|ct| !ct.starts_with("text/html"));
+
+    if opted_out || page_answered_non_html {
+        if md.explicit_url {
+            // `/x.md` names a resource that does not exist for this page.
+            let body = format!(
+                "# 404 Not Found\n\n`{}` has no markdown representation.\n\nRead it at `{}` instead.\n",
+                crate::markdown::md_url_for(md.render_url.split('?').next().unwrap_or("/")),
+                md.render_url,
+            );
+            let mut resp = Response::from_data(body.into_bytes()).with_status_code(404);
+            for (name, value) in [
+                ("Content-Type", "text/markdown; charset=utf-8"),
+                ("Vary", "Accept"),
+                ("Cache-Control", "no-store"),
+                ("X-Content-Type-Options", "nosniff"),
+            ] {
+                if let Ok(h) = Header::from_bytes(name, value) {
+                    resp = resp.with_header(h);
+                }
+            }
+            if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes())
+            {
+                resp = resp.with_header(h);
+            }
+            let _ = request.respond(resp);
+            return None;
+        }
+        if !md.html_acceptable {
+            let path = md.render_url.split('?').next().unwrap_or("/");
+            let _ = request.respond(not_acceptable_response(path, false, cors_origin));
+            return None;
+        }
+        // The client would read HTML too, and we already have it — send the
+        // render we just buffered rather than making the client ask twice.
+        let mut resp = Response::from_data(html).with_status_code(status);
+        for h in build_ssr_response_headers(
+            page_headers,
+            cors_origin,
+            false,
+            false,
+            VariantHeaders::default(),
+        ) {
+            resp = resp.with_header(h);
+        }
+        let _ = request.respond(resp);
+        return None;
+    }
+
+    let source = String::from_utf8_lossy(&html);
+    let markdown = crate::markdown::html_to_markdown(&source, absolute_url);
+    let bytes = markdown.into_bytes();
+    let cache_copy = std::sync::Arc::new(std::sync::Mutex::new(bytes.clone()));
+    let mut resp = Response::from_data(bytes).with_status_code(status);
+    for h in build_ssr_response_headers(
+        page_headers,
+        cors_origin,
+        // Markdown bodies are never advertised as shared-cacheable at the CDN:
+        // a cache keyed on URL alone (Cloudflare ignores Vary) would replay
+        // them to browsers asking for HTML. The origin's own ISR entry — keyed
+        // on the variant — still skips the render.
+        false,
+        false,
+        VariantHeaders {
+            content_type: Some(md.representation.content_type()),
+            alternate_md: None,
+        },
+    ) {
+        resp = resp.with_header(h);
+    }
+    let _ = request.respond(resp);
+    Some(cache_copy)
 }
 
 /// Lowercase `host[:port]` from a bare host or a full URL; `""` when empty.
@@ -2277,11 +2712,18 @@ pub fn is_nav_request(request: &Request) -> bool {
 /// a client-side navigation — so sharing a key would let one be served where
 /// the other is expected: a navigation rendering a raw JSON blob, or a
 /// crawler being handed a payload instead of a page.
-fn ssr_cache_vary(request_host: Option<&str>, nav: bool) -> Vec<(String, String)> {
-    vec![
+fn ssr_cache_vary(request_host: Option<&str>, nav: bool, markdown: bool) -> Vec<(String, String)> {
+    let mut vary = vec![
         ("host".to_string(), ssr_cache_host_bucket(request_host)),
         ("nav".to_string(), if nav { "1" } else { "0" }.to_string()),
-    ]
+    ];
+    // Same reasoning as `nav`: the markdown representation is a different
+    // answer to the same URL. Only added when markdown, so every existing HTML
+    // entry keeps its key (no cache-wide invalidation on upgrade).
+    if markdown {
+        vary.push(("var".to_string(), "md".to_string()));
+    }
+    vary
 }
 
 /// PPR Phase 0 cache-key `vary` for an auth-BUCKET render: the host dimension
@@ -2295,15 +2737,20 @@ fn ssr_cache_bucket_vary(
     request_host: Option<&str>,
     session_present: bool,
     nav: bool,
+    markdown: bool,
 ) -> Vec<(String, String)> {
-    vec![
+    let mut vary = vec![
         ("host".to_string(), ssr_cache_host_bucket(request_host)),
         (
             "sess".to_string(),
             if session_present { "1" } else { "0" }.to_string(),
         ),
         ("nav".to_string(), if nav { "1" } else { "0" }.to_string()),
-    ]
+    ];
+    if markdown {
+        vary.push(("var".to_string(), "md".to_string()));
+    }
+    vary
 }
 
 /// PPR Phase 0: is the CDN configured to key its cache on session-cookie
@@ -2507,17 +2954,24 @@ fn serve_cached_ssr(
     entry: crate::ssr_cache::CacheEntry,
     cors_origin: &str,
     nav: bool,
+    md: Option<&MarkdownRequest>,
+    route_kind: Option<&str>,
     request: Request,
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
         entry.headers.into_iter().collect();
+    let md_url = html_alternate_md_url(md, nav, route_kind, &request);
+    let variant = VariantHeaders {
+        content_type: md.map(|m| m.representation.content_type()),
+        alternate_md: md_url.as_deref(),
+    };
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
     // Reached only for cookie-anonymous, eligible requests (the cache READ gate),
     // and the stored body is the anonymous render → safe to advertise `public`.
     // EXCEPT for a navigation payload: the origin keys HTML and JSON apart, but
     // a CDN keys on URL alone, so advertising `public` on the JSON would let it
     // be cached at the page's URL and then served to a real document request.
-    for h in build_ssr_response_headers(&page_headers, cors_origin, !nav, false) {
+    for h in build_ssr_response_headers(&page_headers, cors_origin, !nav, false, variant) {
         resp = resp.with_header(h);
     }
     let _ = request.respond(resp);
@@ -2535,10 +2989,17 @@ fn serve_cached_bucket_ssr(
     entry: crate::ssr_cache::CacheEntry,
     cors_origin: &str,
     nav: bool,
+    md: Option<&MarkdownRequest>,
+    route_kind: Option<&str>,
     request: Request,
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
         entry.headers.into_iter().collect();
+    let md_url = html_alternate_md_url(md, nav, route_kind, &request);
+    let variant = VariantHeaders {
+        content_type: md.map(|m| m.representation.content_type()),
+        alternate_md: md_url.as_deref(),
+    };
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
     for h in build_ssr_response_headers(
         &page_headers,
@@ -2546,6 +3007,7 @@ fn serve_cached_bucket_ssr(
         false,
         // Never hand a navigation payload to a shared cache keyed on URL alone.
         bucket_cdn_sharing_enabled() && !nav,
+        variant,
     ) {
         resp = resp.with_header(h);
     }
@@ -2571,6 +3033,9 @@ fn try_serve_stale_on_error(
     bucket_vary: &[(String, String)],
     cors_origin: &str,
     nav: bool,
+    // The variant keys are already markdown-specific (see `ssr_cache_vary`), so
+    // this only decides the Content-Type of whatever the lookup found.
+    md: Option<&MarkdownRequest>,
     request: Request,
 ) -> Result<(), Request> {
     // Prefer an anon entry; fall back to this request's session bucket. Both are
@@ -2591,7 +3056,7 @@ fn try_serve_stale_on_error(
                 fresh = entry.fresh,
                 "SSR render unavailable — serving cached copy (stale-on-error)"
             );
-            serve_cached_ssr_stale(entry, cors_origin, nav, request)
+            serve_cached_ssr_stale(entry, cors_origin, nav, md, request)
         }
         None => Err(request),
     }
@@ -2624,6 +3089,7 @@ fn serve_cached_ssr_stale(
     entry: crate::ssr_cache::CacheEntry,
     cors_origin: &str,
     nav: bool,
+    md: Option<&MarkdownRequest>,
     request: Request,
 ) -> Result<(), Request> {
     let page_headers: std::collections::HashMap<String, String> =
@@ -2637,7 +3103,16 @@ fn serve_cached_ssr_stale(
         .keys()
         .any(|k| k.eq_ignore_ascii_case("x-pylon-bucket"));
     let mut resp = Response::from_data(entry.body).with_status_code(entry.status);
-    for h in build_ssr_response_headers(&page_headers, cors_origin, !nav, false) {
+    for h in build_ssr_response_headers(
+        &page_headers,
+        cors_origin,
+        !nav,
+        false,
+        VariantHeaders {
+            content_type: md.map(|m| m.representation.content_type()),
+            alternate_md: None,
+        },
+    ) {
         // Drop the stored Cache-Control; we re-apply a short one below.
         if h.field
             .as_str()
@@ -2761,12 +3236,19 @@ fn serve_via_form_rpc(
             cors_origin,
         ));
         return Ok(());
-    } else if body.is_empty() {
+    } else if body.is_empty() || content_type.starts_with("application/json") {
+        // A JSON body has no form fields to parse. Running it through the
+        // urlencoded parser produced one nonsense key per `&`-free blob, which
+        // read as "the fields are there, just wrong". The handler reads
+        // `req.body` instead.
         serde_json::json!({})
     } else {
         // Unknown content-type with a body — best-effort urlencoded.
         parse_urlencoded_form(&body)
     };
+    // The exact bytes, for handlers that answer machines: JSON APIs, JSON-RPC
+    // (MCP), and webhooks that verify a signature over the raw body.
+    let raw_body = String::from_utf8_lossy(&body).to_string();
 
     let params_json =
         serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
@@ -2817,6 +3299,7 @@ fn serve_via_form_rpc(
                 params_json,
                 search_params_json,
                 form_json,
+                raw_body,
                 headers_map,
                 cookies_map,
                 auth,
@@ -2853,8 +3336,15 @@ fn serve_via_form_rpc(
     let response = Response::new(
         tiny_http::StatusCode(status),
         // Form-handler (POST) path — never a shareable GET, so never `public`
-        // (anon or bucket).
-        build_ssr_response_headers(&page_headers, cors_origin, false, false),
+        // (anon or bucket). A route handler sets its own content type, so the
+        // variant carries nothing.
+        build_ssr_response_headers(
+            &page_headers,
+            cors_origin,
+            false,
+            false,
+            VariantHeaders::default(),
+        ),
         streaming_body,
         None,
         None,
@@ -2923,6 +3413,32 @@ fn form_text_response(
 /// header dropped rather than injected — header-injection-safe by
 /// construction. `content-type` and `cache-control` defaults only apply
 /// when the page didn't set them.
+/// The `.md` URL to advertise on an HTML page response — `None` when this
+/// response IS the markdown, or when it's a client-router navigation payload
+/// (no document, nothing to offer an alternate for).
+fn html_alternate_md_url(
+    md: Option<&MarkdownRequest>,
+    nav: bool,
+    route_kind: Option<&str>,
+    request: &Request,
+) -> Option<String> {
+    if md.is_some() || nav || is_data_route_kind(route_kind) {
+        return None;
+    }
+    let url = request.url();
+    let path = url.split('?').next().unwrap_or("/");
+    Some(crate::markdown::md_url_for(path))
+}
+
+/// Representation metadata for one SSR response: what content type it actually
+/// carries (set only when the runtime converted the body), and the `.md` URL to
+/// advertise alongside an HTML page.
+#[derive(Debug, Clone, Copy, Default)]
+struct VariantHeaders<'a> {
+    content_type: Option<&'static str>,
+    alternate_md: Option<&'a str>,
+}
+
 fn build_ssr_response_headers(
     page_headers: &std::collections::HashMap<String, String>,
     cors_origin: &str,
@@ -2941,9 +3457,18 @@ fn build_ssr_response_headers(
     // signed-out visitor. A bucket body is identity-free (see `computeBucketVerdict`)
     // so this is about cache-KEYING, not body safety.
     bucket_shareable: bool,
+    // Which representation this response carries, and where the other one
+    // lives. Every SSR response gets `Vary: Accept` from this — the body now
+    // depends on the request's Accept, and a cache that doesn't know that will
+    // hand an agent the HTML (or a browser the markdown).
+    variant: VariantHeaders<'_>,
 ) -> Vec<Header> {
     let mut out: Vec<Header> = Vec::new();
     let mut saw_content_type = false;
+    // A page-set `Vary` is captured and merged with `Accept` rather than
+    // emitted twice — two Vary headers are legal but read badly, and some
+    // intermediaries only honor the first.
+    let mut page_vary: Option<String> = None;
     // A page-set Cache-Control is captured (not emitted in the loop) so the final
     // value can be decided with `request_shareable` in mind — a page must not be
     // able to advertise shared caching (`public`/`s-maxage`) for a non-shareable
@@ -3014,6 +3539,16 @@ fn build_ssr_response_headers(
             page_cache_control = Some(value.clone());
             continue;
         }
+        if lname == "vary" {
+            // Merged with `Accept` below.
+            page_vary = Some(value.clone());
+            continue;
+        }
+        if lname == "content-type" && variant.content_type.is_some() {
+            // This response was converted after the render; the page's own
+            // content type describes bytes that are no longer being sent.
+            continue;
+        }
         if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
             if lname == "content-type" {
                 saw_content_type = true;
@@ -3022,8 +3557,36 @@ fn build_ssr_response_headers(
         }
     }
 
-    if !saw_content_type {
+    if let Some(ct) = variant.content_type {
+        out.push(Header::from_bytes("Content-Type", ct).unwrap());
+    } else if !saw_content_type {
         out.push(Header::from_bytes("Content-Type", "text/html; charset=utf-8").unwrap());
+    }
+    {
+        // `Vary: Accept` on EVERY SSR response, not just the markdown ones: a
+        // shared cache that stored the HTML without it would serve that HTML to
+        // the next agent asking for markdown.
+        let vary = match page_vary {
+            Some(v)
+                if v.split(',')
+                    .any(|t| t.trim().eq_ignore_ascii_case("accept")) =>
+            {
+                v
+            }
+            Some(v) if !v.trim().is_empty() => format!("{}, Accept", v.trim_end_matches(',')),
+            _ => "Accept".to_string(),
+        };
+        if let Ok(h) = Header::from_bytes("Vary", vary.as_bytes()) {
+            out.push(h);
+        }
+    }
+    // Advertise the markdown twin on the HTML response, so an agent that never
+    // sets an Accept header can still find it (RFC 8288 `alternate`).
+    if let Some(md_url) = variant.alternate_md {
+        let value = format!("<{md_url}>; rel=\"alternate\"; type=\"text/markdown\"");
+        if let Ok(h) = Header::from_bytes("Link", value.as_bytes()) {
+            out.push(h);
+        }
     }
     {
         // Does a Cache-Control EXPLICITLY forbid SHARED storage? Only an
@@ -4797,6 +5360,228 @@ mod tests {
     }
 
     #[test]
+    fn markdown_variant_is_chosen_only_when_the_client_asks() {
+        use crate::markdown::Representation;
+        let md = |v: &PageVariant| match v {
+            PageVariant::Markdown(m) => Some(m.clone()),
+            _ => None,
+        };
+        // A browser is untouched.
+        assert!(md(&page_variant_for(
+            false,
+            "/product",
+            Some("text/html,*/*;q=0.8"),
+            false
+        ))
+        .is_none());
+        // An agent asking for markdown gets it, rendered at the page's own URL.
+        let m = md(&page_variant_for(
+            false,
+            "/product?ref=x",
+            Some("text/markdown"),
+            false,
+        ))
+        .expect("markdown");
+        assert_eq!(m.render_url, "/product?ref=x");
+        assert!(!m.explicit_url);
+        assert!(!m.html_acceptable);
+        // The `.md` URL renders the page path, query preserved.
+        let m = md(&page_variant_for(false, "/product.md?ref=x", None, false)).expect("markdown");
+        assert_eq!(m.render_url, "/product?ref=x");
+        assert!(m.explicit_url);
+        assert_eq!(m.representation, Representation::Markdown);
+        // A client-router navigation always wants the hydration payload.
+        assert!(md(&page_variant_for(
+            true,
+            "/product",
+            Some("text/markdown"),
+            false
+        ))
+        .is_none());
+        // A real file under public/ keeps its URL — `public/pylon-skill.md`
+        // must not be shadowed by a `/pylon-skill` page's variant.
+        assert!(md(&page_variant_for(false, "/pylon-skill.md", None, true)).is_none());
+        // Nothing acceptable at all.
+        assert!(matches!(
+            page_variant_for(false, "/product", Some("image/png"), false),
+            PageVariant::NotAcceptable
+        ));
+    }
+
+    #[test]
+    fn every_ssr_response_varies_on_accept() {
+        let page = std::collections::HashMap::new();
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "https://app.example",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
+        assert!(
+            pairs.iter().any(|(k, v)| k == "vary" && v == "Accept"),
+            "{pairs:?}"
+        );
+    }
+
+    #[test]
+    fn a_page_set_vary_is_merged_not_duplicated() {
+        let mut page = std::collections::HashMap::new();
+        page.insert("vary".to_string(), "Cookie".to_string());
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "https://app.example",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
+        let varys: Vec<&String> = pairs
+            .iter()
+            .filter(|(k, _)| k == "vary")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(varys.len(), 1, "exactly one Vary: {pairs:?}");
+        assert_eq!(varys[0], "Cookie, Accept");
+        // A page that already said Accept is left alone.
+        let mut page = std::collections::HashMap::new();
+        page.insert("vary".to_string(), "Accept, Cookie".to_string());
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "https://app.example",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(k, v)| k == "vary" && v == "Accept, Cookie")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn html_advertises_its_markdown_twin_and_markdown_replaces_the_content_type() {
+        let page = std::collections::HashMap::new();
+        let html = header_pairs(&build_ssr_response_headers(
+            &page,
+            "https://app.example",
+            true,
+            false,
+            VariantHeaders {
+                content_type: None,
+                alternate_md: Some("/product.md"),
+            },
+        ));
+        assert!(html
+            .iter()
+            .any(|(k, v)| k == "link"
+                && v == "</product.md>; rel=\"alternate\"; type=\"text/markdown\""));
+        assert!(html
+            .iter()
+            .any(|(k, v)| k == "content-type" && v.starts_with("text/html")));
+
+        // The markdown response carries the converted type, and does NOT point
+        // at itself as an alternate.
+        let md = header_pairs(&build_ssr_response_headers(
+            &page,
+            "https://app.example",
+            false,
+            false,
+            VariantHeaders {
+                content_type: Some("text/markdown; charset=utf-8"),
+                alternate_md: None,
+            },
+        ));
+        assert_eq!(
+            md.iter().filter(|(k, _)| k == "content-type").count(),
+            1,
+            "{md:?}"
+        );
+        assert!(md
+            .iter()
+            .any(|(k, v)| k == "content-type" && v == "text/markdown; charset=utf-8"));
+        assert!(!md.iter().any(|(k, _)| k == "link"));
+    }
+
+    #[test]
+    fn a_page_set_content_type_loses_to_the_converted_body() {
+        // The page said "text/html"; the runtime converted it. Sending both
+        // would be a response-splitting-adjacent contradiction.
+        let mut page = std::collections::HashMap::new();
+        page.insert(
+            "content-type".to_string(),
+            "text/html; charset=utf-8".to_string(),
+        );
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "https://app.example",
+            false,
+            false,
+            VariantHeaders {
+                content_type: Some("text/plain; charset=utf-8"),
+                alternate_md: None,
+            },
+        ));
+        let cts: Vec<&String> = pairs
+            .iter()
+            .filter(|(k, _)| k == "content-type")
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(cts, vec!["text/plain; charset=utf-8"]);
+    }
+
+    #[test]
+    fn markdown_and_html_never_share_a_cache_entry() {
+        // Same reasoning as the nav/html split: one URL, two representations.
+        // A shared key would hand an agent the HTML or a browser the markdown.
+        let key = |vary: &[(String, String)]| crate::ssr_cache::cache_key("/p", "/p", vary);
+        assert_ne!(
+            key(&ssr_cache_vary(Some("a.example.com"), false, false)),
+            key(&ssr_cache_vary(Some("a.example.com"), false, true)),
+            "anon lane: html and markdown are distinct entries"
+        );
+        assert_ne!(
+            key(&ssr_cache_bucket_vary(
+                Some("a.example.com"),
+                true,
+                false,
+                false
+            )),
+            key(&ssr_cache_bucket_vary(
+                Some("a.example.com"),
+                true,
+                false,
+                true
+            )),
+            "bucket lane: html and markdown are distinct entries"
+        );
+        // Existing HTML entries keep their key across the upgrade — the pair is
+        // only appended for markdown.
+        assert_eq!(
+            key(&ssr_cache_vary(Some("a.example.com"), true, false)),
+            key(&[
+                (
+                    "host".to_string(),
+                    ssr_cache_host_bucket(Some("a.example.com"))
+                ),
+                ("nav".to_string(), "1".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn markdown_files_are_served_as_markdown() {
+        // A committed `public/*.md` used to go out as application/octet-stream,
+        // which agents download instead of read.
+        assert_eq!(
+            content_type_for(Path::new("/app/public/pylon-skill.md")),
+            "text/markdown; charset=utf-8"
+        );
+    }
+
+    #[test]
     fn ssr_headers_inject_defaults_and_preserve_page_headers() {
         let mut page = std::collections::HashMap::new();
         page.insert("x-custom".to_string(), "hi".to_string());
@@ -4805,6 +5590,7 @@ mod tests {
             "https://app.example",
             true,
             false,
+            VariantHeaders::default(),
         ));
         assert!(pairs.iter().any(|(k, v)| k == "x-custom" && v == "hi"));
         assert!(pairs.iter().any(|(k, _)| k == "content-type"));
@@ -4821,7 +5607,13 @@ mod tests {
             "content-type".to_string(),
             "application/rss+xml".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
         let cts: Vec<&(String, String)> =
             pairs.iter().filter(|(k, _)| k == "content-type").collect();
         assert_eq!(cts.len(), 1, "exactly one content-type (no default added)");
@@ -4835,7 +5627,13 @@ mod tests {
             "set-cookie".to_string(),
             "a=1; Path=/; HttpOnly\nb=2; Path=/; HttpOnly".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
         let cookies: Vec<&String> = pairs
             .iter()
             .filter(|(k, _)| k == "set-cookie")
@@ -4849,10 +5647,16 @@ mod tests {
     #[test]
     fn ssr_cookie_response_is_no_store_else_no_cache() {
         let cc = |page: &std::collections::HashMap<String, String>| {
-            header_pairs(&build_ssr_response_headers(page, "*", true, false))
-                .into_iter()
-                .find(|(k, _)| k == "cache-control")
-                .map(|(_, v)| v)
+            header_pairs(&build_ssr_response_headers(
+                page,
+                "*",
+                true,
+                false,
+                VariantHeaders::default(),
+            ))
+            .into_iter()
+            .find(|(k, _)| k == "cache-control")
+            .map(|(_, v)| v)
         };
         // Anonymous page → no-cache (it can opt into edge caching explicitly).
         let anon = std::collections::HashMap::new();
@@ -4875,7 +5679,13 @@ mod tests {
     #[test]
     fn ssr_cacheable_proof_yields_public_smaxage_and_is_stripped() {
         let headers = |page: &std::collections::HashMap<String, String>| {
-            header_pairs(&build_ssr_response_headers(page, "*", true, false))
+            header_pairs(&build_ssr_response_headers(
+                page,
+                "*",
+                true,
+                false,
+                VariantHeaders::default(),
+            ))
         };
         let cc = |page: &std::collections::HashMap<String, String>| {
             headers(page)
@@ -4920,10 +5730,16 @@ mod tests {
         // proof its response must NEVER be advertised `public` — else a shared
         // cache (Cloudflare) could replay one user's identity to another.
         let cc = |page: &std::collections::HashMap<String, String>, shareable: bool| {
-            header_pairs(&build_ssr_response_headers(page, "*", shareable, false))
-                .into_iter()
-                .find(|(k, _)| k == "cache-control")
-                .map(|(_, v)| v)
+            header_pairs(&build_ssr_response_headers(
+                page,
+                "*",
+                shareable,
+                false,
+                VariantHeaders::default(),
+            ))
+            .into_iter()
+            .find(|(k, _)| k == "cache-control")
+            .map(|(_, v)| v)
         };
         let mut proven = std::collections::HashMap::new();
         proven.insert("x-pylon-cacheable".to_string(), "60".to_string());
@@ -4953,6 +5769,7 @@ mod tests {
                 "*",
                 req_shareable,
                 bucket_shareable,
+                VariantHeaders::default(),
             ))
             .into_iter()
             .find(|(k, _)| k == "cache-control")
@@ -4983,9 +5800,15 @@ mod tests {
 
         // The internal proof header NEVER reaches the client/CDN.
         assert!(
-            !header_pairs(&build_ssr_response_headers(&bucket, "*", false, true))
-                .iter()
-                .any(|(k, _)| k == "x-pylon-bucket"),
+            !header_pairs(&build_ssr_response_headers(
+                &bucket,
+                "*",
+                false,
+                true,
+                VariantHeaders::default()
+            ))
+            .iter()
+            .any(|(k, _)| k == "x-pylon-bucket"),
             "the internal bucket proof must be stripped"
         );
 
@@ -5109,27 +5932,47 @@ mod tests {
         // a crawler handed JSON instead of a page.
         let key = |vary: &[(String, String)]| crate::ssr_cache::cache_key("/p", "/p", vary);
         assert_ne!(
-            key(&ssr_cache_vary(Some("a.example.com"), false)),
-            key(&ssr_cache_vary(Some("a.example.com"), true)),
+            key(&ssr_cache_vary(Some("a.example.com"), false, false)),
+            key(&ssr_cache_vary(Some("a.example.com"), true, false)),
             "anon lane: html and nav are distinct entries"
         );
         assert_ne!(
-            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, false)),
-            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, true)),
+            key(&ssr_cache_bucket_vary(
+                Some("a.example.com"),
+                true,
+                false,
+                false
+            )),
+            key(&ssr_cache_bucket_vary(
+                Some("a.example.com"),
+                true,
+                true,
+                false
+            )),
             "bucket lane: html and nav are distinct entries"
         );
         // And the nav dimension must not collapse the dimensions already there.
         assert_ne!(
-            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, true)),
-            key(&ssr_cache_bucket_vary(Some("a.example.com"), false, true)),
+            key(&ssr_cache_bucket_vary(
+                Some("a.example.com"),
+                true,
+                true,
+                false
+            )),
+            key(&ssr_cache_bucket_vary(
+                Some("a.example.com"),
+                false,
+                true,
+                false
+            )),
             "session presence still separates nav entries"
         );
         // Loopback hosts each get their own bucket (untrusted public hosts
         // deliberately collapse to one, so a Host sprayer can't multiply
         // entries — see ssr_cache_host_bucket).
         assert_ne!(
-            key(&ssr_cache_vary(Some("127.0.0.1"), true)),
-            key(&ssr_cache_vary(Some("localhost"), true)),
+            key(&ssr_cache_vary(Some("127.0.0.1"), true, false)),
+            key(&ssr_cache_vary(Some("localhost"), true, false)),
             "host still separates nav entries"
         );
     }
@@ -5141,9 +5984,9 @@ mod tests {
         // — and a bucket entry can never collide with an anon entry for the same
         // route (distinct vary shape).
         let key = |vary: &[(String, String)]| crate::ssr_cache::cache_key("/p", "/p", vary);
-        let anon = ssr_cache_vary(Some("a.example.com"), false);
-        let b_in = ssr_cache_bucket_vary(Some("a.example.com"), true, false);
-        let b_out = ssr_cache_bucket_vary(Some("a.example.com"), false, false);
+        let anon = ssr_cache_vary(Some("a.example.com"), false, false);
+        let b_in = ssr_cache_bucket_vary(Some("a.example.com"), true, false, false);
+        let b_out = ssr_cache_bucket_vary(Some("a.example.com"), false, false, false);
         assert_ne!(
             key(&b_in),
             key(&b_out),
@@ -5161,7 +6004,12 @@ mod tests {
         );
         // Same inputs → same key (deterministic, so read/write/stale agree).
         assert_eq!(
-            key(&ssr_cache_bucket_vary(Some("a.example.com"), true, false)),
+            key(&ssr_cache_bucket_vary(
+                Some("a.example.com"),
+                true,
+                false,
+                false
+            )),
             key(&b_in)
         );
     }
@@ -5175,10 +6023,16 @@ mod tests {
         // fix, a page-set `cache-control` set `saw_cache_control` and skipped the
         // shareability gate entirely.
         let cc = |page: &std::collections::HashMap<String, String>, shareable: bool| {
-            header_pairs(&build_ssr_response_headers(page, "*", shareable, false))
-                .into_iter()
-                .find(|(k, _)| k == "cache-control")
-                .map(|(_, v)| v)
+            header_pairs(&build_ssr_response_headers(
+                page,
+                "*",
+                shareable,
+                false,
+                VariantHeaders::default(),
+            ))
+            .into_iter()
+            .find(|(k, _)| k == "cache-control")
+            .map(|(_, v)| v)
         };
         let mut pub_page = std::collections::HashMap::new();
         pub_page.insert(
@@ -5215,7 +6069,13 @@ mod tests {
         // Any forged `x-pylon-*` from page headers is stripped, never emitted.
         let mut forged = std::collections::HashMap::new();
         forged.insert("x-pylon-foo".to_string(), "1".to_string());
-        let pairs = header_pairs(&build_ssr_response_headers(&forged, "*", true, false));
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &forged,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
         assert!(!pairs.iter().any(|(k, _)| k.starts_with("x-pylon-")));
     }
 
@@ -5231,10 +6091,16 @@ mod tests {
             if let Some(v) = page_cc {
                 page.insert("cache-control".to_string(), v.to_string());
             }
-            header_pairs(&build_ssr_response_headers(&page, "*", false, false))
-                .into_iter()
-                .find(|(k, _)| k == "cache-control")
-                .map(|(_, v)| v)
+            header_pairs(&build_ssr_response_headers(
+                &page,
+                "*",
+                false,
+                false,
+                VariantHeaders::default(),
+            ))
+            .into_iter()
+            .find(|(k, _)| k == "cache-control")
+            .map(|(_, v)| v)
         };
         // No page CC at all → the default must NOT be a bare `no-cache` (shared-
         // storable); it's forced to private,no-store for an unshareable request.
@@ -5457,6 +6323,7 @@ mod tests {
             "*",
             true,
             false,
+            VariantHeaders::default(),
         ));
         let get = |k: &str| pairs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         assert_eq!(get("x-frame-options").as_deref(), Some("SAMEORIGIN")); // clickjacking
@@ -5467,7 +6334,13 @@ mod tests {
         // duplicate header emitted.
         let mut page = std::collections::HashMap::new();
         page.insert("x-frame-options".to_string(), "ALLOWALL".to_string());
-        let p2 = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
+        let p2 = header_pairs(&build_ssr_response_headers(
+            &page,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
         let xfo: Vec<&String> = p2
             .iter()
             .filter(|(n, _)| n == "x-frame-options")
@@ -5542,7 +6415,13 @@ mod tests {
             "x-evil".to_string(),
             "ok\r\nset-cookie: stolen=1".to_string(),
         );
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
         assert!(
             pairs.iter().all(|(_, v)| !v.contains("stolen")),
             "CRLF-injected value must not appear in any header"
@@ -5561,7 +6440,13 @@ mod tests {
         let mut page = std::collections::HashMap::new();
         page.insert("x-evil\r\nset-cookie".to_string(), "stolen=1".to_string());
         page.insert("x:colon".to_string(), "v".to_string());
-        let pairs = header_pairs(&build_ssr_response_headers(&page, "*", true, false));
+        let pairs = header_pairs(&build_ssr_response_headers(
+            &page,
+            "*",
+            true,
+            false,
+            VariantHeaders::default(),
+        ));
         assert!(pairs
             .iter()
             .all(|(k, _)| !k.contains('\r') && !k.contains('\n') && !k.contains(':')));

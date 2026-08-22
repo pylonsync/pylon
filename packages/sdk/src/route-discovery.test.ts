@@ -94,14 +94,38 @@ describe("discoverAppRoutes — opengraph-image convention", () => {
       "opengraph-image.tsx": OG,
       "sitemap.ts": "export default function S(){ return []; }",
       "robots.ts": "export default function R(){ return {}; }",
+      "llms.ts": "export default function L(){ return { title: 'x' }; }",
     });
     const routes = await discoverAppRoutes();
     const idx = (p: string) => routes.findIndex((r) => r.path === p);
     const dynamic = idx("/:orgSlug");
     expect(dynamic).toBeGreaterThan(-1);
-    for (const literal of ["/opengraph-image", "/sitemap.xml", "/robots.txt"]) {
+    for (const literal of [
+      "/opengraph-image",
+      "/sitemap.xml",
+      "/robots.txt",
+      "/llms.txt",
+    ]) {
       expect(idx(literal)).toBeGreaterThan(-1);
       expect(idx(literal)).toBeLessThan(dynamic);
     }
+  });
+
+  test("app/llms.ts → /llms.txt", async () => {
+    app({
+      "page.tsx": PAGE,
+      "llms.ts": "export default function L(){ return { title: 'Acme' }; }",
+    });
+    const routes = await discoverAppRoutes();
+    const llms = routes.find((r) => r.kind === "llms");
+    expect(llms?.path).toBe("/llms.txt");
+    expect(llms?.mode).toBe("ssr");
+    expect(llms?.component).toMatch(/llms$/);
+  });
+
+  test("no app/llms.ts → no /llms.txt route", async () => {
+    app({ "page.tsx": PAGE });
+    const routes = await discoverAppRoutes();
+    expect(routes.some((r) => r.kind === "llms")).toBe(false);
   });
 });

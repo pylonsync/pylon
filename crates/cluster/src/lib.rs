@@ -72,6 +72,17 @@ pub struct Envelope {
     pub payload: serde_json::Value,
 }
 
+/// Durable-relay wire frame. `relay_seq` is assigned by the relay and is
+/// independent from an entity change sequence. It lets a machine reconnect
+/// and replay cluster envelopes that arrived while its socket was down.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayFrame {
+    pub relay_seq: u64,
+    #[serde(default)]
+    pub message_id: String,
+    pub envelope: Envelope,
+}
+
 impl Envelope {
     pub fn change(instance_id: &str, event: &pylon_sync::ChangeEvent) -> Self {
         Self {
@@ -248,6 +259,16 @@ pub mod redis_bus;
 
 #[cfg(feature = "redis-bus")]
 pub use redis_bus::RedisBus;
+
+// ---------------------------------------------------------------------------
+// RelayBus — managed Pylon Cloud transport via the PylonSync DO.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "relay-bus")]
+pub mod relay_bus;
+
+#[cfg(feature = "relay-bus")]
+pub use relay_bus::RelayBus;
 
 // ---------------------------------------------------------------------------
 // Tests

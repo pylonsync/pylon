@@ -533,6 +533,7 @@ export interface RouteDefinition {
     | "route"
     | "sitemap"
     | "robots"
+    | "llms"
     | "og-image";
 }
 
@@ -784,6 +785,7 @@ export interface ManifestRoute {
     | "route"
     | "sitemap"
     | "robots"
+    | "llms"
     | "og-image";
 }
 
@@ -1335,6 +1337,19 @@ export async function discoverAppRoutes(opts?: {
       mode: "ssr",
       component: robotsMod,
       kind: "robots",
+    });
+  }
+  // `app/llms.ts` → `/llms.txt` (llmstxt.org). Same shape as sitemap/robots:
+  // a default export returning structured data, serialized by the SSR runtime.
+  // It is the file an agent reads FIRST to decide whether this site is worth
+  // its context, so it earns a convention rather than a hand-written route.
+  const llmsMod = findModule(appDir, "llms");
+  if (llmsMod) {
+    dataRoutes.push({
+      path: "/llms.txt",
+      mode: "ssr",
+      component: llmsMod,
+      kind: "llms",
     });
   }
 

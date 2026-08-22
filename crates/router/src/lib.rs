@@ -570,6 +570,7 @@ pub trait FnOps: Send + Sync {
         _params: serde_json::Value,
         _search_params: serde_json::Value,
         _form: serde_json::Value,
+        _body: String,
         _headers: std::collections::HashMap<String, String>,
         _cookies: std::collections::HashMap<String, String>,
         _auth: pylon_functions::protocol::AuthInfo,

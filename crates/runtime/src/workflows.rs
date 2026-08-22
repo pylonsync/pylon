@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -95,6 +95,9 @@ pub type WorkflowRunnerHook =
 /// route would block for the whole segment).
 pub type WorkflowKickHook = Box<dyn Fn(&str) + Send + Sync>;
 
+const DISTRIBUTED_WORKFLOW_LEASE_SECS: u64 = 30;
+const DISTRIBUTED_WORKFLOW_HEARTBEAT_SECS: u64 = 10;
+
 pub struct WorkflowEngine {
     /// Registered workflow definitions.
     definitions: Mutex<HashMap<String, WorkflowDef>>,
@@ -112,6 +115,14 @@ pub struct WorkflowEngine {
     /// survive restart (restore_from at boot). Best-effort like the job
     /// store: a failed write logs, never blocks.
     store: Mutex<Option<std::sync::Arc<crate::workflow_store::WorkflowStore>>>,
+    /// Shared workflow state used by Postgres deployments.
+    pg_store: Mutex<Option<Arc<crate::pg_workflow_store::PgWorkflowStore>>>,
+    /// Lease tokens held by this process. Persistence checks the token so a
+    /// stale worker cannot overwrite a newer workflow transition.
+    lease_tokens: Mutex<HashMap<String, String>>,
+    lease_seq: AtomicU64,
+    id_seq: AtomicU64,
+    instance_id: String,
     /// Instances currently being driven by run_to_pause. The driver can
     /// receive duplicate kicks (the sweep tick re-kicks every Running
     /// instance); without this guard two concurrent drivers would both
@@ -120,6 +131,32 @@ pub struct WorkflowEngine {
     /// Max instances to keep in history (unused currently, reserved for GC).
     #[allow(dead_code)]
     max_history: usize,
+}
+
+struct DistributedWorkflowLease<'a> {
+    engine: &'a WorkflowEngine,
+    store: Arc<crate::pg_workflow_store::PgWorkflowStore>,
+    id: String,
+    token: String,
+    stop: Option<std::sync::mpsc::Sender<()>>,
+    heartbeat: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for DistributedWorkflowLease<'_> {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.heartbeat.take() {
+            let _ = handle.join();
+        }
+        if let Err(e) = self.store.release(&self.id, &self.token) {
+            tracing::warn!("[workflows] failed to release lease for {}: {e}", self.id);
+        }
+        if let Ok(mut tokens) = self.engine.lease_tokens.lock() {
+            tokens.remove(&self.id);
+        }
+    }
 }
 
 impl WorkflowEngine {
@@ -131,6 +168,11 @@ impl WorkflowEngine {
             runner_hook: Mutex::new(None),
             kick_hook: Mutex::new(None),
             store: Mutex::new(None),
+            pg_store: Mutex::new(None),
+            lease_tokens: Mutex::new(HashMap::new()),
+            lease_seq: AtomicU64::new(1),
+            id_seq: AtomicU64::new(1),
+            instance_id: pylon_cluster::new_instance_id(),
             advancing: Mutex::new(std::collections::HashSet::new()),
             max_history,
         }
@@ -151,12 +193,95 @@ impl WorkflowEngine {
         *self.store.lock().unwrap() = Some(store);
     }
 
-    fn persist(&self, instance: &WorkflowInstance) {
-        if let Some(store) = self.store.lock().unwrap().as_ref() {
-            if let Err(e) = store.save(instance) {
-                tracing::warn!("[workflows] failed to persist {}: {e}", instance.id);
-            }
+    pub fn attach_pg_store(&self, store: Arc<crate::pg_workflow_store::PgWorkflowStore>) {
+        *self.pg_store.lock().unwrap() = Some(store);
+    }
+
+    fn pg_store(&self) -> Option<Arc<crate::pg_workflow_store::PgWorkflowStore>> {
+        self.pg_store.lock().unwrap().clone()
+    }
+
+    fn persist(&self, instance: &WorkflowInstance) -> Result<(), String> {
+        if let Some(store) = self.pg_store() {
+            let token = self.lease_tokens.lock().unwrap().get(&instance.id).cloned();
+            return match token {
+                Some(token) => store.save_owned(instance, &token),
+                None => store.save(instance),
+            };
         }
+        if let Some(store) = self.store.lock().unwrap().as_ref() {
+            store.save(instance)?;
+        }
+        Ok(())
+    }
+
+    fn acquire_distributed_lease(
+        &self,
+        workflow_id: &str,
+    ) -> Result<Option<DistributedWorkflowLease<'_>>, String> {
+        let Some(store) = self.pg_store() else {
+            return Ok(None);
+        };
+        let token = format!(
+            "{}-{}",
+            self.instance_id,
+            self.lease_seq.fetch_add(1, Ordering::Relaxed)
+        );
+        if !store.try_acquire(workflow_id, &token, DISTRIBUTED_WORKFLOW_LEASE_SECS)? {
+            return Ok(None);
+        }
+        self.lease_tokens
+            .lock()
+            .unwrap()
+            .insert(workflow_id.to_string(), token.clone());
+
+        let heartbeat_store = Arc::clone(&store);
+        let heartbeat_id = workflow_id.to_string();
+        let heartbeat_token = token.clone();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let heartbeat = match std::thread::Builder::new()
+            .name("pylon-workflow-heartbeat".into())
+            .spawn(move || loop {
+                match stop_rx.recv_timeout(Duration::from_secs(DISTRIBUTED_WORKFLOW_HEARTBEAT_SECS))
+                {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        match heartbeat_store.heartbeat(
+                            &heartbeat_id,
+                            &heartbeat_token,
+                            DISTRIBUTED_WORKFLOW_LEASE_SECS,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::warn!(
+                                    "[workflows] lease lost while {} was advancing",
+                                    heartbeat_id
+                                );
+                                break;
+                            }
+                            Err(e) => tracing::warn!(
+                                "[workflows] heartbeat failed for {}: {e}",
+                                heartbeat_id
+                            ),
+                        }
+                    }
+                }
+            }) {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.lease_tokens.lock().unwrap().remove(workflow_id);
+                let _ = store.release(workflow_id, &token);
+                return Err(format!("failed to start workflow heartbeat: {e}"));
+            }
+        };
+        Ok(Some(DistributedWorkflowLease {
+            engine: self,
+            store,
+            id: workflow_id.to_string(),
+            token,
+            stop: Some(stop_tx),
+            heartbeat: Some(heartbeat),
+        }))
     }
 
     pub(crate) fn kick(&self, workflow_id: &str) {
@@ -180,7 +305,11 @@ impl WorkflowEngine {
             .get(name)
             .ok_or_else(|| format!("Workflow '{}' not registered", name))?;
 
-        let id = generate_workflow_id();
+        let id = format!(
+            "wf_{}_{}",
+            self.instance_id,
+            self.id_seq.fetch_add(1, Ordering::Relaxed)
+        );
         let instance = WorkflowInstance {
             id: id.clone(),
             name: name.to_string(),
@@ -198,7 +327,7 @@ impl WorkflowEngine {
             max_retries: def.max_retries,
         };
 
-        self.persist(&instance);
+        self.persist(&instance)?;
         self.instances.lock().unwrap().insert(id.clone(), instance);
         // Hand the new instance to the driver — steps never run on the
         // caller's thread.
@@ -215,6 +344,25 @@ impl WorkflowEngine {
         workflow_id: &str,
         max_steps: usize,
     ) -> Result<WorkflowStatus, String> {
+        let distributed_lease = match self.acquire_distributed_lease(workflow_id)? {
+            Some(lease) => Some(lease),
+            None if self.pg_store().is_some() => {
+                return self
+                    .get(workflow_id)
+                    .map(|instance| instance.status)
+                    .ok_or_else(|| format!("Workflow '{}' not found", workflow_id));
+            }
+            None => None,
+        };
+        if let Some(store) = self.pg_store() {
+            let latest = store
+                .load(workflow_id)?
+                .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?;
+            self.instances
+                .lock()
+                .unwrap()
+                .insert(workflow_id.to_string(), latest);
+        }
         // Single-driver guard: duplicate kicks (the sweep tick re-kicks
         // every Running instance) must not race two drivers into
         // executing the same step twice. Losing the race is a no-op —
@@ -249,15 +397,16 @@ impl WorkflowEngine {
             id: workflow_id.to_string(),
         };
         let result = (|| {
-            let mut last = self.advance(workflow_id)?;
+            let mut last = self.advance_owned(workflow_id)?;
             let mut steps = 1;
             while last == WorkflowStatus::Running && steps < max_steps {
-                last = self.advance(workflow_id)?;
+                last = self.advance_owned(workflow_id)?;
                 steps += 1;
             }
             Ok(last)
         })();
         drop(_guard);
+        drop(distributed_lease);
         if matches!(result, Ok(WorkflowStatus::Running)) {
             // Budget exhausted mid-run — re-kick so the driver picks the
             // instance up on a fresh job instead of monopolizing a worker.
@@ -275,6 +424,20 @@ impl WorkflowEngine {
     /// - `{ "action": "complete", "output": ... }`
     /// - `{ "action": "fail", "error": "...", "step_name": "..." }`
     pub fn advance(&self, workflow_id: &str) -> Result<WorkflowStatus, String> {
+        let lease = match self.acquire_distributed_lease(workflow_id)? {
+            Some(lease) => Some(lease),
+            None if self.pg_store().is_some() => {
+                return Err("Workflow is currently advancing; retry the operation".into());
+            }
+            None => None,
+        };
+        self.refresh_distributed(workflow_id)?;
+        let result = self.advance_owned(workflow_id);
+        drop(lease);
+        result
+    }
+
+    fn advance_owned(&self, workflow_id: &str) -> Result<WorkflowStatus, String> {
         let instance = {
             let instances = self.instances.lock().unwrap();
             instances
@@ -335,6 +498,14 @@ impl WorkflowEngine {
         workflow_id: &str,
         response: serde_json::Value,
     ) -> Result<WorkflowStatus, String> {
+        let lease = match self.acquire_distributed_lease(workflow_id)? {
+            Some(lease) => Some(lease),
+            None if self.pg_store().is_some() => {
+                return Err("Workflow is currently advancing; retry the operation".into());
+            }
+            None => None,
+        };
+        self.refresh_distributed(workflow_id)?;
         // Verify the workflow exists and is advanceable.
         {
             let instances = self.instances.lock().unwrap();
@@ -350,7 +521,9 @@ impl WorkflowEngine {
             }
         }
 
-        self.apply_response(workflow_id, &response)
+        let result = self.apply_response(workflow_id, &response);
+        drop(lease);
+        result
     }
 
     /// Send an event to a waiting workflow.
@@ -360,6 +533,14 @@ impl WorkflowEngine {
         event: &str,
         data: serde_json::Value,
     ) -> Result<(), String> {
+        let lease = match self.acquire_distributed_lease(workflow_id)? {
+            Some(lease) => Some(lease),
+            None if self.pg_store().is_some() => {
+                return Err("Workflow is currently advancing; retry the event".into());
+            }
+            None => None,
+        };
+        self.refresh_distributed(workflow_id)?;
         let mut instances = self.instances.lock().unwrap();
         let inst = instances.get_mut(workflow_id).ok_or("Workflow not found")?;
 
@@ -390,7 +571,8 @@ impl WorkflowEngine {
         inst.waiting_for = None;
         let snapshot = inst.clone();
         drop(instances);
-        self.persist(&snapshot);
+        self.persist(&snapshot)?;
+        drop(lease);
         self.kick(workflow_id);
 
         Ok(())
@@ -398,23 +580,45 @@ impl WorkflowEngine {
 
     /// Cancel a workflow.
     pub fn cancel(&self, workflow_id: &str) -> Result<(), String> {
+        let _lease = match self.acquire_distributed_lease(workflow_id)? {
+            Some(lease) => Some(lease),
+            None if self.pg_store().is_some() => {
+                return Err("Workflow is currently advancing; retry cancellation".into());
+            }
+            None => None,
+        };
+        self.refresh_distributed(workflow_id)?;
         let mut instances = self.instances.lock().unwrap();
         let inst = instances.get_mut(workflow_id).ok_or("Workflow not found")?;
         inst.status = WorkflowStatus::Cancelled;
         inst.completed_at = Some(now_iso());
         let snapshot = inst.clone();
         drop(instances);
-        self.persist(&snapshot);
+        self.persist(&snapshot)?;
         Ok(())
     }
 
     /// Get a workflow instance by ID.
     pub fn get(&self, workflow_id: &str) -> Option<WorkflowInstance> {
+        if let Some(store) = self.pg_store() {
+            return store.load(workflow_id).unwrap_or_else(|e| {
+                tracing::warn!("[workflows] Postgres get failed for {workflow_id}: {e}");
+                None
+            });
+        }
         self.instances.lock().unwrap().get(workflow_id).cloned()
     }
 
     /// List all workflow instances with optional status filter.
     pub fn list(&self, status: Option<&WorkflowStatus>) -> Vec<WorkflowInstance> {
+        if let Some(store) = self.pg_store() {
+            return store
+                .list(status.map(workflow_status_name))
+                .unwrap_or_else(|e| {
+                    tracing::warn!("[workflows] Postgres list failed: {e}");
+                    Vec::new()
+                });
+        }
         let instances = self.instances.lock().unwrap();
         instances
             .values()
@@ -432,11 +636,40 @@ impl WorkflowEngine {
         self.definitions.lock().unwrap().values().cloned().collect()
     }
 
+    /// Return only workflows that need a driver job. The Postgres path reads
+    /// IDs from an indexed status query and does not load workflow steps.
+    pub fn runnable_ids(&self) -> Vec<String> {
+        if let Some(store) = self.pg_store() {
+            return store.runnable_ids().unwrap_or_else(|e| {
+                tracing::warn!("[workflows] failed to list runnable workflows: {e}");
+                Vec::new()
+            });
+        }
+        self.instances
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|instance| {
+                matches!(
+                    instance.status,
+                    WorkflowStatus::Pending | WorkflowStatus::Running
+                )
+            })
+            .map(|instance| instance.id.clone())
+            .collect()
+    }
+
     /// Prune terminal instances older than `max_age_secs` from memory and
     /// the store. Returns how many were dropped from memory. Without
     /// this, the instance map and the workflows DB grow without bound
     /// now that workflows actually run.
     pub fn prune_terminal(&self, max_age_secs: u64) -> usize {
+        if let Some(store) = self.pg_store() {
+            return store.cleanup_terminal(max_age_secs).unwrap_or_else(|e| {
+                tracing::warn!("[workflows] Postgres cleanup failed: {e}");
+                0
+            });
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -477,6 +710,44 @@ impl WorkflowEngine {
     /// Wake sleeping workflows whose timer has expired. Returns the IDs of
     /// workflows that were woken.
     pub fn wake_sleeping(&self) -> Vec<String> {
+        if let Some(store) = self.pg_store() {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let sleeping = store.due_sleeping_ids(now).unwrap_or_else(|e| {
+                tracing::warn!("[workflows] failed to find sleeping workflows: {e}");
+                Vec::new()
+            });
+            let mut woken = Vec::new();
+            for workflow_id in sleeping {
+                let Ok(Some(lease)) = self.acquire_distributed_lease(&workflow_id) else {
+                    continue;
+                };
+                let Ok(Some(mut current)) = store.load(&workflow_id) else {
+                    continue;
+                };
+                if current.status != WorkflowStatus::Sleeping
+                    || current.wake_at.is_none_or(|wake_at| wake_at > now)
+                {
+                    continue;
+                }
+                current.status = WorkflowStatus::Running;
+                current.wake_at = None;
+                self.instances
+                    .lock()
+                    .unwrap()
+                    .insert(current.id.clone(), current.clone());
+                if let Err(e) = self.persist(&current) {
+                    tracing::warn!("[workflows] failed to wake {}: {e}", current.id);
+                    continue;
+                }
+                drop(lease);
+                self.kick(&current.id);
+                woken.push(current.id);
+            }
+            return woken;
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -499,13 +770,32 @@ impl WorkflowEngine {
         }
         drop(instances);
         for snapshot in &snapshots {
-            self.persist(snapshot);
+            if let Err(e) = self.persist(snapshot) {
+                tracing::warn!(
+                    "[workflows] failed to persist wake for {}: {e}",
+                    snapshot.id
+                );
+            }
         }
         for id in &woken {
             self.kick(id);
         }
 
         woken
+    }
+
+    fn refresh_distributed(&self, workflow_id: &str) -> Result<(), String> {
+        let Some(store) = self.pg_store() else {
+            return Ok(());
+        };
+        let workflow = store
+            .load(workflow_id)?
+            .ok_or_else(|| format!("Workflow '{}' not found", workflow_id))?;
+        self.instances
+            .lock()
+            .unwrap()
+            .insert(workflow_id.to_string(), workflow);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -682,7 +972,7 @@ impl WorkflowEngine {
         let snapshot = inst.clone();
         drop(instances);
         if result.is_ok() {
-            self.persist(&snapshot);
+            self.persist(&snapshot)?;
         }
         result
     }
@@ -773,6 +1063,19 @@ fn parse_duration_str(s: &str) -> u64 {
     }
 }
 
+fn workflow_status_name(status: &WorkflowStatus) -> &'static str {
+    match status {
+        WorkflowStatus::Pending => "Pending",
+        WorkflowStatus::Running => "Running",
+        WorkflowStatus::Sleeping => "Sleeping",
+        WorkflowStatus::WaitingForEvent => "WaitingForEvent",
+        WorkflowStatus::Completed => "Completed",
+        WorkflowStatus::Failed => "Failed",
+        WorkflowStatus::Cancelled => "Cancelled",
+    }
+}
+
+#[cfg(test)]
 fn generate_workflow_id() -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

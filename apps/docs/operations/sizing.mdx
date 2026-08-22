@@ -77,7 +77,10 @@ The WS hub `broadcast` number measures the enqueue side. It fans out to 16 shard
 
 ## On Pylon Cloud
 
-Cloud autoscales the HTTP, WebSocket, and shard tiers separately. You do not pre-provision; you pay for what you use. The numbers above are useful for self-hosted capacity planning. On Cloud, you do not need to think about them.
+Cloud supports multiple application machines for Postgres projects. It uses
+the managed PylonSync relay for cross-machine realtime events. SQLite projects
+must stay on one application machine. Resize the machine or switch to Postgres
+before you add replicas.
 
 For multiplayer apps with sticky shard connections, latency to your players matters. Set the workspace region accordingly when you sign up.
 

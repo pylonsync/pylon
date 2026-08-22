@@ -50,6 +50,12 @@
       ]
     },
     {
+      "path": "/llms.txt",
+      "mode": "ssr",
+      "component": "app/llms",
+      "kind": "llms"
+    },
+    {
       "path": "/",
       "mode": "ssr",
       "component": "app/not-found",
@@ -94,6 +100,7 @@
       "invite_entity": "OrgInvite",
       "disabled": false
     },
+    "org_roles": [],
     "trusted_origins": []
   },
   "fonts": [

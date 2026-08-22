@@ -30,6 +30,7 @@
 //! relay-eligible yet; the dual-write diff surfaces this immediately.
 
 use pylon_auth::AuthContext;
+use pylon_cluster::{Envelope, RelayFrame};
 use pylon_kernel::{AppManifest, ManifestAuthUserConfig};
 use pylon_policy::{PolicyEngine, PolicyResult};
 use pylon_sync::{ChangeEvent, ChangeKind};
@@ -38,6 +39,11 @@ use pylon_sync::{ChangeEvent, ChangeKind};
 /// cursor is older than the ring's tail must fall back to the
 /// machine's `/api/sync/pull` (deep history stays on the machine).
 pub const RING_CAPACITY: usize = 1024;
+
+/// Origin-to-origin cluster envelopes are small and short-lived. Keep enough
+/// history to cover a normal relay reconnect without turning the DO into the
+/// source of truth.
+pub const CLUSTER_RING_CAPACITY: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Filter
@@ -236,6 +242,90 @@ pub fn parse_event_key(key: &str) -> Option<u64> {
     key.strip_prefix("e:")?.parse().ok()
 }
 
+// ---------------------------------------------------------------------------
+// Origin cluster ring
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+pub struct ClusterRing {
+    frames: std::collections::VecDeque<RelayFrame>,
+}
+
+impl ClusterRing {
+    pub fn hydrate(frames: Vec<RelayFrame>) -> Self {
+        let mut frames = frames;
+        frames.sort_by_key(|f| f.relay_seq);
+        let mut ring = Self {
+            frames: frames.into(),
+        };
+        while ring.frames.len() > CLUSTER_RING_CAPACITY {
+            ring.frames.pop_front();
+        }
+        ring
+    }
+
+    pub fn push(&mut self, envelope: Envelope, message_id: String) -> (RelayFrame, bool, Vec<u64>) {
+        if !message_id.is_empty() {
+            if let Some(existing) = self
+                .frames
+                .iter()
+                .find(|frame| frame.message_id == message_id)
+            {
+                return (existing.clone(), false, Vec::new());
+            }
+        }
+        let relay_seq = self.latest_seq().saturating_add(1);
+        let frame = RelayFrame {
+            relay_seq,
+            message_id,
+            envelope,
+        };
+        self.frames.push_back(frame.clone());
+        let mut evicted = Vec::new();
+        while self.frames.len() > CLUSTER_RING_CAPACITY {
+            if let Some(old) = self.frames.pop_front() {
+                evicted.push(old.relay_seq);
+            }
+        }
+        (frame, true, evicted)
+    }
+
+    pub fn latest_seq(&self) -> u64 {
+        self.frames.back().map(|f| f.relay_seq).unwrap_or(0)
+    }
+
+    pub fn oldest_seq(&self) -> u64 {
+        self.frames.front().map(|f| f.relay_seq).unwrap_or(0)
+    }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
+
+    pub fn since(&self, since: u64) -> Option<Vec<&RelayFrame>> {
+        if self.frames.is_empty() {
+            return Some(Vec::new());
+        }
+        if since.saturating_add(1) < self.oldest_seq() {
+            return None;
+        }
+        Some(
+            self.frames
+                .iter()
+                .filter(|frame| frame.relay_seq > since)
+                .collect(),
+        )
+    }
+}
+
+pub fn cluster_event_key(seq: u64) -> String {
+    format!("ce:{seq:020}")
+}
+
+pub fn parse_cluster_event_key(key: &str) -> Option<u64> {
+    key.strip_prefix("ce:")?.parse().ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +361,32 @@ mod tests {
             ..Default::default()
         };
         serde_json::json!({ "manifest": manifest }).to_string()
+    }
+
+    #[test]
+    fn cluster_ring_assigns_sequence_and_replays() {
+        let mut ring = ClusterRing::default();
+        let (a, inserted, evicted) = ring.push(
+            Envelope::presence("machine-a", serde_json::json!({"room":"r1"})),
+            "message-a".into(),
+        );
+        let (b, _, _) = ring.push(
+            Envelope::presence("machine-b", serde_json::json!({"room":"r1"})),
+            "message-b".into(),
+        );
+        assert!(inserted);
+        assert!(evicted.is_empty());
+        assert_eq!(a.relay_seq, 1);
+        assert_eq!(b.relay_seq, 2);
+        let replay = ring.since(1).unwrap();
+        assert_eq!(replay.len(), 1);
+        assert_eq!(replay[0].envelope.instance_id, "machine-b");
+        let (duplicate, inserted, _) = ring.push(
+            Envelope::presence("machine-a", serde_json::json!({"room":"changed"})),
+            "message-a".into(),
+        );
+        assert!(!inserted);
+        assert_eq!(duplicate.relay_seq, a.relay_seq);
     }
 
     fn note_event(

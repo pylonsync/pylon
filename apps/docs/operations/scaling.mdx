@@ -28,13 +28,28 @@ clients.
 The default transport is `NoopBus`. Single-machine deploys pay zero
 overhead.
 
-The production transport is Redis PUB/SUB.
+Pylon provides two production transports:
+
+- Redis PUB/SUB for self-hosted deployments.
+- The PylonSync Durable Object relay for Pylon Cloud.
+
+Multi-machine deployments must use Postgres. SQLite cannot be shared
+safely by multiple Pylon processes.
 
 ```bash
+DATABASE_URL=postgres://user:pass@postgres.internal:5432/my_app \
 PYLON_CLUSTER_BUS=redis://default:pass@redis.internal:6379/0 \
 PYLON_CLUSTER_NAMESPACE=my-app \
   pylon start app.ts
 ```
+
+Postgres stores the entities, sessions, global sync sequence, and
+persistent change log. Redis carries low-latency events between the
+running processes.
+
+Pylon Cloud uses the built-in relay. It does not add Redis to a
+customer project. The control plane gives each project a derived relay
+key. It never gives a customer machine the relay root key.
 
 `PYLON_CLUSTER_NAMESPACE` prefixes the Redis channel so multiple
 unrelated pylon deploys can share one Redis instance without
@@ -47,6 +62,11 @@ peer mutations. That produces the same "phantom row" UX failure the
 bus exists to fix, and it is harder to diagnose. A loud failure is
 the safer default.
 
+The managed relay applies backpressure when its publish queue is full.
+It retries a publish until the relay accepts it. Each publish has a
+stable message ID. The relay removes duplicate retries and keeps a
+bounded replay ring for WebSocket reconnects.
+
 ## What's fanned out
 
 - **Change events** (`ChangeEvent`): every mutation, action write,
@@ -58,20 +78,60 @@ the safer default.
   into the JSON envelope, so a single pubsub channel handles every
   payload shape.
 
+## Shared sync state
+
+Postgres provides one global sequence for all changes. It also stores
+the persistent change log. Each process keeps a bounded in-memory ring
+for fast pulls and hydrates that ring from Postgres at startup.
+
+The cluster bus mirrors a peer event into each process's local ring.
+As a result, a write on machine A is available from
+`/api/sync/pull?since=N` on machine B. If the local ring does not cover
+the requested range, the pull reads the shared Postgres change log.
+
+The client-side `reconcile()` pass remains a safety check. On reconnect
+or a visibility change, it compares the local replica with the
+authoritative entity rows and removes stale rows.
+
+## Shared jobs and workflows
+
+Postgres deployments use Postgres as the job queue and workflow store.
+Workers claim ready jobs with row locks and short leases. One replica
+executes a claim at a time. Another replica can claim the job after the
+lease expires if the worker stops or loses its machine.
+
+Workflow transitions use the same lease model. A lease token prevents a
+stale worker from replacing newer workflow state. Workflow steps and the
+workflow state commit in one database transaction.
+
+Jobs use at-least-once execution. A worker can finish an external side
+effect and then stop before it records completion. A later worker can run
+that job again. Job and workflow handlers must be idempotent. An idempotent
+handler gives the same result when it runs more than once.
+
+Schedules created inside a Postgres mutation commit in the same transaction
+as the application writes. A rollback removes both the writes and the
+scheduled job.
+
+During a rolling release, each replica claims only job names for which it
+has a local handler. An old replica does not consume work that only the new
+release can execute.
+
+SQLite keeps jobs and workflows on the local machine. SQLite deployments
+remain single-machine deployments.
+
 ## State that remains local
 
-- **`/api/sync/pull?since=N` cursor catch-up.** Each pylon process
-  keeps its own in-memory `ChangeLog`, and sequence numbers are
-  per-machine. Clients that pull from machine A see different
-  sequence numbers than clients that pull from machine B. The
-  client-side `reconcile()` pass (added in @pylonsync/sync v0.3.130)
-  is the backstop. On reconnect or a visibility change, clients pull
-  the authoritative entity row set from `/api/entities/<entity>/cursor`
-  and remove any local rows that are not in that set.
-- **Per-tenant policy filtering.** Each receiving machine re-runs its
-  own per-client read policy before it forwards the inbound event to
-  its connected WS and SSE clients. The bus carries raw events; the
-  local fanout is responsible for authorization.
+- **Per-client policy filtering.** Each receiving machine re-runs the
+  read policy before it forwards an inbound event to its connected WS
+  and SSE clients. The bus carries raw events. The local fanout remains
+  responsible for authorization.
+- **Rate-limit counters.** Limits apply per process. With `N` processes,
+  the effective cluster limit is approximately `N` times the configured
+  value. Adjust `PYLON_RATE_LIMIT_MAX` and
+  `PYLON_RATE_LIMIT_MAX_AUTHED` for the number of processes.
+- **SSR output cache.** Each process has its own cache. Put a CDN in
+  front of the load balancer when pages need a shared cache layer.
 
 ## Self-event filtering
 
@@ -127,9 +187,19 @@ too:
   rare cases where two tabs need to see each other's writes without a
   real cluster bus.
 
+## Pylon Cloud
+
+Pylon Cloud supports multiple application machines for Postgres
+projects. The control plane configures the managed Durable Object relay,
+copies the current image and inline files to each new replica, and fans
+deploys and secret updates to all replicas. It also disables autostop
+while more than one machine serves the project.
+
+SQLite projects stay on one application machine. Switch the project to
+Postgres before you request replicas.
+
 ## Backend choice
 
-Currently, Redis PUB/SUB is the only backend. The trait is
-transport-agnostic, so future transports (NATS, Cloudflare Durable
-Objects, Postgres LISTEN/NOTIFY) can land without API changes for
-callers.
+Use Redis for self-hosted apps. Pylon Cloud uses the managed Durable
+Object relay. `ClusterBus` remains transport-agnostic, so other
+transports can be added without API changes for callers.

@@ -58,7 +58,8 @@
               "ssr/overview",
               "ssr/link",
               "ssr/image",
-              "ssr/styling"
+              "ssr/styling",
+              "ssr/agents"
             ]
           },
           {

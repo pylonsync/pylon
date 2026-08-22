@@ -1,6 +1,12 @@
 # Sync tier on Durable Objects — design
 
-Status: Option C's building blocks shipped (v0.4.24) — `PylonSync` DO
+Status: Option C's client relay shipped in v0.4.24. The same `PylonSync` DO now
+also provides the managed origin-to-origin `ClusterBus` transport for Pylon
+Cloud. The implementation includes `POST /sync/cluster/push` and
+`GET /sync/cluster/ws`, a durable replay ring, stable publish IDs, duplicate
+removal, and per-project derived keys.
+
+The client relay building blocks are the `PylonSync` DO
 (`crates/workers/src/{sync_do,relay_core}.rs`), `ChangeLogSink` +
 machine push (`crates/runtime/src/sync_relay.rs`), signed auth blob
 (`crates/auth/src/relay_blob.rs`), `GET /api/sync/relay-token`, and
@@ -8,6 +14,23 @@ machine push (`crates/runtime/src/sync_relay.rs`), signed auth blob
 apps/docs/operations/sync-relay.mdx. Still open: a deployed wrangler
 integration test, the live dual-write diff on cloud traffic, and the
 autostop flip (steps 2–5 below — cloud-side rollout, not framework).
+
+## Managed cluster extension
+
+The client relay and the cluster transport use separate rings and socket tags.
+Client sockets receive policy-filtered `ChangeEvent` frames. Origin sockets
+receive trusted raw `ClusterBus` envelopes. These envelopes include changes,
+presence, session changes, and CRDT snapshots.
+
+The control plane derives `HMAC(root, "pylon-relay-app-v1\0" + projectId)`.
+It injects only this derived value into customer machines. The relay Worker
+keeps the root key and derives the same project key before it verifies a
+request. A customer app cannot use its key to publish to another project.
+
+The runtime opens the origin WebSocket before it serves traffic. A configured
+relay failure stops startup. The publisher retries with the same message ID
+and applies backpressure instead of dropping a committed event. The DO removes
+duplicate retries and assigns a relay sequence for reconnect replay.
 
 ## Why
 

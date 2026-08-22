@@ -178,6 +178,17 @@ Special files (`loading.tsx`, `error.tsx`, `not-found.tsx`), `<Suspense>` stream
 
 `loading.tsx` works in both directions. It is the Suspense fallback the SSR stream flushes first on a document load, and it is what the client router paints over the page area when a [`<Link>`](/ssr/link) navigation runs longer than about 100ms. Faster navigations swap straight to content, so it never flashes. It resolves by nearest ancestor, and route groups are transparent. A `loading.tsx` in `app/(dash)/` covers routes at `/`. `error.tsx` and `not-found.tsx` follow the same rule.
 
+## Data files
+
+Four root-level files under `app/` serve generated documents instead of pages. Each exports a default function, sync or async, so it can enumerate routes from the database:
+
+- `app/sitemap.ts` → `/sitemap.xml`
+- `app/robots.ts` → `/robots.txt`
+- `app/llms.ts` → `/llms.txt`
+- `app/**/opengraph-image.tsx` → a PNG for that route
+
+Every page also answers as markdown when a client asks for it. See [Agent-readable pages](/ssr/agents).
+
 ## Try it
 
 ```bash

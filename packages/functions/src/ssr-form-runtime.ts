@@ -6,14 +6,19 @@
 // POST-redirect-GET: write something, then `response.redirect("/x?ok=1")`
 // (303 by default here) so the no-JS browser follows with a GET.
 //
-// A `GET` export is special: it's a RAW handler. Instead of returning void +
-// shaping the reply through `response`, it returns
+// ANY handler may instead RETURN a raw response —
 //   { body, contentType?, status?, headers? }
-// which is streamed verbatim — no React render, no hydration tail. This is the
-// mechanism behind dynamic raw GET routes (RSS/Atom feeds, dynamic XML, text,
-// JSON, .well-known files) — the GET analogue of `app/sitemap.ts`/`robots.ts`,
-// but at an arbitrary route path. A GET handler may still throw
-// `response.redirect()`/`notFound()` instead of returning a body.
+// — which is streamed verbatim, with no React render and no hydration tail.
+// For `GET` that is the normal shape (dynamic RSS/Atom, XML, text, JSON: the
+// GET analogue of `app/sitemap.ts`/`robots.ts` at an arbitrary path, where the
+// default status is 200 rather than the form default of 303).
+//
+// The same return works on POST/PUT/PATCH/DELETE, because an endpoint that
+// answers a machine has to answer with a body: a JSON API, a webhook receiver
+// that must echo a challenge, a JSON-RPC endpoint such as MCP. Without it the
+// only reply a non-GET route could make was a redirect, which is right for a
+// browser form and wrong for everything else. Returning nothing keeps the
+// POST-redirect-GET behavior, so existing handlers are untouched.
 import {
   makeResponseController,
   PylonRouteControl,
@@ -35,6 +40,8 @@ export interface HandleFormMessage {
   params: Record<string, string>;
   search_params: Record<string, string>;
   form: Record<string, string | string[]>;
+  /** The raw request body, as sent. Empty for GET. */
+  body: string;
   headers: Record<string, string>;
   cookies: Record<string, string>;
   auth: {
@@ -97,6 +104,9 @@ export async function handleForm(
   const response = makeResponseController(responseState, 303);
   const req = {
     form: makeFormFields(msg.form ?? {}),
+    // The exact bytes. `form` is only populated for urlencoded bodies, so a
+    // JSON API / JSON-RPC / signature-verifying webhook handler reads this.
+    body: msg.body ?? "",
     params: msg.params,
     searchParams: msg.search_params,
     auth: msg.auth,
@@ -156,10 +166,18 @@ export async function handleForm(
 
   try {
     const out = await handler(req);
-    if (method === "GET") {
-      // Raw GET: stream `out.body` with the handler's content-type/status/
-      // headers (merged with anything set via the response controller). No
-      // React, no hydration tail — verbatim bytes, like sitemap/robots.
+    // A returned object is a RAW response, whatever the method. GET always
+    // takes this path (its return value IS the reply, even when empty); the
+    // other methods take it only when the handler actually returned one, so a
+    // form handler that returns void still gets POST-redirect-GET.
+    const returnedRaw =
+      out != null &&
+      typeof out === "object" &&
+      ("body" in out || "contentType" in out || "status" in out || "headers" in out);
+    if (method === "GET" || returnedRaw) {
+      // Stream `out.body` with the handler's content-type/status/headers
+      // (merged with anything set via the response controller). No React, no
+      // hydration tail — verbatim bytes, like sitemap/robots.
       const raw = (out ?? {}) as {
         body?: unknown;
         contentType?: string;
@@ -174,7 +192,12 @@ export async function handleForm(
       for (const [k, v] of Object.entries(raw.headers ?? {})) {
         extra[k.toLowerCase()] = String(v);
       }
-      const rawStatus = raw.status ?? responseState.status;
+      // A non-GET handler's response state still defaults to 303 (the form
+      // default). A raw return that names no status means 200 — a JSON reply
+      // with an accidental 303 and no Location is a broken response.
+      const rawStatus =
+        raw.status ??
+        (method === "GET" || responseState.status !== 303 ? responseState.status : 200);
       send({
         type: "response_start",
         call_id: msg.call_id,

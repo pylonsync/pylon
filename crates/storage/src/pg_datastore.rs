@@ -138,6 +138,17 @@ impl PgPool {
         }
     }
 
+    /// Run one operation without replaying it after a mid-flight connection
+    /// failure. Use this for operations such as distributed claims where a
+    /// retry could acquire a second row after the first transaction committed.
+    pub fn with_client_once<T>(
+        &self,
+        op: impl FnOnce(&mut postgres::Client) -> Result<T, postgres::Error>,
+    ) -> Result<T, String> {
+        let mut conn = self.checkout().map_err(|e| e.message)?;
+        op(conn.client_mut()).map_err(|e| format!("PG statement failed: {e}"))
+    }
+
     /// Idle connections currently in the pool (for diagnostics/tests).
     pub fn available_count(&self) -> usize {
         self.pool.available_count()

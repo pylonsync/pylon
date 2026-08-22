@@ -816,6 +816,81 @@ impl<'a> DataStore for PgTxStore<'a> {
             Ok(())
         })
     }
+
+    fn enqueue_internal_job(&self, job: &serde_json::Value) -> Result<(), DataError> {
+        let required_str = |name: &str| {
+            job.get(name)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+                .ok_or_else(|| DataError {
+                    code: "INVALID_INTERNAL_JOB".into(),
+                    message: format!("durable job is missing string field {name}"),
+                })
+        };
+        let id = required_str("id")?;
+        let name = required_str("name")?;
+        let queue = required_str("queue")?;
+        let payload = job
+            .get("payload")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let priority = job
+            .get("priority")
+            .and_then(|value| value.as_str())
+            .map(|value| match value {
+                "low" => 0i16,
+                "high" => 2i16,
+                "critical" => 3i16,
+                _ => 1i16,
+            })
+            .unwrap_or(1);
+        let max_retries = job
+            .get("max_retries")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(3)
+            .min(i32::MAX as u64) as i32;
+        let delay_secs = job
+            .get("delay_secs")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+            .min(i64::MAX as u64) as i64;
+        let created_at = job
+            .get("created_at")
+            .and_then(|value| value.as_str())
+            .and_then(|value| value.trim_end_matches('Z').parse::<u64>().ok())
+            .unwrap_or(0)
+            .min(i64::MAX as u64) as i64;
+        let ready_at = job
+            .get("ready_at")
+            .and_then(|value| value.as_u64())
+            .filter(|value| *value > 0)
+            .unwrap_or_else(|| (created_at.max(0) as u64).saturating_add(delay_secs.max(0) as u64))
+            .min(i64::MAX as u64) as i64;
+        let auth = job.get("auth").cloned().filter(|value| !value.is_null());
+        self.with_tx(|tx| {
+            tx.execute(
+                "INSERT INTO _pylon_jobs
+                 (id,name,payload,priority,status,max_retries,retry_count,queue,
+                  delay_secs,ready_at,created_at,auth)
+                 VALUES ($1,$2,$3,$4,'pending',$5,0,$6,$7,$8,$9,$10)
+                 ON CONFLICT (id) DO NOTHING",
+                &[
+                    &id,
+                    &name,
+                    &payload,
+                    &priority,
+                    &max_retries,
+                    &queue,
+                    &delay_secs,
+                    &ready_at,
+                    &created_at,
+                    &auth,
+                ],
+            )
+            .map_err(pg_err_to_data)?;
+            Ok(())
+        })
+    }
 }
 
 /// Hash an arbitrary string into a stable `(i32, i32)` pair for

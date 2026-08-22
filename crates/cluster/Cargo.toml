@@ -15,27 +15,33 @@ path = "src/lib.rs"
 
 [dependencies]
 pylon-sync = { path = "../sync", version = "0.4.29" }
+pylon-auth = { path = "../auth", version = "0.4.29", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tracing = { workspace = true }
+tracing = { workspace = true, optional = true }
 base64 = { workspace = true }
 # UUID for per-process instance ids. v4 is fine — these are short-lived
 # (one per pylon process) and only used to filter self-originated bus
 # messages, not for security.
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "js"] }
 
 # Redis client for the cross-machine fanout transport. Sync API matches
 # the rest of the runtime — pylon doesn't have a tokio runtime in its
 # hot path, and the cluster bus runs from dedicated background threads
 # anyway. Feature-gated so default builds don't pull the dep tree.
 redis = { version = "0.27", optional = true, default-features = false, features = ["script"] }
+ureq = { workspace = true, optional = true }
+tungstenite = { workspace = true, optional = true, features = ["rustls-tls-webpki-roots"] }
 
 [features]
 default = []
 # Enables the Redis-backed ClusterBus impl. Pulls the `redis` crate
 # and its TCP dependencies. Operators opt in by both building with
 # this feature and setting PYLON_CLUSTER_BUS=redis://... at runtime.
-redis-bus = ["redis"]
+redis-bus = ["redis", "tracing"]
+# Pylon Cloud transport. Uses the existing PylonSync Durable Object and does
+# not require a customer Redis service.
+relay-bus = ["pylon-auth", "tracing", "ureq", "tungstenite"]
 
 [lints]
 workspace = true

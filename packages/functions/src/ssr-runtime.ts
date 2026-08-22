@@ -2729,6 +2729,79 @@ export function serializeSitemap(entries: Sitemap | undefined): string {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<urlset ${ns}>${body}</urlset>\n`;
 }
 
+/** One link in an `llms.txt` section. */
+export interface LlmsLink {
+  title: string;
+  url: string;
+  /** Short note after the link — what an agent finds there. */
+  notes?: string;
+}
+
+/** An H2-delimited section of file links. */
+export interface LlmsSection {
+  title: string;
+  links: LlmsLink[];
+}
+
+/**
+ * Return type of a default export in `app/llms.ts`, serialized to
+ * <https://llmstxt.org> format.
+ *
+ * The spec's order is fixed and load-bearing, because the file is parsed by
+ * "standard programmatic-based tools": an H1 title, a blockquote summary, free
+ * prose with NO headings, then H2 sections of markdown links.
+ */
+export interface LlmsTxt {
+  /** H1 — the site or project name. The one required element. */
+  title: string;
+  /** The blockquote under it: what this is, in one or two sentences. */
+  summary?: string;
+  /**
+   * Prose paragraphs between the summary and the first section. Headings are
+   * not allowed here — the parser reads the first H2 as the start of the link
+   * lists, so a heading in this block would swallow the rest of the file.
+   */
+  details?: string | string[];
+  sections?: LlmsSection[];
+}
+
+/** Serialize an {@link LlmsTxt} to llmstxt.org format. */
+export function serializeLlms(doc: LlmsTxt | undefined): string {
+  if (!doc || typeof doc.title !== "string" || !doc.title.trim()) {
+    return "";
+  }
+  // A stray newline would end the blockquote / list item early and silently
+  // reshape the document.
+  const oneLine = (s: unknown): string =>
+    String(s).replace(/\s*\n+\s*/g, " ").trim();
+  const out: string[] = [`# ${oneLine(doc.title)}`];
+  if (doc.summary && oneLine(doc.summary)) {
+    out.push("", `> ${oneLine(doc.summary)}`);
+  }
+  const details =
+    doc.details == null
+      ? []
+      : Array.isArray(doc.details)
+        ? doc.details
+        : [doc.details];
+  for (const p of details) {
+    const text = String(p).trim();
+    if (!text) continue;
+    // Headings here would be read as the start of a link section.
+    out.push("", text.replace(/^#+\s*/gm, ""));
+  }
+  for (const section of doc.sections ?? []) {
+    if (!section || !section.title) continue;
+    out.push("", `## ${oneLine(section.title)}`, "");
+    for (const link of section.links ?? []) {
+      if (!link || !link.title || !link.url) continue;
+      const notes = link.notes ? `: ${oneLine(link.notes)}` : "";
+      out.push(`- [${oneLine(link.title)}](${oneLine(link.url)})${notes}`);
+    }
+  }
+  return `${out.join("\n").trim()}\n`;
+}
+
 /** Serialize a robots config to robots.txt text. */
 export function serializeRobots(robots: Robots | undefined): string {
   const arr = (v: string | string[] | undefined): string[] =>
@@ -2761,7 +2834,7 @@ export function serializeRobots(robots: Robots | undefined): string {
  */
 export async function handleDataRoute(
   msg: RenderRouteMessage,
-  kind: "sitemap" | "robots",
+  kind: "sitemap" | "robots" | "llms",
   send: Send,
 ): Promise<void> {
   const emit = (status: number, contentType: string, body: string): void => {
@@ -2788,6 +2861,10 @@ export async function handleDataRoute(
     const data = typeof exp === "function" ? await exp() : exp;
     if (kind === "sitemap") {
       emit(200, "application/xml; charset=utf-8", serializeSitemap(data as Sitemap));
+    } else if (kind === "llms") {
+      // text/plain, not text/markdown: llms.txt is fetched by name, and a
+      // `.txt` served as markdown makes some clients offer a download.
+      emit(200, "text/plain; charset=utf-8", serializeLlms(data as LlmsTxt));
     } else {
       emit(200, "text/plain; charset=utf-8", serializeRobots(data as Robots));
     }
@@ -2910,13 +2987,15 @@ export async function handleRenderRoute(
   // app/robots.*, so the basename is exactly "sitemap"/"robots" (a real page
   // component always ends in "/page"). Mirrors the not-found/error basename
   // check used for boundaries.
-  const dataKind: "sitemap" | "robots" | null = /(^|[\\/])sitemap$/.test(
+  const dataKind: "sitemap" | "robots" | "llms" | null = /(^|[\\/])sitemap$/.test(
     msg.component,
   )
     ? "sitemap"
     : /(^|[\\/])robots$/.test(msg.component)
       ? "robots"
-      : null;
+      : /(^|[\\/])llms$/.test(msg.component)
+        ? "llms"
+        : null;
   if (dataKind) return handleDataRoute(msg, dataKind, send);
 
   // `opengraph-image` (and future `twitter-image`) render to a PNG, not
@@ -3419,6 +3498,13 @@ export async function handleRenderRoute(
           : cacheable
             ? { "x-pylon-cacheable": String(revalidateSecs) }
             : {}),
+        // `export const markdown = false` — this page declines its markdown
+        // representation (an app shell whose value is the interaction, not the
+        // prose). The host reads this AFTER the render: a client that also
+        // accepts HTML gets the HTML we just produced, one that doesn't gets a
+        // 406, and the `<path>.md` URL 404s. Trusted channel, stripped by the
+        // host, so a page can't forge the inverse and force a conversion.
+        ...((mod as any).markdown === false ? { "x-pylon-md": "0" } : {}),
         // Dev-only: the host parses this into its diagnostics ring (served at
         // /_pylon/dev/diagnostics + `pylon diagnostics`). Single-line JSON, no
         // newlines. Stripped before the client like every x-pylon-* header.
