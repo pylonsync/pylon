@@ -224,9 +224,73 @@ fn check_fn_rate_limits() -> Check {
 }
 
 fn check_jobs_db() -> Check {
-    match std::env::var("PYLON_JOBS_DB") {
-        Ok(v) if !v.is_empty() => Check::pass(format!("PYLON_JOBS_DB={v}")),
-        _ => Check::pass("PYLON_JOBS_DB unset (defaults to pylon.jobs.db in cwd)"),
+    let database_url = std::env::var("DATABASE_URL").ok();
+    let jobs_in_memory = env_flag("PYLON_JOBS_IN_MEMORY");
+    let cluster_required = env_flag("PYLON_CLUSTER_REQUIRED");
+    let cluster_bus = std::env::var("PYLON_CLUSTER_BUS").ok();
+    let jobs_db = std::env::var("PYLON_JOBS_DB").ok();
+    let workflows_db = std::env::var("PYLON_WORKFLOWS_DB").ok();
+
+    check_background_storage(
+        database_url.as_deref(),
+        jobs_in_memory,
+        cluster_required,
+        cluster_bus.as_deref(),
+        jobs_db.as_deref(),
+        workflows_db.as_deref(),
+    )
+}
+
+fn env_flag(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn check_background_storage(
+    database_url: Option<&str>,
+    jobs_in_memory: bool,
+    cluster_required: bool,
+    cluster_bus: Option<&str>,
+    jobs_db: Option<&str>,
+    workflows_db: Option<&str>,
+) -> Check {
+    let has_postgres = database_url
+        .is_some_and(|url| url.starts_with("postgres://") || url.starts_with("postgresql://"));
+    if cluster_required && !has_postgres {
+        return Check::error("PYLON_CLUSTER_REQUIRED needs a Postgres DATABASE_URL");
+    }
+    if cluster_required && cluster_bus.is_none_or(|value| value.is_empty()) {
+        return Check::error("PYLON_CLUSTER_REQUIRED needs PYLON_CLUSTER_BUS");
+    }
+    if jobs_in_memory && cluster_required {
+        return Check::error("PYLON_JOBS_IN_MEMORY conflicts with PYLON_CLUSTER_REQUIRED");
+    }
+    if jobs_in_memory {
+        return Check::warn(
+            "Jobs and workflows use memory only",
+            "pending work is lost on restart and cannot fail over",
+        );
+    }
+
+    if has_postgres {
+        return Check::pass("Jobs and workflows use shared Postgres tables");
+    }
+
+    match (
+        jobs_db.filter(|v| !v.is_empty()),
+        workflows_db.filter(|v| !v.is_empty()),
+    ) {
+        (Some(jobs), Some(workflows)) => Check::pass(format!(
+            "SQLite background stores: jobs={jobs}, workflows={workflows}"
+        )),
+        (Some(jobs), None) => Check::pass(format!(
+            "SQLite background stores: jobs={jobs}, workflows beside app database"
+        )),
+        (None, Some(workflows)) => Check::pass(format!(
+            "SQLite background stores: jobs beside app database, workflows={workflows}"
+        )),
+        (None, None) => Check::pass("Jobs and workflows use SQLite sidecars beside app database"),
     }
 }
 
@@ -521,5 +585,66 @@ mod tests {
     fn check_error_has_no_detail() {
         let c = Check::error("label");
         assert!(c.detail.is_none());
+    }
+
+    #[test]
+    fn postgres_uses_shared_background_tables() {
+        let c = check_background_storage(
+            Some("postgres://localhost/app"),
+            false,
+            true,
+            Some("relay"),
+            Some("ignored.jobs.db"),
+            Some("ignored.workflows.db"),
+        );
+        assert_eq!(c.severity, Severity::Info);
+        assert_eq!(c.label, "Jobs and workflows use shared Postgres tables");
+    }
+
+    #[test]
+    fn cluster_mode_rejects_in_memory_background_state() {
+        let c = check_background_storage(
+            Some("postgres://localhost/app"),
+            true,
+            true,
+            Some("relay"),
+            None,
+            None,
+        );
+        assert_eq!(c.severity, Severity::Error);
+    }
+
+    #[test]
+    fn cluster_mode_rejects_sqlite_background_state() {
+        let c = check_background_storage(None, false, true, Some("relay"), None, None);
+        assert_eq!(c.severity, Severity::Error);
+        assert_eq!(
+            c.label,
+            "PYLON_CLUSTER_REQUIRED needs a Postgres DATABASE_URL"
+        );
+    }
+
+    #[test]
+    fn cluster_mode_rejects_missing_bus() {
+        let c = check_background_storage(
+            Some("postgres://localhost/app"),
+            false,
+            true,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(c.severity, Severity::Error);
+        assert_eq!(c.label, "PYLON_CLUSTER_REQUIRED needs PYLON_CLUSTER_BUS");
+    }
+
+    #[test]
+    fn sqlite_reports_sidecar_defaults() {
+        let c = check_background_storage(None, false, false, None, None, None);
+        assert_eq!(c.severity, Severity::Info);
+        assert_eq!(
+            c.label,
+            "Jobs and workflows use SQLite sidecars beside app database"
+        );
     }
 }

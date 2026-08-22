@@ -16,7 +16,7 @@ PYLON_MANIFEST=/etc/pylon/pylon.manifest.json
 
 # Auth (MUST be set in non-dev)
 PYLON_ADMIN_TOKEN=<64+ random bytes, hex>
-PYLON_SESSION_DB=/var/lib/pylon/sessions.db
+PYLON_SESSION_DB=/var/lib/pylon/sessions.db  # SQLite only; Postgres shares auth state
 
 # At-rest encryption key — used for SSO/SAML client secrets and any
 # other sensitive values pylon persists. 32 bytes hex (or base64). When
@@ -47,7 +47,8 @@ PYLON_DEV_MODE=false
 Optional:
 
 ```sh
-PYLON_JOBS_DB=/var/lib/pylon/jobs.db  # durable job queue
+PYLON_JOBS_DB=/var/lib/pylon/jobs.db          # SQLite job sidecar only
+PYLON_WORKFLOWS_DB=/var/lib/pylon/workflows.db # SQLite workflow sidecar only
 PYLON_OAUTH_GOOGLE_CLIENT_ID=...         # 25 builtin providers + any OIDC IdP
 PYLON_OAUTH_GITHUB_CLIENT_ID=...         # see /auth/oauth for the full list
 # Apple, Microsoft, Discord, Slack, Spotify, Twitch, Twitter, LinkedIn,
@@ -140,24 +141,16 @@ The runtime picks its backend from the URL prefix:
 
 `DATABASE_URL` takes precedence over `PYLON_DB_PATH` when both are set.
 
-### Postgres caveats (current)
+### Postgres runtime state
 
 What works on Postgres today:
 - Entity CRUD (`/api/entities/*`): insert / get / update / delete /
   list / list_after / lookup / link / unlink
 - Filtered queries, graph queries, aggregations
 - `/api/transact`: real PG transactions with auto-rollback on Drop
+- Shared auth state, including sessions, OAuth state, magic codes, and API keys
+- Shared jobs and workflows with leased claims and replica failover
 - Multi-replica horizontal scaling for the data plane
-
-What still uses local SQLite even with `DATABASE_URL` set:
-- Sessions (`PYLON_SESSION_DB`): local per-replica today; multi-replica
-  deploys should put the cookie behind a sticky-session LB until the
-  Postgres session backend lands. Tracking issue: PG aux stores.
-- Job queue (`PYLON_JOBS_DB`): local per-replica, with the same caveat. A job
-  enqueued on replica A is only run by replica A.
-- Workflow engine: same shape as jobs, local per-replica.
-- OAuth state: local per-replica; OAuth flows must complete on the same
-  replica that started them (sticky-session covers this too).
 - CRDT mode + FTS5 search: supported on both backends. CRDT uses
   per-row Loro snapshots stored in `_crdt_<entity>` (a separate table
   on Postgres, alongside the row table on SQLite). FTS5 maps to a
@@ -165,9 +158,10 @@ What still uses local SQLite even with `DATABASE_URL` set:
   Postgres, FTS5 virtual table on SQLite. Both maintained automatically
   on every insert/update/delete.
 
-For a single-replica Postgres deploy (one ECS task, one Fly machine)
-none of these caveats apply. Sticky sessions are trivially satisfied
-when there's only one replica. Multi-replica is when they bite.
+Jobs and workflow steps use at-least-once execution. Make their handlers
+idempotent. Realtime change, presence, and CRDT fanout still needs
+`PYLON_CLUSTER_BUS` on a self-hosted multi-replica deployment. See the
+[horizontal scaling guide](../../apps/docs/operations/scaling.mdx).
 
 ## Shape 3: Cloudflare Workers (edge, experimental)
 
@@ -211,11 +205,9 @@ promote it, send SIGTERM to the old one.
 
 ## Scale-out
 
-Single-process by design. For higher throughput:
-- **Reads**: cache + rely on the 4-connection read pool (already in)
-- **Writes**: move to Postgres (`postgres-live` feature)
-- **WS fanout**: workers + Durable Objects; shape 3 amortizes edge
-- **Shards**: run one process per game region; load-balance by match id
+Run multiple Pylon processes behind a load balancer. Use Postgres for
+shared data, auth state, jobs, workflows, and sync state. Configure
+`PYLON_CLUSTER_BUS` for realtime fanout. SQLite remains a single-machine
+backend.
 
-Horizontal HA isn't a first-class shape yet. If you need multi-master
-SQLite, you don't want SQLite.
+See the [horizontal scaling guide](../../apps/docs/operations/scaling.mdx).

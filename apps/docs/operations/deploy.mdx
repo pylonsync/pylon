@@ -16,7 +16,7 @@ PYLON_MANIFEST=/etc/pylon/pylon.manifest.json
 
 # Auth (MUST be set in non-dev)
 PYLON_ADMIN_TOKEN=<64+ random bytes, hex>
-PYLON_SESSION_DB=/var/lib/pylon/sessions.db
+PYLON_SESSION_DB=/var/lib/pylon/sessions.db  # SQLite only; Postgres shares auth state
 
 # Client-facing — declarative: prefer manifest.auth.trustedOrigins
 # in app.ts (one source feeds CORS + CSRF + OAuth-redirect). These
@@ -31,7 +31,8 @@ PYLON_SESSION_DB=/var/lib/pylon/sessions.db
 Optional:
 
 ```sh
-PYLON_JOBS_DB=/var/lib/pylon/jobs.db          # durable job queue
+PYLON_JOBS_DB=/var/lib/pylon/jobs.db          # SQLite job sidecar only
+PYLON_WORKFLOWS_DB=/var/lib/pylon/workflows.db # SQLite workflow sidecar only
 PYLON_OAUTH_GOOGLE_CLIENT_ID=...              # enable Google OAuth
 PYLON_OAUTH_GITHUB_CLIENT_ID=...              # enable GitHub OAuth
 PYLON_EMAIL_PROVIDER=stack0                   # or sendgrid | resend | webhook
@@ -218,14 +219,11 @@ Native clients hit the same HTTP and WebSocket endpoints as browsers. Keep these
 
 ## Scale-out
 
-Pylon is single-process by design. For higher throughput:
+Pylon supports multiple processes behind a load balancer. Use Postgres for shared entities, auth state, jobs, workflows, and sync state. Configure `PYLON_CLUSTER_BUS` for live change, presence, and CRDT fanout between self-hosted processes. Pylon Cloud configures its managed relay for you.
 
-- **Reads**: cache results and rely on the built-in 4-connection read pool.
-- **Writes**: move to Postgres (`postgres-live` feature).
-- **WS fanout**: use Workers and Durable Objects; shape 3 moves this cost to the edge.
-- **Shards**: run one process per game region and load-balance by match ID.
+Jobs and workflow steps use at-least-once execution. Make their handlers idempotent. SQLite remains a single-machine backend.
 
-Horizontal high availability is not a built-in shape yet. If you need multi-master SQLite, use Postgres instead.
+See [Horizontal scaling](/operations/scaling) for the full setup and failure model.
 
 For multi-region on Pylon Cloud, set the workspace region during signup. Self-hosted multi-region is a manual setup: one Pylon process per region, with app-level routing.
 

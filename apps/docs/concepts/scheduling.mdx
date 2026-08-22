@@ -62,11 +62,15 @@ await ctx.scheduler.runAfter(0, "rebuildSearchIndex", {});
 
 **Schedule format.** Standard 5-field cron: `minute hour day-of-month month day-of-week`. A schedule that does not parse, or a `function` name that is not registered, is logged loudly at boot and skipped. A typo fails visibly in `pylon dev` instead of silently never running.
 
-**Durability.** Cron jobs are backed by a persistent job store. A fire that is in flight survives a restart, and the schedule resumes after a redeploy.
+**Durability.** Cron jobs are backed by a persistent job store. A fire that is in flight survives a restart, and the schedule resumes after a redeploy. Postgres stores the queue in the application database. SQLite stores it in a local sidecar database.
 
 <Warning>
-  **Multiple replicas.** Each running Pylon process schedules crons independently. On a shared datastore (Postgres, the Pylon Cloud default), the runtime takes a per-minute lease, so each cron fires exactly once per tick across all replicas. This costs no extra work on your part. On per-replica SQLite, there is no shared lease, so each replica fires every tick. Keep those handlers idempotent (guard on a row you write, since most maintenance is naturally idempotent already), or run the scheduled work on a single machine. A single-machine app always fires exactly once.
+  **Execution is at least once.** A worker can finish an external side effect and stop before it records completion. Another worker can then run the job again. Make every scheduled function idempotent.
 </Warning>
+
+On Postgres, all replicas use one shared queue. Workers use row locks and short leases to claim jobs. Another replica can recover a job after its lease expires. One elected cron scheduler adds each matching cron to the shared queue once per tick. During a rolling release, each replica claims only functions that exist in that release.
+
+SQLite jobs stay on one machine. Do not run one SQLite database on multiple replicas.
 
 ## One-shot: `ctx.scheduler`
 
@@ -84,6 +88,8 @@ await ctx.scheduler.cancel(scheduleId);
 ```
 
 The scheduled function runs with the auth identity of the caller that scheduled it. Pylon enforces this identity at schedule time. The `args` you pass are delivered verbatim. Like crons, these scheduled calls are durable across restarts.
+
+When a Postgres mutation calls `runAfter` or `runAt`, Pylon commits the scheduled job in the same database transaction as the mutation writes. A rollback removes both the writes and the job. Scheduling from an action cannot share a transaction with its external work.
 
 <Tip>
   Before `cron(...)` existed, the common pattern for recurring work was a self-perpetuating function: one that re-armed itself with `ctx.scheduler.runAfter(...)` at the end. That still works, but `cron(...)` is clearer and cannot silently stop if a re-arm is missed.

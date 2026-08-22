@@ -1,6 +1,6 @@
 ---
 title: "Durable Workflows"
-description: "Multi-step processes that survive restarts: steps run exactly once, sleeps span days, and events resume a paused run."
+description: "Multi-step processes that survive restarts: completed results replay, sleeps span days, and events resume a paused run."
 ---
 
 A workflow is a TypeScript function that composes `step`, `sleep`, and
@@ -27,8 +27,7 @@ one default-exported `workflow(...)`:
 import { workflow } from "@pylonsync/functions";
 
 export default workflow("onboarding", async (wf, ctx) => {
-  // Steps run EXACTLY ONCE. On replay a completed step returns its
-  // recorded output without executing.
+  // A completed step returns its recorded output during replay.
   const user = await wf.step("load-user", () =>
     ctx.runQuery("getUser", { id: wf.input.userId }),
   );
@@ -81,9 +80,9 @@ example from the webhook action that received the confirmation:
 await ctx.workflows.sendEvent(workflowId, "email_confirmed", { ok: true });
 ```
 
-Steps execute through the background job queue, sleeps wake on
-schedule, and state persists to `<app-db>.workflows.db` across
-restarts. The admin API drives the same engine for operators:
+Steps execute through the background job queue, and sleeps wake on
+schedule. SQLite stores state in `<app-db>.workflows.db`. Postgres
+stores state in shared application tables. The admin API drives the same engine for operators:
 `POST /api/workflows/start`, `POST /api/workflows/<id>/event` (both
 with `Authorization: Bearer $PYLON_ADMIN_TOKEN`).
 
@@ -119,5 +118,19 @@ export default workflow("sync-crm", handler, { maxRetries: 5 });
 
 Once retries are exhausted, the run lands in `failed` with the error and
 the step that caused it, inspectable via the API. Code between steps
-should be side-effect free. Anything that must happen once belongs in a
-step.
+should be side-effect free.
+
+Workflow step execution is at least once. A step can finish an external
+side effect and stop before Pylon records its result. Pylon can then run
+that step again. Make step bodies idempotent when they call an external
+system.
+
+## Multiple replicas
+
+Postgres replicas share workflow state. A replica takes a short lease
+before it advances a run. It renews the lease while the handler runs. A
+lease token prevents a stale worker from replacing newer state. Another
+replica resumes the run after an expired lease.
+
+SQLite workflow state is local to one machine. Use Postgres for
+horizontal scaling.

@@ -1015,11 +1015,13 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 One machine is the recommended shape (a single machine serves thousands of rps with a CDN in front) — scale up first. When you do need more than one machine (pylon ≥ 0.3.315):
 
 ```bash
-DATABASE_URL=postgres://…          # shared store: entities, sessions, sync log
-PYLON_CLUSTER_BUS=redis://…        # realtime fanout between machines
+DATABASE_URL=postgres://…          # entities, auth, sync, jobs, workflows
+PYLON_CLUSTER_BUS=redis://…        # self-hosted realtime fanout
 ```
 
-With both set, the cross-machine story is tested end to end (tools/smoke-cluster.sh in the pylon repo): reads/writes and the sync cursor are shared through Postgres; WS/SSE change events, presence, and CRDT frames relay through Redis; boot-time DDL is serialized across machines (a joining machine waits, then no-ops); and cron fires exactly once cluster-wide (advisory-lock leader). SQLite mode is single-machine by definition.
+Postgres provides shared entities, auth state, sync state, jobs, and workflows. Workers claim jobs and workflows with short leases. Another machine can recover work after a lease expires. Execution is at least once, so job and workflow handlers must be idempotent. During a rolling release, each machine claims only jobs that have a local handler.
+
+Redis relays WS/SSE change events, presence, and CRDT frames for self-hosted deployments. Pylon Cloud configures its built-in relay and does not add Redis to the project. Boot-time DDL is serialized across machines. One elected scheduler adds each cron fire to the shared queue. SQLite mode is single-machine by definition.
 
 Known per-machine semantics (documented, not bugs): rate-limit counters are per machine (N machines ≈ N× the configured limit — set PYLON_RATE_LIMIT_MAX accordingly), and the SSR output cache is per machine (put a CDN in front).
 

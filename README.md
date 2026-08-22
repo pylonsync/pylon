@@ -204,6 +204,8 @@ PYLON_DEV_MODE=false
   binary; sign up and run `pylon deploy`
 - **Self-host**: use `curl … | bash` or `docker run`; see
   [docs/ops/DEPLOY.md](docs/ops/DEPLOY.md)
+- **Horizontal scaling**: use Postgres and a cluster bus; see
+  [apps/docs/operations/scaling.mdx](apps/docs/operations/scaling.mdx)
 - **AWS ECS**: see `deploy/terraform/` and `deploy/sst/`
 - **Cloudflare Workers**: see `crates/workers/README.md` (experimental)
 
@@ -223,8 +225,8 @@ Operational docs:
 ## Project status
 
 **Pre-1.0.** API is stable enough to build with but may evolve. SQLite is
-the default backend and Postgres is supported for deployments that need an
-external database or horizontal database operations. Cloudflare Workers / D1
+the default single-machine backend. Postgres supports shared application,
+auth, job, workflow, and sync state across replicas. Cloudflare Workers / D1
 is experimental. See `SECURITY.md` for a list of pre-1.0 hardening gaps.
 
 ## Contributing

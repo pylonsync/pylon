@@ -141,7 +141,13 @@ my-app/
 | Variable | Default | Purpose |
 |---|---|---|
 | `PYLON_DB_PATH` | `.pylon/dev.db` | SQLite file location (ignored if `DATABASE_URL` is set) |
-| `DATABASE_URL` | *(unset)* | `postgres://...` connection string. When set, Pylon uses the Postgres adapter instead of SQLite |
+| `DATABASE_URL` | *(unset)* | `postgres://...` connection string. When set, Pylon uses Postgres for application data, auth state, jobs, and workflows. |
+| `PYLON_SESSION_DB` | next to the app database | SQLite auth-state sidecar. Postgres ignores this setting. |
+| `PYLON_JOBS_DB` | next to the app database | SQLite job-queue sidecar. Postgres ignores this setting. |
+| `PYLON_WORKFLOWS_DB` | next to the app database | SQLite workflow sidecar. Postgres ignores this setting. |
+| `PYLON_JOB_WORKERS` | `2` | Number of local job workers. Shared Postgres claims prevent duplicate concurrent ownership. |
+| `PYLON_CLUSTER_BUS` | *(unset)* | Redis URL for realtime fanout between self-hosted replicas. Pylon Cloud supplies a managed relay. |
+| `PYLON_CLUSTER_REQUIRED` | `false` | Refuse to start without the shared Postgres runtime stores and a cluster bus. |
 | `PYLON_FILES_DIR` | `.pylon/uploads` | File upload storage |
 | `PYLON_CORS_ORIGIN` | from `manifest.auth.trustedOrigins` | CORS allowlist override (comma-separated). `*` only in dev. Loopback always auto-trusted. |
 | `PYLON_DEV_MODE` | `true` | Dev-only behavior (generous rate limits, CORS `*` fallback when neither manifest nor env is set) |

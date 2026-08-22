@@ -1747,6 +1747,51 @@ mod change_log_wiring_tests {
     }
 }
 
+fn validate_cluster_background_storage(
+    has_postgres: bool,
+    jobs_in_memory: bool,
+    cluster_required: bool,
+) -> Result<(), String> {
+    if cluster_required && !has_postgres {
+        return Err(
+            "PYLON_CLUSTER_REQUIRED needs a Postgres DATABASE_URL. Horizontal scaling cannot use local SQLite job and workflow stores."
+                .into(),
+        );
+    }
+    if cluster_required && jobs_in_memory {
+        return Err(
+            "PYLON_JOBS_IN_MEMORY cannot be enabled when PYLON_CLUSTER_REQUIRED is set. Horizontal scaling requires the shared Postgres job and workflow stores."
+                .into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cluster_background_storage_tests {
+    use super::validate_cluster_background_storage;
+
+    #[test]
+    fn cluster_mode_requires_postgres() {
+        assert!(validate_cluster_background_storage(false, false, true).is_err());
+    }
+
+    #[test]
+    fn cluster_mode_rejects_in_memory_stores() {
+        assert!(validate_cluster_background_storage(true, true, true).is_err());
+    }
+
+    #[test]
+    fn cluster_mode_accepts_shared_postgres_stores() {
+        assert!(validate_cluster_background_storage(true, false, true).is_ok());
+    }
+
+    #[test]
+    fn single_machine_mode_keeps_existing_storage_choices() {
+        assert!(validate_cluster_background_storage(false, true, false).is_ok());
+    }
+}
+
 fn start_server(
     runtime: Arc<Runtime>,
     port: u16,
@@ -1993,12 +2038,11 @@ fn start_server(
     let cluster_required = std::env::var("PYLON_CLUSTER_REQUIRED")
         .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
         .unwrap_or(false);
-    if runtime.pg_data_store_pub().is_some() && jobs_in_memory && cluster_required {
-        return Err(
-            "PYLON_JOBS_IN_MEMORY cannot be enabled when PYLON_CLUSTER_REQUIRED is set. Horizontal scaling requires the shared Postgres job and workflow stores."
-                .into(),
-        );
-    }
+    validate_cluster_background_storage(
+        runtime.pg_data_store_pub().is_some(),
+        jobs_in_memory,
+        cluster_required,
+    )?;
     if !jobs_in_memory {
         if let Some(pg) = runtime.pg_data_store_pub() {
             let owner = pylon_cluster::new_instance_id();

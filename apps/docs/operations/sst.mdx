@@ -386,6 +386,8 @@ Requirements for a correct multi-replica deploy:
 3. **Sticky WebSocket sessions** ✅: `stickySessions: true` on the load balancer. The default config satisfies this requirement.
 4. **Cross-replica live fanout** ❌: WebSocket broadcasts are in-process by default, so a mutation handled by replica A never reaches clients on replica B until their next `reconcile()`. The default config does not address this. Set the cluster bus before scaling past one replica.
 
+Jobs and workflows need no Redis. They use the shared Aurora database and can fail over between replicas. Their handlers must be idempotent because execution is at least once.
+
 For cross-replica fanout, run ElastiCache Redis and point every replica at it with `PYLON_CLUSTER_BUS`. Pylon refuses to boot if the bus is set but unreachable (loud failure beats silent split-brain). See [Horizontal scaling](/operations/scaling).
 
 ```typescript

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # smoke-cluster.sh — prove the multi-machine story with two REAL
 # pylon processes sharing Postgres, fanning realtime over the Redis
-# cluster bus. Everything a two-machine deploy must get right:
+# cluster bus. This script checks the shared data and realtime paths:
 #
 #   1. shared data       insert on A → readable on B
 #   2. sync cursor       change on A → B's /api/sync/pull sees it
@@ -57,11 +57,9 @@ common_env=(
 )
 ( cd "$APP_DIR" && env "${common_env[@]}" \
     PYLON_PORT=$PORT_A PYLON_CORS_ORIGIN="http://localhost:$PORT_A" \
-    PYLON_JOBS_DB="$SCRATCH/a.jobs.db" \
     "$PYLON_BIN" start app.ts >"$SCRATCH/a.log" 2>&1 ) & PID_A=$!
 ( cd "$APP_DIR" && env "${common_env[@]}" \
     PYLON_PORT=$PORT_B PYLON_CORS_ORIGIN="http://localhost:$PORT_B" \
-    PYLON_JOBS_DB="$SCRATCH/b.jobs.db" \
     "$PYLON_BIN" start app.ts >"$SCRATCH/b.log" 2>&1 ) & PID_B=$!
 
 for port in $PORT_A $PORT_B; do
