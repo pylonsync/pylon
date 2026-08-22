@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/pylonsync/pylon/compare/v0.4.29...v0.5.0) (2026-08-22)
+
+
+### Features
+
+* **runtime:** ship reliable horizontal scaling ([f9c9eec](https://github.com/pylonsync/pylon/commit/f9c9eec381e2bfa63778e3230de34f94ac18c02e))
+
 ## [0.4.0](https://github.com/pylonsync/pylon/compare/v0.3.385...v0.4.0) (2026-08-09)
 
 
