@@ -84,6 +84,8 @@ If you want to force a release right now (to ship a hotfix without waiting for m
 
 **Publish failed after the tag was created** — both `publish-npm` and `publish-crates` are idempotent. Fix the underlying issue and re-run the `release.yml` workflow from the Actions UI. Crates already published stay; missing ones get retried.
 
+**The release PR updated only part of the workspace** — run `./release.sh X.Y.Z` at the release commit. The command can reconcile files when the root already has version `X.Y.Z`. Commit the generated crate, package, and lockfile updates before you create the tag.
+
 **Need to re-release the same version** — you can't. Bump to the next patch (`fix: re-publish after infra issue`) and merge.
 
 ## Manual override

@@ -109,11 +109,10 @@ else
 fi
 
 if [[ "$current" == "$target" ]]; then
-	echo "error: target version $target is the same as current — nothing to do" >&2
-	exit 1
+	echo "Reconciling all workspace versions at $target"
+else
+	echo "Bumping $current → $target"
 fi
-
-echo "Bumping $current → $target"
 
 # --- preflight checks (only enforced when --tag is set) -------------------
 
@@ -166,7 +165,7 @@ done < <(find crates -maxdepth 2 -name Cargo.toml -print0)
 # the plugin packages stranded at 0.3.83.
 while IFS= read -r -d '' f; do
 	[[ "$f" == *node_modules* ]] && continue
-	perl -pi -e "s/(\"version\"\s*:\s*\")\Q$current\E(\")/\${1}$target\${2}/" "$f"
+	perl -pi -e "s/(\"version\"\s*:\s*\")[0-9]+\.[0-9]+\.[0-9]+(\")/\${1}$target\${2}/" "$f"
 done < <(find packages -maxdepth 3 -name package.json -print0)
 
 # 3b. @pylonsync/cli's optionalDependencies pin to exact-version

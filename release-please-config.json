@@ -31,6 +31,7 @@
         { "type": "json", "path": "packages/functions/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/react/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/sync/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/workflows/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/next/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/plugins/stripe/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/plugins/feature-flags/package.json", "jsonpath": "$.version" },

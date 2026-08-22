@@ -46,7 +46,7 @@ jobs:
             exit 1
           fi
 
-          for pkg in packages/sdk packages/functions packages/react packages/react-native packages/sync packages/loro packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon; do
+          for pkg in packages/sdk packages/functions packages/react packages/react-native packages/sync packages/loro packages/workflows packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon; do
             if [[ -f "$pkg/package.json" ]]; then
               PKG_V="$(node -p "require('./$pkg/package.json').version")"
               if [[ "$PKG_V" != "$TAG" ]]; then
@@ -152,7 +152,7 @@ jobs:
           # has rights to publish it. End users invoke via
           # `npm create @pylonsync/pylon@latest` (npm rewrites
           # `@pylonsync/pylon` to `@pylonsync/create-pylon`).
-          PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/client packages/react-native packages/loro packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon)
+          PYLON_PKGS=(packages/sdk packages/sync packages/functions packages/react packages/client packages/react-native packages/loro packages/workflows packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon)
           REFERENCE_VERSION=""
           for pkg in "${PYLON_PKGS[@]}"; do
             [[ -f "$pkg/package.json" ]] || continue
