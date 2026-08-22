@@ -22,7 +22,7 @@
 # boot an app with no entities ("SCHEMA_EMPTY — Schema has no entities"). This
 # site is exactly that shape — SSR pages, no database — so on 0.3.355 or older
 # the container crash-loops at startup.
-ARG PYLON_IMAGE=ghcr.io/pylonsync/pylon:0.4.17
+ARG PYLON_IMAGE=ghcr.io/pylonsync/pylon:0.5.0
 FROM ${PYLON_IMAGE}
 
 # We're already at WORKDIR=/app in the base image, owned by the pylon user.

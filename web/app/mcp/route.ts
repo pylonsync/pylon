@@ -1,4 +1,8 @@
-import type { RawRouteHandler, RouteHandler } from "@pylonsync/react";
+import type {
+  RawResponse,
+  RawRouteHandler,
+  RouteHandler,
+} from "@pylonsync/react";
 import {
   INVALID_REQUEST,
   PARSE_ERROR,
@@ -60,7 +64,10 @@ function originAllowed(origin: string | undefined): boolean {
   }
 }
 
-export const POST: RouteHandler = async ({ headers, body }) => {
+export const POST: RouteHandler = async ({
+  headers,
+  body,
+}): Promise<RawResponse> => {
   if (!originAllowed(headers.origin)) {
     return rpcError(403, INVALID_REQUEST, "Cross-site origin refused.");
   }
