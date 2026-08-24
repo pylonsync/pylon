@@ -14,6 +14,7 @@
   },
   "//pylonsync": "Keep the Pylon packages and the Docker runtime image on the same released version.",
   "dependencies": {
+    "@pylon-cloud/ui": "workspace:*",
     "@pylonsync/functions": "0.5.0",
     "@pylonsync/react": "0.5.0",
     "@pylonsync/sdk": "0.5.0",
