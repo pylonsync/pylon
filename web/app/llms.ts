@@ -104,6 +104,12 @@ export default function llms(): LlmsTxt {
             url: `${DOCS_URL}/auth/overview`,
             notes: "Magic codes, passwords, OAuth, passkeys, TOTP, SSO, API keys, organizations.",
           },
+          {
+            title: "Migrating from InstantDB",
+            url: `${DOCS_URL}/migrate/instantdb`,
+            notes:
+              "Instant Cloud shuts down on August 31, 2027 and the team joined OpenAI. Concept map, data export and import, and the parts that need a decision.",
+          },
         ],
       },
       {
