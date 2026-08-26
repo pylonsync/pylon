@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.5.1](https://github.com/pylonsync/pylon/compare/v0.5.0...v0.5.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* **builder:** install the xmlsec libs the CLI links against ([6cc2d89](https://github.com/pylonsync/pylon/commit/6cc2d890ef9bd5c22ad849231b8b2286c479e564))
+* **cli:** three messages that pointed somewhere wrong ([9256c8d](https://github.com/pylonsync/pylon/commit/9256c8dd5d84b435bc4657c8e09be0d777d5171c))
+* **create-pylon:** Ctrl+D cancels; label the manifest handoff ([d2f61df](https://github.com/pylonsync/pylon/commit/d2f61df772e12dbe0b62530835e1e6c4d6d2757c))
+* **policy:** a wrong-case entity name says which entity exists ([6c3be9a](https://github.com/pylonsync/pylon/commit/6c3be9ad7374282c487b3fa62d794863b9132524))
+* **runtime:** routine startup lines log at INFO, not WARN ([b001f37](https://github.com/pylonsync/pylon/commit/b001f37763c69e47fb4541cab657387b4f040634))
+
 ## [0.5.0](https://github.com/pylonsync/pylon/compare/v0.4.29...v0.5.0) (2026-08-22)
 
 
