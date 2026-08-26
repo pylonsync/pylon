@@ -5,16 +5,23 @@ description: "Move an app off Instant Cloud to Pylon: the concept map, the data 
 
 ## What is happening
 
-On August 20, 2026, Instant announced the end of Instant Cloud. These are the
-facts from the announcement:
+On August 20, 2026, Instant announced the end of Instant Cloud. On August 25,
+2026, Instant announced that the team joins OpenAI. These are the facts from
+both announcements:
 
-- Instant closes new signups soon.
+- New signups are closed.
 - Instant Cloud apps stop on August 31, 2027.
 - Backups stay available until August 31, 2028.
 - Instant refunds subscriptions that started after July 31, 2026.
-- Instant is open source. Instant recommends that you self-host it.
+- Instant stays open source, but the team does not maintain it. Instant
+  recommends that you self-host it.
 
-Public sources: the Hacker News thread [*Instant (Instantdb.com)
+The team gives a reason for the move: "most of our users began to use Instant
+through agents."
+
+Public sources: Instant's [*The Instant team joins
+OpenAI*](https://www.instantdb.com/essays/instant_team_joins_openai), the Hacker
+News thread [*Instant (Instantdb.com)
 Sunsetting*](https://news.ycombinator.com/item?id=49375277), plus Instant's
 [self-hosting](https://www.instantdb.com/docs/self-hosting) and
 [Cloud-to-self-host migration](https://www.instantdb.com/docs/self-hosting/migrate)
@@ -34,8 +41,10 @@ stack is large. To self-host Instant, you operate:
 - the Java heap, tuned with `JAVA_OPTS`.
 
 Instant quotes about $30 per month for a side-project VPS, and $600 or more per
-month for a business AWS setup. Self-host Instant if you have an operations team
-and you want the exact Instant stack.
+month for a business AWS setup. You also maintain the code. The team is at
+OpenAI, so bug fixes, security patches, and new features are now your work or
+the community's. Self-host Instant if you have an operations team and you want
+the exact Instant stack.
 
 **2. Move to a managed backend.** You chose Instant Cloud because you did not
 want to run a database, a JVM, and an email provider. Self-hosting gives you all
