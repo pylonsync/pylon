@@ -314,6 +314,30 @@ impl PolicyEngine {
         self.sync_scopes.contains_key(entity_name)
     }
 
+    /// The default-deny denial reason, with a casing hint when the name
+    /// differs only by case from an entity that does have a policy.
+    ///
+    /// Entity names are case-sensitive, so `GET /api/entities/item` against a
+    /// schema that declares `Item` lands on default-deny. The plain message
+    /// then tells the caller to register a policy for "item", which is the
+    /// wrong fix: the entity does not exist, and a policy for it never will
+    /// help. Agents follow that instruction literally and get stuck. Naming
+    /// the entity that does exist turns a dead end into a one-character fix.
+    fn default_deny_reason(&self, entity_name: &str) -> String {
+        if let Some(actual) = self
+            .entity_policies_by_name
+            .keys()
+            .find(|known| known.eq_ignore_ascii_case(entity_name))
+        {
+            return format!(
+                "No entity named \"{entity_name}\". Did you mean \"{actual}\"? Entity names are case-sensitive."
+            );
+        }
+        format!(
+            "No policy registered for entity \"{entity_name}\" — default-deny refuses access. Register a policy via policy({{entity: \"{entity_name}\", ...}}) or `policy({{entity: \"{entity_name}\", allow: \"true\"}})` for an intentionally-public entity."
+        )
+    }
+
     /// The policies registered for `entity_name` as a borrowed slice — O(1),
     /// no allocation. Empty slice when none are registered (the default-deny
     /// path keys off `is_empty()`).
@@ -445,9 +469,7 @@ impl PolicyEngine {
             }
             return PolicyResult::Denied {
                 policy_name: "_default_deny".into(),
-                reason: format!(
-                    "No policy registered for entity \"{entity_name}\" — default-deny refuses access. Register a policy via policy({{entity: \"{entity_name}\", ...}}) or `policy({{entity: \"{entity_name}\", allow: \"true\"}})` for an intentionally-public entity."
-                ),
+                reason: self.default_deny_reason(entity_name),
             };
         }
 
@@ -554,9 +576,7 @@ impl PolicyEngine {
             }
             return PolicyResult::Denied {
                 policy_name: "_default_deny".into(),
-                reason: format!(
-                    "No policy registered for entity \"{entity_name}\" — default-deny refuses access. Register a policy via policy({{entity: \"{entity_name}\", ...}}) or `policy({{entity: \"{entity_name}\", allow: \"true\"}})` for an intentionally-public entity."
-                ),
+                reason: self.default_deny_reason(entity_name),
             };
         }
 
@@ -2271,6 +2291,65 @@ mod tests {
             engine.entity_policies_by_name.values().map(Vec::len).sum();
         assert_eq!(entity_policy_count, 1); // ownerReadTodos
         assert_eq!(engine.action_policies.len(), 2); // authenticatedCreate, ownerToggle
+    }
+
+    #[test]
+    fn wrong_case_entity_names_the_real_entity_instead_of_blaming_policies() {
+        use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
+        let manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            entities: vec![],
+            routes: vec![],
+            queries: vec![],
+            actions: vec![],
+            policies: vec![ManifestPolicy {
+                name: "item".into(),
+                entity: Some("Item".into()),
+                allow_read: Some("true".into()),
+                ..Default::default()
+            }],
+            auth: Default::default(),
+            llm: Default::default(),
+            connections: vec![],
+            crons: vec![],
+            fonts: vec![],
+        };
+        let eng = PolicyEngine::from_manifest(&manifest);
+        let anon = AuthContext::anonymous();
+
+        // `item` is still denied — casing does not grant access.
+        let denied = eng.check_entity_read("item", &anon, None);
+        let reason = match &denied {
+            PolicyResult::Denied { reason, .. } => reason.clone(),
+            other => panic!("expected denial, got {other:?}"),
+        };
+        // ...but the message must name `Item`, not send the caller off to
+        // write a policy for an entity that does not exist. An agent follows
+        // that advice literally and never recovers.
+        assert!(
+            reason.contains("Item"),
+            "denial should name the real entity: {reason}"
+        );
+        assert!(
+            !reason.contains("Register a policy"),
+            "a casing mistake must not be reported as a missing policy: {reason}"
+        );
+
+        // A genuinely unknown entity keeps the original default-deny guidance.
+        let unknown = eng.check_entity_read("Widget", &anon, None);
+        let unknown_reason = match &unknown {
+            PolicyResult::Denied { reason, .. } => reason.clone(),
+            other => panic!("expected denial, got {other:?}"),
+        };
+        assert!(
+            unknown_reason.contains("Register a policy"),
+            "unknown entities still get the default-deny guidance: {unknown_reason}"
+        );
+
+        // The correct casing is unaffected.
+        assert!(eng.check_entity_read("Item", &anon, None).is_allowed());
     }
 
     #[test]
