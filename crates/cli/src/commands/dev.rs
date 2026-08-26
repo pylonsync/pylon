@@ -500,7 +500,25 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             // accepts, no error anywhere. Print to stderr so the operator sees
             // the real reason in `fly logs` / container stdout.
             if let Err(e) = pylon_runtime::server::start(rt_clone, port) {
-                eprintln!("[pylon] server failed to start: {e}");
+                let msg = e.to_string();
+                // A busy port is the most common way this fails and the least
+                // informative to read: "Address already in use (os error 48)"
+                // names neither the port nor the way out, so people assume the
+                // framework is broken rather than that their last dev server
+                // is still running.
+                if msg.contains("Address already in use") {
+                    eprintln!(
+                        "[pylon] port {port} is already in use — another dev server is probably still running.\n\
+                         [pylon] Free that port, or start on a different one:\n\
+                         [pylon]     pylon dev --port {next}\n\
+                         [pylon]     npm run dev -- --port {next}\n\
+                         [pylon]     PYLON_PORT={next} pylon dev",
+                        port = port,
+                        next = port.saturating_add(1)
+                    );
+                } else {
+                    eprintln!("[pylon] server failed to start: {msg}");
+                }
                 std::process::exit(1);
             }
         });

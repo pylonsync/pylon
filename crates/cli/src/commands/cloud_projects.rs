@@ -498,12 +498,18 @@ fn run_create(args: &[String], json_mode: bool) -> ExitCode {
                     });
                     println!("{}", serde_json::to_string(&out).unwrap_or_default());
                 } else {
+                    // "is live" used to go here, which was not true yet: the
+                    // machine runs, but it holds no app. It boots, hits
+                    // START_ENTRY_NOT_FOUND on the missing app.ts, and Fly
+                    // gives up after ten restarts — so the URL printed below
+                    // hangs rather than answering, until the first deploy
+                    // lands. Say what actually happened and mark the URL.
                     println!(
-                        "✓ Project {} is live ({}s)",
+                        "✓ Project {} provisioned ({}s)",
                         created.slug,
                         started.elapsed().as_secs()
                     );
-                    println!("  URL:  {url}");
+                    println!("  URL:  {url}  (serves once you deploy)");
                     println!("  Next: pylon deploy");
                 }
                 return ExitCode::Ok;

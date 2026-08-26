@@ -344,6 +344,14 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                 ));
                 return ExitCode::Error;
             }
+            FlipOutcome::Vanished => {
+                output::print_error(
+                    "Lost track of this deployment — it no longer appears in the \
+                     project's recent deployments. The project may have been deleted, \
+                     or the deployment was superseded. Check with: pylon deployments list",
+                );
+                return ExitCode::Error;
+            }
         }
     }
 
@@ -435,6 +443,10 @@ enum FlipOutcome {
     TimedOut {
         status: String,
     },
+    /// The deployment stopped appearing in the project's recent list. The
+    /// build is not "still running" — we lost track of it, which is a
+    /// different thing and deserves a different message.
+    Vanished,
 }
 
 /// Poll the deployments list until `deployment_id` reaches a terminal
@@ -481,8 +493,14 @@ fn wait_for_flip(
     )
     .map_err(|e| format!("could not resolve project id: {e}"))?;
 
+    // Six consecutive misses at a 10s poll = one minute of the deployment not
+    // appearing in the project's recent list. Enough to ride out a row that is
+    // slow to show up, short enough that a deleted project fails fast.
+    const MISSING_POLLS_BEFORE_GIVING_UP: u32 = 6;
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15 * 60);
     let mut last_status = String::new();
+    let mut missing_polls: u32 = 0;
     loop {
         let rows: Vec<DeploymentRow> = post_json(
             creds,
@@ -493,11 +511,26 @@ fn wait_for_flip(
             },
         )
         .map_err(|e| format!("could not poll deployments: {e}"))?;
-        let status = rows
-            .iter()
-            .find(|d| d.id == deployment_id)
-            .map(|d| d.status.clone())
-            .unwrap_or_else(|| "unknown".to_string());
+        // A missing row is NOT a status. It means the deployment is not in the
+        // project's recent list at all — deleted project, or it aged out —
+        // and reporting it as "unknown" made the timeout claim the build was
+        // "still running" when there was nothing left to run. Track it as its
+        // own condition and give up early rather than waiting out the full
+        // ceiling for a row that will never appear.
+        let found = rows.iter().find(|d| d.id == deployment_id);
+        let status = match found {
+            Some(row) => {
+                missing_polls = 0;
+                row.status.clone()
+            }
+            None => {
+                missing_polls += 1;
+                if missing_polls >= MISSING_POLLS_BEFORE_GIVING_UP {
+                    return Ok((project.id, FlipOutcome::Vanished));
+                }
+                last_status.clone()
+            }
+        };
         if status != last_status {
             if !json_mode {
                 println!("  build status: {status}");
