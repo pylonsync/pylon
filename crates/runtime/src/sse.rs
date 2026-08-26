@@ -461,7 +461,7 @@ pub fn start_sse_server(hub: Arc<SseHub>, sessions: Arc<SessionStore>, port: u16
         }
     };
 
-    tracing::warn!(
+    tracing::info!(
         "[sse] SSE server listening on http://localhost:{port}/events (sharded, {NUM_SHARDS} shards)"
     );
 

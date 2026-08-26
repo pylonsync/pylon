@@ -1573,7 +1573,7 @@ pub fn start_ws_server(
         }
     };
 
-    tracing::warn!(
+    tracing::info!(
         "[ws] WebSocket server listening on ws://localhost:{port} (sharded, {NUM_SHARDS} shards)"
     );
 

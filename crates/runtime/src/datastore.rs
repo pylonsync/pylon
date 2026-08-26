@@ -5111,7 +5111,7 @@ pub fn try_spawn_functions(
         }
     }
     if runners.len() > 1 {
-        tracing::warn!(
+        tracing::info!(
             "[functions] Bun runtime pool: {} runners (PYLON_FN_POOL_SIZE)",
             runners.len()
         );
@@ -5138,7 +5138,7 @@ pub fn try_spawn_functions(
     let registry = Arc::new(FnRegistry::new());
     let count = defs.len();
     registry.replace_all(defs);
-    tracing::warn!("[functions] Loaded {count} function(s) from {fn_dir}");
+    tracing::info!("[functions] Loaded {count} function(s) from {fn_dir}");
     // Register schedule + email hooks on EVERY runner in the pool.
     // Logic is identical across runners (calls the same downstream
     // adapters); only the closure-captured Arcs differ per

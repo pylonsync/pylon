@@ -2975,7 +2975,7 @@ fn start_server(
     // No-op on SQLite (never acquired).
     crate::pg_boot_guard::release();
 
-    tracing::warn!("pylon dev server listening on http://localhost:{port}");
+    tracing::info!("pylon dev server listening on http://localhost:{port}");
     tracing::info!("  WebSocket: ws://localhost:{ws_port}");
     tracing::info!("  Studio: http://localhost:{port}/studio");
     tracing::info!("  API:    http://localhost:{port}/api/entities/<entity>");
