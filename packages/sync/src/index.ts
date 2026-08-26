@@ -2396,21 +2396,33 @@ export class SyncEngine {
    * origin (every app on localhost:4321 in dev) both read the default,
    * unprefixed `pylon_token`, so one app sends the other's token and the
    * server rejects it. The failure surfaces far away as "anonymous session"
-   * from createOrg, which names neither the token nor the keyspace. Point at
-   * the real cause, once. A genuinely signed-out user has no stored token,
-   * so this stays quiet for them.
+   * from createOrg, which names neither the token nor the keyspace.
+   *
+   * Heal it here instead of "on next login": clear the app's OWN namespaced
+   * token so the invalid value stops being sent and the app drops cleanly to
+   * signed-out (a real sign-in then writes a valid token into this namespace).
+   * Only the namespaced key — never the shared default `pylon_token`, which may
+   * belong to a different app on this origin. Warn once so the cause is named.
+   * A genuinely signed-out user has no stored token, so this stays quiet.
    */
   private warnForeignToken(): void {
     if (this.warnedForeignToken) return;
     if (this.config.token) return; // explicit token, not a keyspace artifact
-    if (!this.storage.get(this.tokenStorageKey())) return; // no token → normal signed-out
+    const key = this.tokenStorageKey();
+    if (!this.storage.get(key)) return; // no token → normal signed-out
     this.warnedForeignToken = true;
+    if (key !== "pylon_token") {
+      // Self-heal: drop the rejected token from this app's namespace so the
+      // next request doesn't resend it. Leaves the ambiguous default key alone.
+      this.storage.remove(key);
+      this.storage.remove(key.replace(/:token$/, ":userId"));
+    }
     console.warn(
       '[pylon] a stored auth token was rejected (/api/auth/me resolved to an ' +
-        'anonymous identity). If more than one Pylon app runs on this origin, ' +
-        'they share the default "pylon_token" keyspace and clobber each ' +
-        "other's sessions. Give each app a name: init({ appName }) / " +
-        "configureClient({ appName }).",
+        'anonymous identity) and has been cleared from this app. If more than ' +
+        'one Pylon app runs on this origin, they share the default ' +
+        '"pylon_token" keyspace and clobber each other\'s sessions. Give each ' +
+        "app a name: init({ appName }) / configureClient({ appName }).",
     );
   }
 

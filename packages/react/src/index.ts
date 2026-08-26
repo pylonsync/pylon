@@ -241,8 +241,7 @@ export function configureClient(config: AgentDBClientConfig): void {
     // An app moving off the default (unprefixed `pylon_token`) keyspace onto
     // its own `pylon:<app>:token` namespace keeps its session: copy the legacy
     // keys up once. COPY, never delete — a framework rollback still finds the
-    // old keys, and a shared-origin multi-app collision self-heals on next
-    // login (each app rewrites its own namespace).
+    // old keys.
     if (config.appName !== "default" && prev === "default") {
       adoptLegacyKeys();
     }
@@ -253,8 +252,30 @@ export function configureClient(config: AgentDBClientConfig): void {
  *  app namespace on first `configureClient({ appName })`. */
 const MIGRATED_SLOTS = ["token", "userId"] as const;
 
+/**
+ * A `pylon:<other>:token` key already on this origin means another Pylon app
+ * has run here — so the unprefixed `pylon_token` cannot be assumed to be OURS.
+ * The legacy keyspace records no owner, and on a shared origin (every app on
+ * localhost:4321 in dev) that stranger's token is usually invalid for us.
+ * Adopt only when this looks like the origin's sole app; otherwise leave the
+ * slot empty and let a real sign-in fill it. Web-only — RN's per-app async
+ * adapters are already isolated, so the shared-origin hazard doesn't exist.
+ */
+function anotherAppNamespaced(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  const mine = storageKey("token");
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith("pylon:") && k.endsWith(":token") && k !== mine) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function adoptLegacyKeys(): void {
   try {
+    if (anotherAppNamespaced()) return; // legacy token is likely foreign — skip
     for (const slot of MIGRATED_SLOTS) {
       const nsKey = storageKey(slot); // pylon:<app>:<slot>
       const legacyKey = `pylon_${slot}`;
