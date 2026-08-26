@@ -5,7 +5,7 @@ Pylon serves the API, auth, sync, WebSocket, SSE, and native React 19 SSR from o
 ## Directory conventions
 
 **Unified SSR app:**
-- `app.ts`: data model + manifest (`entity()` + `field.*`, queries/actions/policies, `routes: await discoverAppRoutes()`). Ends with `console.log(JSON.stringify(manifest))`.
+- `app.ts`: data model + manifest (`entity()` + `field.*`, queries/actions/policies, `routes: await discoverAppRoutes()`). Ends with `console.log(JSON.stringify(manifest))` — that line is the manifest handoff (the CLI parses this file's stdout), not debug output. Never remove it.
 - `app/`: file-based SSR routes. `app/page.tsx` → `/`, `app/about/page.tsx` → `/about`, `app/blog/[slug]/page.tsx` → `/blog/:slug`. A `(group)` directory is stripped from the URL — `app/(marketing)/about/page.tsx` still serves `/about` — so a group's `layout.tsx` gives one section its own chrome (nav, footer) without changing any path; routes outside the group render without it. `app/layout.tsx` is the document shell; `app/error.tsx` / `app/not-found.tsx` are boundaries.
 - `app/globals.css`: Tailwind v4 entrypoint (auto-compiled and injected).
 - `functions/`: server functions, one per file, `default`-exported.

@@ -137,4 +137,7 @@ const manifest = buildManifest({
 	routes: [],
 });
 
+// Not a debug leftover: the CLI runs `bun run` on this file and parses stdout
+// as your manifest (see crates/cli/src/bun.rs). Deleting this line breaks every
+// pylon command that reads your schema.
 console.log(JSON.stringify(manifest));

@@ -162,6 +162,9 @@ const manifest = buildManifest({
   routes: await discoverAppRoutes(),
 });
 
+// Not a debug leftover: the CLI runs `bun run app.ts` and parses stdout as
+// your manifest (see crates/cli/src/bun.rs). Deleting this line breaks every
+// pylon command that reads your schema.
 console.log(JSON.stringify(manifest, null, 2));
 
 export default manifest;

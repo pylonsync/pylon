@@ -311,6 +311,28 @@ Examples:
 }
 
 const rl = createInterface({ input: stdin, output: stdout });
+
+/**
+ * Prompt, treating Ctrl+D / Ctrl+C as a deliberate cancel.
+ *
+ * readline rejects the pending question with an AbortError, which at top
+ * level in an ESM script surfaces as an unhandled rejection — so someone who
+ * changes their mind at the template picker gets a Node stack trace instead
+ * of "cancelled". Nothing has been written to disk at this point, so say so
+ * and leave quietly.
+ */
+async function ask(question) {
+	try {
+		return await rl.question(question);
+	} catch (err) {
+		if (err?.code === "ABORT_ERR") {
+			stdout.write("\nCancelled — nothing was created.\n");
+			rl.close();
+			exit(0);
+		}
+		throw err;
+	}
+}
 // Non-interactive stdin (CI, piped, `| npm create …`): never block on a prompt.
 // Fall back to the same defaults the interactive path uses. The skill-install
 // below already gates on `stdin.isTTY`; the INPUT prompts must too — without
@@ -319,7 +341,7 @@ const rl = createInterface({ input: stdin, output: stdout });
 const isInteractive = !!stdin.isTTY;
 if (!projectName) {
 	projectName =
-		(isInteractive ? (await rl.question("Project name: ")).trim() : "") ||
+		(isInteractive ? (await ask("Project name: ")).trim() : "") ||
 		"my-pylon-app";
 }
 if (!flags.template) {
@@ -329,7 +351,7 @@ if (!flags.template) {
 			.join("\n");
 		process.stdout.write(`\n${lines}\n`);
 		const ans = (
-			await rl.question(
+			await ask(
 				`Template (${TEMPLATES_AVAILABLE.join(", ")}) [${DEFAULT_TEMPLATE}]: `,
 			)
 		)
@@ -352,7 +374,7 @@ if (!isUnified && !flags.platforms) {
 	const supported = TEMPLATE_REGISTRY[flags.template].platforms.join(", ");
 	const ans = isInteractive
 		? (
-				await rl.question(
+				await ask(
 					`Platforms for ${flags.template} (${supported}, comma-separated) [web]: `,
 				)
 			).trim()
@@ -364,7 +386,7 @@ if (!flags.pm) {
 	const def = detected ?? "bun";
 	if (isInteractive) {
 		const choice = (
-			await rl.question(`Package manager (bun, pnpm, yarn, npm) [${def}]: `)
+			await ask(`Package manager (bun, pnpm, yarn, npm) [${def}]: `)
 		)
 			.trim()
 			.toLowerCase();
@@ -376,7 +398,7 @@ if (!flags.pm) {
 if (flags.skill === undefined) {
 	if (isInteractive) {
 		const ans = (
-			await rl.question(
+			await ask(
 				"Add the Pylon skill to your coding agent (Claude Code / Codex / Cursor)? [Y/n]: ",
 			)
 		)
