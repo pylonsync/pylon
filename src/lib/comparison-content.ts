@@ -4,11 +4,13 @@
 // ships and is reachable from a TypeScript app. No "use both" sections: a /vs
 // page makes the case for Pylon.
 
-// Hidden pre-launch: the /vs comparison pages are gated off while the site
-// focuses on what Pylon offers rather than competitor framing. Every consumer
-// — marketing-nav, site-footer, the /vs + /vs/[slug] routes, and the sitemap —
-// respects this flag, so flipping it to `true` brings the whole surface back.
-export const COMPARISONS_ENABLED = false;
+// Live since 2026-08-25. These pages were held back pre-launch to keep the
+// site on what Pylon offers rather than competitor framing. Instant Cloud's
+// shutdown changed the calculus: people are searching for a replacement
+// backend now, and the InstantDB page plus the migration guide are the honest
+// answer to that search. Every consumer — marketing-nav, site-footer, the /vs
+// + /vs/[slug] routes, and the sitemap — respects this flag.
+export const COMPARISONS_ENABLED = true;
 
 export type ComparisonTableRow = {
 	dim: string;
@@ -61,13 +63,42 @@ export const COMPARISONS: Comparison[] = [
 				"You want one binary on a VPS, native faceted search with live counts, in-process functions that share a transaction with your writes, or a typed entity API + realtime sync over the same data.",
 		},
 		architecture: [
-			{ dim: "Process count", pylon: "1", competitor: "7+ (Postgres, GoTrue, PostgREST, Realtime, Storage, Studio, Edge Functions)" },
-			{ dim: "Default DB", pylon: "SQLite (Postgres optional)", competitor: "Postgres (required)" },
-			{ dim: "Backed by", pylon: "Rust", competitor: "Postgres + Go + Elixir + Deno" },
-			{ dim: "Self-host", pylon: "scp + systemctl", competitor: "docker-compose with 7+ containers" },
-			{ dim: "Schema source of truth", pylon: "TypeScript (entity())", competitor: "SQL migrations" },
-			{ dim: "Faceted search", pylon: "Native (full-text + facets)", competitor: "tsvector for FTS, build facets yourself" },
-			{ dim: "Function-to-DB latency", pylon: "<1ms (same process)", competitor: "50–200ms (Edge → Postgres)" },
+			{
+				dim: "Process count",
+				pylon: "1",
+				competitor:
+					"7+ (Postgres, GoTrue, PostgREST, Realtime, Storage, Studio, Edge Functions)",
+			},
+			{
+				dim: "Default DB",
+				pylon: "SQLite (Postgres optional)",
+				competitor: "Postgres (required)",
+			},
+			{
+				dim: "Backed by",
+				pylon: "Rust",
+				competitor: "Postgres + Go + Elixir + Deno",
+			},
+			{
+				dim: "Self-host",
+				pylon: "scp + systemctl",
+				competitor: "docker-compose with 7+ containers",
+			},
+			{
+				dim: "Schema source of truth",
+				pylon: "TypeScript (entity())",
+				competitor: "SQL migrations",
+			},
+			{
+				dim: "Faceted search",
+				pylon: "Native (full-text + facets)",
+				competitor: "tsvector for FTS, build facets yourself",
+			},
+			{
+				dim: "Function-to-DB latency",
+				pylon: "<1ms (same process)",
+				competitor: "50–200ms (Edge → Postgres)",
+			},
 		],
 		sameShape: [
 			"Real-time subscriptions over WebSocket",
@@ -123,13 +154,34 @@ export const COMPARISONS: Comparison[] = [
 			},
 		],
 		migration: [
-			{ competitor: "SQL schema + RLS", pylon: "entity() + policy() in TypeScript" },
-			{ competitor: "supabase.from('todos').select()", pylon: 'db.useQuery("Todo")' },
-			{ competitor: "supabase.auth.signInWithOtp(...)", pylon: "magic-link auth, built in" },
-			{ competitor: "Storage buckets", pylon: "presigned uploads (S3 / R2 / local)" },
-			{ competitor: "Edge Functions", pylon: "mutation / action in functions/*.ts" },
-			{ competitor: "Realtime subscriptions", pylon: "db.useQuery (server-authoritative)" },
-			{ competitor: "auth.users", pylon: "Pylon's User entity (you control the shape)" },
+			{
+				competitor: "SQL schema + RLS",
+				pylon: "entity() + policy() in TypeScript",
+			},
+			{
+				competitor: "supabase.from('todos').select()",
+				pylon: 'db.useQuery("Todo")',
+			},
+			{
+				competitor: "supabase.auth.signInWithOtp(...)",
+				pylon: "magic-link auth, built in",
+			},
+			{
+				competitor: "Storage buckets",
+				pylon: "presigned uploads (S3 / R2 / local)",
+			},
+			{
+				competitor: "Edge Functions",
+				pylon: "mutation / action in functions/*.ts",
+			},
+			{
+				competitor: "Realtime subscriptions",
+				pylon: "db.useQuery (server-authoritative)",
+			},
+			{
+				competitor: "auth.users",
+				pylon: "Pylon's User entity (you control the shape)",
+			},
 		],
 		honestWeakness:
 			"Supabase exposes raw SQL as the primary interface, with direct SQL-tool interop (Metabase, Hex, Mode, Retool) and the full Postgres feature set one query away. Pylon can use the same Postgres, but reaches data through a typed entity API. Supabase is a better fit today for ad-hoc analytics and the wider SQL ecosystem.",
@@ -149,13 +201,41 @@ export const COMPARISONS: Comparison[] = [
 				"You want a single-binary self-host, a permissive license, native faceted search, or server-rendered React in the same process.",
 		},
 		architecture: [
-			{ dim: "Process model", pylon: "One service (Rust + Bun)", competitor: "Hosted service / multi-service self-host" },
-			{ dim: "Default store", pylon: "SQLite (Postgres optional)", competitor: "Custom Convex DB" },
-			{ dim: "License", pylon: "MIT OR Apache-2.0", competitor: "FSL — converts to Apache after 2 yrs" },
-			{ dim: "Self-host on day 1", pylon: "Yes — one binary", competitor: "Yes — multi-service" },
-			{ dim: "Faceted search", pylon: "Built-in (full-text + facets)", competitor: "Roll your own queries" },
-			{ dim: "Native SSR", pylon: "Yes — React in the same binary", competitor: "Pair with Next.js" },
-			{ dim: "Native mobile sync", pylon: "Swift engine at parity", competitor: "React Native" },
+			{
+				dim: "Process model",
+				pylon: "One service (Rust + Bun)",
+				competitor: "Hosted service / multi-service self-host",
+			},
+			{
+				dim: "Default store",
+				pylon: "SQLite (Postgres optional)",
+				competitor: "Custom Convex DB",
+			},
+			{
+				dim: "License",
+				pylon: "MIT OR Apache-2.0",
+				competitor: "FSL — converts to Apache after 2 yrs",
+			},
+			{
+				dim: "Self-host on day 1",
+				pylon: "Yes — one binary",
+				competitor: "Yes — multi-service",
+			},
+			{
+				dim: "Faceted search",
+				pylon: "Built-in (full-text + facets)",
+				competitor: "Roll your own queries",
+			},
+			{
+				dim: "Native SSR",
+				pylon: "Yes — React in the same binary",
+				competitor: "Pair with Next.js",
+			},
+			{
+				dim: "Native mobile sync",
+				pylon: "Swift engine at parity",
+				competitor: "React Native",
+			},
 		],
 		sameShape: [
 			"Reactive queries that auto-update the UI on writes",
@@ -203,15 +283,33 @@ export const COMPARISONS: Comparison[] = [
 			},
 		],
 		migration: [
-			{ competitor: "defineSchema(...)", pylon: "buildManifest({ entities: [...] })" },
-			{ competitor: "query / mutation / action", pylon: "Same names, identical mental model" },
+			{
+				competitor: "defineSchema(...)",
+				pylon: "buildManifest({ entities: [...] })",
+			},
+			{
+				competitor: "query / mutation / action",
+				pylon: "Same names, identical mental model",
+			},
 			{ competitor: "useQuery(api.tasks.list)", pylon: 'db.useQuery("Task")' },
-			{ competitor: 'ctx.db.insert("tasks", {...})', pylon: 'ctx.db.insert("Task", {...})' },
+			{
+				competitor: 'ctx.db.insert("tasks", {...})',
+				pylon: 'ctx.db.insert("Task", {...})',
+			},
 			{ competitor: "Convex auth", pylon: "Magic-link / OAuth / OIDC" },
-			{ competitor: "Convex file storage", pylon: "presigned uploads (S3 / R2 / local)" },
-			{ competitor: "Convex scheduled functions", pylon: "ctx.scheduler + durable ctx.workflows" },
+			{
+				competitor: "Convex file storage",
+				pylon: "presigned uploads (S3 / R2 / local)",
+			},
+			{
+				competitor: "Convex scheduled functions",
+				pylon: "ctx.scheduler + durable ctx.workflows",
+			},
 			{ competitor: "Convex search index", pylon: "Per-entity search config" },
-			{ competitor: "Convex vector search", pylon: "field.vector + ctx.db.vectorSearch" },
+			{
+				competitor: "Convex vector search",
+				pylon: "field.vector + ctx.db.vectorSearch",
+			},
 		],
 		honestWeakness:
 			"Convex has more developer mindshare today and more polish in reactive query batching, type-inference depth, and IDE integration. If you want the most polished pure-TS reactive backend and do not need single-process self-hosting, faceted search, or native SSR, Convex is a strong choice.",
@@ -231,12 +329,36 @@ export const COMPARISONS: Comparison[] = [
 				"You want self-host, a permissive license, declarative schema instead of schemaless documents, faceted search without Algolia, or no cold starts on functions.",
 		},
 		architecture: [
-			{ dim: "License", pylon: "MIT OR Apache-2.0", competitor: "Closed source" },
-			{ dim: "Self-hostable", pylon: "Yes, on any Linux box", competitor: "No, Google-only" },
-			{ dim: "Schema", pylon: "Declarative (TypeScript)", competitor: "Schemaless (Firestore documents)" },
-			{ dim: "Functions runtime", pylon: "In-process", competitor: "Cloud Functions (separate)" },
-			{ dim: "Function cold start", pylon: "None", competitor: "1–10 seconds for cold containers" },
-			{ dim: "Full-text search", pylon: "Built-in (full-text + facets)", competitor: "Mirror to Algolia / Typesense" },
+			{
+				dim: "License",
+				pylon: "MIT OR Apache-2.0",
+				competitor: "Closed source",
+			},
+			{
+				dim: "Self-hostable",
+				pylon: "Yes, on any Linux box",
+				competitor: "No, Google-only",
+			},
+			{
+				dim: "Schema",
+				pylon: "Declarative (TypeScript)",
+				competitor: "Schemaless (Firestore documents)",
+			},
+			{
+				dim: "Functions runtime",
+				pylon: "In-process",
+				competitor: "Cloud Functions (separate)",
+			},
+			{
+				dim: "Function cold start",
+				pylon: "None",
+				competitor: "1–10 seconds for cold containers",
+			},
+			{
+				dim: "Full-text search",
+				pylon: "Built-in (full-text + facets)",
+				competitor: "Mirror to Algolia / Typesense",
+			},
 			{ dim: "Open source", pylon: "Yes", competitor: "No" },
 		],
 		sameShape: [
@@ -288,13 +410,35 @@ export const COMPARISONS: Comparison[] = [
 			},
 		],
 		migration: [
-			{ competitor: "Firestore collections", pylon: "entity() definitions in TypeScript" },
-			{ competitor: "Security rules (custom DSL)", pylon: "policy() with boolean expressions" },
-			{ competitor: "firestore.collection().onSnapshot()", pylon: 'db.useQuery("Entity")' },
-			{ competitor: "Cloud Functions (HTTP-triggered)", pylon: "mutation / action in functions/*.ts" },
-			{ competitor: "Firebase Auth", pylon: "Magic-link / OAuth (export users, import as User rows)" },
-			{ competitor: "Cloud Storage", pylon: "presigned uploads (S3 / R2 / local)" },
-			{ competitor: "Firebase Cloud Messaging", pylon: "Keep FCM; register tokens via an action and send from your function" },
+			{
+				competitor: "Firestore collections",
+				pylon: "entity() definitions in TypeScript",
+			},
+			{
+				competitor: "Security rules (custom DSL)",
+				pylon: "policy() with boolean expressions",
+			},
+			{
+				competitor: "firestore.collection().onSnapshot()",
+				pylon: 'db.useQuery("Entity")',
+			},
+			{
+				competitor: "Cloud Functions (HTTP-triggered)",
+				pylon: "mutation / action in functions/*.ts",
+			},
+			{
+				competitor: "Firebase Auth",
+				pylon: "Magic-link / OAuth (export users, import as User rows)",
+			},
+			{
+				competitor: "Cloud Storage",
+				pylon: "presigned uploads (S3 / R2 / local)",
+			},
+			{
+				competitor: "Firebase Cloud Messaging",
+				pylon:
+					"Keep FCM; register tokens via an action and send from your function",
+			},
 		],
 		honestWeakness:
 			"Firebase's mobile-first integrations include FCM, Crashlytics, A/B testing through Remote Config, and in-app messaging. Pylon does not provide equivalents. Firebase has more polish for apps centered on push notifications and mobile experimentation. With Pylon, bring your own analytics, crash reporting, and push provider; register FCM through an action.",
@@ -306,21 +450,49 @@ export const COMPARISONS: Comparison[] = [
 		keyword: "InstantDB alternative",
 		metaDescription:
 			"Open-source InstantDB alternative. Pylon combines optimistic local-first sync, server functions, row-level policies, native SSR, and self-hosting in one binary.",
-		lede: "InstantDB and Pylon both center on local-first, optimistic sync. InstantDB is a client-focused realtime database with a relational graph query language. Pylon combines sync, server functions, policies, SSR, and a managed cloud in one binary.",
+		lede: "Instant Cloud is shutting down. Signups are closed, hosted apps stop on August 31, 2027, and the team has joined OpenAI — Instant stays open source but unmaintained, so your options are self-hosting a Clojure/JVM stack or moving. InstantDB and Pylon both center on local-first, optimistic sync; Pylon adds server functions, policies, SSR, and a managed cloud in one binary. Step-by-step move: docs.pylonsync.com/migrate/instantdb.",
 		tldr: {
 			chooseCompetitor:
-				"You want the purest client-side local-first DX, you like the InstaQL graph query language, you're happy on the hosted model, and your backend logic is light enough to live in permission rules and the client.",
+				"You want the purest client-side local-first DX, you like the InstaQL graph query language, your backend logic is light enough to live in permission rules and the client, and you have the operations appetite to self-host an unmaintained JVM + Postgres 16 stack now that the hosted option is ending.",
 			choosePylon:
 				"You want server functions running in-process with your data, deny-by-default row-level policies, native React SSR, faceted search, or to self-host the whole thing as a single binary.",
 		},
 		architecture: [
-			{ dim: "Shape", pylon: "Full-stack framework", competitor: "Client-leaning realtime DB" },
-			{ dim: "Server logic", pylon: "In-process query / mutation / action", competitor: "Rules + client; lighter server surface" },
-			{ dim: "Schema", pylon: "TypeScript entity()", competitor: "Typed schema + InstaQL graph queries" },
-			{ dim: "Access control", pylon: "Row-level policies, deny-by-default", competitor: "Permission rules" },
-			{ dim: "Native SSR", pylon: "Yes — React in the same binary", competitor: "Client-first; pair a renderer" },
-			{ dim: "Self-host", pylon: "One binary on any Linux box", competitor: "Primarily hosted" },
-			{ dim: "Search", pylon: "Full-text + facets built-in", competitor: "Query the graph yourself" },
+			{
+				dim: "Shape",
+				pylon: "Full-stack framework",
+				competitor: "Client-leaning realtime DB",
+			},
+			{
+				dim: "Server logic",
+				pylon: "In-process query / mutation / action",
+				competitor: "Rules + client; lighter server surface",
+			},
+			{
+				dim: "Schema",
+				pylon: "TypeScript entity()",
+				competitor: "Typed schema + InstaQL graph queries",
+			},
+			{
+				dim: "Access control",
+				pylon: "Row-level policies, deny-by-default",
+				competitor: "Permission rules",
+			},
+			{
+				dim: "Native SSR",
+				pylon: "Yes — React in the same binary",
+				competitor: "Client-first; pair a renderer",
+			},
+			{
+				dim: "Self-host",
+				pylon: "One binary on any Linux box",
+				competitor: "Clojure/JVM + Postgres 16, unmaintained",
+			},
+			{
+				dim: "Search",
+				pylon: "Full-text + facets built-in",
+				competitor: "Query the graph yourself",
+			},
 		],
 		sameShape: [
 			"Local-first, optimistic writes that reconcile in the background",
@@ -329,7 +501,7 @@ export const COMPARISONS: Comparison[] = [
 			"Built-in auth and access rules",
 			"Offline-capable clients",
 			"React SDK",
-			"Managed cloud option",
+			"Managed cloud option (Instant's ends August 31, 2027)",
 		],
 		competitorBetter: [
 			{
@@ -364,7 +536,7 @@ export const COMPARISONS: Comparison[] = [
 			},
 			{
 				title: "Self-host as one binary",
-				body: "Run the whole stack on a VPS you control, or on Smallware. InstantDB is primarily a hosted product.",
+				body: "Run the whole stack on a VPS you control, or on Smallware. Instant's own self-host path is a Clojure/JVM server on Postgres 16 plus a reverse proxy and an email provider, and its cloud stops on August 31, 2027.",
 			},
 			{
 				title: "A first-class Swift engine",
@@ -372,12 +544,27 @@ export const COMPARISONS: Comparison[] = [
 			},
 		],
 		migration: [
-			{ competitor: "InstantDB schema", pylon: "entity() definitions in TypeScript" },
-			{ competitor: "Permission rules", pylon: "policy() with boolean expressions" },
-			{ competitor: "useQuery / InstaQL", pylon: 'db.useQuery("Entity", { where })' },
-			{ competitor: "transact / tx", pylon: "mutation / action in functions/*.ts" },
+			{
+				competitor: "InstantDB schema",
+				pylon: "entity() definitions in TypeScript",
+			},
+			{
+				competitor: "Permission rules",
+				pylon: "policy() with boolean expressions",
+			},
+			{
+				competitor: "useQuery / InstaQL",
+				pylon: 'db.useQuery("Entity", { where })',
+			},
+			{
+				competitor: "transact / tx",
+				pylon: "mutation / action in functions/*.ts",
+			},
 			{ competitor: "InstantDB auth", pylon: "Magic-link / OAuth / OIDC" },
-			{ competitor: "Client-side logic", pylon: "Move privileged logic into server functions" },
+			{
+				competitor: "Client-side logic",
+				pylon: "Move privileged logic into server functions",
+			},
 		],
 		honestWeakness:
 			"For client-only apps that need InstaQL graph queries and frontend-defined permissions, InstantDB is leaner to adopt and more expressive for nested relational reads. Pylon adds surface area when you do not need server functions, SSR, or self-hosting.",
