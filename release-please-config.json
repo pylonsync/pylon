@@ -35,7 +35,10 @@
         { "type": "json", "path": "packages/next/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/plugins/stripe/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/plugins/feature-flags/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/plugins/webhooks/package.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "packages/plugins/webhooks/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/react-native/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/loro/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/create-pylon/package.json", "jsonpath": "$.version" }
       ]
     }
   }
