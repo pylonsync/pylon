@@ -2030,6 +2030,14 @@ export function buildHydrationTail(args: {
     props: serializableProps,
     ssrData: args.ssrData,
   };
+  // App name (from the manifest, surfaced by the runtime as PYLON_APP_NAME) so
+  // the client namespaces its localStorage/IndexedDB per-app at hydrate. Without
+  // it every app on a shared origin (all localhost:4321 in dev) collides on the
+  // default `pylon_token`. App-global + identity-free, so it stays byte-identical
+  // across users — safe in the PPR-bucketed shared tail too.
+  const appName =
+    typeof process !== "undefined" ? process.env.PYLON_APP_NAME : undefined;
+  if (appName) hydrationPayload.app = appName;
   if (args.kind) hydrationPayload.kind = args.kind;
   const json = escapeScriptJson(JSON.stringify(hydrationPayload));
   let tail = `<script id="__PYLON_DATA__" type="application/json">${json}</script>`;

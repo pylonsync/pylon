@@ -236,7 +236,37 @@ export function configureClient(config: AgentDBClientConfig): void {
     maybeWarnDowngrade(config.baseUrl);
   }
   if (config.appName) {
+    const prev = _appName;
     _appName = config.appName;
+    // An app moving off the default (unprefixed `pylon_token`) keyspace onto
+    // its own `pylon:<app>:token` namespace keeps its session: copy the legacy
+    // keys up once. COPY, never delete — a framework rollback still finds the
+    // old keys, and a shared-origin multi-app collision self-heals on next
+    // login (each app rewrites its own namespace).
+    if (config.appName !== "default" && prev === "default") {
+      adoptLegacyKeys();
+    }
+  }
+}
+
+/** Session slots whose legacy (default-keyspace) value is adopted into the
+ *  app namespace on first `configureClient({ appName })`. */
+const MIGRATED_SLOTS = ["token", "userId"] as const;
+
+function adoptLegacyKeys(): void {
+  try {
+    for (const slot of MIGRATED_SLOTS) {
+      const nsKey = storageKey(slot); // pylon:<app>:<slot>
+      const legacyKey = `pylon_${slot}`;
+      if (nsKey === legacyKey) continue;
+      const existing = _storage.get(nsKey);
+      if (existing != null && existing !== "") continue; // already namespaced
+      const legacy = _storage.get(legacyKey);
+      if (legacy != null && legacy !== "") _storage.set(nsKey, legacy);
+    }
+  } catch {
+    // Storage can be absent (SSR/node) or throw (Safari private mode) —
+    // never let a migration attempt break client configuration.
   }
 }
 

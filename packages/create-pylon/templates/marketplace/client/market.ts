@@ -5,7 +5,10 @@
 // init() resolves window.location.origin.
 import { init, configureClient, callFn, setSessionToken, storageKey } from "@pylonsync/react";
 
-export const APP_NAME = "market";
+// Match the manifest name (app.ts `buildManifest({ name })`) so this explicit
+// appName agrees with the value the SSR runtime auto-injects at hydrate — no
+// keyspace disagreement, no double token migration.
+export const APP_NAME = "__APP_NAME__";
 
 // Prefilled demo account — the shopper you sign in as. Owns a couple of its
 // own listings so "My Market" isn't empty, but NOT the bulk of the catalog,

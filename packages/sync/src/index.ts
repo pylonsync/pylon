@@ -389,6 +389,8 @@ export class SyncEngine {
    *  joiner whose orchestrator never fires onPromote (because it was
    *  never leader) silently run as a leader. */
   private isMultiTabLeader = false;
+  /** One-shot guard for the cross-app keyspace-collision warning. */
+  private warnedForeignToken = false;
 
   /**
    * Serialized apply queue. Every change-event apply — from WS onmessage,
@@ -1634,7 +1636,22 @@ export class SyncEngine {
   /** Current auth token from config or the storage adapter. Null when neither has one. */
   private currentToken(): string | null {
     if (this.config.token) return this.config.token;
-    return this.storage.get(this.tokenStorageKey());
+    const key = this.tokenStorageKey();
+    const token = this.storage.get(key);
+    if (token) return token;
+    // Non-destructive legacy adoption, mirroring React's configureClient:
+    // an app that shipped on the default `pylon_token` keeps its session
+    // when it adopts a namespace. On web this is a no-op (React already
+    // copied it in shared localStorage); it matters for async/native
+    // adapters the React layer doesn't touch. COPY, never delete.
+    if (key !== "pylon_token") {
+      const legacy = this.storage.get("pylon_token");
+      if (legacy) {
+        this.storage.set(key, legacy);
+        return legacy;
+      }
+    }
+    return null;
   }
 
   /**
@@ -2358,6 +2375,7 @@ export class SyncEngine {
         roles?: string[];
         avatar_url?: string | null;
       };
+      if ((raw.user_id ?? null) === null) this.warnForeignToken();
       return {
         userId: raw.user_id ?? null,
         tenantId: raw.tenant_id ?? null,
@@ -2370,6 +2388,30 @@ export class SyncEngine {
       // will retry. Don't take down the sync loop for this.
       return null;
     }
+  }
+
+  /**
+   * A stored token that /api/auth/me resolves to no user is either expired
+   * or — the common footgun — a FOREIGN token: two Pylon apps sharing an
+   * origin (every app on localhost:4321 in dev) both read the default,
+   * unprefixed `pylon_token`, so one app sends the other's token and the
+   * server rejects it. The failure surfaces far away as "anonymous session"
+   * from createOrg, which names neither the token nor the keyspace. Point at
+   * the real cause, once. A genuinely signed-out user has no stored token,
+   * so this stays quiet for them.
+   */
+  private warnForeignToken(): void {
+    if (this.warnedForeignToken) return;
+    if (this.config.token) return; // explicit token, not a keyspace artifact
+    if (!this.storage.get(this.tokenStorageKey())) return; // no token → normal signed-out
+    this.warnedForeignToken = true;
+    console.warn(
+      '[pylon] a stored auth token was rejected (/api/auth/me resolved to an ' +
+        'anonymous identity). If more than one Pylon app runs on this origin, ' +
+        'they share the default "pylon_token" keyspace and clobber each ' +
+        "other's sessions. Give each app a name: init({ appName }) / " +
+        "configureClient({ appName }).",
+    );
   }
 
   /**

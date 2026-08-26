@@ -5079,6 +5079,16 @@ pub fn try_spawn_functions(
         pylon_functions::pool::FnRunnerPool::default_pool_size(),
     );
 
+    // Surface the app's manifest name to the Bun SSR runtime (inherited via
+    // the child's env) so its hydration blob carries `app`, and the browser
+    // client namespaces localStorage/IndexedDB per-app. Without it every app on
+    // a shared origin (all localhost:4321 in dev) collides on the default
+    // `pylon_token`. Set before ANY runner spawns so all inherit it.
+    let app_name = runtime.manifest().name.clone();
+    if !app_name.is_empty() {
+        std::env::set_var("PYLON_APP_NAME", &app_name);
+    }
+
     // Spawn the first runner separately so we can capture its function
     // defs for the registry — all runners load the same fn_dir and
     // produce identical defs, so we only need one handshake's worth.
