@@ -33,6 +33,9 @@ import type {
   Connections,
   Domains,
   TenantDomainResult,
+  DomainAvailability,
+  RegisterDomainOptions,
+  RegisteredDomainResult,
   QueryCtx,
   MutationCtx,
   ActionCtx,
@@ -1119,6 +1122,16 @@ function buildDomains(): Domains {
         hostname,
       }),
     list: () => call<{ hosts: string[] }>("listProjectTrustedHosts", {}),
+    search: (query: string, opts?: { suggest?: boolean; tldFilter?: string[] }) =>
+      call<{ results: DomainAvailability[] }>("searchAvailableDomains", {
+        query,
+        ...(opts ?? {}),
+      }),
+    register: (domainName: string, opts?: RegisterDomainOptions) =>
+      call<RegisteredDomainResult>("registerCustomerDomain", {
+        domainName,
+        ...(opts ?? {}),
+      }),
   };
 }
 

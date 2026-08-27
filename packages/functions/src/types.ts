@@ -919,6 +919,71 @@ export interface TenantDomainResult {
  * const s = await ctx.domains.status("app.customer.com"); // s.active === true
  * ```
  */
+/** One domain-availability / pricing result from a search. */
+export interface DomainAvailability {
+  domainName: string;
+  sld: string;
+  tld: string;
+  purchasable: boolean;
+  premium?: boolean;
+  /** First-term price (USD), when purchasable. */
+  purchasePrice?: number;
+  renewalPrice?: number;
+  purchaseType?: string;
+  /** Why it isn't purchasable, when unavailable. */
+  reason?: string | null;
+}
+
+/** A registrant/admin/tech/billing contact for a domain registration. */
+export interface DomainContact {
+  firstName: string;
+  lastName: string;
+  companyName?: string;
+  address1: string;
+  address2?: string;
+  city: string;
+  state: string;
+  zip: string;
+  country: string;
+  email: string;
+  phone: string;
+  fax?: string;
+}
+
+/** Options for {@link Domains.register}. `purchasePrice` is a price ceiling —
+ *  registration is refused if the real price is higher, so a premium name can't
+ *  surprise-charge. Contacts default to the platform account's when omitted. */
+export interface RegisterDomainOptions {
+  years?: number;
+  autorenewEnabled?: boolean;
+  privacyEnabled?: boolean;
+  nameservers?: string[];
+  contacts?: {
+    registrant: DomainContact;
+    admin?: DomainContact;
+    tech?: DomainContact;
+    billing?: DomainContact;
+  };
+  purchasePrice?: number;
+  promoCode?: string;
+}
+
+/** Result of a domain registration. */
+export interface RegisteredDomainResult {
+  domain: {
+    domainName: string;
+    createDate?: string;
+    expireDate?: string;
+    autorenewEnabled?: boolean;
+    locked?: boolean;
+    privacyEnabled?: boolean;
+    nameservers?: string[];
+    renewalPrice?: number;
+  };
+  order?: number;
+  totalPaid?: number;
+}
+
 export interface Domains {
   /** Attach a custom domain for one of your end-customers. Returns the DNS the
    *  customer must set (the CNAME target + ownership/DCV TXT records). */
@@ -929,6 +994,20 @@ export interface Domains {
   remove(hostname: string): Promise<{ hostname: string; removed: boolean }>;
   /** The hostnames currently ready (trusted) for this app — owner + tenant. */
   list(): Promise<{ hosts: string[] }>;
+  /** Search domain availability + pricing to buy. A `query` with a dot is an
+   *  exact check ("acme.com"); a bare keyword ("acme") returns suggestions.
+   *  Requires the registrar (name.com) to be configured on the control plane. */
+  search(
+    query: string,
+    opts?: { suggest?: boolean; tldFilter?: string[] },
+  ): Promise<{ results: DomainAvailability[] }>;
+  /** REGISTER (buy) a domain for your end-customer. Spends money on the
+   *  platform's registrar account; requires a paid plan. Buying does not by
+   *  itself serve the app — attach a host with `add()` afterward. */
+  register(
+    domainName: string,
+    opts?: RegisterDomainOptions,
+  ): Promise<RegisteredDomainResult>;
 }
 
 export interface ActionCtx<R extends AuthRequirement = "optional"> {

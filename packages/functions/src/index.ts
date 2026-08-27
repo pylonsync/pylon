@@ -95,4 +95,8 @@ export type {
   Domains,
   TenantDomainResult,
   TenantDomainDns,
+  DomainAvailability,
+  DomainContact,
+  RegisterDomainOptions,
+  RegisteredDomainResult,
 } from "./types";
