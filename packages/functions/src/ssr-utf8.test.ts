@@ -14,7 +14,10 @@
  * server-only text corrupts with no warning at all.
  */
 import { describe, expect, test } from "bun:test";
-import { streamWithHeadInjection } from "./ssr-runtime";
+import {
+  buildCloudBadgeChunk,
+  streamWithHeadInjection,
+} from "./ssr-runtime";
 
 /** A reader over pre-split byte chunks — the shape React hands us. */
 function readerOf(chunks: Uint8Array[]): ReadableStreamDefaultReader<Uint8Array> {
@@ -32,9 +35,18 @@ function splitAt(text: string, at: number): Uint8Array[] {
   return [bytes.slice(0, at), bytes.slice(at)];
 }
 
-async function collect(chunks: Uint8Array[], headBlob = ""): Promise<string> {
+async function collect(
+  chunks: Uint8Array[],
+  headBlob = "",
+  bodyBlob = "",
+): Promise<string> {
   const out: string[] = [];
-  await streamWithHeadInjection(readerOf(chunks), headBlob, (t) => out.push(t));
+  await streamWithHeadInjection(
+    readerOf(chunks),
+    headBlob,
+    (t) => out.push(t),
+    bodyBlob,
+  );
   return out.join("");
 }
 
@@ -106,5 +118,82 @@ describe("streamWithHeadInjection — UTF-8 across chunk boundaries", () => {
     for (let at = 1; at < bytes.length; at++) {
       expect(await collect(splitAt(html, at))).toBe(html);
     }
+  });
+});
+
+describe("streamWithHeadInjection — body injection", () => {
+  const doc = "<html><head><title>t</title></head><body><p>hi</p></body></html>";
+  const withBadge =
+    "<html><head><title>t</title></head><body><p>hi</p><i>B</i></body></html>";
+
+  test("the blob lands immediately before </body>", async () => {
+    const bytes = new TextEncoder().encode(doc);
+    expect(await collect([bytes], "", "<i>B</i>")).toBe(withBadge);
+  });
+
+  test("head and body blobs both land, in document order", async () => {
+    const bytes = new TextEncoder().encode(doc);
+    expect(await collect([bytes], "<meta>", "<i>B</i>")).toBe(
+      "<html><head><title>t</title><meta></head><body><p>hi</p><i>B</i></body></html>",
+    );
+  });
+
+  test("</body> split across every chunk boundary still matches", async () => {
+    // The carry buffer is the point: React splits wherever it likes, so a
+    // marker cut in half must not be missed (dropping the badge) or matched
+    // twice (duplicating it).
+    const bytes = new TextEncoder().encode(doc);
+    for (let at = 1; at < bytes.length; at++) {
+      const out = await collect(
+        [bytes.slice(0, at), bytes.slice(at)],
+        "",
+        "<i>B</i>",
+      );
+      expect(out).toBe(withBadge);
+    }
+  });
+
+  test("a document with no </body> passes through untouched", async () => {
+    // Fragment renders have no body close. Emitting the blob anyway would put
+    // a floating badge into markup meant to be embedded.
+    const frag = "<p>fragment</p>";
+    expect(await collect([new TextEncoder().encode(frag)], "", "<i>B</i>")).toBe(
+      frag,
+    );
+  });
+
+  test("an empty body blob leaves the stream byte-identical", async () => {
+    expect(await collect([new TextEncoder().encode(doc)])).toBe(doc);
+  });
+
+  test("only the first </body> is injected into", async () => {
+    const nested = "<body>a</body><body>b</body>";
+    expect(await collect([new TextEncoder().encode(nested)], "", "X")).toBe(
+      "<body>aX</body><body>b</body>",
+    );
+  });
+});
+
+describe("buildCloudBadgeChunk", () => {
+  test("returns nothing unless the control plane sets the flag", () => {
+    // Every paid project and every self-hosted install lands here.
+    expect(buildCloudBadgeChunk({})).toBe("");
+    expect(buildCloudBadgeChunk({ PYLON_CLOUD_BADGE: "" })).toBe("");
+    expect(buildCloudBadgeChunk({ PYLON_CLOUD_BADGE: "0" })).toBe("");
+    expect(buildCloudBadgeChunk({ PYLON_CLOUD_BADGE: "false" })).toBe("");
+    expect(buildCloudBadgeChunk({ PYLON_CLOUD_BADGE: "no" })).toBe("");
+  });
+
+  test("renders one self-contained anchor when enabled", () => {
+    const html = buildCloudBadgeChunk({ PYLON_CLOUD_BADGE: "1" });
+    expect(html).toContain("usesmallware.com");
+    expect(html).toContain('aria-label="Built on Smallware"');
+    expect(html).toContain('rel="noopener noreferrer"');
+    // It renders inside someone else's app: no script, and nothing that costs
+    // their visitors a network round trip.
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<link");
+    expect(html).not.toContain("@import");
+    expect(html.match(/<a /g)?.length).toBe(1);
   });
 });

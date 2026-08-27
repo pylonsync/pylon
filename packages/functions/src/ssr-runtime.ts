@@ -1401,11 +1401,43 @@ export async function streamWithHeadInjection(
   reader: ReadableStreamDefaultReader<Uint8Array>,
   headBlob: string,
   sendChunk: (text: string) => void,
+  bodyBlob = "",
 ): Promise<void> {
-  let headInjected = headBlob.length === 0;
+  // Injections in document order, each consumed the first time its marker is
+  // seen. Once the list empties the reader is a straight pass-through, which
+  // is every chunk after the <head> on a normal page.
+  const pending: Array<{ marker: string; blob: string }> = [];
+  if (headBlob.length > 0) pending.push({ marker: "</head>", blob: headBlob });
+  if (bodyBlob.length > 0) pending.push({ marker: "</body>", blob: bodyBlob });
   let carry = "";
-  const HEAD_CLOSE = "</head>";
   const decoder = new TextDecoder("utf-8");
+  const feed = (text: string): void => {
+    let buf = carry + text;
+    carry = "";
+    while (pending.length > 0) {
+      const next = pending[0];
+      const idx = buf.indexOf(next.marker);
+      if (idx < 0) break;
+      sendChunk(buf.slice(0, idx));
+      sendChunk(next.blob);
+      sendChunk(next.marker);
+      buf = buf.slice(idx + next.marker.length);
+      pending.shift();
+    }
+    if (pending.length === 0) {
+      if (buf) sendChunk(buf);
+      return;
+    }
+    // Withhold len(marker) − 1 so a marker straddling a chunk boundary is
+    // still matched once the next read arrives.
+    const keep = pending[0].marker.length - 1;
+    if (buf.length > keep) {
+      sendChunk(buf.slice(0, buf.length - keep));
+      carry = buf.slice(buf.length - keep);
+    } else {
+      carry = buf;
+    }
+  };
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
@@ -1414,41 +1446,16 @@ export async function streamWithHeadInjection(
     // A chunk that ended mid-character decodes to "" — the bytes are held
     // in the decoder until the rest arrives. Nothing to emit yet.
     if (!text) continue;
-    if (!headInjected) {
-      const combined = carry + text;
-      const idx = combined.indexOf(HEAD_CLOSE);
-      if (idx >= 0) {
-        sendChunk(combined.slice(0, idx));
-        sendChunk(headBlob);
-        sendChunk(HEAD_CLOSE);
-        const after = combined.slice(idx + HEAD_CLOSE.length);
-        if (after) sendChunk(after);
-        headInjected = true;
-        carry = "";
-      } else {
-        const keep = HEAD_CLOSE.length - 1;
-        if (combined.length > keep) {
-          sendChunk(combined.slice(0, combined.length - keep));
-          carry = combined.slice(combined.length - keep);
-        } else {
-          carry = combined;
-        }
-      }
-    } else {
-      sendChunk(text);
-    }
+    feed(text);
   }
   // Flush the decoder. A stream that ends mid-character is genuinely
   // truncated input, and this is where it becomes a replacement character
   // rather than silently vanishing.
   const tail = decoder.decode();
-  if (tail) {
-    if (!headInjected) {
-      carry += tail;
-    } else {
-      sendChunk(tail);
-    }
-  }
+  if (tail) feed(tail);
+  // A document with no `</body>` (fragment renders, truncated streams) leaves
+  // its injection unconsumed. Emit the held-back bytes as-is rather than
+  // forcing a badge into markup with nowhere to put it.
   if (carry) sendChunk(carry);
 }
 
@@ -1828,6 +1835,58 @@ export function buildDevHudChunk(devInfo: Record<string, unknown>): string {
   return (
     `<script id="__PYLON_DEV__" type="application/json">${json}</script>` +
     `<script>(${pylonDevHud.toString()})();</script>`
+  );
+}
+
+/**
+ * The free-tier attribution badge, injected before `</body>` when the control
+ * plane sets `PYLON_CLOUD_BADGE` (it does so only for hobby-plan projects, and
+ * the key is protected so an app cannot unset it for itself).
+ *
+ * Deliberately plain: one anchor, inline styles, no script, no webfont, no
+ * network request. It renders inside somebody else's app, so it must not fight
+ * their layout or cost their visitors a round trip. Everything it could
+ * inherit from the host page — font, line-height, box-sizing, text-transform —
+ * is stated rather than left to chance.
+ *
+ * Returns "" when the flag is unset: every paid project, and every self-hosted
+ * install.
+ */
+export function buildCloudBadgeChunk(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const flag = env.PYLON_CLOUD_BADGE?.trim().toLowerCase();
+  if (!flag || flag === "0" || flag === "false" || flag === "no") return "";
+  const href =
+    "https://www.usesmallware.com/?utm_source=smallware_badge&utm_medium=app&utm_campaign=hobby";
+  const style = [
+    "position:fixed",
+    "right:12px",
+    "bottom:12px",
+    "z-index:2147483000",
+    "display:inline-flex",
+    "align-items:center",
+    "gap:6px",
+    "box-sizing:border-box",
+    "margin:0",
+    "padding:6px 10px",
+    "border-radius:8px",
+    "border:1px solid rgba(247,245,239,.14)",
+    "background:#1a1814",
+    "color:#f7f5ef",
+    "font:500 12px/1 ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif",
+    "letter-spacing:0",
+    "text-transform:none",
+    "text-decoration:none",
+    "white-space:nowrap",
+    "opacity:.92",
+  ].join(";");
+  const dot =
+    "width:6px;height:6px;border-radius:50%;background:#3b5bdb;flex:none";
+  return (
+    `<a href="${href}" target="_blank" rel="noopener noreferrer"` +
+    ` aria-label="Built on Smallware" data-pylon-badge style="${style}">` +
+    `<span style="${dot}"></span>Built on Smallware</a>`
   );
 }
 
@@ -2222,7 +2281,12 @@ async function renderBoundaryToClient(
       data: Buffer.from(text, "utf8").toString("base64"),
     });
   };
-  await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
+  await streamWithHeadInjection(
+    stream.getReader(),
+    headBlob,
+    sendChunk,
+    buildCloudBadgeChunk(),
+  );
   if (tail && manifestRoute) {
     const tailHtml = buildHydrationTail({
       component: tail.component,
@@ -3617,7 +3681,15 @@ export async function handleRenderRoute(
           "</head><body>",
       );
     } else {
-      await streamWithHeadInjection(stream.getReader(), headBlob, sendChunk);
+      // navRender is skipped deliberately: it ships a data-only shell whose
+      // markup the client throws away, so a badge there would never be seen
+      // and would ride in every client-side navigation payload.
+      await streamWithHeadInjection(
+        stream.getReader(),
+        headBlob,
+        sendChunk,
+        buildCloudBadgeChunk(),
+      );
     }
 
     // #278: detect a late response.* mutation from a suspended subtree that the
