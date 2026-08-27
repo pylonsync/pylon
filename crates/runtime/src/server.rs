@@ -858,7 +858,13 @@ fn canonical_redirect_target(canonical: &str, host: &str, url: &str) -> Option<S
 fn ws_cookie_origin_trusted(origin: Option<&str>, allowlist: &[String]) -> bool {
     match origin {
         Some(o) => {
-            pylon_auth::is_localhost_origin(o) || allowlist.iter().any(|a| a == o || a == "*")
+            pylon_auth::is_localhost_origin(o)
+                || allowlist.iter().any(|a| a == o || a == "*")
+                // Platform (tenant) custom domains — trusted dynamically from
+                // the control plane so a tenant's browser can open a
+                // cookie-authed sync WS without the host being in the boot
+                // allowlist. Exact-host match only; empty set on self-host.
+                || crate::tenant_hosts::is_trusted_origin(o)
         }
         None => false,
     }
@@ -1825,6 +1831,12 @@ fn start_server(
     // these are set per-machine at provision time so every customer
     // app ships request rows to the central workspace.
     crate::metrics::init_tinybird_logger();
+
+    // Dynamic trusted-host set for platform (tenant) domains. Refreshes the
+    // app's per-customer custom hostnames from the control plane so the CORS /
+    // WS-CSWSH / redirect / SSR-origin gates trust them without a restart per
+    // domain. No-op on self-host (PYLON_CLOUD_URL / PYLON_DOMAINS_TOKEN unset).
+    crate::tenant_hosts::init();
 
     // In-process request-log ring buffer. Backs the
     // /admin/logs/tail endpoint, which the Pylon Cloud dashboard
@@ -3291,7 +3303,12 @@ fn start_server(
             match &req_origin_header {
                 Some(o)
                     if pylon_auth::is_localhost_origin(o)
-                        || cors_allowlist.iter().any(|a| a == o) =>
+                        || cors_allowlist.iter().any(|a| a == o)
+                        // Platform (tenant) custom domains — reflected (with
+                        // credentials) when the control plane lists the host as
+                        // a ready tenant domain for this project. Exact-host
+                        // match only; empty on self-host.
+                        || crate::tenant_hosts::is_trusted_origin(o) =>
                 {
                     o.clone()
                 }

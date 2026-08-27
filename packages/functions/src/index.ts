@@ -90,4 +90,9 @@ export type {
   LlmCompleteResponse,
   LlmStreamEvent,
   Rooms,
+  // Platform domains — app authors name these when handling ctx.domains
+  // results (the DNS the end-customer must set).
+  Domains,
+  TenantDomainResult,
+  TenantDomainDns,
 } from "./types";

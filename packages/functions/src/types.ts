@@ -873,6 +873,64 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
 }
 
 /** Context for action handlers (external I/O, non-transactional). */
+/** One DNS record a tenant must set (name + value), as returned by the
+ *  registrar/CDN. Used for the CNAME target's DCV + ownership TXT records. */
+export interface TenantDomainDns {
+  name: string;
+  value: string;
+}
+
+/** The result of attaching / polling a tenant (platform) custom domain —
+ *  everything your app shows its end-customer to complete DNS setup. */
+export interface TenantDomainResult {
+  hostname: string;
+  /** "provisioning" until the cert is active, then "ready". */
+  status: string;
+  /** Whether the hostname + TLS certificate are both active. */
+  active?: boolean;
+  /** The single CNAME the customer points their hostname at. */
+  cnameTarget: string;
+  /** TXT record proving domain ownership before DNS cutover (or null). */
+  ownership: TenantDomainDns | null;
+  /** TXT records that issue the DV certificate. */
+  dcv: TenantDomainDns[];
+  /** Human-readable provisioning errors, empty when healthy. */
+  errors: string[];
+}
+
+/**
+ * Platform domains: attach / register / detach custom domains for your app's
+ * OWN end-customers, so each tenant can reach your app on their own hostname.
+ *
+ * Cloud-only — proxies to the Pylon Cloud control plane (which holds the
+ * Cloudflare/registrar credentials the app never sees). On a self-hosted Pylon
+ * every method throws a typed `DOMAINS_NOT_CONFIGURED` error.
+ *
+ * A newly attached hostname is trusted by the app's CORS / WebSocket / SSR
+ * gates automatically (the runtime refreshes the trusted-host set from the
+ * control plane) — no redeploy per tenant.
+ *
+ * @example
+ * ```ts
+ * // In an action, when your customer adds their domain:
+ * const d = await ctx.domains.add("app.customer.com");
+ * // Show them: CNAME app.customer.com -> d.cnameTarget, plus d.dcv TXT records.
+ * // Later, poll:
+ * const s = await ctx.domains.status("app.customer.com"); // s.active === true
+ * ```
+ */
+export interface Domains {
+  /** Attach a custom domain for one of your end-customers. Returns the DNS the
+   *  customer must set (the CNAME target + ownership/DCV TXT records). */
+  add(hostname: string): Promise<TenantDomainResult>;
+  /** Poll a tenant domain's verification + certificate status. */
+  status(hostname: string): Promise<TenantDomainResult>;
+  /** Detach a tenant domain (deletes the hostname + frees the slot). */
+  remove(hostname: string): Promise<{ hostname: string; removed: boolean }>;
+  /** The hostnames currently ready (trusted) for this app — owner + tenant. */
+  list(): Promise<{ hosts: string[] }>;
+}
+
 export interface ActionCtx<R extends AuthRequirement = "optional"> {
   auth: AuthInfo<R>;
   stream: Stream;
@@ -887,6 +945,9 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   connections: Connections;
   /** Durable workflows: start / deliver events — see {@link Workflows}. */
   workflows: Workflows;
+  /** Attach / register custom domains for your app's OWN end-customers
+   *  (platform domains) — see {@link Domains}. Cloud-only. */
+  domains: Domains;
   /** Environment variables / secrets. */
   env: Record<string, string>;
   /** Signed file-download URLs — see {@link Files}. */

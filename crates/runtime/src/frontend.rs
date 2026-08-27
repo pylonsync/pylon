@@ -2681,6 +2681,11 @@ fn ssr_cache_host_bucket(request_host: Option<&str>) -> String {
     }
     if allow.contains(&host) {
         host
+    } else if crate::tenant_hosts::is_trusted_host(&host) {
+        // Platform (tenant) custom domain — trusted dynamically from the control
+        // plane, so the SSR path treats the tenant's own hostname as a first-
+        // class origin (its own cache bucket) without a per-domain restart.
+        host
     } else {
         String::new()
     }

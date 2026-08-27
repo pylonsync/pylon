@@ -31,6 +31,8 @@ import type {
   Rooms,
   Workflows,
   Connections,
+  Domains,
+  TenantDomainResult,
   QueryCtx,
   MutationCtx,
   ActionCtx,
@@ -1056,6 +1058,70 @@ function buildConnections(callId: string): Connections {
   };
 }
 
+/**
+ * `ctx.domains` — platform (tenant) custom domains. Pure TS: proxies to the
+ * Pylon Cloud control plane over HTTP, authed by the machine's own
+ * `PYLON_DOMAINS_TOKEN` (a plain env var stamped at deploy — not a shared
+ * credential, so no Rust-side transport hook like ctx.email needs). Fails LOUD
+ * with `DOMAINS_NOT_CONFIGURED` when the cloud env is absent (self-host), rather
+ * than silently no-opping — a call that looks like it attached a domain but
+ * didn't would be a worse footgun.
+ */
+function buildDomains(): Domains {
+  const cloudUrl = (process.env.PYLON_CLOUD_URL || "").replace(/\/+$/, "");
+  const token = process.env.PYLON_DOMAINS_TOKEN || "";
+
+  async function call<T>(
+    endpoint: string,
+    body: Record<string, unknown>,
+  ): Promise<T> {
+    if (!cloudUrl || !token) {
+      const e = new Error(
+        "custom domains require Pylon Cloud (PYLON_CLOUD_URL / PYLON_DOMAINS_TOKEN are not set on this machine)",
+      );
+      (e as any).code = "DOMAINS_NOT_CONFIGURED";
+      throw e;
+    }
+    const res = await fetch(`${cloudUrl}/api/fn/${endpoint}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    let json: any = {};
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      json = {};
+    }
+    // /api/fn returns the handler's raw value on 200, or
+    // {error:{code,message}} on failure (crates/router json_error).
+    if (!res.ok || json?.error) {
+      const err = new Error(
+        json?.error?.message || `platform-domains ${endpoint} failed (${res.status})`,
+      );
+      (err as any).code = json?.error?.code || "DOMAINS_REQUEST_FAILED";
+      throw err;
+    }
+    return json as T;
+  }
+
+  return {
+    add: (hostname: string) =>
+      call<TenantDomainResult>("provisionTenantDomain", { hostname }),
+    status: (hostname: string) =>
+      call<TenantDomainResult>("getTenantDomainStatus", { hostname }),
+    remove: (hostname: string) =>
+      call<{ hostname: string; removed: boolean }>("removeTenantDomain", {
+        hostname,
+      }),
+    list: () => call<{ hosts: string[] }>("listProjectTrustedHosts", {}),
+  };
+}
+
 function buildActionCtx(
   callId: string,
   auth: AuthInfo,
@@ -1089,6 +1155,7 @@ function buildActionCtx(
     rooms,
     connections,
     workflows: buildWorkflows(callId),
+    domains: buildDomains(),
     env: process.env as Record<string, string>,
     async runQuery(fnName, args) {
       return rpc(callId, {

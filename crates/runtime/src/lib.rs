@@ -49,6 +49,7 @@ pub mod sse;
 pub mod ssr_cache;
 pub mod stream_hub;
 pub mod sync_relay;
+pub mod tenant_hosts;
 pub mod tinybird_logger;
 pub mod tls;
 pub mod trusted_device_backend;
