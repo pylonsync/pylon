@@ -33,7 +33,7 @@ const manifest = buildManifest({
   actions: [],
   crons: [],
   routes: await discoverAppRoutes({ appDir: "web/app" }),
-  // Geist only. The Smallware product faces (Archivo / Newsreader / IBM Plex
+  // Geist only. The Stack0 Cloud product faces (Archivo / Newsreader / IBM Plex
   // Mono) stay with the control plane — this app never renders that brand, so
   // shipping their @font-face blocks here would be dead weight on every page.
   fonts: [

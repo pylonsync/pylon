@@ -10,7 +10,7 @@ export const cache = "auth-bucketed";
 export const revalidate = 3600; // 1 hour
 
 const DESCRIPTION =
-	"How to reach Pylon: support@pylonsync.com for the framework, GitHub issues for bugs, security@pylonsync.com for vulnerabilities, and Smallware for hosting and billing. Built in Dallas, Texas.";
+	"How to reach Pylon: support@pylonsync.com for the framework, GitHub issues for bugs, security@pylonsync.com for vulnerabilities, and Stack0 Cloud for hosting and billing. Built in Dallas, Texas.";
 
 export const metadata: Metadata = {
 	title: "Contact Pylon: support, security, and hosting",

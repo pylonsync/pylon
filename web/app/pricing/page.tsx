@@ -2,7 +2,7 @@ import type { Metadata } from "@pylonsync/react";
 import type { PageProps } from "@pylonsync/react";
 
 // The framework has no price — it's open source and free to self-host. What
-// used to live here was Smallware's plan table, which put the hosting
+// used to live here was Stack0 Cloud's plan table, which put the hosting
 // product's pricing on the framework's domain and read as though Pylon
 // itself cost $25.
 //

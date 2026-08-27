@@ -176,7 +176,7 @@ export default function llms(): LlmsTxt {
         title: "Hosting",
         links: [
           {
-            title: "Smallware",
+            title: "Stack0 Cloud",
             url: CLOUD_URL,
             notes:
               "Managed Pylon: the same binary, deployed with `pylon deploy`. Free tier, usage-based pricing, no monthly minimum.",

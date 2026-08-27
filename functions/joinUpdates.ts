@@ -12,7 +12,7 @@ import { mutation, v } from "@pylonsync/functions";
  *
  * Server-side rather than letting the browser POST cross-origin, because a
  * cross-origin call would couple this site to whatever the control plane's
- * CORS + CSRF allowlists happen to be — and those move as the Smallware
+ * CORS + CSRF allowlists happen to be — and those move as the Stack0 Cloud
  * rebrand proceeds. The browser only ever talks to its own origin; the
  * server-to-server hop carries no Origin header, so it is unaffected by either
  * gate. The upstream mutation is `auth: "public"`, so no credential is needed
@@ -39,7 +39,7 @@ export default mutation<
     const src = (source ?? "footer").slice(0, MAX_SOURCE_LEN);
 
     // The control plane owns EmailSignup and the Slack notifier, so the
-    // signup relays to wherever it lives — the Smallware host, not this
+    // signup relays to wherever it lives — the Stack0 Cloud host, not this
     // marketing domain, even though the visitor typed their address here.
     const base = (
       ctx.env.PYLON_CONTROL_PLANE_URL ?? "https://www.usesmallware.com"

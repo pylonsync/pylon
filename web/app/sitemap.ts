@@ -30,7 +30,7 @@ const SITE = SITE_URL;
 export default function sitemap(): Sitemap {
   const entries: Sitemap = [
     { url: `${SITE}/`, changeFrequency: "weekly", priority: 1 },
-    // No /pricing — the framework is free, and Smallware's plans live on
+    // No /pricing — the framework is free, and Stack0 Cloud's plans live on
     // usesmallware.com. The route still exists here only to 301 there.
     { url: `${SITE}/product`, changeFrequency: "weekly", priority: 0.9 },
     { url: `${SITE}/solutions`, changeFrequency: "monthly", priority: 0.8 },

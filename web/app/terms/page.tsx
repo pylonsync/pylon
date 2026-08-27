@@ -8,12 +8,12 @@ export const revalidate = 3600; // 1 hour
 export const metadata: Metadata = {
 	title: "Terms of Service — Pylon",
 	description:
-		"The terms that govern your access to and use of pylonsync.com and Smallware.",
+		"The terms that govern your access to and use of pylonsync.com and Stack0 Cloud.",
 	canonical: "/terms",
 	robots: "index,follow",
 	openGraph: {
 		title: "Terms of Service — Pylon",
-		description: "The terms governing Smallware.",
+		description: "The terms governing Stack0 Cloud.",
 		url: "https://www.pylonsync.com/terms",
 		type: "article",
 	},
@@ -30,12 +30,12 @@ export default function TermsPage({
 			title="Terms of Service"
 			lastUpdated="July 8, 2026"
 			intro={
-				'These Terms of Service ("Terms") govern your access to and use of pylonsync.com and the Smallware hosting service (the "Service"), operated by Pylon. By creating an account or using the Service, you agree to these Terms. If you use the Service on behalf of an organization, you represent that you have authority to bind it.'
+				'These Terms of Service ("Terms") govern your access to and use of pylonsync.com and the Stack0 Cloud hosting service (the "Service"), operated by Pylon. By creating an account or using the Service, you agree to these Terms. If you use the Service on behalf of an organization, you represent that you have authority to bind it.'
 			}
 		>
 			<LegalSection heading="1. The Service">
 				<p>
-					Smallware is a hosted platform for building, deploying, and running
+					Stack0 Cloud is a hosted platform for building, deploying, and running
 					applications on the Pylon framework. We may add, change, or remove
 					features over time. The open-source Pylon software is a separate
 					offering licensed under its own terms (MIT or Apache-2.0); these Terms

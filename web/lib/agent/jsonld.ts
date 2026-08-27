@@ -44,7 +44,7 @@ export function organizationLd() {
       url: `${SITE_URL}/brand/pylon-logo@2x.png`,
     },
     description:
-      "Pylon builds the agent-native full-stack framework of the same name, and Smallware, its managed hosting.",
+      "Pylon builds the agent-native full-stack framework of the same name, and Stack0 Cloud, its managed hosting.",
     email: SUPPORT_EMAIL,
     contactPoint: [
       {
