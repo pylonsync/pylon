@@ -79,7 +79,7 @@ export interface Group {
 	items: Example[];
 }
 
-// Live, deployed demos — real Pylon apps running on Smallware. Verified up
+// Live, deployed demos — real Pylon apps running on Stack0 Cloud. Verified up
 // before shipping; we don't link demos we can't stand behind.
 export const LIVE_DEMOS: Example[] = [
 	{

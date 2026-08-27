@@ -367,7 +367,7 @@ export const COMPARISONS: Comparison[] = [
 			"Functions for server-side logic",
 			"File storage with signed URLs",
 			"Web + mobile + native SDKs",
-			"Managed cloud (Firebase / Smallware)",
+			"Managed cloud (Firebase / Stack0 Cloud)",
 		],
 		competitorBetter: [
 			{
@@ -406,7 +406,7 @@ export const COMPARISONS: Comparison[] = [
 			},
 			{
 				title: "Predictable pricing",
-				body: "Firebase prices reads, writes, deletes, egress, invocations, and GB-seconds separately. Smallware lists one price per dimension; self-hosted users pay their infrastructure bill.",
+				body: "Firebase prices reads, writes, deletes, egress, invocations, and GB-seconds separately. Stack0 Cloud lists one price per dimension; self-hosted users pay their infrastructure bill.",
 			},
 		],
 		migration: [
@@ -536,7 +536,7 @@ export const COMPARISONS: Comparison[] = [
 			},
 			{
 				title: "Self-host as one binary",
-				body: "Run the whole stack on a VPS you control, or on Smallware. Instant's own self-host path is a Clojure/JVM server on Postgres 16 plus a reverse proxy and an email provider, and its cloud stops on August 31, 2027.",
+				body: "Run the whole stack on a VPS you control, or on Stack0 Cloud. Instant's own self-host path is a Clojure/JVM server on Postgres 16 plus a reverse proxy and an email provider, and its cloud stops on August 31, 2027.",
 			},
 			{
 				title: "A first-class Swift engine",

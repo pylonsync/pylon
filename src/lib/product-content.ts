@@ -569,11 +569,11 @@ export default function ProductPage({ params }) {
 
 	cloud: {
 		slug: "cloud",
-		navLabel: "Smallware",
-		category: "Smallware",
+		navLabel: "Stack0 Cloud",
+		category: "Stack0 Cloud",
 		title: "Push to GitHub. It's live.",
 		tagline:
-			"Smallware runs the same binary you run locally. Connect a repo and every push deploys. Resize machines, add replicas, expand regions, bring your domain, and turn on SSO from one dashboard.",
+			"Stack0 Cloud runs the same binary you run locally. Connect a repo and every push deploys. Resize machines, add replicas, expand regions, bring your domain, and turn on SSO from one dashboard.",
 		highlights: [
 			"Connect GitHub and every push to main deploys; PRs get preview environments",
 			"Or run pylon deploy for air-gapped builds and CI without GitHub",
@@ -597,7 +597,7 @@ export default function ProductPage({ params }) {
 		sections: [
 			{
 				title: "The same binary, managed",
-				body: "There's no special cloud build of your app. Smallware runs the identical runtime you run on localhost, so what passes in dev behaves in production. Connect a repo for push-to-deploy with preview environments per pull request, or cut releases manually with pylon deploy.",
+				body: "There's no special cloud build of your app. Stack0 Cloud runs the identical runtime you run on localhost, so what passes in dev behaves in production. Connect a repo for push-to-deploy with preview environments per pull request, or cut releases manually with pylon deploy.",
 			},
 			{
 				title: "Scale from the dashboard",
@@ -608,9 +608,9 @@ export default function ProductPage({ params }) {
 				body: "Bring your own domain and Cloud handles the certificate. Configure OIDC or SAML SSO at the org level. An activity log records changes, and snapshots restore your volume. Co-located managed Postgres alongside SQLite is in private beta.",
 			},
 		],
-		metaTitle: "Smallware: push-to-deploy managed hosting for Pylon apps",
+		metaTitle: "Stack0 Cloud: push-to-deploy managed hosting for Pylon apps",
 		metaDescription:
-			"Connect a repo and push. Smallware runs the same binary you run locally with scaling, global regions, custom domains, SSO, snapshots, and one dashboard.",
+			"Connect a repo and push. Stack0 Cloud runs the same binary you run locally with scaling, global regions, custom domains, SSO, snapshots, and one dashboard.",
 		related: ["ssr", "workflows", "studio"],
 	},
 

@@ -65,7 +65,7 @@ export function PylonWordmark({
 	);
 }
 
-// Compact lockup used in the dashboard header: icon + "Smallware".
+// Compact lockup used in the dashboard header: icon + "Stack0 Cloud".
 // "Pylon" carries the brand weight; "Cloud" dims to mark the product
 // surface without competing visually.
 export function PylonLockup({ className }: { className?: string }) {

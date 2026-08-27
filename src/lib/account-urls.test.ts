@@ -23,7 +23,7 @@ describe("account URLs are absolute", () => {
 	});
 
 	test("query strings survive, so plan preselect still works", () => {
-		// Smallware's plan cards link across with ?plan=; dropping the query
+		// Stack0 Cloud's plan cards link across with ?plan=; dropping the query
 		// would land every visitor on the default plan regardless of choice.
 		expect(accountUrl("/signup?plan=team")).toBe(
 			"https://www.usesmallware.com/signup?plan=team",

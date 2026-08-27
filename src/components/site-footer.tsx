@@ -86,7 +86,7 @@ export function SiteFooter() {
 
 					{/* Columns */}
 					{/* Comparisons are the only thing left in the fourth column now
-					    that pricing lives on Smallware. Hidden, the column isn't
+					    that pricing lives on Stack0 Cloud. Hidden, the column isn't
 					    rendered at all and the three above widen to keep the row at
 					    12: 3 (brand) + 3 + 3 + 3, vs. 3 + 3 + 2 + 2 + 2 with it. */}
 					<div className="lg:col-span-3">

@@ -61,8 +61,8 @@ export function AboutView({ signedIn = false }: { signedIn?: boolean }) {
 					</p>
 					<p>
 						The work is paid for by{" "}
-						<a href="https://www.usesmallware.com">Smallware</a>, managed
-						hosting for Pylon apps. Smallware runs the same binary you run
+						<a href="https://www.usesmallware.com">Stack0 Cloud</a>, managed
+						hosting for Pylon apps. Stack0 Cloud runs the same binary you run
 						locally, deploys with one command, and charges by usage with a free
 						tier and no monthly minimum. Hosting is the product; the framework
 						is not a trial of it. Nothing in Pylon is gated behind an account,

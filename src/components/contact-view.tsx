@@ -36,7 +36,7 @@ const CHANNELS: Channel[] = [
 	},
 	{
 		title: "Hosting and billing",
-		body: "Anything about a Smallware project: deploys, custom domains, usage, or an invoice. Sign in first and the dashboard shows the project the question is about.",
+		body: "Anything about a Stack0 Cloud project: deploys, custom domains, usage, or an invoice. Sign in first and the dashboard shows the project the question is about.",
 		action: { label: "usesmallware.com", href: "https://www.usesmallware.com" },
 	},
 	{

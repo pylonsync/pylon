@@ -394,7 +394,7 @@ const { data } = db.useQuery("Order");`}
 						<div className="overflow-hidden">
 							<Image
 								src="/marketing/pylon-cloud-dashboard.png"
-								alt="Smallware dashboard with deployments, machine status, and live metrics"
+								alt="Stack0 Cloud dashboard with deployments, machine status, and live metrics"
 								width={3456}
 								height={2234}
 								sizes="(min-width: 1120px) 1120px, 100vw"
@@ -487,7 +487,7 @@ const { data } = db.useQuery("Order");`}
 							a: "SQLite is the default. It uses one file and needs no setup. Set DATABASE_URL to a Postgres connection string to use the same schema and application code with Postgres. On Cloud, bundled SQLite is the default. Co-located managed Postgres is in private beta.",
 						},
 						{
-							q: "Do I have to use Smallware?",
+							q: "Do I have to use Stack0 Cloud?",
 							a: "No. The runtime is one open-source binary. Run it on your own computer or container platform with a volume for SQLite, or use your own Postgres database. Cloud is the managed option, not a requirement. It runs the same binary.",
 						},
 						{
@@ -537,7 +537,7 @@ const { data } = db.useQuery("Order");`}
 							Create a Pylon app.
 						</h2>
 						<p className="mt-5 max-w-[520px] text-[16px] leading-[1.6] text-[#a8a8b2] sm:text-[17px]">
-							Self-host the framework, or use Smallware to run it. Connect
+							Self-host the framework, or use Stack0 Cloud to run it. Connect
 							GitHub or deploy from the CLI.
 						</p>
 					</div>

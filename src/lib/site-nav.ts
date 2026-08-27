@@ -4,7 +4,7 @@
 //
 // Mirrors the Supabase model — Product / Solutions / Developers / Compare /
 // Pricing / Docs — populated with Pylon's actual offering: the framework
-// primitives, Smallware, the Swift SDK, use-case solutions, and the
+// primitives, Stack0 Cloud, the Swift SDK, use-case solutions, and the
 // competitor comparisons. Each link carries a lucide icon so the mega-menu
 // renders Supabase-style icon tiles.
 
@@ -121,7 +121,7 @@ export const PRODUCT_GROUPS: NavGroup[] = [
 			{
 				// Named for the capability, not the brand: the brand already has
 				// its own entry in SOLUTIONS below, and two nav items both reading
-				// "Smallware" told the visitor nothing about the difference. This
+				// "Stack0 Cloud" told the visitor nothing about the difference. This
 				// one is the framework's hosting story; that one is the product.
 				label: "Managed hosting",
 				href: "/product/cloud",
@@ -145,10 +145,10 @@ export const PRODUCT_GROUPS: NavGroup[] = [
 
 export const SOLUTIONS: NavLink[] = [
 	{
-		// Smallware is its own product on its own domain now, so this leaves the
+		// Stack0 Cloud is its own product on its own domain now, so this leaves the
 		// site rather than pointing at /smallware — that route moved with the
 		// control plane and 404s here.
-		label: "Smallware",
+		label: "Stack0 Cloud",
 		href: "https://www.usesmallware.com",
 		external: true,
 		desc: "Purpose-built tools for a handful of users, with deployment, auth, data, and backups included.",

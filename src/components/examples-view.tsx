@@ -117,7 +117,7 @@ export function ExamplesView({ signedIn = false }: { signedIn?: boolean }) {
 						Live demos
 					</div>
 					<p className="mt-2 max-w-[60ch] text-[13.5px] leading-[1.55] text-[var(--color-ink-3)]">
-						Real Pylon apps deployed on Smallware. Open any of them without signing up.
+						Real Pylon apps deployed on Stack0 Cloud. Open any of them without signing up.
 					</p>
 					<div className="mt-6 grid gap-4 sm:grid-cols-2">
 						{LIVE_DEMOS.map((ex) => (
