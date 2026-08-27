@@ -64,22 +64,26 @@ export interface ButtonProps
   static?: boolean;
 }
 
-const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
-  ({ className, variant, size, asChild = false, static: isStatic = false, ...props }, ref) => {
-    const Comp = asChild ? Slot : "button";
-    return (
-      <Comp
-        className={cn(
-          buttonVariants({ variant, size }),
-          isStatic && "active:scale-100",
-          className,
-        )}
-        ref={ref}
-        {...props}
-      />
-    );
-  },
-);
-Button.displayName = "Button";
+function Button({
+  className,
+  variant,
+  size,
+  asChild = false,
+  static: isStatic = false,
+  ...props
+}: ButtonProps) {
+  const Comp = asChild ? Slot : "button";
+  return (
+    <Comp
+      data-slot="button"
+      className={cn(
+        buttonVariants({ variant, size }),
+        isStatic && "active:scale-100",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
 
 export { Button, buttonVariants };
