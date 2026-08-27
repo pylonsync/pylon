@@ -1858,7 +1858,7 @@ export function buildCloudBadgeChunk(
   const flag = env.PYLON_CLOUD_BADGE?.trim().toLowerCase();
   if (!flag || flag === "0" || flag === "false" || flag === "no") return "";
   const href =
-    "https://www.usesmallware.com/?utm_source=smallware_badge&utm_medium=app&utm_campaign=hobby";
+    "https://stack0.dev/?utm_source=stack0_badge&utm_medium=app&utm_campaign=hobby";
   const style = [
     "position:fixed",
     "right:12px",
@@ -1885,8 +1885,8 @@ export function buildCloudBadgeChunk(
     "width:6px;height:6px;border-radius:50%;background:#3b5bdb;flex:none";
   return (
     `<a href="${href}" target="_blank" rel="noopener noreferrer"` +
-    ` aria-label="Built on Smallware" data-pylon-badge style="${style}">` +
-    `<span style="${dot}"></span>Built on Smallware</a>`
+    ` aria-label="Built on Stack0" data-pylon-badge style="${style}">` +
+    `<span style="${dot}"></span>Built on Stack0</a>`
   );
 }
 

@@ -186,8 +186,8 @@ describe("buildCloudBadgeChunk", () => {
 
   test("renders one self-contained anchor when enabled", () => {
     const html = buildCloudBadgeChunk({ PYLON_CLOUD_BADGE: "1" });
-    expect(html).toContain("usesmallware.com");
-    expect(html).toContain('aria-label="Built on Smallware"');
+    expect(html).toContain("stack0.dev");
+    expect(html).toContain('aria-label="Built on Stack0"');
     expect(html).toContain('rel="noopener noreferrer"');
     // It renders inside someone else's app: no script, and nothing that costs
     // their visitors a network round trip.
