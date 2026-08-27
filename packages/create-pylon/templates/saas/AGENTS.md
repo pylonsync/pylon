@@ -2,6 +2,23 @@
 
 Pylon serves the API, auth, sync, WebSocket, SSE, and native React 19 SSR from one Rust process on one port. Treat this app as production infrastructure: it supports real auth, SQLite or Postgres, row-level policies, jobs, search, and one-command deploys. Declare entities, policies, and server functions in TypeScript; the binary handles the runtime. Read the full API reference at https://docs.pylonsync.com/llms-full.txt before guessing an API name.
 
+## First: replace the placeholders
+
+This template ships with placeholder branding, copy, and demo data — the example
+brand **Acme**, `example.com` links, lorem-style text, sample records, and (in the
+marketing templates) fake "Acme vs …" comparisons. Before building features, do
+one pass to make it the real product:
+
+- **Brand** — replace every "Acme", its logo, the `example.com` domain, the support
+  email, and social links with the real name. Find them: `grep -riE "acme|example\.com" .`
+- **Copy** — rewrite hero, feature, marketing, and comparison text for the actual
+  product. Ship no lorem and no "Acme".
+- **Demo data** — replace sample/seed records with the real domain's, or remove them.
+
+The manifest name (`buildManifest({ name })`) is already the project name — the
+placeholders live in the CONTENT. A scaffold that still says "Acme" isn't done; make
+this pass before the user has to ask.
+
 ## Directory conventions
 
 **Unified SSR app:**

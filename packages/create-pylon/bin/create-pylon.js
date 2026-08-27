@@ -785,7 +785,8 @@ const skillLine = skillInstalled
 // (Claude Code / Cursor / Codex) auto-reads AGENTS.md, so point the human at it
 // too. Only the full-stack templates ship one (platform sub-templates don't).
 const agentsLine = existsSync(join(root, "AGENTS.md"))
-	? "AGENTS.md is your coding agent's operating manual for this repo — it reads it first.\n"
+	? "AGENTS.md is your coding agent's operating manual for this repo — it reads it first.\n" +
+		"It starts by replacing the placeholder branding (Acme, example.com, demo data) with your product.\n"
 	: "";
 
 console.log(`
