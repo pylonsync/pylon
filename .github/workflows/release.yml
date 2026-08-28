@@ -693,6 +693,56 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A published version tag is immutable. Re-running a release used to
+      # rebuild and re-push it, and the build is not reproducible, so the same
+      # tag came back pointing at a different image.
+      #
+      # That is not theoretical. 0.3.309 and 0.4.27 were both re-pushed, and
+      # two Cloud projects (chat-api, revtrail) had to be pinned to the
+      # original digests to keep booting -- the newer build under 0.3.309 binds
+      # 127.0.0.1, which the Fly proxy cannot reach. Anyone reading those pins
+      # later sees drift, unpins to the tag, and takes the app down. That
+      # happened on 2026-08-28.
+      #
+      # Skip-if-exists, matching the npm job above, so a re-run after a partial
+      # failure still completes the legs that did not publish. The moving tags
+      # (latest, {{major}}.{{minor}}) are skipped along with it: if the version
+      # is already up, they were pointed at it by the run that pushed it.
+      - name: Refuse to overwrite a published version tag
+        id: immutable
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # workflow_dispatch has no tag ref, and metadata-action emits no
+          # semver tag for it either, so there is nothing to protect.
+          case "${GITHUB_REF:-}" in
+            refs/tags/v*) VERSION="${GITHUB_REF#refs/tags/v}" ;;
+            *)
+              echo "not a version tag ref — nothing to guard"
+              echo "pylon=false"   >> "$GITHUB_OUTPUT"
+              echo "builder=false" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+
+          OWNER="${GITHUB_REPOSITORY_OWNER}"
+          check () {
+            local img="$1" out="$2"
+            local ref="ghcr.io/${OWNER}/${img}:${VERSION}"
+            # Already logged in above; exit 0 means the tag resolves.
+            if docker manifest inspect "$ref" >/dev/null 2>&1; then
+              echo "::warning::${ref} already exists — NOT overwriting it. A published version tag must keep pointing at the image it shipped with; re-pushing is what forced the chat-api and revtrail digest pins. To ship different bits, cut a new version."
+              echo "${out}=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "${ref} is unpublished — safe to push"
+              echo "${out}=false" >> "$GITHUB_OUTPUT"
+            fi
+          }
+          check pylon         pylon
+          check pylon-builder builder
+
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -702,6 +752,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
       - uses: docker/build-push-action@v6
+        if: steps.immutable.outputs.pylon != 'true'
         with:
           context: .
           push: true
@@ -734,6 +785,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
       - uses: docker/build-push-action@v6
+        if: steps.immutable.outputs.builder != 'true'
         with:
           context: .
           file: builder/Dockerfile
