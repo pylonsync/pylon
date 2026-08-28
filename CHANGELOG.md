@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/pylonsync/pylon/compare/v0.5.7...v0.6.0) (2026-08-28)
+
+
+### Features
+
+* **relay:** serve the sync relay from relay.stack0.app ([9cf9dc2](https://github.com/pylonsync/pylon/commit/9cf9dc2f1a46400cdceea3deb97bb390816b6bc5))
+* **ssr:** free-tier attribution badge on cloud apps ([1f94f8d](https://github.com/pylonsync/pylon/commit/1f94f8dc3e44cfcf838778cc4ba4da401b66ceac))
+
+
+### Bug Fixes
+
+* **cli:** follow the Stack0 Cloud rename in stored credentials ([bd6ea65](https://github.com/pylonsync/pylon/commit/bd6ea6509d3ffb67a81825566cde61c61f40a214))
+
 ## [0.5.1](https://github.com/pylonsync/pylon/compare/v0.5.0...v0.5.1) (2026-08-26)
 
 
