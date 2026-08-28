@@ -1,7 +1,7 @@
 //! Pylon Cloud client — credential storage + authenticated HTTP.
 //!
 //! Used by `pylon login`, `pylon logout`, and `pylon deploy --target
-//! cloud`. Talks to https://www.usesmallware.com by default — hosted Pylon
+//! cloud`. Talks to https://cloud.stack0.dev by default — hosted Pylon
 //! Cloud is Smallware, one unified app serving both the API and the
 //! dashboard. The cloud origin is overridable via `PYLON_CLOUD_URL` for
 //! staging / self-hosted installations.
@@ -39,10 +39,10 @@ pub struct Credentials {
 /// Default cloud origin. Override with `PYLON_CLOUD_URL` for staging
 /// or self-hosted installs.
 ///
-/// Hosted Pylon Cloud is Smallware. `www.pylonsync.com` now serves the Pylon
-/// framework's marketing site and no longer answers `/api/*`, so a CLI pointed
-/// there gets HTML where it expects JSON.
-pub const DEFAULT_CLOUD_URL: &str = "https://www.usesmallware.com";
+/// Hosted Pylon Cloud is Stack0 Cloud, at cloud.stack0.dev. Every host it has
+/// answered on before this is in RETIRED_CLOUD_HOSTS below, because a stored
+/// credential keeps addressing the origin it was minted against.
+pub const DEFAULT_CLOUD_URL: &str = "https://cloud.stack0.dev";
 
 pub fn cloud_url() -> String {
     std::env::var("PYLON_CLOUD_URL").unwrap_or_else(|_| DEFAULT_CLOUD_URL.to_string())
@@ -61,10 +61,19 @@ pub fn cloud_url() -> String {
 /// — the failure is an HTML body parsed as JSON rather than a network error,
 /// which is even less legible than the 525. Both the bare and www forms are
 /// listed because credentials were minted against both.
+///
+/// `(www.)usesmallware.com` were retired when Smallware became Stack0 Cloud.
+/// They now 308 to cloud.stack0.dev, and the CLI does not follow redirects on
+/// the artifact upload, so `pylon deploy` failed with the same unhelpful
+/// "expected JSON, got something else" as the pylonsync retirement. Same fix,
+/// same reason: rewrite the stored origin on load rather than asking every
+/// operator to log in again.
 const RETIRED_CLOUD_HOSTS: &[&str] = &[
     "https://api.pylonsync.com",
     "https://pylonsync.com",
     "https://www.pylonsync.com",
+    "https://usesmallware.com",
+    "https://www.usesmallware.com",
 ];
 
 /// Point a stored origin at wherever hosted Pylon Cloud actually lives now.
@@ -88,7 +97,7 @@ pub fn normalize_cloud_url(url: &str) -> String {
 }
 
 /// Where the human-facing dashboard lives. Hosted Pylon Cloud is one unified
-/// app on www.usesmallware.com serving both the API and the dashboard, so this
+/// app on cloud.stack0.dev serving both the API and the dashboard, so this
 /// is normally the same origin the CLI talks to. Retired hosts are rewritten and
 /// self-hosted / staging origins (PYLON_CLOUD_URL) pass through untouched —
 /// both via [`normalize_cloud_url`], which the request path uses too.
@@ -469,7 +478,7 @@ mod tests {
         // framework's marketing site and has no /api/*, so a CLI pointed there
         // parses HTML as JSON; api.pylonsync.com has no certificate at all and
         // dies in the TLS handshake. All three are retired.
-        assert_eq!(DEFAULT_CLOUD_URL, "https://www.usesmallware.com");
+        assert_eq!(DEFAULT_CLOUD_URL, "https://cloud.stack0.dev");
     }
 
     #[test]
@@ -480,12 +489,12 @@ mod tests {
         // answers with a bare Cloudflare 525, no hint that the host moved.
         assert_eq!(
             normalize_cloud_url("https://api.pylonsync.com"),
-            "https://www.usesmallware.com"
+            "https://cloud.stack0.dev"
         );
         // Trailing slash is the shape `pylon login` actually wrote.
         assert_eq!(
             normalize_cloud_url("https://api.pylonsync.com/"),
-            "https://www.usesmallware.com"
+            "https://cloud.stack0.dev"
         );
     }
 
@@ -502,7 +511,23 @@ mod tests {
             "https://pylonsync.com",
             "https://pylonsync.com/",
         ] {
-            assert_eq!(normalize_cloud_url(stored), "https://www.usesmallware.com");
+            assert_eq!(normalize_cloud_url(stored), "https://cloud.stack0.dev");
+        }
+    }
+
+    #[test]
+    fn a_credential_minted_against_smallware_follows_the_rebrand() {
+        // Smallware became Stack0 Cloud, and usesmallware.com now 308s to
+        // cloud.stack0.dev. The CLI does not follow redirects on the artifact
+        // upload, so an un-rewritten credential failed `pylon deploy` with the
+        // same "expected JSON" error the pylonsync retirement produced.
+        for stored in [
+            "https://www.usesmallware.com",
+            "https://www.usesmallware.com/",
+            "https://usesmallware.com",
+            "https://usesmallware.com/",
+        ] {
+            assert_eq!(normalize_cloud_url(stored), "https://cloud.stack0.dev");
         }
     }
 
@@ -523,30 +548,30 @@ mod tests {
     #[test]
     fn normalization_is_idempotent_and_strips_a_trailing_slash() {
         let once = normalize_cloud_url("https://www.pylonsync.com/");
-        assert_eq!(once, "https://www.usesmallware.com");
+        assert_eq!(once, "https://cloud.stack0.dev");
         assert_eq!(normalize_cloud_url(&once), once);
     }
 
     #[test]
-    fn dashboard_url_maps_hosted_origins_to_the_smallware_host() {
-        // www.usesmallware.com is the canonical dashboard host. Credentials
+    fn dashboard_url_maps_hosted_origins_to_the_current_host() {
+        // cloud.stack0.dev is the canonical dashboard host. Credentials
         // minted against any retired host still map to it so browser links
         // don't land on the marketing site (or a dead one).
         assert_eq!(
             dashboard_url_for("https://www.usesmallware.com"),
-            "https://www.usesmallware.com"
+            "https://cloud.stack0.dev"
         );
         assert_eq!(
             dashboard_url_for("https://www.pylonsync.com"),
-            "https://www.usesmallware.com"
+            "https://cloud.stack0.dev"
         );
         assert_eq!(
             dashboard_url_for("https://api.pylonsync.com"),
-            "https://www.usesmallware.com"
+            "https://cloud.stack0.dev"
         );
         assert_eq!(
             dashboard_url_for("https://api.pylonsync.com/"),
-            "https://www.usesmallware.com"
+            "https://cloud.stack0.dev"
         );
     }
 
