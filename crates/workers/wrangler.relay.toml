@@ -20,13 +20,29 @@ name = "pylon-sync-relay"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-12-01"
 
-# Custom domain — the Pylon Cloud relay is reached at
-# relay.pylonsync.com (pylonsync.com is a Cloudflare zone on the same
-# account, so wrangler provisions the DNS record + edge cert on deploy).
+# Custom domains — both zones are on the same Cloudflare account, so
+# wrangler provisions the DNS record + edge cert for each on deploy.
 # This replaces the account's *.workers.dev address for clients and the
 # machine's PYLON_SYNC_RELAY_URL. Self-hosters on a different account
-# must change or remove this route.
+# must change or remove these routes.
+#
+# relay.stack0.app is the current name: it sits beside the apps it serves
+# (<slug>.stack0.app), so the relay and its clients share one registrable
+# domain. `relay` is in RESERVED_PROJECT_SLUGS in the control plane —
+# without that, a customer project named `relay` would collide with this
+# custom domain.
+#
+# relay.pylonsync.com stays because PYLON_SYNC_RELAY_URL is baked into a
+# machine's env at deploy time. Every app deployed before the rename still
+# dials the old name and only learns the new one when it next deploys.
+# Dropping this route would cut live sync for all of them. Retire it once
+# every app has redeployed, not before.
+#
+# One worker, two names, same Durable Objects — per-app isolation comes
+# from `id_from_name(app)`, so which hostname a client used does not
+# matter. Two apps on different names still share one DO.
 routes = [
+  { pattern = "relay.stack0.app", custom_domain = true },
   { pattern = "relay.pylonsync.com", custom_domain = true },
 ]
 
