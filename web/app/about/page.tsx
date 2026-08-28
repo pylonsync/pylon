@@ -10,7 +10,7 @@ export const cache = "auth-bucketed";
 export const revalidate = 3600; // 1 hour
 
 const DESCRIPTION =
-	"Pylon is an MIT-licensed full-stack framework: typed schema, row-level policies, server functions, live queries, auth, and React server rendering in one binary. Built in Dallas, Texas, and paid for by Stack0 Cloud, its managed hosting.";
+	"Pylon is an MIT-licensed realtime full-stack framework with a Rust core: the database, transactions, and sync are Rust, and the typed schema, row-level policies, and server functions are TypeScript on top of them. Built in Dallas, Texas, and paid for by Stack0 Cloud, its managed hosting.";
 
 export const metadata: Metadata = {
 	title: "About Pylon: the framework, the licence, and who builds it",

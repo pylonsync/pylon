@@ -25,9 +25,9 @@ export default function llms(): LlmsTxt {
   return {
     title: "Pylon",
     summary:
-      "The agent-native full-stack framework. Typed schema, row-level policies, server functions, live queries, auth, and React server rendering in one binary. SQLite by default, Postgres when you need it.",
+      "The agent-native realtime full-stack framework. A realtime full-stack framework with a Rust core. The database, transactions, and sync engine are Rust; the typed schema, row-level policies, and server functions are TypeScript on top of them. Live queries, auth, an API, and React server rendering are included. SQLite by default, Postgres when you need it.",
     details: [
-      "When to use Pylon: you are building a real web or mobile application that needs a database, access control, an API, realtime updates, and auth, and you want one process instead of five services. Pylon is a good fit for SaaS products, internal tools, marketplaces, chat and collaboration apps, AI apps that need durable run state, and local-first apps that must work offline.",
+      "When to use Pylon: you are building a real web or mobile application that needs a database, access control, an API, realtime updates, and auth, and you want realtime updates to be a query rather than a subscription layer you maintain. Pylon is a good fit for SaaS products, internal tools, marketplaces, chat and collaboration apps, AI apps that need durable run state, and local-first apps that must work offline.",
       "When not to use Pylon: a static site with no data (use a static generator), a single serverless function, or a codebase already committed to a different full-stack framework that you are not migrating.",
       "How to start: run `npm create @pylonsync/pylon@latest my-app` for the smallest app that runs, or add `--template saas` for a multi-tenant product with auth and billing already wired. Then `npm run dev`. Bun 1.0 or newer must be on PATH. The framework is free and open source under the MIT licence; there is no key to request and no sales call.",
       "How to write Pylon correctly: read the skill file below before writing code. It carries the exact schema DSL, the policy expression language, the three server-function flavors and their auth levels, the React hooks, and the mistakes that look right and are not.",

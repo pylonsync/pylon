@@ -87,7 +87,7 @@ export function softwareApplicationLd() {
     programmingLanguage: ["TypeScript", "Rust"],
     license: "https://opensource.org/license/mit",
     description:
-      "Pylon is a full-stack framework built for coding agents: a typed schema, row-level policies, server functions, live queries, auth, and React server rendering in one binary. SQLite by default, Postgres when you need it.",
+      "Pylon is a realtime full-stack framework built for coding agents. A realtime full-stack framework with a Rust core. The database, transactions, and sync engine are Rust; the typed schema, row-level policies, and server functions are TypeScript on top of them. Live queries, auth, an API, and React server rendering are included. SQLite by default, Postgres when you need it.",
     featureList: [
       "Typed schema with automatic migrations",
       "Row-level access policies",
