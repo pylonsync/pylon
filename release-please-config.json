@@ -38,7 +38,12 @@
         { "type": "json", "path": "packages/plugins/webhooks/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/react-native/package.json", "jsonpath": "$.version" },
         { "type": "json", "path": "packages/loro/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/create-pylon/package.json", "jsonpath": "$.version" }
+        { "type": "json", "path": "packages/create-pylon/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/cli-darwin-arm64/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/cli-linux-x64/package.json", "jsonpath": "$.version" },
+        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.optionalDependencies['@pylonsync/cli-darwin-arm64']" },
+        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.optionalDependencies['@pylonsync/cli-linux-x64']" }
       ]
     }
   }

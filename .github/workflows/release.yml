@@ -46,7 +46,11 @@ jobs:
             exit 1
           fi
 
-          for pkg in packages/sdk packages/functions packages/react packages/react-native packages/sync packages/loro packages/workflows packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon; do
+          # Keep this list in sync with extra-files in release-please-config.json.
+          # The CLI packages are here because release-please bumps them too; a
+          # version that lags the tag would publish a CLI pinned to the wrong
+          # platform binaries.
+          for pkg in packages/sdk packages/functions packages/react packages/react-native packages/sync packages/loro packages/workflows packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon packages/cli packages/cli-darwin-arm64 packages/cli-linux-x64; do
             if [[ -f "$pkg/package.json" ]]; then
               PKG_V="$(node -p "require('./$pkg/package.json').version")"
               if [[ "$PKG_V" != "$TAG" ]]; then
