@@ -875,7 +875,12 @@ impl ResolvedSpec {
     pub fn requires_pkce(&self) -> bool {
         match self {
             ResolvedSpec::Static(s) => s.requires_pkce,
-            ResolvedSpec::Oidc(_) => false,
+            // Always PKCE for discovery-configured IdPs. OAuth 2.1 wants it
+            // even for confidential clients, every compliant IdP accepts a
+            // volunteered code_challenge — and pylon's OWN IdP mode REJECTS
+            // authorize requests without one, so `false` here meant a Pylon
+            // client could federate against Auth0 but not against Pylon.
+            ResolvedSpec::Oidc(_) => true,
         }
     }
     pub fn userinfo_method(&self) -> UserinfoMethod {
