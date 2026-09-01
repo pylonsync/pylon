@@ -300,7 +300,16 @@ fn is_spa_eligible(url: &str) -> bool {
         || path.starts_with("/admin/logs/")
         || path == "/admin/workflows"
         || path.starts_with("/admin/workflows/")
-        || path.starts_with("/.well-known/"))
+        || path.starts_with("/.well-known/")
+        // The OIDC provider's whole surface. `/.well-known/` above already
+        // keeps the discovery doc out of the SPA, but the endpoints it
+        // ADVERTISES live under /oidc/ — leaving them SPA-eligible meant any
+        // app with a frontend served its 404 page for /oidc/jwks while a
+        // headless app served real keys. IdP mode worked in every test and
+        // failed on the first production app, because every production app
+        // has a frontend.
+        || path == "/oidc"
+        || path.starts_with("/oidc/"))
 }
 
 /// Best-effort MIME detection from extension. The set covers what a
@@ -4819,6 +4828,13 @@ mod tests {
         assert!(!is_spa_eligible("/admin/jobs"));
         assert!(!is_spa_eligible("/admin/workflows"));
         assert!(!is_spa_eligible("/.well-known/acme-challenge/x"));
+        // The OIDC IdP surface — a frontend must never shadow these, or
+        // /oidc/jwks serves the app's 404 page instead of signing keys.
+        assert!(!is_spa_eligible("/oidc"));
+        assert!(!is_spa_eligible("/oidc/jwks"));
+        assert!(!is_spa_eligible("/oidc/authorize?client_id=x"));
+        assert!(!is_spa_eligible("/oidc/token"));
+        assert!(!is_spa_eligible("/oidc/userinfo"));
     }
 
     #[test]
@@ -4833,6 +4849,9 @@ mod tests {
         assert!(is_spa_eligible("/admin/orgs"));
         assert!(is_spa_eligible("/admin/fly-costs"));
         assert!(is_spa_eligible("/admin"));
+        // Only the exact /oidc namespace is reserved — an app page that
+        // merely starts with the letters stays an app page.
+        assert!(is_spa_eligible("/oidc-help"));
     }
 
     #[test]
