@@ -252,20 +252,24 @@ fn pylon_client_signs_in_against_pylon_idp() {
     );
     assert_eq!(status, 201, "dev session mint failed: {body}");
     let session: serde_json::Value = serde_json::from_str(&body).expect("session json");
-    let idp_token = session["token"].as_str().expect("session token").to_string();
+    let idp_token = session["token"]
+        .as_str()
+        .expect("session token")
+        .to_string();
     let idp_auth = [
         ("Authorization", format!("Bearer {idp_token}")),
         ("Cookie", format!("pylon_session={idp_token}")),
     ];
-    let idp_auth_ref: Vec<(&str, &str)> =
-        idp_auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let idp_auth_ref: Vec<(&str, &str)> = idp_auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
     // ── 1. Client login kickoff — the PKCE regression assertion. ────────
     // callback/error_callback are where the app sends the browser AFTER the
     // whole dance; loopback origins are always trusted so no env needed.
     let (status, login_cookies, headers, body) = http_request(
         "GET",
-        &format!("{origin}/api/auth/login/selfidp?callback={origin}/&error_callback={origin}/login"),
+        &format!(
+            "{origin}/api/auth/login/selfidp?callback={origin}/&error_callback={origin}/login"
+        ),
         None,
         &[],
     );
@@ -291,9 +295,11 @@ fn pylon_client_signs_in_against_pylon_idp() {
     let state = query_param(&authorize_url, "state").expect("state in authorize URL");
 
     // ── 2. Authorize with the IdP session → code lands on redirect_uri. ─
-    let (status, _, headers, body) =
-        http_request("GET", &authorize_url, None, &idp_auth_ref);
-    assert_eq!(status, 302, "authorize should 302 back to the client: {body}");
+    let (status, _, headers, body) = http_request("GET", &authorize_url, None, &idp_auth_ref);
+    assert_eq!(
+        status, 302,
+        "authorize should 302 back to the client: {body}"
+    );
     let callback_url = header(&headers, "location")
         .expect("authorize 302 without Location")
         .to_string();
@@ -318,8 +324,7 @@ fn pylon_client_signs_in_against_pylon_idp() {
     } else {
         vec![("Cookie", login_jar.as_str())]
     };
-    let (status, cb_cookies, headers, body) =
-        http_request("GET", &callback_url, None, &cb_headers);
+    let (status, cb_cookies, headers, body) = http_request("GET", &callback_url, None, &cb_headers);
     assert!(
         status == 302 || status == 200,
         "callback should complete the login, got {status}: {body} \
