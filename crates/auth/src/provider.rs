@@ -932,6 +932,10 @@ pub struct OidcDiscoveryDoc {
     /// this wrong silently breaks every IdP that follows the spec.
     #[serde(default)]
     pub token_endpoint_auth_methods_supported: Vec<String>,
+    /// Advertised scopes. Only consulted for the Pylon-convention "orgs"
+    /// scope — see [`OidcDiscoveryDoc::into_spec`].
+    #[serde(default)]
+    pub scopes_supported: Vec<String>,
 }
 
 impl OidcDiscoveryDoc {
@@ -969,7 +973,16 @@ impl OidcDiscoveryDoc {
             auth_url: self.authorization_endpoint,
             token_url: self.token_endpoint,
             userinfo_url: self.userinfo_endpoint,
-            scopes: "openid email profile".to_string(),
+            // Standard OIDC scopes, plus the Pylon-convention "orgs" scope
+            // WHEN the IdP advertises it: a Pylon IdP then includes the
+            // user's org memberships in the id_token/userinfo, which is how
+            // a fleet of Pylon apps maps tenants across a federation. IdPs
+            // that don't advertise it are never asked for it.
+            scopes: if self.scopes_supported.iter().any(|s| s == "orgs") {
+                "openid email profile orgs".to_string()
+            } else {
+                "openid email profile".to_string()
+            },
             userinfo_parser: UserinfoParser::Oidc,
             token_exchange,
         }

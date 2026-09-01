@@ -80,7 +80,18 @@ impl DiscoveryDoc {
             response_types_supported: vec!["code".into()],
             subject_types_supported: vec!["public".into()],
             id_token_signing_alg_values_supported: vec!["RS256".into()],
-            scopes_supported: vec!["openid".into(), "email".into(), "profile".into()],
+            // "orgs" is a Pylon-convention scope: the id_token/userinfo carry
+            // the user's Org memberships ({id, name, role}) so a federated
+            // Pylon app can map tenants, not just users. Pylon CLIENTS request
+            // it automatically when they see it advertised here; third-party
+            // clients ignore it, which is the correct default for a claim
+            // that enumerates a user's workspaces.
+            scopes_supported: vec![
+                "openid".into(),
+                "email".into(),
+                "profile".into(),
+                "orgs".into(),
+            ],
             token_endpoint_auth_methods_supported: vec![
                 "client_secret_post".into(),
                 "client_secret_basic".into(),
@@ -92,6 +103,7 @@ impl DiscoveryDoc {
                 "name".into(),
                 "preferred_username".into(),
                 "picture".into(),
+                "orgs".into(),
             ],
         }
     }

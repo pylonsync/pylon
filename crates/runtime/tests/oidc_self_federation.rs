@@ -51,24 +51,67 @@ fn string_field(name: &str, optional: bool, unique: bool) -> ManifestField {
     }
 }
 
+fn entity(name: &str, fields: Vec<ManifestField>) -> ManifestEntity {
+    ManifestEntity {
+        name: name.into(),
+        fields,
+        indexes: vec![],
+        relations: vec![],
+        search: None,
+        crdt: true,
+        sync: true,
+        ..Default::default()
+    }
+}
+
 fn test_manifest() -> AppManifest {
     AppManifest {
         manifest_version: 1,
         name: "oidc-self-federation".into(),
         version: "0.1.0".into(),
-        entities: vec![ManifestEntity {
-            name: "User".into(),
-            fields: vec![
-                string_field("email", false, true),
-                string_field("displayName", true, false),
-            ],
-            indexes: vec![],
-            relations: vec![],
-            search: None,
-            crdt: true,
-            sync: true,
-            ..Default::default()
-        }],
+        entities: vec![
+            entity(
+                "User",
+                vec![
+                    string_field("email", false, true),
+                    string_field("displayName", true, false),
+                ],
+            ),
+            // Org/OrgMember/OrgInvite in the framework-required shapes
+            // (org.rs "Required entity shapes") — the `orgs` claim reads
+            // through the same OrgStore as /api/auth/orgs.
+            entity(
+                "Org",
+                vec![
+                    string_field("name", false, false),
+                    string_field("createdBy", false, false),
+                    string_field("createdAt", false, false),
+                ],
+            ),
+            entity(
+                "OrgMember",
+                vec![
+                    string_field("orgId", false, false),
+                    string_field("userId", false, false),
+                    string_field("role", false, false),
+                    string_field("joinedAt", false, false),
+                ],
+            ),
+            entity(
+                "OrgInvite",
+                vec![
+                    string_field("orgId", false, false),
+                    string_field("email", false, false),
+                    string_field("role", false, false),
+                    string_field("invitedBy", false, false),
+                    string_field("tokenHash", false, false),
+                    string_field("tokenPrefix", false, false),
+                    string_field("createdAt", false, false),
+                    string_field("expiresAt", false, false),
+                    string_field("acceptedAt", true, false),
+                ],
+            ),
+        ],
         routes: vec![],
         queries: vec![],
         actions: vec![],
@@ -293,6 +336,17 @@ fn pylon_client_signs_in_against_pylon_idp() {
          IdP rejects authorize without it. URL: {authorize_url}"
     );
     let state = query_param(&authorize_url, "state").expect("state in authorize URL");
+    // Scope negotiation: the IdP advertises the Pylon-convention "orgs"
+    // scope in its discovery doc, so the discovery-configured client must
+    // have asked for it without any per-app configuration.
+    assert!(
+        query_param(&authorize_url, "scope")
+            .unwrap_or_default()
+            .split('+')
+            .flat_map(|s| s.split("%20"))
+            .any(|s| s == "orgs"),
+        "client should request the advertised orgs scope, got {authorize_url}"
+    );
 
     // ── 2. Authorize with the IdP session → code lands on redirect_uri. ─
     let (status, _, headers, body) = http_request("GET", &authorize_url, None, &idp_auth_ref);
@@ -356,4 +410,99 @@ fn pylon_client_signs_in_against_pylon_idp() {
         "OIDC round-trip must land on the SAME user (linked by email), \
          not mint a duplicate"
     );
+
+    // ── 5. The orgs claim, end to end, as a RAW client. ─────────────────
+    // The app-level flow above never shows us the id_token (the exchange is
+    // server-side), so drive the IdP directly: our own PKCE pair, authorize
+    // with the IdP session, exchange the code ourselves, decode the token.
+    let (status, _, _, body) = http_request(
+        "POST",
+        &format!("{origin}/api/auth/orgs"),
+        Some(r#"{"name":"Fed Org"}"#),
+        &idp_auth_ref,
+    );
+    assert_eq!(status, 200, "org create failed: {body}");
+    let org: serde_json::Value = serde_json::from_str(&body).expect("org json");
+    let org_id = org["id"].as_str().expect("org id").to_string();
+
+    // PKCE pair: verifier is any 43-128 char string; challenge is
+    // b64url(sha256(verifier)) — matching verify_pkce on the IdP side.
+    let verifier = "raw-client-verifier-0123456789abcdefghijklmnopqrstuv";
+    let challenge = {
+        use sha2::{Digest, Sha256};
+        let d = Sha256::digest(verifier.as_bytes());
+        base64_url(&d)
+    };
+    let authorize = format!(
+        "{origin}/oidc/authorize?client_id=self-app&redirect_uri={}&response_type=code&scope=openid%20email%20orgs&code_challenge={challenge}&code_challenge_method=S256&state=rawstate",
+        url_encode(&redirect_uri)
+    );
+    let (status, _, headers, body) = http_request("GET", &authorize, None, &idp_auth_ref);
+    assert_eq!(status, 302, "raw authorize: {body}");
+    let cb = header(&headers, "location").expect("raw authorize Location");
+    let code = query_param(cb, "code").expect("raw code");
+
+    let token_body = format!(
+        "grant_type=authorization_code&code={code}&client_id=self-app&client_secret=s3cr3t-selffed&redirect_uri={}&code_verifier={verifier}",
+        url_encode(&redirect_uri)
+    );
+    let (status, _, _, body) = http_request(
+        "POST",
+        &format!("{origin}/oidc/token"),
+        Some(&token_body),
+        &[("Content-Type", "application/x-www-form-urlencoded")],
+    );
+    assert_eq!(status, 200, "token exchange: {body}");
+    let tokens: serde_json::Value = serde_json::from_str(&body).expect("token json");
+    let id_token = tokens["id_token"].as_str().expect("id_token");
+    let payload = id_token.split('.').nth(1).expect("jwt payload");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&b64url_decode(payload)).expect("claims json");
+    let orgs = claims["orgs"].as_array().expect("orgs claim in id_token");
+    assert_eq!(orgs.len(), 1, "one org: {claims}");
+    assert_eq!(orgs[0]["id"].as_str(), Some(org_id.as_str()));
+    assert_eq!(orgs[0]["name"].as_str(), Some("Fed Org"));
+    assert_eq!(orgs[0]["role"].as_str(), Some("owner"));
+
+    // userinfo carries the same claim.
+    let access = tokens["access_token"].as_str().expect("access_token");
+    let bearer = format!("Bearer {access}");
+    let (status, _, _, body) = http_request(
+        "GET",
+        &format!("{origin}/oidc/userinfo"),
+        None,
+        &[("Authorization", bearer.as_str())],
+    );
+    assert_eq!(status, 200, "userinfo: {body}");
+    let info: serde_json::Value = serde_json::from_str(&body).expect("userinfo json");
+    assert_eq!(
+        info["orgs"][0]["id"].as_str(),
+        Some(org_id.as_str()),
+        "userinfo orgs claim: {info}"
+    );
+}
+
+fn url_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn base64_url(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn b64url_decode(s: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(s)
+        .expect("b64url")
 }

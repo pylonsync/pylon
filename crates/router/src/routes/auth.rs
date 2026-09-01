@@ -49,6 +49,30 @@ fn request_user_agent<'a>(ctx: &'a RouterContext) -> Option<&'a str> {
 /// Pylon's standard schema stores verification as an RFC 3339 datetime,
 /// while custom schemas may use a boolean. Missing, false, malformed, and
 /// otherwise unexpected values must remain unverified: password signup does
+/// The `orgs` claim: every Org the user belongs to, as `{id, name, role}`.
+///
+/// This is what makes Pylon-to-Pylon federation map TENANTS and not just
+/// users — the relying app can mirror a canonical org locally instead of
+/// inventing an unrelated one. Reads through the same OrgStore the
+/// /api/auth/orgs endpoint uses, so the claim can never disagree with what
+/// the IdP's own dashboard shows. Empty array (not absent) when the user has
+/// no orgs or the app doesn't declare the Org entities: the scope was
+/// granted, so the claim should answer "none" rather than vanish.
+fn oidc_orgs_claim(ctx: &RouterContext, user_id: &str) -> serde_json::Value {
+    let list = ctx.orgs.list_for_user(user_id);
+    serde_json::Value::Array(
+        list.iter()
+            .map(|(o, role)| {
+                serde_json::json!({
+                    "id": o.id,
+                    "name": o.name,
+                    "role": role.as_str(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// not prove that the caller controls the supplied address.
 fn oidc_email_is_verified(user_row: Option<&serde_json::Value>) -> bool {
     match user_row.and_then(|row| row.get("emailVerified")) {
@@ -5731,6 +5755,9 @@ pub(crate) fn handle(
                 claims.insert("name".into(), serde_json::Value::String(n.clone()));
             }
         }
+        if stored.scopes.iter().any(|s| s == "orgs") {
+            claims.insert("orgs".into(), oidc_orgs_claim(ctx, &stored.user_id));
+        }
         let id_token = match provider
             .keystore
             .sign_jwt(&serde_json::Value::Object(claims))
@@ -5834,6 +5861,9 @@ pub(crate) fn handle(
             {
                 response.insert("name".into(), serde_json::Value::String(name.into()));
             }
+        }
+        if access.scopes.iter().any(|s| s == "orgs") {
+            response.insert("orgs".into(), oidc_orgs_claim(ctx, &access.user_id));
         }
         return Some((200, serde_json::Value::Object(response).to_string()));
     }
