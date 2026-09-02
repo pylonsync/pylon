@@ -16,21 +16,21 @@ export const cache = "auth-bucketed";
 export const revalidate = 3600; // 1 hour
 
 export const metadata: Metadata = {
-	title: "Pylon: full-stack framework for coding agents",
+	title: "Pylon by Stack0: full-stack framework for coding agents",
 	description:
 		"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly. SQLite by default, Postgres when you need it.",
 	canonical: "https://www.pylonsync.com",
 	openGraph: {
-		title: "Pylon: full-stack framework for coding agents",
+		title: "Pylon by Stack0: full-stack framework for coding agents",
 		description:
 			"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly.",
 		url: "https://www.pylonsync.com",
-		siteName: "Pylon",
+		siteName: "Pylon by Stack0",
 		type: "website",
 	},
 	twitter: {
 		card: "summary_large_image",
-		title: "Pylon: full-stack framework for coding agents",
+		title: "Pylon by Stack0: full-stack framework for coding agents",
 		description:
 			"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly.",
 	},

@@ -4,14 +4,14 @@ import { fileURLToPath } from "node:url";
 
 export const size = { width: 1200, height: 630 };
 
-const PAPER = "#ffffff";
-const PAPER_1 = "#fafafa";
-const RULE = "#e4e4e7";
-const INK = "#18181b";
-const INK_2 = "#3f3f46";
-const INK_3 = "#71717a";
-const BRAND = "#6d4aff";
-const BRAND_SOFT = "#eeeaff";
+const PAPER = "#f8f7f3";
+const PAPER_1 = "#f1efe9";
+const RULE = "#dedbd3";
+const INK = "#171715";
+const INK_2 = "#4f4e49";
+const INK_3 = "#77756e";
+const BRAND = "#315f56";
+const BRAND_SOFT = "#dce8e3";
 
 const SANS = "Geist";
 const MONO = "Geist Mono";
@@ -164,13 +164,13 @@ export default function OpengraphImage() {
 							lineHeight: 0.99,
 						}}
 					>
-						<span>Give your agent</span>
-						<span style={{ color: BRAND }}>app building</span>
-						<span style={{ color: BRAND }}>superpowers</span>
+						<span>The full-stack</span>
+						<span>framework built for</span>
+						<span style={{ color: BRAND }}>coding agents</span>
 					</div>
 
 					<div style={{ marginTop: 27, width: 430, fontSize: 21, lineHeight: 1.42, color: INK_2 }}>
-						A full-stack framework for agents to ship secure, high-performance apps.
+						Define data, policies, server functions, and live clients in TypeScript.
 					</div>
 
 					<div

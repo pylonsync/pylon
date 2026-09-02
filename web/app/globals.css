@@ -65,23 +65,21 @@
   );
   --font-display: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
 
-  /* Light mode — neutral greys with a touch of warmth ------------------- */
-  --color-paper: #ffffff;        /* page background */
-  --color-paper-1: #fafafa;      /* sidebar / sunken surface */
-  --color-paper-2: #f4f4f5;      /* hover state */
-  --color-rule: #e4e4e7;         /* hairline borders */
-  --color-rule-soft: #ededee;    /* faint dividers */
-  --color-ink: #18181b;          /* primary text — zinc-900 */
-  --color-ink-2: #3f3f46;        /* body — zinc-700 */
-  --color-ink-3: #71717a;        /* muted — zinc-500 */
-  --color-ink-4: #a1a1aa;        /* hint — zinc-400 */
+  /* Light mode. Shared with the Stack0 marketing system. */
+  --color-paper: #f8f7f3;
+  --color-paper-1: #f1efe9;
+  --color-paper-2: #e9e6df;
+  --color-rule: #dedbd3;
+  --color-rule-soft: #e9e6df;
+  --color-ink: #171715;
+  --color-ink-2: #4f4e49;
+  --color-ink-3: #77756e;
+  --color-ink-4: #9b988f;
 
-  /* Pylon's accent. Used for primary CTAs, active nav, links.
-     Electric violet, not blue: blue-700 is the default SaaS accent and read
-     as generic enterprise software rather than a developer tool. */
-  --color-brand: #6d4aff;
-  --color-brand-hover: #5838e0;
-  --color-brand-soft: #ece7ff;
+  /* Pylon accent. Use it for actions and code evidence only. */
+  --color-brand: #315f56;
+  --color-brand-hover: #234b43;
+  --color-brand-soft: #dce8e3;
   --color-brand-fg: #ffffff;
 
   /* Status — tinted-pill style, soft backgrounds */
