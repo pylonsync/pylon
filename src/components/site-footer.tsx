@@ -60,12 +60,11 @@ export function SiteFooter() {
 						>
 							<PylonMark size={20} />
 							<span className="text-[15px] font-semibold leading-none tracking-tight">
-								Pylon
+								Pylon <span className="font-normal text-[var(--color-ink-3)]">by Stack0</span>
 							</span>
 						</Link>
 						<p className="mt-4 max-w-[28ch] text-[13px] leading-[1.55] text-[var(--color-ink-3)]">
-							Pylon is a full-stack framework built for agents to ship
-							high-performance and secure apps quickly.
+							The open source full-stack framework for coding agents. Define the app in TypeScript and deploy it anywhere.
 						</p>
 						<div className="mt-5 flex items-center gap-4">
 							<a

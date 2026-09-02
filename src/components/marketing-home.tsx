@@ -151,23 +151,23 @@ export function MarketingPage({
 			    subject and the thesis in the paragraph was drawn nowhere. The
 			    bento now runs as its own band below, and the entity diagram
 			    carries the hero. */}
-			<header className="relative isolate overflow-hidden">
+			<header className="relative isolate overflow-hidden border-b border-[var(--color-rule)] bg-[radial-gradient(circle_at_50%_0%,rgba(120,164,151,0.22),transparent_58%)]">
 				<div
 					className={`${FRAME_COL} px-5 pb-20 pt-16 text-center sm:px-8 sm:pb-24 sm:pt-24`}
 				>
 					<h1 className="mx-auto max-w-[21ch] text-[clamp(42px,6.4vw,68px)] font-semibold leading-[1.02] tracking-[-0.045em] text-[var(--color-ink)]">
-						Give your agent{" "}
+						The full-stack framework{" "}
 						{/* No `whitespace-nowrap` here: it's three words, and forcing them
 						    onto one line overflows the measure below ~420px. Colour
 						    carries across a wrap fine. */}
 						<span className="text-[var(--color-brand)]">
-							app building superpowers
+							built for coding agents
 						</span>
 					</h1>
 
 					<p className="mx-auto mt-6 max-w-[62ch] text-[16px] leading-[1.6] text-[var(--color-ink-2)] sm:text-[17px]">
-						Pylon is a full-stack framework built for agents to ship
-						high-performance and secure apps quickly
+						Define data, policies, server functions, and live clients in TypeScript.
+						Run it anywhere, or deploy it on Stack0 Cloud.
 					</p>
 
 					{/* The only action in the hero. Docs and sign-up live in the nav;

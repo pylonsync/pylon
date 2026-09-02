@@ -11,7 +11,6 @@ import { Link } from "@pylonsync/react";
 import { ChevronDown, Github, Menu, X } from "lucide-react";
 import { PylonMark } from "./brand";
 import { Button } from "./ui/button";
-import { ThemeToggle } from "./theme-toggle";
 import { cn } from "../lib/utils";
 import { FRAME_COL } from "./marketing-frame";
 import { COMPARISONS_ENABLED } from "../lib/comparison-content";
@@ -177,7 +176,7 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 					>
 						<PylonMark size={20} />
 						<span className="text-[15px] font-semibold leading-none tracking-tight">
-							Pylon
+							Pylon <span className="font-normal text-[var(--color-ink-3)]">by Stack0</span>
 						</span>
 					</Link>
 					<div className="hidden items-center gap-0.5 lg:flex">
@@ -206,7 +205,6 @@ export function MarketingNav({ signedIn = false }: { signedIn?: boolean }) {
 						>
 							<Github className="size-[18px]" />
 						</a>
-						<ThemeToggle />
 					{cta}
 					<button
 						type="button"
