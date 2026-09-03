@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/pylonsync/pylon/compare/v0.6.1...v0.7.0) (2026-09-03)
+
+
+### Features
+
+* **auth:** mirror org memberships from a federated Pylon IdP ([1f473c3](https://github.com/pylonsync/pylon/commit/1f473c3e2470acb95a67d6f628ca47cc05c11915))
+* **auth:** the OIDC IdP carries org memberships as an `orgs` claim ([3f2a46e](https://github.com/pylonsync/pylon/commit/3f2a46e9bb4fc86fc2345206e783c2ba06f3ab25))
+
+
+### Bug Fixes
+
+* **cli:** re-vendor the SDK source after the org federation config ([dffcc62](https://github.com/pylonsync/pylon/commit/dffcc628a6b2037020e843d8fbafb8a785ba1e2d))
+
 ## [0.6.0](https://github.com/pylonsync/pylon/compare/v0.5.7...v0.6.0) (2026-08-28)
 
 
