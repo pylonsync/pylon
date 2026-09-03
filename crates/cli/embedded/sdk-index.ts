@@ -1747,6 +1747,27 @@ export type AuthConfig = {
      * management entirely in your own TypeScript functions.
      */
     disabled?: boolean;
+    /**
+     * Mirror org memberships from an upstream Pylon identity provider.
+     * On every login through `provider`, the IdP's `orgs` claim
+     * (`[{ id, name, slug?, role }]`) is reconciled against local Org
+     * rows keyed by `externalIdField`: orgs are created and joined,
+     * roles updated, and (with `removeMissing`) memberships absent from
+     * the claim removed. The org entity must declare `externalIdField`
+     * as `field.string().optional().unique()`.
+     */
+    federation?: {
+      /** OAuth provider id whose `orgs` claim is trusted, e.g. `"stack0"`. */
+      provider: string;
+      /** Field on the org entity holding the upstream org id. Default `"externalId"`. */
+      externalIdField?: string;
+      /** Drop mirrored memberships absent from the claim. Default `true`. */
+      removeMissing?: boolean;
+      /** Claim role → local role. Unknown roles fall back to `member`. */
+      roleMap?: Record<string, string>;
+      /** Refuse `POST /api/auth/orgs` with `403 ORG_FEDERATED`. Default `true`. */
+      disableLocalCreate?: boolean;
+    };
   };
   /**
    * Per-app trusted origins. Single declarative source for the three
@@ -1900,6 +1921,13 @@ export type ManifestAuthConfig = {
     member_entity: string;
     invite_entity: string;
     disabled: boolean;
+    federation?: {
+      provider: string;
+      external_id_field: string;
+      remove_missing: boolean;
+      role_map?: Record<string, string>;
+      disable_local_create: boolean;
+    };
   };
   org_roles: string[];
   trusted_origins: string[];
@@ -1957,6 +1985,19 @@ export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
       member_entity: cfg.org?.memberEntity ?? "OrgMember",
       invite_entity: cfg.org?.inviteEntity ?? "OrgInvite",
       disabled: cfg.org?.disabled ?? false,
+      ...(cfg.org?.federation
+        ? {
+            federation: {
+              provider: cfg.org.federation.provider,
+              external_id_field: cfg.org.federation.externalIdField ?? "externalId",
+              remove_missing: cfg.org.federation.removeMissing ?? true,
+              ...(cfg.org.federation.roleMap && Object.keys(cfg.org.federation.roleMap).length > 0
+                ? { role_map: cfg.org.federation.roleMap }
+                : {}),
+              disable_local_create: cfg.org.federation.disableLocalCreate ?? true,
+            },
+          }
+        : {}),
     },
     org_roles: validateOrgRoles(cfg.orgRoles ?? []),
     trusted_origins: cfg.trustedOrigins ?? [],
