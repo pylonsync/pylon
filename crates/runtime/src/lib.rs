@@ -408,6 +408,10 @@ fn validate_manifest_org_roles(manifest: &AppManifest) -> Result<(), RuntimeErro
     pylon_kernel::validate_org_roles(&manifest.auth.org_roles).map_err(|message| RuntimeError {
         code: "BAD_ORG_ROLE".into(),
         message,
+    })?;
+    pylon_kernel::validate_org_federation(manifest).map_err(|message| RuntimeError {
+        code: "ORG_FEDERATION_FIELD_MISSING".into(),
+        message,
     })
 }
 

@@ -123,6 +123,7 @@ fn account_backend_better_auth_schema_full_roundtrip() {
         scope: Some("email profile openid".into()),
         password: None,
         avatar_url: None,
+        external_orgs: None,
         created_at: now,
         updated_at: now,
     };
@@ -175,6 +176,7 @@ fn account_backend_credential_provider_stores_password() {
         scope: None,
         password: Some("argon2id$dummy_hash".into()),
         avatar_url: None,
+        external_orgs: None,
         created_at: now,
         updated_at: now,
     };
@@ -206,6 +208,7 @@ fn account_backend_find_for_user_lists_multi_provider() {
             scope: None,
             password: None,
             avatar_url: None,
+            external_orgs: None,
             created_at: now,
             updated_at: now,
         });

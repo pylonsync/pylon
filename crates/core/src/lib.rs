@@ -310,6 +310,12 @@ pub struct ManifestAuthOrgConfig {
     /// surface (e.g. they implement their own in TS) opt out here.
     #[serde(default)]
     pub disabled: bool,
+    /// Mirror org memberships from an upstream Pylon IdP. When set,
+    /// every login through `federation.provider` reads the `orgs`
+    /// claim and reconciles local Org rows + memberships against it.
+    /// See [`ManifestAuthOrgFederation`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub federation: Option<ManifestAuthOrgFederation>,
 }
 
 impl Default for ManifestAuthOrgConfig {
@@ -319,7 +325,105 @@ impl Default for ManifestAuthOrgConfig {
             member_entity: default_member_entity(),
             invite_entity: default_invite_entity(),
             disabled: false,
+            federation: None,
         }
+    }
+}
+
+/// Federated org mirroring — the relying-app half of Pylon-to-Pylon
+/// tenant federation.
+///
+/// The IdP (a Pylon app in OIDC provider mode) puts the user's org
+/// memberships in the `orgs` claim as `[{ id, name, slug?, role }]`.
+/// The relying app keeps one local Org row per upstream org, keyed by
+/// `external_id_field`, and reconciles the user's memberships on every
+/// login: orgs in the claim are created/joined, orgs that dropped out
+/// of the claim lose the membership (never the Org row).
+///
+/// The org entity MUST declare `external_id_field` as an optional
+/// unique string; the runtime refuses to boot otherwise
+/// (`ORG_FEDERATION_FIELD_MISSING`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAuthOrgFederation {
+    /// OAuth provider id whose `orgs` claim is trusted — the
+    /// `PYLON_OAUTH_<NAME>_*` name, lowercased (e.g. `"stack0"`).
+    /// Claims from any other provider are stored on the Account row
+    /// but never mirrored.
+    pub provider: String,
+    /// Field on the org entity that holds the upstream org id.
+    /// Default `"externalId"`.
+    #[serde(default = "default_external_id_field")]
+    pub external_id_field: String,
+    /// Drop mirrored memberships that are absent from the claim.
+    /// Default `true`. Org rows are never deleted.
+    #[serde(default = "default_true")]
+    pub remove_missing: bool,
+    /// Claim role → local role. Roles not in the map pass through
+    /// unchanged; a resulting role the app doesn't declare falls
+    /// back to `member`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub role_map: std::collections::BTreeMap<String, String>,
+    /// Make `POST /api/auth/orgs` answer 403 `ORG_FEDERATED` so orgs
+    /// are only ever created upstream. Default `true`.
+    #[serde(default = "default_true")]
+    pub disable_local_create: bool,
+}
+
+fn default_external_id_field() -> String {
+    "externalId".into()
+}
+
+/// Check that an org-federation config has the entity shape it needs:
+/// the org entity declares `external_id_field` as an optional unique
+/// string. Kept in the kernel so every manifest consumer reports the
+/// same error. `Ok(())` when federation is not configured.
+pub fn validate_org_federation(manifest: &AppManifest) -> Result<(), String> {
+    let org = &manifest.auth.org;
+    let Some(fed) = org.federation.as_ref() else {
+        return Ok(());
+    };
+    if fed.provider.trim().is_empty() {
+        return Err(
+            "auth.org.federation.provider must name the OAuth provider whose orgs claim is trusted"
+                .into(),
+        );
+    }
+    let field_name = fed.external_id_field.as_str();
+    let hint = format!(
+        "declare it as `{field_name}: field.string().optional().unique()` on the `{}` entity",
+        org.entity
+    );
+    let Some(entity) = manifest.entities.iter().find(|e| e.name == org.entity) else {
+        return Err(format!(
+            "auth.org.federation needs entity \"{}\" with field \"{field_name}\": the entity is not declared; {hint}",
+            org.entity
+        ));
+    };
+    let Some(field) = entity.fields.iter().find(|f| f.name == field_name) else {
+        return Err(format!(
+            "auth.org.federation needs field \"{field_name}\" on entity \"{}\": the field is not declared; {hint}",
+            org.entity
+        ));
+    };
+    let mut problems = Vec::new();
+    if field.field_type != "string" {
+        problems.push(format!("type is `{}`, not `string`", field.field_type));
+    }
+    if !field.optional {
+        problems
+            .push("it is required, not optional (locally created orgs have no upstream id)".into());
+    }
+    if !field.unique {
+        problems.push("it is not unique (one local org per upstream org)".into());
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "auth.org.federation needs field \"{field_name}\" on entity \"{}\" to be an optional unique string: {}; {hint}",
+            org.entity,
+            problems.join(", ")
+        ))
     }
 }
 
@@ -1057,5 +1161,86 @@ mod tests {
     #[test]
     fn manifest_version_constant() {
         assert_eq!(MANIFEST_VERSION, 1);
+    }
+
+    fn federated_manifest(field: Option<ManifestField>) -> AppManifest {
+        let mut manifest = AppManifest {
+            manifest_version: MANIFEST_VERSION,
+            name: "t".into(),
+            version: "0".into(),
+            ..Default::default()
+        };
+        manifest.entities.push(ManifestEntity {
+            name: "Org".into(),
+            fields: field.into_iter().collect(),
+            ..Default::default()
+        });
+        manifest.auth.org.federation = Some(ManifestAuthOrgFederation {
+            provider: "stack0".into(),
+            external_id_field: "externalId".into(),
+            remove_missing: true,
+            role_map: Default::default(),
+            disable_local_create: true,
+        });
+        manifest
+    }
+
+    #[test]
+    fn org_federation_requires_an_optional_unique_string_external_id() {
+        let ok = ManifestField {
+            name: "externalId".into(),
+            optional: true,
+            unique: true,
+            ..Default::default()
+        };
+        assert!(validate_org_federation(&federated_manifest(Some(ok.clone()))).is_ok());
+
+        // No federation block at all: nothing to check.
+        let mut plain = federated_manifest(None);
+        plain.auth.org.federation = None;
+        assert!(validate_org_federation(&plain).is_ok());
+
+        let missing = validate_org_federation(&federated_manifest(None)).unwrap_err();
+        assert!(
+            missing.contains("\"externalId\"") && missing.contains("\"Org\""),
+            "{missing}"
+        );
+
+        let required = ManifestField {
+            optional: false,
+            ..ok.clone()
+        };
+        let err = validate_org_federation(&federated_manifest(Some(required))).unwrap_err();
+        assert!(err.contains("not optional"), "{err}");
+
+        let dup = ManifestField {
+            unique: false,
+            ..ok.clone()
+        };
+        let err = validate_org_federation(&federated_manifest(Some(dup))).unwrap_err();
+        assert!(err.contains("not unique"), "{err}");
+
+        let int = ManifestField {
+            field_type: "int".into(),
+            ..ok
+        };
+        let err = validate_org_federation(&federated_manifest(Some(int))).unwrap_err();
+        assert!(err.contains("`int`"), "{err}");
+    }
+
+    #[test]
+    fn org_federation_deserializes_with_defaults() {
+        let json = r#"{
+            "manifest_version": 1, "name": "t", "version": "0",
+            "entities": [], "routes": [], "queries": [], "actions": [], "policies": [],
+            "auth": { "org": { "federation": { "provider": "stack0" } } }
+        }"#;
+        let m: AppManifest = serde_json::from_str(json).expect("manifest");
+        let fed = m.auth.org.federation.expect("federation");
+        assert_eq!(fed.provider, "stack0");
+        assert_eq!(fed.external_id_field, "externalId");
+        assert!(fed.remove_missing);
+        assert!(fed.disable_local_create);
+        assert!(fed.role_map.is_empty());
     }
 }

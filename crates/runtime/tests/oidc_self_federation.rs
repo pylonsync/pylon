@@ -86,6 +86,8 @@ fn test_manifest() -> AppManifest {
                     string_field("name", false, false),
                     string_field("createdBy", false, false),
                     string_field("createdAt", false, false),
+                    // Federation: the mirror of an upstream org is keyed here.
+                    string_field("externalId", true, true),
                 ],
             ),
             entity(
@@ -116,7 +118,23 @@ fn test_manifest() -> AppManifest {
         queries: vec![],
         actions: vec![],
         policies: vec![],
-        auth: Default::default(),
+        auth: {
+            let mut auth = pylon_kernel::ManifestAuthConfig::default();
+            // The client half mirrors orgs from the `selfidp` provider — in
+            // this self-federated loop, from its own IdP. The IdP's org and
+            // its local mirror are DIFFERENT rows in the same table; the
+            // mirror is the one with `externalId` set.
+            auth.org.federation = Some(pylon_kernel::ManifestAuthOrgFederation {
+                provider: "selfidp".into(),
+                external_id_field: "externalId".into(),
+                remove_missing: true,
+                role_map: Default::default(),
+                // The test creates the IdP-side org through POST /api/auth/orgs,
+                // which the guard would refuse; leave local create enabled.
+                disable_local_create: false,
+            });
+            auth
+        },
         llm: Default::default(),
         connections: vec![],
         crons: vec![],
@@ -305,6 +323,19 @@ fn pylon_client_signs_in_against_pylon_idp() {
     ];
     let idp_auth_ref: Vec<(&str, &str)> = idp_auth.iter().map(|(k, v)| (*k, v.as_str())).collect();
 
+    // ── 0. The IdP-side org the user belongs to. ─────────────────────────
+    // Created before the client login so the `orgs` claim carries it and
+    // the client half has something to mirror.
+    let (status, _, _, body) = http_request(
+        "POST",
+        &format!("{origin}/api/auth/orgs"),
+        Some(r#"{"name":"Fed Org"}"#),
+        &idp_auth_ref,
+    );
+    assert_eq!(status, 200, "org create failed: {body}");
+    let org: serde_json::Value = serde_json::from_str(&body).expect("org json");
+    let org_id = org["id"].as_str().expect("org id").to_string();
+
     // ── 1. Client login kickoff — the PKCE regression assertion. ────────
     // callback/error_callback are where the app sends the browser AFTER the
     // whole dance; loopback origins are always trusted so no env needed.
@@ -411,19 +442,61 @@ fn pylon_client_signs_in_against_pylon_idp() {
          not mint a duplicate"
     );
 
+    // ── 4b. Federation: the login mirrored the upstream org locally. ────
+    // The client half reconciled the `orgs` claim: a second Org row exists
+    // with `externalId` = the IdP org's id, the user is its owner, and the
+    // new session landed in it as the active tenant.
+    let (status, _, _, body) = http_request(
+        "GET",
+        &format!("{origin}/api/auth/orgs"),
+        None,
+        &[("Cookie", app_jar.as_str())],
+    );
+    assert_eq!(status, 200, "list orgs with the app session: {body}");
+    let listed: serde_json::Value = serde_json::from_str(&body).expect("orgs json");
+    let list = listed
+        .as_array()
+        .or_else(|| listed.get("orgs").and_then(|v| v.as_array()))
+        .expect("orgs array");
+    // The user is a member of the IdP org (created above) AND of its mirror.
+    assert_eq!(list.len(), 2, "IdP org + its local mirror: {listed}");
+    let mirror = list
+        .iter()
+        .find(|o| o["id"].as_str() != Some(org_id.as_str()))
+        .expect("a mirrored org distinct from the IdP org");
+    assert_eq!(mirror["name"].as_str(), Some("Fed Org"));
+    assert_eq!(
+        mirror["role"].as_str(),
+        Some("owner"),
+        "role comes from the claim: {mirror}"
+    );
+    let mirror_id = mirror["id"].as_str().unwrap().to_string();
+    let (status, _, _, body) = http_request(
+        "GET",
+        &format!("{origin}/api/entities/Org/{mirror_id}"),
+        None,
+        &[("Authorization", "Bearer selffed-admin-token")],
+    );
+    assert_eq!(status, 200, "read mirror row: {body}");
+    let row: serde_json::Value = serde_json::from_str(&body).expect("org row");
+    let ext = row["externalId"]
+        .as_str()
+        .or_else(|| row["data"]["externalId"].as_str());
+    assert_eq!(
+        ext,
+        Some(org_id.as_str()),
+        "mirror keyed by the upstream org id: {row}"
+    );
+    assert_eq!(
+        me["tenant_id"].as_str().or_else(|| me["tenantId"].as_str()),
+        Some(mirror_id.as_str()),
+        "first login lands in the first mirrored org: {me}"
+    );
+
     // ── 5. The orgs claim, end to end, as a RAW client. ─────────────────
     // The app-level flow above never shows us the id_token (the exchange is
     // server-side), so drive the IdP directly: our own PKCE pair, authorize
     // with the IdP session, exchange the code ourselves, decode the token.
-    let (status, _, _, body) = http_request(
-        "POST",
-        &format!("{origin}/api/auth/orgs"),
-        Some(r#"{"name":"Fed Org"}"#),
-        &idp_auth_ref,
-    );
-    assert_eq!(status, 200, "org create failed: {body}");
-    let org: serde_json::Value = serde_json::from_str(&body).expect("org json");
-    let org_id = org["id"].as_str().expect("org id").to_string();
 
     // PKCE pair: verifier is any 43-128 char string; challenge is
     // b64url(sha256(verifier)) — matching verify_pkce on the IdP side.
@@ -459,10 +532,15 @@ fn pylon_client_signs_in_against_pylon_idp() {
     let claims: serde_json::Value =
         serde_json::from_slice(&b64url_decode(payload)).expect("claims json");
     let orgs = claims["orgs"].as_array().expect("orgs claim in id_token");
-    assert_eq!(orgs.len(), 1, "one org: {claims}");
-    assert_eq!(orgs[0]["id"].as_str(), Some(org_id.as_str()));
-    assert_eq!(orgs[0]["name"].as_str(), Some("Fed Org"));
-    assert_eq!(orgs[0]["role"].as_str(), Some("owner"));
+    // Two: the IdP org and its local mirror (this server is both halves, so
+    // the mirror is a member org too). The IdP org is what matters here.
+    assert_eq!(orgs.len(), 2, "IdP org + mirror: {claims}");
+    let idp_org = orgs
+        .iter()
+        .find(|o| o["id"].as_str() == Some(org_id.as_str()))
+        .expect("IdP org in the claim");
+    assert_eq!(idp_org["name"].as_str(), Some("Fed Org"));
+    assert_eq!(idp_org["role"].as_str(), Some("owner"));
 
     // userinfo carries the same claim.
     let access = tokens["access_token"].as_str().expect("access_token");
@@ -475,9 +553,11 @@ fn pylon_client_signs_in_against_pylon_idp() {
     );
     assert_eq!(status, 200, "userinfo: {body}");
     let info: serde_json::Value = serde_json::from_str(&body).expect("userinfo json");
-    assert_eq!(
-        info["orgs"][0]["id"].as_str(),
-        Some(org_id.as_str()),
+    assert!(
+        info["orgs"]
+            .as_array()
+            .map(|a| a.iter().any(|o| o["id"].as_str() == Some(org_id.as_str())))
+            .unwrap_or(false),
         "userinfo orgs claim: {info}"
     );
 }

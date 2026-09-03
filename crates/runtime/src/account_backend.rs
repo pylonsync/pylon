@@ -75,6 +75,7 @@ impl SqliteAccountBackend {
                 scope TEXT,
                 password TEXT,
                 avatar_url TEXT,
+                external_orgs TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
                 UNIQUE (provider_id, account_id)
@@ -87,6 +88,10 @@ impl SqliteAccountBackend {
         // and ignored; any other ALTER failure surfaces on first use.
         let _ = conn.execute_batch(&format!(
             "ALTER TABLE {SQLITE_TABLE} ADD COLUMN avatar_url TEXT;"
+        ));
+        // Same shape for the federated `orgs` claim column (0.6.2).
+        let _ = conn.execute_batch(&format!(
+            "ALTER TABLE {SQLITE_TABLE} ADD COLUMN external_orgs TEXT;"
         ));
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
@@ -108,6 +113,7 @@ fn row_to_account(
     scope: Option<String>,
     password: Option<String>,
     avatar_url: Option<String>,
+    external_orgs: Option<String>,
     created_at: i64,
     updated_at: i64,
 ) -> Account {
@@ -124,6 +130,7 @@ fn row_to_account(
         scope,
         password,
         avatar_url,
+        external_orgs,
         created_at: created_at as u64,
         updated_at: updated_at as u64,
     }
@@ -131,7 +138,7 @@ fn row_to_account(
 
 const SELECT_COLS: &str = "id, user_id, provider_id, account_id, access_token, \
     refresh_token, id_token, access_token_expires_at, refresh_token_expires_at, \
-    scope, password, avatar_url, created_at, updated_at";
+    scope, password, avatar_url, external_orgs, created_at, updated_at";
 
 impl AccountBackend for SqliteAccountBackend {
     fn upsert(&self, a: &Account) {
@@ -144,8 +151,8 @@ impl AccountBackend for SqliteAccountBackend {
                     "INSERT INTO {SQLITE_TABLE}
                        (id, user_id, provider_id, account_id, access_token, refresh_token,
                         id_token, access_token_expires_at, refresh_token_expires_at,
-                        scope, password, avatar_url, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                        scope, password, avatar_url, external_orgs, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                      ON CONFLICT(provider_id, account_id) DO UPDATE SET
                        user_id = excluded.user_id,
                        access_token = excluded.access_token,
@@ -156,6 +163,7 @@ impl AccountBackend for SqliteAccountBackend {
                        scope = excluded.scope,
                        password = excluded.password,
                        avatar_url = excluded.avatar_url,
+                       external_orgs = excluded.external_orgs,
                        updated_at = excluded.updated_at"
                 ),
                 rusqlite::params![
@@ -171,6 +179,7 @@ impl AccountBackend for SqliteAccountBackend {
                     a.scope,
                     a.password,
                     a.avatar_url,
+                    a.external_orgs,
                     a.created_at as i64,
                     a.updated_at as i64,
                 ],
@@ -202,8 +211,9 @@ impl AccountBackend for SqliteAccountBackend {
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<String>>(10)?,
                         row.get::<_, Option<String>>(11)?,
-                        row.get(12)?,
+                        row.get::<_, Option<String>>(12)?,
                         row.get(13)?,
+                        row.get(14)?,
                     ))
                 },
             )
@@ -234,8 +244,9 @@ impl AccountBackend for SqliteAccountBackend {
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
-                row.get(12)?,
+                row.get::<_, Option<String>>(12)?,
                 row.get(13)?,
+                row.get(14)?,
             ))
         }) {
             Ok(i) => i,
@@ -279,8 +290,9 @@ impl AccountBackend for SqliteAccountBackend {
                 row.get::<_, Option<String>>(9)?,
                 row.get::<_, Option<String>>(10)?,
                 row.get::<_, Option<String>>(11)?,
-                row.get(12)?,
+                row.get::<_, Option<String>>(12)?,
                 row.get(13)?,
+                row.get(14)?,
             ))
         }) {
             Ok(i) => i,
@@ -321,12 +333,14 @@ mod pg {
                         scope TEXT,
                         password TEXT,
                         avatar_url TEXT,
+                        external_orgs TEXT,
                         created_at BIGINT NOT NULL,
                         updated_at BIGINT NOT NULL,
                         UNIQUE (provider_id, account_id)
                     );
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_user_idx ON {PG_TABLE}(user_id);
-                    ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS avatar_url TEXT;"
+                    ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS avatar_url TEXT;
+                    ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS external_orgs TEXT;"
                 ))
             })
             .map_err(|e| format!("PG init schema: {e}"))?;
@@ -342,8 +356,8 @@ mod pg {
                         "INSERT INTO {PG_TABLE}
                            (id, user_id, provider_id, account_id, access_token, refresh_token,
                             id_token, access_token_expires_at, refresh_token_expires_at,
-                            scope, password, avatar_url, created_at, updated_at)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                            scope, password, avatar_url, external_orgs, created_at, updated_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                          ON CONFLICT (provider_id, account_id) DO UPDATE SET
                            user_id = EXCLUDED.user_id,
                            access_token = EXCLUDED.access_token,
@@ -354,6 +368,7 @@ mod pg {
                            scope = EXCLUDED.scope,
                            password = EXCLUDED.password,
                            avatar_url = EXCLUDED.avatar_url,
+                           external_orgs = EXCLUDED.external_orgs,
                            updated_at = EXCLUDED.updated_at"
                     ),
                     &[
@@ -369,6 +384,7 @@ mod pg {
                         &a.scope,
                         &a.password,
                         &a.avatar_url,
+                        &a.external_orgs,
                         &(a.created_at as i64),
                         &(a.updated_at as i64),
                     ],
@@ -408,8 +424,9 @@ mod pg {
                 row.get::<_, Option<String>>(9),
                 row.get::<_, Option<String>>(10),
                 row.get::<_, Option<String>>(11),
-                row.get(12),
+                row.get::<_, Option<String>>(12),
                 row.get(13),
+                row.get(14),
             ))
         }
 
@@ -441,8 +458,9 @@ mod pg {
                         row.get::<_, Option<String>>(9),
                         row.get::<_, Option<String>>(10),
                         row.get::<_, Option<String>>(11),
-                        row.get(12),
+                        row.get::<_, Option<String>>(12),
                         row.get(13),
+                        row.get(14),
                     )
                 })
                 .collect()
@@ -489,8 +507,9 @@ mod pg {
                         row.get::<_, Option<String>>(9),
                         row.get::<_, Option<String>>(10),
                         row.get::<_, Option<String>>(11),
-                        row.get(12),
+                        row.get::<_, Option<String>>(12),
                         row.get(13),
+                        row.get(14),
                     )
                 })
                 .collect()
@@ -517,6 +536,7 @@ mod tests {
             scope: Some("email profile".into()),
             password: None,
             avatar_url: Some("https://cdn.example/avatar.png".into()),
+            external_orgs: None,
             created_at: 1,
             updated_at: 1,
         }
