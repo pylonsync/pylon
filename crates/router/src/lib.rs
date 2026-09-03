@@ -909,6 +909,10 @@ pub(crate) fn complete_oauth_login_pkce(
             email: email.to_string(),
             name: dev_name.map(String::from),
             avatar_url: None,
+            // The dev path has no IdP and so no `orgs` claim; federation
+            // is exercised through the real OIDC path (see the
+            // oidc_self_federation integration test).
+            orgs: None,
         };
         let tokens = pylon_auth::TokenSet {
             access_token: "dev_access_token".into(),
@@ -1039,7 +1043,42 @@ pub(crate) fn complete_oauth_login_pkce(
             &now,
         )?
     };
-    let session = ctx.session_store.create(user_id.clone());
+    // Federated org mirroring (0.6.2): when this provider is the app's
+    // configured IdP, reconcile local Org memberships against the `orgs`
+    // claim it just sent. Runs after the Account row is upserted, so the
+    // claim is also stored for later inspection. A first login lands the
+    // user in their first mirrored org rather than the tenant lobby.
+    let mut session = ctx.session_store.create(user_id.clone());
+    if let Some(fed) = ctx.orgs.federation() {
+        if fed.provider.eq_ignore_ascii_case(&userinfo.provider) {
+            let declared = ctx.store.manifest().auth.org_roles.clone();
+            pylon_auth::org_federation::mirror_external_orgs(
+                ctx.orgs,
+                fed,
+                &declared,
+                &user_id,
+                userinfo.orgs.as_deref(),
+            );
+            // Land in the first MIRRORED org — the tenant the IdP vouches
+            // for — not merely the first org the user belongs to.
+            if session.tenant_id.is_none() {
+                let first = ctx
+                    .orgs
+                    .list_external_for_user(&fed.external_id_field, &user_id)
+                    .into_iter()
+                    .next()
+                    .map(|(org, _, _)| org.id);
+                if let Some(org_id) = first {
+                    if ctx
+                        .session_store
+                        .set_tenant(&session.token, Some(org_id.clone()))
+                    {
+                        session.tenant_id = Some(org_id);
+                    }
+                }
+            }
+        }
+    }
     Ok((user_id, session))
 }
 

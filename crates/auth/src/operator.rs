@@ -260,6 +260,7 @@ fn account_for(
         scope: None,
         password: Some(password_hash.to_string()),
         avatar_url: None,
+        external_orgs: None,
         created_at,
         updated_at,
     }
@@ -435,6 +436,7 @@ mod tests {
             scope: None,
             password: None,
             avatar_url: None,
+            external_orgs: None,
             created_at: 0,
             updated_at: 0,
         });
@@ -467,6 +469,7 @@ mod tests {
             scope: None,
             password: Some(password::hash_password(GOOD)),
             avatar_url: None,
+            external_orgs: None,
             created_at: 0,
             updated_at: 0,
         });

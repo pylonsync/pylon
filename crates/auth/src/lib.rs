@@ -33,6 +33,7 @@ pub mod email;
 pub mod oidc_provider;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod operator;
+pub mod org_federation;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod org_sso;
 #[cfg(not(target_arch = "wasm32"))]
@@ -956,12 +957,15 @@ impl OAuthConfig {
                     .ok_or("no sub in userinfo")?
                     .to_string();
                 let avatar_url = provider_avatar(&parsed, "picture");
+                // The Pylon-convention `orgs` claim, when the IdP granted it.
+                let orgs = parse_external_orgs(parsed.get("orgs"));
                 Ok(UserInfo {
                     provider: self.provider.clone(),
                     provider_account_id,
                     email,
                     name,
                     avatar_url,
+                    orgs,
                 })
             }
             provider::UserinfoParser::GitHub => {
@@ -994,6 +998,7 @@ impl OAuthConfig {
                     email,
                     name,
                     avatar_url,
+                    orgs: None,
                 })
             }
             provider::UserinfoParser::Custom {
@@ -1028,6 +1033,7 @@ impl OAuthConfig {
                     email,
                     name,
                     avatar_url: None,
+                    orgs: None,
                 })
             }
             provider::UserinfoParser::AppleIdToken => unreachable!("handled above"),
@@ -1113,6 +1119,7 @@ fn parse_apple_id_token(id_token: &str, provider: &str) -> Result<UserInfo, Stri
         email,
         name: None, // Apple sends `name` as a separate form field on FIRST signup only.
         avatar_url: None, // Apple has no profile-picture concept.
+        orgs: None,
     })
 }
 
@@ -1296,6 +1303,7 @@ fn fetch_linear_userinfo(provider: &str, access_token: &str) -> Result<UserInfo,
         email,
         name,
         avatar_url: None,
+        orgs: None,
     })
 }
 
@@ -1330,6 +1338,52 @@ fn json_pointer_string(v: &serde_json::Value, path: &str) -> Option<String> {
     None
 }
 
+/// One org membership as an upstream Pylon IdP reports it in the `orgs`
+/// claim (`[{ id, name, slug?, role }]`). `id` is the IdP's org id — the
+/// canonical tenant id across a federated fleet.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ExternalOrg {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug: Option<String>,
+    pub role: String,
+}
+
+/// Parse an `orgs` claim value. Entries missing `id` or `role` are
+/// dropped; a non-array value is `None` (the claim was not granted).
+pub fn parse_external_orgs(v: Option<&serde_json::Value>) -> Option<Vec<ExternalOrg>> {
+    let arr = v?.as_array()?;
+    Some(
+        arr.iter()
+            .filter_map(|o| {
+                let id = o.get("id")?.as_str()?.trim();
+                let role = o.get("role")?.as_str()?.trim();
+                if id.is_empty() || role.is_empty() {
+                    return None;
+                }
+                Some(ExternalOrg {
+                    id: id.to_string(),
+                    name: o
+                        .get("name")
+                        .and_then(|n| n.as_str())
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .unwrap_or(id)
+                        .to_string(),
+                    slug: o
+                        .get("slug")
+                        .and_then(|n| n.as_str())
+                        .map(str::trim)
+                        .filter(|n| !n.is_empty())
+                        .map(String::from),
+                    role: role.to_string(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// Resolved identity returned by [`OAuthConfig::fetch_userinfo_full`].
 /// `provider_account_id` is the provider-stable subject id (Google `sub`,
 /// GitHub numeric `id`) — what the account store keys on so a renamed
@@ -1344,6 +1398,11 @@ pub struct UserInfo {
     /// `avatar_url`). `None` when the provider has no picture concept
     /// (Apple) or the parser doesn't extract one.
     pub avatar_url: Option<String>,
+    /// The `orgs` claim from a Pylon IdP (see [`ExternalOrg`]). `None`
+    /// when the provider is not a Pylon IdP or the scope was not granted;
+    /// `Some(vec![])` when it was granted and the user has no orgs. Only
+    /// the OIDC parser fills this.
+    pub orgs: Option<Vec<ExternalOrg>>,
 }
 
 /// Token bundle returned by [`OAuthConfig::exchange_code_full`]. Stored
@@ -2768,6 +2827,11 @@ pub struct Account {
     /// `avatar_url`). Refreshed on every OAuth login so stale provider
     /// CDN URLs self-heal. `None` for password/credential rows.
     pub avatar_url: Option<String>,
+    /// The IdP's `orgs` claim as JSON (`[{id,name,slug?,role}]`), for
+    /// providers that send one (a Pylon IdP). Refreshed on every login.
+    /// `None` for other providers and password rows. What
+    /// `org_federation` reconciles local memberships against.
+    pub external_orgs: Option<String>,
     /// Unix epoch seconds when this account was first linked.
     pub created_at: u64,
     /// Unix epoch seconds when the token bundle was last refreshed.
@@ -2793,9 +2857,20 @@ impl Account {
             scope: tokens.scope.clone(),
             password: None,
             avatar_url: info.avatar_url.clone(),
+            external_orgs: info
+                .orgs
+                .as_ref()
+                .and_then(|o| serde_json::to_string(o).ok()),
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// The stored `orgs` claim, parsed. `None` when the provider sent
+    /// none (or the JSON is unreadable).
+    pub fn external_orgs(&self) -> Option<Vec<ExternalOrg>> {
+        let raw = self.external_orgs.as_deref()?;
+        serde_json::from_str(raw).ok()
     }
 
     /// True if the access token will expire within `buffer_secs`. Used
@@ -3174,6 +3249,7 @@ mod tests {
             email: "u@example.com".into(),
             name: Some("U".into()),
             avatar_url: Some("https://cdn/old.png".into()),
+            orgs: None,
         };
         let tokens = TokenSet {
             access_token: "at".into(),
@@ -4368,6 +4444,7 @@ mod tests {
             scope: Some("openid email".into()),
             password: None,
             avatar_url: None,
+            external_orgs: None,
             created_at: now,
             updated_at: now,
         }

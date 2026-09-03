@@ -63,11 +63,17 @@ fn oidc_orgs_claim(ctx: &RouterContext, user_id: &str) -> serde_json::Value {
     serde_json::Value::Array(
         list.iter()
             .map(|(o, role)| {
-                serde_json::json!({
+                let mut entry = serde_json::json!({
                     "id": o.id,
                     "name": o.name,
                     "role": role.as_str(),
-                })
+                });
+                // `slug` when the org entity declares one — relying apps
+                // build billing/portal links from it.
+                if let Some(slug) = ctx.orgs.slug_of(&o.id) {
+                    entry["slug"] = serde_json::Value::String(slug);
+                }
+                entry
             })
             .collect(),
     )
@@ -3689,6 +3695,19 @@ pub(crate) fn handle(
             ));
         }
         if method == HttpMethod::Post {
+            // A federated app mirrors orgs from its IdP; creating one here
+            // would make a tenant the IdP knows nothing about.
+            if let Some(fed) = ctx.orgs.federation() {
+                if fed.disable_local_create {
+                    return Some((
+                        403,
+                        json_error(
+                            "ORG_FEDERATED",
+                            "Organizations are managed by the identity provider for this app. Create it there and sign in again.",
+                        ),
+                    ));
+                }
+            }
             let data: serde_json::Value = match serde_json::from_str(body) {
                 Ok(v) => v,
                 Err(e) => {
@@ -6756,6 +6775,7 @@ mod tests {
             scope: None,
             password: None,
             avatar_url: avatar.map(String::from),
+            external_orgs: None,
             created_at: 0,
             updated_at,
         }

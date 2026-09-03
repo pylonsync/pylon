@@ -76,7 +76,7 @@ impl OrgRole {
             _ => None,
         }
     }
-    fn from_declared(s: &str, declared: &[String]) -> Option<Self> {
+    pub fn from_declared(s: &str, declared: &[String]) -> Option<Self> {
         Self::from_str(s).or_else(|| {
             declared
                 .iter()
@@ -285,6 +285,121 @@ impl OrgStore {
             created_by: creator_id.to_string(),
             created_at: now,
         })
+    }
+
+    /// The org's `slug` field, when the entity declares one.
+    pub fn slug_of(&self, org_id: &str) -> Option<String> {
+        if self.is_disabled() {
+            return None;
+        }
+        let row = self
+            .store
+            .get_by_id(&self.cfg.entity, org_id)
+            .ok()
+            .flatten()?;
+        row.get("slug")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    }
+
+    /// Federation config, when the app mirrors orgs from an upstream IdP.
+    pub fn federation(&self) -> Option<&pylon_kernel::ManifestAuthOrgFederation> {
+        self.cfg.federation.as_ref()
+    }
+
+    /// The local org that mirrors upstream org `external_id`, keyed by
+    /// the configured external-id field.
+    pub fn find_by_external_id(&self, field: &str, external_id: &str) -> Option<Org> {
+        if self.is_disabled() {
+            return None;
+        }
+        let row = self
+            .store
+            .lookup(&self.cfg.entity, field, external_id)
+            .ok()
+            .flatten()?;
+        Some(row_to_org(&row))
+    }
+
+    /// Create a local mirror of an upstream org. Unlike `create`, the
+    /// creator is NOT seeded as owner: the membership comes from the
+    /// claim, with the claim's role. `createdBy` records who triggered
+    /// the mirror (the first federated user to log in).
+    pub fn create_external(
+        &self,
+        name: &str,
+        field: &str,
+        external_id: &str,
+        creator_id: &str,
+    ) -> Option<Org> {
+        if self.is_disabled() {
+            return None;
+        }
+        let now = now_secs();
+        let payload = serde_json::json!({
+            "name": name,
+            field: external_id,
+            "createdBy": creator_id,
+            "createdAt": now_iso(),
+        });
+        let id = match self.store.insert(&self.cfg.entity, &payload) {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!("[org] federated create failed: {} {}", e.code, e.message);
+                return None;
+            }
+        };
+        Some(Org {
+            id,
+            name: name.to_string(),
+            created_by: creator_id.to_string(),
+            created_at: now,
+        })
+    }
+
+    /// The user's memberships in MIRRORED orgs only (rows with the
+    /// external-id field set), with each org's external id.
+    pub fn list_external_for_user(
+        &self,
+        field: &str,
+        user_id: &str,
+    ) -> Vec<(Org, String, OrgRole)> {
+        if self.is_disabled() {
+            return Vec::new();
+        }
+        let memberships = match self.store.query_filtered(
+            &self.cfg.member_entity,
+            &serde_json::json!({ "userId": user_id }),
+        ) {
+            Ok(rows) => rows,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for m in memberships {
+            let Some(org_id) = m.get("orgId").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(role) = m
+                .get("role")
+                .and_then(|v| v.as_str())
+                .and_then(|r| self.parse_role(r))
+            else {
+                continue;
+            };
+            let Ok(Some(row)) = self.store.get_by_id(&self.cfg.entity, org_id) else {
+                continue;
+            };
+            let Some(ext) = row
+                .get(field)
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.is_empty())
+            else {
+                continue;
+            };
+            out.push((row_to_org(&row), ext.to_string(), role));
+        }
+        out
     }
 
     pub fn get(&self, org_id: &str) -> Option<Org> {
