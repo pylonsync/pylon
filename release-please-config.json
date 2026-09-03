@@ -9,41 +9,233 @@
   "include-component-in-tag": false,
   "separate-pull-requests": false,
   "changelog-sections": [
-    { "type": "feat", "section": "Features" },
-    { "type": "fix", "section": "Bug Fixes" },
-    { "type": "perf", "section": "Performance" },
-    { "type": "revert", "section": "Reverts" },
-    { "type": "docs", "section": "Documentation", "hidden": true },
-    { "type": "style", "section": "Styles", "hidden": true },
-    { "type": "chore", "section": "Chore", "hidden": true },
-    { "type": "refactor", "section": "Refactoring", "hidden": true },
-    { "type": "test", "section": "Tests", "hidden": true },
-    { "type": "build", "section": "Build", "hidden": true },
-    { "type": "ci", "section": "CI", "hidden": true }
+    {
+      "type": "feat",
+      "section": "Features"
+    },
+    {
+      "type": "fix",
+      "section": "Bug Fixes"
+    },
+    {
+      "type": "perf",
+      "section": "Performance"
+    },
+    {
+      "type": "revert",
+      "section": "Reverts"
+    },
+    {
+      "type": "docs",
+      "section": "Documentation",
+      "hidden": true
+    },
+    {
+      "type": "style",
+      "section": "Styles",
+      "hidden": true
+    },
+    {
+      "type": "chore",
+      "section": "Chore",
+      "hidden": true
+    },
+    {
+      "type": "refactor",
+      "section": "Refactoring",
+      "hidden": true
+    },
+    {
+      "type": "test",
+      "section": "Tests",
+      "hidden": true
+    },
+    {
+      "type": "build",
+      "section": "Build",
+      "hidden": true
+    },
+    {
+      "type": "ci",
+      "section": "CI",
+      "hidden": true
+    }
   ],
   "packages": {
     ".": {
       "release-type": "simple",
       "package-name": "pylon",
       "extra-files": [
-        { "type": "generic", "path": "Cargo.toml" },
-        { "type": "json", "path": "packages/sdk/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/functions/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/react/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/sync/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/workflows/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/next/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/plugins/stripe/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/plugins/feature-flags/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/plugins/webhooks/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/react-native/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/loro/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/create-pylon/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/cli-darwin-arm64/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/cli-linux-x64/package.json", "jsonpath": "$.version" },
-        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.optionalDependencies['@pylonsync/cli-darwin-arm64']" },
-        { "type": "json", "path": "packages/cli/package.json", "jsonpath": "$.optionalDependencies['@pylonsync/cli-linux-x64']" }
+        {
+          "type": "generic",
+          "path": "Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/action/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/auth/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/cli/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/cluster/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/crdt/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/functions/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/http/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/migrate/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/plugin/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/policy/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/query/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/realtime/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/router/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/runtime/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/schema/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/staticgen/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/storage/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/studio_api/Cargo.toml"
+        },
+        {
+          "type": "generic",
+          "path": "crates/workers/Cargo.toml"
+        },
+        {
+          "type": "json",
+          "path": "packages/sdk/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/client/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/functions/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/react/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/sync/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/workflows/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/next/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/plugins/stripe/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/plugins/feature-flags/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/plugins/webhooks/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/react-native/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/loro/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/create-pylon/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/cli/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/cli-darwin-arm64/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/cli-linux-x64/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": "packages/cli/package.json",
+          "jsonpath": "$.optionalDependencies['@pylonsync/cli-darwin-arm64']"
+        },
+        {
+          "type": "json",
+          "path": "packages/cli/package.json",
+          "jsonpath": "$.optionalDependencies['@pylonsync/cli-linux-x64']"
+        }
       ]
     }
   }
