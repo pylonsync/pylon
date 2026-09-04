@@ -100,6 +100,10 @@ markup5ever_rcdom = "0.38"
 # Raw accept() with a null address — see `accept_tcp` (panic-proof accept
 # around libstd's macOS dual-stack sockaddr assertion). Windows takes the
 # plain libstd accept, which carries no such assertion.
+# Dual-stack listeners need IPV6_V6ONLY set before bind, which
+# std::net::TcpListener does not expose. See bind_dual_stack_tcp.
+socket2 = "0.6"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

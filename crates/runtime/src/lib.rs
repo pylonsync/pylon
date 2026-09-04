@@ -79,16 +79,41 @@ use std::sync::{Arc, Mutex, RwLock};
 /// "connection refused" with no useful diagnostic.
 ///
 /// Pattern: try `[::]:port` first (dual-stack, the kernel maps v4
-/// connections via IPv4-mapped IPv6 addresses on Linux + macOS), fall
-/// back to `0.0.0.0:port` if v6 is unavailable. The fallback exists
-/// because some sandboxed test environments and old Linux kernels
-/// disable IPv6 entirely; we don't want to refuse to start there.
+/// connections via IPv4-mapped IPv6 addresses), fall back to
+/// `0.0.0.0:port` if v6 is unavailable. The fallback exists because some
+/// sandboxed test environments and old Linux kernels disable IPv6
+/// entirely; we don't want to refuse to start there.
+///
+/// `IPV6_V6ONLY` is set explicitly rather than inherited. Windows defaults
+/// it to 1 and Linux reads it from `net.ipv6.bindv6only`, so a plain
+/// `TcpListener::bind("[::]:port")` yields a v6-ONLY listener on Windows:
+/// the server comes up, `::1` works, and every IPv4 client — `127.0.0.1`
+/// included — is refused. That reads as "the server is broken" rather than
+/// as an address-family problem.
 pub fn bind_dual_stack_tcp(port: u16) -> Result<TcpListener, std::io::Error> {
-    let v6 = format!("[::]:{port}");
-    match TcpListener::bind(&v6) {
+    match bind_v6_dual_stack(port) {
         Ok(l) => Ok(l),
         Err(_) => TcpListener::bind(format!("0.0.0.0:{port}")),
     }
+}
+
+/// Bind `[::]:port` with IPv4-mapped connections explicitly enabled.
+fn bind_v6_dual_stack(port: u16) -> Result<TcpListener, std::io::Error> {
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_only_v6(false)?;
+    // libstd's TcpListener::bind sets SO_REUSEADDR on unix so a restart can
+    // rebind a port still in TIME_WAIT, and deliberately does not on Windows,
+    // where the option instead lets two live listeners share one port. Match
+    // it on both counts.
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    let addr: std::net::SocketAddr = (std::net::Ipv6Addr::UNSPECIFIED, port).into();
+    socket.bind(&addr.into())?;
+    // Same backlog libstd uses.
+    socket.listen(128)?;
+    Ok(socket.into())
 }
 
 /// Accept one connection without tripping libstd's `sockaddr` assertion.
@@ -5927,6 +5952,43 @@ mod tests {
     /// exact churn that made libstd's asserting accept panic on macOS
     /// dual-stack `[::]`. We can't deterministically force the kernel to
     /// return a truncated sockaddr, but `accept_tcp` never parses one, so the
+    /// A dual-stack listener must answer IPv4 clients.
+    ///
+    /// Windows defaults IPV6_V6ONLY to 1, so binding `[::]` without asking
+    /// gives a v6-only socket: the server starts, `::1` works, and every
+    /// connect to 127.0.0.1 is refused. `pylon dev` looked broken rather than
+    /// v6-only. Linux can do the same via net.ipv6.bindv6only.
+    #[test]
+    fn dual_stack_listener_accepts_an_ipv4_client() {
+        use std::io::{Read, Write};
+
+        let listener = bind_dual_stack_tcp(0).expect("dual-stack bind");
+        let bound = listener.local_addr().unwrap();
+        // The v4 fallback path is already v4-only; this only has something to
+        // prove when the v6 bind won.
+        if bound.is_ipv4() {
+            return;
+        }
+        let port = bound.port();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _ip) = accept_tcp(&listener).expect("accept");
+            let mut buf = [0u8; 4];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            if &buf[..n] == b"ping" {
+                let _ = stream.write_all(b"pong");
+            }
+        });
+
+        let mut client = std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port))
+            .expect("an IPv4 client must reach a dual-stack listener");
+        client.write_all(b"ping").unwrap();
+        let mut resp = [0u8; 4];
+        client.read_exact(&mut resp).expect("server replied");
+        assert_eq!(&resp, b"pong");
+        server.join().unwrap();
+    }
+
     /// loop must survive the burst and still serve a final good client.
     #[test]
     fn accept_tcp_loop_survives_aborted_connections() {
