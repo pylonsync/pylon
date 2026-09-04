@@ -64,13 +64,14 @@ jobs:
       - run: cargo fmt --all -- --check
 
   cli-vendored:
-    name: cli vendored files in sync
+    name: vendored files in sync
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Catches drift between /templates + /packages/sdk and the
-      # copies vendored into crates/cli/. The vendored copies exist
-      # because cargo publish strips paths outside the crate root.
+      # Catches drift between /templates + /packages/sdk and the copies
+      # vendored into crates/cli/ (cargo publish strips paths outside the
+      # crate root), and between /scripts and the installers the site
+      # serves.
       - run: bash tools/check-cli-vendored.sh
 
   clippy:
