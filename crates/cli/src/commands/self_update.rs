@@ -150,12 +150,16 @@ fn install_release(
     json_mode: bool,
 ) -> Result<(), String> {
     let target = host_target()?;
-    let asset = format!("pylon-v{version}-{target}.tar.gz");
+    let asset = asset_name(version, target);
     let base = format!("https://github.com/{REPO}/releases/download/v{version}/{asset}");
 
     if !json_mode {
         eprintln!("→ pylon {current} → {version} ({target})");
     }
+
+    // A previous upgrade on Windows could not delete the binary it replaced,
+    // because this process was running it. It is gone now.
+    sweep_stale_upgrades(exe);
 
     let archive = http_get_bytes(&base).map_err(|e| {
         format!(
@@ -192,17 +196,33 @@ fn install_release(
     let dir = exe
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", exe.display()))?;
-    let staged = dir.join(format!(".pylon-upgrade-{version}"));
+    // Windows runs a file based on its extension, so the staged copy needs
+    // one — `verify_binary` executes it before it replaces anything.
+    let staged = if cfg!(windows) {
+        dir.join(format!(".pylon-upgrade-{version}.exe"))
+    } else {
+        dir.join(format!(".pylon-upgrade-{version}"))
+    };
     write_executable(&staged, &binary).map_err(|e| {
         let _ = std::fs::remove_file(&staged);
         if e.kind() == std::io::ErrorKind::PermissionDenied {
-            format!(
-                "can't write to {} — this install needs elevated permissions.\n  \
-                 Try: sudo pylon upgrade\n  \
-                 Or reinstall somewhere you own: \
-                 PYLON_INSTALL=$HOME/.pylon curl -fsSL https://www.pylonsync.com/install.sh | bash",
-                dir.display()
-            )
+            if cfg!(windows) {
+                format!(
+                    "can't write to {} — this install needs elevated permissions.\n  \
+                     Try an elevated PowerShell, or reinstall somewhere you own:\n  \
+                     $env:PYLON_INSTALL=\"$HOME\\.pylon\"; \
+                     irm https://www.pylonsync.com/install.ps1 | iex",
+                    dir.display()
+                )
+            } else {
+                format!(
+                    "can't write to {} — this install needs elevated permissions.\n  \
+                     Try: sudo pylon upgrade\n  \
+                     Or reinstall somewhere you own: \
+                     PYLON_INSTALL=$HOME/.pylon curl -fsSL https://www.pylonsync.com/install.sh | bash",
+                    dir.display()
+                )
+            }
         } else {
             format!("couldn't stage the new binary in {}: {e}", dir.display())
         }
@@ -216,12 +236,8 @@ fn install_release(
         return Err(e);
     }
 
-    // Renaming over a running executable is fine on Unix: the running
-    // process keeps its open inode, and the next invocation gets the
-    // new file.
-    std::fs::rename(&staged, exe).map_err(|e| {
+    replace_running_exe(&staged, exe).inspect_err(|_| {
         let _ = std::fs::remove_file(&staged);
-        format!("couldn't replace {}: {e}", exe.display())
     })?;
 
     if json_mode {
@@ -272,6 +288,7 @@ fn host_target() -> Result<&'static str, String> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
         ("linux", "x86_64") => Ok("x86_64-unknown-linux-gnu"),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
         ("macos", arch) => Err(format!(
             "no prebuilt binary for {arch} macOS.\n  \
              Build from source instead: cargo install pylon-cli"
@@ -281,17 +298,40 @@ fn host_target() -> Result<&'static str, String> {
              Run via Docker: ghcr.io/pylonsync/pylon:latest\n  \
              Or build from source: cargo install pylon-cli"
         )),
+        // Windows on ARM runs the x64 build under emulation, but the
+        // installer is the supported way onto it.
+        ("windows", arch) => Err(format!(
+            "no prebuilt binary for {arch} Windows.\n  \
+             Install the x64 build instead: \
+             powershell -c \"irm https://www.pylonsync.com/install.ps1 | iex\""
+        )),
         (os, _) => Err(format!(
             "no prebuilt binary for {os}.\n  \
-             Windows: use WSL2, Docker, or `cargo install pylon-cli`"
+             Run via Docker: ghcr.io/pylonsync/pylon:latest\n  \
+             Or build from source: cargo install pylon-cli"
         )),
     }
 }
 
+/// Release-asset filename for this host. Windows ships a zip, every other
+/// platform a gzipped tar — matching what the release workflow packages.
+fn asset_name(version: &str, target: &str) -> String {
+    let ext = if cfg!(windows) { "zip" } else { "tar.gz" };
+    format!("pylon-v{version}-{target}.{ext}")
+}
+
+/// The binary's filename inside the release archive, and on disk.
+const BINARY_NAME: &str = if cfg!(windows) { "pylon.exe" } else { "pylon" };
+
 /// Which package manager, if any, owns the binary at `exe`.
 fn classify_install(exe: &Path) -> InstallKind {
-    let path = exe.to_string_lossy();
-    if path.contains("/node_modules/") {
+    // Match on components rather than a substring, so the Windows spelling
+    // (`\node_modules\`) classifies the same as the unix one. Getting this
+    // wrong would offer to overwrite a binary npm owns.
+    let in_node_modules = exe
+        .components()
+        .any(|c| c.as_os_str() == std::ffi::OsStr::new("node_modules"));
+    if in_node_modules {
         return InstallKind::Npm;
     }
     if is_cargo_path(exe) {
@@ -303,7 +343,7 @@ fn classify_install(exe: &Path) -> InstallKind {
 fn is_cargo_path(exe: &Path) -> bool {
     let cargo_home = std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")));
+        .or_else(|| pylon_kernel::util::home_dir().map(|h| h.join(".cargo")));
     match cargo_home {
         Some(home) => exe.starts_with(home),
         None => false,
@@ -334,7 +374,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Pull the `pylon` entry out of the release tarball.
+/// Pull the pylon binary out of the release tarball.
+#[cfg(not(windows))]
 fn extract_pylon(archive: &[u8]) -> Result<Vec<u8>, String> {
     let decoder = flate2::read::GzDecoder::new(archive);
     let mut tar = tar::Archive::new(decoder);
@@ -345,7 +386,7 @@ fn extract_pylon(archive: &[u8]) -> Result<Vec<u8>, String> {
         let mut entry = entry.map_err(|e| format!("couldn't read the release archive: {e}"))?;
         let is_pylon = entry
             .path()
-            .map(|p| p.file_name().map(|n| n == "pylon").unwrap_or(false))
+            .map(|p| p.file_name().map(|n| n == BINARY_NAME).unwrap_or(false))
             .unwrap_or(false);
         if !is_pylon {
             continue;
@@ -356,7 +397,38 @@ fn extract_pylon(archive: &[u8]) -> Result<Vec<u8>, String> {
             .map_err(|e| format!("couldn't extract the pylon binary: {e}"))?;
         return Ok(buf);
     }
-    Err("the release archive did not contain a 'pylon' binary".into())
+    Err(format!(
+        "the release archive did not contain a '{BINARY_NAME}' binary"
+    ))
+}
+
+/// Pull the pylon binary out of the release zip.
+#[cfg(windows)]
+fn extract_pylon(archive: &[u8]) -> Result<Vec<u8>, String> {
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive))
+        .map_err(|e| format!("couldn't read the release archive: {e}"))?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("couldn't read the release archive: {e}"))?;
+        // `enclosed_name` rejects entries that would escape the archive root,
+        // so a crafted zip cannot steer this at a name outside it.
+        let is_pylon = entry
+            .enclosed_name()
+            .and_then(|p| p.file_name().map(|n| n == BINARY_NAME))
+            .unwrap_or(false);
+        if !is_pylon {
+            continue;
+        }
+        let mut buf = Vec::new();
+        entry
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("couldn't extract the pylon binary: {e}"))?;
+        return Ok(buf);
+    }
+    Err(format!(
+        "the release archive did not contain a '{BINARY_NAME}' binary"
+    ))
 }
 
 fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -372,6 +444,66 @@ fn write_executable(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// Run the staged binary and confirm it reports the version we asked
 /// for. Catches a wrong-arch or corrupt build before it replaces a
 /// working install.
+/// Move the staged binary over the one currently running.
+///
+/// Renaming onto a running executable is fine on unix: this process keeps its
+/// open inode and the next invocation gets the new file.
+#[cfg(not(windows))]
+fn replace_running_exe(staged: &Path, exe: &Path) -> Result<(), String> {
+    std::fs::rename(staged, exe).map_err(|e| format!("couldn't replace {}: {e}", exe.display()))
+}
+
+/// Move the staged binary over the one currently running.
+///
+/// Windows holds an execute lock on the image of a running process, so
+/// renaming *onto* `exe` fails with a sharing violation. Renaming the running
+/// image *away* is allowed, though, and the handle keeps working — so move it
+/// aside, put the new binary in its place, and try to delete the old one. That
+/// last step fails while this process is alive, which is why
+/// `sweep_stale_upgrades` runs at the start of the next upgrade.
+#[cfg(windows)]
+fn replace_running_exe(staged: &Path, exe: &Path) -> Result<(), String> {
+    let retired = exe.with_extension(format!("old-{}", std::process::id()));
+    let _ = std::fs::remove_file(&retired);
+    std::fs::rename(exe, &retired)
+        .map_err(|e| format!("couldn't move {} out of the way: {e}", exe.display()))?;
+
+    if let Err(e) = std::fs::rename(staged, exe) {
+        // Put the working binary back rather than leaving nothing on PATH.
+        let _ = std::fs::rename(&retired, exe);
+        return Err(format!("couldn't replace {}: {e}", exe.display()));
+    }
+
+    let _ = std::fs::remove_file(&retired);
+    Ok(())
+}
+
+/// Delete binaries a previous upgrade had to leave behind.
+///
+/// No-op off Windows, where nothing is ever left behind.
+fn sweep_stale_upgrades(exe: &Path) {
+    #[cfg(windows)]
+    {
+        let (Some(dir), Some(stem)) = (exe.parent(), exe.file_stem()) else {
+            return;
+        };
+        let prefix = format!("{}.old-", stem.to_string_lossy());
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                // Still running (a concurrent pylon) — try again next time.
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = exe;
+    }
+}
+
 fn verify_binary(staged: &Path, expected_version: &str) -> Result<(), String> {
     let out = std::process::Command::new(staged)
         .arg("version")
@@ -399,8 +531,9 @@ fn print_help() {
     println!("USAGE");
     println!("  pylon upgrade [--check] [--version <v>] [--json]");
     println!();
-    println!("Replaces the pylon installed by install.sh. A CLI installed by npm or");
-    println!("cargo is left alone — those print the command that upgrades it properly.");
+    println!("Replaces the pylon put in place by the standalone installer (install.sh,");
+    println!("or install.ps1 on Windows). A CLI installed by npm or cargo is left alone —");
+    println!("those print the command that upgrades it properly.");
     println!();
     println!("The archive is verified against its published SHA-256 and executed once");
     println!("before it replaces anything. Neither check can be skipped.");
@@ -497,6 +630,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn extracts_the_pylon_entry_from_a_tarball() {
         use flate2::write::GzEncoder;
         use std::io::Write;
@@ -522,6 +656,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn a_tarball_without_pylon_is_an_error() {
         use flate2::write::GzEncoder;
         use std::io::Write;
@@ -544,5 +679,59 @@ mod tests {
         let archive = gz.finish().unwrap();
 
         assert!(extract_pylon(&archive).is_err());
+    }
+
+    /// The asset name has to match what .github/workflows/release.yml
+    /// publishes. If the two drift, `pylon upgrade` 404s on every platform
+    /// at once and the only symptom is a download failure.
+    #[test]
+    fn asset_name_matches_what_the_release_workflow_publishes() {
+        let name = asset_name("1.2.3", host_target().unwrap_or("x86_64-unknown-linux-gnu"));
+        if cfg!(windows) {
+            assert_eq!(name, "pylon-v1.2.3-x86_64-pc-windows-msvc.zip");
+        } else {
+            assert!(
+                name.ends_with(".tar.gz"),
+                "unix targets are packaged as tar.gz, got {name}"
+            );
+        }
+        assert!(name.starts_with("pylon-v1.2.3-"), "got {name}");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn extracts_the_pylon_entry_from_a_zip() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            let opts =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("pylon.exe", opts).unwrap();
+            w.write_all(b"MZ fake binary").unwrap();
+            w.finish().unwrap();
+        }
+
+        assert_eq!(extract_pylon(&buf).unwrap(), b"MZ fake binary");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn a_zip_without_pylon_is_an_error() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let mut buf = Vec::new();
+        {
+            let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+            w.start_file("README", SimpleFileOptions::default())
+                .unwrap();
+            w.write_all(b"nope").unwrap();
+            w.finish().unwrap();
+        }
+
+        assert!(extract_pylon(&buf).is_err());
     }
 }

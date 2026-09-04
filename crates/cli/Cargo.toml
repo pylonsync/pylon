@@ -73,6 +73,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
 ] }
+# `pylon upgrade` reads the release archive, which is a zip on Windows and a
+# gzipped tar everywhere else. Deflate only — that is what Compress-Archive
+# writes.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"

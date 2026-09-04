@@ -229,11 +229,9 @@ pub fn save_state(state: &CliState) -> io::Result<()> {
     let json =
         serde_json::to_string_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&tmp, json)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    }
+    // Not a secret, but it sits beside credentials.json and there is no
+    // reason for it to be more readable than its neighbour.
+    pylon_kernel::secret_file::restrict_to_owner(&tmp)?;
     fs::rename(&tmp, &path)?;
     Ok(())
 }
