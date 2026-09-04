@@ -73,6 +73,20 @@ jobs:
       # crate root), and between /scripts and the installers the site
       # serves.
       - run: bash tools/check-cli-vendored.sh
+      - uses: dtolnay/rust-toolchain@stable
+      # Cargo.lock must already agree with the manifests. Nothing else in CI
+      # passes --locked, but every binary build in release.yml does, so a
+      # stale lock does not fail here — it fails after the tag exists, with
+      # "cannot update the lock file because --locked was passed", and the
+      # release has to be re-cut. Both v0.7.0 and v0.8.0 went that way:
+      # release-please rewrites the versions it tracks and never touches
+      # Cargo.lock. `cargo metadata` resolves without compiling, so this
+      # costs seconds.
+      #
+      # bun.lock has no equivalent step because the `typescript packages`
+      # job already installs with --frozen-lockfile.
+      - name: Cargo.lock agrees with the manifests
+        run: cargo metadata --locked --format-version 1 > /dev/null
 
   clippy:
     name: clippy
