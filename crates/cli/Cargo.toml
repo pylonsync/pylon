@@ -64,8 +64,15 @@ libc = "0.2"
 
 # `pylon doctor`'s free-space check. Windows has no `df`, so it asks the
 # volume through GetDiskFreeSpaceExW instead of skipping the check.
+#
+# Win32_Foundation is listed because that function returns a `BOOL`, which
+# lives behind it. Cargo would unify the feature in from pylon-kernel today,
+# so leaving it out compiles — until pylon-kernel stops needing it.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+] }
 
 [dev-dependencies]
 tempfile = "3"
