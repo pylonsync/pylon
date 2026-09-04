@@ -31,7 +31,7 @@ export default function sitemap(): Sitemap {
   const entries: Sitemap = [
     { url: `${SITE}/`, changeFrequency: "weekly", priority: 1 },
     // No /pricing — the framework is free, and Stack0 Cloud's plans live on
-    // usesmallware.com. The route still exists here only to 301 there.
+    // cloud.stack0.dev. The route still exists here only to 301 there.
     { url: `${SITE}/product`, changeFrequency: "weekly", priority: 0.9 },
     { url: `${SITE}/solutions`, changeFrequency: "monthly", priority: 0.8 },
     ...(COMPARISONS_ENABLED
@@ -55,7 +55,7 @@ export default function sitemap(): Sitemap {
     { url: `${SITE}/privacy`, changeFrequency: "yearly", priority: 0.3 },
     { url: `${SITE}/terms`, changeFrequency: "yearly", priority: 0.3 },
     // `/smallware` used to be listed here and answers 404 — the page moved to
-    // usesmallware.com in the brand split and the entry outlived it. A dead URL
+    // cloud.stack0.dev in the brand split and the entry outlived it. A dead URL
     // in a sitemap is a crawler telling itself the site is stale.
   ];
   for (const slug of PRODUCT_SLUGS) {

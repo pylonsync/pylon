@@ -28,7 +28,7 @@
 #   PYLON_CONTROL_PLANE_URL  where functions/joinUpdates.ts relays the footer
 #                            signup — the control plane stays the single owner
 #                            of EmailSignup + the Slack notifier
-#                            (default https://www.usesmallware.com)
+#                            (default https://cloud.stack0.dev)
 #   REVTRAIL_BASE_URL        analytics upstream (default https://revtrail.pyln.dev)
 
 app = "pylonsync-site"
@@ -58,7 +58,7 @@ primary_region = "iad"
   # open-redirect guard refuses an off-site Location unless the host is named
   # here — so name exactly the one sibling property we redirect to, and
   # nothing wildcard.
-  PYLON_TRUSTED_HOSTS = "www.usesmallware.com"
+  PYLON_TRUSTED_HOSTS = "www.stack0.dev,cloud.stack0.dev"
 
 [http_service]
   internal_port = 4321

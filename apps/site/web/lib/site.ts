@@ -11,7 +11,7 @@
 export const SITE_URL = "https://www.pylonsync.com";
 export const DOCS_URL = "https://docs.pylonsync.com";
 /** Managed Pylon. Different brand, different app, same framework. */
-export const CLOUD_URL = "https://www.usesmallware.com";
+export const CLOUD_URL = "https://cloud.stack0.dev";
 export const GITHUB_URL = "https://github.com/pylonsync/pylon";
 export const NPM_CLI_URL = "https://www.npmjs.com/package/@pylonsync/cli";
 export const NPM_ORG_URL = "https://www.npmjs.com/org/pylonsync";

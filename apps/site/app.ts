@@ -3,7 +3,7 @@
  *
  * Split out of the control-plane app so the two brands stop sharing one
  * deployment. A Pylon app resolves exactly ONE canonical host, so serving
- * pylonsync.com (framework) and usesmallware.com (product) from a single app
+ * pylonsync.com (framework) and cloud.stack0.dev (product) from a single app
  * forced a choice between letting both hosts self-canonicalize identical
  * content and teaching the framework to branch on hostname. Two apps, two
  * canonical hosts, no framework change.

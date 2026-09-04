@@ -80,7 +80,7 @@ describe("links", () => {
     const allowed = [
       "https://www.pylonsync.com",
       "https://docs.pylonsync.com",
-      "https://www.usesmallware.com",
+      "https://cloud.stack0.dev",
       "https://github.com/pylonsync",
       "https://www.npmjs.com/package/@pylonsync",
     ];

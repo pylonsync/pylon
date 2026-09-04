@@ -17,7 +17,7 @@ This skill is a starting point, not the ceiling. When the user asks something th
 - **Docs site:** <https://docs.pylonsync.com/> — human docs covering Get started, Core concepts, Auth, Plugins, Clients, Cloud, Operations, and Compare-vs-X pages.
 - **Source of truth for APIs:** <https://github.com/pylonsync/pylon/tree/main/packages> — the actual `@pylonsync/sdk`, `@pylonsync/functions`, `@pylonsync/react`, `@pylonsync/react-native`, `@pylonsync/next`, and the Swift SDK at `packages/swift/`. When in doubt about a method name or signature, read the source, not your training data.
 - **Working example apps:** <https://github.com/pylonsync/pylon/tree/main/examples> — full apps covering CRM, ERP, chat, 3D, dashboards, plus `examples/swift-todo` for the iOS/macOS SDK.
-- **Smallware:** <https://www.usesmallware.com> — managed Pylon. Same binary, same APIs, no infra to run.
+- **Stack0 Cloud:** <https://cloud.stack0.dev> — managed Pylon. Same binary, same APIs, no infra to run.
 - **This skill file (latest):** <https://www.pylonsync.com/pylon-skill.md> — re-fetch if the user reports the skill is out of date.
 
 **Rule:** if you're about to use an API name or pattern you're not 100% sure exists, fetch the source or docs first. The SDK aliases the common naming variants (see the type table below), but anything outside that table that sounds plausible (`v.money()`, `v.enum()`, `v.timestamp()`) is probably hallucinated. (`db.useAggregate`, `db.useReactiveQuery`, `db.useSearch`, `useRoom`, `useShard` ARE real — see the realtime hooks below.)
@@ -29,7 +29,7 @@ Use this skill whenever:
 - The user's Swift project imports `PylonClient`, `PylonSync`, `PylonRealtime`, or `PylonSwiftUI`.
 - The user says "Pylon", "Pylonsync", "realtime backend", or asks to build a live-syncing feature.
 - The user runs `pylon dev`, `pylon init`, `pylon deploy`, `pylon codegen`, or another `pylon` CLI command.
-- The user mentions Smallware, `www.usesmallware.com`, or `pylon deploy --target cloud`.
+- The user mentions Stack0 Cloud, `cloud.stack0.dev`, or `pylon deploy --target cloud`.
 
 ## Core mental model
 
@@ -960,7 +960,7 @@ PYLON_DEV_MODE=false
 Scaffolding:
 
 ```bash
-pylon deploy                     # default — actual hosted deploy to Smallware
+pylon deploy                     # default — actual hosted deploy to Stack0 Cloud
 pylon deploy --target fly        # Dockerfile + fly.toml
 pylon deploy --target docker     # Dockerfile
 pylon deploy --target compose    # docker-compose.yml + Dockerfile
@@ -971,9 +971,9 @@ pylon deploy --target manifest   # just regenerate manifest + client bindings
 
 For Fly.io the common pattern is a 1GB volume mounted at `/data` with `auto_stop_machines = "stop"` — idle machines sleep and wake on request.
 
-### CLI ops surface (Smallware)
+### CLI ops surface (Stack0 Cloud)
 
-Once logged in (`pylon login`, or via the dashboard's "Hand off to your coding agent" card → `pylon login --code XXXX-XXXX`), the CLI covers every dashboard operation. Use these instead of clicking through `www.usesmallware.com` for anything scripted.
+Once logged in (`pylon login`, or via the dashboard's "Hand off to your coding agent" card → `pylon login --code XXXX-XXXX`), the CLI covers every dashboard operation. Use these instead of clicking through `cloud.stack0.dev` for anything scripted.
 
 ```bash
 pylon whoami                             # account + cloud + active project
@@ -1008,7 +1008,7 @@ Every command accepts `--json` for piping to `jq`. Project context resolves from
 
 **`pylon restart`** (pylon ≥ 0.4.5) cycles the running process on the code already deployed. Reach for it when the app is wedged or crash-looping — `pylon deploy` rebuilds for no reason and `deployments rollback` ships older code. A stopped machine is started rather than restarted, and multi-region projects cycle one region at a time. Exits non-zero if any region failed to come back, so a script won't move on from a half-recovered app. Requires org owner or admin.
 
-**Project creation** (pylon ≥ 0.3.317): `pylon projects create <slug> [--name <name>] [--org <org-slug>] [--region iad] [--db sqlite|postgres] [--no-wait]`. Creates the project, waits for the Fly machine to provision (~30–60s; Postgres adds a managed-DB provision), pins it as the local context, and prints the live `https://<slug>.smallware.run` URL — so login → create → deploy runs end-to-end without the dashboard. `--org` is only needed when the account belongs to multiple orgs. On older CLI versions (or if the account has no org yet), create the project in the dashboard and run `pylon projects use <slug>` instead.
+**Project creation** (pylon ≥ 0.3.317): `pylon projects create <slug> [--name <name>] [--org <org-slug>] [--region iad] [--db sqlite|postgres] [--no-wait]`. Creates the project, waits for the Fly machine to provision (~30–60s; Postgres adds a managed-DB provision), pins it as the local context, and prints the live `https://<slug>.stack0.app` URL — so login → create → deploy runs end-to-end without the dashboard. `--org` is only needed when the account belongs to multiple orgs. On older CLI versions (or if the account has no org yet), create the project in the dashboard and run `pylon projects use <slug>` instead.
 
 ### Multi-machine (horizontal scaling)
 
@@ -1084,7 +1084,7 @@ Three commands exist specifically so you can check your own work:
 # fetches every referenced JS/CSS asset (catches "renders but ships no
 # hydration/styles"). Exit 0 only when nothing failed. --json for machine output.
 pylon verify
-pylon verify --url https://myapp.smallware.run
+pylon verify --url https://myapp.stack0.app
 
 # Deploy. WAITS for the build by default, prints status transitions, and dumps
 # the build log if it fails — so a non-zero exit means the deploy really failed,
@@ -1157,8 +1157,8 @@ Built-ins, declared in `manifest.plugins`:
 - `@pylonsync/loro` — Loro CRDT integration for collaborative editing
 - **Swift SDK** at `packages/swift/` — `PylonClient`, `PylonSync`, `PylonRealtime`, `PylonSwiftUI`. iOS 16+, macOS 13+, tvOS 16+, watchOS 9+, Linux. Codegen via `pylon codegen client --target swift`.
 
-### Smallware
-Managed Pylon at `www.usesmallware.com`. Same binary, same APIs.
+### Stack0 Cloud
+Managed Pylon at `cloud.stack0.dev`. Same binary, same APIs.
 - `pylon login` → `pylon projects create <slug>` → `pylon deploy`
 - Custom domains via `pylon domains add`
 - Environment vars via `pylon env set/list/unset`

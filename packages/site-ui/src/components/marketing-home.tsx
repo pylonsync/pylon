@@ -388,7 +388,7 @@ const { data } = db.useQuery("Order");`}
 							    one. The bar used to read pylonsync.com/dashboard, which is a
 							    404. This site has no auth and no dashboard. */}
 							<span className="mx-auto rounded-full border border-[var(--color-rule)] bg-[var(--color-paper-1)] px-3 py-0.5 font-mono text-[10.5px] text-[var(--color-ink-4)]">
-								usesmallware.com/dashboard
+								cloud.stack0.dev/dashboard
 							</span>
 						</div>
 						<div className="overflow-hidden">

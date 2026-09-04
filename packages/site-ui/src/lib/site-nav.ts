@@ -149,7 +149,7 @@ export const SOLUTIONS: NavLink[] = [
 		// site rather than pointing at /smallware — that route moved with the
 		// control plane and 404s here.
 		label: "Stack0 Cloud",
-		href: "https://www.usesmallware.com",
+		href: "https://cloud.stack0.dev",
 		external: true,
 		desc: "Purpose-built tools for a handful of users, with deployment, auth, data, and backups included.",
 		icon: Boxes,

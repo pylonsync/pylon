@@ -8,10 +8,15 @@ import type { PageProps } from "@pylonsync/react";
 //
 // The URL isn't just deleted: it shipped in this site's sitemap and is
 // indexed, and "pylon pricing" is a real query. A 301 sends it to the page
-// that actually answers it. usesmallware.com is named in PYLON_TRUSTED_HOSTS
+// that actually answers it. www.stack0.dev is named in PYLON_TRUSTED_HOSTS
 // (fly.toml) — the runtime's open-redirect guard refuses an off-site
 // Location otherwise, and it should.
-const PRICING = "https://www.usesmallware.com/pricing";
+//
+// Points at the page that answers with a 200. It used to name the retired
+// usesmallware.com host, which now costs three hops to get here:
+// usesmallware.com/pricing -> cloud.stack0.dev/pricing -> www.stack0.dev/pricing.
+// A 301 chain that long leaks link equity and is slow for the reader.
+const PRICING = "https://www.stack0.dev/pricing";
 
 export const metadata: Metadata = { title: "Pricing", robots: "noindex" };
 

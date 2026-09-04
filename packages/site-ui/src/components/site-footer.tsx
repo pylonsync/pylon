@@ -143,7 +143,7 @@ export function SiteFooter() {
 					  with the product.
 					*/}
 					<a
-						href="https://www.usesmallware.com/status"
+						href="https://cloud.stack0.dev/status"
 						className="inline-flex items-center gap-2 transition-colors hover:text-[var(--color-ink)]"
 					>
 						<span className="block h-1.5 w-1.5 rounded-full bg-[var(--color-status-live)] shadow-[0_0_0_3px_var(--color-status-live-soft)]" />

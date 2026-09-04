@@ -42,7 +42,7 @@ export default mutation<
     // signup relays to wherever it lives — the Stack0 Cloud host, not this
     // marketing domain, even though the visitor typed their address here.
     const base = (
-      ctx.env.PYLON_CONTROL_PLANE_URL ?? "https://www.usesmallware.com"
+      ctx.env.PYLON_CONTROL_PLANE_URL ?? "https://cloud.stack0.dev"
     ).replace(/\/$/, "");
 
     let res: Response;

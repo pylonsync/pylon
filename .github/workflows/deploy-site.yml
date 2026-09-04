@@ -143,7 +143,7 @@ jobs:
           read -r pricing_code pricing_location <<< "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 30 "$base/pricing")"
           echo "/pricing -> HTTP $pricing_code, Location: $pricing_location"
           [ "$pricing_code" = "301" ] || { echo "::error::/pricing returned $pricing_code"; exit 1; }
-          [ "$pricing_location" = "https://www.usesmallware.com/pricing" ] || { echo "::error::/pricing redirected to $pricing_location"; exit 1; }
+          [ "$pricing_location" = "https://www.stack0.dev/pricing" ] || { echo "::error::/pricing redirected to $pricing_location"; exit 1; }
           # The stylesheet is injected by the runtime, not present in the route
           # source — if Tailwind failed to scan packages/site-ui the page still
           # renders, just unstyled, and only this assertion would catch it.
