@@ -7,7 +7,7 @@
 # the @pylonsync/* SDK packages symlinked into /app/node_modules.
 #
 # Build (context is the REPO ROOT, not this directory):
-#   docker build -f apps/pylonsync-site/Dockerfile -t pylonsync-site .
+#   docker build -f apps/site/Dockerfile -t pylonsync-site .
 #
 # Unlike the control plane this image needs no DATABASE_URL, no volume, and no
 # secrets: the app declares zero entities. The only runtime knobs are optional
@@ -28,30 +28,30 @@ FROM ${PYLON_IMAGE}
 # We're already at WORKDIR=/app in the base image, owned by the pylon user.
 # COPY explicitly under that user so we don't trip the non-root permissions.
 USER root
-COPY --chown=pylon:pylon apps/pylonsync-site/app.ts /app/app.ts
-COPY --chown=pylon:pylon apps/pylonsync-site/tsconfig.json /app/tsconfig.json
-COPY --chown=pylon:pylon apps/pylonsync-site/functions /app/functions
+COPY --chown=pylon:pylon apps/site/app.ts /app/app.ts
+COPY --chown=pylon:pylon apps/site/tsconfig.json /app/tsconfig.json
+COPY --chown=pylon:pylon apps/site/functions /app/functions
 
 # The SSR route tree (web/app/**/page.tsx) + globals.css. MUST be present
 # before the codegen below, or the manifest ships zero SSR routes and every URL
 # 404s. tsconfig.json (above) carries the `@/* → ./web/*` path map the SSR
 # render and the client bundler resolve against.
-COPY --chown=pylon:pylon apps/pylonsync-site/web /app/web
+COPY --chown=pylon:pylon apps/site/web /app/web
 
 # The shared UI package. Its destination is load-bearing in two ways:
 #   1. `workspace:*` in package.json resolves against /app/packages/* (see the
 #      workspaces field there, which exists for this build).
-#   2. web/app/globals.css declares `@source "../../packages/ui/src/**"` so
+#   2. web/app/globals.css declares `@source "../../packages/site-ui/src/**"` so
 #      Tailwind scans it — nearly all of this site's markup lives in the
 #      package, and without that scan every class is purged and the site
 #      renders unstyled.
-COPY --chown=pylon:pylon packages/ui /app/packages/ui
+COPY --chown=pylon:pylon packages/site-ui /app/packages/site-ui
 
 # Static assets. Pylon serves these verbatim from <cwd>/public/<path>, so
 # /app/public/brand/pylon-icon.svg answers GET /brand/pylon-icon.svg. This is
 # also where /install.sh (the `curl … | sh` framework installer) and
 # /pylon-skill.md come from — both are advertised URLs, not decoration.
-COPY --chown=pylon:pylon apps/pylonsync-site/public /app/public
+COPY --chown=pylon:pylon apps/site/public /app/public
 
 # /pylon-skill.md is the agent skill we tell people to load ("Teach Claude to
 # write Pylon"), and it LIVES in the framework repo at skills/pylon/SKILL.md.
@@ -76,7 +76,7 @@ RUN curl -fsSL --max-time 20 \
 # fail, and the site 500s or ships dead HTML. Full install (not --production):
 # @tailwindcss/cli lives in devDependencies but is needed at RUNTIME to compile
 # web/app/globals.css.
-COPY --chown=pylon:pylon apps/pylonsync-site/package.json /app/package.json
+COPY --chown=pylon:pylon apps/site/package.json /app/package.json
 RUN cd /app && bun install && chown -R pylon:pylon /app/node_modules
 
 # Generate the manifest INSIDE the build, not from the repo. It is gitignored

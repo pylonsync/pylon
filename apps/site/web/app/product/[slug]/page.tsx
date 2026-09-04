@@ -1,6 +1,6 @@
 import type { Metadata } from "@pylonsync/react";
-import { ProductView } from "@pylon-cloud/ui/components/product-view";
-import { getProduct } from "@pylon-cloud/ui/lib/product-content";
+import { ProductView } from "@pylon-site/ui/components/product-view";
+import { getProduct } from "@pylon-site/ui/lib/product-content";
 
 // Dynamic route for every /product/<slug> primitive page. Per-slug SEO comes
 // from generateMetadata reading the content map; the page body renders the

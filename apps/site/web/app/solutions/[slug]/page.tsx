@@ -1,6 +1,6 @@
 import type { Metadata } from "@pylonsync/react";
-import { SolutionView } from "@pylon-cloud/ui/components/solution-view";
-import { getSolution } from "@pylon-cloud/ui/lib/solutions-content";
+import { SolutionView } from "@pylon-site/ui/components/solution-view";
+import { getSolution } from "@pylon-site/ui/lib/solutions-content";
 
 // Two cached shells per slug keyed on the signed-in bit — see app/page.tsx
 // for the full auth-bucketed rationale.

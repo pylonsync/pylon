@@ -1,5 +1,5 @@
 {
-  "name": "@pylon-cloud/ui",
+  "name": "@pylon-site/ui",
   "version": "0.1.0",
   "private": true,
   "description": "Shared marketing + design-system components for the Pylon Cloud apps. Ships raw .tsx/.ts \u2014 every consumer is a Bun-bundled Pylon app, so there is no build step and no dist/ to fall out of date.",

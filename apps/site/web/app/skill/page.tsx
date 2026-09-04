@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { SkillView } from "@pylon-cloud/ui/components/skill-view";
+import { SkillView } from "@pylon-site/ui/components/skill-view";
 
 // Two cached shells keyed on the signed-in bit — see app/page.tsx for the
 // full auth-bucketed rationale.

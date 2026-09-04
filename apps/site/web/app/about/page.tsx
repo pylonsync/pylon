@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { AboutView } from "@pylon-cloud/ui/components/about-view";
+import { AboutView } from "@pylon-site/ui/components/about-view";
 import { JsonLd } from "../../lib/agent/json-ld";
 import { organizationPageGraph } from "../../lib/agent/jsonld";
 import { SITE_URL } from "../../lib/site";

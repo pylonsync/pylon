@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { DevelopersView } from "@pylon-cloud/ui/components/developers-view";
+import { DevelopersView } from "@pylon-site/ui/components/developers-view";
 import { SITE_URL } from "../../lib/site";
 
 // Two cached shells keyed on the signed-in bit — see app/page.tsx for the

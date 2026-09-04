@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { MarketingPage } from "@pylon-cloud/ui/components/marketing-home";
+import { MarketingPage } from "@pylon-site/ui/components/marketing-home";
 import { JsonLd } from "../lib/agent/json-ld";
 import { homepageGraph } from "../lib/agent/jsonld";
 

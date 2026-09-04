@@ -1,0 +1,151 @@
+# Deploys pylonsync.com — the Pylon framework marketing site — to Fly.
+#
+# Separate from deploy.yml on purpose: the whole point of splitting this app out
+# of the control plane was that a landing-page copy edit should not redeploy the
+# service that provisions customer machines, holds every session, and runs
+# billing. Keeping one workflow with two deploy steps would have put that
+# coupling straight back.
+#
+# Note the packages/site-ui trigger: this site's markup mostly lives in that
+# package, so a change there must redeploy this app. site-ui is the site's own
+# component library — it moved here from pylon-cloud with the site, minus the
+# handful of components only the Cloud dashboard used. Nothing else in this
+# repo imports it, and the framework packages never do.
+#
+# No step interpolates `github.event.*` into a shell command — every `run:` here
+# uses literals and secrets only, so there is no workflow-injection surface.
+name: deploy-site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/site/**"
+      - "packages/site-ui/**"
+      - ".github/workflows/deploy-site.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-site
+  cancel-in-progress: false
+
+# Least-privilege: deploying only needs to read the repo.
+permissions:
+  contents: read
+
+jobs:
+  # Gate: never deploy a site that doesn't compile. Typechecks the shared
+  # package as well as the app — a break in packages/site-ui would otherwise surface
+  # as a build failure inside the image, after the deploy has already started.
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # SHA-pinned like the deploy action below; Dependabot (github-actions)
+      # keeps it current. bun-version matches package.json packageManager.
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2.2.0
+        with:
+          bun-version: 1.3.14
+      - name: Install deps
+        run: bun install --frozen-lockfile
+      - name: Typecheck shared UI package
+        working-directory: packages/site-ui
+        run: bun run check
+      - name: Typecheck site
+        working-directory: apps/site
+        run: bun run check
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      # Pinned to commit SHAs (not branches/tags). A branch/tag ref is mutable —
+      # if the upstream repo is compromised, the next run executes
+      # attacker-controlled code with access to FLY_API_TOKEN.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: superfly/flyctl-actions/setup-flyctl@ed8efb33836e8b2096c7fd3ba1c8afe303ebbff1  # master @ 2026-05-04
+
+      - name: Deploy to Fly
+        # The build context is the REPO ROOT (not the app dir): the Dockerfile
+        # copies both apps/site/** and packages/site-ui.
+        #
+        # --strategy immediate matches fly.toml. This app is single-machine, and
+        # the default canary strategy's stop+swap has repeatedly left a machine
+        # lease held long enough to 502 live requests.
+        #
+        # No --wait-timeout bump: unlike the control plane this app runs no
+        # migrations on boot (zero entities, no database), so the default
+        # health-check window is ample.
+        run: |
+          flyctl deploy \
+            --config apps/site/fly.toml \
+            --dockerfile apps/site/Dockerfile \
+            --strategy immediate \
+            --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PYLONSYNC_SITE }}
+
+      # Post-deploy lease sweep, same problem and fix as deploy.yml: after
+      # `flyctl deploy` resolves, the deploy-token lease on the machine can
+      # linger ~30–60s, and Fly's load balancer trying to auto-start the briefly
+      # stopped machine hits "lease currently held by …@tokens.fly.io" and 502s
+      # every request. This app is more exposed to that than the control plane,
+      # not less: auto_stop_machines = "stop" means Fly stops and starts the
+      # machine as a matter of course.
+      #
+      # Both subcommands are idempotent — clearing a missing lease and starting
+      # an already-started machine both succeed silently.
+      - name: Post-deploy lease sweep
+        run: |
+          set -e
+          # `--strategy immediate` returns once Fly accepts the new config and
+          # health checks pass, but the Machine API can still report
+          # "replacing"/"starting" briefly. Sweeping immediately would hit
+          # "failed_precondition: machine getting replaced".
+          for attempt in $(seq 1 12); do
+            transitional=$(flyctl machines list -a pylonsync-site --json | jq -r '.[] | select(.state == "replacing" or .state == "starting" or .state == "stopping" or .state == "created") | .id' | tr '\n' ' ')
+            if [ -z "$transitional" ]; then
+              echo "all machines stable after ${attempt}x5s wait"
+              break
+            fi
+            echo "waiting for transitional machines to settle ($transitional)…"
+            sleep 5
+          done
+
+          for id in $(flyctl machines list -a pylonsync-site --json | jq -r '.[].id'); do
+            echo "::group::lease sweep for $id"
+            flyctl machine leases clear "$id" -a pylonsync-site || true
+            flyctl machine start "$id" -a pylonsync-site 2>&1 | grep -v "machine getting replaced" || true
+            echo "::endgroup::"
+          done
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PYLONSYNC_SITE }}
+
+      # The real gate: the site must actually answer. A green flyctl deploy has
+      # shipped a 500-ing image before — the SSR render can fail at request time
+      # for reasons the health check (which only proves the process is up) never
+      # sees. Assert that real pages render real markup.
+      - name: Smoke-test the deployed site
+        run: |
+          set -e
+          base="https://pylonsync-site.fly.dev"
+          for path in / /product /skill; do
+            code=$(curl -sS -o /tmp/body -w '%{http_code}' --max-time 30 "$base$path")
+            bytes=$(wc -c < /tmp/body)
+            echo "$path -> HTTP $code, $bytes bytes"
+            [ "$code" = "200" ] || { echo "::error::$path returned $code"; exit 1; }
+            # A 500 page or a stripped render is small; every real page here is
+            # well over 20KB. This is what catches "deployed but empty".
+            [ "$bytes" -gt 20000 ] || { echo "::error::$path returned only $bytes bytes"; exit 1; }
+          done
+          read -r pricing_code pricing_location <<< "$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 30 "$base/pricing")"
+          echo "/pricing -> HTTP $pricing_code, Location: $pricing_location"
+          [ "$pricing_code" = "301" ] || { echo "::error::/pricing returned $pricing_code"; exit 1; }
+          [ "$pricing_location" = "https://www.usesmallware.com/pricing" ] || { echo "::error::/pricing redirected to $pricing_location"; exit 1; }
+          # The stylesheet is injected by the runtime, not present in the route
+          # source — if Tailwind failed to scan packages/site-ui the page still
+          # renders, just unstyled, and only this assertion would catch it.
+          grep -q '_pylon/build/styles-' /tmp/body || { echo "::error::no compiled stylesheet in the page"; exit 1; }
+          echo "smoke test passed"

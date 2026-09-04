@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { Link } from "@pylonsync/react";
 import { AlertCircle, RefreshCw } from "lucide-react";
-import { Button } from "@pylon-cloud/ui/components/ui/button";
+import { Button } from "@pylon-site/ui/components/ui/button";
 
 // Root error boundary — catches anything thrown outside /dashboard
 // (which has its own boundary). /login, /signup, /invite, /verify-email

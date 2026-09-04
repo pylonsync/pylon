@@ -64,23 +64,3 @@ export function PylonWordmark({
 		</span>
 	);
 }
-
-// Compact lockup used in the dashboard header: icon + "Stack0 Cloud".
-// "Pylon" carries the brand weight; "Cloud" dims to mark the product
-// surface without competing visually.
-export function PylonLockup({ className }: { className?: string }) {
-	return (
-		<span
-			className={cn(
-				"inline-flex items-center gap-2 text-[var(--color-ink)]",
-				className,
-			)}
-		>
-			<PylonMark size={18} />
-			<span className="text-[14px] font-semibold tracking-tight leading-none">
-				Pylon{" "}
-				<span className="text-[var(--color-ink-3)] font-normal">Cloud</span>
-			</span>
-		</span>
-	);
-}

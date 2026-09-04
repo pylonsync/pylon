@@ -1,6 +1,6 @@
-import { PRODUCT_SLUGS } from "@pylon-cloud/ui/lib/product-content";
-import { SOLUTION_SLUGS } from "@pylon-cloud/ui/lib/solutions-content";
-import { COMPARISONS_ENABLED, comparisonSlugs } from "@pylon-cloud/ui/lib/comparison-content";
+import { PRODUCT_SLUGS } from "@pylon-site/ui/lib/product-content";
+import { SOLUTION_SLUGS } from "@pylon-site/ui/lib/solutions-content";
+import { COMPARISONS_ENABLED, comparisonSlugs } from "@pylon-site/ui/lib/comparison-content";
 import { SITE_URL } from "../lib/site";
 
 type SitemapEntry = {

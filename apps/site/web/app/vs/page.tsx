@@ -1,7 +1,7 @@
 import type { Metadata } from "@pylonsync/react";
-import { ComparisonIndexView } from "@pylon-cloud/ui/components/comparison-index-view";
-import { ComparisonHidden } from "@pylon-cloud/ui/components/comparison-hidden";
-import { COMPARISONS_ENABLED } from "@pylon-cloud/ui/lib/comparison-content";
+import { ComparisonIndexView } from "@pylon-site/ui/components/comparison-index-view";
+import { ComparisonHidden } from "@pylon-site/ui/components/comparison-hidden";
+import { COMPARISONS_ENABLED } from "@pylon-site/ui/lib/comparison-content";
 
 // Two cached shells keyed on the signed-in bit (see app/page.tsx for the
 // auth-bucketed rationale). Cacheable only once COMPARISONS_ENABLED — the

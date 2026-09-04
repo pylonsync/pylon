@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { SolutionsIndexView } from "@pylon-cloud/ui/components/solutions-index-view";
+import { SolutionsIndexView } from "@pylon-site/ui/components/solutions-index-view";
 
 // Two cached shells keyed on the signed-in bit — see app/page.tsx for the
 // full auth-bucketed rationale.

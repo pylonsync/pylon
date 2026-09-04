@@ -13,7 +13,7 @@ import {
   createCommand,
   templateRepoUrl,
   type Example,
-} from "@pylon-cloud/ui/lib/examples-content";
+} from "@pylon-site/ui/lib/examples-content";
 import { DOCS_URL, GITHUB_URL, SITE_URL } from "../site";
 
 export interface DocHit {

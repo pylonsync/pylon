@@ -1,5 +1,5 @@
 {
-	"name": "@pylon-cloud/pylonsync-site",
+	"name": "@pylon-site/www",
 	"version": "0.1.0",
 	"private": true,
 	"description": "pylonsync.com — the Pylon framework marketing site. A Pylon app with no entities and no database: SSR pages plus two stateless relay functions.",
@@ -16,7 +16,7 @@
 	},
 	"//pylonsync": "Keep the Pylon packages and the Docker runtime image on the same released version.",
 	"dependencies": {
-		"@pylon-cloud/ui": "workspace:*",
+		"@pylon-site/ui": "workspace:*",
 		"@pylonsync/functions": "0.7.0",
 		"@pylonsync/react": "0.7.0",
 		"@pylonsync/sdk": "0.7.0",

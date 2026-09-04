@@ -1,5 +1,5 @@
 import type { NotFoundProps } from "@pylonsync/react";
-import { NotFoundView } from "@pylon-cloud/ui/components/not-found-view";
+import { NotFoundView } from "@pylon-site/ui/components/not-found-view";
 
 // app/not-found.tsx → rendered at HTTP 404 for any unmatched URL.
 //

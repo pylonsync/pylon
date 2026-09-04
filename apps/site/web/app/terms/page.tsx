@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { LegalPage, LegalSection, LegalList } from "@pylon-cloud/ui/components/legal-page";
+import { LegalPage, LegalSection, LegalList } from "@pylon-site/ui/components/legal-page";
 
 // Two cached shells keyed on the signed-in bit — see app/page.tsx for the
 // full auth-bucketed rationale.

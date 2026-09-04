@@ -1,5 +1,5 @@
 import React from "react";
-import { ThemeProvider } from "@pylon-cloud/ui/components/theme-provider";
+import { ThemeProvider } from "@pylon-site/ui/components/theme-provider";
 
 // Root layout for pylonsync.com. Pylon compiles Tailwind from
 // web/app/globals.css and injects the <link>; ThemeProvider (next-themes) runs

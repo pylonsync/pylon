@@ -1,0 +1,285 @@
+{
+  "manifest_version": 1,
+  "name": "pylonsync-site",
+  "version": "0.1.0",
+  "entities": [],
+  "routes": [
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "web/app/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/about",
+      "mode": "ssr",
+      "component": "web/app/about/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/agent/v1/docs",
+      "mode": "ssr",
+      "component": "web/app/agent/v1/docs/route",
+      "kind": "route"
+    },
+    {
+      "path": "/agent/v1/docs/read",
+      "mode": "ssr",
+      "component": "web/app/agent/v1/docs/read/route",
+      "kind": "route"
+    },
+    {
+      "path": "/agent/v1/docs/search",
+      "mode": "ssr",
+      "component": "web/app/agent/v1/docs/search/route",
+      "kind": "route"
+    },
+    {
+      "path": "/agent/v1/skill",
+      "mode": "ssr",
+      "component": "web/app/agent/v1/skill/route",
+      "kind": "route"
+    },
+    {
+      "path": "/agent/v1/templates",
+      "mode": "ssr",
+      "component": "web/app/agent/v1/templates/route",
+      "kind": "route"
+    },
+    {
+      "path": "/contact",
+      "mode": "ssr",
+      "component": "web/app/contact/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/developers",
+      "mode": "ssr",
+      "component": "web/app/developers/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/developers/examples",
+      "mode": "ssr",
+      "component": "web/app/developers/examples/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/llms.txt",
+      "mode": "ssr",
+      "component": "web/app/llms",
+      "kind": "llms"
+    },
+    {
+      "path": "/mcp",
+      "mode": "ssr",
+      "component": "web/app/mcp/route",
+      "kind": "route"
+    },
+    {
+      "path": "/mcp.json",
+      "mode": "ssr",
+      "component": "web/app/mcp.json/route",
+      "kind": "route"
+    },
+    {
+      "path": "/openapi.json",
+      "mode": "ssr",
+      "component": "web/app/openapi.json/route",
+      "kind": "route"
+    },
+    {
+      "path": "/opengraph-image",
+      "mode": "ssr",
+      "component": "web/app/opengraph-image",
+      "kind": "og-image"
+    },
+    {
+      "path": "/pricing",
+      "mode": "ssr",
+      "component": "web/app/pricing/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/privacy",
+      "mode": "ssr",
+      "component": "web/app/privacy/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/product",
+      "mode": "ssr",
+      "component": "web/app/product/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/product/:slug",
+      "mode": "ssr",
+      "component": "web/app/product/[slug]/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/robots.txt",
+      "mode": "ssr",
+      "component": "web/app/robots",
+      "kind": "robots"
+    },
+    {
+      "path": "/sitemap.xml",
+      "mode": "ssr",
+      "component": "web/app/sitemap",
+      "kind": "sitemap"
+    },
+    {
+      "path": "/skill",
+      "mode": "ssr",
+      "component": "web/app/skill/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/solutions",
+      "mode": "ssr",
+      "component": "web/app/solutions/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/solutions/:slug",
+      "mode": "ssr",
+      "component": "web/app/solutions/[slug]/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/terms",
+      "mode": "ssr",
+      "component": "web/app/terms/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/vs",
+      "mode": "ssr",
+      "component": "web/app/vs/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/vs/:slug",
+      "mode": "ssr",
+      "component": "web/app/vs/[slug]/page",
+      "layouts": [
+        "web/app/layout"
+      ]
+    },
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "web/app/not-found",
+      "layouts": [
+        "web/app/layout"
+      ],
+      "kind": "not-found"
+    },
+    {
+      "path": "/",
+      "mode": "ssr",
+      "component": "web/app/error",
+      "layouts": [
+        "web/app/layout"
+      ],
+      "kind": "error"
+    }
+  ],
+  "queries": [],
+  "actions": [],
+  "policies": [],
+  "auth": {
+    "user": {
+      "entity": "User",
+      "expose": [],
+      "hide": []
+    },
+    "session": {
+      "expires_in": 2592000,
+      "cookie_cache": {
+        "enabled": false,
+        "max_age": 300,
+        "claims": [
+          "is_admin",
+          "tenant_id"
+        ]
+      }
+    },
+    "org": {
+      "entity": "Org",
+      "member_entity": "OrgMember",
+      "invite_entity": "OrgInvite",
+      "disabled": false
+    },
+    "org_roles": [],
+    "trusted_origins": [
+      "https://www.pylonsync.com",
+      "https://pylonsync.com",
+      "https://pylonsync-site.fly.dev"
+    ]
+  },
+  "fonts": [
+    {
+      "family": "Geist",
+      "variable": "--font-geist-sans",
+      "weights": [
+        "300..700"
+      ],
+      "styles": [
+        "normal"
+      ],
+      "subsets": [
+        "latin"
+      ],
+      "display": "swap",
+      "preload": true,
+      "adjust_font_fallback": true
+    },
+    {
+      "family": "Geist Mono",
+      "variable": "--font-geist-mono",
+      "weights": [
+        "400..600"
+      ],
+      "styles": [
+        "normal"
+      ],
+      "subsets": [
+        "latin"
+      ],
+      "display": "swap",
+      "preload": true,
+      "adjust_font_fallback": true
+    }
+  ]
+}

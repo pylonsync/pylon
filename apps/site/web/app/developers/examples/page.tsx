@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { ExamplesView } from "@pylon-cloud/ui/components/examples-view";
+import { ExamplesView } from "@pylon-site/ui/components/examples-view";
 
 // Two cached shells keyed on the signed-in bit — see app/page.tsx for the
 // full auth-bucketed rationale.

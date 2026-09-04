@@ -6,15 +6,15 @@
    className in web/app. */
 @source "../**/*.{tsx,ts,jsx,js,mdx}";
 
-/* Most of this site's markup lives in @pylon-cloud/ui, OUTSIDE web/ — without
+/* Most of this site's markup lives in @pylon-site/ui, OUTSIDE web/ — without
    scanning it every marketing class would be purged and the site would render
    unstyled. The package sits at a different depth in the two environments:
    `../../../../packages` from the repo checkout, `../../packages` inside the
-   image (the Dockerfile copies it to /app/packages/ui). Both globs are listed
+   image (the Dockerfile copies it to /app/packages/site-ui). Both globs are listed
    because Tailwind silently ignores a @source that matches nothing, so the
    inapplicable one costs nothing and the applicable one always fires. */
-@source "../../../../packages/ui/src/**/*.{tsx,ts}";
-@source "../../packages/ui/src/**/*.{tsx,ts}";
+@source "../../../../packages/site-ui/src/**/*.{tsx,ts}";
+@source "../../packages/site-ui/src/**/*.{tsx,ts}";
 
 /* ===========================================================================
    Smallware — dashboard design system (v2)

@@ -1,5 +1,5 @@
 import type { Metadata } from "@pylonsync/react";
-import { ContactView } from "@pylon-cloud/ui/components/contact-view";
+import { ContactView } from "@pylon-site/ui/components/contact-view";
 import { JsonLd } from "../../lib/agent/json-ld";
 import { organizationPageGraph } from "../../lib/agent/jsonld";
 import { SITE_URL } from "../../lib/site";
