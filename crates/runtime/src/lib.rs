@@ -5936,7 +5936,16 @@ mod tests {
 
         // Dual-stack bind — the configuration that triggered the crash.
         let listener = bind_dual_stack_tcp(0).expect("dual-stack bind");
-        let addr = listener.local_addr().unwrap();
+        // Connect to loopback, not to the address the listener reports. That
+        // is the wildcard (`[::]` or `0.0.0.0`), which Linux and macOS accept
+        // as a connect target but Windows rejects with WSAEADDRNOTAVAIL. Pick
+        // the loopback matching whichever family the bind settled on, since
+        // `bind_dual_stack_tcp` falls back to v4.
+        let bound = listener.local_addr().unwrap();
+        let addr: std::net::SocketAddr = match bound {
+            std::net::SocketAddr::V4(_) => (std::net::Ipv4Addr::LOCALHOST, bound.port()).into(),
+            std::net::SocketAddr::V6(_) => (std::net::Ipv6Addr::LOCALHOST, bound.port()).into(),
+        };
         let stop = Arc::new(AtomicBool::new(false));
 
         let stop_srv = Arc::clone(&stop);
