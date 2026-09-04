@@ -2710,11 +2710,19 @@ impl SessionStore {
     }
 
     /// Create a guest session with a generated anonymous ID.
+    ///
+    /// The id is 20 random bytes hex-encoded → 40 lowercase-hex chars: the
+    /// same shape as a generated entity id (runtime `is_valid_pylon_id`).
+    /// Guest-ness is carried by the session's `is_guest` flag, NEVER by an
+    /// id prefix — so a guest's `user_id` can double as a valid entity
+    /// primary key (e.g. a `User` row keyed to `ctx.auth.userId`, which is
+    /// what makes username-only guest onboarding work). The old
+    /// `guest_<hex>` shape (38 chars, underscore) could never be a PK.
     pub fn create_guest(&self) -> Session {
         use rand::Rng;
         let mut rng = rand::thread_rng();
-        let bytes: [u8; 16] = rng.gen();
-        let guest_id = format!("guest_{}", hex_encode(&bytes));
+        let bytes: [u8; 20] = rng.gen();
+        let guest_id = hex_encode(&bytes);
         let mut session = self.create(guest_id);
         // `create` stored it as non-guest; flip the flag + re-persist so the
         // session resolves to a guest context (not an authenticated user).
@@ -4066,7 +4074,10 @@ mod tests {
     fn guest_session() {
         let store = SessionStore::new();
         let session = store.create_guest();
-        assert!(session.user_id.starts_with("guest_"));
+        // Guest id must be a valid entity primary key (40 lowercase-hex),
+        // NOT a `guest_`-prefixed string: guest-ness rides on the session
+        // flag, and a username-only guest's `User` row is keyed to this id.
+        assert!(is_valid_entity_id(&session.user_id));
         assert!(!session.token.is_empty());
 
         // Drive the REAL resolution path (create_guest → resolve), the one
@@ -4083,14 +4094,22 @@ mod tests {
             !AuthMode::User.check(&ctx),
             "the AuthMode::User gate must reject a resolved guest"
         );
-        assert!(ctx.user_id.unwrap().starts_with("guest_"));
+        assert!(is_valid_entity_id(&ctx.user_id.unwrap()));
+    }
+
+    /// Mirror of the runtime's `is_valid_pylon_id` (40 lowercase-hex).
+    /// Pins the "guest id is a usable PK" invariant at the auth layer so a
+    /// future tweak to `create_guest` can't silently reintroduce a
+    /// non-PK-shaped id and break guest-keyed entity rows.
+    fn is_valid_entity_id(s: &str) -> bool {
+        s.len() == 40 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
     }
 
     #[test]
     fn upgrade_guest_to_real_user() {
         let store = SessionStore::new();
         let session = store.create_guest();
-        assert!(session.user_id.starts_with("guest_"));
+        assert!(is_valid_entity_id(&session.user_id));
 
         let upgraded = store.upgrade(&session.token, "real-user-123".into());
         assert!(upgraded);
