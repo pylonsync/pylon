@@ -47,6 +47,47 @@ pub fn home_dir() -> Option<std::path::PathBuf> {
 }
 
 // ---------------------------------------------------------------------------
+// Frontend build fallbacks
+// ---------------------------------------------------------------------------
+
+/// Where the frontend gets built when the app's own `web/` directory is not
+/// writable, most durable first.
+///
+/// On Pylon Cloud the source directory arrives from a files-mount owned by
+/// root, so the container user can read it but not write into it — not even
+/// to rename `package.json`, which the strip-workspace-deps step needs.
+///
+/// The CLI writes to the first entry it can create and write; the server
+/// looks for `dist/` under each. Both take the list from here, because a
+/// build written to a directory the server does not search reads to the user
+/// as a frontend that silently never appears.
+pub fn frontend_build_dirs() -> Vec<std::path::PathBuf> {
+    use std::path::PathBuf;
+
+    // The Fly volume: survives machine restarts, so the mtime-marker
+    // fast-skip still applies on a warm boot.
+    let mut dirs = vec![PathBuf::from("/data/.pylon-frontend-build/web")];
+
+    let tmp = std::env::temp_dir()
+        .join(".pylon-frontend-build")
+        .join("web");
+    dirs.push(tmp.clone());
+
+    // `temp_dir()` follows TMPDIR, which macOS points at a per-user
+    // directory, so `/tmp` is a different place there. Keep looking in it so
+    // a build written before this list grew is still found.
+    #[cfg(unix)]
+    {
+        let literal = PathBuf::from("/tmp/.pylon-frontend-build/web");
+        if literal != tmp {
+            dirs.push(literal);
+        }
+    }
+
+    dirs
+}
+
+// ---------------------------------------------------------------------------
 // ISO-8601 timestamps
 // ---------------------------------------------------------------------------
 

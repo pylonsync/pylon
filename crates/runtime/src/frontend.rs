@@ -167,20 +167,10 @@ impl FrontendConfig {
             // First hit wins; matches the layout the `pylon init`
             // template + the examples use.
             //
-            // Fallback candidates: /data/.pylon-frontend-build/web/dist
-            // and /tmp/.pylon-frontend-build/web/dist — these are where
-            // the CLI's `ensure_frontend_built` writes when /app/web/
-            // is read-only (Pylon Cloud / Fly files-mount with root
-            // ownership of source dir).
-            let candidates = [
-                app_dir.join("web/dist"),
-                app_dir.join("apps/web/dist"),
-                PathBuf::from("/data/.pylon-frontend-build/web/dist"),
-                PathBuf::from("/tmp/.pylon-frontend-build/web/dist"),
-            ];
-            candidates
-                .into_iter()
-                .find(|p| p.join("index.html").is_file())
+            // Plus the fallback locations the CLI's `ensure_frontend_built`
+            // writes to when /app/web/ is read-only (Pylon Cloud / Fly
+            // files-mount with root ownership of the source dir).
+            discover_dist_dir(app_dir)
         };
 
         Self {
@@ -1527,18 +1517,18 @@ pub fn try_handle(
 /// finishes so the next request picks up the freshly-built dist
 /// without a process restart.
 fn discover_dist_dir(app_dir: &Path) -> Option<PathBuf> {
-    let candidates = [
-        app_dir.join("web/dist"),
-        app_dir.join("apps/web/dist"),
-        // CLI's ensure_frontend_built falls back to these locations
-        // when /app/web/ is read-only (Pylon Cloud / Fly): keep the
-        // discovery list in sync with bun.rs's resolve_build_dir.
-        PathBuf::from("/data/.pylon-frontend-build/web/dist"),
-        PathBuf::from("/tmp/.pylon-frontend-build/web/dist"),
-    ];
-    candidates
+    let mut candidates = [app_dir.join("web/dist"), app_dir.join("apps/web/dist")]
         .into_iter()
-        .find(|p| p.join("index.html").is_file())
+        // The CLI builds into these when /app/web/ is read-only (Pylon
+        // Cloud / Fly). Both ends read the list from one place, because a
+        // build written somewhere the server does not look reads to the
+        // user as a frontend that silently never appears.
+        .chain(
+            pylon_kernel::util::frontend_build_dirs()
+                .into_iter()
+                .map(|d| d.join("dist")),
+        );
+    candidates.find(|p| p.join("index.html").is_file())
 }
 
 /// Status page shown while `bun install + bun run build` runs in the

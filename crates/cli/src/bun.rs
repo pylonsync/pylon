@@ -545,20 +545,20 @@ pub fn ensure_frontend_built(entry_file: &str, frozen: bool) -> Result<(), Diagn
     //
     // Discovery order tried by `resolve_build_dir`:
     //   1. source_web_dir (in-place, when writable)
-    //   2. /data/.pylon-frontend-build/web (persistent volume — survives reboots so the mtime-marker fast-skip still works)
-    //   3. /tmp/.pylon-frontend-build/web (ephemeral, last resort)
+    //   2. the fallbacks in pylon_kernel::util::frontend_build_dirs — the
+    //      persistent volume first (survives reboots so the mtime-marker
+    //      fast-skip still works), then the temp directory
     let (build_dir, mirror_needed) =
         resolve_build_dir(&source_web_dir).map_err(|e| Diagnostic {
             severity: Severity::Error,
             code: "BUILD_DIR_RESOLVE_FAILED".into(),
             message: format!(
-                "Failed to find a writable build dir for the frontend (tried {}, /data/.pylon-frontend-build, /tmp/.pylon-frontend-build): {e}",
+                "Failed to find a writable build dir for the frontend (tried {}): {e}",
                 source_web_dir.display(),
             ),
             span: None,
             hint: Some(
-                "Ensure either web/ is writable, or /data/ or /tmp/ is mountable + writable by the pylon user."
-                    .into(),
+                "Ensure web/ is writable, or that one of the fallback build directories is.".into(),
             ),
         })?;
 
@@ -800,11 +800,10 @@ fn is_dir_writable(dir: &Path) -> bool {
 ///
 /// Preference order:
 ///   1. `web_dir` (in-place build, fastest)
-///   2. `/data/.pylon-frontend-build/web` (persistent Fly volume —
-///      survives across machine restarts so the mtime-marker fast-skip
-///      still works)
-///   3. `/tmp/.pylon-frontend-build/web` (ephemeral last-resort —
-///      rebuilds on every cold start but always works)
+///   2. the fallbacks from `pylon_kernel::util::frontend_build_dirs` —
+///      the Fly volume first (survives machine restarts, so the
+///      mtime-marker fast-skip still works), then the temp directory
+///      (rebuilds on every cold start but always works)
 ///
 /// On Pylon Cloud / Fly the source dir comes from files-mount with
 /// root ownership. The pylon-uid (10001) container user can read but
@@ -817,24 +816,29 @@ fn resolve_build_dir(web_dir: &Path) -> std::io::Result<(PathBuf, bool)> {
         return Ok((web_dir.to_path_buf(), false));
     }
 
-    // Persistent: lives on the Fly volume so reboots reuse the build.
-    let persistent = PathBuf::from("/data/.pylon-frontend-build/web");
-    if persistent
-        .parent()
-        .map(|p| p.is_dir() || std::fs::create_dir_all(p).is_ok())
-        .unwrap_or(false)
-    {
-        if persistent.is_dir() || std::fs::create_dir_all(&persistent).is_ok() {
-            if is_dir_writable(&persistent) {
-                return Ok((persistent, true));
-            }
+    let candidates = pylon_kernel::util::frontend_build_dirs();
+    let mut last_err = None;
+    for candidate in &candidates {
+        match std::fs::create_dir_all(candidate) {
+            Ok(()) if is_dir_writable(candidate) => return Ok((candidate.clone(), true)),
+            Ok(()) => {}
+            Err(e) => last_err = Some(e),
         }
     }
 
-    // Ephemeral last resort. /tmp is always writable on Unix.
-    let tmp = PathBuf::from("/tmp/.pylon-frontend-build/web");
-    std::fs::create_dir_all(&tmp)?;
-    Ok((tmp, true))
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "no writable frontend build directory among {}",
+                candidates
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )
+    }))
 }
 
 /// Smart copy of a source dir tree into a destination, skipping files
