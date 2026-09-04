@@ -100,6 +100,14 @@ samael = { version = "0.0.20", default-features = false, features = ["xmlsec"] }
 # Debian bookworm + Ubuntu noble + the Cargo publish dry-run all use.
 # Vendored copy has the one-line `as usize` cast so we can build against
 # either system version. Drop the patch when samael ships a fix upstream.
+#
+# The vendored copy carries two more changes, both for Windows:
+#   - bindings.rs locates xmlsec1 through vcpkg when the target ABI is msvc.
+#     There is no `xmlsec1-config` or pkg-config there, and the `-lssl`
+#     / `-lcrypto` / `-lxml2` names it emits do not match the MSVC ones.
+#   - keys.rs widens XmlSecKeyFormat's discriminants explicitly. MSVC types a
+#     C enum as `int` and the Itanium ABI as `unsigned int`, so bindgen hands
+#     back i32 on one and u32 on the other.
 [patch.crates-io]
 samael = { path = "vendor/samael" }
 # Vendored to add `Request::upgrade_split` — the stock `upgrade()` fuses

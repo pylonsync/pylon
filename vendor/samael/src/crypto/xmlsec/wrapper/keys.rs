@@ -12,19 +12,26 @@ use std::ptr::null;
 use std::ptr::null_mut;
 
 /// x509 key format.
+///
+/// The `as u32` on each discriminant is what makes this compile on both
+/// ABIs. `xmlSecKeyDataFormat` is a plain C enum, and bindgen types it from
+/// what the platform's C compiler uses: `unsigned int` under the Itanium ABI
+/// (Linux, macOS), `int` under MSVC. Every value here is small and
+/// non-negative, so widening either one to `u32` is lossless and the
+/// declared `repr` stays the same on every platform.
 #[allow(dead_code)]
 #[allow(missing_docs)]
 #[repr(u32)]
 pub enum XmlSecKeyFormat {
-    Unknown = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatUnknown,
-    Binary = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatBinary,
-    Pem = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPem,
-    Der = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatDer,
-    Pkcs8Pem = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPkcs8Pem,
-    Pkcs8Der = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPkcs8Der,
-    Pkcs12 = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPkcs12,
-    CertPem = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatCertPem,
-    CertDer = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatCertDer,
+    Unknown = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatUnknown as u32,
+    Binary = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatBinary as u32,
+    Pem = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPem as u32,
+    Der = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatDer as u32,
+    Pkcs8Pem = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPkcs8Pem as u32,
+    Pkcs8Der = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPkcs8Der as u32,
+    Pkcs12 = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatPkcs12 as u32,
+    CertPem = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatCertPem as u32,
+    CertDer = bindings::xmlSecKeyDataFormat_xmlSecKeyDataFormatCertDer as u32,
 }
 
 /// Key with which we sign/verify signatures or encrypt data. Used by [`XmlSecSignatureContext`][sigctx].
@@ -43,7 +50,9 @@ impl XmlSecKey {
             backend::xmlSecCryptoAppKeyLoadMemory(
                 buffer.as_ptr(),
                 buffer.len().try_into().expect("Key buffer length overflow"),
-                format as u32,
+                // Back to whatever width the platform's C enum is, rather
+                // than a hardcoded u32 — see XmlSecKeyFormat's note.
+                format as bindings::xmlSecKeyDataFormat,
                 null(),
                 null_mut(),
                 null_mut(),
