@@ -729,6 +729,52 @@ jobs:
             fi
           done
 
+      # A scoped package's FIRST publish defaults to restricted, and
+      # `bun publish --access public` did not actually override that for
+      # @pylonsync/cli-win32-x64 in v0.8.0: it published, reported success,
+      # and then 404'd for anyone without a token. npm treats an unreachable
+      # optionalDependency as "skip it", so `npm i @pylonsync/cli` on Windows
+      # installed cleanly and only failed later, saying no prebuilt binary
+      # exists for the platform.
+      #
+      # Set it explicitly. Already-public packages are a no-op.
+      - name: Force public access on the CLI packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in cli-darwin-arm64 cli-linux-x64 cli-win32-x64 cli; do
+            NAME="$(node -p "require('./packages/$pkg/package.json').name")"
+            npm access set status=public "$NAME" 2>/dev/null \
+              || npm access public "$NAME" 2>/dev/null \
+              || echo "note: could not set access on $NAME (already public?)"
+          done
+
+      # Prove it the way a user's install does: an unauthenticated GET. The
+      # publish step's own success output is not evidence — it printed
+      # `+ @pylonsync/cli-win32-x64@0.8.0` for a package nobody could fetch.
+      - name: Every CLI package is publicly resolvable
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for pkg in cli-darwin-arm64 cli-linux-x64 cli-win32-x64 cli; do
+            NAME="$(node -p "require('./packages/$pkg/package.json').name")"
+            ENC="${NAME/@/%40}"; ENC="${ENC//\//%2f}"
+            code=""
+            for attempt in 1 2 3 4 5 6; do
+              code="$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${ENC}" || true)"
+              [ "$code" = "200" ] && break
+              sleep 10
+            done
+            if [ "$code" != "200" ]; then
+              echo "::error::$NAME is not publicly readable (HTTP $code). npm silently skips an unreachable optionalDependency, so the CLI would report no prebuilt binary for that platform." >&2
+              fail=1
+            else
+              echo "✓ $NAME is publicly resolvable"
+            fi
+          done
+          exit "$fail"
+
   docker:
     runs-on: ubuntu-latest
     steps:
