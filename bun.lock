@@ -416,6 +416,7 @@
       "optionalDependencies": {
         "@pylonsync/cli-darwin-arm64": "0.7.0",
         "@pylonsync/cli-linux-x64": "0.7.0",
+        "@pylonsync/cli-win32-x64": "0.7.0",
       },
     },
     "packages/cli-darwin-arm64": {
@@ -432,6 +433,10 @@
     },
     "packages/cli-linux-x64": {
       "name": "@pylonsync/cli-linux-x64",
+      "version": "0.7.0",
+    },
+    "packages/cli-win32-x64": {
+      "name": "@pylonsync/cli-win32-x64",
       "version": "0.7.0",
     },
     "packages/client": {
@@ -856,6 +861,8 @@
     "@pylonsync/cli-linux-arm64": ["@pylonsync/cli-linux-arm64@workspace:packages/cli-linux-arm64"],
 
     "@pylonsync/cli-linux-x64": ["@pylonsync/cli-linux-x64@workspace:packages/cli-linux-x64"],
+
+    "@pylonsync/cli-win32-x64": ["@pylonsync/cli-win32-x64@workspace:packages/cli-win32-x64"],
 
     "@pylonsync/client": ["@pylonsync/client@workspace:packages/client"],
 
