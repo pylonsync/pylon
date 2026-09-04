@@ -1271,6 +1271,23 @@ mod tests {
     #[test]
     fn fail_retries_when_under_max() {
         let q = JobQueue::new(100);
+        // The default back-off is one second, which turns the "not
+        // dequeuable" assertion at the end of this test into a race with the
+        // wall clock: `fail` sets ready_at to now+1, and if the second ticks
+        // over during the 10ms dequeue wait the job IS ready and the test
+        // fails. It surfaced on a Windows runner first, but nothing about it
+        // is platform-specific — it is roughly a 1-in-100 coin flip anywhere.
+        //
+        // Keep the property that matters (a non-zero default, which is what
+        // stops a deterministic failure burning every retry in milliseconds)
+        // and then pin a back-off no dequeue in this test can outlast. The
+        // schedule itself is covered by
+        // `retry_backoff_schedule_doubles_and_caps`.
+        assert!(
+            q.retry_backoff_base_secs.load(Ordering::Relaxed) > 0,
+            "the default retry back-off must not be zero"
+        );
+        q.set_retry_backoff_base_secs(60);
         let id = q.enqueue_with_options(
             "test",
             serde_json::json!({}),
