@@ -1,0 +1,41 @@
+{
+  "name": "@pylon-cloud/ui",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared marketing + design-system components for the Pylon Cloud apps. Ships raw .tsx/.ts \u2014 every consumer is a Bun-bundled Pylon app, so there is no build step and no dist/ to fall out of date.",
+  "type": "module",
+  "exports": {
+    "./components/*": "./src/components/*.tsx",
+    "./lib/*": "./src/lib/*.ts"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@radix-ui/react-dropdown-menu": "^2.1.4",
+    "@radix-ui/react-slot": "^1.2.3",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "next-themes": "^0.4.4",
+    "tailwind-merge": "^3.3.0"
+  },
+  "peerDependencies": {
+    "@pylonsync/functions": "^0.7.0",
+    "@pylonsync/react": "^0.7.0",
+    "@pylonsync/sdk": "^0.7.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@pylonsync/functions": "^0.7.0",
+    "@pylonsync/react": "^0.7.0",
+    "@pylonsync/sdk": "^0.7.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "^5.9.3"
+  }
+}
