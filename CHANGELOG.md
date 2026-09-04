@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.8.0](https://github.com/pylonsync/pylon/compare/v0.7.0...v0.8.0) (2026-09-04)
+
+
+### Features
+
+* **cli:** native Windows support ([0c33719](https://github.com/pylonsync/pylon/commit/0c33719ea8dd5b49e78c46ad858436321bf5d9c3))
+* **cli:** pylon upgrade works on Windows ([5edfae7](https://github.com/pylonsync/pylon/commit/5edfae7af8f999ded38a692c0b380e5842fc584b))
+* **site:** bring pylonsync.com into this repo ([4224cf4](https://github.com/pylonsync/pylon/commit/4224cf4d1f454ce7a1944a68bb0ece458e959ae1))
+* **ssr:** add a `pathname` page prop and deprecate `url` ([bf615ff](https://github.com/pylonsync/pylon/commit/bf615ffe85cb917520c624d81f8c54f736c784ab))
+
+
+### Bug Fixes
+
+* **cli:** add the win32 platform package to the lockfile ([4911420](https://github.com/pylonsync/pylon/commit/4911420fd011c24756812fc2d4e8f7597c13ad08))
+* **cli:** declare the windows-sys feature the disk check needs ([06e8cd8](https://github.com/pylonsync/pylon/commit/06e8cd8abfa40956e93d3c038765a46657890320))
+* **frontend:** read and write the fallback build dir from one list ([9dbf341](https://github.com/pylonsync/pylon/commit/9dbf3416c93436c1d57371e9476c5166eeb7ed97))
+* **install:** install.ps1 exited 0 on failure ([4c5b56b](https://github.com/pylonsync/pylon/commit/4c5b56b7349cecbe76e4039bf9ff71b1837e76ed))
+* **runtime:** dual-stack listeners refused every IPv4 client on Windows ([e2a5152](https://github.com/pylonsync/pylon/commit/e2a5152679f2afdf51eb4666d07833f8484eabf9))
+* **runtime:** the HTTP and cache servers bound IPv6-only on Windows ([b8cfc10](https://github.com/pylonsync/pylon/commit/b8cfc1020d03c268c9b6aa194310871d02e9affa))
+* **saml:** name libxml2's nested include dir on MSVC ([33fb02d](https://github.com/pylonsync/pylon/commit/33fb02d87166016d2438d326e990361b21607b56))
+* **saml:** XmlSecKeyFormat assumed a u32 C enum ([bfd54bf](https://github.com/pylonsync/pylon/commit/bfd54bfa4f45d47b780209b7aa66ee26b8182e6c))
+* **site:** point every retired usesmallware.com reference at Stack0 Cloud ([4103984](https://github.com/pylonsync/pylon/commit/4103984abef5caa375f8c7fe0bb700c6ffa2c49b))
+* **site:** serve install.ps1, and stop the installers drifting ([ebbbd6a](https://github.com/pylonsync/pylon/commit/ebbbd6a2643858289834c28b70aaa8c9dbc4bb92))
+
 ## [0.7.0](https://github.com/pylonsync/pylon/compare/v0.6.1...v0.7.0) (2026-09-03)
 
 
