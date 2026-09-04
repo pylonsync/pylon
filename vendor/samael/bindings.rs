@@ -111,6 +111,15 @@ fn configure_msvc() -> Vec<String> {
         .collect();
     for dir in &library.include_paths {
         args.push(format!("-I{}", dir.display()));
+        // xmlsec1's headers open with `#include <libxml/tree.h>`, and libxml2
+        // installs under an extra `libxml2/` level — the same layout that
+        // makes `xmlsec1-config --cflags` report `-I/usr/include/libxml2` on
+        // unix. vcpkg-rs reports only the root include directory, so name the
+        // nested one too.
+        let libxml2 = dir.join("libxml2");
+        if libxml2.is_dir() {
+            args.push(format!("-I{}", libxml2.display()));
+        }
     }
     args
 }
