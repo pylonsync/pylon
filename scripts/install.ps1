@@ -20,7 +20,10 @@ $InstallPrefix = if ($env:PYLON_INSTALL) { $env:PYLON_INSTALL } else { Join-Path
 $BinDir = Join-Path $InstallPrefix 'bin'
 
 function Fail($message) {
-    Write-Error "install.ps1: $message"
+    # Not Write-Error: under $ErrorActionPreference = 'Stop' that throws, so
+    # the `exit` below would never run and the script could end with status 0
+    # after failing. Write to the error stream and set the code explicitly.
+    [Console]::Error.WriteLine("install.ps1: $message")
     exit 1
 }
 
@@ -138,9 +141,11 @@ Write-Host "OK  pylon $version installed at $BinDir\pylon.exe"
 $envKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment', $true)
 try {
     $userPath = $envKey.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    $entries = $userPath -split ';' | Where-Object { $_ -ne '' }
+    # Force an array: an empty PATH splits to nothing, and adding to $null
+    # would produce a leading empty entry.
+    $entries = @($userPath -split ';' | Where-Object { $_ -ne '' })
     if ($entries -notcontains $BinDir) {
-        $newPath = (@($entries) + $BinDir) -join ';'
+        $newPath = ($entries + $BinDir) -join ';'
         $envKey.SetValue('Path', $newPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
         Write-Host ''
         Write-Host "Added $BinDir to your user PATH. Open a new terminal for it to take effect."
