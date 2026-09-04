@@ -159,13 +159,20 @@ fn start_stub_server(form_called: Arc<AtomicBool>) -> u16 {
             *boot_err_thread.lock().unwrap() = Some(e.to_string());
         }
     });
-    // 300 x 50ms = 15s. The old budget was 5s AND fell through
-    // silently when it ran out, so a slow CI runner walked into a
+    // Wait up to 15s for the bind. The original budget was 5s AND fell
+    // through silently when it ran out, so a slow CI runner walked into a
     // bare `.expect("connect")` panic further down that looked like a
     // product bug. Fail here instead, naming the port.
+    //
+    // The budget is wall clock rather than a count of attempts, because a
+    // failed connect is not instantly refused everywhere: on Windows a
+    // dropped SYN costs about two seconds, which turned "300 attempts, 50ms
+    // apart" into ten minutes per test rather than fifteen seconds. The
+    // other test binaries here share the shape and the reason.
     {
         let mut ready = false;
-        for _ in 0..300 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
             if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
                 ready = true;
                 break;

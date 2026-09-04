@@ -504,20 +504,21 @@ fn set_server_handle(srv: &Arc<Server>) {
 /// v4-only (`0.0.0.0:port`) when IPv6 sockets aren't available. Shared by the
 /// initial boot and the recv-loop rebuild path so both bind identically.
 fn build_http_server(port: u16) -> Result<Arc<Server>, String> {
-    // Dual-stack bind. `[::]:port` accepts IPv6 AND (on Linux, by default)
-    // IPv4-mapped connections to the same socket. Without this, a v4-only
-    // `0.0.0.0:port` bind silently breaks Fly.io — their fly-proxy reaches
-    // machines via the private IPv6 net, sees no listener, and reports "no
-    // known healthy instances". Falls back to v4-only when v6 isn't available
-    // (older test environments without IPv6 socket support).
-    let addr = format!("[::]:{port}");
-    let server = match Server::http(&addr) {
-        Ok(s) => s,
-        Err(_) => {
-            let v4_addr = format!("0.0.0.0:{port}");
-            Server::http(&v4_addr).map_err(|e| format!("Failed to start server: {e}"))?
-        }
-    };
+    // Dual-stack bind. `[::]:port` accepts IPv6 AND IPv4-mapped connections on
+    // the same socket. Without this, a v4-only `0.0.0.0:port` bind silently
+    // breaks Fly.io — their fly-proxy reaches machines via the private IPv6
+    // net, sees no listener, and reports "no known healthy instances".
+    //
+    // Bind it ourselves through `bind_dual_stack_tcp` rather than handing the
+    // address to tiny_http. `Server::http("[::]:port")` binds through libstd,
+    // which inherits the platform's IPV6_V6ONLY default — 1 on Windows — and
+    // that yields a listener no IPv4 client can reach, 127.0.0.1 included.
+    // `bind_dual_stack_tcp` clears the option explicitly and keeps the
+    // v4-only fallback for environments without IPv6.
+    let listener =
+        crate::bind_dual_stack_tcp(port).map_err(|e| format!("Failed to start server: {e}"))?;
+    let server = Server::from_listener(listener, None)
+        .map_err(|e| format!("Failed to start server: {e}"))?;
     Ok(Arc::new(server))
 }
 

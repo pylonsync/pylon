@@ -165,7 +165,10 @@ fn start_stub_server(call_reached: Arc<AtomicBool>) -> u16 {
     // product bug. Fail here instead, naming the port.
     {
         let mut ready = false;
-        for _ in 0..300 {
+        // Bound the wall clock, not the attempt count: a failed connect is
+        // not instant on every platform (see csrf_form_route.rs).
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while std::time::Instant::now() < deadline {
             if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
                 ready = true;
                 break;

@@ -101,7 +101,10 @@ fn relay_token_404s_when_no_relay_is_configured() {
     });
     let host_port = format!("127.0.0.1:{port}");
     let mut ready = false;
-    for _ in 0..300 {
+    // Bound the wall clock, not the attempt count: a failed connect is
+    // not instant on every platform (see csrf_form_route.rs).
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
         if TcpStream::connect(&host_port).is_ok() {
             ready = true;
             break;

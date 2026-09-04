@@ -114,7 +114,10 @@ fn start_server() -> u16 {
         let fn_ops: std::sync::Arc<dyn pylon_router::FnOps> = std::sync::Arc::new(NoopFnOps);
         let _ = pylon_runtime::server::start_server_for_test_with_fn_ops(rt, port, fn_ops);
     });
-    for _ in 0..300 {
+    // Bound the wall clock, not the attempt count: a failed connect is
+    // not instant on every platform (see csrf_form_route.rs).
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
         if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             return port;
         }
