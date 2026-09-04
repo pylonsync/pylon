@@ -162,7 +162,23 @@ export interface PageProps<
   TParams extends Record<string, string> = Record<string, string>,
   TSearchParams extends Record<string, string> = Record<string, string>,
 > {
-  /** The incoming URL path (e.g. `/blog/hello-world`). */
+  /**
+   * The incoming request PATH — no query string, no origin
+   * (e.g. `/blog/hello-world`). The query arrives separately, already
+   * parsed, as `searchParams`.
+   */
+  pathname: string;
+  /**
+   * The request path. Same value as `pathname`.
+   *
+   * @deprecated Use `pathname`, or `searchParams` for the query. The name is
+   * a trap: a prop called `url` reads as if it carries the query string, so
+   * `new URL(props.url).searchParams.get("next")` looks correct, compiles,
+   * and silently returns null on every request — the runtime split the query
+   * off before the render. That exact mistake shipped a production auth bug
+   * (a login page dropped `?next=`, stranding every OIDC sign-in). Kept so
+   * existing pages keep working; it will be removed in a later release.
+   */
   url: string;
   /** Dynamic-segment matches keyed by name (e.g. `{ slug: "hello-world" }`). */
   params: TParams;

@@ -58,7 +58,11 @@ export interface RenderRouteMessage {
   layouts?: string[];
   /** The matched route pattern (e.g. `/blog/:slug`). */
   route_path: string;
-  /** The incoming URL path (e.g. `/blog/hello-world`). */
+  /**
+   * The incoming request PATH, query already stripped by the router (it
+   * passes `path_only_owned`). Reaches userland as BOTH `pathname` (use
+   * this) and `url` (deprecated); the query is `search_params`.
+   */
   url: string;
   /** Dynamic-segment matches keyed by name (e.g. `{slug: "hello-world"}`). */
   params: Record<string, string>;
@@ -2071,6 +2075,10 @@ export function buildHydrationTail(args: {
     // collapsed binary auth bit. (params/searchParams are keyed by pathname; a
     // bucket request has no query, so searchParams is empty.)
     serializableProps = {
+      // Both, and for the same reason they are both on props: a bucketed page
+      // that got `url` but not `pathname` would hydrate with one of the two
+      // undefined, which is the same trap in a new place.
+      pathname: restProps.pathname ?? restProps.url,
       url: restProps.url,
       params: restProps.params,
       searchParams: restProps.searchParams,
@@ -3245,6 +3253,13 @@ export async function handleRenderRoute(
     );
 
     props = {
+      // Both name the same value: the request PATH, with no query string.
+      // `pathname` is the name to use; `url` is kept for compatibility and
+      // is deprecated — see the doc comments on PageProps. The old name is a
+      // trap, because a prop called `url` reads as if it carries the query,
+      // and code that does `new URL(props.url).searchParams.get(x)` silently
+      // finds nothing forever instead of failing.
+      pathname: msg.url,
       url: msg.url,
       params: msg.params,
       searchParams: msg.search_params,
@@ -3270,6 +3285,7 @@ export async function handleRenderRoute(
     const bucketOptIn = (mod as any).cache === "auth-bucketed";
     const bucketTailBase = bucketOptIn
       ? {
+          pathname: msg.url,
           url: msg.url,
           params: jsonClone(msg.params),
           searchParams: jsonClone(msg.search_params),

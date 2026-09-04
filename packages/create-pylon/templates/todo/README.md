@@ -40,7 +40,7 @@ To require real accounts instead, enable email/password (built in, against a
 ## Add a route
 
 Drop a file at `app/about/page.tsx` and visit `/about`. Pages receive
-`{ url, params, searchParams, auth, response, serverData }` from the SSR
+`{ pathname, params, searchParams, auth, response, serverData }` from the SSR
 runtime — all typed via `PageProps` from `@pylonsync/react`.
 
 ## Add data
