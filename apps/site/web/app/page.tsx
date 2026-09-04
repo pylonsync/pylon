@@ -1,0 +1,54 @@
+import type { Metadata } from "@pylonsync/react";
+import { MarketingPage } from "@pylon-cloud/ui/components/marketing-home";
+import { JsonLd } from "../lib/agent/json-ld";
+import { homepageGraph } from "../lib/agent/jsonld";
+
+// Auth-bucketed output cache: the runtime keeps TWO identity-free shells
+// (signed-in / signed-out) keyed on the binary `session.exists` bit and picks
+// the right one per request — so the signed-in nav CTA is correct in the
+// FIRST server-rendered byte (no client-side swap, no flash) while renders
+// still hit the origin cache. Reading full `props.auth` here would make the
+// output identity-specific and kill caching entirely — only read
+// `session.exists`. (On Cloudflare Free the HTML passes through to the
+// origin's ~ms bucketed cache; a Business+ plan + cookie-keyed cache rule
+// would edge-cache both shells with no code change.)
+export const cache = "auth-bucketed";
+export const revalidate = 3600; // 1 hour
+
+export const metadata: Metadata = {
+	title: "Pylon by Stack0: full-stack framework for coding agents",
+	description:
+		"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly. SQLite by default, Postgres when you need it.",
+	canonical: "https://www.pylonsync.com",
+	openGraph: {
+		title: "Pylon by Stack0: full-stack framework for coding agents",
+		description:
+			"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly.",
+		url: "https://www.pylonsync.com",
+		siteName: "Pylon by Stack0",
+		type: "website",
+	},
+	twitter: {
+		card: "summary_large_image",
+		title: "Pylon by Stack0: full-stack framework for coding agents",
+		description:
+			"Pylon is a full-stack framework built for agents to ship high-performance and secure apps quickly.",
+	},
+};
+
+export default function HomePage({
+	session,
+}: {
+	session?: { exists: boolean };
+}) {
+	return (
+		<>
+			{/* Machine-readable identity: the site, the organization that
+			    publishes it, and the framework itself, as one linked graph. A
+			    parser that reads only this block can answer "what is this, who
+			    makes it, what does it cost, how do I contact them". */}
+			<JsonLd graph={homepageGraph()} />
+			<MarketingPage initialSignedIn={Boolean(session?.exists)} />
+		</>
+	);
+}

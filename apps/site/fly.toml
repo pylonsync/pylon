@@ -1,0 +1,96 @@
+# Fly app for pylonsync.com — the Pylon framework marketing site.
+#
+# Split out of pylon-cloud so the two brands stop sharing a deployment: a Pylon
+# app resolves one canonical host, and a marketing copy edit should not redeploy
+# the control plane that provisions customer machines and runs billing.
+#
+# Provision (org slug is pylon-280, not "pylon" — `fly orgs list` to confirm):
+#   fly apps create pylonsync-site -o pylon-280
+#
+# Certs for pylonsync.com and www.pylonsync.com are issued here. Both hostnames
+# are proxied through Cloudflare, so each one needs its own
+# _fly-ownership.<host> TXT (app-qjg13nd) on top of the _acme-challenge CNAME —
+# a TXT name holds several values, so pylon-cloud's token can sit alongside
+# ours, but a name holds only ONE CNAME, which is why pylon-cloud gave up
+# renewal on these two when they moved here.
+#
+# NOTE the control plane still owns the /api surface these hostnames used to
+# serve. Anything that outlived the cutover — a CLI older than 0.3.357, a
+# webhook registered before the move — reaches this app and gets HTML where it
+# expected JSON.
+#
+# First deploy (context is the REPO ROOT):
+#   fly deploy --config apps/pylonsync-site/fly.toml \
+#              --dockerfile apps/pylonsync-site/Dockerfile
+#
+# NO SECRETS REQUIRED. The app declares zero entities, so there is no
+# DATABASE_URL, no SECRETS_MASTER_KEY, and no volume. Two optional overrides:
+#   PYLON_CONTROL_PLANE_URL  where functions/joinUpdates.ts relays the footer
+#                            signup — the control plane stays the single owner
+#                            of EmailSignup + the Slack notifier
+#                            (default https://www.usesmallware.com)
+#   REVTRAIL_BASE_URL        analytics upstream (default https://revtrail.pyln.dev)
+
+app = "pylonsync-site"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Same reasoning as the control plane: the default "canary" strategy launches a
+# tester alongside the live machine and promotes by stopping the old one, and on
+# a small deploy that stop+swap dance has repeatedly left a Fly machine lease
+# held long enough to 502 live requests for 30–60s. "immediate" trades that for
+# a brief cold-start window per deploy.
+[deploy]
+  strategy = "immediate"
+
+[env]
+  PORT = "4321"
+  PYLON_DEV_MODE = "false"
+  # www is canonical, so the runtime 308s the apex to it. This drives no other
+  # redirect: `canonical_redirect_target` (crates/runtime/src/server.rs) rewrites
+  # only the exact apex↔www sibling of this value. It ALSO feeds the trusted-host
+  # allowlist that keys the SSR/ISR cache, which is why it has to name the host
+  # visitors actually arrive on rather than the .fly.dev name.
+  PYLON_CANONICAL_HOST = "www.pylonsync.com"
+  # /pricing 301s to Smallware, which is a different origin. The runtime's
+  # open-redirect guard refuses an off-site Location unless the host is named
+  # here — so name exactly the one sibling property we redirect to, and
+  # nothing wildcard.
+  PYLON_TRUSTED_HOSTS = "www.usesmallware.com"
+
+[http_service]
+  internal_port = 4321
+  force_https = true
+  # Unlike the control plane this app MAY sleep. It holds no sessions, runs no
+  # webhooks, and serves no deploy backplane — a cold start costs one visitor
+  # one slow page load instead of taking customer infrastructure with it. Fly's
+  # "stop" (not "suspend") because a suspended machine resuming under an
+  # unbounded fetch is what stalled the model-proxy for minutes.
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  # One always-warm machine so the common case is never a cold start; the
+  # autostop above only matters if Fly scales beyond it.
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  grace_period = "30s"
+  method = "GET"
+  path = "/health"
+
+# No [mounts]. Nothing here persists: no entities, no sessions, no uploads. The
+# SSR/ISR cache is a rebuildable artifact and lives on the container's writable
+# layer, which is exactly right for it.
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 512

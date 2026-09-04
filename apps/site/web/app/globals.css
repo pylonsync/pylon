@@ -1,0 +1,908 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Pylon compiles Tailwind v4 via @tailwindcss/cli (not next/postcss), so the
+   content sources are declared here explicitly. `../` is web/, covering every
+   className in web/app. */
+@source "../**/*.{tsx,ts,jsx,js,mdx}";
+
+/* Most of this site's markup lives in @pylon-cloud/ui, OUTSIDE web/ — without
+   scanning it every marketing class would be purged and the site would render
+   unstyled. The package sits at a different depth in the two environments:
+   `../../../../packages` from the repo checkout, `../../packages` inside the
+   image (the Dockerfile copies it to /app/packages/ui). Both globs are listed
+   because Tailwind silently ignores a @source that matches nothing, so the
+   inapplicable one costs nothing and the applicable one always fires. */
+@source "../../../../packages/ui/src/**/*.{tsx,ts}";
+@source "../../packages/ui/src/**/*.{tsx,ts}";
+
+/* ===========================================================================
+   Smallware — dashboard design system (v2)
+   ---------------------------------------------------------------------------
+   See ./DESIGN.md for the full system (color/type/spacing/motion/voice rules).
+   That doc is the source of truth; these tokens are its implementation.
+
+   Inspired by PlanetScale's dashboard: clean neutrals, soft-rounded cards
+   with hairline borders, tinted icon backgrounds for visual hierarchy.
+   The brand accent is used sparingly — the surface
+   speaks through neutrals, status colors, and tinted category icons.
+   The palette is cool by mandate: no warm/orange decorative color. The only
+   sanctioned warm signal is the `warn` status (muted amber), always paired
+   with an icon + text.
+   Light + dark, both first-class.
+
+   Tokens use Tailwind v4 @theme so they're picked up by utility generation
+   AND available as CSS variables (--color-bg, etc.) for arbitrary values.
+   =========================================================================== */
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  /* Type ----------------------------------------------------------------- */
+  /* "Geist" / "Geist Mono" are SELF-HOSTED via the framework font primitive
+     (fonts: [font({...})] in app.ts): the build fetches the families once,
+     serves the woff2 same-origin under /_pylon/build/, and injects
+     @font-face + zero-CLS fallback faces + the --font-geist-sans /
+     --font-geist-mono variables into every SSR head. The var() fallbacks
+     below only matter if the injection is somehow absent (e.g. a build
+     without egress) — they collapse to system fonts instead of breaking. */
+  --font-sans: var(
+    --font-geist-sans,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif
+  );
+  --font-mono: var(
+    --font-geist-mono,
+    ui-monospace,
+    "SFMono-Regular",
+    "Menlo",
+    "Monaco",
+    "Consolas",
+    monospace
+  );
+  --font-display: var(--font-geist-sans, ui-sans-serif, system-ui, sans-serif);
+
+  /* Light mode. Shared with the Stack0 marketing system. */
+  --color-paper: #f8f7f3;
+  --color-paper-1: #f1efe9;
+  --color-paper-2: #e9e6df;
+  --color-rule: #dedbd3;
+  --color-rule-soft: #e9e6df;
+  --color-ink: #171715;
+  --color-ink-2: #4f4e49;
+  --color-ink-3: #77756e;
+  --color-ink-4: #9b988f;
+
+  /* Pylon accent. Use it for actions and code evidence only. */
+  --color-brand: #315f56;
+  --color-brand-hover: #234b43;
+  --color-brand-soft: #dce8e3;
+  --color-brand-fg: #ffffff;
+
+  /* Status — tinted-pill style, soft backgrounds */
+  --color-status-live: #059669;        /* emerald-600 */
+  --color-status-live-soft: #d1fae5;   /* emerald-100 */
+  --color-status-build: #1d4ed8;       /* blue-700 — "in progress", deliberately
+                                          not the brand accent any more */
+  --color-status-build-soft: #dbeafe;  /* blue-100 */
+  --color-status-warn: #b45309;        /* amber-700 */
+  --color-status-warn-soft: #fef3c7;   /* amber-100 */
+  --color-status-fail: #b91c1c;        /* red-700 */
+  --color-status-fail-soft: #fee2e2;   /* red-100 */
+  --color-status-idle: #71717a;        /* zinc-500 */
+  --color-status-idle-soft: #f4f4f5;   /* zinc-100 */
+
+  /* Category accents — for icon tiles, stat cards, illustrations.
+     Each is a (fg, soft-bg) pair. Use sparingly: 4-6 across a page max.
+     COOL ONLY — no orange/amber here (see DESIGN.md). Warm = state, and
+     state lives in the status-* scale above, never in a category accent. */
+  --color-accent-blue: #2563eb;
+  --color-accent-blue-soft: #dbeafe;
+  --color-accent-purple: #7c3aed;
+  --color-accent-purple-soft: #ede9fe;
+  --color-accent-green: #059669;
+  --color-accent-green-soft: #d1fae5;
+  --color-accent-pink: #db2777;
+  --color-accent-pink-soft: #fce7f3;
+
+  /* Radii — softer, dashboard-y. */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+
+  /* Shadows — subtle elevation for cards and dropdowns. */
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+  --shadow-card-hover: 0 1px 3px 0 rgb(0 0 0 / 0.08), 0 1px 2px -1px rgb(0 0 0 / 0.04);
+  --shadow-dropdown: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.05);
+
+  /* Motion */
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+}
+
+/* Dark mode — true dark neutrals with the same accent palette --------------
+   Engaged via .dark on <html>. next-themes handles toggling. */
+.dark {
+  --color-paper: #09090b;        /* zinc-950 */
+  --color-paper-1: #18181b;      /* zinc-900 — sidebar, sunken */
+  --color-paper-2: #27272a;      /* zinc-800 — hover */
+  --color-rule: #27272a;         /* zinc-800 hairlines */
+  --color-rule-soft: #1f1f23;
+  --color-ink: #fafafa;          /* zinc-50 */
+  --color-ink-2: #d4d4d8;        /* zinc-300 */
+  --color-ink-3: #a1a1aa;        /* zinc-400 */
+  --color-ink-4: #71717a;        /* zinc-500 */
+
+  --color-brand: #a78bfa;        /* violet-400 — lifted for dark paper */
+  --color-brand-hover: #c4b5fd;  /* violet-300 */
+  --color-brand-soft: rgba(167, 139, 250, 0.12);
+  --color-brand-fg: #09090b;
+
+  --color-status-live: #34d399;
+  --color-status-live-soft: #064e3b33;
+  --color-status-build: #60a5fa;
+  --color-status-build-soft: #1e3a8a33;
+  --color-status-warn: #fbbf24;
+  --color-status-warn-soft: #78350f33;
+  --color-status-fail: #f87171;
+  --color-status-fail-soft: #7f1d1d33;
+  --color-status-idle: #71717a;
+  --color-status-idle-soft: #27272a;
+
+  --color-accent-blue: #60a5fa;
+  --color-accent-blue-soft: #1e3a8a33;
+  --color-accent-purple: #a78bfa;
+  --color-accent-purple-soft: #4c1d9533;
+  --color-accent-green: #34d399;
+  --color-accent-green-soft: #064e3b33;
+  --color-accent-pink: #f472b6;
+  --color-accent-pink-soft: #831843;
+
+  --shadow-card: 0 1px 2px 0 rgb(0 0 0 / 0.3);
+  --shadow-card-hover: 0 1px 3px 0 rgb(0 0 0 / 0.5), 0 1px 2px -1px rgb(0 0 0 / 0.3);
+  --shadow-dropdown: 0 10px 15px -3px rgb(0 0 0 / 0.4), 0 4px 6px -4px rgb(0 0 0 / 0.3);
+}
+
+@theme inline {
+  /* Re-export everything as Tailwind tokens so utility classes resolve */
+  --color-background: var(--color-paper);
+  --color-foreground: var(--color-ink);
+  --color-card: var(--color-paper);
+  --color-card-foreground: var(--color-ink);
+  --color-popover: var(--color-paper);
+  --color-popover-foreground: var(--color-ink);
+  --color-primary: var(--color-ink);              /* primary = ink, not brand — PS-style */
+  --color-primary-foreground: var(--color-paper);
+  --color-secondary: var(--color-paper-1);
+  --color-secondary-foreground: var(--color-ink);
+  --color-muted: var(--color-paper-1);
+  --color-muted-foreground: var(--color-ink-3);
+  --color-accent: var(--color-paper-1);
+  --color-accent-foreground: var(--color-ink);
+  --color-destructive: var(--color-status-fail);
+  --color-destructive-foreground: #ffffff;
+  --color-border: var(--color-rule);
+  --color-input: var(--color-rule);
+  --color-ring: var(--color-brand);
+  --radius: var(--radius-md);
+}
+
+/* Base resets ------------------------------------------------------------- */
+* {
+  border-color: var(--color-rule);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+  font-feature-settings:
+    "ss01" on,
+    "cv11" on;
+}
+
+/* Text wrapping — balance headings so the last line isn't a lonely orphan,
+   and prettify body copy to avoid single-word last lines. Browser-capped to
+   a few lines, so this is safe to apply at the element level. */
+h1,
+h2,
+h3,
+h4 {
+  text-wrap: balance;
+}
+p {
+  text-wrap: pretty;
+}
+
+html,
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Mono blocks get optical sizing */
+code,
+pre,
+.font-mono {
+  font-feature-settings:
+    "calt" 0,
+    "zero" on;
+  font-variant-ligatures: none;
+}
+
+::selection {
+  background: var(--color-brand-soft);
+  color: var(--color-ink);
+}
+
+/* Scrollbar — slim, dashboard-quiet */
+@media (pointer: fine) {
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-rule);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--color-ink-4);
+    background-clip: content-box;
+    border: 2px solid transparent;
+  }
+}
+
+/* ===========================================================================
+   Signature pieces
+   =========================================================================== */
+
+/* Soft dot-grid backdrop. Used in empty states + a hint of texture on
+   the topology card. Lower contrast than the old blueprint grid. */
+.bg-dotgrid {
+  background-image: radial-gradient(
+    var(--color-rule) 1px,
+    transparent 1px
+  );
+  background-size: 16px 16px;
+  background-position: 0 0;
+}
+
+/* Status pulse — a quiet, slow heartbeat for in-progress states. */
+@keyframes pylon-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.animate-pylon-pulse {
+  animation: pylon-pulse 1.6s ease-in-out infinite;
+}
+
+/* Indeterminate progress bar — slides across a building deployment row. */
+@keyframes pylon-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(400%);
+  }
+}
+.animate-pylon-progress {
+  animation: pylon-progress 1.8s var(--ease-out-quart) infinite;
+}
+
+/* Subtle reveal for page mounts — used sparingly */
+@keyframes pylon-rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-pylon-rise {
+  animation: pylon-rise 280ms var(--ease-out-quart) both;
+}
+
+/* Focus ring — brand, thin, offset. */
+:focus-visible {
+  outline: none;
+}
+[data-focus-ring]:focus-visible,
+button:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+[data-slot="input"]:focus-visible,
+[data-slot="select-trigger"]:focus-visible {
+  outline: none;
+}
+
+/* ===========================================================================
+   Marketing site (pylonsync.com)
+   ---------------------------------------------------------------------------
+   The public marketing pages (homepage + /product, /solutions, /vs, /pricing,
+   /developers, /skill) share the dashboard token system but want a few of
+   their own touches. Keeping this here ALSO content-bumps the compiled CSS
+   filename whenever marketing styles change — the asset hash tracks this file,
+   so a marketing-only change that didn't touch globals.css would otherwise be
+   served stale from cache.
+   =========================================================================== */
+
+/* Smooth in-page anchor jumps on the marketing pages. */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Elevated shadow for the mega-menu dropdown panel + cards. */
+@theme {
+  --shadow-mega: 0 24px 48px -12px rgb(0 0 0 / 0.5);
+}
+
+/* ===========================================================================
+   Smallware: editorial short-run software (/smallware)
+   ---------------------------------------------------------------------------
+   A separate brand world scoped to `.smallware`: engraved editorial imagery,
+   deep navy, cool paper, cobalt, and one fluorescent coral printing plate.
+
+   Tokens are prefixed `--sw-*` and declared on the scope rather than in
+   @theme, because @theme is global and these must not become site-wide
+   utilities. Markup reads them as arbitrary values — `text-[var(--sw-ink)]` —
+   which is the same idiom the marketing pages already use for `--color-*`.
+   =========================================================================== */
+
+.smallware {
+  --sw-paper: #f3eee3;
+  --sw-paper-2: #e8e1d3;
+  --sw-card: #faf7ef;
+  --sw-ink: #222821;
+  --sw-ink-2: #4e554d;
+  --sw-ink-3: #636b62;
+  --sw-ink-4: #636b62;
+  --sw-rule: #d3cabb;
+  --sw-rule-soft: #e2dbcf;
+  --sw-blue: #0d5868;
+  --sw-navy: #0c3d4b;
+  --sw-coral: #b74a1a;
+  --sw-coral-ink: #9c3e16;
+  --sw-pink: #b74a1a;
+  --sw-over: #5a513b;
+  --sw-live: #237050;
+  --sw-hero-ink: #f3e4ce;
+  --sw-hero-muted: rgba(243, 228, 206, 0.76);
+  --sw-code-ink: #e8dbc4;
+
+  background: var(--sw-paper);
+  color: var(--sw-ink);
+  font-family: var(
+    --font-archivo,
+    "Helvetica Neue",
+    Arial,
+    ui-sans-serif,
+    system-ui,
+    sans-serif
+  );
+  font-variant-numeric: tabular-nums;
+}
+
+.dark .smallware {
+  --sw-paper: #151a18;
+  --sw-paper-2: #1d2421;
+  --sw-card: #242b27;
+  --sw-ink: #f1e5cf;
+  --sw-ink-2: #cfc4ad;
+  --sw-ink-3: #afa894;
+  --sw-ink-4: #9c9685;
+  --sw-rule: #3b4540;
+  --sw-rule-soft: #303934;
+  --sw-blue: #62a0ad;
+  --sw-coral: #b74a1a;
+  --sw-coral-ink: #e6814e;
+  --sw-pink: #d66835;
+  --sw-live: #52b483;
+}
+
+/* Borders and focus rings have to be declared HERE rather than with Tailwind
+   utilities in the markup, and the reason is worth writing down.
+   `@import "tailwindcss"` puts every utility in the `utilities` cascade layer.
+   The base resets further up this file — `* { border-color: … }` and the
+   `a:focus-visible { outline: … }` block — are UNLAYERED, and unlayered styles
+   beat layered ones no matter what their specificity is. So a
+   `border-[color:var(--sw-ink)]` in the markup compiles correctly, loads
+   correctly, and is then silently overruled by the `*` reset.
+   These rules are unlayered too, and outrank the resets on specificity
+   (`.smallware *` = 0,1,0 vs `*` = 0,0,0), so the sub-brand gets its own
+   hairline and its own focus ring. Anything that needs a border OTHER than the
+   default hairline wears one of the `sw-b-*` classes below. */
+.smallware *,
+.smallware ::before,
+.smallware ::after {
+  border-color: var(--sw-rule);
+}
+.smallware .sw-b-ink {
+  border-color: var(--sw-ink);
+}
+
+.smallware a:focus-visible,
+.smallware button:focus-visible,
+.smallware input:focus-visible,
+.smallware summary:focus-visible,
+.smallware [role="button"]:focus-visible {
+  outline: 2px solid var(--sw-coral);
+  outline-offset: 3px;
+}
+
+.smallware .sw-display {
+  font-family: var(--font-newsreader, Georgia, "Times New Roman", serif);
+  font-weight: 520;
+}
+
+/* Ledger face — part numbers, user counts, statuses, eyebrows. Mono is
+   load-bearing here the same way it is in the dashboard: it's what makes a
+   list of tools read as a parts catalog rather than a feature grid. */
+.smallware .sw-mono {
+  font-family: var(
+    --font-plex-mono,
+    ui-monospace,
+    "SFMono-Regular",
+    "Menlo",
+    monospace
+  );
+  font-variant-ligatures: none;
+}
+
+.smallware .sw-hero {
+  background: var(--sw-navy);
+}
+
+.smallware .sw-hero-art {
+  filter: saturate(0.96) contrast(1.03);
+  transform: scale(1.018);
+  animation: sw-art-arrive 1.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.smallware .sw-hero-poster {
+  display: none;
+}
+
+.smallware .sw-hero-shade {
+  background:
+    linear-gradient(
+      90deg,
+      rgba(6, 34, 42, 0.98) 0%,
+      rgba(6, 34, 42, 0.9) 34%,
+      rgba(6, 34, 42, 0.36) 67%,
+      rgba(6, 34, 42, 0.08) 100%
+    ), linear-gradient(0deg, rgba(6, 34, 42, 0.32), transparent 50%);
+}
+
+.smallware .sw-hero-title,
+.smallware .sw-hero-copy,
+.smallware .sw-hero-actions {
+  animation: sw-copy-arrive 700ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.smallware .sw-hero-title {
+  animation-delay: 80ms;
+}
+
+.smallware .sw-hero-copy {
+  animation-delay: 150ms;
+}
+
+.smallware .sw-hero-actions {
+  animation-delay: 220ms;
+}
+
+.smallware .sw-catalog-tabs {
+  scrollbar-width: thin;
+  scrollbar-color: var(--sw-rule) transparent;
+  scroll-snap-type: x proximity;
+}
+
+.smallware .sw-catalog-tab {
+  flex: none;
+  scroll-snap-align: start;
+  border: 1px solid var(--sw-rule);
+  border-radius: 999px;
+  background: var(--sw-card);
+  padding: 10px 16px;
+  color: var(--sw-ink-2);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1;
+  white-space: nowrap;
+  transition:
+    background-color 160ms ease,
+    border-color 220ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.smallware .sw-catalog-tab:hover {
+  border-color: var(--sw-blue);
+  color: var(--sw-ink);
+}
+
+.smallware .sw-catalog-tab:active {
+  transform: scale(0.98);
+}
+
+.smallware .sw-catalog-tab.is-active {
+  border-color: var(--sw-navy);
+  background: var(--sw-navy);
+  color: var(--sw-hero-ink);
+}
+
+.smallware .sw-catalog-stage {
+  display: grid;
+  overflow: hidden;
+  /* The prompt reads left, the app it produced reads right. The app side is
+     wider because its shape changes per example — a week grid and a chart need
+     the room that a quotation does not. */
+  grid-template-columns: minmax(260px, 0.72fr) minmax(0, 1.28fr);
+  min-height: 470px;
+  border: 1px solid var(--sw-rule);
+  border-radius: 24px;
+  background: var(--sw-card);
+}
+
+.smallware .sw-catalog-preview {
+  min-width: 0;
+  padding: 28px;
+  background:
+    radial-gradient(
+      circle at 12% 18%,
+      color-mix(in srgb, var(--sw-coral) 14%, transparent),
+      transparent 32%
+    ),
+    var(--sw-paper-2);
+  animation: sw-preview-in 180ms ease-out both;
+}
+
+/* ── Catalog self-play ────────────────────────────────────────────────
+   The prompt types itself, then the app assembles: the window rises, and
+   its content cascades in top to bottom. The cascade targets the first two
+   levels under .sw-app-content generically, so every shape (queue, chart,
+   board…) animates without per-shape wiring. Both levels compound, which
+   reads as rows arriving slightly after their container — intended.
+   The section's reduced-motion block below zeroes all of this. */
+.smallware .sw-caret {
+  display: inline-block;
+  width: 3px;
+  height: 0.95em;
+  margin-left: 3px;
+  vertical-align: -0.12em;
+  background: var(--sw-coral);
+  animation: sw-blink 900ms steps(1) infinite;
+}
+@keyframes sw-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.smallware .sw-app-play {
+  animation: sw-app-in 460ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+@keyframes sw-app-in {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.988);
+  }
+}
+.smallware .sw-app-play .sw-app-content > * {
+  animation: sw-app-item 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: 0.16s;
+}
+.smallware .sw-app-play .sw-app-content > *:nth-child(2) {
+  animation-delay: 0.24s;
+}
+.smallware .sw-app-play .sw-app-content > *:nth-child(3) {
+  animation-delay: 0.32s;
+}
+.smallware .sw-app-play .sw-app-content > * > * {
+  animation: sw-app-item 400ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: 0.3s;
+}
+.smallware .sw-app-play .sw-app-content > * > *:nth-child(2) {
+  animation-delay: 0.38s;
+}
+.smallware .sw-app-play .sw-app-content > * > *:nth-child(3) {
+  animation-delay: 0.46s;
+}
+.smallware .sw-app-play .sw-app-content > * > *:nth-child(4) {
+  animation-delay: 0.54s;
+}
+.smallware .sw-app-play .sw-app-content > * > *:nth-child(5) {
+  animation-delay: 0.62s;
+}
+.smallware .sw-app-play .sw-app-content > * > *:nth-child(n + 6) {
+  animation-delay: 0.7s;
+}
+@keyframes sw-app-item {
+  from {
+    opacity: 0;
+    transform: translateY(7px);
+  }
+}
+
+/* Chrome's white-space is now a shorthand over text-wrap-mode, so the
+   UNLAYERED `p { text-wrap: pretty }` base reset overrides the LAYERED
+   `.truncate` utility's white-space: nowrap — same cascade-layer trap as
+   border-color above. Rescope nowrap here so truncation works. */
+.smallware .truncate {
+  white-space: nowrap;
+}
+
+/* Skeleton shown in the window while the prompt is still typing. */
+.smallware .sw-skel {
+  border-radius: 5px;
+  background: #e7eae3;
+  animation: sw-skel-pulse 1.3s ease-in-out infinite;
+}
+@keyframes sw-skel-pulse {
+  50% {
+    opacity: 0.55;
+  }
+}
+
+/* Collapsible row for the permissions demo: grid-template-rows transitions
+   cleanly between 1fr and 0fr, which height:auto cannot do. */
+.smallware .sw-vis {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows 420ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 320ms ease;
+}
+.smallware .sw-vis[data-hidden="true"] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.smallware .sw-vis > * {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.smallware .sw-price-card {
+  display: flex;
+  min-height: 330px;
+  flex-direction: column;
+  justify-content: space-between;
+  border: 1px solid var(--sw-rule);
+  border-radius: 22px;
+  background: var(--sw-card);
+  padding: 28px;
+}
+
+.smallware .sw-price-card-featured {
+  border-color: var(--sw-navy);
+  background: var(--sw-navy);
+}
+
+@keyframes sw-copy-arrive {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sw-art-arrive {
+  from {
+    opacity: 0.78;
+    transform: scale(1.06);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1.018);
+  }
+}
+
+@keyframes sw-preview-in {
+  from {
+    opacity: 0.68;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (max-width: 1023px) {
+  .smallware .sw-hero-shade {
+    background:
+      linear-gradient(
+        90deg,
+        rgba(6, 34, 42, 0.98) 0%,
+        rgba(6, 34, 42, 0.87) 60%,
+        rgba(6, 34, 42, 0.36) 100%
+      ), linear-gradient(0deg, rgba(6, 34, 42, 0.7), transparent 62%);
+  }
+
+  .smallware .sw-catalog-stage {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 639px) {
+  .smallware .sw-hero-art {
+    object-position: 68% center;
+    opacity: 0.76;
+  }
+
+  .smallware .sw-hero-shade {
+    background:
+      linear-gradient(
+        90deg,
+        rgba(6, 34, 42, 0.98) 0%,
+        rgba(6, 34, 42, 0.82) 72%,
+        rgba(6, 34, 42, 0.55) 100%
+      ), linear-gradient(0deg, rgba(6, 34, 42, 0.88) 0%, transparent 65%);
+  }
+
+  .smallware .sw-catalog-stage {
+    min-height: 0;
+    border-radius: 18px;
+  }
+
+  .smallware .sw-catalog-preview {
+    padding: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .smallware .sw-hero-video {
+    display: none;
+  }
+
+  .smallware .sw-hero-poster {
+    display: block;
+  }
+
+  .smallware *,
+  .smallware ::before,
+  .smallware ::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* css-hash-bust: Smallware editorial brand, Newsreader display, engraved art */
+
+:root {
+  --panel-open-dur: 400ms;
+  --panel-close-dur: 350ms;
+  --panel-translate-y: 100px;
+  --panel-blur: 2px;
+  --panel-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --learn-shift: 2px;
+  --learn-spread: 8deg;
+  --learn-in: 350ms;
+  --learn-out: 350ms;
+  --learn-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-panel-slide {
+  transform: translateY(var(--panel-translate-y));
+  opacity: 0;
+  filter: blur(var(--panel-blur));
+  pointer-events: none;
+  transition:
+    transform var(--panel-close-dur) var(--panel-ease),
+    opacity   var(--panel-close-dur) var(--panel-ease),
+    filter    var(--panel-close-dur) var(--panel-ease);
+  will-change: transform, opacity, filter;
+}
+.t-panel-slide[data-open="true"] {
+  transform: translateY(0);
+  opacity: 1;
+  filter: blur(0);
+  pointer-events: auto;
+  transition:
+    transform var(--panel-open-dur) var(--panel-ease),
+    opacity   var(--panel-open-dur) var(--panel-ease),
+    filter    var(--panel-open-dur) var(--panel-ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-panel-slide { transition: none !important; }
+}
+
+.template-detail-panel {
+  --panel-translate-y: 16px;
+}
+
+/* The capability chapter stays readable before hydration. On large screens,
+   the active row gets the panel-reveal emphasis while nearby rows remain
+   visible. This avoids the blank mobile state caused by hiding rows before the
+   observer starts. */
+@media (min-width: 1024px) {
+  .feature-ledger-copy,
+  .feature-ledger-visual {
+    transition:
+      transform var(--panel-open-dur) var(--panel-ease),
+      opacity var(--panel-open-dur) var(--panel-ease),
+      filter var(--panel-open-dur) var(--panel-ease);
+    will-change: transform, opacity, filter;
+  }
+
+  .feature-ledger-row[data-active="false"] .feature-ledger-copy {
+    transform: translateY(12px);
+    opacity: 0.58;
+    filter: blur(1px);
+  }
+
+  .feature-ledger-row[data-active="false"] .feature-ledger-visual {
+    transform: translateY(16px);
+    opacity: 0.64;
+    filter: blur(var(--panel-blur));
+  }
+
+  .feature-ledger-row[data-active="true"] .feature-ledger-copy,
+  .feature-ledger-row[data-active="true"] .feature-ledger-visual {
+    transform: translateY(0);
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+
+.t-learn-chevron {
+  display: inline-flex;
+  transform: translateX(0);
+  transition: transform var(--learn-out) var(--learn-ease);
+}
+.t-learn-arm {
+  transform-box: view-box;
+  transform-origin: 10px 8px;
+  vector-effect: non-scaling-stroke;
+  transition: transform var(--learn-out) var(--learn-ease);
+}
+.t-learn:hover .t-learn-chevron { transform: translateX(var(--learn-shift)); transition-duration: var(--learn-in); }
+.t-learn:hover .t-learn-arm { transition-duration: var(--learn-in); }
+.t-learn:hover .t-learn-arm-top { transform: rotate(var(--learn-spread)); }
+.t-learn:hover .t-learn-arm-bot { transform: rotate(calc(var(--learn-spread) * -1)); }
+
+@media (prefers-reduced-motion: reduce) {
+  .feature-ledger-copy,
+  .feature-ledger-visual,
+  .t-learn-chevron,
+  .t-learn-arm { transition: none !important; }
+
+  .feature-ledger-copy,
+  .feature-ledger-visual {
+    transform: none !important;
+    opacity: 1 !important;
+    filter: none !important;
+  }
+}
