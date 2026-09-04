@@ -2789,6 +2789,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "ureq",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2845,6 +2846,7 @@ dependencies = [
  "js-sys",
  "serde",
  "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3550,6 +3552,7 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "uuid",
+ "vcpkg",
 ]
 
 [[package]]

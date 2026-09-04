@@ -113,17 +113,38 @@ fn dashboard_url_for(api: &str) -> String {
     normalize_cloud_url(api)
 }
 
-/// Path to the credentials file. Honors XDG_CONFIG_HOME; falls back
-/// to `~/.config/pylon/credentials.json`.
-pub fn credentials_path() -> io::Result<PathBuf> {
-    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else {
+/// Directory the CLI keeps its per-user files in.
+///
+/// `XDG_CONFIG_HOME` wins on every platform, so a user who sets it gets
+/// one location across their machines. Otherwise each platform gets its
+/// own convention: `%APPDATA%` on Windows, `~/.config` elsewhere.
+fn config_base() -> io::Result<PathBuf> {
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(xdg));
+    }
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var("APPDATA").map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "neither APPDATA nor XDG_CONFIG_HOME is set",
+            )
+        })?;
+        Ok(PathBuf::from(appdata))
+    }
+    #[cfg(not(windows))]
+    {
         let home = std::env::var("HOME")
             .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "HOME not set"))?;
-        PathBuf::from(home).join(".config")
-    };
-    Ok(base.join("pylon").join("credentials.json"))
+        Ok(PathBuf::from(home).join(".config"))
+    }
+}
+
+/// Path to the credentials file. Honors XDG_CONFIG_HOME; falls back
+/// to `~/.config/pylon/credentials.json` (`%APPDATA%\pylon\credentials.json`
+/// on Windows).
+pub fn credentials_path() -> io::Result<PathBuf> {
+    Ok(config_base()?.join("pylon").join("credentials.json"))
 }
 
 /// Read stored credentials, or None if the file doesn't exist.
@@ -160,11 +181,9 @@ pub fn save_credentials(creds: &Credentials) -> io::Result<()> {
     let json =
         serde_json::to_string_pretty(creds).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&tmp, json)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
-    }
+    // Lock the temp file down before the rename, so the credentials are
+    // never briefly readable under their final name.
+    pylon_kernel::secret_file::restrict_to_owner(&tmp)?;
     fs::rename(&tmp, &path)?;
     Ok(())
 }
@@ -173,14 +192,7 @@ pub fn save_credentials(creds: &Credentials) -> io::Result<()> {
 /// rotating the auth token doesn't blow away cached selections like
 /// the default project). Honors XDG_CONFIG_HOME the same way.
 pub fn state_path() -> io::Result<PathBuf> {
-    let base = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        PathBuf::from(xdg)
-    } else {
-        let home = std::env::var("HOME")
-            .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "HOME not set"))?;
-        PathBuf::from(home).join(".config")
-    };
-    Ok(base.join("pylon").join("state.json"))
+    Ok(config_base()?.join("pylon").join("state.json"))
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

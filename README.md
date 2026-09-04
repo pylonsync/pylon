@@ -23,7 +23,8 @@ dev` runs it. You only need [Bun](https://bun.sh) ≥ 1.0 on your PATH (Pylon ru
 your TypeScript and SSR on it).
 
 Want `pylon` on your PATH (for `pylon init`, or `pylon deploy` from anywhere)?
-`curl -fsSL https://www.pylonsync.com/install.sh | bash`. Prefer a backend-only
+`curl -fsSL https://www.pylonsync.com/install.sh | bash`, or on Windows
+`powershell -c "irm https://www.pylonsync.com/install.ps1 | iex"`. Prefer a backend-only
 project? `pylon init my-app` scaffolds an API-only app (add a frontend with
 `--frontend react|tanstack|nextjs`); `http://localhost:4321/studio` is the
 inspector.
@@ -79,6 +80,16 @@ curl -fsSL https://www.pylonsync.com/install.sh | bash
 # or: cargo install --git https://github.com/pylonsync/pylon pylon-cli
 # or: docker pull ghcr.io/pylonsync/pylon:latest
 ```
+
+On Windows, use the PowerShell installer instead:
+
+```powershell
+powershell -c "irm https://www.pylonsync.com/install.ps1 | iex"
+```
+
+Prebuilt binaries: macOS arm64, Linux x64, Windows x64. Other platforms build
+from source with `cargo install`, which needs libxmlsec1 and libxml2 — see
+[docs/ops/DEPLOY.md](docs/ops/DEPLOY.md#building-from-source).
 
 The schema and policies for this backend fit in one `app.ts`:
 

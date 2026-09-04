@@ -15,6 +15,38 @@ pub fn quote_ident(name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Home directory
+// ---------------------------------------------------------------------------
+
+/// The current user's home directory.
+///
+/// `HOME` is the unix spelling and is normally unset on Windows, where the
+/// profile path is `USERPROFILE` (or the `HOMEDRIVE` + `HOMEPATH` pair on a
+/// domain-joined machine that redirects it). Reading only `HOME` silently
+/// resolves to nothing on Windows, which turns a "look under the home
+/// directory" lookup into a lookup that never matches.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+        return Some(std::path::PathBuf::from(home));
+    }
+    #[cfg(windows)]
+    {
+        if let Some(profile) = std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()) {
+            return Some(std::path::PathBuf::from(profile));
+        }
+        if let (Some(drive), Some(path)) = (
+            std::env::var_os("HOMEDRIVE").filter(|v| !v.is_empty()),
+            std::env::var_os("HOMEPATH").filter(|v| !v.is_empty()),
+        ) {
+            let mut joined = std::ffi::OsString::from(drive);
+            joined.push(path);
+            return Some(std::path::PathBuf::from(joined));
+        }
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
 // ISO-8601 timestamps
 // ---------------------------------------------------------------------------
 
@@ -332,7 +364,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// The exact DSN shape that leaked into a production log stream: a
     /// PlanetScale Postgres URL with a dotted user, a `pscale_pw_` secret, and
     /// libpq TLS params after the database name. `pylon start`'s banner printed

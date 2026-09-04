@@ -73,8 +73,13 @@ Linux)
     *) fail "unsupported Linux architecture: $arch" ;;
     esac
     ;;
+MINGW* | MSYS* | CYGWIN* | Windows_NT)
+    fail "this script installs the unix binary. On Windows, run the PowerShell installer instead:
+  powershell -c \"irm https://www.pylonsync.com/install.ps1 | iex\""
+    ;;
 *)
-    fail "unsupported OS: $os (Windows: use WSL2, Docker, or \`cargo install pylon-cli\`)"
+    fail "unsupported OS: $os
+  Run via Docker instead:  docker run -p 4321:4321 ghcr.io/pylonsync/pylon:latest"
     ;;
 esac
 

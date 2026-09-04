@@ -47,10 +47,6 @@ rpassword = "7"
 # the single largest slice of edit→reload latency. Falls back to the poll
 # if the platform watcher can't be created.
 notify = "6.1.1"
-# `pylon dev` hot reload: close inherited descriptors before re-exec'ing so
-# sockets accepted by the outgoing process image don't survive into the new
-# one as connections nothing is servicing (see close_inherited_fds).
-libc = "0.2"
 tar = "0.4"
 flate2 = "1.0"
 base64 = { workspace = true }
@@ -58,6 +54,18 @@ base64 = { workspace = true }
 # bundle's SHA-256 against the hash the control plane injected via env
 # before extracting (see commands/artifact.rs).
 sha2 = { workspace = true }
+
+# `pylon dev` hot reload: close inherited descriptors before re-exec'ing so
+# sockets accepted by the outgoing process image don't survive into the new
+# one as connections nothing is servicing (see close_inherited_fds). Windows
+# has no exec, so the reload path there respawns instead and needs none of it.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# `pylon doctor`'s free-space check. Windows has no `df`, so it asks the
+# volume through GetDiskFreeSpaceExW instead of skipping the check.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"

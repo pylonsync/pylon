@@ -228,6 +228,11 @@
         },
         {
           "type": "json",
+          "path": "packages/cli-win32-x64/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "packages/cli/package.json",
           "jsonpath": "$.optionalDependencies['@pylonsync/cli-darwin-arm64']"
         },
@@ -235,6 +240,11 @@
           "type": "json",
           "path": "packages/cli/package.json",
           "jsonpath": "$.optionalDependencies['@pylonsync/cli-linux-x64']"
+        },
+        {
+          "type": "json",
+          "path": "packages/cli/package.json",
+          "jsonpath": "$.optionalDependencies['@pylonsync/cli-win32-x64']"
         }
       ]
     }

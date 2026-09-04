@@ -4,6 +4,41 @@ pylon runs as a single binary behind a TLS-terminating reverse proxy.
 This doc covers the supported self-hosted deploy shapes plus the
 experimental Workers path.
 
+## Building from source
+
+Prebuilt binaries cover macOS arm64, Linux x64 and Windows x64. Everywhere
+else, build with `cargo install --git https://github.com/pylonsync/pylon
+pylon-cli`.
+
+The build links libxmlsec1 for SAML 2.0 signature verification, so that
+library and libxml2 have to be present first. libxmlsec1 1.3.x or newer is
+required — 1.2.x declares `xmlSecSize` as `unsigned int` and the bindings
+expect `size_t`.
+
+```sh
+# Debian / Ubuntu
+sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
+  libclang-dev clang
+
+# macOS
+brew install libxmlsec1 libxml2 pkg-config
+```
+
+On Windows the same libraries come from [vcpkg](https://vcpkg.io), and the
+build finds them through `VCPKG_ROOT`. `bindgen` needs libclang, which ships
+with LLVM:
+
+```powershell
+vcpkg install xmlsec:x64-windows-static-md
+$env:VCPKG_ROOT = "C:\path\to\vcpkg"
+$env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
+cargo install --git https://github.com/pylonsync/pylon pylon-cli
+```
+
+The `x64-windows-static-md` triplet links those libraries into `pylon.exe`
+and leaves the CRT dynamic, which is what Rust's msvc target expects. The
+result is one self-contained binary with no DLLs to distribute alongside it.
+
 ## Required environment
 
 ```sh

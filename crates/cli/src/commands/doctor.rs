@@ -302,29 +302,63 @@ fn check_port() -> Check {
 }
 
 fn check_disk_space() -> Check {
-    // Use `df` on unix-like systems to check available space.
-    match std::process::Command::new("df").args(["-k", "."]).output() {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            // Second line contains the stats; 4th column is available KB.
-            if let Some(line) = text.lines().nth(1) {
-                let cols: Vec<&str> = line.split_whitespace().collect();
-                if let Some(avail_kb) = cols.get(3).and_then(|s| s.parse::<u64>().ok()) {
-                    let avail_mb = avail_kb / 1024;
-                    if avail_mb < 100 {
-                        return Check::warn(
-                            format!("Low disk space ({avail_mb} MB available)"),
-                            "at least 100 MB recommended",
-                        );
-                    }
-                    return Check::pass(format!("Disk space OK ({avail_mb} MB available)"));
-                }
-            }
-            // Could not parse — just pass silently.
-            Check::pass("Disk space check skipped (could not parse df output)")
-        }
-        _ => Check::pass("Disk space check skipped (df unavailable)"),
+    let Some(avail_mb) = available_mb() else {
+        return Check::pass("Disk space check skipped (free space unreadable)");
+    };
+    if avail_mb < 100 {
+        return Check::warn(
+            format!("Low disk space ({avail_mb} MB available)"),
+            "at least 100 MB recommended",
+        );
     }
+    Check::pass(format!("Disk space OK ({avail_mb} MB available)"))
+}
+
+/// Megabytes free on the volume holding the current directory.
+#[cfg(not(windows))]
+fn available_mb() -> Option<u64> {
+    let out = std::process::Command::new("df")
+        .args(["-k", "."])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    // Second line carries the stats; 4th column is available KB.
+    let line = text.lines().nth(1)?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let avail_kb: u64 = cols.get(3)?.parse().ok()?;
+    Some(avail_kb / 1024)
+}
+
+/// Windows has no `df`. Ask the volume directly — and ask for the quota-aware
+/// figure, since the bytes free on the disk are not necessarily bytes this
+/// user may write.
+#[cfg(windows)]
+fn available_mb() -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let dir = std::env::current_dir().ok()?;
+    let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
+    wide.push(0);
+
+    let mut free_to_caller: u64 = 0;
+    // SAFETY: a null-terminated directory path in, one out-parameter written
+    // on success; the two totals we do not need are passed as null.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut free_to_caller,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some(free_to_caller / (1024 * 1024))
 }
 
 fn check_manifest() -> Check {

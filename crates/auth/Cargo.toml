@@ -53,12 +53,24 @@ flate2 = { workspace = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq = { workspace = true }
 samael = { workspace = true }
-openssl = { version = "0.10", features = ["vendored"] }
 ring = { workspace = true }
 k256 = { workspace = true }
 sha3 = { workspace = true }
 argon2 = { workspace = true }
 rsa = { workspace = true }
+
+# OpenSSL, split by ABI. samael links xmlsec1-openssl, which is built
+# against whatever OpenSSL the platform's xmlsec1 was built against —
+# Homebrew's on macOS, the distro's on Linux, vcpkg's on Windows. On
+# MSVC, vendoring a second copy here would put two OpenSSL builds in one
+# binary, so let openssl-sys find the vcpkg one that xmlsec1 already uses.
+# Everywhere else the vendored build is what keeps the shipped binary
+# from depending on the host's OpenSSL version.
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_env = "msvc")))'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
+[target.'cfg(all(not(target_arch = "wasm32"), target_env = "msvc"))'.dependencies]
+openssl = { version = "0.10" }
 
 # rand pulls getrandom transitively. On wasm32 getrandom defaults
 # to a target with no entropy source and refuses to compile —

@@ -35,9 +35,6 @@ pylon-realtime = { path = "../realtime", version = "0.7.0" }  # x-release-please
 pylon-cluster = { path = "../cluster", version = "0.7.0", features = ["redis-bus", "relay-bus"] }  # x-release-please-version
 postgres = { workspace = true }
 rusqlite = { workspace = true }
-# Raw accept() with a null address — see `accept_tcp` (panic-proof accept
-# around libstd's macOS dual-stack sockaddr assertion).
-libc = "0.2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tiny_http = { workspace = true }
@@ -99,6 +96,12 @@ rand = { workspace = true }
 # values that any regex mis-slices.
 htmd = "0.5"
 markup5ever_rcdom = "0.38"
+
+# Raw accept() with a null address — see `accept_tcp` (panic-proof accept
+# around libstd's macOS dual-stack sockaddr assertion). Windows takes the
+# plain libstd accept, which carries no such assertion.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 rand = { workspace = true }

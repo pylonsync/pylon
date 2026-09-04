@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub mod clock;
 pub mod errors;
 pub mod net_guard;
+pub mod secret_file;
 pub mod studio;
 pub mod util;
 

@@ -327,13 +327,8 @@ impl OidcKeyStore {
         // Restrict to owner read/write only. Without this, anyone
         // on the same host with read access to the data dir could
         // exfiltrate the signing key and mint forged id_tokens.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(path, perms)
-                .map_err(|e| format!("chmod 0600 {path:?}: {e}"))?;
-        }
+        pylon_kernel::secret_file::restrict_to_owner(path)
+            .map_err(|e| format!("restrict {path:?} to owner: {e}"))?;
         let public = RsaPublicKey::from(&private);
         let kid = derive_kid(&public);
         Ok(Self {

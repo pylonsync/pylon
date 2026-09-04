@@ -111,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -121,6 +121,7 @@ jobs:
           bun-version: "1.3.14"
       - name: Build Studio UI bundle
         working-directory: crates/studio_api/web
+        shell: bash
         run: bun install --frozen-lockfile && bun run build
       - name: Install xmlsec1 + libxml2 (Linux only — for SAML signature path)
         if: matrix.os == 'ubuntu-latest'
@@ -128,6 +129,13 @@ jobs:
       - name: Install xmlsec1 + libxml2 (macOS — runner pre-installed via brew)
         if: matrix.os == 'macos-latest'
         run: brew install libxml2 libxmlsec1 || true
+      # Windows is in this matrix rather than only in the release workflow so
+      # a unix-only assumption fails on the PR that introduces it, not on the
+      # release that ships it.
+      - name: Set up xmlsec1 (Windows)
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 45
+        uses: ./.github/actions/setup-xmlsec-windows
       # PYLON_RUN_XMLSEC_SIGN_TESTS opts in to the SAML cert-trust
       # regression tests on Linux. They're #[ignore]'d by default
       # because samael's IdP signing path SIGSEGVs on macOS dev boxes
@@ -141,7 +149,26 @@ jobs:
       - name: cargo test (macOS — skips ignored)
         if: matrix.os == 'macos-latest'
         run: cargo test --workspace --all-targets -- --test-threads=1
+      - name: cargo test (Windows — skips ignored)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --workspace --all-targets -- --test-threads=1
       - run: cargo test --workspace --doc
+      # The Windows installer has no other gate: it is not exercised by any
+      # build, and a syntax error in it only shows up when a user pipes it
+      # into their shell. Parse it here.
+      - name: Parse install.ps1
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path scripts/install.ps1), [ref]$null, [ref]$errors) | Out-Null
+          if ($errors -and $errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host "::error::install.ps1: $($_.Message)" }
+            exit 1
+          }
+          Write-Host "install.ps1 parses clean"
 
   # Catastrophic-performance-regression gate. Runs the release-only
   # `perf_guard` tests (crates/runtime/tests/perf_guard.rs) — they assert each

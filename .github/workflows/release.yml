@@ -50,7 +50,7 @@ jobs:
           # The CLI packages are here because release-please bumps them too; a
           # version that lags the tag would publish a CLI pinned to the wrong
           # platform binaries.
-          for pkg in packages/sdk packages/functions packages/react packages/react-native packages/sync packages/loro packages/workflows packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon packages/cli packages/cli-darwin-arm64 packages/cli-linux-x64; do
+          for pkg in packages/sdk packages/functions packages/react packages/react-native packages/sync packages/loro packages/workflows packages/next packages/plugins/stripe packages/plugins/feature-flags packages/plugins/webhooks packages/create-pylon packages/cli packages/cli-darwin-arm64 packages/cli-linux-x64 packages/cli-win32-x64; do
             if [[ -f "$pkg/package.json" ]]; then
               PKG_V="$(node -p "require('./$pkg/package.json').version")"
               if [[ "$PKG_V" != "$TAG" ]]; then
@@ -395,15 +395,15 @@ jobs:
           # ubuntu-latest is non-trivial). Add back once we either
           # static-link xmlsec1 or drop samael's xmlsec feature in
           # favor of an in-process verifier.
-          # Windows binary intentionally not built — samael's xmlsec
-          # feature (required for SAML 2.0 XMLDSig signature verification)
-          # links against libxmlsec1, which is not a Windows-native
-          # library. Self-hosters on Windows can run pylon under WSL2 or
-          # Docker; native-Windows support would require either a SAML
-          # backend that doesn't depend on xmlsec1, or shipping a build
-          # variant with SAML disabled. Don't ship a SAML-disabled build
-          # silently — that's the kind of half-assing the user explicitly
-          # forbids.
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          # Windows gets the same SAML support as every other target. Its
+          # libxmlsec1 comes from vcpkg, whose `xmlsec` port builds the
+          # same `xmlsec1` + `xmlsec1-openssl` pair the autotools build
+          # produces; vendor/samael/bindings.rs takes the vcpkg path when
+          # the target ABI is msvc. A SAML-disabled Windows variant was
+          # never on the table.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -453,6 +453,10 @@ jobs:
         run: |
           brew install libxmlsec1 libxml2 pkg-config
           brew link --overwrite libxmlsec1 || true
+      - name: Set up xmlsec1 (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 45
+        uses: ./.github/actions/setup-xmlsec-windows
       # `pylon-studio-api`'s build.rs requires `web/dist/index.html` to
       # exist. Build the Studio UI bundle before cargo runs.
       - uses: oven-sh/setup-bun@v2
@@ -503,8 +507,18 @@ jobs:
           else
             tar czf "../../../pylon-$TAG-$TARGET.tar.gz" pylon
           fi
-      # Windows archive step removed alongside the windows-msvc target
-      # (samael/xmlsec1 isn't available on native Windows).
+      # The Windows build links its C dependencies statically (see the vcpkg
+      # setup above), so the archive is the single .exe.
+      - name: Package (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Compress-Archive -Path "target/$env:TARGET/release/pylon.exe" `
+            -DestinationPath "pylon-$env:TAG-$env:TARGET.zip"
       - name: Compute SHA256 (unix)
         if: matrix.archive == 'tar.gz' && runner.os == 'Linux'
         run: |
@@ -515,6 +529,20 @@ jobs:
         run: |
           shasum -a 256 pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz \
             > pylon-${{ github.ref_name }}-${{ matrix.target }}.tar.gz.sha256
+      # install.ps1 and install.sh both read the hash as the first
+      # whitespace-separated field, so match `sha256sum`'s "<hash>  <name>"
+      # shape rather than Get-FileHash's default object rendering.
+      - name: Compute SHA256 (windows)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $asset = "pylon-$env:TAG-$env:TARGET.zip"
+          $hash = (Get-FileHash -Algorithm SHA256 $asset).Hash.ToLower()
+          "$hash  $asset" | Out-File -FilePath "$asset.sha256" -Encoding ascii -NoNewline
       # Publish to the private source repo (so internal tooling, the
       # release-please flow, and crates/npm jobs all observe the same tag).
       - uses: softprops/action-gh-release@v2
@@ -552,6 +580,17 @@ jobs:
             target/${{ matrix.target }}/release/lib
           retention-days: 1
           if-no-files-found: error
+      # Windows has no lib/ closure to carry, so the artifact is the .exe on
+      # its own. Same artifact-name shape as the unix targets, which is what
+      # `publish-cli-npm` maps over.
+      - name: Upload raw binary artifact (windows)
+        if: matrix.archive == 'zip'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pylon-bin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/pylon.exe
+          retention-days: 1
+          if-no-files-found: error
 
   publish-cli-npm:
     name: Publish @pylonsync/cli + platform packages
@@ -583,22 +622,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Map rust target → npm platform package directory. Windows
-          # + musl are intentionally skipped for now: the npm CLI focuses
-          # on the cases pylon-cloud + standard Mac/Linux dev shops hit.
-          # Anyone needing windows/musl can still grab the binary from
-          # the GitHub release.
+          # Map rust target → npm platform package directory. musl is
+          # intentionally skipped for now; anyone needing it can still grab
+          # the binary from the GitHub release.
           # x86_64-apple-darwin + aarch64-unknown-linux-gnu intentionally
           # absent — see binary matrix comment for why. Add the line back
           # here once the binary itself is being built again.
           declare -A TARGET_TO_PKG=(
             [aarch64-apple-darwin]=cli-darwin-arm64
             [x86_64-unknown-linux-gnu]=cli-linux-x64
+            [x86_64-pc-windows-msvc]=cli-win32-x64
           )
           for target in "${!TARGET_TO_PKG[@]}"; do
             pkg="${TARGET_TO_PKG[$target]}"
-            src="artifacts/pylon-bin-${target}/pylon"
-            dest="packages/${pkg}/bin/pylon"
+            # Windows carries the .exe suffix into the package, because that
+            # is the name the dispatcher spawns.
+            exe="pylon"
+            case "$target" in *windows*) exe="pylon.exe" ;; esac
+            src="artifacts/pylon-bin-${target}/${exe}"
+            dest="packages/${pkg}/bin/${exe}"
             if [[ ! -f "$src" ]]; then
               echo "::error::Missing binary artifact for $target at $src" >&2
               exit 1
@@ -614,7 +656,7 @@ jobs:
               cp -R "$libsrc" "$(dirname "$dest")/lib"
               echo "  ↳ staged $(ls "$libsrc" | wc -l | tr -d ' ') vendored dylibs → $pkg/bin/lib/"
             fi
-            echo "✓ staged $target → $pkg/bin/pylon ($(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest") bytes)"
+            echo "✓ staged $target → $pkg/bin/$exe ($(stat -c%s "$dest" 2>/dev/null || stat -f%z "$dest") bytes)"
           done
           # A macOS package without lib/ would publish cleanly and fail on
           # every user's machine, so fail the release here instead.
@@ -642,7 +684,7 @@ jobs:
           # aren't published. Their package.jsons stay in the workspace
           # with stale versions; the version-match check skips anything
           # not in this list.
-          CLI_PKGS=(packages/cli packages/cli-darwin-arm64 packages/cli-linux-x64)
+          CLI_PKGS=(packages/cli packages/cli-darwin-arm64 packages/cli-linux-x64 packages/cli-win32-x64)
           REF=""
           for pkg in "${CLI_PKGS[@]}"; do
             v="$(node -p "require('./$pkg/package.json').version")"
@@ -676,7 +718,7 @@ jobs:
           # because its optionalDependencies must already exist on npm
           # for the install-time `bun install --frozen-lockfile`
           # postflight to resolve.
-          for pkg in cli-darwin-arm64 cli-linux-x64 cli; do
+          for pkg in cli-darwin-arm64 cli-linux-x64 cli-win32-x64 cli; do
             NAME="$(node -p "require('./packages/$pkg/package.json').name")"
             VERSION="$(node -p "require('./packages/$pkg/package.json').version")"
             if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then

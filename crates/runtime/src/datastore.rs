@@ -4771,7 +4771,6 @@ pub fn find_functions_runtime() -> Option<String> {
     // workspace users see "TypeScript function runtime is not configured"
     // and think the server is broken when it's just a CWD issue.
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let relative_candidates = [
         "node_modules/@pylonsync/functions/src/runtime.ts",
         "node_modules/@pylonsync/functions/dist/runtime.js",
@@ -4794,9 +4793,11 @@ pub fn find_functions_runtime() -> Option<String> {
     }
 
     // Final fallback: user-wide install under ~/.pylon.
-    let user_path = format!("{home}/.pylon/runtime.ts");
-    if std::path::Path::new(&user_path).exists() {
-        return Some(user_path);
+    let user_path = pylon_kernel::util::home_dir()?
+        .join(".pylon")
+        .join("runtime.ts");
+    if user_path.exists() {
+        return user_path.to_str().map(|s| s.to_string());
     }
     None
 }

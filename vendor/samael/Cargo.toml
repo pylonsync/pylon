@@ -112,3 +112,10 @@ version = "^0.72.1"
 
 [build-dependencies.pkg-config]
 version = "^0.3.17"
+
+# Windows/MSVC has no `xmlsec1-config` and no pkg-config, so bindings.rs
+# locates xmlsec1 through vcpkg there instead. Unconditional rather than
+# host-gated: `[target.'cfg(windows)'.build-dependencies]` keys off the
+# HOST, which would drop the dependency on any cross-compile into MSVC.
+[build-dependencies.vcpkg]
+version = "^0.2.15"

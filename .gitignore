@@ -101,5 +101,6 @@ packages/cli-darwin-arm64/bin/
 packages/cli-darwin-x64/bin/
 packages/cli-linux-arm64/bin/
 packages/cli-linux-x64/bin/
+packages/cli-win32-x64/bin/
 .gstack/
 dump.rdb

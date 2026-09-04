@@ -63,11 +63,7 @@ pub fn signing_secret() -> &'static [u8] {
             buf
         };
         if std::fs::create_dir_all(".pylon").is_ok() && std::fs::write(&path, &fresh).is_ok() {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
+            let _ = pylon_kernel::secret_file::restrict_to_owner(&path);
         }
         fresh
     })

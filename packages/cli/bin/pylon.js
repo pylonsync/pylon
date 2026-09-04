@@ -34,7 +34,12 @@ const require = createRequire(import.meta.url);
 const PLATFORM_PACKAGES = {
 	"darwin-arm64": "@pylonsync/cli-darwin-arm64",
 	"linux-x64": "@pylonsync/cli-linux-x64",
+	"win32-x64": "@pylonsync/cli-win32-x64",
 };
+
+// Windows needs the suffix: the file on disk is pylon.exe, and spawnSync
+// takes a path rather than doing a PATHEXT search.
+const BINARY_NAME = process.platform === "win32" ? "pylon.exe" : "pylon";
 
 const UNSUPPORTED_HINTS = {
 	"darwin-x64":
@@ -77,13 +82,21 @@ function resolveBinary() {
 	//   PYLON_BIN=$HOME/.cargo/bin/pylon bun dev
 	const override = process.env.PYLON_BIN;
 	if (override) {
-		if (!existsSync(override)) {
+		// A Windows override is easy to write without the suffix — cargo puts
+		// the binary at target\release\pylon.exe. Accept either spelling
+		// rather than reporting a missing file that is right there.
+		const candidates =
+			process.platform === "win32" && !override.toLowerCase().endsWith(".exe")
+				? [override, `${override}.exe`]
+				: [override];
+		const found = candidates.find((c) => existsSync(c));
+		if (!found) {
 			throw new Error(
 				`@pylonsync/cli: PYLON_BIN is set to "${override}" but no file ` +
 					`exists there.`,
 			);
 		}
-		return override;
+		return found;
 	}
 
 	const arch = hardwareArch();
@@ -130,7 +143,7 @@ function resolveBinary() {
 		);
 	}
 
-	const binPath = join(dirname(entry), "bin", "pylon");
+	const binPath = join(dirname(entry), "bin", BINARY_NAME);
 	if (!existsSync(binPath)) {
 		throw new Error(
 			`@pylonsync/cli: binary missing at ${binPath}.\n` +

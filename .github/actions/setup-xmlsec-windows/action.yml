@@ -1,0 +1,50 @@
+name: Set up xmlsec1 on Windows
+description: >-
+  Install libxmlsec1 (plus libxml2 and OpenSSL) through vcpkg and export the
+  paths the Pylon build needs. Used by both CI and the release workflow so the
+  two cannot drift.
+
+runs:
+  using: composite
+  steps:
+    # Building openssl + libxml2 + xmlsec from source is the slow part, so the
+    # binary cache is keyed on the port set. A miss costs ~20 minutes and still
+    # succeeds; a hit is seconds.
+    - name: Cache vcpkg binaries
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/vcpkg-archives
+        key: vcpkg-x64-windows-static-md-xmlsec-v1
+    - name: Install xmlsec1 via vcpkg
+      shell: bash
+      env:
+        VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-archives
+      run: |
+        set -euo pipefail
+        mkdir -p "$VCPKG_DEFAULT_BINARY_CACHE"
+        # Classic (non-manifest) mode: it installs into the vcpkg tree's own
+        # `installed/` dir and writes the status database vcpkg-rs reads.
+        # Manifest mode would put both somewhere vendor/samael/bindings.rs
+        # cannot find.
+        #
+        # `x64-windows-static-md` links the C libraries into pylon.exe while
+        # leaving the CRT dynamic, which is what Rust's msvc target expects
+        # and what vcpkg-rs picks by default. The result is one self-contained
+        # binary, with no DLL closure to vendor the way macOS vendors dylibs.
+        "$VCPKG_INSTALLATION_ROOT/vcpkg" install xmlsec:x64-windows-static-md
+    - name: Export vcpkg + libclang paths
+      shell: bash
+      run: |
+        set -euo pipefail
+        # vcpkg-rs — used by vendor/samael/bindings.rs, the libxml crate and
+        # openssl-sys — locates the tree through VCPKG_ROOT.
+        echo "VCPKG_ROOT=$VCPKG_INSTALLATION_ROOT" >> "$GITHUB_ENV"
+        # bindgen needs libclang for the xmlsec1 bindings. Fail here with a
+        # clear message rather than inside a build script if the runner image
+        # ever drops LLVM.
+        LLVM_BIN="/c/Program Files/LLVM/bin"
+        if [ ! -f "$LLVM_BIN/libclang.dll" ]; then
+          echo "::error::libclang.dll not found under $LLVM_BIN — bindgen cannot generate the xmlsec1 bindings. Install LLVM on the runner." >&2
+          exit 1
+        fi
+        echo 'LIBCLANG_PATH=C:\Program Files\LLVM\bin' >> "$GITHUB_ENV"

@@ -46,6 +46,7 @@ const NODE = "node";
 let workDir;
 let preload;
 let isolatedLauncher;
+const scratchFiles = [];
 
 beforeAll(() => {
 	const probe = spawnSync(NODE, ["--version"], { encoding: "utf8" });
@@ -58,21 +59,14 @@ beforeAll(() => {
 
 	workDir = mkdtempSync(join(tmpdir(), "pylon-launcher-"));
 
-	// Redefining the two properties the launcher reads. They're getters on the
-	// real process object, so a plain assignment silently does nothing.
-	preload = join(workDir, "fake-platform.cjs");
-	writeFileSync(
-		preload,
-		`Object.defineProperty(process, "platform", { value: "darwin" });\n` +
-			`Object.defineProperty(process, "arch", { value: "x64" });\n`,
-	);
+	preload = preloadFor("darwin", "x64");
 
 	isolatedLauncher = join(workDir, "pylon.js");
 	copyFileSync(REAL_LAUNCHER, isolatedLauncher);
 });
 
 afterAll(() => {
-	for (const f of [preload, isolatedLauncher, join(workDir, "sysctl")]) {
+	for (const f of [...scratchFiles, isolatedLauncher, join(workDir, "sysctl")]) {
 		try {
 			unlinkSync(f);
 		} catch {}
@@ -81,6 +75,34 @@ afterAll(() => {
 		rmdirSync(workDir);
 	} catch {}
 });
+
+/**
+ * Write a preload that makes node report `platform`/`arch`. Redefinition
+ * rather than assignment: they're getters on the real process object, so a
+ * plain assignment silently does nothing.
+ */
+function preloadFor(platform, arch) {
+	const file = join(workDir, `fake-${platform}-${arch}.cjs`);
+	writeFileSync(
+		file,
+		`Object.defineProperty(process, "platform", { value: "${platform}" });\n` +
+			`Object.defineProperty(process, "arch", { value: "${arch}" });\n`,
+	);
+	scratchFiles.push(file);
+	return file;
+}
+
+/** Run the launcher as a process reporting `platform`/`arch`. */
+function runAs(platform, arch, env = {}) {
+	return spawnSync(
+		NODE,
+		["-r", preloadFor(platform, arch), isolatedLauncher, "--version"],
+		{
+			encoding: "utf8",
+			env: { ...process.env, PATH: `${workDir}:${process.env.PATH}`, ...env },
+		},
+	);
+}
 
 /**
  * Install a stub `sysctl` answering `hw.optional.arm64` with `answer`, or
@@ -157,4 +179,45 @@ test("a native process never probes sysctl", () => {
 	);
 
 	expect(stderr).toContain(`${process.platform}-${process.arch}`);
+});
+
+test("win32-x64 resolves the windows platform package", () => {
+	const { stderr } = runAs("win32", "x64");
+
+	// The isolated copy can't see the package, so this lands on the
+	// not-installed branch — which is proof the platform mapped at all.
+	expect(stderr).toContain("cli-win32-x64");
+	expect(stderr).not.toContain("no prebuilt binary");
+});
+
+test("an unmapped windows arch says so instead of naming a package", () => {
+	const { stderr } = runAs("win32", "arm64");
+
+	expect(stderr).toContain("no prebuilt binary for win32-arm64");
+	// The supported list has to stay honest about what npm actually ships.
+	expect(stderr).toContain("win32-x64");
+});
+
+test("PYLON_BIN without the .exe suffix still finds the binary on windows", () => {
+	// cargo writes target\release\pylon.exe, so an override typed as
+	// ...\release\pylon is the likely spelling. It should work.
+	const stem = join(workDir, "override-pylon");
+	const exe = `${stem}.exe`;
+	writeFileSync(exe, "#!/bin/sh\necho OVERRIDE_RAN\n");
+	chmodSync(exe, 0o755);
+	scratchFiles.push(exe);
+
+	const { stdout, stderr } = runAs("win32", "x64", { PYLON_BIN: stem });
+
+	expect(stdout).toContain("OVERRIDE_RAN");
+	expect(stderr).not.toContain("no file");
+});
+
+test("PYLON_BIN pointing at nothing still fails loudly on windows", () => {
+	const { stderr } = runAs("win32", "x64", {
+		PYLON_BIN: join(workDir, "does-not-exist"),
+	});
+
+	expect(stderr).toContain("no file");
+	expect(stderr).toContain("does-not-exist");
 });

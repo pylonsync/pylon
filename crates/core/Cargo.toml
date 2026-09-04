@@ -24,3 +24,15 @@ serde_json = { workspace = true }
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 
+# Win32 ACL calls behind `secret_file::restrict_to_owner`. Windows has no
+# chmod, so the 0600 the unix build applies to signing keys and stored
+# credentials has to be spelled as an explicit DACL there.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+

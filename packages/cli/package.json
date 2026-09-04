@@ -26,6 +26,7 @@
   },
   "optionalDependencies": {
     "@pylonsync/cli-darwin-arm64": "0.7.0",
-    "@pylonsync/cli-linux-x64": "0.7.0"
+    "@pylonsync/cli-linux-x64": "0.7.0",
+    "@pylonsync/cli-win32-x64": "0.7.0"
   }
 }
