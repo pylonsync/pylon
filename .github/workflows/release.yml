@@ -729,29 +729,19 @@ jobs:
             fi
           done
 
-      # A scoped package's FIRST publish defaults to restricted, and
-      # `bun publish --access public` did not actually override that for
-      # @pylonsync/cli-win32-x64 in v0.8.0: it published, reported success,
-      # and then 404'd for anyone without a token. npm treats an unreachable
-      # optionalDependency as "skip it", so `npm i @pylonsync/cli` on Windows
-      # installed cleanly and only failed later, saying no prebuilt binary
-      # exists for the platform.
+      # A brand-new scoped package is not immediately readable without a
+      # token: @pylonsync/cli-win32-x64 published in v0.8.0, and an
+      # unauthenticated GET 404'd for ~3.5 minutes afterwards while its
+      # already-existing siblings answered 200 straight away.
       #
-      # Set it explicitly. Already-public packages are a no-op.
-      - name: Force public access on the CLI packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          for pkg in cli-darwin-arm64 cli-linux-x64 cli-win32-x64 cli; do
-            NAME="$(node -p "require('./packages/$pkg/package.json').name")"
-            npm access set status=public "$NAME" 2>/dev/null \
-              || npm access public "$NAME" 2>/dev/null \
-              || echo "note: could not set access on $NAME (already public?)"
-          done
-
-      # Prove it the way a user's install does: an unauthenticated GET. The
-      # publish step's own success output is not evidence — it printed
-      # `+ @pylonsync/cli-win32-x64@0.8.0` for a package nobody could fetch.
+      # That window matters because npm SKIPS an optionalDependency it cannot
+      # fetch. A Windows `npm i @pylonsync/cli` during it succeeds and then
+      # reports no prebuilt binary for the platform — an install that looks
+      # fine and is not. Wait for each package to actually be reachable, the
+      # way a user's install reaches it, before calling the release done.
+      #
+      # This also fails loudly on the other cause of a 404 here: a first
+      # publish that landed as `restricted` rather than public.
       - name: Every CLI package is publicly resolvable
         shell: bash
         run: |
@@ -761,13 +751,14 @@ jobs:
             NAME="$(node -p "require('./packages/$pkg/package.json').name")"
             ENC="${NAME/@/%40}"; ENC="${ENC//\//%2f}"
             code=""
-            for attempt in 1 2 3 4 5 6; do
+            # ~5 minutes: the observed propagation delay was 3.5.
+            for attempt in $(seq 1 20); do
               code="$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/${ENC}" || true)"
               [ "$code" = "200" ] && break
-              sleep 10
+              sleep 15
             done
             if [ "$code" != "200" ]; then
-              echo "::error::$NAME is not publicly readable (HTTP $code). npm silently skips an unreachable optionalDependency, so the CLI would report no prebuilt binary for that platform." >&2
+              echo "::error::$NAME is not publicly readable (HTTP $code). npm silently skips an unreachable optionalDependency, so the CLI would report no prebuilt binary for that platform. Check whether the package published as restricted." >&2
               fail=1
             else
               echo "✓ $NAME is publicly resolvable"
