@@ -121,3 +121,31 @@ test("missing template dir fails LOUD instead of scaffolding an empty project", 
 		);
 	}
 });
+
+test("the mobile template scaffolds a backend + an Expo app with the store flow", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-mobile-"));
+	const res = runScaffold({ name: "myapp", template: "mobile", cwd: dir });
+	assert.equal(res.status, 0, `expected exit 0, got ${res.status}\n${res.stderr}`);
+	const root = join(dir, "myapp");
+	// The platform defaults to expo for this template (no --platforms given).
+	for (const f of [
+		"package.json",
+		"apps/api/app.ts",
+		"apps/api/functions/createNote.ts",
+		"apps/api/functions/revenuecatWebhook.ts",
+		"apps/expo/app.config.ts",
+		"apps/expo/eas.json",
+		"apps/expo/STORE.md",
+		"apps/expo/app/_layout.tsx",
+		"apps/expo/app/(onboarding)/welcome.tsx",
+		"apps/expo/app/(auth)/sign-in.tsx",
+		"apps/expo/app/paywall.tsx",
+		"apps/expo/app/(tabs)/settings.tsx",
+		"apps/expo/assets/icon.png",
+	]) {
+		assert.ok(existsSync(join(root, f)), `${f} missing`);
+	}
+	const cfg = readFileSync(join(root, "apps/expo/app.config.ts"), "utf8");
+	assert.ok(!cfg.includes("__APP_NAME"), "placeholder left in app.config.ts");
+	assert.match(cfg, /com\.example\.myapp/, "bundle id not derived from the app name");
+});

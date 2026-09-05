@@ -1,0 +1,23 @@
+{
+  "name": "@__APP_NAME_KEBAB__/api",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pylon dev",
+    "build": "pylon build",
+    "deploy": "pylon deploy",
+    "check": "tsc --noEmit",
+    "test": "pylon test"
+  },
+  "dependencies": {
+    "@pylonsync/sdk": "^__PYLON_VERSION__",
+    "@pylonsync/functions": "^__PYLON_VERSION__",
+    "@pylonsync/revenuecat": "^__PYLON_VERSION__"
+  },
+  "devDependencies": {
+    "@pylonsync/cli": "^__PYLON_VERSION__",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

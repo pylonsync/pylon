@@ -1,0 +1,45 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "remote"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": {
+        "APP_VARIANT": "development",
+        "EXPO_PUBLIC_PYLON_BASE_URL": "http://localhost:4321"
+      },
+      "ios": { "simulator": true }
+    },
+    "device": {
+      "extends": "development",
+      "ios": { "simulator": false }
+    },
+    "preview": {
+      "distribution": "internal",
+      "env": {
+        "APP_VARIANT": "preview",
+        "EXPO_PUBLIC_PYLON_BASE_URL": "https://__APP_NAME_KEBAB__.pylonapp.com"
+      }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": {
+        "APP_VARIANT": "production",
+        "EXPO_PUBLIC_PYLON_BASE_URL": "https://__APP_NAME_KEBAB__.pylonapp.com"
+      }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "ascAppId": "REPLACE_WITH_APP_STORE_CONNECT_APP_ID"
+      },
+      "android": {
+        "track": "internal"
+      }
+    }
+  }
+}

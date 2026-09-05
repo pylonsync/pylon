@@ -98,6 +98,12 @@ const TEMPLATE_REGISTRY = {
 		platforms: [],
 		unified: true,
 	},
+	mobile: {
+		blurb:
+			"App Store-ready mobile app — Expo Router, guest-first onboarding, Sign in with Apple/Google/email code, RevenueCat paywall, offline sync, EAS profiles + a submission checklist. Backend in apps/api.",
+		platforms: ["expo"],
+		unified: false,
+	},
 	consumer: {
 		blurb:
 			"Social feed — live posts + likes, public-read, owner-write. One SSR app.",
@@ -289,6 +295,7 @@ ${tmplLines.join("\n")}
 Examples:
   npm create @pylonsync/pylon my-app                        # default — the smallest SSR app that runs
   npm create @pylonsync/pylon my-app --template saas        # building a product? start here: landing + orgs + billing
+  npm create @pylonsync/pylon my-app --template mobile      # App Store-ready Expo app + backend: onboarding, sign-in, paywall
   npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
   npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
   npm create @pylonsync/pylon my-app --template waitlist     # coming-soon landing + live signup counter
@@ -379,7 +386,8 @@ if (!isUnified && !flags.platforms) {
 				)
 			).trim()
 		: "";
-	flags.platforms = ans || "web";
+	flags.platforms =
+		ans || (TEMPLATE_REGISTRY[flags.template].platforms[0] ?? "web");
 }
 if (!flags.pm) {
 	const detected = detectPackageManager();
@@ -417,7 +425,7 @@ rl.close();
 // everything else, parse + validate the platform list.
 const platforms = isUnified
 	? []
-	: (flags.platforms ?? "web")
+	: (flags.platforms ?? TEMPLATE_REGISTRY[flags.template].platforms[0] ?? "web")
 			.split(",")
 			.map((p) => p.trim().toLowerCase())
 			.filter(Boolean);
