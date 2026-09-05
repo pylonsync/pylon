@@ -91,6 +91,17 @@ public actor SyncEngine {
     private var ws: PylonWebSocket?
     private var reconnectAttempts = 0
     private var consecutive410s = 0
+    /// Consecutive TRANSIENT push failures (offline / 5xx / 429 / 401)
+    /// since the last server response. Drives the exponential backoff on
+    /// the retry so an offline client does not hot-loop. Reset to 0 the
+    /// moment the server returns any response. Parity with TS
+    /// `pushFailureCount`.
+    private var pushFailureCount = 0
+    private var pushRetryScheduled = false
+    /// Bumped on every WS / SSE connect. A consume loop that ends only
+    /// schedules a reconnect when its generation is still current, so a
+    /// deliberate cycle (identity flip) does not spawn a second socket.
+    private var transportGeneration: UInt64 = 0
     /// Live-event hold buffer, non-nil while a pull is in flight (parity
     /// with the TS engine's `pullHold`). A live WS/SSE frame landing
     /// mid-pull used to apply immediately and jump the cursor past the
@@ -300,6 +311,11 @@ public actor SyncEngine {
             // writes (don't push user A's offline mutations under B's token).
             await resetReplica(wipeMutations: true)
             Task { await self.refreshResolvedSession() }
+            // The live socket authenticated as the OLD identity and keeps
+            // streaming that identity's events until it reconnects. Cycle
+            // it so the next connect binds the new token. Parity with the
+            // TS engine's transport cycle on `tokenChanged`.
+            cycleTransport()
         }
         lastSeenToken = tokenNow
         lastSeenTokenObserved = true
@@ -354,8 +370,13 @@ public actor SyncEngine {
                 // and this task interleave only at suspension points
                 // (the network await vs. the store await).
                 pendingApply = Task {
-                    if !changes.isEmpty {
-                        await self.store.applyChangesAsync(changes)
+                    // Per-event monotonic filter: an already-seen seq is
+                    // skipped before touching the store, so a retransmit
+                    // (WS + pull window overlap) is not applied twice.
+                    // Parity with TS `enqueueApply`.
+                    let fresh = changes.filter { $0.seq > self.cursor.last_seq }
+                    if !fresh.isEmpty {
+                        await self.store.applyChangesAsync(fresh)
                     }
                     if respCursor.last_seq > self.cursor.last_seq {
                         self.cursor = respCursor
@@ -577,6 +598,9 @@ public actor SyncEngine {
         let req = PushRequest(changes: pending.map(\.change), client_id: clientId)
         do {
             let resp = try await client.syncPush(req)
+            // Any server response (success or per-op rejection) ends the
+            // transient-failure episode.
+            pushFailureCount = 0
             if let results = resp.results, !results.isEmpty {
                 // Per-op mapping by op_id — correct on a partial batch failure
                 // (e.g. op 1 applied, op 2 rejected, op 3 applied). Positional
@@ -619,14 +643,43 @@ public actor SyncEngine {
             // stop retrying. Transient (5xx/429/offline/no-status) → leave
             // pending; the poll loop / next push retries.
             if isPermanentPushError(err.httpStatus) {
+                pushFailureCount = 0
                 let msg: String
                 if case let .http(_, code, m) = err { msg = m ?? code ?? "rejected" } else { msg = "rejected" }
                 for m in pending { await failPushedMutation(m, error: msg) }
                 await mutations.clear()
+            } else {
+                scheduleTransientPushRetry(status: err.httpStatus)
             }
         } catch {
             // Network throw (no status) — transient. Leave pending.
+            scheduleTransientPushRetry(status: nil)
         }
+    }
+
+    /// Retry a transiently-failed push with bounded exponential backoff
+    /// (1s, 2s, … 30s). Without this a push that failed while offline in
+    /// WS / SSE mode sat in the queue until the next local write; only the
+    /// poll loop retried. A 429 also pushes the reconnect backoff out so a
+    /// rate-limited push does not drive a tight loop. Parity with the TS
+    /// transient branch of `push()`.
+    private func scheduleTransientPushRetry(status: Int?) {
+        if status == 429 { reconnectAttempts += 3 }
+        let attempt = pushFailureCount
+        pushFailureCount += 1
+        if pushRetryScheduled { return }
+        pushRetryScheduled = true
+        let delayMs = min(30_000, 1000 * (1 << min(attempt, 5)))
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delayMs) * 1_000_000)
+            guard let self else { return }
+            await self.retryPush()
+        }
+    }
+
+    private func retryPush() async {
+        pushRetryScheduled = false
+        await push()
     }
 
     /// Roll back an optimistic mutation the server permanently rejected:
@@ -653,12 +706,20 @@ public actor SyncEngine {
 
     // MARK: - Optimistic mutations
 
+    /// Insert a row with optimistic local update.
+    ///
+    /// Invariant: the optimistic ghost and the canonical server row share
+    /// one id. The client mints a Pylon-shaped id, threads it through the
+    /// data payload, and the server honors it on the canonical insert.
     @discardableResult
     public func insert(_ entity: String, _ data: Row) async -> String {
-        let tempId = store.optimisticInsert(entity, data)
-        await mutations.add(ClientChange(entity: entity, row_id: tempId, kind: .insert, data: data))
+        let id = PylonIds.generate()
+        var withId = data
+        withId["id"] = .string(id)
+        store.optimisticInsertWithId(entity, id: id, withId)
+        await mutations.add(ClientChange(entity: entity, row_id: id, kind: .insert, data: withId))
         await push()
-        return tempId
+        return id
     }
 
     public func update(_ entity: String, id: String, _ data: Row) async {
@@ -732,6 +793,8 @@ public actor SyncEngine {
             url = deriveWsURL()
             token = await client.currentToken()
         }
+        transportGeneration &+= 1
+        let generation = transportGeneration
         let socket = webSocketFactory(url, token)
         ws = socket
         do {
@@ -739,7 +802,7 @@ public actor SyncEngine {
             wsConnected = true
         } catch {
             wsConnected = false
-            scheduleReconnect()
+            if generation == transportGeneration { scheduleReconnect() }
             return
         }
         // Sweep rows that changed while disconnected — the WS only delivers
@@ -772,7 +835,36 @@ public actor SyncEngine {
 
         receiveTask = Task { [weak self] in
             guard let self else { return }
-            await self.consume(socket: socket)
+            await self.consume(socket: socket, generation: generation)
+        }
+    }
+
+    /// Close the live transport and reconnect with fresh credentials.
+    /// Used on an identity flip: the open socket was authenticated as the
+    /// previous identity. The old consume loop sees a stale generation
+    /// and does not schedule its own reconnect.
+    private func cycleTransport() {
+        guard running else { return }
+        switch config.transport {
+        case .websocket:
+            guard ws != nil else { return }
+            transportGeneration &+= 1
+            receiveTask?.cancel()
+            receiveTask = nil
+            ws?.close()
+            ws = nil
+            wsConnected = false
+            Task { [weak self] in await self?.connectWs() }
+        case .sse:
+            guard sseStream != nil else { return }
+            transportGeneration &+= 1
+            sseTask?.cancel()
+            sseTask = nil
+            sseStream?.close()
+            sseStream = nil
+            Task { [weak self] in await self?.connectSse() }
+        case .poll:
+            break
         }
     }
 
@@ -781,7 +873,7 @@ public actor SyncEngine {
         stableTimer = nil
     }
 
-    private func consume(socket: PylonWebSocket) async {
+    private func consume(socket: PylonWebSocket, generation: UInt64) async {
         do {
             for try await message in socket.messages() {
                 switch message {
@@ -797,6 +889,9 @@ public actor SyncEngine {
         } catch {
             // Stream errored — fall through to reconnect path.
         }
+        // A cycled socket (identity flip) already has a successor; only
+        // the current generation drives a reconnect.
+        guard generation == transportGeneration else { return }
         wsConnected = false
         if running {
             scheduleReconnect()
@@ -821,6 +916,8 @@ public actor SyncEngine {
         await refreshResolvedSession()
         let url = deriveSseURL()
         let token = await client.currentToken()
+        transportGeneration &+= 1
+        let generation = transportGeneration
         let stream = SSEStream(url: url, token: token)
         sseStream = stream
         stream.connect()
@@ -829,11 +926,11 @@ public actor SyncEngine {
         }
         sseTask = Task { [weak self] in
             guard let self else { return }
-            await self.consumeSse(stream: stream)
+            await self.consumeSse(stream: stream, generation: generation)
         }
     }
 
-    private func consumeSse(stream: SSEStream) async {
+    private func consumeSse(stream: SSEStream, generation: UInt64) async {
         do {
             for try await event in stream.messages() {
                 await handleTextFrame(event)
@@ -841,6 +938,7 @@ public actor SyncEngine {
         } catch {
             // Connection ended with an error — fall through to backoff.
         }
+        guard generation == transportGeneration else { return }
         if running {
             // Same exponential backoff as the WS path so SSE clients
             // don't form a second reconnect wave on server restart.
@@ -873,7 +971,32 @@ public actor SyncEngine {
             await applyLiveEvent(change)
         } else if parsed.type == "presence" {
             store.notify()
+        } else if parsed.type == "row-revoked", let entity = parsed.entity, let rowId = parsed.row_id {
+            // Server-driven revocation: this client lost read access to
+            // one row. Drop it at the carried seq (else the current cursor)
+            // so a racing late frame for the same row cannot resurrect it.
+            let seq = (parsed.seq ?? 0) > 0 ? parsed.seq! : cursor.last_seq
+            await handleRowRevocation(entity: entity, rowId: rowId, tombstoneSeq: seq)
+        } else if parsed.type == "session-changed" {
+            // Session mutated server-side (select-org / clear-org / revoke).
+            // Re-read /api/auth/me; a tenant flip resets the replica.
+            await refreshResolvedSession()
         }
+    }
+
+    /// Apply a `row-revoked` envelope. Distinct from a delete change event:
+    /// it has no global seq and only this recipient's visibility changed.
+    /// Mirrors the TS `handleRowRevocation`.
+    private func handleRowRevocation(entity: String, rowId: String, tombstoneSeq: Int64) async {
+        let removed = store.revokeRow(entity, id: rowId, tombstoneSeq: tombstoneSeq)
+        if removed, let persistence {
+            try? await persistence.persist(ChangeEvent(
+                seq: tombstoneSeq, entity: entity, row_id: rowId, kind: .delete, data: nil, timestamp: ""))
+            store.notify()
+        }
+        // Catch-up pull so any in-flight frame above the revocation seq is
+        // resolved against server truth.
+        Task { [weak self] in await self?.pull() }
     }
 
     /// Apply one live change event through the seq gate: already-seen
@@ -906,11 +1029,11 @@ public actor SyncEngine {
         pollTask = Task { [weak self] in
             while let self, await self.running {
                 try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                // Push then pull, like the TS `performPollTick`. No
+                // reconcile here: a full per-entity refetch every tick
+                // re-downloaded every table on every poll.
                 await self.push()
                 await self.pull()
-                // Periodic phantom-row sweep (debounced) so a delete/update
-                // the poll's delta missed still converges.
-                await self.reconcile()
             }
         }
     }
@@ -925,25 +1048,24 @@ public actor SyncEngine {
         do {
             let next = try await client.me()
             let tenantNow = next.tenantId
-            if lastSeenTenantObserved && lastSeenTenant != tenantNow {
-                if config.resetOnTenantFlip {
+            // Same verdict as the TS SessionResolver.inspectSession:
+            //   tenantChanged      — a tenant we had observed moved.
+            //   isFirstResolution  — null → X: the engine started before
+            //                        select-org landed; the cached rows ARE
+            //                        for the new tenant, so no wipe.
+            //   replicaInvalidated — a real X → Y (or X → null) flip.
+            let tenantChanged = lastSeenTenantObserved && lastSeenTenant != tenantNow
+            let isFirstResolution = lastSeenTenantObserved && lastSeenTenant == nil && tenantNow != nil
+            let replicaInvalidated = tenantChanged && !isFirstResolution
+            // `resetOnTenantFlip: false` — membership-scoped reads: the
+            // replica is valid across all the user's orgs, so keep every
+            // row and reconcile to pick up rows of an org the user only
+            // just joined (their change events predate membership).
+            let skipReset = !config.resetOnTenantFlip
+            if tenantChanged {
+                if replicaInvalidated && !skipReset {
                     // Tenant flip is an identity change → wipe rows + queued writes.
                     await resetReplica(wipeMutations: true)
-                } else {
-                    // Membership-scoped reads: the replica is valid across all
-                    // the user's orgs — keep every row, and reconcile to pick
-                    // up rows of an org the user only just joined (their
-                    // change events predate membership). Parity with the TS
-                    // engine's resetOnTenantFlip: false path.
-                    lastSeenTenant = tenantNow
-                    lastSeenTenantObserved = true
-                    if next != resolvedSession {
-                        resolvedSession = next
-                        store.notify()
-                    }
-                    await pull()
-                    await reconcile()
-                    return
                 }
             }
             lastSeenTenant = tenantNow
@@ -951,6 +1073,14 @@ public actor SyncEngine {
             if next != resolvedSession {
                 resolvedSession = next
                 store.notify()
+            }
+            if tenantChanged {
+                // Re-pull under the new tenant. After a wipe this is the
+                // from-zero snapshot; without one it is the delta.
+                await pull()
+                if skipReset {
+                    await reconcile()
+                }
             }
         } catch {
             // /api/auth/me failures are transient — let the next pull retry.

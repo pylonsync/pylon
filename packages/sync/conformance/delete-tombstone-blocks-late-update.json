@@ -1,0 +1,14 @@
+{
+  "name": "a delete tombstones the row against an older update but not a newer insert",
+  "steps": [
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "title": "v1" } },
+    { "op": "pull" },
+    { "op": "frame", "frame": { "type": "change", "seq": 3, "entity": "Note", "row_id": "n1", "kind": "delete", "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": false },
+    { "op": "frame", "frame": { "type": "change", "seq": 2, "entity": "Note", "row_id": "n1", "kind": "update", "data": { "id": "n1", "title": "late" }, "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": false },
+    { "op": "frame", "frame": { "type": "change", "seq": 4, "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "id": "n1", "title": "again" }, "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": true, "fields": { "title": "again" } },
+    { "op": "expectCursor", "last_seq": 4 }
+  ]
+}

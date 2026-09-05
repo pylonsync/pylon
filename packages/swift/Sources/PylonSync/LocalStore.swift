@@ -18,6 +18,13 @@ public final class LocalStore: @unchecked Sendable {
     /// here is considered deleted; any insert/update with `seq < tombSeq`
     /// is dropped so a delayed replay can't resurrect it.
     private var tombstones: [String: [String: Int64]] = [:]
+    /// Rows deleted optimistically and not yet confirmed by the server.
+    /// Blocks an insert/update for the id until the server's own delete
+    /// event lands (which records a real tombstone and clears this entry)
+    /// or the push is rejected (`restoreRow` clears it). Kept apart from
+    /// the seq-keyed tombstones so a client fence never outranks a later
+    /// legitimate re-create of the id. Mirrors the TS `optimisticTombstones`.
+    private var optimisticTombstones: [String: Set<String>] = [:]
 
     private var listeners: [UUID: @Sendable () -> Void] = [:]
 
@@ -132,11 +139,15 @@ public final class LocalStore: @unchecked Sendable {
     }
 
     private func isTombstonedLocked(entity: String, id: String, atSeq: Int64) -> Bool {
+        if optimisticTombstones[entity]?.contains(id) == true { return true }
         guard let tombSeq = tombstones[entity]?[id] else { return false }
         return atSeq < tombSeq
     }
 
     private func recordTombstoneLocked(entity: String, id: String, seq: Int64) {
+        // A server-issued tombstone supersedes the optimistic fence for
+        // this id, so a later legitimate re-create is not blocked.
+        optimisticTombstones[entity]?.remove(id)
         if tombstones[entity] == nil { tombstones[entity] = [:] }
         let existing = tombstones[entity]?[id]
         if existing == nil || seq > (existing ?? 0) {
@@ -146,20 +157,27 @@ public final class LocalStore: @unchecked Sendable {
 
     // MARK: - Optimistic
 
-    /// Apply an optimistic insert. Returns a temporary id the caller should
-    /// pass back to the mutation queue.
+    /// Apply an optimistic insert under a freshly minted Pylon id and
+    /// return it. The engine threads the same id through the push so the
+    /// canonical server row replaces the ghost in place.
     @discardableResult
     public func optimisticInsert(_ entity: String, _ data: Row) -> String {
-        let tempId = "_pending_\(Int(Date().timeIntervalSince1970 * 1000))_\(UUID().uuidString.prefix(8))"
+        let id = PylonIds.generate()
+        optimisticInsertWithId(entity, id: id, data)
+        return id
+    }
+
+    /// Apply an optimistic insert under a caller-chosen id. Mirrors the TS
+    /// `optimisticInsertWithId`.
+    public func optimisticInsertWithId(_ entity: String, id: String, _ data: Row) {
         lock.lock()
         if tables[entity] == nil { tables[entity] = [:] }
         var copy = data
-        copy["id"] = .string(tempId)
-        tables[entity]?[tempId] = copy
+        copy["id"] = .string(id)
+        tables[entity]?[id] = copy
         let listeners = Array(self.listeners.values)
         lock.unlock()
         for l in listeners { l() }
-        return tempId
     }
 
     public func optimisticUpdate(_ entity: String, id: String, _ data: Row) {
@@ -174,12 +192,16 @@ public final class LocalStore: @unchecked Sendable {
         for l in listeners { l() }
     }
 
+    /// Apply an optimistic delete: drop the row and fence the id against
+    /// any insert/update until the server's own delete event arrives (or
+    /// the push is rejected and `restoreRow` lifts the fence). The fence is
+    /// not a seq tombstone: a server re-create of the id after the delete
+    /// still lands once the server's delete has cleared it.
     public func optimisticDelete(_ entity: String, id: String) {
         lock.lock()
         tables[entity]?.removeValue(forKey: id)
-        // Use Int64.max so the next server replay can't undo this delete
-        // until the authoritative event refreshes the tombstone.
-        recordTombstoneLocked(entity: entity, id: id, seq: .max)
+        if optimisticTombstones[entity] == nil { optimisticTombstones[entity] = [] }
+        optimisticTombstones[entity]?.insert(id)
         let listeners = Array(self.listeners.values)
         let persist = persistFn
         lock.unlock()
@@ -187,13 +209,11 @@ public final class LocalStore: @unchecked Sendable {
         // Mirror applyChange's persistence path so the delete survives
         // an app restart. Without this, the row sits in memory as
         // deleted but the on-disk replica still has it — relaunching
-        // restores LocalStore from disk and the row reappears. Use
-        // Int64.max for seq to match the tombstone above; any future
-        // server replay that arrives with a real seq won't resurrect
-        // the row because the persisted tombstone outranks it.
+        // restores LocalStore from disk and the row reappears. The
+        // pending mutation in the queue re-pushes the delete on launch.
         if let persist {
             let change = ChangeEvent(
-                seq: .max,
+                seq: 0,
                 entity: entity,
                 row_id: id,
                 kind: .delete,
@@ -234,6 +254,7 @@ public final class LocalStore: @unchecked Sendable {
         lock.lock()
         tables.removeAll()
         tombstones.removeAll()
+        optimisticTombstones.removeAll()
         let listeners = Array(self.listeners.values)
         lock.unlock()
         for l in listeners { l() }
@@ -295,8 +316,23 @@ public final class LocalStore: @unchecked Sendable {
         }
     }
 
+    /// Per-subscriber row revocation: the server signaled that this client
+    /// lost read access to one row. ALWAYS records the tombstone (even when
+    /// the row is not in memory) so a stale insert/update that arrives after
+    /// the revocation cannot resurrect it. Returns whether a row was removed.
+    /// Mirrors the TS `revokeRow`.
+    public func revokeRow(_ entity: String, id: String, tombstoneSeq: Int64) -> Bool {
+        lock.lock()
+        let removed = tables[entity]?.removeValue(forKey: id) != nil
+        recordTombstoneLocked(entity: entity, id: id, seq: tombstoneSeq)
+        let listeners = removed ? Array(self.listeners.values) : []
+        lock.unlock()
+        for l in listeners { l() }
+        return removed
+    }
+
     /// Remove an optimistic insert ghost whose push was permanently rejected.
-    /// No tombstone — the temp id was never real server state.
+    /// No tombstone — the id was never real server state.
     public func rollbackOptimisticInsert(_ entity: String, id: String) {
         lock.lock()
         let removed = tables[entity]?.removeValue(forKey: id) != nil
@@ -315,10 +351,15 @@ public final class LocalStore: @unchecked Sendable {
     public func restoreRow(_ entity: String, id: String, prev: Row?) {
         let (snapshot, listeners, persist) = withLock {
             () -> (ChangeEvent, [@Sendable () -> Void], (@Sendable (ChangeEvent) async -> Void)?) in
-            // Clear the optimistic-delete fence (recorded at Int64.max).
-            if tombstones[entity]?[id] == .max { tombstones[entity]?.removeValue(forKey: id) }
+            // The failed mutation's own optimistic fence always clears.
+            optimisticTombstones[entity]?.remove(id)
             let snap: ChangeEvent
-            if let prev {
+            if tombstones[entity]?[id] != nil {
+                // The server removed this row while the rejected push was in
+                // flight; its delete outranks the local rollback.
+                tables[entity]?.removeValue(forKey: id)
+                snap = ChangeEvent(seq: 0, entity: entity, row_id: id, kind: .delete, data: nil, timestamp: "")
+            } else if let prev {
                 if tables[entity] == nil { tables[entity] = [:] }
                 var row = prev
                 row["id"] = .string(id)
@@ -326,7 +367,7 @@ public final class LocalStore: @unchecked Sendable {
                 snap = ChangeEvent(seq: 0, entity: entity, row_id: id, kind: .insert, data: row, timestamp: "")
             } else {
                 tables[entity]?.removeValue(forKey: id)
-                snap = ChangeEvent(seq: .max, entity: entity, row_id: id, kind: .delete, data: nil, timestamp: "")
+                snap = ChangeEvent(seq: 0, entity: entity, row_id: id, kind: .delete, data: nil, timestamp: "")
             }
             return (snap, Array(self.listeners.values), persistFn)
         }

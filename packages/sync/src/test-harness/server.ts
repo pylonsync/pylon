@@ -355,6 +355,46 @@ export class TestServer {
     return this.bumpSeq();
   }
 
+  /** The most recently issued seq (0 before any change). */
+  currentSeq(): number {
+    return this.nextSeq;
+  }
+
+  /**
+   * Apply one op from `/api/sync/push` the way the real server does:
+   * write the row, append a change-log entry at the next seq, and fan
+   * it out to subscribers. Returns the per-op result the server puts in
+   * `results[]`. An update/delete of a row that does not exist is
+   * rejected, not silently applied.
+   */
+  applyPushedChange(change: {
+    entity: string;
+    row_id: string;
+    kind: "insert" | "update" | "delete";
+    data?: Row;
+    op_id?: string;
+  }): { op_id?: string; status: "applied" | "error"; seq?: number; error?: { code: string; message: string } } {
+    const { entity, row_id, kind, op_id } = change;
+    const exists = this.rows.get(entity)?.has(row_id) ?? false;
+    if (kind === "insert") {
+      this.insert(entity, { ...(change.data ?? {}), id: row_id } as Row);
+      return { op_id, status: "applied", seq: this.nextSeq };
+    }
+    if (!exists) {
+      return {
+        op_id,
+        status: "error",
+        error: { code: "NOT_FOUND", message: `${entity}/${row_id} does not exist` },
+      };
+    }
+    if (kind === "update") {
+      this.update(entity, row_id, change.data ?? {});
+    } else {
+      this.delete(entity, row_id);
+    }
+    return { op_id, status: "applied", seq: this.nextSeq };
+  }
+
   // ---- Read paths the engine calls ----------------------------------------
 
   /** /api/entities/<entity>/cursor — policy-filtered list.

@@ -1,0 +1,15 @@
+{
+  "name": "an optimistic delete removes the row, the server confirms it, and a later re-create lands",
+  "steps": [
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "title": "v1" } },
+    { "op": "pull" },
+    { "op": "delete", "entity": "Note", "id": "n1" },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": false },
+    { "op": "pull" },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": false },
+    { "op": "expectCursor", "last_seq": 2 },
+    { "op": "frame", "frame": { "type": "change", "seq": 10, "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "id": "n1", "title": "recreated" }, "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": true, "fields": { "title": "recreated" } },
+    { "op": "expectCursor", "last_seq": 10 }
+  ]
+}

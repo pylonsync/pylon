@@ -341,7 +341,36 @@ async function handle(
         body: { error: { code: "PUSH_REJECTED" } },
       };
     }
-    return { status: 200, body: { ops: [] } };
+    // Apply the ops like the real server: rows + change log + fan-out,
+    // and answer with the per-op `results[]` shape the engine maps by
+    // op_id. A stub that applied nothing left every pushed mutation
+    // pending and the server's own echo of the write never existed.
+    let changes: Array<{
+      entity: string;
+      row_id: string;
+      kind: "insert" | "update" | "delete";
+      data?: Record<string, unknown>;
+      op_id?: string;
+    }> = [];
+    try {
+      const body = typeof _init?.body === "string" ? JSON.parse(_init.body) : null;
+      changes = Array.isArray(body?.changes) ? body.changes : [];
+    } catch {
+      changes = [];
+    }
+    const results = changes.map((c) => server.applyPushedChange(c));
+    const applied = results.filter((r) => r.status === "applied").length;
+    const maxApplied = results.reduce((m, r) => Math.max(m, r.seq ?? 0), 0);
+    return {
+      status: 200,
+      body: {
+        applied,
+        errors: results.filter((r) => r.status === "error").map((r) => r.error?.message ?? "rejected"),
+        results,
+        cursor: { last_seq: server.currentSeq() },
+        max_applied_seq: maxApplied > 0 ? maxApplied : undefined,
+      },
+    };
   }
 
   // Anything else: 404 with a clear error so test failures point

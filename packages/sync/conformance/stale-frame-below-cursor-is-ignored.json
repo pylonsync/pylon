@@ -1,0 +1,15 @@
+{
+  "name": "a live frame at or below the cursor is not re-applied",
+  "steps": [
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "title": "v1" } },
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "update", "data": { "title": "v2" } },
+    { "op": "pull" },
+    { "op": "expectCursor", "last_seq": 2 },
+    { "op": "frame", "frame": { "type": "change", "seq": 1, "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "id": "n1", "title": "v1" }, "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": true, "fields": { "title": "v2" } },
+    { "op": "expectCursor", "last_seq": 2 },
+    { "op": "frame", "frame": { "type": "change", "seq": 3, "entity": "Note", "row_id": "n1", "kind": "update", "data": { "id": "n1", "title": "v3" }, "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": true, "fields": { "title": "v3" } },
+    { "op": "expectCursor", "last_seq": 3 }
+  ]
+}

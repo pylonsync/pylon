@@ -1,0 +1,12 @@
+{
+  "name": "a pull applies every change and lands the server cursor",
+  "steps": [
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "title": "one" } },
+    { "op": "seed", "entity": "Note", "row_id": "n2", "kind": "insert", "data": { "title": "two" } },
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "update", "data": { "title": "one-v2" } },
+    { "op": "pull" },
+    { "op": "expectCount", "entity": "Note", "count": 2 },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": true, "fields": { "title": "one-v2" } },
+    { "op": "expectCursor", "last_seq": 3 }
+  ]
+}

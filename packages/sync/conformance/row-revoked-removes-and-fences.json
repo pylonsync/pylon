@@ -1,0 +1,12 @@
+{
+  "name": "a row-revoked envelope removes the row and blocks a stale replay",
+  "steps": [
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "title": "visible" } },
+    { "op": "pull" },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": true },
+    { "op": "frame", "frame": { "type": "row-revoked", "entity": "Note", "row_id": "n1", "seq": 5 } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": false },
+    { "op": "frame", "frame": { "type": "change", "seq": 1, "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "id": "n1", "title": "STALE" }, "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": false }
+  ]
+}

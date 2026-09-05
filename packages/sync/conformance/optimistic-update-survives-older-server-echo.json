@@ -1,0 +1,10 @@
+{
+  "name": "an optimistic update is not clobbered by a server frame older than the cursor",
+  "steps": [
+    { "op": "seed", "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "title": "server" } },
+    { "op": "pull" },
+    { "op": "update", "entity": "Note", "id": "n1", "data": { "title": "local" } },
+    { "op": "frame", "frame": { "type": "change", "seq": 1, "entity": "Note", "row_id": "n1", "kind": "insert", "data": { "id": "n1", "title": "server" }, "timestamp": "" } },
+    { "op": "expectRow", "entity": "Note", "id": "n1", "present": true, "fields": { "title": "local" } }
+  ]
+}

@@ -1298,6 +1298,14 @@ export class SyncEngine {
     }
   }
 
+  /** Close and reopen the live transport so the next connect binds the
+   *  current token. Leader-only (followers hold no transport). */
+  private cycleTransport(): void {
+    if (!this.transport || !this.isMultiTabLeader || !this.running) return;
+    this.transport.stop();
+    this.transport.start();
+  }
+
   /** Broadcast a payload to other tabs in this origin. Delegates to
    *  the orchestrator; no-op when the orchestrator isn't running
    *  (SSR-only consumers that never reach `start()`). */
@@ -1754,6 +1762,13 @@ export class SyncEngine {
       // Token flipped → the cached tenant is for the previous user. Pull
       // the fresh session in parallel with the cursor catch-up below.
       void this.refreshResolvedSession();
+      // The live socket was opened with the OLD token (the bearer rides
+      // the WS subprotocol at connect time), so the server keeps
+      // fanning out the previous identity's events to it. Cycle the
+      // transport: stop() closes the socket, start() reconnects and
+      // reads the token fresh. The new socket's onConnected pull sees
+      // the token as already observed, so this does not recurse.
+      this.cycleTransport();
     }
 
     // Capture whether this pull started from cursor=0 BEFORE the

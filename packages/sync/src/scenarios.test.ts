@@ -815,6 +815,47 @@ describe("sync scenarios", () => {
     expect((env.engine.mutations as unknown as { queue: unknown[] }).queue).toHaveLength(0);
   });
 
+  // TRANSPORT CYCLE ON IDENTITY FLIP. The WS binds the bearer token at
+  // connect time (subprotocol), so a socket opened as user A keeps
+  // receiving A's fan-out after the tab signs in as B. The token-flip
+  // path in pull() must close that socket and reconnect as B.
+  test("an identity flip reconnects the WebSocket as the new identity", async () => {
+    env = createTestEnv({ reconnectDelay: 1 });
+    env.signIn({ userId: "u1" });
+    await env.start();
+    await env.flush(50);
+    const before = env.transport.wsConnectCount();
+    expect(before).toBeGreaterThan(0);
+
+    // Sign in as a different user in the same tab and let the engine
+    // notice on its next pull (what a real sign-in triggers).
+    env.signIn({ userId: "u2" });
+    await env.engine.pull();
+    await env.flush(50);
+    expect(env.transport.wsConnectCount()).toBeGreaterThan(before);
+
+    // The live socket is now u2's: u2's fan-out lands, u1's does not.
+    env.server.pushToUser("u2", {
+      seq: env.server.nextSeqValue(),
+      entity: "Note",
+      row_id: "n-u2",
+      kind: "insert",
+      data: { id: "n-u2", title: "for u2" },
+      timestamp: "",
+    });
+    env.server.pushToUser("u1", {
+      seq: env.server.nextSeqValue(),
+      entity: "Note",
+      row_id: "n-u1",
+      kind: "insert",
+      data: { id: "n-u1", title: "for u1" },
+      timestamp: "",
+    });
+    await env.flush(50);
+    expect(env.engine.store.get("Note", "n-u2")).not.toBeNull();
+    expect(env.engine.store.get("Note", "n-u1")).toBeNull();
+  });
+
   test("a same-user 410 resync PRESERVES pending offline writes", async () => {
     env = createTestEnv({ transport: "poll" });
     env.signIn({ userId: "u1" });
