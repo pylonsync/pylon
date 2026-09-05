@@ -31,6 +31,9 @@ pub enum XmlSecProviderError {
     #[error("The given XML is missing a root element")]
     XmlMissingRootElement,
 
+    #[error("The given XML declares a DTD; SAML documents must not")]
+    XmlDtdForbidden,
+
     #[error("xml sec Error: {}", error)]
     XmlParseError {
         #[from]
@@ -95,6 +98,43 @@ impl From<XmlParseError> for CryptoError {
     }
 }
 
+/// Parse XML that arrived from the network (a SAML response, assertion,
+/// or metadata document) with the parser locked down:
+///
+/// - `no_net`: libxml2 never fetches an external entity or DTD over the
+///   network, so a crafted document cannot make the server issue requests.
+/// - Entity substitution and external DTD loading are never enabled
+///   (`XML_PARSE_NOENT` / `XML_PARSE_DTDLOAD` are not in `ParserOptions`),
+///   so an entity reference stays an unexpanded node.
+/// - `recover` is off: a malformed document is an error, not a best-effort
+///   tree the signature check then runs over.
+/// - Any DTD (internal or external subset) is rejected after the parse.
+///   SAML never carries one, and refusing it up front removes the whole
+///   entity-expansion class (billion laughs, XXE) instead of relying on
+///   libxml2's default limits.
+pub fn parse_untrusted_xml<Bytes: AsRef<[u8]>>(
+    xml: Bytes,
+) -> Result<libxml::tree::Document, CryptoError> {
+    let options = libxml::parser::ParserOptions {
+        recover: false,
+        no_net: true,
+        no_error: true,
+        no_warning: true,
+        ..Default::default()
+    };
+    let document = XmlParser::default().parse_string_with_options(xml, options)?;
+    // SAFETY: `doc_ptr` is a live libxml2 document owned by `document`;
+    // reading its subset pointers is a field read on a valid struct.
+    let has_dtd = unsafe {
+        let raw = document.doc_ptr();
+        !(*raw).intSubset.is_null() || !(*raw).extSubset.is_null()
+    };
+    if has_dtd {
+        return Err(XmlSecProviderError::XmlDtdForbidden.into());
+    }
+    Ok(document)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VerifiedSelectionKind {
     WholeNode,
@@ -130,8 +170,7 @@ impl super::CryptoProvider for XmlSec {
         x509_cert_der: &CertificateDer,
         id_attribute: Option<&str>,
     ) -> Result<(), CryptoError> {
-        let parser = XmlParser::default();
-        let document = parser.parse_string(xml)?;
+        let document = parse_untrusted_xml(xml)?;
 
         let key = XmlSecKey::from_memory(x509_cert_der.der_data(), XmlSecKeyFormat::CertDer)?;
         let mut context = XmlSecSignatureContext::new()?;
@@ -154,7 +193,7 @@ impl super::CryptoProvider for XmlSec {
         certs_der: &[CertificateDer],
         reduce_mode: ReduceMode,
     ) -> Result<String, CryptoError> {
-        let mut xml = XmlParser::default().parse_string(xml_str)?;
+        let mut xml = parse_untrusted_xml(xml_str)?;
 
         // collect ID attribute values and tell libxml about them
         collect_id_attributes(&mut xml)?;
@@ -309,8 +348,7 @@ impl super::CryptoProvider for XmlSec {
         xml: Bytes,
         private_key_der: &[u8],
     ) -> Result<String, CryptoError> {
-        let parser = XmlParser::default();
-        let document = parser.parse_string(xml)?;
+        let document = parse_untrusted_xml(xml)?;
 
         let key = XmlSecKey::from_memory(private_key_der, XmlSecKeyFormat::Der)?;
         let mut context = XmlSecSignatureContext::new()?;
@@ -474,7 +512,7 @@ fn parse_selection(
     predigest_xml: &str,
 ) -> Result<ParsedSelection, CryptoError> {
     let wrapped_fragment = format!("<samael-fragment>{predigest_xml}</samael-fragment>");
-    let fragment_doc = XmlParser::default().parse_string(&wrapped_fragment)?;
+    let fragment_doc = parse_untrusted_xml(&wrapped_fragment)?;
     let fragment_root = fragment_doc
         .get_root_element()
         .ok_or(XmlSecProviderError::XmlMissingRootElement)?;
@@ -1247,6 +1285,52 @@ fn decrypt_aead(
 
 #[cfg(test)]
 mod tests {
+    use super::parse_untrusted_xml;
+
+    fn is_dtd_error(err: &super::CryptoError) -> bool {
+        format!("{err:?}").contains("XmlDtdForbidden")
+    }
+
+    #[test]
+    fn untrusted_parser_accepts_a_plain_document() {
+        let doc = parse_untrusted_xml("<a><b/></a>").expect("plain XML parses");
+        assert_eq!(doc.get_root_element().unwrap().get_name(), "a");
+    }
+
+    #[test]
+    fn untrusted_parser_rejects_an_internal_dtd() {
+        // Billion-laughs shape: an internal subset with a nested entity.
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE a [ <!ENTITY x "xx"> <!ENTITY y "&x;&x;"> ]>
+<a>&y;</a>"#;
+        let err = parse_untrusted_xml(xml).err().expect("DTD must be refused");
+        assert!(is_dtd_error(&err), "{err:?}");
+    }
+
+    #[test]
+    fn untrusted_parser_rejects_an_external_entity() {
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE a [ <!ENTITY xxe SYSTEM "file:///etc/hostname"> ]>
+<a>&xxe;</a>"#;
+        let err = parse_untrusted_xml(xml).err().expect("XXE must be refused");
+        assert!(is_dtd_error(&err), "{err:?}");
+    }
+
+    #[test]
+    fn untrusted_parser_rejects_an_external_dtd_reference() {
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE a SYSTEM "http://127.0.0.1:9/never.dtd">
+<a/>"#;
+        let err = parse_untrusted_xml(xml).err().expect("external DTD must be refused");
+        assert!(is_dtd_error(&err), "{err:?}");
+    }
+
+    #[test]
+    fn untrusted_parser_does_not_recover_malformed_xml() {
+        // With `recover` the default parser returns a partial tree here.
+        assert!(parse_untrusted_xml("<a><b></a>").is_err());
+    }
+
     use super::*;
 
     fn reduce_with_selection<F>(xml: &str, reduce_mode: ReduceMode, make_selection: F) -> String

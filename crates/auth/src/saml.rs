@@ -658,6 +658,44 @@ mod tests {
         assert!(result.is_err(), "unsigned response must be rejected");
     }
 
+    /// A SAML response carrying a DTD is refused before any signature work.
+    /// This is the XXE / entity-expansion class: the parser runs with
+    /// network access off and rejects any internal or external subset.
+    #[test]
+    fn verify_rejects_response_with_a_dtd() {
+        let cfg = cfg("acme", vec![]);
+        let xml = r#"<?xml version="1.0"?>
+<!DOCTYPE samlp:Response [ <!ENTITY xxe SYSTEM "file:///etc/hostname"> ]>
+<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" InResponseTo="_abc">
+  <saml:Issuer>&xxe;</saml:Issuer>
+</samlp:Response>"#;
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
+        let result = verify_and_parse_response(
+            &cfg,
+            "https://my-app/sp",
+            "https://my-app/acs",
+            &b64,
+            "_abc",
+        );
+        assert!(result.is_err(), "a response with a DTD must be rejected");
+    }
+
+    /// The hardened parser itself: no DTD of any kind, no recovery of a
+    /// malformed document, plain documents still parse.
+    #[test]
+    fn untrusted_xml_parser_refuses_dtds_and_malformed_input() {
+        use samael::crypto::parse_untrusted_xml;
+        assert!(parse_untrusted_xml("<a><b/></a>").is_ok());
+        let internal = r#"<!DOCTYPE a [ <!ENTITY x "xx"> <!ENTITY y "&x;&x;"> ]><a>&y;</a>"#;
+        let err = parse_untrusted_xml(internal).err().expect("internal DTD");
+        assert!(format!("{err:?}").contains("XmlDtdForbidden"), "{err:?}");
+        let external = r#"<!DOCTYPE a SYSTEM "http://127.0.0.1:9/never.dtd"><a/>"#;
+        let err = parse_untrusted_xml(external).err().expect("external DTD");
+        assert!(format!("{err:?}").contains("XmlDtdForbidden"), "{err:?}");
+        assert!(parse_untrusted_xml("<a><b></a>").is_err(), "no recovery");
+    }
+
     #[test]
     fn verify_rejects_garbage_base64() {
         let cfg = cfg("acme", vec![]);

@@ -2299,6 +2299,9 @@ const MAX_ATTEMPTS: u32 = 5;
 /// Minimum seconds between successive `create()` calls for the same email.
 /// Throttles magic-code spam (user can't be flooded with login codes).
 const CREATE_COOLDOWN_SECS: u64 = 60;
+/// Compared against on the no-code path so that path costs the same as a
+/// real verify. Never issued: it is not six digits.
+const DUMMY_MAGIC_CODE: &str = "nocode";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MagicCodeError {
@@ -2414,7 +2417,13 @@ impl MagicCodeStore {
 
         let mc = match codes.get_mut(email) {
             Some(m) => m,
-            None => return Err(MagicCodeError::NotFound),
+            None => {
+                // Spend the same compare an existing code would, so the
+                // response time does not tell a caller whether a code was
+                // ever issued for this email.
+                let _ = constant_time_eq(DUMMY_MAGIC_CODE.as_bytes(), code.as_bytes());
+                return Err(MagicCodeError::NotFound);
+            }
         };
 
         if mc.attempts >= MAX_ATTEMPTS {
