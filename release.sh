@@ -15,6 +15,16 @@
 #   ./release.sh 0.3.0              # explicit
 #   ./release.sh patch --tag        # also: commit, tag vX.Y.Z, push
 #                                   #   → kicks off .github/workflows/release.yml
+#   ./release.sh patch --tag --allow-red-ci "hotfix: <why>"
+#                                   # tag even though ci.yml is not green for
+#                                   # HEAD; the reason lands in the commit
+#
+# `--tag` refuses to run unless:
+#   - the working tree is clean (another session's in-flight files would
+#     otherwise be swept into the release commit — that published a
+#     half-written module under 0.4.28),
+#   - ci.yml has completed with success for HEAD (release.yml checks this
+#     again server-side; the local check fails faster).
 #
 # What gets updated:
 #   - Cargo.toml workspace version (the line with x-release-please-version)
@@ -40,10 +50,17 @@ Usage: ./release.sh <bump|version> [--tag]
 
   --tag:   also commit, tag (vX.Y.Z), and push origin
            (kicks off the GitHub Actions release workflow)
+           Requires a clean tree and a green ci.yml run for HEAD.
+
+  --allow-red-ci "<reason>":
+           tag even though ci.yml is not green for HEAD. The reason is
+           recorded in the release commit. release.yml still waits for
+           ci.yml on the pushed commit, so this only skips the local check.
 
 Examples:
   ./release.sh patch
   ./release.sh 0.3.0 --tag
+  ./release.sh patch --tag --allow-red-ci "hotfix: auth outage, flaky swift job"
 EOF
 	exit "${1:-1}"
 }
@@ -52,14 +69,26 @@ EOF
 
 bump=""
 tag=false
+allow_red_ci=""
+expect_reason=false
 for arg in "$@"; do
+	if $expect_reason; then
+		allow_red_ci="$arg"
+		expect_reason=false
+		continue
+	fi
 	case "$arg" in
 		--tag) tag=true ;;
+		--allow-red-ci) expect_reason=true ;;
 		--help|-h) usage 0 ;;
 		*) [[ -z "$bump" ]] && bump="$arg" || usage 1 ;;
 	esac
 done
 [[ -z "$bump" ]] && usage 1
+if $expect_reason; then
+	echo "error: --allow-red-ci needs a reason argument" >&2
+	usage 1
+fi
 
 # --- read current version -------------------------------------------------
 
@@ -116,10 +145,71 @@ fi
 
 # --- preflight checks (only enforced when --tag is set) -------------------
 
+# The files this script edits and stages. The commit is built from this
+# list, never from `git add -A`: other sessions work in this tree at the
+# same time and their half-written files must not ride along.
+release_files() {
+	echo Cargo.toml Cargo.lock bun.lock .release-please-manifest.json
+	find crates -maxdepth 2 -name Cargo.toml
+	find packages -maxdepth 3 -name package.json -not -path '*/node_modules/*'
+}
+
+# Is ci.yml green for the commit we are about to release on top of?
+# Prints the run URL on stdout; returns non-zero when the run is missing,
+# still running, or failed.
+ci_state_for_head() {
+	local sha run
+	sha="$(git rev-parse HEAD)"
+	if ! command -v gh >/dev/null 2>&1; then
+		echo "gh CLI not installed" >&2
+		return 2
+	fi
+	run="$(gh run list --workflow ci.yml --commit "$sha" \
+		--json status,conclusion,url --limit 1 --jq '.[0] // empty' 2>/dev/null)" || {
+		echo "gh run list failed (not logged in?)" >&2
+		return 2
+	}
+	if [[ -z "$run" ]]; then
+		echo "no ci.yml run for $sha (push HEAD first, or wait for it to start)" >&2
+		return 1
+	fi
+	local status conclusion url
+	status="$(jq -r .status <<<"$run")"
+	conclusion="$(jq -r .conclusion <<<"$run")"
+	url="$(jq -r .url <<<"$run")"
+	echo "$url"
+	if [[ "$status" != "completed" ]]; then
+		echo "ci.yml is still $status for $sha" >&2
+		return 1
+	fi
+	if [[ "$conclusion" != "success" ]]; then
+		echo "ci.yml concluded '$conclusion' for $sha" >&2
+		return 1
+	fi
+	return 0
+}
+
 if $tag; then
 	if [[ -n "$(git status --porcelain)" ]]; then
-		echo "error: working tree is not clean — commit or stash first" >&2
+		echo "error: working tree is not clean." >&2
+		echo "       Commit your own work first. If these files belong to another" >&2
+		echo "       session, do not stash or commit them — wait for that session." >&2
 		git status --short >&2
+		exit 1
+	fi
+	if [[ -n "$(git log --oneline "@{upstream}..HEAD" 2>/dev/null)" ]]; then
+		echo "error: HEAD has commits not on the remote; push first so ci.yml can run on them." >&2
+		exit 1
+	fi
+	echo "Checking ci.yml for HEAD…"
+	if ci_url="$(ci_state_for_head)"; then
+		echo "  ci.yml green: $ci_url"
+	elif [[ -n "$allow_red_ci" ]]; then
+		echo "warning: ci.yml is NOT green for HEAD; continuing because --allow-red-ci was given:" >&2
+		echo "         $allow_red_ci" >&2
+	else
+		echo "error: refusing to tag on a commit without a green ci.yml run." >&2
+		echo "       Wait for CI, fix it, or pass --allow-red-ci \"<reason>\" for an emergency." >&2
 		exit 1
 	fi
 	branch="$(git rev-parse --abbrev-ref HEAD)"
@@ -311,8 +401,24 @@ fi
 
 echo
 echo "Committing + tagging…"
-git add -A
-git commit -m "chore: release $target"
+# Stage only the release files. Anything else in the tree was created after
+# the preflight by another session; leave it alone and say so.
+release_files | xargs git add --
+stray="$(git status --porcelain | grep -v '^[MARC]  ' || true)"
+if [[ -n "$stray" ]]; then
+	echo "error: files outside the release set changed while this script ran:" >&2
+	echo "$stray" >&2
+	echo "       Not committing them. Re-run once the tree holds only your work." >&2
+	git reset --quiet
+	exit 1
+fi
+commit_msg="chore: release $target"
+if [[ -n "$allow_red_ci" ]]; then
+	commit_msg="$commit_msg
+
+Released with --allow-red-ci: $allow_red_ci"
+fi
+git commit -m "$commit_msg"
 # Annotated tag is required for `git push --follow-tags` to actually
 # push it. A lightweight tag (`git tag NAME` without -a) is created
 # locally but the next `git push --follow-tags` silently leaves it

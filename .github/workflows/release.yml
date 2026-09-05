@@ -23,11 +23,67 @@ env:
 
 jobs:
   # ---------------------------------------------------------------
+  # Gate: the CI workflow for this exact commit must have passed.
+  #
+  # A tag push does not run ci.yml, and nothing here used to depend on it,
+  # so a red test suite on main never blocked a release (0.4.28 shipped
+  # with `cargo fmt --check` failing; the stale default-deny tests were
+  # red on main for weeks while releases kept publishing). Every job that
+  # writes to a registry now depends on this one.
+  #
+  # The commit push and the tag push arrive together (`git push
+  # --follow-tags`), so the CI run usually exists but is still running;
+  # poll until it concludes. No run at all is a failure, not a pass.
+  # ---------------------------------------------------------------
+  ci-gate:
+    name: CI passed for this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Wait for ci.yml on ${{ github.sha }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="${GITHUB_SHA}"
+          echo "commit: $sha"
+          deadline=$((SECONDS + 55 * 60))
+          while :; do
+            run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$sha" \
+              --json databaseId,status,conclusion,url --limit 1 --jq '.[0] // empty')"
+            if [[ -z "$run" ]]; then
+              echo "no ci.yml run found for $sha yet"
+            else
+              status="$(jq -r .status <<<"$run")"
+              conclusion="$(jq -r .conclusion <<<"$run")"
+              url="$(jq -r .url <<<"$run")"
+              echo "ci.yml: status=$status conclusion=$conclusion $url"
+              if [[ "$status" == "completed" ]]; then
+                if [[ "$conclusion" == "success" ]]; then
+                  exit 0
+                fi
+                echo "::error::ci.yml concluded '$conclusion' for $sha — fix main, then re-run this workflow ($url)"
+                exit 1
+              fi
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "::error::gave up waiting for ci.yml on $sha"
+              exit 1
+            fi
+            sleep 30
+          done
+
+  # ---------------------------------------------------------------
   # Sanity check: every published artifact must agree on the version.
   # Runs before anything mutates a registry.
   # ---------------------------------------------------------------
   verify:
     name: Verify versions match tag
+    needs: ci-gate
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
@@ -364,6 +420,7 @@ jobs:
 
   binaries:
     name: binary (${{ matrix.target }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -767,6 +824,7 @@ jobs:
           exit "$fail"
 
   docker:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -878,3 +936,37 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------
+  # Tell Pylon Cloud the release exists so its PYLON_RELEASE pin moves.
+  #
+  # The control plane derives the customer runtime image, the builder
+  # image, and the dev-box image from that one secret. It used to be
+  # bumped by hand, and was not: PYLON_DEFAULT_IMAGE sat on 0.3.283 for
+  # months while releases kept shipping. Runs only after every leg that a
+  # cloud deploy depends on has published (npm packages for the builder's
+  # `bun install`, the CLI packages, and the runtime image).
+  #
+  # The receiving workflow lives in pylonsync/pylon-cloud
+  # (.github/workflows/pylon-release.yml). It re-checks that the image
+  # tag and the npm packages are reachable before it touches the secret.
+  # ---------------------------------------------------------------
+  notify-cloud:
+    name: Bump PYLON_RELEASE on Pylon Cloud
+    needs: [verify, publish-npm, publish-cli-npm, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch pylon-release to pylon-cloud
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            /repos/pylonsync/pylon-cloud/dispatches \
+            -f event_type=pylon-release \
+            -F "client_payload[version]=$VERSION" \
+            -F "client_payload[sha]=$GITHUB_SHA"
+          echo "dispatched pylon-release $VERSION to pylonsync/pylon-cloud"
