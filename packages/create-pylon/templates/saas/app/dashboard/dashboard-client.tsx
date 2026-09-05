@@ -7,13 +7,31 @@ import {
   deleteOrg,
   listInvites,
   listOrgMembers,
+  removeMember,
   renameOrg,
   revokeInvite,
+  updateMemberRole,
   useAuth,
   type OrgMember,
   type PendingInvite,
 } from "@pylonsync/client";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { SetupChecklist, type SetupState } from "@/components/setup-checklist";
+import {
+  FREE_PROJECT_LIMIT,
+  TRIAL_DAYS,
+  annualSavingsPercent,
+  formatPrice,
+  planById,
+} from "@/lib/plans";
 import {
   FolderKanban,
   Users2,
@@ -188,6 +206,7 @@ export function Overview({
   projects,
   memberCount,
   plan,
+  setup,
 }: {
   tenantId: string | null;
   orgName?: string;
@@ -195,6 +214,8 @@ export function Overview({
   projects: Project[];
   memberCount: number;
   plan: string;
+  /** Getting-started state; null once the checklist is dismissed. */
+  setup?: SetupState | null;
 }) {
   if (!tenantId) return <NoOrg />;
   const activeCount = projects.filter(
@@ -217,6 +238,8 @@ export function Overview({
           happening in your workspace.
         </p>
       </div>
+
+      {setup ? <SetupChecklist state={setup} /> : null}
 
       <div className="grid gap-4 sm:grid-cols-3">
         <StatCard
@@ -331,6 +354,9 @@ function ProjectsList({
 }) {
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [limitHit, setLimitHit] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
   // Render the server-seeded `initial` rows on the server AND the client's
   // first paint, then swap to the live reactive query once mounted. Gating the
   // swap on a post-mount flag (rather than `loading`, which is already settled
@@ -351,19 +377,34 @@ function ProjectsList({
       return a.createdAt < b.createdAt ? 1 : -1;
     });
 
+  // Creates go through the `createProject` function: it enforces the free
+  // plan's cap on the server and answers LIMIT_REACHED at the cap, which
+  // opens the upgrade dialog. The new row arrives through sync.
   async function add(e: React.FormEvent) {
     e.preventDefault();
     const value = name.trim();
     if (!value) return;
     const description = desc.trim();
-    setName("");
-    setDesc("");
-    await db.insert("Project", {
-      orgId,
-      name: value,
-      status: "active",
-      ...(description ? { description } : {}),
-    });
+    setCreating(true);
+    setCreateError(null);
+    try {
+      await callFn("createProject", {
+        orgId,
+        name: value,
+        ...(description ? { description } : {}),
+      });
+      setName("");
+      setDesc("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/LIMIT_REACHED/.test(msg) || (err as { code?: string })?.code === "LIMIT_REACHED") {
+        setLimitHit(true);
+      } else {
+        setCreateError(msg.replace(/^[A-Z_]+:\s*/, ""));
+      }
+    } finally {
+      setCreating(false);
+    }
   }
 
   return (
@@ -387,15 +428,21 @@ function ProjectsList({
             aria-label="Project description"
             className={inputCls + " sm:flex-1"}
           />
-          <Button type="submit" size="sm" className="shrink-0">
-            <Plus className="size-4" /> New project
+          <Button type="submit" size="sm" className="shrink-0" disabled={creating}>
+            <Plus className="size-4" /> {creating ? "Creating…" : "New project"}
           </Button>
         </form>
-        <p className="mt-2 text-xs text-zinc-400">
-          Tenant-scoped + live — only this workspace&apos;s projects (enforced by
-          policy), and every change syncs across tabs instantly.
-        </p>
+        {createError ? (
+          <p className="mt-2 text-xs text-red-600">{createError}</p>
+        ) : (
+          <p className="mt-2 text-xs text-zinc-400">
+            Tenant-scoped + live — only this workspace&apos;s projects (enforced by
+            policy), and every change syncs across tabs instantly.
+          </p>
+        )}
       </div>
+
+      <UpgradeDialog open={limitHit} onClose={() => setLimitHit(false)} />
 
       {projects.length === 0 ? (
         <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-zinc-300 py-14 text-center">
@@ -415,6 +462,44 @@ function ProjectsList({
         </div>
       )}
     </div>
+  );
+}
+
+// Shown when `createProject` answers LIMIT_REACHED. One action: go to
+// Billing, where the trial starts.
+function UpgradeDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const pro = planById("pro")!;
+  return (
+    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>You&apos;ve reached the free plan&apos;s limit</DialogTitle>
+          <DialogDescription>
+            Free workspaces can have {FREE_PROJECT_LIMIT} active projects. Archive one, or
+            upgrade to Pro for unlimited projects. Pro starts with a {TRIAL_DAYS}-day free
+            trial.
+          </DialogDescription>
+        </DialogHeader>
+        <ul className="space-y-1.5 text-sm text-zinc-700">
+          {pro.features.map((f) => (
+            <li key={f} className="flex gap-2">
+              <span className="text-zinc-900">✓</span> {f}
+            </li>
+          ))}
+        </ul>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Not now
+          </Button>
+          <a
+            href="/dashboard/billing?upgrade=pro&interval=annual"
+            className="inline-flex h-9 items-center rounded-lg bg-zinc-900 px-4 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
+          >
+            {pro.cta}
+          </a>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -682,6 +767,31 @@ function MembersList({
     }
   }
 
+  async function changeRole(userId: string, next: string) {
+    setNote(null);
+    try {
+      await updateMemberRole(orgId, userId, next);
+    } catch {
+      setNote("Couldn't change that role.");
+    } finally {
+      void load();
+    }
+  }
+
+  async function remove(m: OrgMember) {
+    const label = m.name || m.email || "this member";
+    if (!window.confirm(`Remove ${label} from the workspace?`)) return;
+    setNote(null);
+    setMembers((prev) => prev?.filter((x) => x.user_id !== m.user_id) ?? null);
+    try {
+      await removeMember(orgId, m.user_id);
+    } catch {
+      setNote("Couldn't remove that member.");
+    } finally {
+      void load();
+    }
+  }
+
   return (
     <div className="space-y-6">
     <Card title="Members" action={members ? <Count n={members.length} /> : null}>
@@ -741,7 +851,28 @@ function MembersList({
                       </div>
                     )}
                   </div>
-                  <RoleBadge role={m.role} />
+                  {canManage && !isMe && m.role !== "owner" ? (
+                    <>
+                      <select
+                        value={m.role}
+                        onChange={(e) => void changeRole(m.user_id, e.target.value)}
+                        aria-label={`Role for ${label}`}
+                        className="h-8 rounded-md border border-zinc-300 bg-white px-2 text-[12px] text-zinc-700"
+                      >
+                        <option value="member">Member</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => void remove(m)}
+                        className="text-[13px] font-medium text-zinc-400 transition-colors hover:text-red-600"
+                      >
+                        Remove
+                      </button>
+                    </>
+                  ) : (
+                    <RoleBadge role={m.role} />
+                  )}
                 </li>
               );
             })}
@@ -817,17 +948,186 @@ function Count({ n }: { n: number }) {
 
 /* ============================ Settings ============================ */
 
+export interface AccountInfo {
+  id: string;
+  email: string;
+  displayName?: string | null;
+}
+
 export function Settings({
   org,
   role,
   memberCount,
+  me,
 }: {
   org: OrgInfo | null;
   role: string;
   memberCount: number;
+  me: AccountInfo | null;
 }) {
   if (!org) return <NoOrg />;
-  return <SettingsView org={org} role={role} memberCount={memberCount} />;
+  return (
+    <>
+      <SettingsView org={org} role={role} memberCount={memberCount} />
+      {me ? <AccountSettings me={me} /> : null}
+    </>
+  );
+}
+
+// The signed-in person's own account, below the workspace settings. Display
+// name saves through `updateProfile`; the password and delete-account paths
+// are the framework's own routes.
+function AccountSettings({ me }: { me: AccountInfo }) {
+  const [displayName, setDisplayName] = useState(me.displayName ?? "");
+  const [savedName, setSavedName] = useState(false);
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [pwNote, setPwNote] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState("");
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function saveName(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy("name");
+    setSavedName(false);
+    try {
+      await callFn("updateProfile", { displayName });
+      setSavedName(true);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function changePassword(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy("password");
+    setPwNote(null);
+    try {
+      const res = await fetch("/api/auth/password/change", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ currentPassword: current, newPassword: next }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+      if (!res.ok) throw new Error(data.error?.message ?? "Couldn't change the password.");
+      setCurrent("");
+      setNext("");
+      setPwNote("Password updated.");
+    } catch (err) {
+      setPwNote(err instanceof Error ? err.message : "Couldn't change the password.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function deleteAccount() {
+    if (confirm.trim().toLowerCase() !== me.email.toLowerCase()) return;
+    setBusy("delete");
+    setDeleteError(null);
+    try {
+      const res = await fetch("/api/auth/account", { method: "DELETE", credentials: "include" });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+        throw new Error(data.error?.message ?? "Couldn't delete the account.");
+      }
+      window.location.assign("/");
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Couldn't delete the account.");
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="mt-6 max-w-2xl space-y-6">
+      <Card title="Your account">
+        <form onSubmit={saveName} className="space-y-3">
+          <label className="block">
+            <span className="mb-1.5 block text-[13px] font-medium text-zinc-700">Display name</span>
+            <div className="flex items-center gap-2">
+              <input
+                value={displayName}
+                onChange={(e) => {
+                  setDisplayName(e.target.value);
+                  setSavedName(false);
+                }}
+                placeholder="How teammates see you"
+                aria-label="Display name"
+                className={inputCls}
+              />
+              <Button type="submit" size="sm" disabled={busy === "name" || !displayName.trim()}>
+                {busy === "name" ? "…" : "Save"}
+              </Button>
+            </div>
+          </label>
+          {savedName && <p className="text-xs text-green-600">Name updated.</p>}
+          <p className="text-[13px] text-zinc-500">
+            Signed in as <span className="font-medium text-zinc-700">{me.email}</span>
+          </p>
+        </form>
+      </Card>
+
+      <Card title="Password">
+        <form onSubmit={changePassword} className="space-y-3">
+          <input
+            type="password"
+            value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            placeholder="Current password"
+            autoComplete="current-password"
+            aria-label="Current password"
+            className={inputCls}
+          />
+          <input
+            type="password"
+            value={next}
+            onChange={(e) => setNext(e.target.value)}
+            placeholder="New password (10+ characters)"
+            autoComplete="new-password"
+            minLength={10}
+            aria-label="New password"
+            className={inputCls}
+          />
+          {pwNote && <p className="text-xs text-zinc-600">{pwNote}</p>}
+          <Button type="submit" size="sm" variant="outline" disabled={busy === "password" || !current || next.length < 10}>
+            {busy === "password" ? "…" : "Change password"}
+          </Button>
+          <p className="text-[12px] text-zinc-400">
+            Signed in with an email code or Google? Set a password from the{" "}
+            <a href="/forgot-password" className="underline underline-offset-2">reset link</a>.
+          </p>
+        </form>
+      </Card>
+
+      <Card title="Delete account">
+        <p className="text-sm text-zinc-600">
+          Removes your account and signs you out everywhere. Workspaces you own must be deleted
+          or handed to another owner first.
+        </p>
+        <label className="mt-3 block">
+          <span className="mb-1.5 block text-[13px] text-zinc-500">
+            Type <span className="font-medium text-zinc-700">{me.email}</span> to confirm
+          </span>
+          <input
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            aria-label="Confirm email"
+            className={inputCls}
+          />
+        </label>
+        {deleteError && <p className="mt-2 text-xs text-red-600">{deleteError}</p>}
+        <button
+          type="button"
+          onClick={() => void deleteAccount()}
+          disabled={busy === "delete" || confirm.trim().toLowerCase() !== me.email.toLowerCase()}
+          className="mt-3 inline-flex h-9 items-center rounded-lg bg-red-600 px-4 text-[13px] font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-40"
+        >
+          {busy === "delete" ? "Deleting…" : "Delete my account"}
+        </button>
+      </Card>
+    </div>
+  );
 }
 
 function SettingsView({
@@ -1039,8 +1339,24 @@ function BillingView({
   const canManage = isManager(role);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [annual, setAnnual] = useState(true);
   const active = subscription && ACTIVE.includes(subscription.status);
   const planLabel = active ? subscription!.plan : "free";
+  const pro = planById("pro")!;
+  const savings = annualSavingsPercent(pro);
+
+  // `/dashboard/billing?upgrade=pro&interval=annual` (from /pricing or the
+  // upgrade dialog) starts checkout without another click.
+  useEffect(() => {
+    if (active || !canManage) return;
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("upgrade") !== "pro") return;
+    const wantsAnnual = params.get("interval") !== "monthly";
+    setAnnual(wantsAnnual);
+    window.history.replaceState(null, "", window.location.pathname);
+    void startCheckout(wantsAnnual);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   function origin() {
     return typeof window !== "undefined" ? window.location.origin : "";
@@ -1069,16 +1385,21 @@ function BillingView({
     }
   }
 
-  async function upgrade() {
+  async function startCheckout(yearly: boolean) {
     await run("upgrade", async () => {
       const res = await callFn<{ url: string }>("createCheckoutSession", {
         plan: "pro",
         referenceId: tenantId,
+        annual: yearly,
         successUrl: `${origin()}/dashboard/billing`,
         cancelUrl: `${origin()}/dashboard/billing`,
       });
       window.location.assign(res.url);
     });
+  }
+
+  function upgrade() {
+    return startCheckout(annual);
   }
 
   async function manage() {
@@ -1127,7 +1448,13 @@ function BillingView({
             )}
             {!active && (
               <p className="mt-1 text-[13px] text-zinc-500">
-                The free plan. Upgrade to Pro for higher limits.
+                The free plan: up to {FREE_PROJECT_LIMIT} active projects. Pro is unlimited and
+                starts with a {TRIAL_DAYS}-day free trial.
+              </p>
+            )}
+            {active && subscription!.status === "trialing" && subscription!.currentPeriodEnd && (
+              <p className="mt-1 text-[13px] text-zinc-500">
+                Trial — first charge on {formatDate(subscription!.currentPeriodEnd)} unless cancelled.
               </p>
             )}
           </div>
@@ -1154,6 +1481,29 @@ function BillingView({
             </span>
           )}
         </div>
+
+        {!active && canManage && (
+          <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-zinc-100 pt-3 text-[13px]">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setAnnual(false)}
+                className={`rounded-md px-2 py-1 ${annual ? "text-zinc-500 hover:text-zinc-900" : "bg-zinc-100 font-medium text-zinc-900"}`}
+              >
+                Monthly {formatPrice(pro.monthly)}/mo
+              </button>
+              <button
+                type="button"
+                onClick={() => setAnnual(true)}
+                className={`rounded-md px-2 py-1 ${annual ? "bg-zinc-100 font-medium text-zinc-900" : "text-zinc-500 hover:text-zinc-900"}`}
+              >
+                Yearly {formatPrice(pro.annualPerMonth ?? pro.monthly)}/mo
+                {savings > 0 ? ` · save ${savings}%` : ""}
+              </button>
+            </div>
+            <span className="text-zinc-400">Card required; no charge for {TRIAL_DAYS} days.</span>
+          </div>
+        )}
 
         {active && canManage && (
           <div className="mt-4 border-t border-zinc-100 pt-3 text-[13px]">

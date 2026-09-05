@@ -1,14 +1,13 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { createOrg, listOrgs } from "@pylonsync/client";
+import { listOrgs } from "@pylonsync/client";
 import { db } from "@pylonsync/react";
 
-// Org-less safety net. New signups get "My Workspace" auto-created in the signup
-// flow, so this only renders in edge cases: that creation failed, or a user left
-// or deleted their last workspace. Pick an existing org if one turned up,
-// otherwise create "My Workspace", make it active, and reload into the ready
-// dashboard. No multi-step onboarding — there's nothing for the user to decide.
+// Org-less safety net. A new account goes through /onboarding, so this only
+// renders when a user lost their active workspace (left or deleted their last
+// org, or the wizard was abandoned before step 1). Re-select an existing org
+// if one turned up; otherwise send them to the wizard to create one.
 export function ProvisionWorkspace() {
   const [error, setError] = useState<string | null>(null);
 
@@ -17,8 +16,11 @@ export function ProvisionWorkspace() {
     void (async () => {
       try {
         const orgs = await listOrgs();
-        const target = orgs[0] ?? (await createOrg("My Workspace"));
-        await db.sync.selectOrg(target.id);
+        if (orgs.length === 0) {
+          if (!cancelled) window.location.assign("/onboarding");
+          return;
+        }
+        await db.sync.selectOrg(orgs[0].id);
         if (!cancelled) window.location.reload();
       } catch (err) {
         if (!cancelled) {

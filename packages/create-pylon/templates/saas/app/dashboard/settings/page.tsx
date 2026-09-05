@@ -2,6 +2,7 @@ import React, { use } from "react";
 import { type Metadata, type PageProps } from "@pylonsync/react";
 import {
   Settings,
+  type AccountInfo,
   type OrgInfo,
   type OrgMemberRow,
 } from "../dashboard-client";
@@ -21,6 +22,7 @@ export default function SettingsPage({ auth, response, serverData }: PageProps) 
     return null;
   }
   const org = use(serverData.get<OrgInfo>("Org", auth.tenant_id));
+  const me = use(serverData.get<AccountInfo>("User", auth.user_id!));
   const members = use(serverData.list<OrgMemberRow>("OrgMember"));
   const memberCount = members.filter(
     (m) => m.orgId === auth.tenant_id,
@@ -30,6 +32,7 @@ export default function SettingsPage({ auth, response, serverData }: PageProps) 
       org={org}
       role={auth.roles?.[0] ?? ""}
       memberCount={memberCount}
+      me={me}
     />
   );
 }

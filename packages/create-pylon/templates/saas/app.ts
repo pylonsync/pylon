@@ -49,6 +49,11 @@ const Org = entity(
     // The billing plugin creates + stamps this on first checkout; server-only
     // so it never reaches the client.
     stripeCustomerId: field.string().serverOnly().optional(),
+    // First-run state. `onboardedAt` is stamped when the /onboarding wizard
+    // finishes (the dashboard sends a fresh workspace back there until then);
+    // `setupDismissedAt` hides the Overview's getting-started checklist.
+    onboardedAt: field.datetime().optional(),
+    setupDismissedAt: field.datetime().optional(),
   },
   { indexes: [{ name: "by_created_by", fields: ["createdBy"], unique: false }] },
 );
@@ -157,14 +162,14 @@ const orgInvitePolicy = policy({
 });
 
 // Projects are scoped to your ACTIVE tenant. `auth.tenantId == data.orgId`
-// gates read AND write — and because orgId is client-supplied at insert time
-// (not stamped later), checking it here means you can only create a project in
-// the org you've selected. Switch orgs → a different project list.
+// gates reads, edits, and deletes. Inserts go through the `createProject`
+// function instead, which enforces the free plan's project cap on the server
+// (lib/plans.ts) — a client cannot skip the paywall by writing the row itself.
 const projectPolicy = policy({
   name: "project_tenant",
   entity: "Project",
   allowRead: "auth.tenantId == data.orgId",
-  allowInsert: "auth.tenantId == data.orgId",
+  allowInsert: "false",
   allowUpdate: "auth.tenantId == data.orgId",
   allowDelete: "auth.tenantId == data.orgId",
 });
@@ -179,12 +184,15 @@ const manifest = buildManifest({
   version: "0.1.0",
   entities: [User, Org, OrgMember, OrgInvite, Project, ...billing.manifest.entities],
   queries: fns.queries,
-  // Billing actions (createCheckoutSession / createBillingPortalSession /
-  // cancelSubscription / restoreSubscription / stripeWebhook). The plugin also
-  // declares getSubscription/listSubscriptions queries, but the dashboard reads
-  // the StripeSubscription entity directly (it's client-readable via the
-  // plugin's policy), so we don't wire those.
-  actions: [...fns.actions, ...billing.manifest.actions],
+  // The billing actions (createCheckoutSession / createBillingPortalSession /
+  // cancelSubscription / restoreSubscription / stripeWebhook) are re-exported
+  // from functions/, so discovery already lists them; spreading
+  // `billing.manifest.actions` as well would register each name twice and
+  // the server refuses to boot on a duplicate. The plugin also declares
+  // getSubscription/listSubscriptions queries, but the dashboard reads the
+  // StripeSubscription entity directly (client-readable via the plugin's
+  // policy), so those aren't wired.
+  actions: fns.actions,
   policies: [
     userPolicy,
     orgPolicy,

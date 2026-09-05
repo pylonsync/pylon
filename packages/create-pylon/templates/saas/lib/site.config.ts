@@ -1,3 +1,4 @@
+import { PLANS, formatPrice } from "./plans";
 // Business-specific copy and settings live here. The marketing components,
 // `create-pylon` scaffolder, and automated generators all read this file.
 //
@@ -280,51 +281,18 @@ export const siteConfig: SiteConfig = {
   pricing: {
     eyebrow: "Pricing",
     headline: "Simple pricing. Every plan.",
-    body: "Start free and upgrade as your team grows, with predictable pricing and no annual commitment.",
-    plans: [
-      {
-        name: "Free",
-        tagline: "For getting started.",
-        price: "$0",
-        unit: "forever",
-        cta: "Get started",
-        featured: false,
-        features: [
-          "Up to 3 projects",
-          "Unlimited members",
-          "Real-time board",
-          "Community support",
-        ],
-      },
-      {
-        name: "Team",
-        tagline: "For small teams.",
-        price: "$29",
-        unit: "/ month",
-        cta: "Start free trial",
-        featured: true,
-        features: [
-          "Unlimited projects",
-          "Roadmap and updates",
-          "Private boards",
-          "Priority support",
-        ],
-      },
-      {
-        name: "Business",
-        tagline: "For growing teams.",
-        price: "$59",
-        unit: "/ month",
-        cta: "Start free trial",
-        featured: false,
-        features: [
-          "Everything in Team",
-          "SSO and audit log",
-          "Custom domain",
-          "Onboarding help",
-        ],
-      },
-    ],
+    body: "Start free. Try Pro free for two weeks, and pay yearly to save.",
+    // Derived from lib/plans.ts, the catalog the Billing tab and the server
+    // cap read, so marketing and billing can't disagree on a price.
+    plans: PLANS.map((p) => ({
+      name: p.name,
+      tagline: p.tagline,
+      price: formatPrice(p.monthly),
+      unit: p.monthly === 0 ? "forever" : "/ month",
+      cta: p.cta,
+      featured: p.id === "pro",
+      features: p.features,
+    })),
   },
 
   team: {

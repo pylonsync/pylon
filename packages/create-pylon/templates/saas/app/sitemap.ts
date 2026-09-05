@@ -23,6 +23,7 @@ export default async function sitemap(): Promise<Sitemap> {
 
   return [
     { url: `${SITE}/`, changeFrequency: "weekly", priority: 1 },
+    { url: `${SITE}/pricing`, changeFrequency: "monthly", priority: 0.9 },
     ...collection("/products", PRODUCTS.map((p) => p.slug)),
     ...collection("/solutions", SOLUTIONS.map((s) => s.slug)),
     ...collection("/resources", RESOURCES.map((r) => r.slug)),

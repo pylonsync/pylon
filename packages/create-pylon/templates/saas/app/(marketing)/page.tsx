@@ -14,6 +14,7 @@ import {
   Terminal,
 } from "@/components/marketing";
 import { siteConfig, productBySlug, type Product } from "@/lib/site.config";
+import { PricingTable } from "@/components/pricing-table";
 
 // SEO metadata. Exported `metadata` is rendered into <head> on the server, so
 // this marketing page is fully indexable — view source and the copy is in the
@@ -306,58 +307,8 @@ export default function LandingPage({ auth }: PageProps) {
         <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
           {pricing.body}
         </p>
-        <div className="mt-12 grid gap-5 lg:grid-cols-3">
-          {pricing.plans.map((p) => (
-            <div
-              key={p.name}
-              className={`flex flex-col rounded-2xl border p-7 ${
-                p.featured
-                  ? "border-zinc-900 bg-white shadow-[0_24px_60px_-30px_rgba(0,0,0,0.3)]"
-                  : "border-zinc-200 bg-paper"
-              }`}
-            >
-              <div className="flex items-center justify-between">
-                <h3 className="text-base font-semibold">{p.name}</h3>
-                {p.featured && (
-                  <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-brand">
-                    Most popular
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 text-[13px] text-zinc-500">{p.tagline}</p>
-              <div className="mt-5 flex items-baseline gap-1">
-                <span className="text-4xl font-semibold tracking-tight">
-                  {p.price}
-                </span>
-                <span className="text-[13px] text-zinc-500">{p.unit}</span>
-              </div>
-              <ul className="mt-6 flex-1 space-y-3 text-[14px] text-zinc-600">
-                {p.features.map((f) => (
-                  <li key={f} className="flex gap-2.5">
-                    <span className="mt-[3px] text-brand">✓</span>
-                    {f}
-                  </li>
-                ))}
-              </ul>
-              <div className="mt-7">
-                {p.featured ? (
-                  <PrimaryButton
-                    href={primaryHref}
-                    className="w-full justify-center"
-                  >
-                    {p.cta}
-                  </PrimaryButton>
-                ) : (
-                  <Link
-                    href={primaryHref}
-                    className="inline-flex w-full items-center justify-center rounded-full border border-zinc-300 px-5 py-2.5 text-sm font-medium text-zinc-900 transition-colors hover:border-zinc-400 hover:bg-zinc-50"
-                  >
-                    {p.cta}
-                  </Link>
-                )}
-              </div>
-            </div>
-          ))}
+        <div className="mt-12">
+          <PricingTable signedIn={signedIn} />
         </div>
       </section>
 

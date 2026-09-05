@@ -198,7 +198,7 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
               <NavDropdown label="Product" items={PRODUCT_MENU} />
               <NavDropdown label="Resources" items={RESOURCES_MENU} />
               <Link
-                href="/#pricing"
+                href="/pricing"
                 className="text-[13.5px] text-zinc-600 transition-colors hover:text-zinc-900"
               >
                 Pricing
