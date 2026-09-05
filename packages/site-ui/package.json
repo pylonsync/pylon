@@ -1,6 +1,6 @@
 {
   "name": "@pylon-site/ui",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "private": true,
   "description": "Shared marketing + design-system components for the Pylon Cloud apps. Ships raw .tsx/.ts \u2014 every consumer is a Bun-bundled Pylon app, so there is no build step and no dist/ to fall out of date.",
   "type": "module",
