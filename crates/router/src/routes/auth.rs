@@ -5733,7 +5733,15 @@ pub(crate) fn handle(
                 "pylon only supports response_type=code",
             );
         }
-        let scopes: Vec<&str> = scope.split_whitespace().collect();
+        // RFC 6749 §3.1: the authorization endpoint's query is
+        // application/x-www-form-urlencoded, so clients (Better Auth,
+        // for one) send `scope=openid+email`. parse_query keeps `+`
+        // literal on purpose (state tokens), so split on it here —
+        // `+` can never appear inside a scope token (§3.3 NQCHAR).
+        let scopes: Vec<&str> = scope
+            .split(|c: char| c.is_whitespace() || c == '+')
+            .filter(|s| !s.is_empty())
+            .collect();
         if !scopes.contains(&"openid") {
             return redirect_err("invalid_scope", "openid scope is required");
         }

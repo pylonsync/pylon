@@ -354,6 +354,24 @@ fn oidc_full_route_surface() {
     let loc = headers.get("location").unwrap();
     assert!(loc.contains("error=invalid_scope"), "got {loc}");
 
+    // ----- /oidc/authorize: form-encoded scope list (`openid+email`) -----
+    // RFC 6749 §3.1 makes the authorize query x-www-form-urlencoded, and
+    // Better Auth's genericOAuth sends scopes joined by `+`. That must
+    // not read as one unknown scope. A well-formed request past scope
+    // validation with no session 302s to the login page, not to
+    // redirect_uri with error=invalid_scope.
+    let authorize_url = format!(
+        "{base}/oidc/authorize?response_type=code&client_id=docs-portal&redirect_uri={}&scope=openid+email+profile&state=s2b&code_challenge=c&code_challenge_method=S256",
+        url_encode("https://docs.example.com/cb"),
+    );
+    let (status, headers, _) = http_request("GET", &authorize_url, None, &[]);
+    assert_eq!(status, 302);
+    let loc = headers.get("location").unwrap();
+    assert!(
+        !loc.contains("error=invalid_scope"),
+        "plus-separated scopes must be accepted: {loc}"
+    );
+
     // ----- /oidc/authorize: unauthenticated → redirect to login -----
     // All the above are pre-auth validation. A properly-formed
     // authorize URL with NO session cookie should 302 to the
