@@ -30,6 +30,8 @@ pub mod captcha;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod email;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod native_id_token;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oidc_provider;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod operator;

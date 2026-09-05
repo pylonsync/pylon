@@ -110,6 +110,11 @@ libc = "0.2"
 [dev-dependencies]
 rand = { workspace = true }
 tempfile = "3"
+# tests/native_signin.rs signs a Sign-in-with-Apple-shaped id_token with a
+# locally generated RSA key and seeds the JWKS cache with its public half.
+rsa = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
 # Used by tests/oidc_provider.rs to pre-generate the OIDC signing key
 # outside the timed HTTP request path (see the comment in start_server).
 pylon-auth = { path = "../auth" }

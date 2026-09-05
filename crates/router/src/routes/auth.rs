@@ -2221,6 +2221,168 @@ pub(crate) fn handle(
         return Some((200, serde_json::json!({"revoked": true}).to_string()));
     }
 
+    // POST /api/auth/native/<apple|google> — sign in with an id_token the
+    // platform SDK handed a native app (Sign in with Apple, Google
+    // Sign-In). The token never went through a back-channel exchange, so
+    // it is verified here against the provider's JWKS: signature, issuer,
+    // audience (the app's configured bundle ids / client ids), expiry.
+    // Then it joins the same account-link + session path as the browser
+    // OAuth callback, including the anonymous-guest merge.
+    //
+    // Body: { "id_token": "<jwt>", "name"?: "Jane Doe" } — Apple only
+    // reveals the name to the app on the FIRST sign-in and never puts it
+    // in the token, so the app forwards it.
+    //
+    // 404 when no audience is configured for the provider
+    // (PYLON_APPLE_NATIVE_CLIENT_IDS / PYLON_GOOGLE_NATIVE_CLIENT_IDS, or
+    // the OAuth client id), so an unconfigured server never accepts a
+    // token minted for some other app.
+    if let Some(provider_name) = url
+        .strip_prefix("/api/auth/native/")
+        .filter(|p| !p.is_empty() && !p.contains('/'))
+    {
+        if method != HttpMethod::Post {
+            return Some((405, json_error("METHOD_NOT_ALLOWED", "POST only")));
+        }
+        let provider = match pylon_auth::native_id_token::NativeProvider::parse(provider_name) {
+            Some(p) => p,
+            None => {
+                return Some((
+                    404,
+                    json_error(
+                        "PROVIDER_NOT_FOUND",
+                        "Native sign-in supports \"apple\" and \"google\"",
+                    ),
+                ));
+            }
+        };
+        let audiences = provider.configured_audiences();
+        if audiences.is_empty() {
+            return Some((
+                404,
+                json_error(
+                    "PROVIDER_NOT_FOUND",
+                    &format!(
+                        "Native {} sign-in is not configured on this server",
+                        provider.name()
+                    ),
+                ),
+            ));
+        }
+        let rl = pylon_auth::rate_limit::AuthRateLimiter::shared();
+        if let pylon_auth::rate_limit::RateLimitDecision::Deny { retry_after_secs } = rl.check(
+            pylon_auth::rate_limit::AuthBucket::Verify,
+            ctx.peer_ip,
+            None,
+        ) {
+            return Some((
+                429,
+                json_error_with_hint(
+                    "RATE_LIMITED",
+                    "Too many sign-in attempts",
+                    &format!("Try again in {retry_after_secs}s"),
+                ),
+            ));
+        }
+        let data: serde_json::Value = match serde_json::from_str(body) {
+            Ok(v) => v,
+            Err(e) => {
+                return Some((
+                    400,
+                    json_error_safe(
+                        "INVALID_JSON",
+                        "Invalid request body",
+                        &format!("Invalid JSON: {e}"),
+                    ),
+                ));
+            }
+        };
+        let id_token = match data.get("id_token").and_then(|v| v.as_str()) {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                return Some((400, json_error("MISSING_FIELD", "id_token is required")));
+            }
+        };
+        let identity =
+            match pylon_auth::native_id_token::verify_id_token(provider, id_token, &audiences) {
+                Ok(id) => id,
+                Err(pylon_auth::native_id_token::NativeTokenError::Jwks(msg)) => {
+                    tracing::warn!("[auth] native {} JWKS unavailable: {msg}", provider.name());
+                    return Some((
+                        502,
+                        json_error(
+                            "PROVIDER_KEYS_UNAVAILABLE",
+                            "Could not load the provider's signing keys; try again",
+                        ),
+                    ));
+                }
+                Err(err) => {
+                    tracing::warn!("[auth] native {} id_token rejected: {err}", provider.name());
+                    return Some((
+                        401,
+                        json_error("INVALID_ID_TOKEN", "The sign-in token was not accepted"),
+                    ));
+                }
+            };
+        // Apple relay addresses are always verified; Google says so
+        // explicitly. An unverified Google address must not link to an
+        // existing account by email.
+        if provider == pylon_auth::native_id_token::NativeProvider::Google
+            && !identity.email_verified
+        {
+            return Some((
+                401,
+                json_error(
+                    "EMAIL_NOT_VERIFIED",
+                    "The Google account's email address is not verified",
+                ),
+            ));
+        }
+        let name = data
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .or(identity.name.clone());
+        let userinfo = pylon_auth::UserInfo {
+            provider: provider.name().to_string(),
+            provider_account_id: identity.sub.clone(),
+            email: identity.email.clone(),
+            name,
+            avatar_url: identity.picture.clone(),
+            orgs: None,
+        };
+        // No OAuth access token exists on this path; the Account row keeps
+        // the id_token so the link is inspectable.
+        let tokens = pylon_auth::TokenSet {
+            access_token: String::new(),
+            refresh_token: None,
+            id_token: Some(id_token.to_string()),
+            expires_at: None,
+            scope: None,
+        };
+        return Some(
+            match crate::complete_login_from_userinfo(ctx, provider.name(), &userinfo, &tokens) {
+                Ok((user_id, session)) => {
+                    audit_oauth_login(ctx, &user_id, provider.name());
+                    ctx.maybe_set_session_cookie(&session.token);
+                    (
+                        200,
+                        serde_json::json!({
+                            "token": session.token,
+                            "user_id": user_id,
+                            "expires_at": session.expires_at,
+                            "provider": provider.name(),
+                        })
+                        .to_string(),
+                    )
+                }
+                Err(err) => (err.status, json_error(err.code, &err.message)),
+            },
+        );
+    }
+
     // POST /api/auth/native-session — mint a fresh server-stored
     // session token for the currently-authenticated user.
     //

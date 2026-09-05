@@ -2963,6 +2963,7 @@ dependencies = [
  "rand 0.8.5",
  "ravif",
  "ring",
+ "rsa",
  "rusqlite",
  "serde",
  "serde_json",

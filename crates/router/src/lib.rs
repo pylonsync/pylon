@@ -939,6 +939,21 @@ pub(crate) fn complete_oauth_login_pkce(
         });
     };
 
+    complete_login_from_userinfo(ctx, provider, &userinfo, &tokens)
+}
+
+/// Turn a provider-vouched identity into a Pylon session: link or create
+/// the User row, upsert the Account link, mirror federated orgs, mint the
+/// session. Shared by the browser/SDK OAuth callback (identity from the
+/// back-channel code exchange) and native sign-in (identity from a
+/// JWKS-verified id_token).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn complete_login_from_userinfo(
+    ctx: &RouterContext,
+    provider: &str,
+    userinfo: &pylon_auth::UserInfo,
+    tokens: &pylon_auth::TokenSet,
+) -> Result<(String, pylon_auth::Session), OAuthError> {
     // Canonicalize the provider-supplied email BEFORE any lookup or
     // insert. Different auth paths previously took different casing
     // (password/register lowercased, OAuth used Google's casing
@@ -1025,15 +1040,15 @@ pub(crate) fn complete_oauth_login_pkce(
                 ctx,
                 &user_entity_name,
                 &canonical_email,
-                &userinfo,
-                &tokens,
+                userinfo,
+                tokens,
                 &now,
             )?
         } else {
             // User row exists — refresh the token bundle and
             // reuse the linked id.
             let mut refreshed =
-                pylon_auth::Account::new(existing.user_id.clone(), &userinfo, &tokens);
+                pylon_auth::Account::new(existing.user_id.clone(), userinfo, tokens);
             refreshed.created_at = existing.created_at;
             ctx.account_store.upsert(&refreshed);
             existing.user_id
@@ -1047,8 +1062,8 @@ pub(crate) fn complete_oauth_login_pkce(
             ctx,
             &user_entity_name,
             &canonical_email,
-            &userinfo,
-            &tokens,
+            userinfo,
+            tokens,
             &now,
         )?
     };
