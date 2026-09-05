@@ -123,7 +123,7 @@ fn declared_sdk_version() -> Option<String> {
 
 /// Split out so the parsing is testable without `chdir` — cargo runs tests
 /// in threads, and changing the process-wide cwd races every other test.
-fn declared_sdk_version_in(package_json: &str) -> Option<String> {
+pub(crate) fn declared_sdk_version_in(package_json: &str) -> Option<String> {
     let pkg: serde_json::Value = serde_json::from_str(package_json).ok()?;
     for field in ["dependencies", "devDependencies"] {
         let Some(deps) = pkg.get(field).and_then(|d| d.as_object()) else {

@@ -130,6 +130,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         println!("→ Packaging project source...");
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    warn_on_runtime_version_skew(&cwd, json_mode);
     let workspace = detect_workspace(&cwd);
 
     // Fail fast when there's nothing deployable here: a single-app pack
@@ -1095,6 +1096,38 @@ fn sanitize_slug(name: &str) -> String {
     } else {
         capped
     }
+}
+
+/// The deployed app boots on the runtime matching the `@pylonsync/*`
+/// version in its package.json, not on this CLI's version. When the two
+/// differ the deploy still works, but the app runs a binary the developer
+/// has not been testing against locally (`pylon dev` uses this CLI). Say so
+/// once, before the upload, so the skew is a choice rather than a surprise.
+fn warn_on_runtime_version_skew(cwd: &Path, json_mode: bool) {
+    let Some(declared) = std::fs::read_to_string(cwd.join("package.json"))
+        .ok()
+        .and_then(|text| crate::commands::cloud_runtime::declared_sdk_version_in(&text))
+    else {
+        return;
+    };
+    let cli = env!("CARGO_PKG_VERSION");
+    if declared == cli {
+        return;
+    }
+    if json_mode {
+        output::print_json(&serde_json::json!({
+            "code": "RUNTIME_VERSION_SKEW",
+            "cli": cli,
+            "declared": declared,
+            "message": "the app will boot on the runtime matching package.json, not this CLI",
+        }));
+        return;
+    }
+    println!(
+        "  ! package.json declares @pylonsync/* {declared}; this CLI is {cli}.\n    \
+         The app boots on pylon {declared}. To run the same binary locally and in the cloud,\n    \
+         either bump the dependency to {cli} or run `pylon upgrade {declared}`."
+    );
 }
 
 /// Does the machine-global project selection plausibly name this
