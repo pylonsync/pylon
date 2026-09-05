@@ -27,14 +27,14 @@ workers = [
 ]
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.8.2" }  # x-release-please-version
-pylon-http = { path = "../http", version = "0.8.2" }  # x-release-please-version
-pylon-router = { path = "../router", version = "0.8.2" }  # x-release-please-version
-pylon-auth = { path = "../auth", version = "0.8.2" }  # x-release-please-version
-pylon-policy = { path = "../policy", version = "0.8.2" }  # x-release-please-version
-pylon-sync = { path = "../sync", version = "0.8.2" }  # x-release-please-version
-pylon-realtime = { path = "../realtime", version = "0.8.2" }  # x-release-please-version
-pylon-cluster = { path = "../cluster", version = "0.8.2" }  # x-release-please-version
+pylon-kernel = { path = "../core", version = "0.8.3" }  # x-release-please-version
+pylon-http = { path = "../http", version = "0.8.3" }  # x-release-please-version
+pylon-router = { path = "../router", version = "0.8.3" }  # x-release-please-version
+pylon-auth = { path = "../auth", version = "0.8.3" }  # x-release-please-version
+pylon-policy = { path = "../policy", version = "0.8.3" }  # x-release-please-version
+pylon-sync = { path = "../sync", version = "0.8.3" }  # x-release-please-version
+pylon-realtime = { path = "../realtime", version = "0.8.3" }  # x-release-please-version
+pylon-cluster = { path = "../cluster", version = "0.8.3" }  # x-release-please-version
 serde = { workspace = true }
 serde_json = { workspace = true }
 

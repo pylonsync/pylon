@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/cli-win32-x64",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Pylon CLI binary for win32-x64. Installed automatically by @pylonsync/cli on 64-bit Windows.",
   "license": "MIT",
   "homepage": "https://pylonsync.com",
