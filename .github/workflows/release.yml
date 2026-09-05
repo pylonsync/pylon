@@ -949,7 +949,7 @@ jobs:
   # cloud deploy depends on has published (npm packages for the builder's
   # `bun install`, the CLI packages, and the runtime image).
   #
-  # The receiving workflow lives in pylonsync/pylon-cloud
+  # The receiving workflow lives in the control-plane repo (PYLON_CLOUD_REPO)
   # (.github/workflows/pylon-release.yml). It re-checks that the image
   # tag and the npm packages are reachable before it touches the secret.
   # ---------------------------------------------------------------
@@ -958,17 +958,21 @@ jobs:
     needs: [verify, publish-npm, publish-cli-npm, docker]
     runs-on: ubuntu-latest
     steps:
-      - name: Dispatch pylon-release to pylon-cloud
+      # The control-plane repo is moving into the stack0 GitHub org. The
+      # target comes from the PYLON_CLOUD_REPO repository variable so the
+      # move is a one-value change here; the default is the current home.
+      - name: Dispatch pylon-release to the control-plane repo
         env:
           GH_TOKEN: ${{ secrets.RELEASES_REPO_TOKEN }}
           VERSION: ${{ needs.verify.outputs.version }}
+          CLOUD_REPO: ${{ vars.PYLON_CLOUD_REPO || 'pylonsync/pylon-cloud' }}
         shell: bash
         run: |
           set -euo pipefail
           gh api --method POST \
             -H "Accept: application/vnd.github+json" \
-            /repos/pylonsync/pylon-cloud/dispatches \
+            "/repos/$CLOUD_REPO/dispatches" \
             -f event_type=pylon-release \
             -F "client_payload[version]=$VERSION" \
             -F "client_payload[sha]=$GITHUB_SHA"
-          echo "dispatched pylon-release $VERSION to pylonsync/pylon-cloud"
+          echo "dispatched pylon-release $VERSION to $CLOUD_REPO"
