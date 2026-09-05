@@ -13,7 +13,7 @@ pub fn validate_all(manifest: &AppManifest) -> Vec<Diagnostic> {
 
 /// Parse a JSON string into an AppManifest, returning structured diagnostics on failure.
 pub fn parse_manifest(contents: &str, path: &str) -> Result<AppManifest, Vec<Diagnostic>> {
-    serde_json::from_str(contents).map_err(|e| {
+    let mut manifest: AppManifest = serde_json::from_str(contents).map_err(|e| {
         vec![Diagnostic {
             severity: Severity::Error,
             code: "MANIFEST_PARSE_ERROR".into(),
@@ -25,7 +25,12 @@ pub fn parse_manifest(contents: &str, path: &str) -> Result<AppManifest, Vec<Dia
             }),
             hint: Some("Ensure the manifest is valid JSON matching the canonical schema".into()),
         }]
-    })
+    })?;
+    // Every consumer of a parsed manifest (start, dev, build, deploy,
+    // migrate) must see the same schema, or the Postgres fingerprint and
+    // the SQLite DDL disagree about which indexes exist.
+    manifest.ensure_relation_indexes();
+    Ok(manifest)
 }
 
 /// Read and parse a manifest file from disk.

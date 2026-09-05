@@ -476,8 +476,11 @@ fn load_manifests() -> Result<(pylon_kernel::AppManifest, pylon_kernel::AppManif
         std::env::var("PYLON_MANIFEST").unwrap_or_else(|_| "pylon.manifest.json".into());
     let current = std::fs::read_to_string(&manifest_path)
         .map_err(|e| format!("Cannot read manifest {manifest_path}: {e}"))?;
-    let new: pylon_kernel::AppManifest =
+    let mut new: pylon_kernel::AppManifest =
         serde_json::from_str(&current).map_err(|e| format!("Invalid manifest JSON: {e}"))?;
+    // Same normalization as `parse_manifest`, so the plan includes the
+    // relation indexes the runtime creates on boot.
+    new.ensure_relation_indexes();
 
     // Previously-applied manifest (from DB). Empty if fresh DB.
     let db_path = std::env::var("PYLON_DB_PATH").unwrap_or_else(|_| "pylon.db".into());

@@ -724,6 +724,63 @@ pub struct ManifestRelation {
     pub many: bool,
 }
 
+/// Name of the implicit index on a relation's join column. Prefixed with
+/// the table because SQLite index names are database-wide.
+pub fn relation_index_name(table: &str, field: &str) -> String {
+    format!("{table}_rel_{field}")
+}
+
+impl AppManifest {
+    /// Add a single-column index on every relation join column.
+    ///
+    /// A one-relation reads `field` on the entity and looks the target up
+    /// by id. A many-relation filters the TARGET by `field` (the join key
+    /// the parent also carries). Both sides are how `include` fans out, so
+    /// each batched child query scanned the table before this. Skips a
+    /// column that is `unique` (already indexed) or already covered by a
+    /// declared single-column index. Idempotent.
+    pub fn ensure_relation_indexes(&mut self) {
+        let mut wanted: Vec<(String, String)> = Vec::new();
+        for entity in &self.entities {
+            for rel in &entity.relations {
+                let table = if rel.many {
+                    rel.target.clone()
+                } else {
+                    entity.name.clone()
+                };
+                let pair = (table, rel.field.clone());
+                if !wanted.contains(&pair) {
+                    wanted.push(pair);
+                }
+            }
+        }
+        for (table, field) in wanted {
+            let Some(entity) = self.entities.iter_mut().find(|e| e.name == table) else {
+                continue;
+            };
+            let Some(column) = entity.fields.iter().find(|f| f.name == field) else {
+                continue;
+            };
+            if column.unique {
+                continue;
+            }
+            if entity
+                .indexes
+                .iter()
+                .any(|i| i.fields.len() == 1 && i.fields[0] == field)
+            {
+                continue;
+            }
+            entity.indexes.push(ManifestIndex {
+                name: relation_index_name(&table, &field),
+                fields: vec![field],
+                unique: false,
+                where_clause: None,
+            });
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestField {
     pub name: String,
@@ -1071,6 +1128,139 @@ pub struct ManifestPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn field(name: &str, unique: bool) -> ManifestField {
+        ManifestField {
+            name: name.into(),
+            field_type: "string".into(),
+            optional: false,
+            unique,
+            crdt: None,
+            server_only: false,
+            readonly: false,
+            default: None,
+            enum_values: None,
+            encrypted: false,
+            sync_omit: false,
+        }
+    }
+
+    fn entity(
+        name: &str,
+        fields: Vec<ManifestField>,
+        relations: Vec<ManifestRelation>,
+    ) -> ManifestEntity {
+        ManifestEntity {
+            name: name.into(),
+            fields,
+            relations,
+            ..Default::default()
+        }
+    }
+
+    fn index_names(m: &AppManifest, entity: &str) -> Vec<String> {
+        m.entities
+            .iter()
+            .find(|e| e.name == entity)
+            .map(|e| e.indexes.iter().map(|i| i.name.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn relation_indexes_cover_both_join_sides() {
+        let mut m = AppManifest {
+            entities: vec![
+                entity(
+                    "User",
+                    vec![field("groupKey", false)],
+                    vec![ManifestRelation {
+                        name: "posts".into(),
+                        target: "Post".into(),
+                        field: "groupKey".into(),
+                        many: true,
+                    }],
+                ),
+                entity(
+                    "Post",
+                    vec![field("authorId", false), field("groupKey", false)],
+                    vec![ManifestRelation {
+                        name: "author".into(),
+                        target: "User".into(),
+                        field: "authorId".into(),
+                        many: false,
+                    }],
+                ),
+            ],
+            ..Default::default()
+        };
+        m.ensure_relation_indexes();
+        // one-relation: the entity's own FK column.
+        // many-relation: the TARGET's join column.
+        assert_eq!(
+            index_names(&m, "Post"),
+            vec![
+                "Post_rel_groupKey".to_string(),
+                "Post_rel_authorId".to_string()
+            ]
+        );
+        assert!(
+            index_names(&m, "User").is_empty(),
+            "the parent side of a many-relation is looked up by id"
+        );
+        let fk = &m.entities[1].indexes[1];
+        assert_eq!(fk.fields, vec!["authorId".to_string()]);
+        assert!(!fk.unique);
+        assert!(fk.where_clause.is_none());
+
+        // Idempotent: a second pass adds nothing.
+        let before = m.clone();
+        m.ensure_relation_indexes();
+        assert_eq!(m, before);
+    }
+
+    #[test]
+    fn relation_indexes_skip_columns_that_are_already_indexed() {
+        let mut m = AppManifest {
+            entities: vec![
+                entity("Org", vec![], vec![]),
+                entity(
+                    "Member",
+                    vec![field("orgId", false), field("ownerId", true)],
+                    vec![
+                        ManifestRelation {
+                            name: "org".into(),
+                            target: "Org".into(),
+                            field: "orgId".into(),
+                            many: false,
+                        },
+                        ManifestRelation {
+                            name: "owner".into(),
+                            target: "User".into(),
+                            field: "ownerId".into(),
+                            many: false,
+                        },
+                        ManifestRelation {
+                            name: "ghost".into(),
+                            target: "Org".into(),
+                            field: "missingColumn".into(),
+                            many: false,
+                        },
+                    ],
+                ),
+            ],
+            ..Default::default()
+        };
+        m.entities[1].indexes.push(ManifestIndex {
+            name: "member_org".into(),
+            fields: vec!["orgId".into()],
+            unique: false,
+            where_clause: None,
+        });
+        m.ensure_relation_indexes();
+        // orgId: declared index wins. ownerId: UNIQUE already indexes it.
+        // missingColumn: no such field, nothing to index.
+        assert_eq!(index_names(&m, "Member"), vec!["member_org".to_string()]);
+    }
 
     #[test]
     fn manifest_deserializes_crons_from_sdk_shape() {

@@ -806,6 +806,7 @@ impl Runtime {
         // against the runtime's own manifest — so this only bites Postgres.)
         ensure_connection_entity(&mut manifest);
         ensure_cron_lease_entity(&mut manifest);
+        manifest.ensure_relation_indexes();
         force_vector_fields_server_only(&mut manifest);
         validate_manifest_org_roles(&manifest)?;
         // Serialize this machine's boot DDL against peers sharing the
@@ -1567,6 +1568,7 @@ impl Runtime {
 
         ensure_connection_entity(&mut manifest);
         ensure_cron_lease_entity(&mut manifest);
+        manifest.ensure_relation_indexes();
         force_vector_fields_server_only(&mut manifest);
         validate_manifest_org_roles(&manifest)?;
         validate_encrypted_fields(&manifest)?;
@@ -4726,6 +4728,77 @@ mod tests {
             crons: vec![],
             fonts: vec![],
         }
+    }
+
+    /// Boot creates an index on every relation join column (see
+    /// `AppManifest::ensure_relation_indexes`): `include` filters the child
+    /// table by that column, and without the index each batched child
+    /// query scans the table.
+    #[test]
+    fn boot_creates_an_index_on_relation_join_columns() {
+        let mut manifest = test_manifest();
+        let mut post = manifest.entities[0].clone();
+        post.name = "Post".into();
+        post.fields = vec![
+            ManifestField {
+                name: "authorId".into(),
+                field_type: "string".into(),
+                optional: false,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+                sync_omit: false,
+            },
+            ManifestField {
+                name: "groupKey".into(),
+                field_type: "string".into(),
+                optional: true,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+                sync_omit: false,
+            },
+        ];
+        post.indexes = vec![];
+        post.relations = vec![pylon_kernel::ManifestRelation {
+            name: "author".into(),
+            target: "User".into(),
+            field: "authorId".into(),
+            many: false,
+        }];
+        post.crdt = false;
+        manifest.entities[0].relations = vec![pylon_kernel::ManifestRelation {
+            name: "posts".into(),
+            target: "Post".into(),
+            field: "groupKey".into(),
+            many: true,
+        }];
+        manifest.entities.push(post);
+
+        let rt = Runtime::in_memory(manifest).unwrap();
+        let conn = rt.lock_write_conn().unwrap();
+        let mut stmt = conn.prepare("PRAGMA index_list(\"Post\")").unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+        assert!(
+            names.contains(&"Post_rel_authorId".to_string()),
+            "one-relation FK column must be indexed: {names:?}"
+        );
+        assert!(
+            names.contains(&"Post_rel_groupKey".to_string()),
+            "many-relation join column on the target must be indexed: {names:?}"
+        );
     }
 
     /// A manifest field built with `field.X().owner()` serializes its
