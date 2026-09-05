@@ -323,8 +323,10 @@ jobs:
           # Retry loop because npm's CDN takes 5-30s to propagate freshly-
           # published versions to all edge nodes, and bun's resolver can
           # fail with a hard "package not found" on the first try while
-          # subsequent tries succeed. Six attempts × 10s = a 60s window,
-          # which empirically covers every propagation case we've hit.
+          # subsequent tries succeed. Twenty attempts × 15s = a 5-minute
+          # window: 0.8.1 published every package and still failed a
+          # 60-second window, and the CLI-package check below already
+          # allows ~5 minutes for the same propagation.
           POSTFLIGHT_DIR="$(mktemp -d)"
           (
             cd "$POSTFLIGHT_DIR"
@@ -338,13 +340,13 @@ jobs:
             attempt=0
             until bun install --no-save 2>&1 | tee install.log; do
               attempt=$((attempt + 1))
-              if [[ "$attempt" -ge 6 ]]; then
-                echo "::error::Postflight: bun install of @pylonsync/react@$REFERENCE_VERSION FAILED after 6 attempts. The graph published this run is unsatisfiable for end users. Investigate before announcing the release; consider yanking these versions." >&2
+              if [[ "$attempt" -ge 20 ]]; then
+                echo "::error::Postflight: bun install of @pylonsync/react@$REFERENCE_VERSION FAILED after 20 attempts over 5 minutes. Check the registry directly before yanking: every published package may be fine and only propagation slow." >&2
                 cat install.log >&2
                 exit 5
               fi
-              echo "→ postflight attempt $attempt failed, retrying in 10s for npm CDN propagation..."
-              sleep 10
+              echo "→ postflight attempt $attempt failed, retrying in 15s for npm CDN propagation..."
+              sleep 15
             done
           )
           rm -rf "$POSTFLIGHT_DIR"
