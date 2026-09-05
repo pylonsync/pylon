@@ -498,6 +498,15 @@ pub trait FnOps: Send + Sync {
     /// List all registered functions.
     fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef>;
 
+    /// Respawn every function runner so it re-imports the app's modules,
+    /// and replace the registry with what the fresh runners report.
+    /// `pylon dev` calls this when a source file changes and the manifest
+    /// did not, so an edit to a function or a page component takes effect
+    /// without restarting the process. Returns the function count.
+    fn reload_runtime(&self) -> Result<usize, String> {
+        Err("runtime reload is not supported by this backend".to_string())
+    }
+
     /// Execute a function. For streaming responses, `on_stream` is called for
     /// each chunk as it arrives from the function handler.
     ///

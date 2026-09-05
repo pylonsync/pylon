@@ -4041,19 +4041,24 @@ fn dev_reload_registry() -> &'static std::sync::Mutex<Vec<std::sync::mpsc::Sende
     R.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// Bun runner + app dir needed to rebuild the client bundle in place. Set once
-/// by the dev SSR server at boot; `None` elsewhere so `trigger_dev_reload`
-/// reports it can't and the caller falls back to a full restart.
-type DevRebuildCtx = (std::sync::Arc<dyn pylon_router::FnOps>, String);
+/// Bun runner pool + the SSR app dir (None for an app with no SSR routes,
+/// which has no client bundle to rebuild). Set once by the dev server at
+/// boot; `None` elsewhere so `trigger_dev_reload_with` reports it can't and
+/// the caller falls back to a full restart.
+type DevRebuildCtx = (std::sync::Arc<dyn pylon_router::FnOps>, Option<String>);
 fn dev_rebuild_ctx() -> &'static std::sync::Mutex<Option<DevRebuildCtx>> {
     static C: std::sync::OnceLock<std::sync::Mutex<Option<DevRebuildCtx>>> =
         std::sync::OnceLock::new();
     C.get_or_init(|| std::sync::Mutex::new(None))
 }
 
-/// Register the bundle-rebuild context so an in-process dev reload can rebuild
-/// the client bundle. Called once from the dev SSR server at boot.
-pub fn set_dev_rebuild_ctx(fn_ops: std::sync::Arc<dyn pylon_router::FnOps>, app_dir: String) {
+/// Register the in-process reload context. Called once from the dev server
+/// at boot for every app with a functions backend; `app_dir` is set only
+/// when the app has SSR routes (and so a client bundle).
+pub fn set_dev_rebuild_ctx(
+    fn_ops: std::sync::Arc<dyn pylon_router::FnOps>,
+    app_dir: Option<String>,
+) {
     *dev_rebuild_ctx().lock().unwrap() = Some((fn_ops, app_dir));
 }
 
@@ -4067,24 +4072,61 @@ static DEV_RELOAD_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU
 /// Returns false when the rebuild context isn't registered (not a dev SSR
 /// server) or the rebuild failed, so the caller falls back to a full restart.
 pub fn trigger_dev_reload() -> bool {
+    trigger_dev_reload_with(DevReload {
+        respawn_runtime: false,
+        rebuild_client: true,
+    })
+    .is_ok()
+}
+
+/// What an in-process dev reload has to redo for a given edit.
+#[derive(Debug, Clone, Copy)]
+pub struct DevReload {
+    /// Respawn the function runners so server code (functions, SSR
+    /// components, anything they import) is re-imported.
+    pub respawn_runtime: bool,
+    /// Rebuild the client bundle so hydrated code and styles match.
+    pub rebuild_client: bool,
+}
+
+/// Run an in-process reload. Returns the function count when the runtime
+/// was respawned (`Ok(0)` when it was not). The error names why an
+/// in-place reload was not possible; the caller falls back to a full
+/// restart and shows the reason.
+pub fn trigger_dev_reload_with(what: DevReload) -> Result<usize, String> {
     let Some((fn_ops, app_dir)) = dev_rebuild_ctx().lock().unwrap().clone() else {
-        return false;
+        return Err("no reload context registered by the dev server".to_string());
+    };
+    let mut fn_count = 0;
+    if what.respawn_runtime {
+        fn_count = fn_ops
+            .reload_runtime()
+            .map_err(|e| format!("runtime respawn failed: {e}"))?;
+    }
+    // No SSR routes means no client bundle: the respawn above is the whole
+    // reload. Open tabs (a legacy `web/dist` frontend) still get the ping.
+    let Some(app_dir) = app_dir.filter(|_| what.rebuild_client) else {
+        ping_dev_reload_clients();
+        return Ok(fn_count);
     };
     // Bundle filenames are content-hashed, so a tab must never reload against a
     // stale hash: invalidate the memo, then rebuild synchronously. The rebuild
     // re-memoizes the cache and rewrites `client-build/manifest.json` (read by
     // the SSR render path), keeping the reloaded HTML + its assets coherent.
     *cached_bundle_outdir().lock().unwrap() = None;
-    if let Err(e) = warm_client_bundle(&fn_ops, &app_dir) {
-        tracing::warn!("dev reload: client bundle rebuild failed ({e}); falling back to restart");
-        return false;
-    }
+    warm_client_bundle(&fn_ops, &app_dir)
+        .map_err(|e| format!("client bundle rebuild failed: {e}"))?;
+    ping_dev_reload_clients();
+    Ok(fn_count)
+}
+
+/// Tell every open `/_pylon/dev/live` tab to reload.
+fn ping_dev_reload_clients() {
     let generation = DEV_RELOAD_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     dev_reload_registry()
         .lock()
         .unwrap()
         .retain(|tx| tx.send(generation).is_ok());
-    true
 }
 
 /// Recover the project-relative route directory (the `appDir` the

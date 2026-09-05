@@ -3064,6 +3064,22 @@ fn start_server(
     // logged and harmless because the lazy first-request path is still the
     // fallback. Only when the project actually has SSR routes + a functions
     // backend wired — API-only and legacy `web/dist` apps skip it.
+    // Dev only: register the in-place reload context so a source edit can
+    // respawn the function runners (and, for an SSR app, rebuild the client
+    // bundle) instead of re-exec'ing `pylon dev`. Registered for every app
+    // with a functions backend, not only SSR apps — an API-only app reloads
+    // its functions the same way; it just has no client bundle to rebuild.
+    if is_dev {
+        if let Some(fn_ops_dev) = frontend_config.fn_ops.clone() {
+            let app_dir = if frontend_config.ssr_routes.is_empty() {
+                None
+            } else {
+                Some(crate::frontend::derive_app_dir(&frontend_config.ssr_routes))
+            };
+            crate::frontend::set_dev_rebuild_ctx(fn_ops_dev, app_dir);
+        }
+    }
+
     if !frontend_config.ssr_routes.is_empty() {
         // #277 Stage 2: drop on-disk ISR entries from previous deploys so a new
         // build never serves a prior build's HTML (cache is build-id-namespaced;
@@ -3075,12 +3091,6 @@ fn start_server(
             // client bundler must walk the SAME dir or it finds no routes
             // and ships no hydration bundle.
             let warm_app_dir = crate::frontend::derive_app_dir(&frontend_config.ssr_routes);
-            // Dev only: register the rebuild context so a UI-only edit can
-            // reload in place (rebuild the client bundle + ping open tabs)
-            // instead of re-exec'ing `pylon dev`.
-            if is_dev {
-                crate::frontend::set_dev_rebuild_ctx(fn_ops_warm.clone(), warm_app_dir.clone());
-            }
             let _ = std::thread::Builder::new()
                 .name("ssr-bundle-warm".into())
                 .spawn(move || {

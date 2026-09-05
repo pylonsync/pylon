@@ -4284,6 +4284,21 @@ impl pylon_router::FnOps for FnOpsImpl {
         self.registry.list()
     }
 
+    fn reload_runtime(&self) -> Result<usize, String> {
+        // Same sequence the supervisor runs on a crash (`respawn_runner`):
+        // respawn, then replace the registry so a deleted function stops
+        // being callable. Every runner loads the same modules, so the last
+        // definition set is the one to keep.
+        let mut latest: Option<Vec<FnDef>> = None;
+        for runner in self.pool.runners() {
+            latest = Some(runner.respawn()?);
+        }
+        let defs = latest.unwrap_or_default();
+        let count = defs.len();
+        self.registry.replace_all(defs);
+        Ok(count)
+    }
+
     fn wait_for_runner_ready(&self, timeout: std::time::Duration) -> bool {
         // Bridge the cold-boot window where the Rust listener is up but the
         // Bun runner hasn't finished spawning — see

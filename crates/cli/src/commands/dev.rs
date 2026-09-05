@@ -570,6 +570,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 &functions_dir_rel,
                 json_mode,
                 rebuild_count,
+                last_manifest_json,
             );
         }
     };
@@ -578,7 +579,6 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
     // canonical prefixes rather than the relative join.
     let base = std::fs::canonicalize(watch_dir).unwrap_or_else(|_| watch_dir.to_path_buf());
     let functions_dir = base.join("functions");
-    let app_dir = base.join("app");
 
     loop {
         // Block on the next event, but wake every 400ms to re-check env files
@@ -604,6 +604,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                     &functions_dir_rel,
                     json_mode,
                     rebuild_count,
+                    last_manifest_json,
                 );
             }
         }
@@ -624,49 +625,84 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             continue; // only generated / vendored files touched
         }
 
-        if changed.iter().any(|p| p.starts_with(&functions_dir)) {
-            print_reload_reason("functions changed", json_mode);
-            exec_restart(json_mode); // does not return
-        }
+        reload_for_changes(
+            &changed,
+            &functions_dir,
+            entry_file,
+            json_mode,
+            &mut rebuild_count,
+            &mut last_manifest_json,
+        );
+    }
+}
 
-        // Rebuild the manifest. We can reload IN PLACE (rebuild the client
-        // bundle + ping open tabs) instead of re-exec'ing ONLY when the
-        // manifest is byte-for-byte identical AND every changed file is a
-        // stylesheet under `app/`. CSS is the one kind of edit that's safe
-        // this way: it's a client asset the bun runner never imports.
-        //
-        // A `.ts`/`.tsx` edit is NOT safe in place. The warm runner
-        // import-caches each route/component module for SSR `render_route`;
-        // the in-process reload rebuilds the CLIENT bundle but never re-imports
-        // those modules, so the server keeps rendering the STALE component —
-        // intermittently, as requests round-robin across the runner pool
-        // (verified: an in-place `.tsx` edit served old/new/old across
-        // consecutive GETs, and fully stale on a cold cloud machine). So any
-        // code edit — plus any manifest change (new route, schema, policy) or
-        // non-`app/` edit — falls through to a full restart, which respawns the
-        // runner pool and makes SSR re-import. On a codegen/validation error,
-        // keep the running server up.
-        if let Some((_manifest, manifest_json)) =
-            run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count)
-        {
-            let app_dir_only = changed.iter().all(|p| p.starts_with(&app_dir));
-            if manifest_json == last_manifest_json
-                && app_dir_only
-                && is_css_only(&changed)
-                && pylon_runtime::frontend::trigger_dev_reload()
-            {
+/// React to a set of changed source files: reload in place when the
+/// manifest is unchanged, restart the process when it is not.
+///
+/// In place means: respawn the function runners so server code is
+/// re-imported (functions, SSR components, and anything they import —
+/// the warm runner import-caches every module, so without a respawn it
+/// keeps rendering the stale component), rebuild the client bundle, and
+/// ping open tabs. A stylesheet edit skips the respawn; a `functions/`-only
+/// edit skips the bundle rebuild.
+///
+/// A manifest change (new route, schema, policy, a new function) needs the
+/// process to re-read it, so that path re-execs as before. On a codegen or
+/// validation error the running server stays up.
+fn reload_for_changes(
+    changed: &HashSet<PathBuf>,
+    functions_dir: &Path,
+    entry_file: &str,
+    json_mode: bool,
+    rebuild_count: &mut u32,
+    last_manifest_json: &mut String,
+) {
+    let Some((_manifest, manifest_json)) =
+        run_rebuild_and_get_manifest(entry_file, json_mode, rebuild_count)
+    else {
+        return;
+    };
+    let functions_only = changed.iter().all(|p| p.starts_with(functions_dir));
+    let functions_touched = changed.iter().any(|p| p.starts_with(functions_dir));
+    let reason = if is_css_only(changed) {
+        "styles changed"
+    } else if functions_touched {
+        "functions changed"
+    } else {
+        "code changed"
+    };
+    if manifest_json == *last_manifest_json {
+        let what = pylon_runtime::frontend::DevReload {
+            respawn_runtime: !is_css_only(changed),
+            rebuild_client: !functions_only,
+        };
+        match pylon_runtime::frontend::trigger_dev_reload_with(what) {
+            Ok(fn_count) => {
                 if !json_mode {
                     println!();
-                    println!("  ✓ styles changed — reloaded");
+                    if what.respawn_runtime {
+                        println!("  ✓ {reason} — reloaded ({fn_count} functions)");
+                    } else {
+                        println!("  ✓ {reason} — reloaded");
+                    }
                     println!();
                 }
-            } else {
-                last_manifest_json = manifest_json;
-                print_reload_reason("code changed", json_mode);
-                exec_restart(json_mode);
+                return;
+            }
+            Err(why) => {
+                if !json_mode {
+                    println!();
+                    println!("  ! in-place reload unavailable ({why})");
+                }
             }
         }
+    } else if !json_mode {
+        println!();
+        println!("  ! manifest changed");
     }
+    *last_manifest_json = manifest_json;
+    print_reload_reason(reason, json_mode);
+    exec_restart(json_mode);
 }
 
 /// Like run_rebuild but returns the manifest on success (for server init).
@@ -1250,6 +1286,7 @@ fn run_poll_watch(
     functions_dir: &Path,
     json_mode: bool,
     mut rebuild_count: u32,
+    mut last_manifest_json: String,
 ) -> ExitCode {
     let mut last_mtimes = collect_ts_mtimes(watch_dir);
     let env_watch = env_watch_paths();
@@ -1271,31 +1308,30 @@ fn run_poll_watch(
         }
 
         if current_mtimes != last_mtimes {
-            let functions_changed = current_mtimes.iter().any(|(path, mtime)| {
-                let is_in_functions = Path::new(path).starts_with(functions_dir);
-                if !is_in_functions {
-                    return false;
+            // Every path whose mtime moved, appeared, or disappeared.
+            let mut changed: HashSet<PathBuf> = HashSet::new();
+            for (path, mtime) in &current_mtimes {
+                if last_mtimes.get(path) != Some(mtime) {
+                    changed.insert(PathBuf::from(path));
                 }
-                match last_mtimes.get(path) {
-                    Some(prev) => prev != mtime,
-                    None => true,
+            }
+            for path in last_mtimes.keys() {
+                if !current_mtimes.contains_key(path) {
+                    changed.insert(PathBuf::from(path));
                 }
-            }) || last_mtimes.iter().any(|(path, _)| {
-                Path::new(path).starts_with(functions_dir) && !current_mtimes.contains_key(path)
-            });
-
+            }
             last_mtimes = current_mtimes;
 
-            if functions_changed {
-                print_reload_reason("functions changed", json_mode);
-                exec_restart(json_mode);
-                continue;
-            }
-
-            if run_rebuild_and_get_manifest(entry_file, json_mode, &mut rebuild_count).is_some() {
-                print_reload_reason("schema changed", json_mode);
-                exec_restart(json_mode);
-            }
+            // `collect_ts_mtimes` records paths relative to the watch dir,
+            // matching the relative `functions_dir` this loop receives.
+            reload_for_changes(
+                &changed,
+                functions_dir,
+                entry_file,
+                json_mode,
+                &mut rebuild_count,
+                &mut last_manifest_json,
+            );
         }
     }
 }
