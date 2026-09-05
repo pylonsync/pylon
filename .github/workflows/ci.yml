@@ -342,6 +342,10 @@ jobs:
   #
   # Set this as the one required check in the branch protection rule.
   # -----------------------------------------------------------------
+  # macOS only. The Swift SDK depends on loro-swift, which ships as an
+  # Apple xcframework binary (platforms: iOS, macOS, visionOS) with no
+  # Linux build, so a Linux lane cannot compile the package. The former
+  # ubuntu lane failed on every run it ever executed.
   swift:
     name: swift build & test (${{ matrix.os }})
     needs: changes
@@ -349,26 +353,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest]
+        os: [macos-14]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
         working-directory: packages/swift
     steps:
       - uses: actions/checkout@v4
-      - name: Install Swift toolchain (Linux only)
-        if: runner.os == 'Linux'
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: '5.10'
-      - name: Install sqlite3 dev headers (Linux only)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - name: swift build
         # Retry with backoff: SwiftPM downloads the LoroFFI binary
         # xcframework from GitHub releases on a cold cache, and that
-        # download times out whenever GitHub's release CDN degrades
-        # (three consecutive Linux-lane failures on 2026-08-17). The
+        # download can time out when GitHub's release CDN degrades. The
         # failure is pre-compilation, so a plain re-run is safe.
         run: swift build || (sleep 30 && swift build) || (sleep 90 && swift build)
       - name: swift test
