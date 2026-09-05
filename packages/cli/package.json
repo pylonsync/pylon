@@ -1,6 +1,6 @@
 {
   "name": "@pylonsync/cli",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Pylon CLI — `pylon dev`, `pylon start`, `pylon migrate`, etc. Bundles the native binary for your platform via optionalDependencies, no postinstall script required.",
   "license": "MIT",
   "homepage": "https://pylonsync.com",
@@ -25,8 +25,8 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@pylonsync/cli-darwin-arm64": "0.8.0",
-    "@pylonsync/cli-linux-x64": "0.8.0",
-    "@pylonsync/cli-win32-x64": "0.8.0"
+    "@pylonsync/cli-darwin-arm64": "0.8.1",
+    "@pylonsync/cli-linux-x64": "0.8.1",
+    "@pylonsync/cli-win32-x64": "0.8.1"
   }
 }

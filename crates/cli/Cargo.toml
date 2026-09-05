@@ -15,15 +15,15 @@ name = "pylon"
 path = "src/main.rs"
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.8.0" }  # x-release-please-version
-pylon-plugin = { path = "../plugin", version = "0.8.0" }  # x-release-please-version
-pylon-schema = { path = "../schema", version = "0.8.0" }  # x-release-please-version
-pylon-storage = { path = "../storage", version = "0.8.0", features = ["postgres-live"] }  # x-release-please-version
-pylon-runtime = { path = "../runtime", version = "0.8.0" }  # x-release-please-version
-pylon-staticgen = { path = "../staticgen", version = "0.8.0" }  # x-release-please-version
-pylon-migrate = { path = "../migrate", version = "0.8.0" }  # x-release-please-version
-pylon-policy = { path = "../policy", version = "0.8.0" }  # x-release-please-version
-pylon-auth = { path = "../auth", version = "0.8.0" }  # x-release-please-version
+pylon-kernel = { path = "../core", version = "0.8.1" }  # x-release-please-version
+pylon-plugin = { path = "../plugin", version = "0.8.1" }  # x-release-please-version
+pylon-schema = { path = "../schema", version = "0.8.1" }  # x-release-please-version
+pylon-storage = { path = "../storage", version = "0.8.1", features = ["postgres-live"] }  # x-release-please-version
+pylon-runtime = { path = "../runtime", version = "0.8.1" }  # x-release-please-version
+pylon-staticgen = { path = "../staticgen", version = "0.8.1" }  # x-release-please-version
+pylon-migrate = { path = "../migrate", version = "0.8.1" }  # x-release-please-version
+pylon-policy = { path = "../policy", version = "0.8.1" }  # x-release-please-version
+pylon-auth = { path = "../auth", version = "0.8.1" }  # x-release-please-version
 rusqlite = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
