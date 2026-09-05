@@ -566,6 +566,20 @@
         "bun-types",
       ],
     },
+    "packages/plugins/revenuecat": {
+      "name": "@pylonsync/revenuecat",
+      "version": "0.8.1",
+      "dependencies": {
+        "@pylonsync/functions": "workspace:*",
+        "@pylonsync/sdk": "workspace:*",
+      },
+      "peerDependencies": {
+        "bun-types": "*",
+      },
+      "optionalPeers": [
+        "bun-types",
+      ],
+    },
     "packages/plugins/stripe": {
       "name": "@pylonsync/stripe",
       "version": "0.8.1",
@@ -949,6 +963,8 @@
     "@pylonsync/react": ["@pylonsync/react@workspace:packages/react"],
 
     "@pylonsync/react-native": ["@pylonsync/react-native@workspace:packages/react-native"],
+
+    "@pylonsync/revenuecat": ["@pylonsync/revenuecat@workspace:packages/plugins/revenuecat"],
 
     "@pylonsync/sdk": ["@pylonsync/sdk@workspace:packages/sdk"],
 

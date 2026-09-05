@@ -1,0 +1,27 @@
+{
+  "name": "@pylonsync/revenuecat",
+  "publishConfig": {
+    "access": "public"
+  },
+  "version": "0.8.1",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@pylonsync/sdk": "workspace:*",
+    "@pylonsync/functions": "workspace:*"
+  },
+  "peerDependencies": {
+    "bun-types": "*"
+  },
+  "peerDependenciesMeta": {
+    "bun-types": {
+      "optional": true
+    }
+  }
+}
