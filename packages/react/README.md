@@ -2,6 +2,8 @@
 
 React hooks for [Pylon](https://pylonsync.com) — live queries, optimistic mutations, reactive server functions, search, presence, all backed by a local sync replica that re-renders on every change.
 
+Pylon is the open-source application framework from [Stack0](https://stack0.dev).
+
 ```sh
 bun add @pylonsync/react
 # or: npm i @pylonsync/react

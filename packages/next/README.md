@@ -4,6 +4,8 @@ Next.js 16 helpers for Pylon. Cookie-based auth, server-side data
 loading, edge proxy gate, OAuth provider rendering — all designed
 around App Router conventions.
 
+Pylon is the open-source application framework from [Stack0](https://stack0.dev).
+
 ## Install
 
 ```sh

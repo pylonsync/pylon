@@ -6,6 +6,8 @@ auth, entity CRUD, server functions, file uploads, real-time sync with an
 offline-safe write queue, SwiftUI hooks, and Loro CRDT subscriptions via
 [`loro-swift`](https://github.com/loro-dev/loro-swift).
 
+Pylon is the open-source application framework from [Stack0](https://stack0.dev).
+
 ## Platforms
 
 | Target          | Min version |

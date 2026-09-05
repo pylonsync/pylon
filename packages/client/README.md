@@ -4,6 +4,8 @@ Drop-in React components for Pylon auth. Clerk-style API, wired to the
 existing `/api/auth/*` surface — magic link, password, and OAuth all
 work with zero config.
 
+Pylon is the open-source application framework from [Stack0](https://stack0.dev).
+
 ```bash
 pnpm add @pylonsync/client
 ```

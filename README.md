@@ -2,6 +2,8 @@
 
 A self-hostable, full-stack framework for web, mobile, and real-time apps.
 
+Pylon is the open-source application framework from [Stack0](https://stack0.dev).
+
 [![CI](https://github.com/pylonsync/pylon/actions/workflows/ci.yml/badge.svg)](https://github.com/pylonsync/pylon/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![skills.sh](https://skills.sh/b/pylonsync/pylon)](https://skills.sh/pylonsync/pylon)
