@@ -29,6 +29,22 @@ import { AsyncStorageReplicaPersistence } from "./replica-persistence";
 export * from "@pylonsync/react";
 
 // React Native specific.
+export {
+  AuthError,
+  clearSession,
+  deleteAccount,
+  getMe,
+  guestSession,
+  nativeSignIn,
+  passwordLogin,
+  passwordRegister,
+  persistSession,
+  sendEmailCode,
+  signOut,
+  verifyEmailCode,
+  type Me,
+  type Session,
+} from "./auth";
 export { useNetworkStatus } from "./useNetworkStatus";
 export type { NetworkStatus } from "./useNetworkStatus";
 export { AsyncStorageReplicaPersistence } from "./replica-persistence";
