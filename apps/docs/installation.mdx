@@ -152,6 +152,8 @@ my-app/
 | `PYLON_CORS_ORIGIN` | from `manifest.auth.trustedOrigins` | CORS allowlist override (comma-separated). `*` only in dev. Loopback always auto-trusted. |
 | `PYLON_DEV_MODE` | `true` | Dev-only behavior (generous rate limits, CORS `*` fallback when neither manifest nor env is set) |
 | `PYLON_PORT` | `4321` | HTTP port |
+| `PYLON_DESIGN_MODE` | *(unset)* | With `pylon dev`: stamp SSR output with `data-pylon-src` and enable the `X-Pylon-Design` render, `/_pylon/dev/render`, and `X-Pylon-Design-Viewer`. See [Design mode](/ssr/agents#design-mode). Dev only. |
+| `PYLON_DEV_FILE_API_TOKEN` | *(unset)* | Bearer token for the dev file API (`/_pylon/dev/files/*`), `/_pylon/dev/render`, and viewer impersonation. Unset leaves the file API open on localhost and disables impersonation. |
 | `PYLON_RATE_LIMIT_MAX` | `100` | Max anonymous requests per window (per IP). Kept low, because anonymous traffic is the main target for repeated login attempts. |
 | `PYLON_RATE_LIMIT_MAX_AUTHED` | `1000` | Max authenticated requests per window (per user id). Higher than the anonymous limit, because polling dashboards routinely exceed 100 requests/min for one legitimate user. |
 | `PYLON_RATE_LIMIT_WINDOW` | `60` | Window in seconds. Applies to both the anonymous and authenticated limits. |

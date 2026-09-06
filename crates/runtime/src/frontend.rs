@@ -925,12 +925,101 @@ pub(crate) struct MarkdownRequest {
     html_acceptable: bool,
 }
 
+/// A page requested as a design render (`X-Pylon-Design: 1`, dev mode only).
+/// The page renders with no hydration tail, no dev HUD, no live-reload
+/// snippet, an inlined stylesheet, and a `<base href>` so the HTML can be
+/// shown in a `srcdoc` iframe. The response is never cached.
+#[derive(Debug, Clone)]
+pub(crate) struct DesignRequest {
+    /// The URL the page renders under (path + query).
+    render_url: String,
+    /// `X-Pylon-Design-Viewer`: render as this user id (`anon` = anonymous).
+    /// Only honored when `PYLON_DEV_FILE_API_TOKEN` is set and the request
+    /// carries it; see `design_viewer_from_request`.
+    viewer: Option<String>,
+}
+
 /// Which representation of a page this request wants.
 pub(crate) enum PageVariant {
     Html,
     Markdown(MarkdownRequest),
+    Design(DesignRequest),
     /// The client ruled out every representation this server can produce.
     NotAcceptable,
+}
+
+/// `X-Pylon-Design: 1` on the request.
+fn is_design_request(request: &Request) -> bool {
+    header_value(request, "x-pylon-design")
+        .map(|v| v.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Outcome of checking `Authorization: Bearer <PYLON_DEV_FILE_API_TOKEN>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevTokenCheck {
+    /// No token configured: the gate is open (dev mode only anyway).
+    Unset,
+    /// Token configured and the request carries it.
+    Ok,
+    /// Token configured and the request does not carry it.
+    Missing,
+}
+
+fn check_dev_token(request: &Request) -> DevTokenCheck {
+    let token = match std::env::var("PYLON_DEV_FILE_API_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return DevTokenCheck::Unset,
+    };
+    let want = format!("Bearer {token}");
+    let ok = request.headers().iter().any(|h| {
+        h.field
+            .as_str()
+            .as_str()
+            .eq_ignore_ascii_case("authorization")
+            && h.value.as_str() == want.as_str()
+    });
+    if ok {
+        DevTokenCheck::Ok
+    } else {
+        DevTokenCheck::Missing
+    }
+}
+
+/// The viewer to impersonate for a design render, from
+/// `X-Pylon-Design-Viewer`. `Ok(None)` when the header is absent. `Err(401)`
+/// when the header is present but `PYLON_DEV_FILE_API_TOKEN` is unset or the
+/// request does not carry it: impersonation is never open, even in dev.
+fn design_viewer_from_request(request: &Request) -> Result<Option<String>, u16> {
+    let Some(viewer) = header_value(request, "x-pylon-design-viewer") else {
+        return Ok(None);
+    };
+    let viewer = viewer.trim().to_string();
+    if viewer.is_empty() {
+        return Ok(None);
+    }
+    match check_dev_token(request) {
+        DevTokenCheck::Ok => Ok(Some(viewer)),
+        DevTokenCheck::Unset | DevTokenCheck::Missing => Err(401),
+    }
+}
+
+fn plain_response(
+    status: u16,
+    body: &str,
+    cors_origin: &str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    let mut resp = Response::from_string(body).with_status_code(status);
+    for (k, v) in [
+        ("Content-Type", "text/plain; charset=utf-8"),
+        ("Cache-Control", "no-store"),
+        ("Access-Control-Allow-Origin", cors_origin),
+    ] {
+        if let Ok(h) = Header::from_bytes(k, v) {
+            resp = resp.with_header(h);
+        }
+    }
+    resp
 }
 
 /// Routes whose representation is fixed by the file convention that declares
@@ -964,6 +1053,15 @@ fn header_value(request: &Request, name: &str) -> Option<String> {
 ///     `public/pylon-skill.md` beating a `/pylon-skill` page's variant.
 fn page_variant(request: &Request, url: &str, accept: Option<&str>) -> PageVariant {
     let path_only = url.split('?').next().unwrap_or(url);
+    // A design render is a dev-only request shape. It wins over markdown
+    // negotiation: the design canvas always wants HTML. The caller has
+    // already rejected the header outside dev mode.
+    if is_design_request(request) && !is_nav_request(request) {
+        return PageVariant::Design(DesignRequest {
+            render_url: url.to_string(),
+            viewer: None,
+        });
+    }
     page_variant_for(
         is_nav_request(request),
         url,
@@ -1208,11 +1306,28 @@ pub fn try_handle(
         return Err(request);
     }
 
+    // Render by component (design mode): `GET /_pylon/dev/render?component=
+    // <rel module path>&layouts=<csv>&path=<url path>`. Renders a module that
+    // is not routable (a `.design/variants/<id>.tsx` file) as a design render.
+    // Dev-only; bearer token required when `PYLON_DEV_FILE_API_TOKEN` is set.
+    if path_only == "/_pylon/dev/render" {
+        if is_dev_mode() {
+            return serve_dev_render(cfg, request, &url, cors_origin);
+        }
+        return Err(request);
+    }
+
     // SSR branch sits ABOVE dev_proxy so file-based pages take
     // precedence over Vite's catch-all (Vite would serve the SPA
     // shell, masking the SSR'd output). Falls through to proxy/disk
     // when no SSR route matches.
     if !cfg.ssr_routes.is_empty() && cfg.fn_ops.is_some() {
+        // Design render (`X-Pylon-Design: 1`) exists in dev mode only. Outside
+        // dev the header names a variant this server does not produce: 404.
+        if is_design_request(&request) && !is_dev_mode() {
+            let _ = request.respond(plain_response(404, "not found", cors_origin));
+            return Ok(());
+        }
         // Which representation does this client want? A markdown request routes
         // to the SAME page — matched on the path with any `.md` suffix removed
         // — and is converted after the render (see `serve_via_ssr_rpc`).
@@ -1224,6 +1339,26 @@ pub fn try_handle(
         };
         let md_request: Option<MarkdownRequest> = match &variant {
             PageVariant::Markdown(m) => Some(m.clone()),
+            _ => None,
+        };
+        let design_request: Option<DesignRequest> = match &variant {
+            PageVariant::Design(d) => {
+                let viewer = match design_viewer_from_request(&request) {
+                    Ok(v) => v,
+                    Err(status) => {
+                        let _ = request.respond(plain_response(
+                            status,
+                            "unauthorized: X-Pylon-Design-Viewer requires the dev file API token",
+                            cors_origin,
+                        ));
+                        return Ok(());
+                    }
+                };
+                Some(DesignRequest {
+                    render_url: d.render_url.clone(),
+                    viewer,
+                })
+            }
             _ => None,
         };
         // Data routes (`sitemap.ts`, `robots.ts`, `llms.ts`, `opengraph-image`)
@@ -1294,6 +1429,7 @@ pub fn try_handle(
             // session-carrying request is safe; an anon entry stays restricted to
             // cookie-anonymous requests (defense-in-depth).
             let bucket_eligible = !is_dev_mode()
+                && design_request.is_none()
                 && matches!(request.method(), Method::Get)
                 && match_url
                     .split_once('?')
@@ -1364,6 +1500,7 @@ pub fn try_handle(
                 cacheable_eligible,
                 bucket_eligible,
                 md_request,
+                design_request,
             );
         }
         // Raw GET routes: a `route.ts` exporting `GET` (kind:"route") matched
@@ -1421,6 +1558,7 @@ pub fn try_handle(
                     false,
                     false,
                     md_request,
+                    design_request,
                 );
             }
         }
@@ -2011,6 +2149,173 @@ fn looks_like_document_nav(url: &str) -> bool {
 /// instead of a `Vec`. Buffered now keeps the diff small enough to
 /// land safely; streaming pulls in `StreamingBody` visibility +
 /// `spawn_streaming_response` from `server.rs`.
+/// A project-relative module path for `/_pylon/dev/render`: no absolute path,
+/// no `..`, no extension, and a source file must exist under `root`. Returns
+/// the normalized relative path.
+fn dev_render_module(root: &Path, rel: &str) -> Option<String> {
+    let rel = rel.trim().trim_start_matches("./").replace('\\', "/");
+    if rel.is_empty()
+        || rel.starts_with('/')
+        || rel.contains("//")
+        || rel
+            .split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        || rel.contains('\0')
+    {
+        return None;
+    }
+    let root_canon = root.canonicalize().ok()?;
+    for ext in ["tsx", "ts", "jsx", "js"] {
+        let candidate = root.join(format!("{rel}.{ext}"));
+        if let Ok(canon) = candidate.canonicalize() {
+            if canon.starts_with(&root_canon) && canon.is_file() {
+                return Some(rel);
+            }
+        }
+    }
+    None
+}
+
+/// `GET /_pylon/dev/render` — see `try_handle`.
+fn serve_dev_render(
+    cfg: &FrontendConfig,
+    request: Request,
+    url: &str,
+    cors_origin: &str,
+) -> Result<(), Request> {
+    if !matches!(request.method(), Method::Get) {
+        let _ = request.respond(plain_response(405, "method not allowed", cors_origin));
+        return Ok(());
+    }
+    if check_dev_token(&request) == DevTokenCheck::Missing {
+        let _ = request.respond(plain_response(401, "unauthorized", cors_origin));
+        return Ok(());
+    }
+    let viewer = match design_viewer_from_request(&request) {
+        Ok(v) => v,
+        Err(status) => {
+            let _ = request.respond(plain_response(
+                status,
+                "unauthorized: X-Pylon-Design-Viewer requires the dev file API token",
+                cors_origin,
+            ));
+            return Ok(());
+        }
+    };
+    let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let params = parse_query_string(query);
+    let get = |k: &str| params.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let root = std::env::var("PYLON_DEV_WATCH_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let Some(component) = get("component").and_then(|c| dev_render_module(&root, &c)) else {
+        let _ = request.respond(plain_response(
+            400,
+            "bad request: `component` must name a source module inside the project",
+            cors_origin,
+        ));
+        return Ok(());
+    };
+    let mut layouts: Vec<String> = Vec::new();
+    for raw in get("layouts")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+    {
+        match dev_render_module(&root, raw) {
+            Some(l) => layouts.push(l),
+            None => {
+                let _ = request.respond(plain_response(
+                    400,
+                    "bad request: `layouts` must name source modules inside the project",
+                    cors_origin,
+                ));
+                return Ok(());
+            }
+        }
+    }
+    let path = get("path")
+        .filter(|p| p.starts_with('/'))
+        .unwrap_or_else(|| "/".to_string());
+    let route = pylon_kernel::ManifestRoute {
+        path: path.clone(),
+        mode: "ssr".into(),
+        query: None,
+        auth: None,
+        component: Some(component),
+        layouts,
+        kind: None,
+    };
+    let matched = SsrMatch {
+        route,
+        params: std::collections::HashMap::new(),
+    };
+    serve_via_ssr_rpc(
+        cfg,
+        matched,
+        request,
+        cors_origin,
+        None,
+        false,
+        false,
+        None,
+        Some(DesignRequest {
+            render_url: path,
+            viewer,
+        }),
+    )
+}
+
+/// Auth context for a design render that impersonates `viewer` (`anon` =
+/// anonymous). Built the way a real session resolves: the user's active
+/// tenant (their most recent session's, else their first org), then the same
+/// admin-lift and org-role enrichment `resolve_request_auth` applies.
+fn resolve_design_viewer_auth(
+    cfg: &FrontendConfig,
+    viewer: &str,
+) -> pylon_functions::protocol::AuthInfo {
+    let anonymous = pylon_functions::protocol::AuthInfo {
+        user_id: None,
+        is_admin: false,
+        tenant_id: None,
+        roles: vec![],
+    };
+    if viewer.is_empty() || viewer.eq_ignore_ascii_case("anon") {
+        return anonymous;
+    }
+    let mut ctx = pylon_auth::AuthContext::authenticated(viewer.to_string());
+    let session_tenant = cfg.session_store.as_ref().and_then(|store| {
+        let mut sessions = store.list_for_user(viewer);
+        sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        sessions.into_iter().find_map(|s| s.tenant_id)
+    });
+    let tenant = session_tenant.or_else(|| {
+        cfg.orgs.as_ref().filter(|o| o.enabled()).and_then(|o| {
+            o.list_for_user(viewer)
+                .into_iter()
+                .next()
+                .map(|(org, _)| org.id)
+        })
+    });
+    if let Some(t) = tenant {
+        ctx = ctx.with_tenant(t);
+    }
+    if let Some(rt) = cfg.runtime.as_ref() {
+        crate::server::lift_admin(rt, &mut ctx);
+    }
+    if let Some(orgs) = cfg.orgs.as_ref() {
+        pylon_auth::org::enrich_active_org_role(orgs, &mut ctx);
+    }
+    pylon_functions::protocol::AuthInfo {
+        user_id: ctx.user_id.clone(),
+        is_admin: ctx.is_admin,
+        tenant_id: ctx.tenant_id.clone(),
+        roles: ctx.roles.clone(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn serve_via_ssr_rpc(
     cfg: &FrontendConfig,
     matched: SsrMatch,
@@ -2032,6 +2337,11 @@ fn serve_via_ssr_rpc(
     // auth — and the finished HTML is converted before it goes out. Buffered
     // rather than streamed, because the converter needs a whole document.
     md: Option<MarkdownRequest>,
+    // Set for a design render (`X-Pylon-Design: 1` or `/_pylon/dev/render`).
+    // Dev only. The page renders under `render_url`, optionally as the
+    // impersonated `viewer`; the runtime strips hydration; the response is
+    // `Cache-Control: no-store` and never written to the SSR disk cache.
+    design: Option<DesignRequest>,
 ) -> Result<(), Request> {
     let fn_ops = match cfg.fn_ops.as_ref() {
         Some(f) => f.clone(),
@@ -2071,9 +2381,10 @@ fn serve_via_ssr_rpc(
     // `metadata.canonical`, its og:url, and its own `props.url` must all read
     // as the canonical page, or the markdown would advertise a URL that exists
     // only as a variant.
-    let url = match md.as_ref() {
-        Some(m) => m.render_url.clone(),
-        None => request.url().to_string(),
+    let url = match (md.as_ref(), design.as_ref()) {
+        (Some(m), _) => m.render_url.clone(),
+        (None, Some(d)) => d.render_url.clone(),
+        (None, None) => request.url().to_string(),
     };
     let (path_only, query) = match url.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
@@ -2127,7 +2438,12 @@ fn serve_via_ssr_rpc(
     // SessionStore + CookieConfig are wired (the standard case for
     // pylon dev / pylon start). Without them, fall back to anonymous
     // AuthInfo — matches Phase 1 behavior.
-    let auth = resolve_request_auth(cfg, &cookies_map);
+    // A design render with a viewer header impersonates that user (token-gated
+    // upstream); otherwise the request's own session cookie decides.
+    let auth = match design.as_ref().and_then(|d| d.viewer.as_deref()) {
+        Some(viewer) => resolve_design_viewer_auth(cfg, viewer),
+        None => resolve_request_auth(cfg, &cookies_map),
+    };
     // Identity-FREE session presence for `props.session.exists` (Phase 0 auth
     // bucketing) — whether the request RESOLVED to a signed-in user, NOT who.
     // Derived from the already-resolved `auth` (free), so an expired/invalid
@@ -2230,8 +2546,9 @@ fn serve_via_ssr_rpc(
     // A markdown response is buffered + converted on THIS thread (see below),
     // so the chunk tee would only collect HTML we are about to throw away — the
     // markdown path builds its own cache buffer from the converted bytes.
+    let design_render = design.is_some();
     let tee_buf: Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> =
-        if bucket_eligible && md.is_none() {
+        if bucket_eligible && md.is_none() && !design_render {
             Some(std::sync::Arc::new(std::sync::Mutex::new(Vec::new())))
         } else {
             None
@@ -2294,6 +2611,7 @@ fn serve_via_ssr_rpc(
                 auth,
                 session_present,
                 initial_status,
+                design_render,
                 Some(on_response_start),
                 on_chunk,
             );
@@ -2398,21 +2716,35 @@ fn serve_via_ssr_rpc(
             } else {
                 Some(crate::markdown::md_url_for(&path_only))
             };
+            let mut response_headers = build_ssr_response_headers(
+                &page_headers,
+                cors_origin,
+                // A navigation payload answers the same URL as the page with
+                // different content. The origin keys them apart; a CDN keys on URL
+                // alone, so this must never advertise `public`.
+                cacheable_eligible && !nav,
+                bucket_shareable,
+                VariantHeaders {
+                    content_type: None,
+                    alternate_md: md_url.as_deref(),
+                },
+            );
+            if design_render {
+                // A design render is a dev tool's private snapshot: never stored
+                // by a browser or a shared cache.
+                response_headers.retain(|h| {
+                    !h.field
+                        .as_str()
+                        .as_str()
+                        .eq_ignore_ascii_case("cache-control")
+                });
+                if let Ok(h) = Header::from_bytes("Cache-Control", "no-store") {
+                    response_headers.push(h);
+                }
+            }
             let response = Response::new(
                 tiny_http::StatusCode(status),
-                build_ssr_response_headers(
-                    &page_headers,
-                    cors_origin,
-                    // A navigation payload answers the same URL as the page with
-                    // different content. The origin keys them apart; a CDN keys on URL
-                    // alone, so this must never advertise `public`.
-                    cacheable_eligible && !nav,
-                    bucket_shareable,
-                    VariantHeaders {
-                        content_type: None,
-                        alternate_md: md_url.as_deref(),
-                    },
-                ),
+                response_headers,
                 crate::server::StreamingBody::new(body_rx),
                 None, // content-length unknown → tiny_http uses chunked transfer
                 None,

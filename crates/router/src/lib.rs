@@ -552,6 +552,7 @@ pub trait FnOps: Send + Sync {
         _auth: pylon_functions::protocol::AuthInfo,
         _session_present: bool,
         _initial_status: Option<u16>,
+        _design: bool,
         _on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
         _on_chunk: pylon_functions::runner::ByteStreamCallback,
     ) -> Result<(), pylon_functions::runner::FnCallError> {

@@ -135,6 +135,12 @@ pub struct RenderRouteMessage {
     /// Skipped on serialize when `None` so existing renders are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_status: Option<u16>,
+    /// Design render (dev only). The runtime skips the hydration tail, the
+    /// dev HUD and the live-reload snippet, inlines the stylesheet with no
+    /// size cap, and adds a `<base href>` so the HTML can be shown in a
+    /// `srcdoc` iframe. Skipped on serialize when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub design: bool,
 }
 
 impl RenderRouteMessage {
@@ -152,6 +158,7 @@ impl RenderRouteMessage {
         auth: AuthInfo,
         session_present: bool,
         initial_status: Option<u16>,
+        design: bool,
     ) -> Self {
         Self {
             msg_type: "render_route",
@@ -167,6 +174,7 @@ impl RenderRouteMessage {
             auth,
             session_present,
             initial_status,
+            design,
         }
     }
 }

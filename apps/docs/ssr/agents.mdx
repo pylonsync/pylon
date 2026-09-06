@@ -176,3 +176,35 @@ right for and the call to make. Marketing copy does not read as guidance.
   of `details` for you, because a heading there ends the prose block and starts
   a link section.
 </Note>
+
+## Design mode
+
+A design tool needs a static copy of a page that maps back to source. `pylon dev` provides one when `PYLON_DESIGN_MODE=1` is set. All of it is dev-only and returns 404 in production.
+
+**Source stamps.** The SSR runner adds `data-pylon-src="app/pricing/page.tsx:12:8"` to every DOM element written under `app/`, `components/`, and `.design/`. The value is the file, the 1-based line, and the column of the opening `<`. Components are not stamped; each DOM element inside a component carries its own stamp. Browser bundles are unchanged.
+
+**The design render.** Send `X-Pylon-Design: 1`:
+
+```bash
+curl -H 'X-Pylon-Design: 1' http://127.0.0.1:4321/pricing
+```
+
+The response is the page's HTML with:
+
+- no hydration tail (`__PYLON_DATA__`, module script), no dev HUD, no live-reload script,
+- the route stylesheet inlined as `<style>` with no size cap,
+- `<base href="http://127.0.0.1:4321/">` first in `<head>`, so relative asset URLs resolve inside a `srcdoc` iframe,
+- `Cache-Control: no-store`. The render is never written to the SSR cache.
+
+The DOM is otherwise the page's own.
+
+**Render by component.** A file outside `app/` has no URL. `GET /_pylon/dev/render` renders it anyway:
+
+```bash
+curl -H 'Authorization: Bearer $PYLON_DEV_FILE_API_TOKEN' \
+  'http://127.0.0.1:4321/_pylon/dev/render?component=.design/variants/v1&layouts=app/layout&path=/pricing'
+```
+
+`component` and `layouts` are project-relative module paths without extension. They must exist inside the project; anything else is a 400. `path` is the URL the page renders under (default `/`). The result is a design render. The bearer token is required when `PYLON_DEV_FILE_API_TOKEN` is set.
+
+**Viewer.** A page that redirects anonymous visitors renders as a signed-in user with `X-Pylon-Design-Viewer: <userId>` (or `anon`). The auth context is built the way a session resolves: the user's most recent session's org, their org role, and the admin flag. This header works only on design renders, and only when `PYLON_DEV_FILE_API_TOKEN` is set and sent. Without the token the request is a 401.

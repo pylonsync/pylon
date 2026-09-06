@@ -755,6 +755,15 @@ In production, use `pylon start app.ts` instead of `pylon dev` (run `pylon build
 
 When a page won't cache, returns no data, or is slow, check these FIRST — the verdict reason names the exact cause (e.g. "read props.auth", "not opted in", "the render set a cookie"). Dev-only; absent in prod.
 
+### Design mode (for design tools)
+
+Set `PYLON_DESIGN_MODE=1` with `pylon dev` to get a static, source-mapped render of any page for a design canvas. Dev-only; every part 404s in prod.
+
+- **`PYLON_DESIGN_MODE=1`** — the SSR runner stamps every DOM element under `app/`, `components/` and `.design/` with `data-pylon-src="app/x/page.tsx:12:8"` (file, 1-based line, column of the `<`). Components are not stamped; browser bundles are unchanged.
+- **`X-Pylon-Design: 1`** request header — the page renders with no hydration tail (no `__PYLON_DATA__`, no module script), no dev HUD, no live-reload snippet, the stylesheet inlined with no size cap, and `<base href="http://127.0.0.1:<port>/">` first in `<head>` so relative assets resolve inside a `srcdoc` iframe. Response is `Cache-Control: no-store` and never written to the SSR cache.
+- **`GET /_pylon/dev/render?component=<rel module path>&layouts=<csv>&path=<url path>`** — render a module that is not a route (for example `.design/variants/v1`) with the given layout chain, as a design render. `component` and `layouts` are project-relative paths without extension and must exist inside the project. `path` defaults to `/`. Requires `Authorization: Bearer <PYLON_DEV_FILE_API_TOKEN>` when that env is set.
+- **`X-Pylon-Design-Viewer: <userId>` or `anon`** — render as that user (their most recent session's org, roles, admin flag), so pages that redirect anonymous visitors still render. Only on design renders, and only with `PYLON_DEV_FILE_API_TOKEN` set and sent; otherwise 401.
+
 ## Deployment
 
 Production env vars to set:
