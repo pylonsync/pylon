@@ -93,6 +93,13 @@ export interface RenderRouteMessage {
    * override it via `response.setStatus`.
    */
   initial_status?: number;
+  /**
+   * Design render (dev only). No hydration tail, no dev HUD, no live-reload
+   * snippet; the stylesheet is inlined with no size cap and the head gets a
+   * `<base href>` so the HTML works inside a `srcdoc` iframe. See
+   * `designHeadBlob`.
+   */
+  design?: boolean;
 }
 
 type Send = (msg: Record<string, unknown>) => void;
@@ -1923,6 +1930,9 @@ export async function cssHeadTag(
   css: string,
   prefix: string,
   routeOverride?: boolean,
+  // Size cap override. A design render passes `Infinity`: the whole sheet is
+  // inlined so the HTML is self-contained.
+  maxBytes?: number,
 ): Promise<string> {
   const link = `<link rel="stylesheet" href="${prefix}${css}">`;
   // Per-route `export const inlineCss = true|false` beats the env
@@ -1932,7 +1942,10 @@ export async function cssHeadTag(
     routeOverride ??
     /^(1|true)$/i.test(process.env.PYLON_SSR_INLINE_CSS ?? "");
   if (!enabled) return link;
-  let cached = inlineCssCache.get(css);
+  const max =
+    maxBytes ?? (Number(process.env.PYLON_SSR_INLINE_CSS_MAX ?? "") || 32768);
+  const cacheKey = `${max}:${css}`;
+  let cached = inlineCssCache.get(cacheKey);
   if (cached === undefined) {
     cached = null;
     try {
@@ -1940,7 +1953,6 @@ export async function cssHeadTag(
       const manifest: any = await getManifest();
       const fs = await import("fs");
       const path = await import("path");
-      const max = Number(process.env.PYLON_SSR_INLINE_CSS_MAX ?? "") || 32768;
       const file = path.join(
         process.cwd(),
         manifest.outdir || ".pylon/client-build",
@@ -1955,11 +1967,64 @@ export async function cssHeadTag(
       cached = null;
     }
     if (inlineCssCache.size > 64) inlineCssCache.clear();
-    inlineCssCache.set(css, cached);
+    inlineCssCache.set(cacheKey, cached);
   }
   return cached === null
     ? link
     : `<style data-pylon-css="${css}">${cached}</style>`;
+}
+
+/**
+ * `<base href>` for a design render. The HTML is shown in a `srcdoc` iframe,
+ * where relative URLs have no origin to resolve against; the base points them
+ * at the dev server. Uses the request's Host, else `127.0.0.1:<PYLON_PORT>`.
+ */
+export function designBaseHref(
+  headers: Record<string, string | undefined>,
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const host = (headers.host ?? "").trim();
+  const origin = host
+    ? `http://${host}`
+    : `http://127.0.0.1:${env.PYLON_PORT || "4321"}`;
+  return `<base href="${origin.replace(/"/g, "%22")}/">`;
+}
+
+/**
+ * Head blob for a design render: `<base href>` first, then fonts, then every
+ * route stylesheet inlined with no size cap. No modulepreloads: the page does
+ * not hydrate, so no client chunk is fetched.
+ */
+async function designHeadBlob(
+  headers: Record<string, string | undefined>,
+  manifestRoute: { css: string[] } | null,
+  publicPrefix: string,
+): Promise<string> {
+  let blob = designBaseHref(headers);
+  blob += await buildFontHeadBlob();
+  if (manifestRoute) {
+    for (const css of manifestRoute.css) {
+      blob += await cssHeadTag(css, publicPrefix, true, Infinity);
+    }
+    return blob;
+  }
+  // No per-route entry: inline the stylesheet union like the boundary path.
+  try {
+    const { getManifest } = await import("./ssr-client-bundler");
+    const manifest = await getManifest();
+    const prefix = manifest.public_prefix || "/_pylon/build/";
+    const seen = new Set<string>();
+    for (const route of Object.values(manifest.routes || {}) as any[]) {
+      for (const css of (route.css || []) as string[]) {
+        if (seen.has(css)) continue;
+        seen.add(css);
+        blob += await cssHeadTag(css, prefix, true, Infinity);
+      }
+    }
+  } catch {
+    // Unstyled design render; the canvas still shows the DOM.
+  }
+  return blob;
 }
 
 async function collectBoundaryHeadBlob(): Promise<string> {
@@ -2240,6 +2305,8 @@ async function renderBoundaryToClient(
     kind: "error" | "not-found";
     errorForClient?: { message: string; digest?: string };
   },
+  // Design render: no hydration tail, inlined CSS, `<base href>`.
+  design?: { headers: Record<string, string | undefined> },
 ): Promise<void> {
   const stream: ReadableStream<Uint8Array> = await renderToReadableStream(tree, {
     onError(e: unknown) {
@@ -2264,7 +2331,9 @@ async function renderBoundaryToClient(
       manifestRoute = null;
     }
   }
-  if (manifestRoute) {
+  if (design) {
+    headBlob = await designHeadBlob(design.headers, manifestRoute, publicPrefix);
+  } else if (manifestRoute) {
     headBlob += await buildFontHeadBlob();
     const co = /^https?:\/\//i.test(publicPrefix) ? " crossorigin" : "";
     for (const css of manifestRoute.css) {
@@ -2293,9 +2362,9 @@ async function renderBoundaryToClient(
     stream.getReader(),
     headBlob,
     sendChunk,
-    buildCloudBadgeChunk(),
+    design ? "" : buildCloudBadgeChunk(),
   );
-  if (tail && manifestRoute) {
+  if (tail && manifestRoute && !design) {
     const tailHtml = buildHydrationTail({
       component: tail.component,
       layouts: tail.layouts,
@@ -2329,6 +2398,7 @@ async function tryRenderBoundary(
     callId: string;
     status: number;
     headers: Record<string, string>;
+    design?: { headers: Record<string, string | undefined> };
   },
 ): Promise<boolean> {
   const { React, renderToReadableStream, cwd, componentPath, fileName, props, send, callId, status, headers } =
@@ -2417,6 +2487,7 @@ async function tryRenderBoundary(
         kind: fileName === "error" ? "error" : "not-found",
         errorForClient,
       },
+      opts.design,
     );
     return true;
   } catch (e) {
@@ -3323,6 +3394,9 @@ export async function handleRenderRoute(
     // render still runs (it is what resolves serverData), but the response
     // carries only the head metadata and the data.
     const navRender = isNavRequest(msg.headers as Record<string, unknown>);
+    // Design render (dev only, set by the host for `X-Pylon-Design: 1` and
+    // `/_pylon/dev/render`): static HTML for the design canvas.
+    const designRender = msg.design === true && !navRender;
 
     // loading.tsx (#278): the nearest `loading` module — walked up from the
     // page dir, like not-found/error — becomes ONE route-level Suspense
@@ -3641,7 +3715,13 @@ export async function handleRenderRoute(
     // modulepreloads. The entry script tag stays in the body-tail
     // (it needs the inline __PYLON_DATA__ to have been parsed first).
     let headBlob = "";
-    if (preloadManifestRoute) {
+    if (designRender) {
+      headBlob = await designHeadBlob(
+        msg.headers,
+        preloadManifestRoute,
+        preloadPublicPrefix,
+      );
+    } else if (preloadManifestRoute) {
       headBlob += await buildFontHeadBlob();
       const co = /^https?:\/\//i.test(preloadPublicPrefix) ? " crossorigin" : "";
       const inlineOverride =
@@ -3704,7 +3784,7 @@ export async function handleRenderRoute(
         stream.getReader(),
         headBlob,
         sendChunk,
-        buildCloudBadgeChunk(),
+        designRender ? "" : buildCloudBadgeChunk(),
       );
     }
 
@@ -3773,7 +3853,9 @@ export async function handleRenderRoute(
     // load. `buildHydrationTail` does the props strip (serverData/response +
     // the security headers/cookies strip) + the </script> + U+2028/2029
     // escaping. The CSS/modulepreload links were already injected into <head>.
-    const wantsHydration = !isBoundaryComponent || !!preloadManifestRoute;
+    // A design render never hydrates: the canvas owns the DOM.
+    const wantsHydration =
+      !designRender && (!isBoundaryComponent || !!preloadManifestRoute);
     if (wantsHydration) {
       const tail = buildHydrationTail({
         component: msg.component,
@@ -3808,7 +3890,7 @@ export async function handleRenderRoute(
     //
     // Never on a navigation response: there is no document for the overlay to
     // attach to, and its blob would dwarf the payload it rode in on.
-    if (devVerdict && !navRender) {
+    if (devVerdict && !navRender && !designRender) {
       const renderMs = Math.round((performance.now() - renderStart) * 10) / 10;
       // Build-level failures that degraded this page (currently: the
       // Tailwind compile). Dev-only and unmissable — the HUD paints a
@@ -3887,6 +3969,7 @@ export async function handleRenderRoute(
           callId: msg.call_id,
           status: 404,
           headers: finalizeHeaders(responseState),
+          design: msg.design === true ? { headers: msg.headers } : undefined,
         })
       ) {
         return;
@@ -3924,6 +4007,7 @@ export async function handleRenderRoute(
         callId: msg.call_id,
         status: 500,
         headers: finalizeHeaders(responseState),
+        design: msg.design === true ? { headers: msg.headers } : undefined,
       })
     ) {
       return;

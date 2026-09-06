@@ -4662,6 +4662,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         auth: FnAuth,
         session_present: bool,
         initial_status: Option<u16>,
+        design: bool,
         on_response_start: Option<pylon_functions::runner::ResponseStartCallback>,
         on_chunk: pylon_functions::runner::ByteStreamCallback,
     ) -> Result<(), FnCallError> {
@@ -4689,6 +4690,7 @@ impl pylon_router::FnOps for FnOpsImpl {
             auth,
             session_present,
             initial_status,
+            design,
             store,
             on_response_start,
             on_chunk,
@@ -4814,6 +4816,36 @@ pub fn find_functions_runtime() -> Option<String> {
     if user_path.exists() {
         return user_path.to_str().map(|s| s.to_string());
     }
+    None
+}
+
+/// True when `PYLON_DESIGN_MODE=1` (or `true`). Design mode is a dev-only
+/// feature; the runtime still requires `PYLON_DEV_MODE` for the design render
+/// paths, this only controls the JSX source stamp preload.
+pub fn is_design_mode() -> bool {
+    std::env::var("PYLON_DESIGN_MODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Path of the design stamp preload for the resolved runtime script, when
+/// design mode is on and the file exists. The preload lives next to the
+/// runtime: `design-stamp.ts` beside `runtime.ts` (source), `design-stamp.js`
+/// beside `runtime.js` (built).
+pub fn design_stamp_preload(runtime_script: &str) -> Option<String> {
+    if !is_design_mode() {
+        return None;
+    }
+    let script = std::path::Path::new(runtime_script);
+    let ext = script.extension().and_then(|e| e.to_str()).unwrap_or("ts");
+    let candidate = script.with_file_name(format!("design-stamp.{ext}"));
+    if candidate.exists() {
+        return candidate.to_str().map(|s| s.to_string());
+    }
+    tracing::warn!(
+        "[functions] PYLON_DESIGN_MODE is set but {} does not exist — SSR output will not carry data-pylon-src",
+        candidate.display()
+    );
     None
 }
 
@@ -5105,11 +5137,27 @@ pub fn try_spawn_functions(
         std::env::set_var("PYLON_APP_NAME", &app_name);
     }
 
+    // Design mode (`PYLON_DESIGN_MODE=1`, dev only): preload the JSX source
+    // stamp so SSR output carries `data-pylon-src` on every DOM element. The
+    // preload is a sibling of the runtime script. The client bundler does not
+    // see it, so browser bundles are unchanged.
+    let runner_args: Vec<String> = match design_stamp_preload(&runtime_script) {
+        Some(preload) => vec![
+            "run".into(),
+            "--preload".into(),
+            preload,
+            runtime_script.clone(),
+            fn_dir.clone(),
+        ],
+        None => vec!["run".into(), runtime_script.clone(), fn_dir.clone()],
+    };
+    let runner_args: Vec<&str> = runner_args.iter().map(String::as_str).collect();
+
     // Spawn the first runner separately so we can capture its function
     // defs for the registry — all runners load the same fn_dir and
     // produce identical defs, so we only need one handshake's worth.
     let first_runner = Arc::new(FnRunner::new(1000));
-    let defs = match first_runner.start("bun", &["run", &runtime_script, &fn_dir]) {
+    let defs = match first_runner.start("bun", &runner_args) {
         Ok(defs) => defs,
         Err(e) => {
             tracing::warn!("[functions] Failed to start Bun runtime: {e}");
@@ -5128,7 +5176,7 @@ pub fn try_spawn_functions(
     runners.push(first_runner);
     for i in 1..pool_size {
         let r = Arc::new(FnRunner::new(1000));
-        match r.start("bun", &["run", &runtime_script, &fn_dir]) {
+        match r.start("bun", &runner_args) {
             Ok(_) => runners.push(r),
             Err(e) => tracing::warn!(
                 "[functions] Failed to start pool runner [{i}/{pool_size}]: {e} — continuing with {} runner(s)",

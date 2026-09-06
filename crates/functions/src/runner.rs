@@ -876,6 +876,7 @@ impl FnRunner {
         auth: crate::protocol::AuthInfo,
         session_present: bool,
         initial_status: Option<u16>,
+        design: bool,
         store: &dyn DataStore,
         on_response_start: Option<ResponseStartCallback>,
         on_chunk: ByteStreamCallback,
@@ -892,6 +893,7 @@ impl FnRunner {
             auth,
             session_present,
             initial_status,
+            design,
             store,
             on_response_start,
             on_chunk,
@@ -913,6 +915,7 @@ impl FnRunner {
         auth: crate::protocol::AuthInfo,
         session_present: bool,
         initial_status: Option<u16>,
+        design: bool,
         store: &dyn DataStore,
         mut on_response_start: Option<ResponseStartCallback>,
         mut on_chunk: ByteStreamCallback,
@@ -956,6 +959,7 @@ impl FnRunner {
             auth,
             session_present,
             initial_status,
+            design,
         );
         self.send(&msg)?;
 
