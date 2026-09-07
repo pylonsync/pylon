@@ -39,6 +39,24 @@ echo "→ scaffold mobile template"
 }
 APP="$TMP/smoke-app"
 
+# The scaffold pins @pylonsync/* to this checkout's version, which is not
+# on npm yet when CI runs on a release commit. Install whatever is
+# published; the local packages replace it below.
+echo "→ pin @pylonsync/* to the published release"
+for pkg in "$APP/apps/expo/package.json" "$APP/apps/api/package.json"; do
+	node -e '
+const fs = require("node:fs");
+const file = process.argv[1];
+const pkg = JSON.parse(fs.readFileSync(file, "utf8"));
+for (const section of ["dependencies", "devDependencies"]) {
+	for (const name of Object.keys(pkg[section] ?? {})) {
+		if (name.startsWith("@pylonsync/")) pkg[section][name] = "latest";
+	}
+}
+fs.writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
+' "$pkg"
+done
+
 echo "→ bun install"
 (cd "$APP" && bun install >"$TMP/install.log" 2>&1) || {
 	tail -50 "$TMP/install.log" >&2
