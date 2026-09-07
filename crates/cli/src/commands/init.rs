@@ -13,6 +13,8 @@ use crate::output::{print_diagnostics, print_json};
 const TEMPLATE_BASIC_APP: &str = include_str!("../../templates/basic/app.ts");
 const TEMPLATE_BASIC_TSCONFIG: &str = include_str!("../../templates/basic/tsconfig.json");
 const SDK_SOURCE: &str = include_str!("../../embedded/sdk-index.ts");
+// `sdk.ts` imports `./route` (the client-safe route module); ship it too.
+const SDK_ROUTE_SOURCE: &str = include_str!("../../embedded/sdk-route.ts");
 
 // ---- Frontend templates -----------------------------------------------------
 
@@ -304,6 +306,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let api_pkg = api_package_json(&app_name);
     let api_files: &[(&str, &str)] = &[
         ("sdk.ts", SDK_SOURCE),
+        ("route.ts", SDK_ROUTE_SOURCE),
         ("app.ts", &app_ts),
         ("tsconfig.json", TEMPLATE_BASIC_TSCONFIG),
         ("package.json", &api_pkg),

@@ -25,7 +25,10 @@ TMP="$(mktemp -d -t pylon-mobile-smoke.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "→ build local package types"
-for pkg in sdk sync react; do
+# Each package's `types` points at dist/, so the overlay below needs a
+# fresh build or the scaffold typechecks against src (which needs dev
+# types the app does not install).
+for pkg in sdk sync react functions; do
 	(cd "$ROOT/packages/$pkg" && bun run build >/dev/null)
 done
 

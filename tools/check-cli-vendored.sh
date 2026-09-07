@@ -20,6 +20,7 @@
 #   cp templates/basic/app.ts        crates/cli/templates/basic/app.ts
 #   cp templates/basic/tsconfig.json crates/cli/templates/basic/tsconfig.json
 #   cp packages/sdk/src/index.ts     crates/cli/embedded/sdk-index.ts
+#   cp packages/sdk/src/route.ts     crates/cli/embedded/sdk-route.ts
 #   cp scripts/install.sh            apps/site/public/install.sh
 #   cp scripts/install.ps1           apps/site/public/install.ps1
 #
@@ -41,6 +42,7 @@ check() {
 check templates/basic/app.ts        crates/cli/templates/basic/app.ts
 check templates/basic/tsconfig.json crates/cli/templates/basic/tsconfig.json
 check packages/sdk/src/index.ts     crates/cli/embedded/sdk-index.ts
+check packages/sdk/src/route.ts crates/cli/embedded/sdk-route.ts
 
 check scripts/install.sh            apps/site/public/install.sh
 check scripts/install.ps1           apps/site/public/install.ps1
