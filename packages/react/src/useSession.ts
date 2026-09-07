@@ -8,6 +8,15 @@ export type { ResolvedSession };
 export interface UseSessionReturn {
   /** Server-resolved session. `userId=null` means anonymous. */
   session: ResolvedSession;
+  /**
+   * True once `/api/auth/me` has answered during this engine run. Until
+   * then `session` is the empty placeholder: `userId` is null because the
+   * answer has not arrived, not because the user is anonymous. Route
+   * guards must not send a user to sign-in while this is false. Stays
+   * false on an offline start; the persisted token still authenticates
+   * the replica and the next successful pull resolves it.
+   */
+  resolved: boolean;
   /** Convenience accessors. */
   userId: string | null;
   tenantId: string | null;
@@ -50,6 +59,11 @@ export function useSession(sync: SyncEngine): UseSessionReturn {
     () => sync.resolvedSession(),
     () => sync.resolvedSession(),
   );
+  const resolved = useSyncExternalStore(
+    (cb) => sync.store.subscribe(cb),
+    () => sync.sessionResolved(),
+    () => false,
+  );
 
   // Watch the localStorage token key. If another tab signs in/out, or the
   // app writes a new token without going through `notifySessionChanged`,
@@ -69,7 +83,13 @@ export function useSession(sync: SyncEngine): UseSessionReturn {
         }
       }
     };
-    if (typeof window !== "undefined") {
+    // React Native defines `window` as an alias of the global object,
+    // without `addEventListener`. Only browsers deliver `storage` events,
+    // so subscribe only where the listener API exists.
+    if (
+      typeof window !== "undefined" &&
+      typeof window.addEventListener === "function"
+    ) {
       window.addEventListener("storage", onStorage);
       return () => window.removeEventListener("storage", onStorage);
     }
@@ -78,6 +98,7 @@ export function useSession(sync: SyncEngine): UseSessionReturn {
 
   return {
     session,
+    resolved,
     userId: session.userId,
     tenantId: session.tenantId,
     isAdmin: session.isAdmin,

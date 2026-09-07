@@ -247,6 +247,15 @@ pub struct ManifestAuthConfig {
     /// Merged with anything in `PYLON_TRUSTED_ORIGINS` env.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_origins: Vec<String>,
+    /// Name of an app function the runtime calls before it deletes a
+    /// user through `DELETE /api/auth/account`. Pylon deletes the User
+    /// row plus its own auth-side rows (sessions, API keys, linked
+    /// accounts, trusted devices); it does not know which app tables
+    /// belong to the user. The function runs as the user with
+    /// `{ userId }` and must remove that data. A failure aborts the
+    /// deletion, so the account is never gone while its data stays.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_delete_account: Option<String>,
 }
 
 /// Validate application-defined organization role slugs. Kept in the kernel

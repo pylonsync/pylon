@@ -16,7 +16,15 @@ export const FREE_NOTE_LIMIT = 10;
 // Point the dashboard webhook at https://<your-app>/api/fn/revenuecatWebhook.
 export const purchases = revenuecat({
   entitlements: [PRO_ENTITLEMENT],
+  // Guests can buy before they sign in (the plugin default). The server
+  // reads RevenueCat by the caller's own id, so a guest cannot claim an
+  // entitlement it did not pay for. Set `syncAuth: "user"` to require an
+  // account first.
+  syncAuth: "guest",
 });
+
+/** The synced entitlement entity; `deleteMyData` purges it on account deletion. */
+export const ENTITLEMENT_ENTITY = purchases.manifest.entities[0].name;
 
 export const { revenuecatWebhook, syncEntitlements } = purchases.handlers;
 export const { _pylonRcUpsertEntitlement } = purchases.internals;

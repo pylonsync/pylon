@@ -102,3 +102,10 @@ describe("custom organization roles", () => {
     expect(() => auth({ orgRoles: ["member"] })).toThrow("is built in");
   });
 });
+
+describe("auth() account deletion hook", () => {
+  test("names the function in the manifest only when configured", () => {
+    expect(auth({ onDeleteAccount: "purgeMyData" }).on_delete_account).toBe("purgeMyData");
+    expect("on_delete_account" in auth({})).toBe(false);
+  });
+});

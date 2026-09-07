@@ -14,11 +14,13 @@
     "build:preview": "eas build --profile preview --platform all",
     "build:prod": "eas build --profile production --platform all",
     "submit:ios": "eas submit --platform ios --latest",
-    "submit:android": "eas submit --platform android --latest"
+    "submit:android": "eas submit --platform android --latest",
+    "check:bundle": "expo export --platform ios --platform android --output-dir .expo-export"
   },
   "dependencies": {
     "@pylonsync/react": "^__PYLON_VERSION__",
     "@pylonsync/react-native": "^__PYLON_VERSION__",
+    "@pylonsync/revenuecat": "^__PYLON_VERSION__",
     "@pylonsync/sdk": "^__PYLON_VERSION__",
     "@pylonsync/sync": "^__PYLON_VERSION__",
     "@react-native-async-storage/async-storage": "2.2.0",
@@ -42,11 +44,13 @@
     "react-native-reanimated": "4.5.1",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
-    "react-native-web": "~0.21.0"
+    "react-native-web": "~0.21.0",
+    "react-native-worklets": "0.10.1"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.0",
-    "@types/react": "~19.2.0",
-    "typescript": "~5.9.0"
+    "@babel/core": "^7.29.0",
+    "@types/react": "~19.2.4",
+    "babel-preset-expo": "~57.0.10",
+    "typescript": "~6.0.3"
   }
 }

@@ -15,6 +15,11 @@ import { Caption, Row, Screen, Spacer, Title } from "@/ui";
  * Account, subscription, legal, and support. App Review requires an
  * in-app account deletion path when the app offers account creation, and
  * both stores require the privacy policy and terms links.
+ *
+ * Delete account: `deleteAccount()` calls `DELETE /api/auth/account`. The
+ * backend runs `deleteMyData` first (see `auth({ onDeleteAccount })` in
+ * apps/api/app.ts), so the user's notes and entitlement rows go with the
+ * account. Add every new entity that stores user data to that function.
  */
 export default function Settings() {
   const router = useRouter();
@@ -40,7 +45,7 @@ export default function Settings() {
   function confirmDelete() {
     Alert.alert(
       "Delete account?",
-      "This removes your account and every note on our servers. Subscriptions are managed by the store and must be cancelled there.",
+      "This deletes your account and every note on our servers. A subscription is managed by the store; cancel it there.",
       [
         { text: "Cancel", style: "cancel" },
         {

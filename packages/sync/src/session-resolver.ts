@@ -104,6 +104,7 @@ export class SessionResolver {
   commitObservation(next: ResolvedSession): void {
     this.lastSeenTenant = next.tenantId;
     this._resolved = next;
+    this._observed = true;
   }
 
   /** Convenience for tests / migration: inspect + commit in one call.
@@ -112,7 +113,6 @@ export class SessionResolver {
   observeSession(next: ResolvedSession): SessionTransition {
     const verdict = this.inspectSession(next);
     this.commitObservation(next);
-    this._observed = true;
     return verdict;
   }
 

@@ -4,10 +4,11 @@ import type { ConfigContext, ExpoConfig } from "expo/config";
  * App config. The values that change per environment come from env vars
  * so one file serves development builds, TestFlight, and the store:
  *
- *   APP_BUNDLE_ID       reverse-DNS id (iOS bundle id + Android package)
- *   APP_SCHEME          deep-link scheme, e.g. "__APP_NAME_KEBAB__"
- *   EAS_PROJECT_ID      from `eas init` (printed once, then stable)
- *   APP_VARIANT         "development" | "preview" | "production" (set by eas.json)
+ *   APP_BUNDLE_ID                reverse-DNS id (iOS bundle id + Android package)
+ *   APP_SCHEME                   deep-link scheme, e.g. "__APP_NAME_KEBAB__"
+ *   EAS_PROJECT_ID               from `eas init` (printed once, then stable)
+ *   EXPO_PUBLIC_PYLON_BASE_URL   the backend; https:// outside development
+ *   APP_VARIANT                  "development" | "preview" | "production" (set by eas.json)
  *
  * A development build gets a ".dev" suffix so it installs alongside the
  * store app on the same phone.
@@ -16,6 +17,27 @@ const variant = process.env.APP_VARIANT ?? "development";
 const baseBundleId = process.env.APP_BUNDLE_ID ?? "com.example.__APP_NAME_SNAKE__";
 const bundleId = variant === "development" ? `${baseBundleId}.dev` : baseBundleId;
 const name = variant === "production" ? "__APP_NAME__" : `__APP_NAME__ (${variant})`;
+
+// A preview or store build with placeholder values would install and
+// then fail at first launch. Refuse to build instead.
+if (variant !== "development") {
+  const problems: string[] = [];
+  if (!process.env.APP_BUNDLE_ID) {
+    problems.push("APP_BUNDLE_ID is unset; the com.example placeholder cannot ship");
+  }
+  if (!process.env.EAS_PROJECT_ID) {
+    problems.push("EAS_PROJECT_ID is unset; run `eas init` and copy the id");
+  }
+  if (!/^https:\/\//.test(process.env.EXPO_PUBLIC_PYLON_BASE_URL ?? "")) {
+    problems.push("EXPO_PUBLIC_PYLON_BASE_URL must be the deployed https:// backend");
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `The ${variant} build is not configured:\n  - ${problems.join("\n  - ")}\n` +
+        `Set these under build.${variant}.env in eas.json, or export them before building.`,
+    );
+  }
+}
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
@@ -56,7 +78,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
     [
       "expo-build-properties",
       {
-        ios: { deploymentTarget: "15.1" },
+        // The floors for Expo SDK 57 / React Native 0.86. expo-build-properties
+        // rejects a lower iOS target; Android below 24 does not build.
+        ios: { deploymentTarget: "16.4" },
         // Cleartext lets a dev/preview build reach http://localhost:4321.
         android: { minSdkVersion: 24, usesCleartextTraffic: variant !== "production" },
       },

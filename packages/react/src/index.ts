@@ -1,5 +1,11 @@
-export { defineRoute } from "@pylonsync/sdk";
-export type { RouteMode, AppManifest } from "@pylonsync/sdk";
+// `defineRoute` comes from the sdk's `route` entry, not its root. The root
+// module contains the filesystem-backed discovery helpers, which reference
+// `import.meta` and Node builtins that Metro cannot bundle. Keep every
+// runtime import in this package off the sdk root so React Native apps
+// can import `@pylonsync/react` (and `@pylonsync/react-native`).
+export { defineRoute } from "@pylonsync/sdk/route";
+export type { RouteMode } from "@pylonsync/sdk/route";
+export type { AppManifest } from "@pylonsync/sdk";
 
 // SSR primitives — Next.js-style <Link> and <Image>. Both render
 // progressively (work without JS) and enhance on the client.

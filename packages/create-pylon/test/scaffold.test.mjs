@@ -132,6 +132,7 @@ test("the mobile template scaffolds a backend + an Expo app with the store flow"
 		"package.json",
 		"apps/api/app.ts",
 		"apps/api/functions/createNote.ts",
+		"apps/api/functions/deleteMyData.ts",
 		"apps/api/functions/revenuecatWebhook.ts",
 		"apps/expo/app.config.ts",
 		"apps/expo/eas.json",

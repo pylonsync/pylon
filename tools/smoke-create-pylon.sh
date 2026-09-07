@@ -68,6 +68,9 @@ COMBOS=(
 	# The starter people reach for to build a product — biggest template
 	# in the set, and until now the only one with no smoke coverage.
 	"saas|web"
+	# The App Store-ready Expo app + backend. Native bundling is covered
+	# by tools/smoke-mobile-bundle.sh; this gate covers the scaffold.
+	"mobile|expo"
 )
 
 NODE_VERSION="$(node -p 'process.versions.node')"

@@ -6871,6 +6871,13 @@ pub(crate) fn handle(
                 ),
             ));
         }
+        // App data first. The manifest can name a function that purges
+        // the user's rows in app-owned tables; it runs as the user while
+        // the session is still valid. A failure aborts the whole
+        // deletion — an account must not disappear while its data stays.
+        if let Err((status, body)) = run_delete_account_hook(ctx, &user_id) {
+            return Some((status, body));
+        }
         // Revoke sessions first so a slow user-row delete doesn't
         // leave the attacker with a usable session.
         let revoked_sessions = ctx.session_store.revoke_all_for_user(&user_id);
@@ -6881,12 +6888,9 @@ pub(crate) fn handle(
                 revoked_keys += 1;
             }
         }
-        // Remove all linked OAuth accounts (codex P2). App-owned
-        // tables that reference the user are NOT cascade-deleted by
-        // pylon — the host schema is the source of truth and must
-        // declare its own deletion semantics. The /api/auth/account
-        // docs call this out so apps register a `before-delete-user`
-        // hook to purge their tables.
+        // Remove all linked OAuth accounts. App-owned tables that
+        // reference the user are the `on_delete_account` hook's job
+        // (above); pylon only knows its own auth-side rows.
         let revoked_accounts = ctx.account_store.delete_for_user(&user_id);
         // Trusted-device records — same rationale as sessions/api keys.
         // Without this, deleting an account leaves orphan trust cookies
@@ -6925,6 +6929,57 @@ pub(crate) fn handle(
     }
 
     None
+}
+
+/// Run the manifest's `auth.on_delete_account` function, if one is
+/// declared, as `user_id`. Returns the HTTP error to send when the hook
+/// cannot run or fails; `Ok(())` when there is no hook or it succeeded.
+fn run_delete_account_hook(ctx: &RouterContext, user_id: &str) -> Result<(), (u16, String)> {
+    let Some(fn_name) = ctx.store.manifest().auth.on_delete_account.as_deref() else {
+        return Ok(());
+    };
+    let Some(fn_ops) = ctx.functions else {
+        return Err((
+            503,
+            json_error(
+                "FUNCTIONS_NOT_AVAILABLE",
+                &format!(
+                    "auth.onDeleteAccount names \"{fn_name}\" but the function runtime is not configured"
+                ),
+            ),
+        ));
+    };
+    if fn_ops.get_fn(fn_name).is_none() {
+        return Err((
+            500,
+            json_error(
+                "ACCOUNT_DELETE_HOOK_MISSING",
+                &format!(
+                    "auth.onDeleteAccount names \"{fn_name}\" but no such function is registered"
+                ),
+            ),
+        ));
+    }
+    let auth = pylon_functions::protocol::AuthInfo {
+        user_id: Some(user_id.to_string()),
+        is_admin: ctx.auth_ctx.is_admin,
+        tenant_id: ctx.auth_ctx.tenant_id.clone(),
+        roles: ctx.auth_ctx.roles.clone(),
+    };
+    let args = serde_json::json!({ "userId": user_id });
+    match fn_ops.call(fn_name, args, auth, None, None, None) {
+        Ok(_) => Ok(()),
+        Err(e) => Err((
+            500,
+            json_error(
+                "ACCOUNT_DELETE_HOOK_FAILED",
+                &format!(
+                    "auth.onDeleteAccount \"{fn_name}\" failed: [{}] {}",
+                    e.code, e.message
+                ),
+            ),
+        )),
+    }
 }
 
 #[cfg(test)]

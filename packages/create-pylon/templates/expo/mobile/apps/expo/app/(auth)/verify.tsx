@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Alert, TextInput } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { sendEmailCode, verifyEmailCode } from "@pylonsync/react-native";
+import { db, sendEmailCode, verifyEmailCode } from "@pylonsync/react-native";
 import { track } from "@/analytics";
 import { space } from "@/theme";
 import { Body, Button, Field, Screen, Spacer, Title } from "@/ui";
@@ -26,6 +26,8 @@ export default function Verify() {
     try {
       await verifyEmailCode(email, value);
       track("sign_in_completed", { method: "email" });
+      // See sign-in.tsx: let the route guard observe the session first.
+      await db.sync.notifySessionChanged();
       if (next) router.replace(next as never);
       else router.replace("/(tabs)");
     } catch (e) {

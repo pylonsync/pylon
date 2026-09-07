@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Alert, Platform, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { nativeSignIn, sendEmailCode } from "@pylonsync/react-native";
+import { db, nativeSignIn, sendEmailCode } from "@pylonsync/react-native";
 import { track } from "@/analytics";
 import { useAppSession } from "@/session";
 import { space, useTheme } from "@/theme";
@@ -59,9 +59,20 @@ export default function SignIn() {
     });
   }, [apple, google]);
 
-  function done() {
+  async function done() {
     track("sign_in_completed");
+    // Wait for the server to confirm the new session so the route guard
+    // sees `ready` before the navigation, not after it.
+    await db.sync.notifySessionChanged();
     if (params.next) router.replace(params.next as never);
+    else router.replace("/(tabs)");
+  }
+
+  // "Not now" is reachable from a cold start (no history) as well as from
+  // Settings (history). Fall back to the app when there is nothing to go
+  // back to.
+  function dismiss() {
+    if (router.canGoBack()) router.back();
     else router.replace("/(tabs)");
   }
 
@@ -81,7 +92,7 @@ export default function SignIn() {
         .filter(Boolean)
         .join(" ");
       await nativeSignIn("apple", credential.identityToken, name || undefined);
-      done();
+      await done();
     } catch (e) {
       if ((e as { code?: string })?.code !== "ERR_REQUEST_CANCELED") {
         Alert.alert("Sign in failed", messageOf(e));
@@ -101,7 +112,7 @@ export default function SignIn() {
       const idToken = result.type === "success" ? result.data.idToken : null;
       if (!idToken) return;
       await nativeSignIn("google", idToken, result.type === "success" ? result.data.user.name : undefined);
-      done();
+      await done();
     } catch (e) {
       Alert.alert("Sign in failed", messageOf(e));
     } finally {
@@ -132,7 +143,7 @@ export default function SignIn() {
       <Spacer h={space.xxl} />
       <Title>Sign in</Title>
       <Body muted style={{ marginTop: space.sm }}>
-        Keep your notes on every device. Anything you made already comes with you.
+        Keep everything on every device. Anything you made already comes with you.
       </Body>
       <Spacer h={space.xxl} />
       <View style={{ gap: space.md }}>
@@ -179,7 +190,7 @@ export default function SignIn() {
           onPress={() => void continueAsGuest().then(() => router.replace("/(tabs)"))}
         />
       ) : (
-        <Button title="Not now" variant="ghost" onPress={() => router.back()} />
+        <Button title="Not now" variant="ghost" onPress={dismiss} />
       )}
       <Spacer />
       <Text style={{ color: t.muted, fontSize: 12, textAlign: "center", lineHeight: 18 }}>

@@ -21,22 +21,23 @@
       "distribution": "internal",
       "env": {
         "APP_VARIANT": "preview",
-        "EXPO_PUBLIC_PYLON_BASE_URL": "https://__APP_NAME_KEBAB__.pylonapp.com"
+        "APP_BUNDLE_ID": "",
+        "EAS_PROJECT_ID": "",
+        "EXPO_PUBLIC_PYLON_BASE_URL": ""
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
         "APP_VARIANT": "production",
-        "EXPO_PUBLIC_PYLON_BASE_URL": "https://__APP_NAME_KEBAB__.pylonapp.com"
+        "APP_BUNDLE_ID": "",
+        "EAS_PROJECT_ID": "",
+        "EXPO_PUBLIC_PYLON_BASE_URL": ""
       }
     }
   },
   "submit": {
     "production": {
-      "ios": {
-        "ascAppId": "REPLACE_WITH_APP_STORE_CONNECT_APP_ID"
-      },
       "android": {
         "track": "internal"
       }

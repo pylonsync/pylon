@@ -2,7 +2,8 @@
 // Route modes
 // ---------------------------------------------------------------------------
 
-export type RouteMode = "static" | "server" | "live" | "ssr";
+export type { RouteMode } from "./route";
+import type { RouteDefinition } from "./route";
 
 // ---------------------------------------------------------------------------
 // Field types
@@ -493,53 +494,12 @@ export function relation(def: RelationDefinition): RelationDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// Route definition
+// Route definition — lives in ./route so client bundles can import it
+// without the Node-only discovery helpers below.
 // ---------------------------------------------------------------------------
 
-export type AuthMode = "public" | "user";
-
-export interface RouteDefinition {
-  path: string;
-  mode: RouteMode;
-  query?: string;
-  auth?: AuthMode;
-  /**
-   * Project-relative module path (e.g. `app/hello/page`) for SSR
-   * routes. Required when `mode === "ssr"`. Discovered automatically
-   * by `discoverAppRoutes()`; only specify manually for one-off
-   * SSR routes outside the `app/` tree.
-   */
-  component?: string;
-  /**
-   * Layout module path chain (root→leaf). Each layout wraps the next
-   * as `children`. Only relevant for `mode === "ssr"`.
-   */
-  layouts?: string[];
-  /**
-   * Route kind. Omitted (or `"page"`) is a normal navigable page.
-   * `"not-found"` / `"error"` are SSR boundary modules discovered from
-   * `app/.../not-found.tsx` and `app/.../error.tsx`. Boundary routes are
-   * NOT matched as navigable URLs — the host renders `not-found` for
-   * unmatched URLs (HTTP 404) and `error` on render failure (HTTP 500).
-   * `path` records the segment prefix the boundary covers (`/` for root).
-   * `"route"` is a form/method handler (`app/.../route.ts` exporting
-   * POST/PUT/PATCH/DELETE) — matched on its `path` for non-GET requests only,
-   * never rendered as a page.
-   */
-  kind?:
-    | "page"
-    | "not-found"
-    | "error"
-    | "route"
-    | "sitemap"
-    | "robots"
-    | "llms"
-    | "og-image";
-}
-
-export function defineRoute(route: RouteDefinition): RouteDefinition {
-  return route;
-}
+export { defineRoute } from "./route";
+export type { AuthMode, RouteDefinition } from "./route";
 
 // ---------------------------------------------------------------------------
 // Query definition
@@ -1778,6 +1738,17 @@ export type AuthConfig = {
    * any port) is always auto-trusted at every gate.
    */
   trustedOrigins?: string[];
+  /**
+   * Name of a function the runtime calls before it deletes a user through
+   * `DELETE /api/auth/account`. Pylon deletes the User row and its own
+   * auth-side rows (sessions, API keys, linked accounts, trusted devices).
+   * It does not know which app tables belong to the user, so the named
+   * function must remove them. It runs as the user with `{ userId }`; a
+   * failure aborts the deletion and the client gets
+   * `ACCOUNT_DELETE_HOOK_FAILED`. Required by the App Store's account
+   * deletion rule whenever an app stores user content.
+   */
+  onDeleteAccount?: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -1931,6 +1902,7 @@ export type ManifestAuthConfig = {
   };
   org_roles: string[];
   trusted_origins: string[];
+  on_delete_account?: string;
 };
 
 const BUILTIN_ORG_ROLES = new Set(["owner", "admin", "member"]);
@@ -2001,6 +1973,7 @@ export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
     },
     org_roles: validateOrgRoles(cfg.orgRoles ?? []),
     trusted_origins: cfg.trustedOrigins ?? [],
+    ...(cfg.onDeleteAccount ? { on_delete_account: cfg.onDeleteAccount } : {}),
   };
 }
 

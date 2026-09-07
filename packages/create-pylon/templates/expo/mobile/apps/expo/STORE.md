@@ -11,12 +11,15 @@ pylon secrets set PYLON_APPLE_NATIVE_CLIENT_IDS=<bundle id> REVENUECAT_WEBHOOK_A
 ```
 
 Put the deployed URL in `apps/expo/eas.json` (`EXPO_PUBLIC_PYLON_BASE_URL`
-under `preview` and `production`).
+under `preview` and `production`). `app.config.ts` refuses a preview or
+production build until that value, `APP_BUNDLE_ID`, and `EAS_PROJECT_ID`
+are set.
 
 ## 2. Identifiers
 
 - Pick a bundle id (`com.yourco.app`) and set `APP_BUNDLE_ID` in `eas.json`
-  env for every profile, or export it before building.
+  env for `preview` and `production`, or export it before building. The
+  `development` profile appends `.dev` to the `com.example` placeholder.
 - `eas init` prints the project id; set `EAS_PROJECT_ID` the same way.
 - Apple: an App ID with the Sign in with Apple capability. EAS creates it on
   the first `eas build` when you let it manage credentials.
@@ -70,8 +73,25 @@ eas submit --platform ios --latest
 eas submit --platform android --latest
 ```
 
-Fill `submit.production.ios.ascAppId` in `eas.json` with the App Store
-Connect app id first.
+For iOS, add the App Store Connect app id to `eas.json` first:
+
+```json
+"submit": { "production": { "ios": { "ascAppId": "1234567890" } } }
+```
+
+Without it `eas submit` asks for the app interactively.
+
+## Before the first store build
+
+- Products: the `pro` entitlement and a `default` offering exist in
+  RevenueCat, and the iOS and Android public keys are in `apps/expo/.env`.
+- Sign-in: `PYLON_APPLE_NATIVE_CLIENT_IDS` (the bundle id) and
+  `PYLON_GOOGLE_NATIVE_CLIENT_IDS` are set on the backend.
+- Legal: `EXPO_PUBLIC_PRIVACY_URL`, `EXPO_PUBLIC_TERMS_URL`, and
+  `EXPO_PUBLIC_SUPPORT_EMAIL` point at real pages and a monitored inbox.
+- Deletion: `apps/api/functions/deleteMyData.ts` removes every entity that
+  stores user data. Test it with a throwaway account.
+- Copy: the "Replace the demo" list in `README.md` is done.
 
 ## After launch
 

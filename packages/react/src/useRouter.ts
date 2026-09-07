@@ -17,7 +17,14 @@ import { use, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 
 // `Window.__pylon` is globally augmented in ./Link (same package, ambient).
 
 function subscribe(onChange: () => void): () => void {
-  if (typeof window === "undefined") return () => {};
+  // React Native has a `window` global with no event API; treat it
+  // like the server and never subscribe.
+  if (
+    typeof window === "undefined" ||
+    typeof window.addEventListener !== "function"
+  ) {
+    return () => {};
+  }
   window.addEventListener("popstate", onChange);
   window.addEventListener("pylon:navigation", onChange);
   return () => {

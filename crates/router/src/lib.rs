@@ -3332,7 +3332,15 @@ mod auth_gate_tests {
     where
         F: FnOnce(&RouterContext),
     {
-        with_ctx_full(is_dev, auth, &NoopPluginHooks, Some(cookie_config), None, f);
+        with_ctx_full(
+            is_dev,
+            auth,
+            &NoopPluginHooks,
+            Some(cookie_config),
+            None,
+            None,
+            f,
+        );
     }
 
     /// Variant of `with_ctx` that takes an explicit ChangeNotifier.
@@ -3342,7 +3350,15 @@ mod auth_gate_tests {
     where
         F: FnOnce(&RouterContext),
     {
-        with_ctx_full(is_dev, auth, &NoopPluginHooks, None, Some(notifier), f);
+        with_ctx_full(
+            is_dev,
+            auth,
+            &NoopPluginHooks,
+            None,
+            Some(notifier),
+            None,
+            f,
+        );
     }
 
     pub(crate) fn with_ctx_hooks<F>(
@@ -3353,7 +3369,30 @@ mod auth_gate_tests {
     ) where
         F: FnOnce(&RouterContext),
     {
-        with_ctx_full(is_dev, auth, hooks, None, None, f);
+        with_ctx_full(is_dev, auth, hooks, None, None, None, f);
+    }
+
+    /// Route with a function runtime attached and a custom manifest.
+    pub(crate) fn with_ctx_functions<F>(
+        auth: &AuthContext,
+        manifest: AppManifest,
+        functions: Option<&dyn FnOps>,
+        f: F,
+    ) where
+        F: FnOnce(&RouterContext),
+    {
+        let store = StubDataStore::empty(manifest.clone());
+        with_ctx_store(
+            false,
+            auth,
+            &NoopPluginHooks,
+            None,
+            None,
+            functions,
+            manifest,
+            store,
+            f,
+        );
     }
 
     fn with_ctx_full<F>(
@@ -3362,6 +3401,7 @@ mod auth_gate_tests {
         hooks: &dyn PluginHookOps,
         cookie_config_override: Option<CookieConfig>,
         notifier_override: Option<&dyn ChangeNotifier>,
+        functions_override: Option<&dyn FnOps>,
         f: F,
     ) where
         F: FnOnce(&RouterContext),
@@ -3374,6 +3414,7 @@ mod auth_gate_tests {
             hooks,
             cookie_config_override,
             notifier_override,
+            functions_override,
             manifest,
             store,
             f,
@@ -3387,6 +3428,7 @@ mod auth_gate_tests {
         hooks: &dyn PluginHookOps,
         cookie_config_override: Option<CookieConfig>,
         notifier_override: Option<&dyn ChangeNotifier>,
+        functions_override: Option<&dyn FnOps>,
         manifest: AppManifest,
         store: StubDataStore,
         f: F,
@@ -3455,7 +3497,7 @@ mod auth_gate_tests {
             workflows: &workflows,
             files: &files,
             openapi: &openapi,
-            functions: None,
+            functions: functions_override,
             email: &email,
             shards: None,
             plugin_hooks: hooks,
@@ -3564,6 +3606,7 @@ mod auth_gate_tests {
             false,
             &auth,
             &NoopPluginHooks,
+            None,
             None,
             None,
             manifest,
@@ -4383,6 +4426,158 @@ mod auth_gate_tests {
         assert_eq!(rejector.before_insert_calls.load(Ordering::SeqCst), 1);
         // after_insert must NOT have been called when before_insert rejected.
         assert_eq!(rejector.after_insert_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // DELETE /api/auth/account runs the manifest's on_delete_account hook
+    // -----------------------------------------------------------------------
+
+    /// Records every call and answers with a canned result.
+    struct RecordingFnOps {
+        registered: Vec<String>,
+        calls: std::sync::Mutex<Vec<(String, serde_json::Value, Option<String>)>>,
+        fail: bool,
+    }
+
+    impl RecordingFnOps {
+        fn new(registered: &[&str], fail: bool) -> Self {
+            Self {
+                registered: registered.iter().map(|s| s.to_string()).collect(),
+                calls: std::sync::Mutex::new(Vec::new()),
+                fail,
+            }
+        }
+    }
+
+    impl FnOps for RecordingFnOps {
+        fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef> {
+            self.registered
+                .iter()
+                .any(|n| n == name)
+                .then(|| pylon_functions::registry::FnDef {
+                    name: name.to_string(),
+                    fn_type: pylon_functions::protocol::FnType::Mutation,
+                    args_schema: None,
+                    internal: false,
+                    auth: pylon_functions::registry::FnAuthMode::User,
+                    timeout_secs: None,
+                })
+        }
+        fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
+            self.registered
+                .iter()
+                .filter_map(|n| self.get_fn(n))
+                .collect()
+        }
+        fn call(
+            &self,
+            fn_name: &str,
+            args: serde_json::Value,
+            auth: pylon_functions::protocol::AuthInfo,
+            _on_stream: Option<pylon_functions::runner::StreamCallback>,
+            _request: Option<pylon_functions::protocol::RequestInfo>,
+            _stream_id: Option<String>,
+        ) -> Result<
+            (serde_json::Value, pylon_functions::trace::FnTrace),
+            pylon_functions::runner::FnCallError,
+        > {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((fn_name.to_string(), args, auth.user_id.clone()));
+            if self.fail {
+                return Err(pylon_functions::runner::FnCallError {
+                    code: "PURGE_FAILED".into(),
+                    message: "boom".into(),
+                });
+            }
+            Ok((
+                serde_json::json!({ "ok": true }),
+                pylon_functions::trace::TraceBuilder::new(
+                    "c1".into(),
+                    fn_name.to_string(),
+                    pylon_functions::protocol::FnType::Mutation,
+                    auth.user_id,
+                )
+                .finish_ok(None),
+            ))
+        }
+        fn recent_traces(&self, _limit: usize) -> Vec<pylon_functions::trace::FnTrace> {
+            vec![]
+        }
+    }
+
+    fn manifest_with_delete_hook(name: &str) -> AppManifest {
+        let mut m = empty_manifest();
+        m.auth.on_delete_account = Some(name.into());
+        m
+    }
+
+    #[test]
+    fn delete_account_runs_the_hook_as_the_user_before_deleting() {
+        let auth = AuthContext::user("alice".into());
+        let fns = RecordingFnOps::new(&["purgeMyData"], false);
+        with_ctx_functions(
+            &auth,
+            manifest_with_delete_hook("purgeMyData"),
+            Some(&fns),
+            |ctx| {
+                let (status, body, _ct) =
+                    route(ctx, HttpMethod::Delete, "/api/auth/account", "", None);
+                assert_eq!(status, 200, "{body}");
+                assert!(body.contains("\"deleted\":true"));
+            },
+        );
+        let calls = fns.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "purgeMyData");
+        assert_eq!(calls[0].1, serde_json::json!({ "userId": "alice" }));
+        assert_eq!(calls[0].2.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn delete_account_aborts_when_the_hook_fails() {
+        let auth = AuthContext::user("alice".into());
+        let fns = RecordingFnOps::new(&["purgeMyData"], true);
+        with_ctx_functions(
+            &auth,
+            manifest_with_delete_hook("purgeMyData"),
+            Some(&fns),
+            |ctx| {
+                let (status, body, _ct) =
+                    route(ctx, HttpMethod::Delete, "/api/auth/account", "", None);
+                assert_eq!(status, 500, "{body}");
+                assert!(body.contains("ACCOUNT_DELETE_HOOK_FAILED"));
+                assert!(body.contains("PURGE_FAILED"));
+            },
+        );
+    }
+
+    #[test]
+    fn delete_account_refuses_when_the_hook_is_not_registered() {
+        let auth = AuthContext::user("alice".into());
+        let fns = RecordingFnOps::new(&[], false);
+        with_ctx_functions(
+            &auth,
+            manifest_with_delete_hook("purgeMyData"),
+            Some(&fns),
+            |ctx| {
+                let (status, body, _ct) =
+                    route(ctx, HttpMethod::Delete, "/api/auth/account", "", None);
+                assert_eq!(status, 500, "{body}");
+                assert!(body.contains("ACCOUNT_DELETE_HOOK_MISSING"));
+            },
+        );
+        assert!(fns.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_account_without_a_hook_still_deletes() {
+        let auth = AuthContext::user("alice".into());
+        with_ctx_functions(&auth, empty_manifest(), None, |ctx| {
+            let (status, body, _ct) = route(ctx, HttpMethod::Delete, "/api/auth/account", "", None);
+            assert_eq!(status, 200, "{body}");
+        });
     }
 
     // -----------------------------------------------------------------------

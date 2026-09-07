@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { entitlementsFromSubscriber } from "./handlers/sync";
+import { entitlementsFromSubscriber, syncEntitlementsHandler } from "./handlers/sync";
+import { hasEntitlement as hasEntitlementClient } from "./client";
 import { entitlementIdsOf, revenuecatWebhookHandler, statusForEvent, webhookAuthorized } from "./handlers/webhook";
 import { hasEntitlement } from "./index";
 import type { HandlerCtx } from "./types";
@@ -130,5 +131,18 @@ describe("webhook handler", () => {
 		const out = await handler.handler(ctx, {});
 		expect(out.skipped).toBe("no app user id");
 		expect(mutations).toHaveLength(0);
+	});
+});
+
+describe("syncEntitlements auth", () => {
+	test("guests may sync by default; apps can restrict to accounts", () => {
+		expect(syncEntitlementsHandler({ entitlements: ["pro"] }).auth).toBe("guest");
+		expect(syncEntitlementsHandler({ entitlements: ["pro"], syncAuth: "user" }).auth).toBe("user");
+	});
+});
+
+describe("client entry", () => {
+	test("the root and the client entry export the same hasEntitlement", () => {
+		expect(hasEntitlementClient).toBe(hasEntitlement);
 	});
 });

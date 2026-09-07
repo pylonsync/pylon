@@ -1044,6 +1044,14 @@ public actor SyncEngine {
         resolvedSession
     }
 
+    /// Whether `/api/auth/me` has answered during this run. Before that,
+    /// `currentResolvedSession()` is the empty placeholder, which readers
+    /// must not mistake for a signed-out user. Mirrors the TS
+    /// `SyncEngine.sessionResolved()`.
+    public func isSessionResolved() -> Bool {
+        lastSeenTenantObserved
+    }
+
     public func refreshResolvedSession() async {
         do {
             let next = try await client.me()

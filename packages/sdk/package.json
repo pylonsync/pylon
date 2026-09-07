@@ -7,6 +7,24 @@
   "type": "module",
   "main": "./src/index.ts",
   "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./src/index.ts"
+    },
+    "./route": {
+      "types": "./dist/route.d.ts",
+      "default": "./src/route.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "route": [
+        "./dist/route.d.ts"
+      ]
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json --noEmit",

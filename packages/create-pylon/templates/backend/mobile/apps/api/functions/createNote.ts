@@ -9,15 +9,19 @@ import { FREE_NOTE_LIMIT, PRO_ENTITLEMENT } from "../lib/purchases";
  *
  * Returns `LIMIT_REACHED` when a free account is at the cap; the app opens
  * the paywall on that code.
+ *
+ * `auth: "guest"`: the app starts every user as a guest, and the default
+ * (`"user"`) rejects guest sessions with 401 before the handler runs.
  */
 export default mutation({
+  auth: "guest",
   args: {
     title: v.string(),
     body: v.optional(v.string()),
   },
   async handler(ctx, args: { title: string; body?: string }) {
     const userId = ctx.auth.userId;
-    if (!userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
+    if (!userId) throw ctx.error("UNAUTHENTICATED", "start a guest session or sign in first");
     const title = args.title.trim();
     if (!title) throw ctx.error("INVALID_ARGS", "title is required");
 

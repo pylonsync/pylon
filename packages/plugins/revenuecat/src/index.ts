@@ -27,6 +27,11 @@
  *   REVENUECAT_SECRET_KEY     (or REVENUECAT_PUBLIC_KEY) for the subscriber read in syncEntitlements
  *
  * Point the RevenueCat webhook at `POST /api/fn/revenuecatWebhook`.
+ *
+ * App code reads entitlements through sync and gates with
+ * `hasEntitlement` from `@pylonsync/revenuecat/client`. Do not import
+ * this root module from a browser or React Native bundle: it pulls in
+ * `@pylonsync/functions`.
  */
 
 import { buildRevenueCatManifest, type RevenueCatManifestFragment } from "./manifest";
@@ -42,10 +47,10 @@ export type {
 	RevenueCatConfig,
 	RevenueCatHooks,
 	RevenueCatEvent,
-	RcEntitlementRow,
 	EntitlementChange,
 	HandlerCtx,
 } from "./types";
+export type { RcEntitlementRow } from "./client";
 export type { RevenueCatManifestFragment } from "./manifest";
 export { entitlementEntityName } from "./manifest";
 export { statusForEvent, entitlementIdsOf, webhookAuthorized } from "./handlers/webhook";
@@ -73,20 +78,7 @@ export function revenuecat(cfg: RevenueCatConfig): RevenueCatPlugin {
 	};
 }
 
-/**
- * Client-side helper: is `entitlement` active in a list of rows the app
- * read through sync? Treats a row with a past `expiresAt` as inactive even
- * if the webhook has not delivered the expiration yet.
- */
-export function hasEntitlement(
-	rows: ReadonlyArray<{ entitlement: string; status: string; expiresAt?: string | null }>,
-	entitlement: string,
-	now: number = Date.now(),
-): boolean {
-	return rows.some(
-		(r) =>
-			r.entitlement === entitlement &&
-			r.status === "active" &&
-			(r.expiresAt == null || new Date(r.expiresAt).getTime() > now),
-	);
-}
+// `hasEntitlement` also ships from `@pylonsync/revenuecat/client`, which
+// carries no server imports. App code (browser, React Native) must import
+// from there; this root re-export keeps server-side callers working.
+export { hasEntitlement } from "./client";

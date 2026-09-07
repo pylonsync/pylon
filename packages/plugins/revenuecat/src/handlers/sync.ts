@@ -48,11 +48,16 @@ export function entitlementsFromSubscriber(
  * a client can trigger the sync but never assert an entitlement.
  */
 export function syncEntitlementsHandler(cfg: RevenueCatConfig) {
+	// Guests are allowed by default: a guest's purchase is keyed on the
+	// guest id, and the row follows the account on sign-in through
+	// RevenueCat's alias. See `RevenueCatConfig.syncAuth`.
+	const auth: "guest" | "user" = cfg.syncAuth ?? "guest";
 	return action({
 		args: {},
+		auth: auth as "guest",
 		async handler(ctx: HandlerCtx) {
 			const userId = ctx.auth.userId;
-			if (!userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
+			if (!userId) throw ctx.error("UNAUTHENTICATED", "start a guest session or sign in first");
 			const key = resolveApiKey(ctx, cfg);
 			if (!key) throw ctx.error("RC_NOT_CONFIGURED", "no RevenueCat API key on the server");
 

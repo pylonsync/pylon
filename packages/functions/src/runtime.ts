@@ -1394,6 +1394,11 @@ async function handleCall(msg: CallMessage): Promise<void> {
   try {
     const result = await def.handler(ctx, msg.args);
     if (cancelledCalls.has(msg.call_id)) return;
+    // `return ctx.error(...)` instead of `throw ctx.error(...)` is a
+    // common slip. An Error has no JSON shape, so a returned one can
+    // only mean the handler meant to fail: treat it as thrown so the
+    // caller gets the error code, not a 200 with `{}`.
+    if (result instanceof Error) throw result;
     send({
       type: "return",
       call_id: msg.call_id,

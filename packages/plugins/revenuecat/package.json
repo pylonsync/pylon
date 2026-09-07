@@ -7,6 +7,24 @@
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./client": {
+      "types": "./src/client.ts",
+      "default": "./src/client.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "typesVersions": {
+    "*": {
+      "client": [
+        "./src/client.ts"
+      ]
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit",
     "check": "tsc -p tsconfig.json --noEmit",

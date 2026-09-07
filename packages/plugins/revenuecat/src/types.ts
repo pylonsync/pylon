@@ -27,6 +27,14 @@ export interface RevenueCatConfig {
 	getApiKey?: (ctx: HandlerCtx) => string | undefined;
 	/** Entity name override. Default `RcEntitlement`. */
 	entities?: { entitlement?: string };
+	/**
+	 * Who may call `syncEntitlements`. Default `"guest"`: mobile apps start
+	 * users as guests and a guest can buy before signing in. The action is
+	 * safe for guests because the server reads RevenueCat by the caller's
+	 * own id and never trusts a client-asserted entitlement. Set `"user"`
+	 * when the app has no guest purchases.
+	 */
+	syncAuth?: "guest" | "user";
 	hooks?: RevenueCatHooks;
 }
 
@@ -68,19 +76,6 @@ export interface RevenueCatEvent {
 	new_product_id?: string;
 	transaction_id?: string;
 	id?: string;
-}
-
-/** One row of the entitlement entity. */
-export interface RcEntitlementRow {
-	id: string;
-	userId: string;
-	entitlement: string;
-	productId: string;
-	status: "active" | "expired";
-	store: string;
-	environment?: string | null;
-	expiresAt?: string | null;
-	updatedAt: string;
 }
 
 /** Function context shape the handlers use; structurally compatible with

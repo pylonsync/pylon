@@ -6,6 +6,7 @@ data API, realtime sync, auth, and the RevenueCat webhook.
 ```
 app.ts                 User + Note + RcEntitlement (from @pylonsync/revenuecat)
 functions/createNote   server-enforced free-tier cap, then insert
+functions/deleteMyData the user's rows, run by DELETE /api/auth/account
 functions/revenuecatWebhook, syncEntitlements, _pylonRcUpsertEntitlement
 lib/purchases.ts       the RevenueCat plugin instance + FREE_NOTE_LIMIT
 ```

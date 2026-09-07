@@ -548,6 +548,16 @@ export class SyncEngine {
   }
 
   /**
+   * Whether `/api/auth/me` has answered during this run. Before that,
+   * `resolvedSession()` returns the empty placeholder, which readers must
+   * not mistake for a signed-out user. Notified through the same store
+   * channel as the session itself.
+   */
+  sessionResolved(): boolean {
+    return this.session.hasObserved();
+  }
+
+  /**
    * Coarse connection state (see `SyncConnectionStatus`). Updated as
    * the WS opens/closes and reconnect attempts run; subscribers re-
    * render via the same store notify channel as live queries, so
@@ -2498,8 +2508,11 @@ export class SyncEngine {
           }
         }
       }
+      const firstResolution = !this.session.hasObserved();
       this.session.commitObservation(next);
-      if (verdict.identityChanged) {
+      if (verdict.identityChanged || firstResolution) {
+        // The first answer flips `sessionResolved()` even when the
+        // session itself matches the placeholder (anonymous caller).
         this.store.notify();
       }
       if (broadcast && this.isMultiTabLeader) {

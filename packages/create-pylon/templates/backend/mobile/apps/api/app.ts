@@ -79,7 +79,11 @@ const manifest = buildManifest({
   // the app's ids on the server: PYLON_APPLE_NATIVE_CLIENT_IDS (the iOS
   // bundle id) and PYLON_GOOGLE_NATIVE_CLIENT_IDS (the iOS + Android OAuth
   // client ids). See .env.example.
-  auth: auth(),
+  //
+  // `onDeleteAccount`: DELETE /api/auth/account runs this function before
+  // it removes the User row. Pylon deletes its own auth rows; the app's
+  // rows (Note, RcEntitlement) are deleted in functions/deleteMyData.ts.
+  auth: auth({ onDeleteAccount: "deleteMyData" }),
 });
 
 // The CLI runs `bun run app.ts` and reads this as the manifest.

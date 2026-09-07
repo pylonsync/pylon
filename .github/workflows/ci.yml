@@ -316,6 +316,28 @@ jobs:
           node-version: 22
       - run: bash tools/smoke-create-pylon.sh
 
+  # The mobile template must bundle for iOS and Android with the packages
+  # in this checkout. Metro resolves every import at build time, so a
+  # Node-only module anywhere in the client import graph breaks every
+  # native app; 0.8.3 shipped that way. tools/smoke-mobile-bundle.sh
+  # scaffolds the template, overlays the local packages, and exports both
+  # bundles.
+  mobile-bundle:
+    name: mobile template native bundles
+    needs: changes
+    if: needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - run: bun install --frozen-lockfile
+      - run: bash tools/smoke-mobile-bundle.sh
+
   audit:
     name: cargo audit
     needs: changes
