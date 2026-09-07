@@ -45,6 +45,8 @@ jobs:
               - 'package.json'
               - 'bun.lockb'
               - 'bun.lock'
+              # The scaffold + mobile bundle smoke scripts.
+              - 'tools/**'
               - '.github/workflows/ci.yml'
             swift:
               - 'packages/swift/**'
