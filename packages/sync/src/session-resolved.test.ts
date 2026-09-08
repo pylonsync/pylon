@@ -50,7 +50,7 @@ test("an offline start leaves the session unresolved instead of reporting anonym
   const original = globalThis.fetch;
   globalThis.fetch = (async () => {
     throw new Error("simulated network failure (offline)");
-  }) as typeof fetch;
+  }) as unknown as typeof fetch;
   const engine = new SyncEngine({
     baseUrl: "http://stub.invalid",
     persist: false,
