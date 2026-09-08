@@ -4,6 +4,7 @@ import { useRouter } from "expo-router";
 import Constants from "expo-constants";
 import { deleteAccount } from "@pylonsync/react-native";
 import { track } from "@/analytics";
+import { PRIVACY_URL, SUPPORT_EMAIL, SUPPORT_URL, TERMS_URL } from "@/links";
 import { usePro } from "@/entitlements";
 import { resetFlags } from "@/flags";
 import { manageSubscriptionUrl, restore } from "@/purchases";
@@ -27,9 +28,8 @@ export default function Settings() {
   const { pro } = usePro();
   const [busy, setBusy] = useState<string | null>(null);
 
-  const privacy = process.env.EXPO_PUBLIC_PRIVACY_URL;
-  const terms = process.env.EXPO_PUBLIC_TERMS_URL;
-  const support = process.env.EXPO_PUBLIC_SUPPORT_EMAIL;
+  // These resolve to the site the backend serves (apps/api), so the rows
+  // always render and always lead somewhere real. See src/links.ts.
   const version = Constants.expoConfig?.version ?? "dev";
 
   async function restorePurchases() {
@@ -99,9 +99,12 @@ export default function Settings() {
         <Spacer />
 
         <Caption>About</Caption>
-        {privacy ? <Row label="Privacy policy" onPress={() => void Linking.openURL(privacy)} /> : null}
-        {terms ? <Row label="Terms of service" onPress={() => void Linking.openURL(terms)} /> : null}
-        {support ? <Row label="Contact support" onPress={() => void Linking.openURL(`mailto:${support}`)} /> : null}
+        <Row label="Help" onPress={() => void Linking.openURL(SUPPORT_URL)} />
+        <Row label="Privacy policy" onPress={() => void Linking.openURL(PRIVACY_URL)} />
+        <Row label="Terms of service" onPress={() => void Linking.openURL(TERMS_URL)} />
+        {SUPPORT_EMAIL ? (
+          <Row label="Contact support" onPress={() => void Linking.openURL(`mailto:${SUPPORT_EMAIL}`)} />
+        ) : null}
         <Row label="Version" value={version} />
         <Spacer />
 

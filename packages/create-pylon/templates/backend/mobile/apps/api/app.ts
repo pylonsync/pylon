@@ -1,6 +1,7 @@
 import {
   auth,
   buildManifest,
+  discoverAppRoutes,
   discoverFunctions,
   entity,
   field,
@@ -73,8 +74,11 @@ const manifest = buildManifest({
   // register each twice.
   actions: fns.actions,
   policies: [userPolicy, notePolicy, ...purchases.manifest.policies],
-  // API only: the Expo app is the frontend.
-  routes: [],
+  // The public website: landing page, support, privacy policy, and terms,
+  // under `app/`. One Pylon server answers the Expo app's API calls AND
+  // serves these pages, so the legal URLs both stores demand are live on the
+  // same host as soon as you deploy. Content lives in `lib/site.ts`.
+  routes: await discoverAppRoutes(),
   // Email/password + magic codes are on by default. Native sign-in needs
   // the app's ids on the server: PYLON_APPLE_NATIVE_CLIENT_IDS (the iOS
   // bundle id) and PYLON_GOOGLE_NATIVE_CLIENT_IDS (the iOS + Android OAuth

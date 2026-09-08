@@ -15,8 +15,15 @@ src/session.tsx            boot + state machine
 src/purchases.ts           RevenueCat wrapper, safe in Expo Go
 src/entitlements.ts        usePro() from the synced RcEntitlement rows
 src/analytics.ts           funnel events; wire to your SDK in one place
+src/links.ts               privacy / terms / support URLs, served by apps/api
 STORE.md                   the submission checklist
 ```
+
+The public website (landing page, `/privacy`, `/terms`, `/support`) is served
+by the backend in `apps/api`, on the same host as the API. The links in
+Settings and under the paywall point there with no configuration, which is
+what makes the store requirement satisfiable from a fresh scaffold. Edit its
+copy in `apps/api/lib/site.ts`.
 
 ## Run
 
@@ -49,6 +56,8 @@ also carry Notes-specific copy or logic:
 - `app/(tabs)/settings.tsx`: the delete-account confirmation.
 - `app/(tabs)/index.tsx`: the list, `FREE_LIMIT`, and the sign-in nudge.
 - `app.config.ts`: `name`, `slug`, `scheme`, and the icons in `assets/`.
+- `apps/api/lib/site.ts`: the website copy, store links, and the company
+  details the privacy policy and terms need.
 - `apps/api/functions/deleteMyData.ts`: delete every entity that stores
   user data, or account deletion leaves rows behind.
 - `apps/api/functions/createNote.ts`: the free-tier cap.

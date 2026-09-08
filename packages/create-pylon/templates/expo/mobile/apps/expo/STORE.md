@@ -3,7 +3,7 @@
 The order below is the shortest path that App Review and Google Play accept
 on the first try. Each step is one command or one dashboard page.
 
-## 1. Backend live
+## 1. Backend and website live
 
 ```bash
 cd apps/api && pylon deploy
@@ -52,8 +52,12 @@ Test the purchase on TestFlight with a sandbox Apple ID before submitting.
 
 Both stores require, and reviewers check:
 
-- Privacy policy URL and terms URL (`EXPO_PUBLIC_PRIVACY_URL`, `EXPO_PUBLIC_TERMS_URL`).
-  The app shows them in Settings and under the paywall.
+- Privacy policy URL and terms URL. The backend serves them at
+  `<your-backend>/privacy` and `<your-backend>/terms`, and the app links to
+  them from Settings and under the paywall with no configuration. Fill in
+  `apps/api/lib/site.ts` first: the text ships as a draft and a banner stays
+  on the page until you do.
+- A support URL for App Store Connect: `<your-backend>/support`.
 - Account deletion inside the app (Settings → Delete account). Present.
 - Sign in with Apple when any other third-party sign-in is offered. Present.
 - Subscription terms next to the purchase button (price, period, renewal). Present.
@@ -87,8 +91,8 @@ Without it `eas submit` asks for the app interactively.
   RevenueCat, and the iOS and Android public keys are in `apps/expo/.env`.
 - Sign-in: `PYLON_APPLE_NATIVE_CLIENT_IDS` (the bundle id) and
   `PYLON_GOOGLE_NATIVE_CLIENT_IDS` are set on the backend.
-- Legal: `EXPO_PUBLIC_PRIVACY_URL`, `EXPO_PUBLIC_TERMS_URL`, and
-  `EXPO_PUBLIC_SUPPORT_EMAIL` point at real pages and a monitored inbox.
+- Legal: `apps/api/lib/site.ts` is filled in, the draft banner is gone from
+  `/privacy` and `/terms`, and a lawyer has read both.
 - Deletion: `apps/api/functions/deleteMyData.ts` removes every entity that
   stores user data. Test it with a throwaway account.
 - Copy: the "Replace the demo" list in `README.md` is done.

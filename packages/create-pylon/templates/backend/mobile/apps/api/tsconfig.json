@@ -3,11 +3,15 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
+    "jsx": "react",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "types": ["node"]
+    "lib": ["ES2022", "DOM"],
+    "types": ["react", "react-dom", "node"],
+    "baseUrl": ".",
+    "paths": { "@/*": ["./*"] }
   },
-  "include": ["app.ts", "functions", "lib"]
+  "include": ["app.ts", "app/**/*", "components/**/*", "functions/**/*", "lib/**/*"]
 }

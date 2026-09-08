@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Alert, Linking, Pressable, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { track } from "@/analytics";
+import { PRIVACY_URL, TERMS_URL } from "@/links";
 import { usePro } from "@/entitlements";
 import { available, offers, purchase, restore, type Offer } from "@/purchases";
 import { radius, space, useTheme } from "@/theme";
@@ -45,8 +46,7 @@ export default function Paywall() {
     if (pro) router.back();
   }, [pro, router]);
 
-  const privacy = process.env.EXPO_PUBLIC_PRIVACY_URL;
-  const terms = process.env.EXPO_PUBLIC_TERMS_URL;
+
 
   async function buy() {
     const offer = list?.find((o) => o.id === selected);
@@ -160,17 +160,13 @@ export default function Paywall() {
       <Button title="Restore purchases" variant="ghost" loading={busy === "restore"} onPress={() => void restorePurchases()} />
       <Text style={{ color: t.muted, fontSize: 11, textAlign: "center", lineHeight: 16, marginTop: space.sm }}>
         Renews automatically until cancelled. Manage in your store account settings.{" "}
-        {terms ? (
-          <Text style={{ textDecorationLine: "underline" }} onPress={() => void Linking.openURL(terms)}>
-            Terms
-          </Text>
-        ) : null}
-        {terms && privacy ? " · " : ""}
-        {privacy ? (
-          <Text style={{ textDecorationLine: "underline" }} onPress={() => void Linking.openURL(privacy)}>
-            Privacy
-          </Text>
-        ) : null}
+        <Text style={{ textDecorationLine: "underline" }} onPress={() => void Linking.openURL(TERMS_URL)}>
+          Terms
+        </Text>
+        {" · "}
+        <Text style={{ textDecorationLine: "underline" }} onPress={() => void Linking.openURL(PRIVACY_URL)}>
+          Privacy
+        </Text>
       </Text>
     </Screen>
   );
