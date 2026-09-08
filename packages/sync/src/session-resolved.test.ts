@@ -5,6 +5,7 @@
 // first answer, anonymous or not, and notifies store subscribers.
 
 import { afterEach, expect, test } from "bun:test";
+import { SyncEngine } from "./index";
 import { createTestEnv, type TestEnv } from "./test-harness";
 
 let env: TestEnv | null = null;
@@ -38,4 +39,29 @@ test("resolved with the signed-in identity", async () => {
   await env.engine.start();
   expect(env.engine.sessionResolved()).toBe(true);
   expect(env.engine.resolvedSession().userId).toBe("u1");
+});
+
+test("an offline start leaves the session unresolved instead of reporting anonymous", async () => {
+  // A cold launch with no network: /api/auth/me never answers, so the
+  // engine cannot know who the user is. `sessionResolved()` must stay
+  // false. A mobile route guard that read the placeholder `userId: null`
+  // as "signed out" would send a signed-in user to the sign-in screen
+  // every time they open the app on a plane.
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("simulated network failure (offline)");
+  }) as typeof fetch;
+  const engine = new SyncEngine({
+    baseUrl: "http://stub.invalid",
+    persist: false,
+    multiTab: false,
+  });
+  try {
+    await engine.start();
+    expect(engine.sessionResolved()).toBe(false);
+    expect(engine.resolvedSession().userId).toBeNull();
+  } finally {
+    engine.stop();
+    globalThis.fetch = original;
+  }
 });
