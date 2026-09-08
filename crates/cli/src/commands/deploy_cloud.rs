@@ -45,23 +45,31 @@ use crate::output;
 /// node_modules bombs early instead of timing out the cloud.
 const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Directories we never include in the upload tarball. Anything in
-/// here is either rebuilt by the cloud (node_modules, target), part
-/// of git state we don't want to ship (.git), or framework local
-/// state (.pylon, dev databases).
-const EXCLUDE_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
+/// Directories we never include in the upload tarball, wherever they
+/// appear. These nest legitimately (a workspace member has its own
+/// `node_modules`), so they are matched by name at any depth. Each is
+/// either rebuilt by the cloud, git state we don't want to ship, or
+/// framework local state.
+const EXCLUDE_DIRS_ANYWHERE: &[&str] = &[".git", "node_modules", ".pylon"];
+
+/// Build output. Matched ONLY directly inside a package root — the project
+/// root, or a workspace member's directory.
+///
+/// These used to be matched by name at any depth, which silently deleted
+/// source: `app/build/page.tsx` is the route `/build`, and Stack0 Build
+/// shipped for a day with its entire builder missing and a green "Live" from
+/// the deploy. A directory called `build` under `app/` is a route; one next
+/// to `package.json` is output.
+///
+/// `dist` is excluded because shipping the pre-built bundle hits Fly's
+/// machine-config body cap (every byte gets base64'd into the updateMachine
+/// payload; the chat example's loro_wasm alone is 3MB → 4MB encoded, blows
+/// the cap before the rest of the bundle is even considered). The runtime
+/// rebuilds in /app/web/ on boot, which is both cheaper to ship AND gets a
+/// deterministic install against the locked deps.
+const EXCLUDE_BUILD_DIRS_AT_PACKAGE_ROOT: &[&str] = &[
     "target",
-    ".pylon",
     ".next",
-    // `dist` excluded: shipping the pre-built bundle hits Fly's
-    // machine-config body cap (every byte gets base64'd into the
-    // updateMachine payload; the chat example's loro_wasm alone is
-    // 3MB → 4MB encoded, blows the cap before the rest of the bundle
-    // is even considered). The runtime rebuilds in /app/web/ on boot,
-    // which is both cheaper to ship AND gets a deterministic install
-    // against the locked deps.
     "dist",
     "build",
     ".turbo",
@@ -587,7 +595,7 @@ fn build_tarball(root: &Path) -> io::Result<Vec<u8>> {
         let gz = GzEncoder::new(&mut buf, Compression::default());
         let mut tar = tar::Builder::new(gz);
         let gitignore = load_gitignore(root);
-        walk_into_tar(&mut tar, root, root, &gitignore)?;
+        walk_into_tar(&mut tar, root, root, root, &gitignore)?;
         tar.into_inner()?.finish()?;
     }
     Ok(buf)
@@ -767,7 +775,7 @@ fn build_workspace_tarball(ws: &WorkspaceDeploy) -> io::Result<Vec<u8>> {
         tar.append_data(&mut header, "package.json", root_pkg.as_slice())?;
 
         for dir in &ws.member_dirs {
-            walk_into_tar(&mut tar, &ws.root, dir, &gitignore)?;
+            walk_into_tar(&mut tar, &ws.root, dir, dir, &gitignore)?;
         }
         tar.into_inner()?.finish()?;
     }
@@ -791,12 +799,17 @@ fn rewrite_root_workspaces(root: &Path, members: &[PathBuf]) -> io::Result<Vec<u
     Ok(out)
 }
 
+/// Walk `dir` into the tarball. `package_root` is the directory build output
+/// may live in — the project root, or the workspace member being packed.
+/// Everything below it is source.
 fn walk_into_tar<W: Write>(
     tar: &mut tar::Builder<W>,
     root: &Path,
+    package_root: &Path,
     dir: &Path,
     gitignore: &[String],
 ) -> io::Result<()> {
+    let at_package_root = dir == package_root;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -805,13 +818,16 @@ fn walk_into_tar<W: Write>(
         let ft = entry.file_type()?;
 
         if ft.is_dir() {
-            if EXCLUDE_DIRS.iter().any(|d| *d == name) {
+            if EXCLUDE_DIRS_ANYWHERE.iter().any(|d| *d == name) {
+                continue;
+            }
+            if at_package_root && EXCLUDE_BUILD_DIRS_AT_PACKAGE_ROOT.iter().any(|d| *d == name) {
                 continue;
             }
             if matches_gitignore(&path, root, gitignore) {
                 continue;
             }
-            walk_into_tar(tar, root, &path, gitignore)?;
+            walk_into_tar(tar, root, package_root, &path, gitignore)?;
         } else if ft.is_file() {
             if EXCLUDE_FILES.iter().any(|f| *f == name) {
                 continue;
@@ -1377,6 +1393,50 @@ mod tests {
         assert!(
             !names.iter().any(|n| n == "notes.txt"),
             "other gitignored files must stay excluded: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `build`, `dist` and friends were matched by name at any depth, so a
+    // route directory called `app/build/` was dropped from every upload and
+    // the deploy still reported success. Stack0 Build shipped that way for a
+    // day with its whole builder page 404ing.
+    #[test]
+    fn tarball_keeps_route_dirs_named_like_build_output() {
+        let dir = std::env::temp_dir().join(format!(
+            "pylon-tar-routes-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("app/build")).unwrap();
+        std::fs::create_dir_all(dir.join("app/dist")).unwrap();
+        std::fs::create_dir_all(dir.join("app/build/node_modules")).unwrap();
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.join("app.ts"), "export {};").unwrap();
+        std::fs::write(dir.join("app/build/page.tsx"), "export default () => null;").unwrap();
+        std::fs::write(dir.join("app/dist/page.tsx"), "export default () => null;").unwrap();
+        std::fs::write(dir.join("app/build/node_modules/junk.js"), "//").unwrap();
+        std::fs::write(dir.join("build/bundle.js"), "//").unwrap();
+        std::fs::write(dir.join("node_modules/pkg/index.js"), "//").unwrap();
+
+        let names = tar_entry_names(&build_tarball(&dir).unwrap());
+        assert!(
+            names.iter().any(|n| n == "app/build/page.tsx"),
+            "a route directory named `build` is source, not output: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "app/dist/page.tsx"),
+            "same for `dist`: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.starts_with("build/")),
+            "build output at the package root still goes: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("node_modules")),
+            "node_modules is excluded at every depth: {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
