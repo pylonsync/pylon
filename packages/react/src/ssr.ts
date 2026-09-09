@@ -85,6 +85,26 @@ export interface SsrResponse {
  *   return <ul>{posts.map((p) => <li key={p.id}>{p.title}</li>)}</ul>;
  * }
  * ```
+ *
+ * Every method returns a thenable CACHED by (method, args), which is what
+ * makes `use()` stable across the replayed render — and already fulfilled on
+ * the client, so `use()` returns synchronously there.
+ *
+ * Reading several things: start every call BEFORE the first `use()`. Reading
+ * one at a time is correct but serial, since `use()` suspends on the first
+ * pending thenable.
+ *
+ * ```tsx
+ * const orgPromise = serverData.get<Org>("Org", auth.tenant_id);
+ * const postsPromise = serverData.list<Post>("Post");
+ * const org = use(orgPromise);
+ * const posts = use(postsPromise);
+ * ```
+ *
+ * NEVER `use(Promise.all([...]))`. `Promise.all` returns a new, pending,
+ * uncached promise on every render, so `use()` suspends, React re-renders,
+ * builds another, and the component never returns — reported as an async
+ * Client Component (minified React error #482).
  */
 export interface ServerData {
   /** Get a single row by id. Resolves to null if not found. */

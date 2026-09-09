@@ -52,14 +52,14 @@ const MAX_TARBALL_BYTES: u64 = 50 * 1024 * 1024;
 /// framework local state.
 const EXCLUDE_DIRS_ANYWHERE: &[&str] = &[".git", "node_modules", ".pylon"];
 
-/// Build output. Matched ONLY directly inside a package root — the project
-/// root, or a workspace member's directory.
+/// Build output, and the manifest whose presence proves the directory really
+/// is output rather than source.
 ///
 /// These used to be matched by name at any depth, which silently deleted
 /// source: `app/build/page.tsx` is the route `/build`, and Stack0 Build
-/// shipped for a day with its entire builder missing and a green "Live" from
-/// the deploy. A directory called `build` under `app/` is a route; one next
-/// to `package.json` is output.
+/// shipped for a day with its entire builder missing while each deploy
+/// reported Live. A directory called `build` beside a `package.json` is
+/// output; one under `app/` is a route.
 ///
 /// `dist` is excluded because shipping the pre-built bundle hits Fly's
 /// machine-config body cap (every byte gets base64'd into the updateMachine
@@ -67,15 +67,27 @@ const EXCLUDE_DIRS_ANYWHERE: &[&str] = &[".git", "node_modules", ".pylon"];
 /// the cap before the rest of the bundle is even considered). The runtime
 /// rebuilds in /app/web/ on boot, which is both cheaper to ship AND gets a
 /// deterministic install against the locked deps.
-const EXCLUDE_BUILD_DIRS_AT_PACKAGE_ROOT: &[&str] = &[
-    "target",
-    ".next",
-    "dist",
-    "build",
-    ".turbo",
-    ".vercel",
-    ".cache",
+///
+/// The manifest is checked in the directory the candidate sits in, not at the
+/// project root, so nested packages are covered too — `desktop/src-tauri/`
+/// has its own `Cargo.toml` and its own multi-gigabyte `target/`.
+const EXCLUDE_BUILD_DIRS: &[(&str, &str)] = &[
+    ("target", "Cargo.toml"),
+    (".next", "package.json"),
+    ("dist", "package.json"),
+    ("build", "package.json"),
+    (".turbo", "package.json"),
+    (".vercel", "package.json"),
+    (".cache", "package.json"),
 ];
+
+/// Is `name` inside `dir` build output? True when a manifest that produces it
+/// sits beside it.
+fn is_build_output(dir: &Path, name: &str) -> bool {
+    EXCLUDE_BUILD_DIRS
+        .iter()
+        .any(|(d, manifest)| *d == name && dir.join(manifest).is_file())
+}
 
 /// Upload attempts before giving up. Smallware's ephemeral Fly builder can
 /// fail to start transiently, and the control plane itself redeploys — both
@@ -595,7 +607,7 @@ fn build_tarball(root: &Path) -> io::Result<Vec<u8>> {
         let gz = GzEncoder::new(&mut buf, Compression::default());
         let mut tar = tar::Builder::new(gz);
         let gitignore = load_gitignore(root);
-        walk_into_tar(&mut tar, root, root, root, &gitignore)?;
+        walk_into_tar(&mut tar, root, root, &gitignore)?;
         tar.into_inner()?.finish()?;
     }
     Ok(buf)
@@ -775,7 +787,7 @@ fn build_workspace_tarball(ws: &WorkspaceDeploy) -> io::Result<Vec<u8>> {
         tar.append_data(&mut header, "package.json", root_pkg.as_slice())?;
 
         for dir in &ws.member_dirs {
-            walk_into_tar(&mut tar, &ws.root, dir, dir, &gitignore)?;
+            walk_into_tar(&mut tar, &ws.root, dir, &gitignore)?;
         }
         tar.into_inner()?.finish()?;
     }
@@ -799,17 +811,12 @@ fn rewrite_root_workspaces(root: &Path, members: &[PathBuf]) -> io::Result<Vec<u
     Ok(out)
 }
 
-/// Walk `dir` into the tarball. `package_root` is the directory build output
-/// may live in — the project root, or the workspace member being packed.
-/// Everything below it is source.
 fn walk_into_tar<W: Write>(
     tar: &mut tar::Builder<W>,
     root: &Path,
-    package_root: &Path,
     dir: &Path,
     gitignore: &[String],
 ) -> io::Result<()> {
-    let at_package_root = dir == package_root;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -821,13 +828,13 @@ fn walk_into_tar<W: Write>(
             if EXCLUDE_DIRS_ANYWHERE.iter().any(|d| *d == name) {
                 continue;
             }
-            if at_package_root && EXCLUDE_BUILD_DIRS_AT_PACKAGE_ROOT.iter().any(|d| *d == name) {
+            if is_build_output(dir, &name) {
                 continue;
             }
             if matches_gitignore(&path, root, gitignore) {
                 continue;
             }
-            walk_into_tar(tar, root, package_root, &path, gitignore)?;
+            walk_into_tar(tar, root, &path, gitignore)?;
         } else if ft.is_file() {
             if EXCLUDE_FILES.iter().any(|f| *f == name) {
                 continue;
@@ -1414,6 +1421,10 @@ mod tests {
         std::fs::create_dir_all(dir.join("app/build/node_modules")).unwrap();
         std::fs::create_dir_all(dir.join("build")).unwrap();
         std::fs::create_dir_all(dir.join("node_modules/pkg")).unwrap();
+        std::fs::create_dir_all(dir.join("desktop/src-tauri/target/debug")).unwrap();
+        std::fs::write(dir.join("package.json"), "{}").unwrap();
+        std::fs::write(dir.join("desktop/src-tauri/Cargo.toml"), "").unwrap();
+        std::fs::write(dir.join("desktop/src-tauri/target/debug/junk.o"), "//").unwrap();
         std::fs::write(dir.join("app.ts"), "export {};").unwrap();
         std::fs::write(dir.join("app/build/page.tsx"), "export default () => null;").unwrap();
         std::fs::write(dir.join("app/dist/page.tsx"), "export default () => null;").unwrap();
@@ -1437,6 +1448,34 @@ mod tests {
         assert!(
             !names.iter().any(|n| n.contains("node_modules")),
             "node_modules is excluded at every depth: {names:?}"
+        );
+        // A nested Cargo package's `target/` is output wherever it sits.
+        assert!(
+            !names.iter().any(|n| n.contains("src-tauri/target")),
+            "a nested Cargo target/ still goes: {names:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Without a manifest beside it, a directory named like build output is
+    // just a directory. Erring toward shipping is the safe direction: a few
+    // extra files cost bytes, a dropped route costs a page.
+    #[test]
+    fn a_build_dir_with_no_manifest_beside_it_ships() {
+        let dir = std::env::temp_dir().join(format!(
+            "pylon-tar-nomanifest-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("app.ts"), "export {};").unwrap();
+        std::fs::write(dir.join("build/page.tsx"), "export default () => null;").unwrap();
+
+        let names = tar_entry_names(&build_tarball(&dir).unwrap());
+        assert!(
+            names.iter().any(|n| n == "build/page.tsx"),
+            "no package.json means `build` is not output: {names:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

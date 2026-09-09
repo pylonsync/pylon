@@ -48,6 +48,17 @@ this pass before the user has to ask.
 - **`error.tsx` / `not-found.tsx` boundaries are HYDRATED (interactive).** `app/.../error.tsx` catches a throw below it (HTTP 500) and receives `{ error: { message, digest }, reset }` (`import type { ErrorBoundaryProps }`); `reset()` re-attempts the route; the stack NEVER reaches the client (dev overlay + logs only). `app/.../not-found.tsx` renders at 404 (also for `response.notFound()`) and gets the page props (`NotFoundProps`), no `reset`. Both run useState/onClick/hooks.
 - **Client navigation hooks live in @pylonsync/react.** `useRouter()` → `{ push, replace, back, forward, refresh, prefetch }`; `useSearchParams()` → reactive `URLSearchParams`; `usePathname()` → reactive pathname. The hooks are CLIENT-reactive; during SSR they return defaults (empty params / "/"); for server-side URL values read the `pathname` / `searchParams` page props (`pathname` is the PATH only — the query is already parsed into `searchParams`, so never try to read a query parameter back out of it; the older `url` prop is the same value and is deprecated).
 - **Dynamic + catch-all routes follow Next conventions.** `app/blog/[slug]/page.tsx` → `params.slug`. `app/docs/[...path]/page.tsx` is a catch-all (matches `/docs/a/b/c`; `params.path === "a/b/c"`; `.split("/")` for segments). `app/shop/[[...filters]]/page.tsx` is an optional catch-all (also matches the bare `/shop`, with `params.filters === ""`). A catch-all must be the last segment; static beats dynamic beats catch-all on overlap.
+- **Never wrap `serverData` calls in `Promise.all`.** Each method returns a thenable the handle CACHES by key — on the client it is already fulfilled, so `use()` returns synchronously. `Promise.all` builds a new, pending, uncached promise on every render, so `use()` suspends, re-renders, builds another, and the page never returns; React reports it as an async Client Component (minified error #482) and the error boundary shows a broken page. To read several things in parallel, START every call before the first `use()`, then `use()` each handle — the reads overlap and the replayed render finds each one cached:
+
+  ```tsx
+  const orgPromise = serverData.get<Org>("Org", auth.tenant_id);
+  const projectsPromise = serverData.list<Project>("Project");
+  const org = use(orgPromise);
+  const projects = use(projectsPromise);
+  ```
+
+  Reading them one at a time (`use(serverData.a()); use(serverData.b());`) is correct but serial: each read waits for the one above it.
+
 - **`serverData` (SSR) is READ-ONLY.** No write methods; the runtime rejects write frames (`SSR_WRITE_FORBIDDEN`). Mutations belong in actions/functions, never in a page render.
 - **`response.*` / `response.redirect()` / `response.notFound()` must fire in the synchronous shell render**, before any `await` / `<Suspense>`. The HTTP head commits when the shell is ready; status/headers/cookies set from a suspended subtree are lost, and `redirect`/`notFound` thrown below a Suspense boundary are swallowed.
 - **`ctx.llm`, `ctx.rooms`, and `ctx.connections` are on mutation + action only, NOT query** (reactive purity). `action` has no direct `ctx.db`; use `ctx.runQuery` / `ctx.runMutation`.

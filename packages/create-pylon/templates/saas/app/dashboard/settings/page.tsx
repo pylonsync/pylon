@@ -21,10 +21,17 @@ export default function SettingsPage({ auth, response, serverData }: PageProps) 
     response.redirect("/dashboard");
     return null;
   }
-  const org = use(serverData.get<OrgInfo>("Org", auth.tenant_id));
-  const me = use(serverData.get<AccountInfo>("User", auth.user_id!));
-  const members = use(serverData.list<OrgMemberRow>("OrgMember"));
-  const memberCount = members.filter(
+  // Every read is started before the first use(): calling them one at a time
+  // makes each wait for the last, since use() suspends on the first pending
+  // thenable. Never Promise.all them — a new pending promise each render means
+  // the page never returns (React error #482).
+  const orgPromise = serverData.get<OrgInfo>("Org", auth.tenant_id);
+  const mePromise = serverData.get<AccountInfo>("User", auth.user_id!);
+  const membersPromise = serverData.list<OrgMemberRow>("OrgMember");
+
+  const org = use(orgPromise);
+  const me = use(mePromise);
+  const memberCount = use(membersPromise).filter(
     (m) => m.orgId === auth.tenant_id,
   ).length;
   return (

@@ -27,13 +27,35 @@ export default function DashboardPage({ auth, response, serverData }: PageProps)
   if (!auth.tenant_id) {
     return <ProvisionWorkspace />;
   }
-  const me = use(serverData.get<{ email?: string }>("User", auth.user_id!));
-  const org = use(
-    serverData.get<{ name?: string; onboardedAt?: string | null; setupDismissedAt?: string | null }>(
-      "Org",
-      auth.tenant_id,
-    ),
-  );
+  // Every read is STARTED here, before the first use(). Each serverData call
+  // returns a thenable the handle caches by key, and use() suspends on the
+  // first one still pending — so reading them one at a time makes each wait
+  // for the last. Six reads that way is six round trips; issued together it
+  // is one, and the replayed render finds each already cached.
+  //
+  // Do NOT reach for Promise.all. It builds a new, pending, uncached promise
+  // on every render, so use() suspends, re-renders, builds another, and the
+  // page never returns — React reports it as an async Client Component
+  // (minified error #482).
+  //
+  // The onboarding redirect below only needs `org`, so on that path the other
+  // reads are issued and thrown away. A redirect is the rare case; paying one
+  // round trip on every normal load to save four on a rare one is the wrong
+  // way round.
+  const mePromise = serverData.get<{ email?: string }>("User", auth.user_id!);
+  const orgPromise = serverData.get<{
+    name?: string;
+    onboardedAt?: string | null;
+    setupDismissedAt?: string | null;
+  }>("Org", auth.tenant_id);
+  const projectsPromise = serverData.list<Project>("Project");
+  const membersPromise = serverData.list<OrgMemberRow>("OrgMember");
+  const subsPromise = serverData.list<Subscription>("StripeSubscription");
+  const invitesPromise =
+    serverData.list<{ orgId: string; acceptedAt?: string | null }>("OrgInvite");
+
+  const me = use(mePromise);
+  const org = use(orgPromise);
   // A workspace created outside the wizard (or one that abandoned it) gets
   // sent through it once. Owners/admins only; a member who lands here just
   // sees the dashboard.
@@ -43,21 +65,22 @@ export default function DashboardPage({ auth, response, serverData }: PageProps)
     response.redirect("/onboarding");
     return null;
   }
-  const projects = use(serverData.list<Project>("Project"));
-  const members = use(serverData.list<OrgMemberRow>("OrgMember"));
+  const projects = use(projectsPromise);
   // The OrgMember read policy returns this user's memberships across every org,
   // so scope the count to the active workspace.
-  const memberCount = members.filter((m) => m.orgId === auth.tenant_id).length;
+  const memberCount = use(membersPromise).filter(
+    (m) => m.orgId === auth.tenant_id,
+  ).length;
   // Active-plan badge from the workspace's Stripe subscription (Free until one
   // exists). Scoped to the active tenant by the plugin's read policy.
-  const subs = use(serverData.list<Subscription>("StripeSubscription"));
-  const active = subs.find((s) =>
+  const active = use(subsPromise).find((s) =>
     ["active", "trialing", "past_due"].includes(s.status),
   );
   const plan = active ? active.plan : "free";
   // Getting-started checklist, derived from real rows so it ticks itself off.
-  const invites = use(serverData.list<{ orgId: string; acceptedAt?: string | null }>("OrgInvite"));
-  const pendingInvites = invites.filter((i) => i.orgId === auth.tenant_id && !i.acceptedAt).length;
+  const pendingInvites = use(invitesPromise).filter(
+    (i) => i.orgId === auth.tenant_id && !i.acceptedAt,
+  ).length;
   const setup: SetupState | null = org?.setupDismissedAt
     ? null
     : {

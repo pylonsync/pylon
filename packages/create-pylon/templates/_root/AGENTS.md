@@ -40,6 +40,17 @@ this pass before the user has to ask.
 ## Key gotchas
 
 - **Policies deny by default; server functions bypass them.** Direct client CRUD (`/api/entities/*`) and sync are policy-checked. Functions run with full database access, so enforce trust with `ctx.auth` checks inside the handler.
+- **Never wrap `serverData` calls in `Promise.all`.** Each method returns a thenable the handle CACHES by key — on the client it is already fulfilled, so `use()` returns synchronously. `Promise.all` builds a new, pending, uncached promise on every render, so `use()` suspends, re-renders, builds another, and the page never returns; React reports it as an async Client Component (minified error #482) and the error boundary shows a broken page. To read several things in parallel, START every call before the first `use()`, then `use()` each handle — the reads overlap and the replayed render finds each one cached:
+
+  ```tsx
+  const orgPromise = serverData.get<Org>("Org", auth.tenant_id);
+  const projectsPromise = serverData.list<Project>("Project");
+  const org = use(orgPromise);
+  const projects = use(projectsPromise);
+  ```
+
+  Reading them one at a time (`use(serverData.a()); use(serverData.b());`) is correct but serial: each read waits for the one above it.
+
 - **`serverData` (SSR) is READ-ONLY.** No write methods; the runtime rejects write frames (`SSR_WRITE_FORBIDDEN`). Mutations belong in actions/functions, never in a page render.
 - **`response.*` / `response.redirect()` / `response.notFound()` must fire in the synchronous shell render**, before any `await` or `<Suspense>`. The HTTP head commits when the shell is ready. Status, headers, and cookies set from a suspended subtree are lost, and `redirect` or `notFound` thrown below a Suspense boundary are swallowed.
 - **`ctx.llm`, `ctx.rooms`, and `ctx.connections` are available on mutations and actions, not queries.** An `action` has no direct `ctx.db`; use `ctx.runQuery` or `ctx.runMutation`.

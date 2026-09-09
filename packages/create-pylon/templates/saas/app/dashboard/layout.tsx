@@ -36,8 +36,15 @@ export default function DashboardLayout({
   if (!auth.tenant_id) {
     return <>{children}</>;
   }
-  const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
-  const org = use(serverData.get<{ name?: string }>("Org", auth.tenant_id));
+  // Every read is started before the first use(): calling them one at a time
+  // makes each wait for the last, since use() suspends on the first pending
+  // thenable. Never Promise.all them — a new pending promise each render means
+  // the page never returns (React error #482).
+  const mePromise = serverData.get<{ email?: string }>("User", auth.user_id);
+  const orgPromise = serverData.get<{ name?: string }>("Org", auth.tenant_id);
+
+  const me = use(mePromise);
+  const org = use(orgPromise);
   // Longest matching NAV href wins so /dashboard/projects highlights
   // Projects, not Overview.
   const path = (url ?? "").split("?")[0];

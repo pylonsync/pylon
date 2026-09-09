@@ -82,7 +82,11 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     };
     let route_paths: Vec<String> = manifest.routes.iter().map(|r| r.path.clone()).collect();
 
-    let report = match url {
+    // Source lint first: it needs no server, and it is the only thing that
+    // sees this class of defect at all (see find_use_promise_all).
+    let source_checks = lint_sources(std::path::Path::new("app"));
+
+    let mut report = match url {
         Some(base) => verify_target(&base, &route_paths),
         None => {
             // Boot THIS project on a free port with the binary we're
@@ -124,6 +128,12 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             report
         }
     };
+
+    // Source lint results lead: a page that cannot render is a bigger answer
+    // than any response code below it.
+    let mut checks = source_checks;
+    checks.extend(report.checks);
+    report.checks = checks;
 
     print_report(&report, json_mode);
     if report.failed() {
@@ -397,5 +407,143 @@ mod tests {
         );
         assert!(report.failed());
         assert_eq!(report.checks.len(), 1); // health only
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Source lint: `use(Promise.all([...]))` in a page
+//
+// serverData's methods hand back a thenable cached by (method, args). That
+// cache is what makes `use()` stable across the render React replays after a
+// suspension. `Promise.all` returns a NEW, pending, uncached promise every
+// render, so `use()` suspends, React re-renders, builds another, and the
+// component never returns — surfacing as React's minified error #482, "an
+// async Client Component".
+//
+// Nothing else catches it. It typechecks, and verify's own route checks pass
+// because a signed-out request redirects before the page ever renders. It only
+// appears once someone signs in, which is how a whole app shipped with every
+// page behind auth broken.
+// ---------------------------------------------------------------------------
+
+/// 1-based line numbers where `use(` wraps a `Promise.all(`.
+pub fn find_use_promise_all(src: &str) -> Vec<usize> {
+    const NEEDLE: &str = "use(";
+    let bytes = src.as_bytes();
+    let mut hits = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = src[from..].find(NEEDLE) {
+        let at = from + rel;
+        from = at + NEEDLE.len();
+        // Not a suffix of another identifier (`reuse(`, `misuse(`).
+        if at > 0 {
+            let prev = bytes[at - 1];
+            if prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'$' || prev == b'.' {
+                continue;
+            }
+        }
+        let rest = src[from..].trim_start();
+        if rest.starts_with("Promise.all(") {
+            hits.push(src[..at].matches('\n').count() + 1);
+        }
+    }
+    hits
+}
+
+#[cfg(test)]
+mod use_promise_all_tests {
+    use super::find_use_promise_all;
+
+    #[test]
+    fn flags_the_wrapped_form_across_lines() {
+        let src = "const [a, b] = use(\n  Promise.all([\n    serverData.list(\"A\"),\n  ]),\n);\n";
+        assert_eq!(find_use_promise_all(src), vec![1]);
+    }
+
+    #[test]
+    fn flags_the_single_line_form() {
+        assert_eq!(find_use_promise_all("const x = use(Promise.all([p, q]));"), vec![1]);
+    }
+
+    #[test]
+    fn leaves_the_correct_pattern_alone() {
+        let src = "const aP = serverData.list(\"A\");\nconst a = use(aP);\nconst b = use(serverData.get(\"B\", id));\n";
+        assert!(find_use_promise_all(src).is_empty());
+    }
+
+    #[test]
+    fn ignores_an_awaited_promise_all() {
+        let src = "const [a, b] = await Promise.all([f(), g()]);";
+        assert!(find_use_promise_all(src).is_empty());
+    }
+
+    #[test]
+    fn does_not_match_a_longer_identifier() {
+        assert!(find_use_promise_all("reuse(Promise.all([p]))").is_empty());
+        assert!(find_use_promise_all("obj.use(Promise.all([p]))").is_empty());
+    }
+
+    #[test]
+    fn reports_every_hit_with_its_line() {
+        let src = "a\nuse(Promise.all([p]))\nb\nc\nuse(\n Promise.all([q]))\n";
+        assert_eq!(find_use_promise_all(src), vec![2, 5]);
+    }
+}
+
+/// Walk `dir` for page/layout sources and lint each one. Returns a Check per
+/// offending file, and a single pass when the tree is clean.
+fn lint_sources(dir: &std::path::Path) -> Vec<Check> {
+    let mut files = Vec::new();
+    collect_tsx(dir, &mut files);
+    let mut checks = Vec::new();
+    for file in &files {
+        let Ok(src) = std::fs::read_to_string(file) else {
+            continue;
+        };
+        let hits = find_use_promise_all(&src);
+        if hits.is_empty() {
+            continue;
+        }
+        let lines = hits
+            .iter()
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        checks.push(Check {
+            name: format!("lint {}", file.display()),
+            status: CheckStatus::Fail,
+            detail: format!(
+                "use(Promise.all(…)) at line {lines}: Promise.all returns a new pending promise \
+                 every render, so use() never settles and the page throws React error #482. \
+                 Start each serverData call before the first use(), then use() each one."
+            ),
+        });
+    }
+    if checks.is_empty() && !files.is_empty() {
+        checks.push(Check {
+            name: "lint app sources".into(),
+            status: CheckStatus::Pass,
+            detail: format!("{} files, no use(Promise.all(…))", files.len()),
+        });
+    }
+    checks
+}
+
+fn collect_tsx(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_tsx(&path, out);
+        } else if name.ends_with(".tsx") {
+            out.push(path);
+        }
     }
 }
