@@ -522,6 +522,12 @@ export interface Llm {
    * `PROVIDER_HTTP_<code>`, `PROVIDER_UNREACHABLE`,
    * `INVALID_REQUEST`.
    */
+  /**
+   * Embeds text. The model is required unless
+   * `PYLON_EMBEDDINGS_MODEL` is set; there is no built-in default,
+   * because the embedding model fixes the vector space and swapping
+   * it silently would leave a stored index unqueryable.
+   */
   embed(input: string[], opts?: { model?: string }): Promise<number[][]>;
 }
 
@@ -629,8 +635,13 @@ export interface LlmTool {
 }
 
 export interface LlmCompleteRequest {
-  /** Override the server's default model. Subject to
-   *  PYLON_AI_MODELS_ALLOWED gating for non-admin callers. */
+  /**
+   * The model to run. Required unless the app declares one in the
+   * manifest with `llm({ defaultModel })`. There is no built-in
+   * fallback: a hardcoded model name goes stale as soon as the
+   * provider ships a new generation. Subject to
+   * `PYLON_AI_MODELS_ALLOWED` gating for non-admin callers.
+   */
   model?: string;
   messages: LlmMessage[];
   system?: string;

@@ -5552,11 +5552,21 @@ fn llm_preflight<'a>(
             for m in client.manifest_allowed_models() {
                 allowed_set.insert(m.clone());
             }
+            // An empty allowlist means the app never opted into one,
+            // so there is nothing to enforce. Unlike `/api/ai/*`, the
+            // model here is chosen by SERVER FUNCTION CODE, not by an
+            // HTTP caller — the same trust boundary that lets functions
+            // bypass row-level policies. Denying here would mean a
+            // function could not name the model it runs on unless the
+            // END USER happened to be an admin, which is unrelated to
+            // whether the model string is trustworthy.
+            //
+            // A declared allowlist is still honoured below: an app that
+            // forwards a user-supplied model into ctx.llm can opt into
+            // the guard with llm({ allowedModels }) or
+            // PYLON_AI_MODELS_ALLOWED.
             if allowed_set.is_empty() {
-                return Err((
-                    "MODEL_OVERRIDE_FORBIDDEN".to_string(),
-                    "Client model override requires PYLON_AI_MODELS_ALLOWED env or llm({ allowedModels: [...] }) in the manifest.".to_string(),
-                ));
+                return Ok(client);
             }
             if !allowed_set.contains(req_model) {
                 return Err((

@@ -462,7 +462,10 @@ mod use_promise_all_tests {
 
     #[test]
     fn flags_the_single_line_form() {
-        assert_eq!(find_use_promise_all("const x = use(Promise.all([p, q]));"), vec![1]);
+        assert_eq!(
+            find_use_promise_all("const x = use(Promise.all([p, q]));"),
+            vec![1]
+        );
     }
 
     #[test]

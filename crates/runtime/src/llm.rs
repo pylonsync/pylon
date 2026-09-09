@@ -185,7 +185,13 @@ pub struct LlmClient {
 struct LlmClientInner {
     provider: LlmProvider,
     api_key: String,
-    default_model: String,
+    /// Model declared by the app, via `llm({ defaultModel })` in the
+    /// manifest. `None` means the app never declared one, and every
+    /// request must name its own model. There is deliberately no
+    /// built-in fallback: a hardcoded model name goes stale the moment
+    /// the provider ships a new generation, and silently routing an
+    /// app to a retired model is worse than refusing the call.
+    configured_model: Option<String>,
     /// Optional base URL override for custom OpenAI-compatible endpoints
     /// (Together, Groq, local Ollama via HTTP). Default uses the
     /// provider's canonical host.
@@ -272,15 +278,31 @@ impl LlmClient {
                 "[llm] Both ANTHROPIC_API_KEY and OPENAI_API_KEY are set with no PYLON_LLM_PROVIDER; auto-selected provider={provider:?}. Set PYLON_LLM_PROVIDER to pin."
             );
         }
-        let manifest_model = manifest_llm.and_then(|m| m.default_model.clone());
-        let default_model = std::env::var("PYLON_LLM_MODEL")
-            .or_else(|_| std::env::var("PYLON_AI_MODEL"))
-            .ok()
-            .or(manifest_model)
-            .unwrap_or_else(|| match provider {
-                LlmProvider::Anthropic => "claude-sonnet-4-5".into(),
-                LlmProvider::Openai => "gpt-4o-mini".into(),
-            });
+        // Model resolution is code-only: the manifest declares it via
+        // `llm({ defaultModel })`, or each call names its own. It is
+        // deliberately NOT read from the environment. A model choice
+        // changes cost and behaviour, so it belongs in reviewed,
+        // version-controlled code next to the prompt — not in ops
+        // config where it drifts out of sync with the app.
+        let configured_model = manifest_llm
+            .and_then(|m| m.default_model.clone())
+            .filter(|s| !s.is_empty());
+        if configured_model.is_none() {
+            tracing::info!(
+                "[llm] no defaultModel declared in the manifest; every ctx.llm call must pass `model`"
+            );
+        }
+        for stale in ["PYLON_LLM_MODEL", "PYLON_AI_MODEL"] {
+            if std::env::var(stale)
+                .ok()
+                .filter(|s| !s.is_empty())
+                .is_some()
+            {
+                tracing::warn!(
+                    "[llm] {stale} is set but no longer used. Declare the model in the manifest with llm({{ defaultModel: \"...\" }}), or pass `model` on each ctx.llm call."
+                );
+            }
+        }
         let base_url = std::env::var("PYLON_LLM_BASE_URL")
             .or_else(|_| std::env::var("PYLON_AI_BASE_URL"))
             .ok()
@@ -300,7 +322,7 @@ impl LlmClient {
             inner: Arc::new(LlmClientInner {
                 provider,
                 api_key,
-                default_model,
+                configured_model,
                 base_url,
                 agent,
                 manifest_allowed,
@@ -345,7 +367,7 @@ impl LlmClient {
             inner: Arc::new(LlmClientInner {
                 provider,
                 api_key: api_key.into(),
-                default_model: default_model.into(),
+                configured_model: Some(default_model.into()),
                 base_url: None,
                 agent,
                 manifest_allowed: Vec::new(),
@@ -357,17 +379,32 @@ impl LlmClient {
     pub fn provider(&self) -> LlmProvider {
         self.inner.provider
     }
-    pub fn default_model(&self) -> &str {
-        &self.inner.default_model
+    /// The app-declared model, if the manifest set one. `None` means
+    /// every request must carry its own `model`.
+    pub fn default_model(&self) -> Option<&str> {
+        self.inner.configured_model.as_deref()
+    }
+
+    /// Resolves the model for a request: the call site wins, then the
+    /// app's manifest declaration. There is no built-in fallback, so a
+    /// request that names no model against an app that declares none is
+    /// an error the operator can act on.
+    fn resolve_model(&self, req: &LlmCompleteRequest) -> Result<String, LlmError> {
+        req.model
+            .clone()
+            .filter(|m| !m.is_empty())
+            .or_else(|| self.inner.configured_model.clone())
+            .ok_or_else(|| LlmError {
+                code: "MODEL_NOT_CONFIGURED".into(),
+                message: "No model specified. Pass `model` on the ctx.llm call, or declare one in the manifest with llm({ defaultModel: \"...\" }).".into(),
+            })
     }
 
     /// Non-streaming completion. Returns the full response in one
     /// shot. Use this when the caller doesn't need progressive output
     /// (agent tool-use loops, batch generation, internal jobs).
     pub fn complete(&self, mut req: LlmCompleteRequest) -> Result<LlmCompleteResponse, LlmError> {
-        if req.model.is_none() {
-            req.model = Some(self.inner.default_model.clone());
-        }
+        req.model = Some(self.resolve_model(&req)?);
         // Clamp max_tokens against the configured cap. Codex P1-5:
         // a caller can request `max_tokens: 200000` against a premium
         // model and burn the entire budget on one request. With the
@@ -393,9 +430,7 @@ impl LlmClient {
         mut req: LlmCompleteRequest,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<LlmCompleteResponse, LlmError> {
-        if req.model.is_none() {
-            req.model = Some(self.inner.default_model.clone());
-        }
+        req.model = Some(self.resolve_model(&req)?);
         let requested_max = req.max_tokens.unwrap_or(4096);
         req.max_tokens = Some(match self.inner.max_tokens_cap {
             Some(cap) => requested_max.min(cap),
@@ -453,10 +488,7 @@ impl LlmClient {
             .send_json(body)
             .map_err(map_ureq_err)?;
 
-        let mut model = req
-            .model
-            .clone()
-            .unwrap_or_else(|| self.inner.default_model.clone());
+        let mut model = req.model.clone().unwrap_or_default();
         let mut content: Vec<ContentBlock> = Vec::new();
         let mut stop_reason = String::from("end_turn");
         let mut usage = LlmUsage::default();
@@ -633,8 +665,15 @@ impl LlmClient {
         }
     }
 
+    /// True when requests go to a custom OpenAI-compatible endpoint
+    /// rather than api.openai.com. Those get the legacy `max_tokens`
+    /// field; see [`openai_request_body`].
+    fn uses_legacy_token_param(&self) -> bool {
+        self.inner.base_url.is_some()
+    }
+
     fn complete_openai(&self, req: LlmCompleteRequest) -> Result<LlmCompleteResponse, LlmError> {
-        let body = openai_request_body(&req, false);
+        let body = openai_request_body(&req, false, self.uses_legacy_token_param());
         let resp = self
             .inner
             .agent
@@ -655,7 +694,7 @@ impl LlmClient {
         req: LlmCompleteRequest,
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<LlmCompleteResponse, LlmError> {
-        let body = openai_request_body(&req, true);
+        let body = openai_request_body(&req, true, self.uses_legacy_token_param());
         let resp = self
             .inner
             .agent
@@ -666,10 +705,7 @@ impl LlmClient {
             .send_json(body)
             .map_err(map_ureq_err)?;
 
-        let mut model = req
-            .model
-            .clone()
-            .unwrap_or_else(|| self.inner.default_model.clone());
+        let mut model = req.model.clone().unwrap_or_default();
         let mut text_buf = String::new();
         let mut tool_calls: Vec<(String, String, String)> = Vec::new(); // (id, name, raw_args)
         let mut stop_reason = String::from("end_turn");
@@ -834,7 +870,45 @@ fn serialize_messages_anthropic(messages: &[LlmMessage]) -> Vec<serde_json::Valu
         .collect()
 }
 
-fn openai_request_body(req: &LlmCompleteRequest, stream: bool) -> serde_json::Value {
+/// Builds the `/v1/chat/completions` body.
+///
+/// `legacy_token_param` selects which output-token field to send.
+/// OpenAI's own API rejects `max_tokens` on every model from the
+/// GPT-5 generation onward ("Unsupported parameter: 'max_tokens' is
+/// not supported with this model. Use 'max_completion_tokens'
+/// instead."), and accepts `max_completion_tokens` on the older
+/// models too — so the canonical host always gets the new field.
+///
+/// A custom `base_url` points at a third-party OpenAI-compatible
+/// server (Together, Groq, Ollama, vLLM). Those universally accept
+/// `max_tokens` and some older builds do not know
+/// `max_completion_tokens`, so they keep the legacy field. Sending
+/// both is not an option: OpenAI rejects that with
+/// `invalid_parameter_combination`.
+/// OpenAI model families that accept an arbitrary `temperature`.
+///
+/// This list is CLOSED by construction: every family on it is a legacy
+/// one that OpenAI is no longer extending. Models from the GPT-5
+/// generation onward support only the default temperature and reject
+/// any other value with `unsupported_value`.
+///
+/// An unrecognised model is therefore treated as restricted. That is
+/// the fail-safe direction: omitting `temperature` always produces a
+/// working request, while sending it to a model that refuses it fails
+/// the entire call.
+fn openai_model_accepts_temperature(model: &str) -> bool {
+    const LEGACY_TEMPERATURE_FAMILIES: &[&str] =
+        &["gpt-4", "gpt-3.5", "chatgpt-4o", "davinci", "babbage"];
+    LEGACY_TEMPERATURE_FAMILIES
+        .iter()
+        .any(|family| model.starts_with(family))
+}
+
+fn openai_request_body(
+    req: &LlmCompleteRequest,
+    stream: bool,
+    legacy_token_param: bool,
+) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(system) = &req.system {
         messages.push(serde_json::json!({"role": "system", "content": system}));
@@ -852,9 +926,14 @@ fn openai_request_body(req: &LlmCompleteRequest, stream: bool) -> serde_json::Va
     let mut body = serde_json::json!({
         "model": req.model.as_deref().unwrap_or(""),
         "messages": messages,
-        "max_tokens": req.max_tokens.unwrap_or(4096),
         "stream": stream,
     });
+    let token_field = if legacy_token_param {
+        "max_tokens"
+    } else {
+        "max_completion_tokens"
+    };
+    body[token_field] = serde_json::json!(req.max_tokens.unwrap_or(4096));
     if stream {
         // Codex P1-8: ask OpenAI to include usage in the final
         // streamed chunk. Without this the streaming path always
@@ -863,7 +942,19 @@ fn openai_request_body(req: &LlmCompleteRequest, stream: bool) -> serde_json::Va
         body["stream_options"] = serde_json::json!({"include_usage": true});
     }
     if let Some(t) = req.temperature {
-        body["temperature"] = serde_json::json!(t);
+        let model = req.model.as_deref().unwrap_or("");
+        if legacy_token_param || openai_model_accepts_temperature(model) {
+            body["temperature"] = serde_json::json!(t);
+        } else {
+            // Reasoning models accept only the default temperature and
+            // reject anything else with `unsupported_value`, which would
+            // fail the whole call. Dropping the field keeps the request
+            // working; the warning explains why the setting had no
+            // effect.
+            tracing::warn!(
+                "[llm] model {model} does not support a custom temperature; ignoring temperature={t}"
+            );
+        }
     }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::json!(req
@@ -1215,7 +1306,11 @@ pub struct EmbeddingsClient {
 struct EmbeddingsClientInner {
     provider: EmbeddingsProvider,
     api_key: String,
-    default_model: String,
+    /// Model declared by the app. `None` means every `ctx.llm.embed`
+    /// call must name its own. No built-in fallback: an embedding model
+    /// determines the vector space, so silently swapping it would leave
+    /// a stored index unqueryable against new vectors.
+    configured_model: Option<String>,
     /// `PYLON_EMBEDDINGS_BASE_URL` — OpenAI-compatible endpoint
     /// override (Together, local inference servers).
     base_url: Option<String>,
@@ -1287,10 +1382,12 @@ impl EmbeddingsClient {
                 }
             }
         };
-        let default_model = env("PYLON_EMBEDDINGS_MODEL").unwrap_or_else(|| match provider {
-            EmbeddingsProvider::Openai => "text-embedding-3-small".into(),
-            EmbeddingsProvider::Voyage => "voyage-3.5".into(),
-        });
+        let configured_model = env("PYLON_EMBEDDINGS_MODEL");
+        if configured_model.is_none() {
+            tracing::info!(
+                "[llm] no PYLON_EMBEDDINGS_MODEL set; every ctx.llm.embed call must pass a model"
+            );
+        }
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(10))
             .timeout(Duration::from_secs(60))
@@ -1299,7 +1396,7 @@ impl EmbeddingsClient {
             inner: Arc::new(EmbeddingsClientInner {
                 provider,
                 api_key,
-                default_model,
+                configured_model,
                 base_url: env("PYLON_EMBEDDINGS_BASE_URL"),
                 agent,
             }),
@@ -1309,8 +1406,8 @@ impl EmbeddingsClient {
     pub fn provider(&self) -> EmbeddingsProvider {
         self.inner.provider
     }
-    pub fn default_model(&self) -> &str {
-        &self.inner.default_model
+    pub fn default_model(&self) -> Option<&str> {
+        self.inner.configured_model.as_deref()
     }
 
     fn url(&self) -> String {
@@ -1343,10 +1440,7 @@ impl EmbeddingsClient {
                 ),
             });
         }
-        let model = req
-            .model
-            .filter(|m| !m.is_empty())
-            .unwrap_or_else(|| self.inner.default_model.clone());
+        let model = req.model.filter(|m| !m.is_empty()).unwrap_or_default();
         let body = serde_json::json!({ "model": model, "input": req.input });
         let resp = self
             .inner
@@ -1550,7 +1644,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let body = openai_request_body(&req, false);
+        let body = openai_request_body(&req, false, false);
         assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "call_1");
         assert_eq!(
             body["messages"][0]["tool_calls"][0]["function"]["name"],
@@ -1577,7 +1671,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let body = openai_request_body(&req, false);
+        let body = openai_request_body(&req, false, false);
         assert_eq!(body["messages"][0]["role"], "tool");
         assert_eq!(body["messages"][0]["tool_call_id"], "call_1");
     }
@@ -1743,10 +1837,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        let body = openai_request_body(&req, true);
+        let body = openai_request_body(&req, true, false);
         assert_eq!(body["stream_options"]["include_usage"], true);
         // Non-streaming should NOT have stream_options.
-        let body2 = openai_request_body(&req, false);
+        let body2 = openai_request_body(&req, false, false);
         assert!(body2.get("stream_options").is_none());
     }
 
@@ -1758,7 +1852,7 @@ mod tests {
             inner: Arc::new(LlmClientInner {
                 provider: LlmProvider::Anthropic,
                 api_key: "test".into(),
-                default_model: "claude-test".into(),
+                configured_model: Some("claude-test".into()),
                 base_url: None,
                 agent: ureq::Agent::new(),
                 manifest_allowed: Vec::new(),
@@ -1834,5 +1928,175 @@ mod tests {
         assert!(parse_embed_response(&bad, 1, "m").is_err());
         // No data array.
         assert!(parse_embed_response(&serde_json::json!({}), 1, "m").is_err());
+    }
+
+    #[test]
+    fn openai_body_sends_max_completion_tokens_for_canonical_host() {
+        // Every OpenAI model from the GPT-5 generation onward rejects
+        // `max_tokens` outright, and the older models accept
+        // `max_completion_tokens`, so the canonical host always gets
+        // the new field. Regression guard: shipping `max_tokens` here
+        // made ctx.llm unusable with every current OpenAI model.
+        let req = LlmCompleteRequest {
+            model: Some("gpt-5.6-luna".into()),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Text("hi".into()),
+            }],
+            max_tokens: Some(250),
+            ..Default::default()
+        };
+        let body = openai_request_body(&req, false, false);
+        assert_eq!(body["max_completion_tokens"], 250);
+        assert!(
+            body.get("max_tokens").is_none(),
+            "sending both is rejected with invalid_parameter_combination"
+        );
+    }
+
+    #[test]
+    fn openai_body_keeps_legacy_max_tokens_for_custom_base_url() {
+        // Third-party OpenAI-compatible servers (Together, Groq,
+        // Ollama, vLLM) universally accept `max_tokens`; some older
+        // builds do not know `max_completion_tokens`.
+        let req = LlmCompleteRequest {
+            model: Some("llama-3.1-70b".into()),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Text("hi".into()),
+            }],
+            max_tokens: Some(250),
+            ..Default::default()
+        };
+        let body = openai_request_body(&req, false, true);
+        assert_eq!(body["max_tokens"], 250);
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
+    #[test]
+    fn openai_body_defaults_output_tokens_when_unset() {
+        let req = LlmCompleteRequest {
+            model: Some("gpt-5.6-luna".into()),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Text("hi".into()),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            openai_request_body(&req, false, false)["max_completion_tokens"],
+            4096
+        );
+        assert_eq!(openai_request_body(&req, false, true)["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn openai_body_drops_temperature_for_reasoning_models() {
+        // gpt-5 generation onward rejects any non-default temperature
+        // with `unsupported_value`, which would fail the whole call.
+        let req = LlmCompleteRequest {
+            model: Some("gpt-5.6-luna".into()),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Text("hi".into()),
+            }],
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        let body = openai_request_body(&req, false, false);
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn openai_body_keeps_temperature_for_legacy_and_custom_endpoints() {
+        let mut req = LlmCompleteRequest {
+            model: Some("gpt-4o-mini".into()),
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Text("hi".into()),
+            }],
+            temperature: Some(0.7),
+            ..Default::default()
+        };
+        let sent = openai_request_body(&req, false, false);
+        assert!((sent["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+
+        // A custom OpenAI-compatible endpoint serves its own models;
+        // pass the setting through rather than guessing.
+        req.model = Some("llama-3.1-70b".into());
+        let custom = openai_request_body(&req, false, true);
+        assert!((custom["temperature"].as_f64().unwrap() - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn temperature_family_check_covers_current_and_legacy_models() {
+        for legacy in [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1-mini",
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+        ] {
+            assert!(
+                openai_model_accepts_temperature(legacy),
+                "{legacy} should accept temperature"
+            );
+        }
+        // Unknown / current models are treated as restricted, which is
+        // the fail-safe direction.
+        for restricted in [
+            "gpt-5.6-luna",
+            "gpt-5.6-sol",
+            "gpt-5-mini",
+            "gpt-6-astra",
+            "o3",
+            "o4-mini",
+        ] {
+            assert!(
+                !openai_model_accepts_temperature(restricted),
+                "{restricted} should not receive a custom temperature"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_model_prefers_call_site_then_manifest() {
+        let client = LlmClient::new(LlmProvider::Openai, "k", "manifest-model");
+        let mut req = LlmCompleteRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Text("hi".into()),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(client.resolve_model(&req).unwrap(), "manifest-model");
+        req.model = Some("call-site-model".into());
+        assert_eq!(client.resolve_model(&req).unwrap(), "call-site-model");
+    }
+
+    #[test]
+    fn resolve_model_errors_when_nothing_declares_one() {
+        // No hardcoded fallback: a stale built-in model name is worse
+        // than an actionable error.
+        let client = LlmClient {
+            inner: Arc::new(LlmClientInner {
+                provider: LlmProvider::Openai,
+                api_key: "k".into(),
+                configured_model: None,
+                base_url: None,
+                agent: ureq::AgentBuilder::new().build(),
+                manifest_allowed: vec![],
+                max_tokens_cap: None,
+            }),
+        };
+        let req = LlmCompleteRequest {
+            messages: vec![LlmMessage {
+                role: "user".into(),
+                content: LlmContent::Text("hi".into()),
+            }],
+            ..Default::default()
+        };
+        let err = client.resolve_model(&req).unwrap_err();
+        assert_eq!(err.code, "MODEL_NOT_CONFIGURED");
     }
 }
