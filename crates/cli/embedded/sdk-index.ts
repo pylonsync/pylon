@@ -1765,7 +1765,12 @@ export type AuthConfig = {
 export type LlmConfig = {
   /** Provider name. Default: env detection. */
   provider?: "anthropic" | "openai";
-  /** Default model when the caller doesn't pass `model`. */
+  /**
+   * Model used when a `ctx.llm` call doesn't pass its own `model`.
+   * There is no built-in fallback — declare it here or pass `model`
+   * at each call site. A hardcoded default would go stale the moment
+   * the provider ships a new generation.
+   */
   defaultModel?: string;
   /**
    * Allowlist of models callers may request via the `model` field.
@@ -1856,8 +1861,8 @@ export function defineConnection(cfg: ConnectionConfig): ManifestConnection {
  * export default {
  *   llm: llm({
  *     provider: "anthropic",
- *     defaultModel: "claude-sonnet-4-5",
- *     allowedModels: ["claude-sonnet-4-5", "claude-haiku-4-5"],
+ *     defaultModel: "claude-opus-5",
+ *     allowedModels: ["claude-opus-5", "claude-haiku-4-5"],
  *   }),
  * }
  * ```
