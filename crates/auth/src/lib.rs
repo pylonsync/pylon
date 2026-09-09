@@ -1674,6 +1674,19 @@ fn dev_callback_origin() -> String {
     format!("http://localhost:{port}")
 }
 
+/// Treats a set-but-empty environment value as unset.
+///
+/// A `.env` template ships credential keys blank, so `Ok("")` means "the
+/// key exists in the file", not "this is configured". Registering an
+/// OAuth provider on a blank client id puts a button in front of users
+/// that reaches the IdP with `client_id=` and returns `invalid_client`.
+fn configured(value: Result<String, std::env::VarError>) -> Option<String> {
+    match value {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        _ => None,
+    }
+}
+
 impl OAuthRegistry {
     pub fn new() -> Self {
         Self {
@@ -1708,15 +1721,21 @@ impl OAuthRegistry {
         for spec in provider::builtin::all() {
             let upper = spec.id.to_ascii_uppercase();
             let prefix = format!("PYLON_OAUTH_{upper}");
-            let id = match std::env::var(format!("{prefix}_CLIENT_ID")) {
-                Ok(v) => v,
-                Err(_) => continue,
+            // An empty value is not configuration. A `.env` template
+            // ships these keys blank, and treating "set but empty" as
+            // configured registers the provider anyway: /api/auth/providers
+            // lists it, the frontend renders a button for it, and every
+            // press reaches the IdP with `client_id=` and comes back
+            // `invalid_client`. A missing button is a better answer than
+            // one that cannot work.
+            let Some(id) = configured(std::env::var(format!("{prefix}_CLIENT_ID"))) else {
+                continue;
             };
-            let secret = match std::env::var(format!("{prefix}_CLIENT_SECRET")) {
-                Ok(v) => v,
+            let secret = match configured(std::env::var(format!("{prefix}_CLIENT_SECRET"))) {
+                Some(v) => v,
                 // Apple's "client_secret" is synthesized — allow blank.
-                Err(_) if spec.id == "apple" => String::new(),
-                Err(_) => continue,
+                None if spec.id == "apple" => String::new(),
+                None => continue,
             };
             // Redirect URI precedence:
             //   1. Explicit per-provider override (PYLON_OAUTH_<X>_REDIRECT)
@@ -4670,5 +4689,35 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, "JWT_MISCONFIGURED");
+    }
+}
+
+#[cfg(test)]
+mod oauth_config_tests {
+    use super::configured;
+    use std::env::VarError;
+
+    #[test]
+    fn blank_credentials_are_not_configuration() {
+        // The regression: a .env template ships these keys empty, and
+        // treating "set but empty" as configured registered the provider,
+        // so /api/auth/providers listed it and the frontend rendered a
+        // button whose every press returned invalid_client.
+        assert_eq!(configured(Ok(String::new())), None);
+        assert_eq!(configured(Ok("   ".into())), None);
+        assert_eq!(configured(Ok("\t\n".into())), None);
+    }
+
+    #[test]
+    fn a_real_credential_is_configuration() {
+        assert_eq!(
+            configured(Ok("abc.apps.googleusercontent.com".into())),
+            Some("abc.apps.googleusercontent.com".into())
+        );
+    }
+
+    #[test]
+    fn an_unset_variable_is_not_configuration() {
+        assert_eq!(configured(Err(VarError::NotPresent)), None);
     }
 }
