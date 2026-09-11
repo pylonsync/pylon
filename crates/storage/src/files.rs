@@ -923,8 +923,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pylon_files_ct_{}", std::process::id()));
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
 
-        let stored = storage.store("episode.mp3", b"\xff\xfbaudio", "audio/mpeg").unwrap();
-        assert_eq!(storage.content_type(&stored.id).as_deref(), Some("audio/mpeg"));
+        let stored = storage
+            .store("episode.mp3", b"\xff\xfbaudio", "audio/mpeg")
+            .unwrap();
+        assert_eq!(
+            storage.content_type(&stored.id).as_deref(),
+            Some("audio/mpeg")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -937,7 +942,10 @@ mod tests {
         let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
 
         let init = storage.init_upload("scene.webp", "image/webp", 9).unwrap();
-        assert_eq!(storage.content_type(&init.asset_id).as_deref(), Some("image/webp"));
+        assert_eq!(
+            storage.content_type(&init.asset_id).as_deref(),
+            Some("image/webp")
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -995,11 +1003,7 @@ mod tests {
 
         assert!(validate_provider_env().is_ok());
 
-        for k in [
-            "PYLON_FILES_PROVIDER",
-            "STACK0_API_KEY",
-            "STACK0_PROJECT",
-        ] {
+        for k in ["PYLON_FILES_PROVIDER", "STACK0_API_KEY", "STACK0_PROJECT"] {
             std::env::remove_var(k);
         }
     }
