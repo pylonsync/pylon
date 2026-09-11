@@ -871,6 +871,35 @@ fn ws_cookie_origin_trusted(origin: Option<&str>, allowlist: &[String]) -> bool 
     }
 }
 
+/// Content type to serve a stored file with.
+///
+/// Three sources, in order of how much they can be trusted:
+///
+///   1. What the uploader declared, kept beside the bytes by the backend.
+///   2. The extension embedded in the minted id. `local_mint_id` builds ids as
+///      `file_<nanos>_<filename with dots replaced by underscores>`, so
+///      `…_scene-3_mp3` still carries "mp3". This is what lets files uploaded
+///      before the type was recorded serve correctly without re-uploading.
+///   3. `application/octet-stream`, which is correct for a download and wrong
+///      for anything a browser is meant to play.
+fn stored_content_type(storage: &dyn pylon_storage::files::FileStorage, id: &str) -> String {
+    if let Some(declared) = storage.content_type(id) {
+        return declared;
+    }
+    if let Some((_, tail)) = id.rsplit_once('_') {
+        if !tail.is_empty() && tail.len() <= 5 && tail.chars().all(|c| c.is_ascii_alphanumeric()) {
+            let guessed = crate::frontend::content_type_for(std::path::Path::new(&format!(
+                "f.{}",
+                tail.to_ascii_lowercase()
+            )));
+            if guessed != "application/octet-stream" {
+                return guessed.to_string();
+            }
+        }
+    }
+    "application/octet-stream".to_string()
+}
+
 /// Authorization decision for `GET /api/files/<id>` on an ownership-tracking
 /// backend. FAIL CLOSED: serve only when the asset has a recorded owner that
 /// matches the caller's user + active tenant. A missing owner (`Ok(None)` — written-but-unconfirmed,
@@ -5658,34 +5687,51 @@ fn start_server(
                         }
                     }
                     // No direct URL — local backend. Stream the bytes.
-                    let (status, body, ct) = match storage.get(asset_id) {
-                        Ok(content) => (200u16, content, "application/octet-stream".to_string()),
-                        Err(e) if e.code == "NOT_FOUND" => (
-                            404u16,
-                            json_error("NOT_FOUND", "File not found").into_bytes(),
-                            "application/json".to_string(),
-                        ),
-                        Err(e) => (
-                            500u16,
-                            json_error(&e.code, &e.message).into_bytes(),
-                            "application/json".to_string(),
-                        ),
-                    };
-                    let response = with_security_headers(
-                        Response::from_data(body)
-                            .with_status_code(status)
-                            .with_header(Header::from_bytes("Content-Type", ct.as_bytes()).unwrap())
-                            .with_header(
-                                Header::from_bytes(
-                                    "Access-Control-Allow-Origin",
-                                    cors_origin.as_bytes().to_vec(),
-                                )
-                                .unwrap(),
-                            ),
-                    );
-                    let _ = request.respond(response);
-                    mt.record_request("GET", status);
-                    return;
+                    //
+                    // Served through the same responder as `public/`, which
+                    // answers a Range request with 206 and always advertises
+                    // Accept-Ranges. Mobile browsers range-request media
+                    // before playing and refuse a 200; desktop tolerates it,
+                    // which hides the problem until someone opens a phone.
+                    match storage.get(asset_id) {
+                        Ok(content) => {
+                            let ct = stored_content_type(storage, asset_id);
+                            mt.record_request("GET", 200);
+                            crate::frontend::respond_static_file(
+                                request,
+                                content,
+                                &ct,
+                                "private, max-age=0, must-revalidate",
+                                &cors_origin,
+                            );
+                            return;
+                        }
+                        Err(e) => {
+                            let (status, body) = if e.code == "NOT_FOUND" {
+                                (404u16, json_error("NOT_FOUND", "File not found"))
+                            } else {
+                                (500u16, json_error(&e.code, &e.message))
+                            };
+                            let response = with_security_headers(
+                                Response::from_string(&body)
+                                    .with_status_code(status)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("GET", status);
+                            return;
+                        }
+                    }
                 }
             }
         }

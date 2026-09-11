@@ -306,7 +306,7 @@ fn is_spa_eligible(url: &str) -> bool {
 /// Vite/Next/Astro build typically emits; unknown extensions fall to
 /// `application/octet-stream` (which browsers handle fine for downloads
 /// but won't auto-execute, so it's the safe default).
-fn content_type_for(path: &Path) -> &'static str {
+pub(crate) fn content_type_for(path: &Path) -> &'static str {
     match path.extension().and_then(|e| e.to_str()) {
         Some("html") | Some("htm") => "text/html; charset=utf-8",
         Some("js") | Some("mjs") => "application/javascript; charset=utf-8",
@@ -414,10 +414,10 @@ fn parse_byte_range(header: &str, total: u64) -> RangeSpec {
 /// answers a range request with `200` instead of `206`, so without this every
 /// video served from `public/` shows a black box with a slashed-out play button
 /// on iPhone/iPad (desktop tolerates `200`, which masks it).
-fn respond_static_file(
+pub(crate) fn respond_static_file(
     request: Request,
     bytes: Vec<u8>,
-    content_type: &'static str,
+    content_type: &str,
     cache: &str,
     cors_origin: &str,
 ) {
@@ -431,7 +431,7 @@ fn respond_static_file(
         }
     });
 
-    let ct = Header::from_bytes("Content-Type", content_type).unwrap();
+    let ct = Header::from_bytes("Content-Type", content_type.as_bytes()).unwrap();
     let cors = Header::from_bytes(
         "Access-Control-Allow-Origin",
         cors_origin.as_bytes().to_vec(),

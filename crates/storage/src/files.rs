@@ -110,6 +110,19 @@ pub trait FileStorage: Send + Sync {
         Ok(None)
     }
 
+    /// Content type recorded when the file was uploaded.
+    ///
+    /// `GET /api/files/<id>` needs this to answer with the right
+    /// `Content-Type`. Serving audio or video as `application/octet-stream`
+    /// makes it unplayable in mobile browsers, which — unlike desktop — will
+    /// not sniff the bytes and play anyway.
+    ///
+    /// Returns `None` for backends that serve their own bytes (Stack0 sets
+    /// the header at the CDN) or for files stored before the type was kept.
+    fn content_type(&self, _id: &str) -> Option<String> {
+        None
+    }
+
     /// Whether the router should enforce per-file owner checks against this
     /// backend. Local disk: yes. Stack0: no (its CDN auth handles access).
     fn requires_owner_check(&self) -> bool {
@@ -242,10 +255,48 @@ pub fn select_from_env() -> Box<dyn FileStorage> {
 /// had to set a new env var. Now they get
 /// `PYLON_FILES_PROVIDER=stack0 requires PYLON_STACK0_PROJECT_SLUG`
 /// at boot, before any user ever tries to upload.
+/// Read a Stack0 setting, accepting the name Pylon Cloud provisions.
+///
+/// Pylon reads `PYLON_STACK0_*`; Pylon Cloud injects the unprefixed
+/// `STACK0_API_KEY` / `STACK0_PROJECT` into every project. Without this
+/// fallback, turning on `PYLON_FILES_PROVIDER=stack0` in a cloud project
+/// fails boot validation even though the credentials are right there — the
+/// operator is asked for a variable the platform has already set under
+/// another name.
+///
+/// The prefixed name wins, so an explicit override still beats the platform.
+fn stack0_env(suffix: &str, cloud_alias: &str) -> Option<String> {
+    let read = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+    read(&format!("PYLON_STACK0_{suffix}")).or_else(|| read(cloud_alias))
+}
+
+/// Stack0 settings and the cloud-provisioned name each one also accepts.
+const STACK0_REQUIRED: &[(&str, &str)] = &[
+    ("API_KEY", "STACK0_API_KEY"),
+    ("PROJECT_SLUG", "STACK0_PROJECT"),
+];
+
 pub fn validate_provider_env() -> Result<(), String> {
     let provider = std::env::var("PYLON_FILES_PROVIDER").unwrap_or_else(|_| "local".into());
+
+    if provider == "stack0" {
+        let missing: Vec<String> = STACK0_REQUIRED
+            .iter()
+            .filter(|(suffix, alias)| stack0_env(suffix, alias).is_none())
+            .map(|(suffix, alias)| format!("PYLON_STACK0_{suffix} (or {alias})"))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "PYLON_FILES_PROVIDER=stack0 requires {} to be set. \
+                 Configure it alongside PYLON_FILES_PROVIDER, or remove \
+                 PYLON_FILES_PROVIDER (defaults to local disk).",
+                missing.join(" + "),
+            ));
+        }
+        return Ok(());
+    }
+
     let required: &[&str] = match provider.as_str() {
-        "stack0" => &["PYLON_STACK0_API_KEY", "PYLON_STACK0_PROJECT_SLUG"],
         // S3 needs the bucket + both credentials. Region defaults to
         // us-east-1 and endpoint/public-url/folder are optional, so they're
         // not required here.
@@ -310,6 +361,26 @@ impl LocalFileStorage {
         self.dir.join(".ownership").join(format!("{id}.json"))
     }
 
+    fn content_type_sidecar_path(&self, id: &str) -> std::path::PathBuf {
+        self.dir.join(".contenttype").join(format!("{id}.txt"))
+    }
+
+    /// Persist the declared content type beside the bytes.
+    ///
+    /// Best-effort: a file whose type could not be recorded is still a
+    /// perfectly good file, and failing the upload over a sidecar would be
+    /// worse than serving it as octet-stream later.
+    fn record_content_type(&self, id: &str, content_type: &str) {
+        if validate_local_id(id).is_err() || content_type.trim().is_empty() {
+            return;
+        }
+        let dir = self.dir.join(".contenttype");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let _ = std::fs::write(self.content_type_sidecar_path(id), content_type.trim());
+    }
+
     /// Receive raw bytes from a client PUT against the `upload_url`
     /// minted by `init_upload`. Called by the HTTP layer's
     /// `PUT /api/files/local-put/<id>` handler after it has validated
@@ -358,7 +429,7 @@ impl FileStorage for LocalFileStorage {
     fn init_upload(
         &self,
         name: &str,
-        _content_type: &str,
+        content_type: &str,
         _size: usize,
     ) -> Result<UploadInit, FileStorageError> {
         // Local backend doesn't pre-allocate disk space — the PUT
@@ -370,6 +441,9 @@ impl FileStorage for LocalFileStorage {
         // logged-in user anyway, so this is mostly to bound how long
         // a partially-finished upload sits in pending state.
         let id = local_mint_id(name);
+        // Recorded now, while it is known: the PUT that follows carries only
+        // bytes, and confirm_upload sees nothing but a path on disk.
+        self.record_content_type(&id, content_type);
         let upload_url = format!("{}/local-put/{}", self.url_prefix, id);
         let cdn_url = format!("{}/{}", self.url_prefix, id);
         let expires_at = std::time::SystemTime::now()
@@ -403,7 +477,7 @@ impl FileStorage for LocalFileStorage {
         &self,
         name: &str,
         content: &[u8],
-        _content_type: &str,
+        content_type: &str,
     ) -> Result<StoredFile, FileStorageError> {
         // Server-side internal path: mint an ID, write bytes, return
         // the same shape `confirm_upload` would have. No PUT-URL
@@ -415,6 +489,7 @@ impl FileStorage for LocalFileStorage {
             code: "WRITE_FAILED".into(),
             message: format!("Failed to write file: {e}"),
         })?;
+        self.record_content_type(&id, content_type);
         Ok(StoredFile {
             url: format!("{}/{}", self.url_prefix, id),
             size: content.len(),
@@ -444,8 +519,9 @@ impl FileStorage for LocalFileStorage {
                 });
             }
         };
-        // Best-effort sidecar cleanup so an owner record can't outlive its file.
+        // Best-effort sidecar cleanup so a record can't outlive its file.
         let _ = std::fs::remove_file(self.owner_sidecar_path(id));
+        let _ = std::fs::remove_file(self.content_type_sidecar_path(id));
         Ok(existed)
     }
 
@@ -486,6 +562,18 @@ impl FileStorage for LocalFileStorage {
                 message: format!("Failed to read owner sidecar: {e}"),
             }),
         }
+    }
+
+    fn content_type(&self, id: &str) -> Option<String> {
+        if validate_local_id(id).is_err() {
+            return None;
+        }
+        let raw = std::fs::read_to_string(self.content_type_sidecar_path(id)).ok()?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_string())
     }
 
     fn requires_owner_check(&self) -> bool {
@@ -554,15 +642,16 @@ impl Stack0FileStorage {
 
     /// Construct from environment variables.
     ///
-    /// Required: `PYLON_STACK0_API_KEY`, `PYLON_STACK0_PROJECT_SLUG`.
+    /// Required: `PYLON_STACK0_API_KEY`, `PYLON_STACK0_PROJECT_SLUG`. Pylon
+    /// Cloud's own `STACK0_API_KEY` / `STACK0_PROJECT` are accepted too.
     /// Optional: `PYLON_STACK0_FOLDER`, `PYLON_STACK0_BASE_URL`.
     ///
     /// Returns `None` if any required var is missing — callers fail-fast
     /// rather than silently degrading to local storage, since the wrong
     /// backend means surprise 400s downstream.
     pub fn from_env() -> Option<Self> {
-        let api_key = std::env::var("PYLON_STACK0_API_KEY").ok()?;
-        let project_slug = std::env::var("PYLON_STACK0_PROJECT_SLUG").ok()?;
+        let api_key = stack0_env("API_KEY", "STACK0_API_KEY")?;
+        let project_slug = stack0_env("PROJECT_SLUG", "STACK0_PROJECT")?;
         let mut s = Self::new(api_key, project_slug);
         if let Ok(folder) = std::env::var("PYLON_STACK0_FOLDER") {
             s = s.with_folder(folder);
@@ -825,6 +914,136 @@ mod tests {
         assert!(not_found.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_records_and_returns_the_declared_content_type() {
+        // Serving audio as application/octet-stream makes it unplayable in
+        // mobile browsers, which do not sniff the bytes the way desktop does.
+        let dir = std::env::temp_dir().join(format!("pylon_files_ct_{}", std::process::id()));
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+
+        let stored = storage.store("episode.mp3", b"\xff\xfbaudio", "audio/mpeg").unwrap();
+        assert_eq!(storage.content_type(&stored.id).as_deref(), Some("audio/mpeg"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_records_the_content_type_declared_at_init() {
+        // The PUT that follows init carries only bytes, and confirm sees only
+        // a path, so init is the one place the type is known.
+        let dir = std::env::temp_dir().join(format!("pylon_files_ct2_{}", std::process::id()));
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+
+        let init = storage.init_upload("scene.webp", "image/webp", 9).unwrap();
+        assert_eq!(storage.content_type(&init.asset_id).as_deref(), Some("image/webp"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_content_type_is_none_when_never_declared() {
+        let dir = std::env::temp_dir().join(format!("pylon_files_ct3_{}", std::process::id()));
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+
+        assert_eq!(storage.content_type("file_never_uploaded"), None);
+        // An empty declaration is not a content type.
+        let stored = storage.store("blob.bin", b"x", "").unwrap();
+        assert_eq!(storage.content_type(&stored.id), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_content_type_sidecar_does_not_outlive_the_file() {
+        let dir = std::env::temp_dir().join(format!("pylon_files_ct4_{}", std::process::id()));
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+
+        let stored = storage.store("gone.mp3", b"bytes", "audio/mpeg").unwrap();
+        assert!(storage.delete(&stored.id).unwrap());
+        assert_eq!(storage.content_type(&stored.id), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_content_type_rejects_traversal_ids() {
+        let dir = std::env::temp_dir().join(format!("pylon_files_ct5_{}", std::process::id()));
+        let storage = LocalFileStorage::new(dir.to_str().unwrap(), "/api/files");
+
+        assert_eq!(storage.content_type("../../etc/passwd"), None);
+        storage.record_content_type("../escape", "text/plain");
+        assert!(!dir.join("..").join("escape").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stack0_accepts_the_names_pylon_cloud_provisions() {
+        // Pylon Cloud injects STACK0_API_KEY / STACK0_PROJECT into every
+        // project. Without the fallback, switching a cloud project to the
+        // stack0 backend fails boot validation with the credentials already
+        // present under another name.
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("PYLON_FILES_PROVIDER", "stack0");
+        for k in ["PYLON_STACK0_API_KEY", "PYLON_STACK0_PROJECT_SLUG"] {
+            std::env::remove_var(k);
+        }
+        std::env::set_var("STACK0_API_KEY", "sk_test");
+        std::env::set_var("STACK0_PROJECT", "peli");
+
+        assert!(validate_provider_env().is_ok());
+
+        for k in [
+            "PYLON_FILES_PROVIDER",
+            "STACK0_API_KEY",
+            "STACK0_PROJECT",
+        ] {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn stack0_still_reports_what_is_missing() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("PYLON_FILES_PROVIDER", "stack0");
+        for k in [
+            "PYLON_STACK0_API_KEY",
+            "PYLON_STACK0_PROJECT_SLUG",
+            "STACK0_API_KEY",
+            "STACK0_PROJECT",
+        ] {
+            std::env::remove_var(k);
+        }
+
+        let err = validate_provider_env().unwrap_err();
+        // Both names are named, so the operator can set whichever they have.
+        assert!(err.contains("PYLON_STACK0_API_KEY"), "{err}");
+        assert!(err.contains("STACK0_API_KEY"), "{err}");
+        assert!(err.contains("PYLON_STACK0_PROJECT_SLUG"), "{err}");
+
+        std::env::remove_var("PYLON_FILES_PROVIDER");
+    }
+
+    #[test]
+    fn stack0_prefixed_name_beats_the_cloud_alias() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("PYLON_STACK0_API_KEY", "explicit");
+        std::env::set_var("STACK0_API_KEY", "platform");
+        assert_eq!(
+            stack0_env("API_KEY", "STACK0_API_KEY").as_deref(),
+            Some("explicit"),
+        );
+        // A blank value is not a value.
+        std::env::set_var("PYLON_STACK0_API_KEY", "   ");
+        assert_eq!(
+            stack0_env("API_KEY", "STACK0_API_KEY").as_deref(),
+            Some("platform"),
+        );
+        for k in ["PYLON_STACK0_API_KEY", "STACK0_API_KEY"] {
+            std::env::remove_var(k);
+        }
     }
 
     #[test]
