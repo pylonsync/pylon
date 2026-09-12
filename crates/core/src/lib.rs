@@ -148,6 +148,32 @@ pub struct AppManifest {
     /// SSR page's `<head>`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fonts: Vec<ManifestFont>,
+    /// Environment variables the app declares it cannot run correctly
+    /// without, via the SDK's `requireEnv(name, description)` helper.
+    /// `pylon deploy` compares these against the project's secrets and
+    /// refuses to ship when one is missing.
+    ///
+    /// This exists for configuration whose absence is silent. A missing
+    /// database URL crashes on the first query; a missing public origin is
+    /// baked into a script tag, served to a customer's site, and errors
+    /// nowhere.
+    #[serde(
+        default,
+        rename = "requiredEnv",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub required_env: Vec<ManifestRequiredEnv>,
+}
+
+/// One environment variable the app cannot run correctly without.
+/// Emitted by the SDK's `requireEnv(...)` helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestRequiredEnv {
+    pub name: String,
+    /// What breaks without it. Printed when the deploy is refused, so it
+    /// should name the consequence rather than the category.
+    #[serde(default)]
+    pub description: String,
 }
 
 /// One recurring job: run `function` on the `schedule` (a 5-field cron

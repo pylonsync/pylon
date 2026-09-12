@@ -145,6 +145,17 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         }
     }
 
+    // 2b. Refuse to ship when the app declares an env var the project has
+    //     no secret for. This runs before packing so a refused deploy costs
+    //     nothing, and it exists for the failures nobody notices: a missing
+    //     database URL crashes on the first query, but a missing public
+    //     origin is baked into a script tag, served to a customer's site,
+    //     and errors nowhere.
+    if let Err(e) = check_required_env(&creds, &project_slug, json_mode) {
+        output::print_error(&e);
+        return ExitCode::Usage;
+    }
+
     // 3. Build the tarball from the current directory.
     if !json_mode {
         println!("→ Packaging project source...");
@@ -1367,8 +1378,168 @@ mod workspace_deploy_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Required environment variables
+// ---------------------------------------------------------------------------
+
+/// The declared variables that the project has no secret for.
+///
+/// Pure so the comparison is testable without a cloud round-trip. Names are
+/// compared exactly: env is case-sensitive on every platform this deploys to,
+/// and quietly matching `site_url` against `SITE_URL` would let a deploy
+/// through that then reads nothing at runtime.
+fn missing_required_env<'a>(
+    declared: &'a [pylon_kernel::ManifestRequiredEnv],
+    present: &[&str],
+) -> Vec<&'a pylon_kernel::ManifestRequiredEnv> {
+    let have: std::collections::HashSet<&str> = present.iter().copied().collect();
+    declared
+        .iter()
+        .filter(|v| !have.contains(v.name.as_str()))
+        .collect()
+}
+
+/// Compare `requiredEnv` in the manifest against the project's secrets.
+///
+/// Only a definite answer stops a deploy. No manifest, nothing declared, or
+/// a cloud call that fails all fall through: this check exists to catch a
+/// misconfiguration, and turning a flaky network into a blocked release
+/// would be a worse failure than the one it prevents.
+fn check_required_env(
+    creds: &crate::cloud_client::Credentials,
+    project_slug: &str,
+    json_mode: bool,
+) -> Result<(), String> {
+    let manifest = match crate::manifest::load_manifest("pylon.manifest.json") {
+        Ok(m) => m,
+        // Deploy validates the manifest further down and reports it properly
+        // there; saying it twice here helps nobody.
+        Err(_) => return Ok(()),
+    };
+    if manifest.required_env.is_empty() {
+        return Ok(());
+    }
+
+    #[derive(serde::Serialize)]
+    struct SlugArgs<'a> {
+        slug: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct ProjectId {
+        id: String,
+    }
+    #[derive(serde::Serialize)]
+    struct ProjectArgs<'a> {
+        #[serde(rename = "projectId")]
+        project_id: &'a str,
+    }
+    #[derive(serde::Deserialize)]
+    struct Secret {
+        key: String,
+    }
+
+    let project: ProjectId =
+        match post_json(creds, "/api/fn/getProjectForCli", &SlugArgs { slug: project_slug }) {
+            Ok(p) => p,
+            Err(_) => return Ok(()),
+        };
+    let secrets: Vec<Secret> = match post_json(
+        creds,
+        "/api/fn/listSecrets",
+        &ProjectArgs {
+            project_id: &project.id,
+        },
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(()),
+    };
+
+    let present: Vec<&str> = secrets.iter().map(|s| s.key.as_str()).collect();
+    let missing = missing_required_env(&manifest.required_env, &present);
+
+    if missing.is_empty() {
+        if !json_mode {
+            println!(
+                "  Required env: {} present.",
+                manifest.required_env.len()
+            );
+        }
+        return Ok(());
+    }
+
+    let names: Vec<&str> = missing.iter().map(|v| v.name.as_str()).collect();
+    if json_mode {
+        return Err(format!(
+            "{{\"error\":\"MISSING_REQUIRED_ENV\",\"missing\":{}}}",
+            serde_json::to_string(&names).unwrap_or_else(|_| "[]".into())
+        ));
+    }
+
+    let mut out = String::from("This app declares env it does not have:\n");
+    for v in &missing {
+        out.push_str(&format!("\n  {}", v.name));
+        if !v.description.is_empty() {
+            out.push_str(&format!("\n    {}", v.description));
+        }
+    }
+    out.push_str("\n\nSet each one, then deploy again:");
+    for name in &names {
+        out.push_str(&format!("\n  pylon secrets set {name} <value>"));
+    }
+    Err(out)
+}
+
 #[cfg(test)]
 mod tests {
+    // -----------------------------------------------------------------
+    // Required env
+    // -----------------------------------------------------------------
+
+    fn req(name: &str) -> pylon_kernel::ManifestRequiredEnv {
+        pylon_kernel::ManifestRequiredEnv {
+            name: name.into(),
+            description: String::new(),
+        }
+    }
+
+    #[test]
+    fn nothing_declared_never_blocks() {
+        assert!(missing_required_env(&[], &["SITE_URL"]).is_empty());
+    }
+
+    #[test]
+    fn a_declared_var_the_project_has_is_not_missing() {
+        let declared = vec![req("SITE_URL")];
+        assert!(missing_required_env(&declared, &["SITE_URL", "PYLON_SECRET"]).is_empty());
+    }
+
+    #[test]
+    fn a_declared_var_the_project_lacks_is_reported() {
+        let declared = vec![req("SITE_URL"), req("STRIPE_KEY")];
+        let missing = missing_required_env(&declared, &["SITE_URL"]);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].name, "STRIPE_KEY");
+    }
+
+    #[test]
+    fn every_missing_var_is_reported_not_just_the_first() {
+        // Reporting one at a time turns a single fix into three deploys.
+        let declared = vec![req("A"), req("B"), req("C")];
+        let missing = missing_required_env(&declared, &["B"]);
+        assert_eq!(
+            missing.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+            vec!["A", "C"]
+        );
+    }
+
+    #[test]
+    fn the_comparison_is_case_sensitive() {
+        // env is case-sensitive, so a near-match is still missing. Matching
+        // loosely would pass a deploy that reads nothing at runtime.
+        let declared = vec![req("SITE_URL")];
+        assert_eq!(missing_required_env(&declared, &["site_url"]).len(), 1);
+    }
+
     use super::*;
 
     fn tar_entry_names(tarball: &[u8]) -> Vec<String> {

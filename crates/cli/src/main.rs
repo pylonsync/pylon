@@ -88,6 +88,7 @@ fn run() -> ExitCode {
     }
 
     match positional.first().copied() {
+        Some("add") => commands::add::run(&args, json_mode),
         Some("admin") => commands::admin::run(&args, json_mode),
         Some("build") => commands::build::run(&args, json_mode),
         Some("cache") => commands::cache::run(&args, json_mode),
@@ -331,6 +332,25 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  -h, --help           Show this help");
             true
         }
+        "add" => {
+            println!("pylon add — wire a Stack0 suite app into this project");
+            println!();
+            println!("Usage:");
+            println!("  pylon add analytics --site-key <KEY>");
+            println!("  pylon add feedback [--project <SLUG>]");
+            println!();
+            println!("analytics writes the beacon relay (functions/ingestEvent.ts) and the");
+            println!("first-party tracker route (app/rt/track.js/route.ts), then adds the tag");
+            println!("to app/layout.tsx. Existing files are kept, never overwritten.");
+            println!();
+            println!("feedback prints the one script tag it needs — there is nothing to generate.");
+            println!();
+            println!("Options:");
+            println!("  --site-key <KEY>   Analytics site key (public; from the dashboard)");
+            println!("  --project <SLUG>   Feedback portal slug");
+            println!("  -h, --help         Show this help");
+            true
+        }
         "secrets" => {
             println!("pylon secrets — manage project secrets");
             println!();
@@ -386,7 +406,8 @@ fn print_usage() {
     println!("Commands:");
     println!("  dev [app.ts]              Start dev server with hot reload");
     println!("  start [app.ts]            Start production server (no watcher)");
-    println!("  init                      Initialize a new project");
+    println!("  init                      Initialize a new project
+  add <analytics|feedback>  Wire a Stack0 suite app into this project");
     println!("  build                     Build for production");
     println!(
         "  deploy                    Deploy to Pylon Cloud (or --target docker|fly|compose|workers|systemd|manifest)"

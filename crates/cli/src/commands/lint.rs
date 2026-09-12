@@ -457,6 +457,7 @@ mod tests {
             connections: vec![],
             crons: vec![],
             fonts: vec![],
+            required_env: vec![],
         }
     }
 

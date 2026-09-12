@@ -854,6 +854,18 @@ export interface AppManifest {
   /** Self-hosted web fonts. Fetched + self-hosted at build; preload +
    *  `@font-face` auto-injected into the SSR `<head>`. */
   fonts?: ManifestFont[];
+  /** Environment variables this app cannot run correctly without.
+   *  `pylon deploy` refuses to ship when one is missing from the
+   *  project's secrets. */
+  requiredEnv?: ManifestRequiredEnv[];
+}
+
+/** One environment variable the app declares it needs. */
+export interface ManifestRequiredEnv {
+  name: string;
+  /** What breaks without it. Printed by `pylon deploy` when it is missing,
+   *  so write the consequence, not the category. */
+  description: string;
 }
 
 /**
@@ -2099,6 +2111,18 @@ export function buildManifest(options: {
   connections?: ManifestConnection[];
   crons?: ManifestCron[];
   fonts?: ManifestFont[];
+  /** Environment variables this app cannot run correctly without. Declare
+   *  the ones whose absence is silent — a public origin baked into a script,
+   *  a webhook secret, an API base URL. `pylon deploy` checks them against
+   *  the project's secrets and refuses to ship when one is missing.
+   *
+   *  ```ts
+   *  requiredEnv: [
+   *    requireEnv("SITE_URL", "this app's public origin; baked into /widget.js"),
+   *  ]
+   *  ```
+   */
+  requiredEnv?: ManifestRequiredEnv[];
   /** Set by `discoverFunctions()` (spread its result into this call).
    *  When true, the framework's AgentRun/AgentMessage entities and
    *  their owner-scoping policies are appended to the manifest —
@@ -2179,7 +2203,32 @@ export function buildManifest(options: {
     ...(options.fonts && options.fonts.length > 0
       ? { fonts: options.fonts }
       : {}),
+    ...(options.requiredEnv && options.requiredEnv.length > 0
+      ? { requiredEnv: options.requiredEnv }
+      : {}),
   };
+}
+
+/**
+ * Declare an environment variable the app cannot run correctly without.
+ *
+ * This exists for the failures that are invisible. A missing database URL
+ * crashes on the first query and someone notices in a minute; a missing
+ * public origin gets baked into a script tag, served to a customer's
+ * website, and nothing errors anywhere — the data just never arrives.
+ *
+ * `pylon deploy` reads these off the manifest, compares them against the
+ * project's secrets, and refuses to ship when one is missing.
+ *
+ * Write the consequence in `description`, not the category: "the public
+ * origin baked into /widget.js" tells the person reading the failure what
+ * breaks, and "site URL" does not.
+ */
+export function requireEnv(
+  name: string,
+  description: string,
+): ManifestRequiredEnv {
+  return { name, description };
 }
 
 // ---------------------------------------------------------------------------

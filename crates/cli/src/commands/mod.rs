@@ -1,3 +1,4 @@
+pub mod add;
 pub mod admin;
 pub mod args;
 pub mod backup;
