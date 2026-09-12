@@ -169,7 +169,14 @@ jobs:
       - name: cargo test (Windows — skips ignored)
         if: matrix.os == 'windows-latest'
         run: cargo test --workspace --all-targets -- --test-threads=1
-      - run: cargo test --workspace --doc
+      # Linux only. `--all-targets` excludes doctests, so this is a SECOND
+      # full compilation of the workspace — and on Windows that pass was
+      # taking longer than everything else in the matrix combined. Doc
+      # examples are plain Rust with no platform-specific paths, so compiling
+      # them three times buys nothing.
+      - name: cargo test --doc (Linux — doc examples are platform agnostic)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test --workspace --doc
       # The Windows installer has no other gate: it is not exercised by any
       # build, and a syntax error in it only shows up when a user pipes it
       # into their shell. Parse it here.
