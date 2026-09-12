@@ -166,7 +166,9 @@ fn manifest() -> AppManifest {
 
 fn available_port() -> u16 {
     // One 1000-port lane per test binary (see fn_sse_content_negotiation).
-    static NEXT: AtomicU16 = AtomicU16::new(28_000);
+    // Must stay below 28_000: integration.rs picks a random base in
+    // [28_000, 31_000), so a fixed lane up there is periodically stomped.
+    static NEXT: AtomicU16 = AtomicU16::new(19_000);
     for _ in 0..200 {
         let base = NEXT.fetch_add(4, Ordering::Relaxed);
         let ok = (0..4)
