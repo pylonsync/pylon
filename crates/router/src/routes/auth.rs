@@ -1335,9 +1335,18 @@ pub(crate) fn handle(
                         }
                         id
                     }
-                    _ => ctx
-                        .store
-                        .insert(
+                    _ => {
+                        // A failed insert used to fall back to the email
+                        // address as the user id. That mints a session for a
+                        // user row that does not exist: every
+                        // `auth.userId == data.userId` policy then compares
+                        // against an email, account deletion cannot find the
+                        // row, and the address leaks into logs and into any
+                        // billing provider keyed on the user id. The usual
+                        // cause is a User entity whose field types do not
+                        // match what is stamped here, which is exactly the
+                        // thing a silent fallback hides.
+                        match ctx.store.insert(
                             &ctx.store.manifest().auth.user.entity,
                             &serde_json::json!({
                                 "email": email,
@@ -1345,8 +1354,25 @@ pub(crate) fn handle(
                                 "emailVerified": now,
                                 "createdAt": now,
                             }),
-                        )
-                        .unwrap_or_else(|_| email.to_string()),
+                        ) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                tracing::error!(
+                                    "[auth] magic-code login: could not create the {} row for {}: {}",
+                                    ctx.store.manifest().auth.user.entity,
+                                    email,
+                                    e
+                                );
+                                return Some((
+                                    500,
+                                    json_error(
+                                        "USER_CREATE_FAILED",
+                                        "Could not create the account.",
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                 };
                 let session = create_session_with_device(ctx, user_id.clone());
                 ctx.maybe_set_session_cookie(&session.token);
