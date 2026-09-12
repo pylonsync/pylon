@@ -2280,6 +2280,7 @@ fn resolve_design_viewer_auth(
         is_admin: false,
         tenant_id: None,
         roles: vec![],
+        is_guest: false,
     };
     if viewer.is_empty() || viewer.eq_ignore_ascii_case("anon") {
         return anonymous;
@@ -2312,6 +2313,7 @@ fn resolve_design_viewer_auth(
         is_admin: ctx.is_admin,
         tenant_id: ctx.tenant_id.clone(),
         roles: ctx.roles.clone(),
+        is_guest: ctx.is_guest,
     }
 }
 
@@ -4855,6 +4857,7 @@ fn resolve_request_auth(
         is_admin: false,
         tenant_id: None,
         roles: vec![],
+        is_guest: false,
     };
     let (Some(store), Some(cookie_cfg)) = (cfg.session_store.as_ref(), cfg.cookie_config.as_ref())
     else {
@@ -4884,6 +4887,7 @@ fn resolve_request_auth(
         is_admin: ctx.is_admin,
         tenant_id: ctx.tenant_id.clone(),
         roles: ctx.roles.clone(),
+        is_guest: ctx.is_guest,
     }
 }
 

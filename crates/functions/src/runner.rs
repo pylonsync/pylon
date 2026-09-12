@@ -121,6 +121,11 @@ pub struct ScheduleCallerInfo {
     /// Active tenant of the scheduling caller, if any. Same propagation
     /// rationale as `caller_user_id`.
     pub caller_tenant_id: Option<String>,
+    /// Whether the scheduling caller was an anonymous guest session.
+    /// Propagated so the job runs as a guest too — dropping it would let
+    /// a guest schedule work that executes with the standing of a real
+    /// account.
+    pub caller_is_guest: bool,
 }
 
 /// Callback invoked when a function calls `ctx.scheduler.runAfter/runAt`.
@@ -1414,6 +1419,7 @@ impl FnRunner {
         let mut caller_is_admin = auth.is_admin;
         let caller_user_id = auth.user_id.clone();
         let caller_tenant_id = auth.tenant_id.clone();
+        let caller_is_guest = auth.is_guest;
         // Per-function `timeout` override wins over the global call timeout, so a
         // function declared long-running (heavy render, big batch) gets the time
         // it needs instead of being cancelled at the 30s default.
@@ -1590,6 +1596,7 @@ impl FnRunner {
                         caller_is_admin,
                         caller_user_id: caller_user_id.clone(),
                         caller_tenant_id: caller_tenant_id.clone(),
+                        caller_is_guest,
                     };
                     let hook_result: Result<String, String> = {
                         let hook = self.schedule_hook.lock().unwrap();
@@ -2998,6 +3005,7 @@ mod tests {
             is_admin: false,
             tenant_id: None,
             roles: vec![],
+            is_guest: false,
         }
     }
 
@@ -3007,6 +3015,7 @@ mod tests {
             is_admin: true,
             tenant_id: None,
             roles: vec![],
+            is_guest: false,
         }
     }
 
@@ -3017,6 +3026,7 @@ mod tests {
             is_admin: false,
             tenant_id: Some("tenant-7".into()),
             roles: vec!["editor".into(), "reviewer".into()],
+            is_guest: false,
         };
 
         let snapshot = current_auth_snapshot(&auth, false);

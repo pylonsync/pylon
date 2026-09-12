@@ -52,6 +52,17 @@ export interface AuthInfo<R extends AuthRequirement = "optional"> {
    *  `ctx.requireMember` for an authoritative membership lookup. */
   roles: string[];
   /**
+   * True for an anonymous guest session. `userId` is set for these — a
+   * stable id, not an account — so `userId != null` alone does not mean
+   * the caller is signed in. `auth: "user"` and `auth: "admin"` handlers
+   * never see a guest; `auth: "public"` and `auth: "guest"` do.
+   *
+   * Check it wherever the answer depends on the caller having an account
+   * they can sign back into: entitlements, purchases, anything keyed to
+   * identity rather than to a device.
+   */
+  isGuest: boolean;
+  /**
    * Promote the call's auth context after the handler has done its
    * own authentication check (HMAC signature verification on a
    * webhook, JWT validation, custom token check). Used by webhook

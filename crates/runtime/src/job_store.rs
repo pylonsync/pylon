@@ -403,6 +403,7 @@ mod tests {
             user_id: Some("u-alice".into()),
             is_admin: true,
             tenant_id: Some("org_acme".into()),
+            is_guest: false,
         });
         store.save(&job).unwrap();
 

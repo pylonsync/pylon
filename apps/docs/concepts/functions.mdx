@@ -50,6 +50,7 @@ ctx.auth.userId   // string (when auth: "user" | "admin") OR string | null (when
 ctx.auth.isAdmin  // boolean
 ctx.auth.tenantId // string | null  (selected org)
 ctx.auth.roles    // string[] (exact active-org/session roles)
+ctx.auth.isGuest  // boolean — true for an anonymous guest session
 ctx.auth.elevate({ admin: true, reason: "..." })  // promote AFTER verifying a webhook/HMAC
 // No ctx.auth.email on the handler ctx — fetch the user row for email:
 //   const u = await ctx.db.get("User", ctx.auth.userId)
@@ -127,6 +128,8 @@ Four modes:
 | `"admin"` | `ctx.auth.isAdmin === true`. | Ops endpoints, dangerous helpers exposed via `/api/fn/...`. |
 
 When the mode doesn't match the caller, the request is rejected before the handler runs: `401 AUTH_REQUIRED` for `"user"` / `"guest"`, `403 FORBIDDEN` for `"admin"`. Admin sessions bypass every mode (same convention as policies).
+
+A guest session carries a `userId` — a stable anonymous id, not an account — so in a `"public"` or `"guest"` handler, `ctx.auth.userId != null` does not mean the caller is signed in. Check `ctx.auth.isGuest` wherever the answer depends on the caller having an account they can sign back into: entitlements, purchases, anything keyed to identity rather than to a device.
 
 ```ts
 // Public endpoint — has to be explicit, never the default.

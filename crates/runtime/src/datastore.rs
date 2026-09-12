@@ -2931,14 +2931,20 @@ impl<'a> DataStore for TxStore<'a> {
 /// shape) but the plugin chain wants the richer `AuthContext`. We
 /// rebuild here at the mutation-tx boundary so plugins see the
 /// caller's identity / admin / tenant accurately. Loses fields the
-/// runner never had (api_key_id, roles, is_guest, is_trusted_device)
-/// — none of which TenantScopePlugin reads, but if a future plugin
-/// needs them we'd need to extend the runner protocol.
+/// runner never had (api_key_id, is_trusted_device) — neither of which
+/// TenantScopePlugin reads, but if a future plugin needs them we'd need
+/// to extend the runner protocol.
 fn auth_info_to_context(auth: &pylon_functions::protocol::AuthInfo) -> pylon_auth::AuthContext {
     let mut ctx = if auth.is_admin {
         pylon_auth::AuthContext::admin()
     } else if let Some(uid) = &auth.user_id {
-        pylon_auth::AuthContext::authenticated(uid.clone())
+        if auth.is_guest {
+            // `authenticated()` would make `is_authenticated()` true for a
+            // guest, which is the opposite of what a guest session is.
+            pylon_auth::AuthContext::guest(uid.clone())
+        } else {
+            pylon_auth::AuthContext::authenticated(uid.clone())
+        }
     } else {
         pylon_auth::AuthContext::anonymous()
     };
@@ -4872,7 +4878,7 @@ fn policy_auth_ctx(auth: &pylon_functions::protocol::AuthInfo) -> pylon_auth::Au
     pylon_auth::AuthContext {
         user_id: auth.user_id.clone(),
         is_admin: auth.is_admin,
-        is_guest: false,
+        is_guest: auth.is_guest,
         roles: auth.roles.clone(),
         tenant_id: auth.tenant_id.clone(),
         api_key_id: None,
@@ -5350,6 +5356,7 @@ fn install_schedule_hook(
                 user_id: caller.caller_user_id.clone(),
                 is_admin: caller.caller_is_admin,
                 tenant_id: caller.caller_tenant_id.clone(),
+                is_guest: caller.caller_is_guest,
             };
 
             // Check the thread-local first. If we're inside a mutation, the
@@ -5937,12 +5944,14 @@ fn register_function_job_handlers(ops: &Arc<FnOpsImpl>, job_queue: &Arc<crate::j
                         // user row at execution time. Job schema
                         // extension to carry roles is a follow-up.
                         roles: Vec::new(),
+                        is_guest: a.is_guest,
                     },
                     None => FnAuth {
                         user_id: None,
                         is_admin: false,
                         tenant_id: None,
                         roles: Vec::new(),
+                        is_guest: false,
                     },
                 };
                 match ops.call(&fn_name, job.payload.clone(), auth, None, None, None) {
@@ -6026,6 +6035,7 @@ pub(crate) fn register_app_crons(
                 is_admin: false,
                 tenant_id: None,
                 roles: Vec::new(),
+                is_guest: false,
             };
             match ops.call(&fn_name, serde_json::json!({}), auth, None, None, None) {
                 Ok(_) => crate::jobs::JobResult::Success,
@@ -8600,6 +8610,55 @@ mod sqlite_transact_tx_safety_tests {
 }
 
 #[cfg(test)]
+mod auth_info_guest_tests {
+    //! A guest session carries a `user_id`, so every conversion out of
+    //! `AuthInfo` has to keep the flag or the guest is promoted to an
+    //! account on the way through.
+
+    use super::{auth_info_to_context, policy_auth_ctx};
+    use pylon_functions::protocol::AuthInfo;
+
+    fn guest() -> AuthInfo {
+        AuthInfo {
+            user_id: Some("guest_a1b2".into()),
+            is_admin: false,
+            tenant_id: None,
+            roles: Vec::new(),
+            is_guest: true,
+        }
+    }
+
+    fn account() -> AuthInfo {
+        AuthInfo {
+            user_id: Some("u1".into()),
+            is_admin: false,
+            tenant_id: None,
+            roles: Vec::new(),
+            is_guest: false,
+        }
+    }
+
+    #[test]
+    fn plugin_chain_sees_a_guest_as_a_guest() {
+        let ctx = auth_info_to_context(&guest());
+        assert!(ctx.is_guest);
+        assert!(!ctx.is_authenticated());
+        assert_eq!(ctx.user_id.as_deref(), Some("guest_a1b2"));
+
+        let ctx = auth_info_to_context(&account());
+        assert!(!ctx.is_guest);
+        assert!(ctx.is_authenticated());
+    }
+
+    #[test]
+    fn policies_see_a_guest_as_a_guest() {
+        assert!(policy_auth_ctx(&guest()).is_guest);
+        assert!(!policy_auth_ctx(&guest()).is_authenticated());
+        assert!(!policy_auth_ctx(&account()).is_guest);
+    }
+}
+
+#[cfg(test)]
 mod ssr_client_read_fence_tests {
     //! The client-read fence (`PolicyGateAdapter::filter_client_read`) that SSR
     //! `serverData.*` reads run through. It must match the entity/sync read
@@ -8663,6 +8722,7 @@ mod ssr_client_read_fence_tests {
             is_admin: false,
             tenant_id: None,
             roles: vec![],
+            is_guest: false,
         }
     }
 

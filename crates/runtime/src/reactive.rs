@@ -742,6 +742,7 @@ mod tests {
             is_admin: false,
             tenant_id: Some("t1".into()),
             roles: Vec::new(),
+            is_guest: false,
         }
     }
 

@@ -74,6 +74,11 @@ pub struct JobAuth {
     pub is_admin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    /// The scheduling caller was an anonymous guest session. Defaults to
+    /// false, so a job persisted before this field existed deserializes
+    /// with the behaviour it was enqueued under.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_guest: bool,
 }
 
 /// A job in the queue.
@@ -1170,6 +1175,7 @@ mod tests {
             user_id: Some("u-alice".into()),
             is_admin: true,
             tenant_id: Some("org_acme".into()),
+            is_guest: false,
         };
         let id = q
             .try_enqueue_with_auth(

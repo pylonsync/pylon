@@ -15,7 +15,29 @@ describe("function auth normalization", () => {
       isAdmin: false,
       tenantId: "org_1",
       roles: ["reviewer"],
+      isGuest: false,
     });
+  });
+
+  test("a guest session is marked as one", () => {
+    // The guest id is a real string, so a handler checking only
+    // `userId != null` cannot tell it from an account without this flag.
+    expect(
+      normalizeAuthClaims({ user_id: "guest_a1b2", is_guest: true }),
+    ).toEqual({
+      userId: "guest_a1b2",
+      isAdmin: false,
+      tenantId: null,
+      roles: [],
+      isGuest: true,
+    });
+    expect(normalizeAuthClaims({ userId: "guest_a1b2", isGuest: true }).isGuest).toBe(
+      true,
+    );
+  });
+
+  test("a payload from before the field existed reads as not-a-guest", () => {
+    expect(normalizeAuthClaims({ user_id: "u1" }).isGuest).toBe(false);
   });
 
   test("defaults missing roles to an empty array and drops non-strings", () => {

@@ -990,6 +990,16 @@ pub struct AuthInfo {
     pub tenant_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub roles: Vec<String>,
+    /// True for an anonymous guest session. `user_id` is set for these —
+    /// a stable id, not an account — so a handler that only checks
+    /// `user_id != null` treats a guest as a signed-in user. Functions
+    /// declaring `auth: "user"` never see one (the runtime rejects it
+    /// first), but `auth: "public"` and `auth: "guest"` handlers do, and
+    /// entitlement checks need to tell the two apart.
+    ///
+    /// Defaults to false so a runner from before this field still parses.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_guest: bool,
 }
 
 /// Error info in protocol messages.
@@ -1002,6 +1012,42 @@ pub struct ErrorInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `is_guest` is the only thing separating an anonymous guest session
+    /// from a real account on the wire — both carry a `user_id`. If it
+    /// stops crossing the pipe, every `auth: "public"` handler that gates
+    /// on having an account silently starts trusting guests.
+    #[test]
+    fn guest_flag_crosses_the_wire() {
+        let guest = AuthInfo {
+            user_id: Some("guest_a1b2".into()),
+            is_admin: false,
+            tenant_id: None,
+            roles: Vec::new(),
+            is_guest: true,
+        };
+        let json = serde_json::to_string(&guest).expect("serialize");
+        assert!(json.contains("\"is_guest\":true"), "{json}");
+        let back: AuthInfo = serde_json::from_str(&json).expect("deserialize");
+        assert!(back.is_guest);
+
+        // Absent means not a guest, so a runner from before the field
+        // existed keeps the behaviour it was built with.
+        let old: AuthInfo =
+            serde_json::from_str(r#"{"user_id":"u1","is_admin":false}"#).expect("deserialize");
+        assert!(!old.is_guest);
+
+        // And a real account does not pay for the field on every call.
+        let account = AuthInfo {
+            user_id: Some("u1".into()),
+            is_admin: false,
+            tenant_id: None,
+            roles: Vec::new(),
+            is_guest: false,
+        };
+        let json = serde_json::to_string(&account).expect("serialize");
+        assert!(!json.contains("is_guest"), "{json}");
+    }
 
     /// The streaming LLM + room surfaces are wire-format contracts with
     /// the TS runtime. A rename on either side silently breaks
@@ -1118,6 +1164,7 @@ mod tests {
                 is_admin: false,
                 tenant_id: None,
                 roles: Vec::new(),
+                is_guest: false,
             },
         );
         let json = serde_json::to_string(&msg).unwrap();

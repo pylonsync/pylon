@@ -6965,6 +6965,8 @@ fn run_delete_account_hook(ctx: &RouterContext, user_id: &str) -> Result<(), (u1
         is_admin: ctx.auth_ctx.is_admin,
         tenant_id: ctx.auth_ctx.tenant_id.clone(),
         roles: ctx.auth_ctx.roles.clone(),
+        // Deleting an account is only reachable for a real one.
+        is_guest: false,
     };
     let args = serde_json::json!({ "userId": user_id });
     match fn_ops.call(fn_name, args, auth, None, None, None) {

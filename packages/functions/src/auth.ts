@@ -15,5 +15,6 @@ export function normalizeAuthClaims(
     roles: Array.isArray(raw.roles)
       ? raw.roles.filter((role): role is string => typeof role === "string")
       : [],
+    isGuest: Boolean(raw.isGuest ?? raw.is_guest),
   };
 }

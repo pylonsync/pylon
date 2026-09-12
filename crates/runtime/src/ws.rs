@@ -2446,6 +2446,7 @@ fn handle_reactive_control(
                 is_admin: auth_ctx.is_admin,
                 tenant_id: auth_ctx.tenant_id.clone(),
                 roles: auth_ctx.roles.clone(),
+                is_guest: auth_ctx.is_guest,
             };
             // Dispatch the initial run to the re-runner thread —
             // the WS reader thread MUST NOT block on fn_ops.call.

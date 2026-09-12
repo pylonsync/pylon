@@ -2586,6 +2586,7 @@ fn start_server(
                     is_admin: true,
                     tenant_id: None,
                     roles: Vec::new(),
+                    is_guest: false,
                 };
                 ops_for_wf
                     .call(
@@ -6425,6 +6426,7 @@ fn start_server(
                     is_admin: auth_ctx.is_admin,
                     tenant_id: auth_ctx.tenant_id.clone(),
                     roles: auth_ctx.roles.clone(),
+                    is_guest: auth_ctx.is_guest,
                 };
 
                 // The Accept header alone does not pick the wire format.
