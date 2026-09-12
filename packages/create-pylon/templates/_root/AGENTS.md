@@ -75,9 +75,39 @@ this pass before the user has to ask.
 | Call a function | `pylon fn <name> key=value` |
 | Health snapshot | `pylon status` |
 | Build for prod | `pylon build` |
+| Wire in Stack0 Analytics or Feedback | `pylon add analytics --site-key <KEY>` \| `pylon add feedback` |
 | Deploy (Pylon Cloud by default) | `pylon deploy` |
 | Look up an error code | `pylon explain <CODE>` |
 
 `--json` works on every command for machine-readable output. Prefer one-shot/agent-safe flags (`pylon logs --limit N`, not a blocking `--follow`).
+
+## Stack0 Analytics and Feedback
+
+Neither is a package you install. Both are hosted apps you point at over HTTP, and neither is wired into this template — run `pylon add` when the product needs one.
+
+**Analytics** — `pylon add analytics --site-key <KEY>`. Do NOT hand-write this: the relay is boilerplate whose every mistake is silent.
+
+- The relay is a FUNCTION, not a route. `/api/fn/*` is Pylon's own namespace, so `app/api/fn/ingestEvent/route.ts` is never matched, and there is no `next.config.js` here to rewrite in. Copying the Next.js recipe gets you a file that is never called.
+- It must be an `action` (only actions get `ctx.request`) and it must forward `ctx.request.rawBody`, not `args` — the beacon carries fields the arg list does not declare.
+- Skipping the relay and pointing the tag straight at the Analytics host does not error either: its CORS allowlist refuses the browser's preflight, which looks exactly like nobody visiting the site.
+- `stack0Analytics()` is a browser global and Pylon renders on the server. Call it from an event handler or effect, never during a render.
+
+**Feedback** — one tag in `app/layout.tsx`; `pylon add feedback` prints it. Reading a public board takes no credential (`POST /api/fn/portalView { slug }`); writing on someone's behalf takes a guest session (`POST /api/auth/guest`, then a bearer token), not an API key. There is no API key and no MCP server in Feedback.
+
+Full API for both: https://www.stack0.dev/docs/sdk/analytics and /docs/sdk/feedback
+
+## Declare the env you cannot run without
+
+`requiredEnv` in `buildManifest({...})` makes `pylon deploy` refuse to ship when the project is missing a secret:
+
+```ts
+import { requireEnv } from "@pylonsync/sdk";
+
+requiredEnv: [
+  requireEnv("SITE_URL", "this app's public origin; baked into every absolute link it serves"),
+],
+```
+
+Declare the variables whose absence is SILENT — a public origin, a webhook secret, an API base URL. A missing database URL crashes on the first query and someone notices in a minute. A missing public origin gets baked into a script tag, served to a customer's website, and errors nowhere.
 
 For full signatures, env vars, the complete CLI, and SSR/client/server-primitive details: **https://docs.pylonsync.com/llms-full.txt**.

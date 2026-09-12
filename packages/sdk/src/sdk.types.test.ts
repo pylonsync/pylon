@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { auth, buildManifest, entity, field } from "./index";
+import { auth, buildManifest, entity, field, requireEnv } from "./index";
 
 /**
  * The shape callers actually hit.
@@ -108,4 +108,36 @@ describe("auth() account deletion hook", () => {
     expect(auth({ onDeleteAccount: "purgeMyData" }).on_delete_account).toBe("purgeMyData");
     expect("on_delete_account" in auth({})).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// requiredEnv
+// ---------------------------------------------------------------------------
+
+test("requiredEnv only appears in the manifest when something is declared", () => {
+  const bare = buildManifest({
+    name: "app",
+    version: "1.0.0",
+    entities: [],
+    routes: [],
+  });
+  // An empty key in every manifest is noise the Rust side then has to ignore.
+  expect("requiredEnv" in bare).toBe(false);
+
+  const declared = buildManifest({
+    name: "app",
+    version: "1.0.0",
+    entities: [],
+    routes: [],
+    requiredEnv: [requireEnv("SITE_URL", "the public origin")],
+  });
+  expect(declared.requiredEnv).toEqual([
+    { name: "SITE_URL", description: "the public origin" },
+  ]);
+});
+
+test("requireEnv keeps the description, because that is what the failure prints", () => {
+  const v = requireEnv("STRIPE_WEBHOOK_SECRET", "payments post here and are dropped without it");
+  expect(v.name).toBe("STRIPE_WEBHOOK_SECRET");
+  expect(v.description).toContain("dropped");
 });
