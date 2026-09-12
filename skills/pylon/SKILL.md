@@ -1179,6 +1179,26 @@ Managed Pylon at `cloud.stack0.dev`. Same binary, same APIs.
 - Includes: managed Postgres, TLS, magic-link email, OAuth (your creds), file storage, Studio, logs/metrics
 - Pricing: usage-based, no monthly minimums; free tier covers small projects
 
+### Stack0 Analytics — the relay is a FUNCTION, not a route
+Hosted at `analytics.stack0.dev`. No package to install; a script tag plus one HTTP endpoint. Full code: https://www.stack0.dev/docs/sdk/analytics
+
+The bare tag (`<script defer src="https://analytics.stack0.dev/track.js" data-site="SITE_KEY">`) only works on a site with no server of your own. **Anywhere you control the server — which includes every Pylon app — relay through your own origin**, or the Analytics CORS allowlist refuses the browser's preflight and the install looks exactly like "no traffic yet".
+
+Do NOT reach for the Next.js recipe. `/api/fn/*` is Pylon's own namespace, so `app/api/fn/ingestEvent/route.ts` is never matched, and there is no `next.config.js` to rewrite in.
+- `functions/ingestEvent.ts` — an `action` with `auth: "public"` that forwards `ctx.request.rawBody` to `https://analytics.stack0.dev/api/fn/ingestEvent` and returns the upstream JSON **verbatim** (`track.js` reads `visitorId` off it). Only actions get `ctx.request`. Forward `rawBody`, not `args` — the beacon carries fields your arg list does not declare. Copy `user-agent`, `x-forwarded-for`, and your edge's geo headers (`cf-ip*` or `x-vercel-ip-*`) or every visitor lands at their country's centre.
+- Name it `ingestEvent` and `track.js` derives the path itself; any other name needs `data-endpoint`, whose value must contain `/api/fn/` or it is read as an origin.
+- `app/rt/track.js/route.ts` — a `RawRouteHandler` that fetches and caches `track.js`, so an ad blocker that knows the Analytics host does not take it out. Load it as `<script defer src="/rt/track.js" data-site="SITE_KEY" />` from `app/layout.tsx`.
+- `stack0Analytics()` is a **browser global** and Pylon renders on the server: call it from an event handler or effect, never during a render. A no-JS `<Form>` + route handler has no client code left to run, so POST the event from the handler.
+- Never send `revenueCents`, `currency` or `customerId` through `ingestEvent` — the site key is public and cannot authenticate money. Revenue arrives by Stripe webhook to `/api/fn/stripeRevenue`.
+
+### Stack0 Feedback — a script tag and a guest session
+Hosted at `feedback.stack0.app`. Boards, votes, comments, roadmaps, changelogs. Full API: https://www.stack0.dev/docs/sdk/feedback
+
+- Embed: `<script src="https://feedback.stack0.app/widget.js" data-project="SLUG" defer></script>`, straight into `app/layout.tsx`. Pylon server-renders it, so you write no client code.
+- **There is no API key and no MCP server.** Public reads take no credential: POST JSON to `/api/fn/portalView` `{ slug }`, `portalPostView`, `portalRoadmapView`, `portalChangelogView`, `similarPosts`. An unknown, unpublished or archived portal returns `null`.
+- Writing on someone's behalf takes a session, not a key: `POST /api/auth/guest` returns `{ token }`, then send `authorization: Bearer <token>` to `submitPost`, `toggleVote`, `addComment`. Call `similarPosts` first and vote on a match rather than filing a duplicate.
+- Reading your own board from your own app is a plain `fetch` inside a normal query.
+
 ### Compare-vs-X pages
 If the user asks "Pylon vs Convex/Supabase/Firebase/Colyseus/Playroom/Nakama", point them at `/compare/<vendor>` in the docs — each page has a structured comparison with sources.
 
