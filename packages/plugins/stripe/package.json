@@ -1,26 +1,37 @@
 {
-  "name": "@pylonsync/stripe",
-  "publishConfig": {
-    "access": "public"
-  },
-  "version": "0.11.0",
-  "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
-  "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit",
-    "check": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@pylonsync/sdk": "workspace:*",
-    "@pylonsync/functions": "workspace:*"
-  },
-  "peerDependencies": {
-    "bun-types": "*"
-  },
-  "peerDependenciesMeta": {
-    "bun-types": {
-      "optional": true
-    }
-  }
+	"name": "@pylonsync/stripe",
+	"publishConfig": {
+		"access": "public"
+	},
+	"version": "0.11.0",
+	"type": "module",
+	"main": "src/index.ts",
+	"types": "src/index.ts",
+	"scripts": {
+		"build": "tsc -p tsconfig.json --noEmit",
+		"check": "tsc -p tsconfig.json --noEmit"
+	},
+	"dependencies": {
+		"@pylonsync/sdk": "workspace:*",
+		"@pylonsync/functions": "workspace:*"
+	},
+	"peerDependencies": {
+		"bun-types": "*"
+	},
+	"peerDependenciesMeta": {
+		"bun-types": {
+			"optional": true
+		}
+	},
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"default": "./src/index.ts"
+		},
+		"./entitlement": {
+			"types": "./src/entitlement.ts",
+			"default": "./src/entitlement.ts"
+		},
+		"./package.json": "./package.json"
+	}
 }

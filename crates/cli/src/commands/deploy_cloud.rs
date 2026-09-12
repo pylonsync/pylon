@@ -1438,11 +1438,14 @@ fn check_required_env(
         key: String,
     }
 
-    let project: ProjectId =
-        match post_json(creds, "/api/fn/getProjectForCli", &SlugArgs { slug: project_slug }) {
-            Ok(p) => p,
-            Err(_) => return Ok(()),
-        };
+    let project: ProjectId = match post_json(
+        creds,
+        "/api/fn/getProjectForCli",
+        &SlugArgs { slug: project_slug },
+    ) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
     let secrets: Vec<Secret> = match post_json(
         creds,
         "/api/fn/listSecrets",
@@ -1459,10 +1462,7 @@ fn check_required_env(
 
     if missing.is_empty() {
         if !json_mode {
-            println!(
-                "  Required env: {} present.",
-                manifest.required_env.len()
-            );
+            println!("  Required env: {} present.", manifest.required_env.len());
         }
         return Ok(());
     }

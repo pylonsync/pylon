@@ -96,7 +96,9 @@ fn add_analytics(args: &[String], json_mode: bool) -> ExitCode {
         Some(k) if !k.trim().is_empty() => k.trim().to_string(),
         _ => {
             output::print_error("A site key is required.");
-            eprintln!("  Add a site at {ANALYTICS_ORIGIN} — the key is public and goes in the tag.");
+            eprintln!(
+                "  Add a site at {ANALYTICS_ORIGIN} — the key is public and goes in the tag."
+            );
             eprintln!();
             eprintln!("  pylon add analytics --site-key <KEY>");
             return ExitCode::Usage;
@@ -108,11 +110,12 @@ fn add_analytics(args: &[String], json_mode: bool) -> ExitCode {
     let mut wrote: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
-    for (path, body) in [
-        (&relay, relay_source()),
-        (&tracker, tracker_source()),
-    ] {
-        let rel = path.strip_prefix(&cwd).unwrap_or(path).display().to_string();
+    for (path, body) in [(&relay, relay_source()), (&tracker, tracker_source())] {
+        let rel = path
+            .strip_prefix(&cwd)
+            .unwrap_or(path)
+            .display()
+            .to_string();
         if path.exists() {
             // Never clobber. Someone who already has a relay has probably
             // changed it, and a generator that eats edits is worse than one
@@ -338,7 +341,12 @@ mod tests {
 
     #[test]
     fn flags_parse_in_both_forms() {
-        let split = vec!["add".into(), "analytics".into(), "--site-key".into(), "abc".into()];
+        let split = vec![
+            "add".into(),
+            "analytics".into(),
+            "--site-key".into(),
+            "abc".into(),
+        ];
         assert_eq!(flag_value(&split, "--site-key"), Some("abc"));
         let joined = vec!["add".into(), "analytics".into(), "--site-key=xyz".into()];
         assert_eq!(flag_value(&joined, "--site-key"), Some("xyz"));
@@ -357,7 +365,10 @@ mod tests {
         let f = dir.join("layout.tsx");
         std::fs::write(&f, layout("        {children}\n")).unwrap();
 
-        assert!(try_insert_tag(&f, "<script defer src=\"/rt/track.js\" data-site=\"k\" />"));
+        assert!(try_insert_tag(
+            &f,
+            "<script defer src=\"/rt/track.js\" data-site=\"k\" />"
+        ));
         let out = std::fs::read_to_string(&f).unwrap();
         let tag_at = out.find("/rt/track.js").unwrap();
         let body_at = out.find("</body>").unwrap();

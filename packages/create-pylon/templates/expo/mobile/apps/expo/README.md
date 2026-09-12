@@ -13,7 +13,7 @@ app/(tabs)/index           the Notes list (free cap enforced server-side)
 app/(tabs)/settings        account, subscription, legal, delete account
 src/session.tsx            boot + state machine
 src/purchases.ts           RevenueCat wrapper, safe in Expo Go
-src/entitlements.ts        usePro() from the synced RcEntitlement rows
+src/entitlements.ts        usePro() from the synced rows of either store
 src/analytics.ts           funnel events; wire to your SDK in one place
 src/links.ts               privacy / terms / support URLs, served by apps/api
 STORE.md                   the submission checklist

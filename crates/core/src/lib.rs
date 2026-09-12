@@ -157,11 +157,7 @@ pub struct AppManifest {
     /// database URL crashes on the first query; a missing public origin is
     /// baked into a script tag, served to a customer's site, and errors
     /// nowhere.
-    #[serde(
-        default,
-        rename = "requiredEnv",
-        skip_serializing_if = "Vec::is_empty"
-    )]
+    #[serde(default, rename = "requiredEnv", skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<ManifestRequiredEnv>,
 }
 

@@ -406,8 +406,10 @@ fn print_usage() {
     println!("Commands:");
     println!("  dev [app.ts]              Start dev server with hot reload");
     println!("  start [app.ts]            Start production server (no watcher)");
-    println!("  init                      Initialize a new project
-  add <analytics|feedback>  Wire a Stack0 suite app into this project");
+    println!(
+        "  init                      Initialize a new project
+  add <analytics|feedback>  Wire a Stack0 suite app into this project"
+    );
     println!("  build                     Build for production");
     println!(
         "  deploy                    Deploy to Pylon Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
