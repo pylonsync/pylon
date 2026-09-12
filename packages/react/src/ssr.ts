@@ -29,6 +29,13 @@ export interface PageAuth {
   tenant_id: string | null;
   /** Role slugs granted to the session. */
   roles: string[];
+  /**
+   * True for an anonymous guest session. `user_id` is set for these — a
+   * stable id, not an account — so `user_id != null` alone does not mean
+   * the visitor is signed in. Absent on a render served by an older
+   * runtime, which is why it reads as optional.
+   */
+  is_guest?: boolean;
 }
 
 /** Options for `response.setCookie`. Defaults: HttpOnly + SameSite=Lax. */

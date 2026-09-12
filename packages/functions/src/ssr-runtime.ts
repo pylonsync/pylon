@@ -78,6 +78,7 @@ export interface RenderRouteMessage {
     is_admin: boolean;
     tenant_id: string | null;
     roles: string[];
+    is_guest?: boolean;
   };
   /**
    * Whether the request carried a session cookie (presence, not identity) —
