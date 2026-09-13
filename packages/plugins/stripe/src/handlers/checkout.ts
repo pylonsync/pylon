@@ -33,6 +33,14 @@ export function createCheckoutSessionHandler(cfg: StripeConfig) {
 			cancelUrl: v.string(),
 			annual: v.optional(v.boolean()),
 			seats: v.optional(v.number()),
+			/**
+			 * An analytics visitor id, carried to Stripe as the session's
+			 * client_reference_id so the eventual payment attributes back to
+			 * the visit that caused it. Without it every purchase looks like
+			 * it came from nowhere, since the webhook arrives from Stripe
+			 * rather than from a browser with a session.
+			 */
+			clientReferenceId: v.optional(v.string()),
 		},
 		async handler(
 			ctx: HandlerCtx,
@@ -43,6 +51,7 @@ export function createCheckoutSessionHandler(cfg: StripeConfig) {
 				cancelUrl: string;
 				annual?: boolean;
 				seats?: number;
+				clientReferenceId?: string;
 			},
 		) {
 			const referenceId = args.referenceId ?? defaultReferenceId(ctx, cfg);
@@ -105,7 +114,9 @@ export function createCheckoutSessionHandler(cfg: StripeConfig) {
 					},
 				],
 				allow_promotion_codes: true,
-				client_reference_id: referenceId,
+				// The caller's id when given: attribution wants the visitor,
+				// not the account, because the visit came first.
+				client_reference_id: args.clientReferenceId ?? referenceId,
 				metadata: { referenceId, plan: plan.name },
 				subscription_data: {
 					metadata: { referenceId, plan: plan.name },
