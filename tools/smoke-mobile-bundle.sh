@@ -84,6 +84,9 @@ for app in apps/expo apps/api; do
 	overlay "$app" sync "$ROOT/packages/sync"
 	overlay "$app" functions "$ROOT/packages/functions"
 	overlay "$app" revenuecat "$ROOT/packages/plugins/revenuecat"
+	# apps/api imports @pylonsync/stripe/entitlement, a subpath the published
+	# plugin gains with the next release; the local package has it now.
+	overlay "$app" stripe "$ROOT/packages/plugins/stripe"
 done
 
 echo "→ expo install --check"

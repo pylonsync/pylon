@@ -435,6 +435,7 @@ fn now_ms_u64() -> u64 {
 
 fn empty_manifest() -> pylon_kernel::AppManifest {
     pylon_kernel::AppManifest {
+        required_env: Vec::new(),
         manifest_version: pylon_kernel::MANIFEST_VERSION,
         name: "workers".into(),
         version: "0.1.0".into(),
