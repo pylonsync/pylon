@@ -199,7 +199,6 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 	for m in ${PYLON_DEV_MODELS:-$PYLON_DEV_MODEL}; do
 		m="$(printf '%s' "$m" | sed 's/^ *//;s/ *$//')"
 		[ -z "$m" ] && continue
-		entry="\"$m\": { \"name\": \"$m\" }"
 		# Exact membership test that does NOT depend on IFS — this loop runs
 		# with IFS="," to split the model list, which would otherwise swallow a
 		# nested word-split and silently classify every model as chat.
@@ -207,6 +206,15 @@ if [ -n "${PYLON_DEV_MODEL_PROXY_URL:-}" ] &&
 		case ",$(printf '%s' "${PYLON_DEV_RESPONSES_MODELS:-}" | tr -d ' ')," in
 		*",$m,"*) is_resp=1 ;;
 		esac
+		# Declare what the model can take. Without `attachment` OpenCode drops
+		# image parts on the floor and the model answers "I cannot read images"
+		# to a screenshot the builder just sent it. Responses models (GPT-5.x)
+		# read images and PDFs; chat models are assumed to read images.
+		if [ "$is_resp" = "1" ]; then
+			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\", \"pdf\"], \"output\": [\"text\"] } }"
+		else
+			entry="\"$m\": { \"name\": \"$m\", \"attachment\": true, \"modalities\": { \"input\": [\"text\", \"image\"], \"output\": [\"text\"] } }"
+		fi
 		if [ "$is_resp" = "1" ]; then
 			if [ -z "$OC_RESP_JSON" ]; then OC_RESP_JSON="$entry"; else OC_RESP_JSON="$OC_RESP_JSON, $entry"; fi
 		else
