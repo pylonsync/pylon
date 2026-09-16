@@ -29,6 +29,7 @@ const TEST_ADMIN_TOKEN: &str = "testadmin_rooms_ws";
 
 fn test_manifest() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "rooms-ws".into(),
         version: "0.1.0".into(),

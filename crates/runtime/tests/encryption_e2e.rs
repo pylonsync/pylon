@@ -24,6 +24,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn manifest_with_encrypted_ssn() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "encryption-e2e".into(),
         version: "0.1.0".into(),

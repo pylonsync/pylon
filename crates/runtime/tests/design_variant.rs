@@ -140,6 +140,7 @@ impl pylon_router::FnOps for StubFnOps {
 
 fn manifest() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "design-variant".into(),
         version: "0.1.0".into(),

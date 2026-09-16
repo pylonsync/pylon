@@ -31,6 +31,7 @@ fn field(name: &str, ft: &str, default: Option<serde_json::Value>) -> ManifestFi
 
 fn manifest() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "tx-defaults".into(),
         version: "0.1.0".into(),

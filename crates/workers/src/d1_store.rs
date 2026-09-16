@@ -502,6 +502,7 @@ mod tests {
 
     fn empty_manifest() -> AppManifest {
         AppManifest {
+            required_env: Vec::new(),
             manifest_version: pylon_kernel::MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),

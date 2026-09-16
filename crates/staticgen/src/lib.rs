@@ -171,6 +171,7 @@ mod tests {
     #[test]
     fn static_route_generates_page() {
         let m = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -213,6 +214,7 @@ mod tests {
     #[test]
     fn parameterized_static_routes_skipped() {
         let m = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -246,6 +248,7 @@ mod tests {
     #[test]
     fn rendered_page_contains_manifest() {
         let m = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "myapp".into(),
             version: "1.0.0".into(),
@@ -305,6 +308,7 @@ mod tests {
     #[test]
     fn write_pages_to_temp_dir() {
         let m = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

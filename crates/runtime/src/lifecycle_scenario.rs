@@ -217,6 +217,7 @@ fn entity(name: &str, fields: &[&str]) -> ManifestEntity {
 
 fn manifest(entities: Vec<ManifestEntity>) -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "Lifecycle".into(),
         version: "0.1.0".into(),

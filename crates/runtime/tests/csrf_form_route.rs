@@ -89,6 +89,7 @@ impl pylon_router::FnOps for StubFnOps {
 
 fn form_route_manifest() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "csrf-form".into(),
         version: "0.1.0".into(),

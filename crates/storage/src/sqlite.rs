@@ -1096,6 +1096,7 @@ mod tests {
 
     fn test_manifest() -> AppManifest {
         AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -1472,6 +1473,7 @@ mod tests {
         let adapter = SqliteAdapter::in_memory().unwrap();
 
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

@@ -271,6 +271,7 @@ mod tests {
     fn test_manifest_minimal() -> pylon_kernel::AppManifest {
         use pylon_kernel::*;
         AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "t".into(),
             version: "0.1.0".into(),

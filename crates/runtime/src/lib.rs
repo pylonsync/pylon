@@ -4673,6 +4673,7 @@ mod tests {
 
     fn test_manifest() -> AppManifest {
         AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "Test".into(),
             version: "0.1.0".into(),
@@ -5707,6 +5708,7 @@ mod tests {
             sync_omit: false,
         };
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "Test".into(),
             version: "0.1.0".into(),
@@ -5830,6 +5832,7 @@ mod tests {
             }
         };
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "G".into(),
             version: "0".into(),

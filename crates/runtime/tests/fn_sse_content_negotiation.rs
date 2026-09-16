@@ -137,6 +137,7 @@ impl pylon_router::FnOps for StubFnOps {
 
 fn empty_manifest() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "fn-sse-negotiation".into(),
         version: "0.1.0".into(),

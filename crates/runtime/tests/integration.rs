@@ -81,6 +81,7 @@ fn http_request_with_auth(
 /// Build a test manifest with `Todo` and `User` entities.
 fn test_manifest() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "integration-test".into(),
         version: "0.1.0".into(),

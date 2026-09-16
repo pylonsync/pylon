@@ -21,6 +21,7 @@ use tungstenite::{client, Message};
 
 fn test_manifest() -> AppManifest {
     AppManifest {
+        required_env: Vec::new(),
         manifest_version: 1,
         name: "e2e-ws".into(),
         version: "0.1.0".into(),

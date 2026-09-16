@@ -2268,6 +2268,7 @@ mod tests {
             ..Default::default()
         };
         AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "todo-app".into(),
             version: "0.1.0".into(),
@@ -2297,6 +2298,7 @@ mod tests {
     fn wrong_case_entity_names_the_real_entity_instead_of_blaming_policies() {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2356,6 +2358,7 @@ mod tests {
     fn cached_policy_eval_is_correct_and_cache_is_populated() {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2422,6 +2425,7 @@ mod tests {
         // so this also proves the index didn't drop the 2nd policy.
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2518,6 +2522,7 @@ mod tests {
             ..Default::default()
         };
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "t".into(),
             version: "0".into(),
@@ -2627,6 +2632,7 @@ mod tests {
         // Pre-fix: writes were silently allowed. Post-fix: missing
         // rule = deny.
         let m = AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -2677,6 +2683,7 @@ mod tests {
         // with `allow: "true"`. This is the explicit opt-in to the
         // pre-fix default behavior, scoped to one entity.
         let m = AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -3210,6 +3217,7 @@ mod tests {
         // entity. Regression for the `existing` alias + comparison feature.
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),

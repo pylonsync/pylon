@@ -651,6 +651,7 @@ mod tests {
 
     fn sample_manifest() -> AppManifest {
         AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "TestApp".into(),
             version: "0.1.0".into(),
@@ -1109,6 +1110,7 @@ mod tests {
     #[test]
     fn empty_manifest_produces_valid_spec() {
         let manifest = AppManifest {
+            required_env: Vec::new(),
             manifest_version: 1,
             name: "Empty".into(),
             version: "0.0.0".into(),
