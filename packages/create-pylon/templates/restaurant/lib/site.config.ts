@@ -19,7 +19,7 @@ export type BaseConfig = {
     copyrightName: string;
     socials: Social[];
   };
-  colors: { brand: string; brandSoft: string; paper: string };
+  colors: { brand: string; brandSoft: string; paper: string; ink: string };
   seo: { title: string; description: string };
 };
 
@@ -36,7 +36,11 @@ export type RestaurantConfig = BaseConfig & {
     subcopy: string;
     ctaLabel: string;
     quickFacts: { hours: string; area: string; phone: string };
+    /** Full-bleed photo behind the hero. Ships as public/images/hero.jpg. */
+    image: string;
   };
+  /** The photo band under the hero: public/images/*.jpg with a caption each. */
+  gallery: Array<{ src: string; caption: string }>;
   menu: { eyebrow: string; headline: string; sections: MenuSection[] };
   reservations: {
     enabled: boolean;
@@ -84,7 +88,7 @@ export const siteConfig: RestaurantConfig = {
     ],
   },
 
-  colors: { brand: "#9f1239", brandSoft: "#ffe4e6", paper: "#fbf7f5" },
+  colors: { brand: "#c2571a", brandSoft: "#3a2418", paper: "#f3ede4", ink: "#151311" },
 
   seo: {
     title: "Cedar & Vine — a seasonal bistro in Dallas. Reserve a table.",
@@ -103,7 +107,14 @@ export const siteConfig: RestaurantConfig = {
       area: "Bishop Arts, Dallas",
       phone: "(214) 555-0172",
     },
+    image: "/images/hero.jpg",
   },
+
+  gallery: [
+    { src: "/images/hearth.jpg", caption: "The hearth" },
+    { src: "/images/branzino.jpg", caption: "Wood-fired branzino" },
+    { src: "/images/bar.jpg", caption: "The bar" },
+  ],
 
   menu: {
     eyebrow: "Menu",

@@ -107,11 +107,14 @@ export function ImagePlaceholder({
   shape = "landscape",
   title,
   hint,
+  src,
   className = "",
 }: {
   shape?: "landscape" | "portrait" | "square" | "circle";
   title: string;
   hint?: string;
+  /** A real image. The template ships one under public/images; swap it for yours. */
+  src?: string;
   className?: string;
 }) {
   const aspect =
@@ -121,6 +124,13 @@ export function ImagePlaceholder({
         ? "aspect-square"
         : "aspect-[4/3]";
   const radius = shape === "circle" ? "rounded-full" : "rounded-2xl";
+  if (src) {
+    return (
+      <div className={`relative overflow-hidden bg-zinc-100 ${aspect} ${radius} ${className}`}>
+        <img src={src} alt={title} className="absolute inset-0 size-full object-cover" loading="lazy" />
+      </div>
+    );
+  }
   return (
     <div
       className={`relative grid place-items-center overflow-hidden border-2 border-dashed border-zinc-300 bg-zinc-50 ${aspect} ${radius} ${className}`}

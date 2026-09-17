@@ -121,7 +121,7 @@ function CaseStudy({
 
       {/* Hero shot — drop in a real project image. */}
       <div className="mt-10">
-        <ImagePlaceholder shape="landscape" title={`${p.title} — hero shot`} hint="Swap for an <img> in app/work/[slug]/page.tsx" />
+        <ImagePlaceholder shape="landscape" title={`${p.title} — hero shot`} src={`/images/work/${p.slug}.jpg`} />
       </div>
 
       <div className="mt-12 space-y-10">

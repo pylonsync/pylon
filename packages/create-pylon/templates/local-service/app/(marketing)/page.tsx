@@ -66,11 +66,7 @@ export default function LandingPage() {
 
           {/* Hero photo — replace the placeholder with a real shot of your shop. */}
           <div className="relative mx-auto w-full max-w-sm lg:max-w-none">
-            <ImagePlaceholder
-              shape="portrait"
-              title="A photo of your shop"
-              hint="Swap for an <img> in app/(marketing)/page.tsx"
-            />
+            <ImagePlaceholder shape="portrait" title="The shop" src="/images/hero.jpg" />
             <div className="absolute left-4 top-4">
               <LiveBadge>Availability updates live</LiveBadge>
             </div>

@@ -19,6 +19,11 @@
   --brand: #4f46e5;
   --brand-soft: #eef2ff;
   --paper: #fafafa;
+  /* The marketing pages: a dark room, cream type. Set from lib/site.config.ts. */
+  --ink: #151311;
+  --ink-2: #1f1b18;
+  --cream: #f3ede4;
+  --cream-2: #cfc4b4;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -152,4 +157,10 @@
   button {
     cursor: pointer;
   }
+}
+
+/* Headlines and menu section names. Fraunces is declared in app.ts. */
+.font-display {
+  font-family: var(--font-display, "Iowan Old Style", "Palatino Linotype", Georgia, serif);
+  font-optical-sizing: auto;
 }

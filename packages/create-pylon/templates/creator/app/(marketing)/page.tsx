@@ -51,11 +51,7 @@ export default function LandingPage() {
           </div>
           {/* Profile photo — replace the placeholder with a real headshot. */}
           <div className="order-first w-32 sm:order-none sm:w-44">
-            <ImagePlaceholder
-              shape="square"
-              title="Your headshot"
-              hint="Replace in app/page.tsx"
-            />
+            <ImagePlaceholder shape="square" title="Headshot" src="/images/headshot.jpg" />
           </div>
         </div>
       </section>

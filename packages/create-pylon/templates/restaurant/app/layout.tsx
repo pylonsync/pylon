@@ -21,6 +21,7 @@ export default function RootLayout({ children }: LayoutProps) {
           "--brand": colors.brand,
           "--brand-soft": colors.brandSoft,
           "--paper": colors.paper,
+          "--ink": colors.ink,
         } as React.CSSProperties
       }
     >

@@ -86,13 +86,13 @@ export default function LandingPage({ serverData }: PageProps) {
             </div>
           </div>
 
-          {/* Hero photo — replace the placeholder with a real shot (the studio,
-              the team at work, a flagship project). */}
+          {/* Hero photo. Ships as public/images/hero.jpg; swap it for the studio,
+              the team at work, or a flagship project. */}
           <div className="relative mx-auto w-full max-w-sm lg:max-w-none">
             <ImagePlaceholder
               shape="portrait"
-              title="A photo of your studio or work"
-              hint="Swap for an <img> in app/page.tsx"
+              title="The studio at work"
+              src="/images/hero.jpg"
             />
           </div>
         </div>
@@ -189,8 +189,8 @@ export default function LandingPage({ serverData }: PageProps) {
         <div className="mt-10 grid gap-8 sm:grid-cols-3">
           {team.members.map((m) => (
             <div key={m.name}>
-              {/* Team headshot — drop in a real photo. */}
-              <ImagePlaceholder shape="square" title="Headshot" hint="Replace per team member" className="max-w-[200px]" />
+              {/* Team headshot: public/images/team/<name>.jpg. */}
+              <ImagePlaceholder shape="square" title={m.name} src={`/images/team/${slugify(m.name)}.jpg`} className="max-w-[200px]" />
               <h3 className="mt-4 text-[15px] font-semibold text-zinc-900">{m.name}</h3>
               <p className="text-[13.5px] text-zinc-500">{m.role}</p>
             </div>

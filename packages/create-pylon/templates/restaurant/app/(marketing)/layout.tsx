@@ -23,42 +23,29 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
 
   return (
     <>
-      <header className="sticky top-0 z-30 border-b border-zinc-200/70 bg-white/85 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-6">
-          <Link href="/" className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-              {brand.letter}
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-              {brand.name}
-            </span>
+      {/* The nav sits over the hero photo: dark, translucent, cream type. */}
+      <header className="sticky top-0 z-30 border-b border-white/10 bg-[var(--ink)]/80 text-[var(--cream)] backdrop-blur">
+        <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
+          <Link href="/" className="font-display text-[22px] tracking-tight">
+            {brand.name}
           </Link>
-          <nav className="flex items-center gap-2">
-            <a
-              href="/#menu"
-              className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex"
-            >
-              Services
+          <nav className="flex items-center gap-1 sm:gap-2">
+            <a href="/#menu" className="hidden px-3 py-1.5 text-[13px] font-medium text-[var(--cream-2)] transition-colors hover:text-[var(--cream)] sm:inline-flex">
+              Menu
+            </a>
+            <a href="/#visit" className="hidden px-3 py-1.5 text-[13px] font-medium text-[var(--cream-2)] transition-colors hover:text-[var(--cream)] sm:inline-flex">
+              Visit
             </a>
             {signedIn ? (
-              <Link
-                href="/dashboard"
-                className="inline-flex items-center rounded-full bg-zinc-900 px-3.5 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
-              >
+              <Link href="/dashboard" className="inline-flex items-center rounded-full border border-white/20 px-3.5 py-1.5 text-[13px] font-medium transition-colors hover:bg-white/10">
                 Dashboard
               </Link>
             ) : (
               <>
-                <Link
-                  href="/login"
-                  className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex"
-                >
+                <Link href="/login" className="hidden px-3 py-1.5 text-[13px] font-medium text-[var(--cream-2)] transition-colors hover:text-[var(--cream)] sm:inline-flex">
                   Sign in
                 </Link>
-                <a
-                  href="/#reserve"
-                  className="inline-flex items-center rounded-full bg-brand px-3.5 py-1.5 text-[13px] font-medium text-white transition-colors hover:opacity-90"
-                >
+                <a href="/#reserve" className="inline-flex items-center rounded-full bg-brand px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-90">
                   {siteConfig.hero.ctaLabel}
                 </a>
               </>
@@ -77,38 +64,29 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
 function SiteFooter() {
   const { brand, location } = siteConfig;
   return (
-    <footer className="border-t border-zinc-200/70 bg-white">
-      <div className="mx-auto max-w-5xl px-6 py-12">
-        <div className="flex flex-col items-start justify-between gap-6 sm:flex-row">
+    <footer className="border-t border-white/10 bg-[var(--ink)] text-[var(--cream-2)]">
+      <div className="mx-auto max-w-6xl px-6 py-14">
+        <div className="flex flex-col items-start justify-between gap-8 sm:flex-row">
           <div className="max-w-sm">
-            <Link href="/" className="inline-flex items-center gap-2">
-              <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-                {brand.letter}
-              </span>
-              <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-                {brand.name}
-              </span>
+            <Link href="/" className="font-display text-[26px] tracking-tight text-[var(--cream)]">
+              {brand.name}
             </Link>
-            <p className="mt-3 text-[13px] leading-relaxed text-zinc-500">
-              {brand.footerBlurb}
-            </p>
+            <p className="mt-3 text-[13.5px] leading-relaxed">{brand.footerBlurb}</p>
           </div>
-          <div className="text-[13px] leading-relaxed text-zinc-500">
-            <div className="font-medium text-zinc-900">Visit</div>
+          <div className="text-[13.5px] leading-relaxed">
+            <div className="font-medium text-[var(--cream)]">Visit</div>
             <p className="mt-2 max-w-[14rem]">{location.address}</p>
             <p className="mt-2">{location.phone}</p>
-            <a href={`mailto:${brand.email}`} className="mt-1 inline-block hover:text-zinc-900">
+            <a href={`mailto:${brand.email}`} className="mt-1 inline-block transition-colors hover:text-[var(--cream)]">
               {brand.email}
             </a>
           </div>
         </div>
-        <div className="mt-10 flex flex-col items-start justify-between gap-3 border-t border-zinc-200/70 pt-6 text-[12px] text-zinc-400 sm:flex-row sm:items-center">
-          <span>
-            © {new Date().getFullYear()} {brand.copyrightName}
-          </span>
+        <div className="mt-12 flex flex-col items-start justify-between gap-3 border-t border-white/10 pt-6 text-[12px] sm:flex-row sm:items-center">
+          <span>© {new Date().getFullYear()} {brand.copyrightName}</span>
           <span>
             Built with{" "}
-            <a href="https://pylonsync.com" className="font-medium text-zinc-600 hover:text-zinc-900">
+            <a href="https://pylonsync.com" className="font-medium text-[var(--cream)]">
               Pylon
             </a>
           </span>
