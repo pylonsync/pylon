@@ -24,7 +24,7 @@ export type BaseConfig = {
   seo: { title: string; description: string };
 };
 
-export type Service = { title: string; body: string; icon?: string };
+export type Service = { title: string; body: string };
 
 // A portfolio piece + case study. `seedProjects` writes these into the public
 // Project entity on first visit; after that the owner curates them from the
@@ -82,7 +82,6 @@ export type Billing = {
 
 export type AgencyConfig = BaseConfig & {
   hero: {
-    tagline: string;
     headline: string;
     subcopy: string;
     ctaLabel: string;
@@ -92,18 +91,16 @@ export type AgencyConfig = BaseConfig & {
   // and the owner manages it from the dashboard. `openSlots` is the number the
   // hero shows live; `label` is the booking window it refers to.
   capacity: { label: string; openSlots: number };
-  logos: { eyebrow: string; names: string[] };
-  services: { eyebrow: string; headline: string; items: Service[] };
-  work: { eyebrow: string; headline: string; items: CaseStudy[] };
+  services: { headline: string; items: Service[] };
+  work: { headline: string; items: CaseStudy[] };
   // The studio's invoice "from" identity + terms.
   billing: Billing;
   // Demo CRM + billing rows seeded into the owner dashboard on first visit.
   backoffice: { clients: ClientSeed[]; invoices: InvoiceSeed[] };
-  process: { eyebrow: string; headline: string; steps: ProcessStep[] };
-  team: { eyebrow: string; headline: string; members: TeamMember[] };
-  testimonials?: { eyebrow: string; headline: string; items: Testimonial[] };
+  process: { headline: string; steps: ProcessStep[] };
+  team: { headline: string; members: TeamMember[] };
+  testimonials?: { headline: string; items: Testimonial[] };
   contact: {
-    eyebrow: string;
     headline: string;
     subcopy: string;
     projectTypes: string[];
@@ -121,7 +118,7 @@ export const siteConfig: AgencyConfig = {
     domain: "halyard.studio",
     email: "hello@halyard.example",
     footerBlurb:
-      "A Dallas product studio that designs and builds software for ambitious teams. We take on only a few projects at a time.",
+      "A Dallas product studio. We design and build web and mobile software and take on a few projects at a time.",
     copyrightName: "Halyard Studio",
     socials: [
       {
@@ -137,60 +134,49 @@ export const siteConfig: AgencyConfig = {
     ],
   },
 
-  colors: { brand: "#4f46e5", brandSoft: "#e0e7ff", paper: "#fafafa" },
+  // `brand` colors links only. `paper` is the grey band behind the contact form.
+  colors: { brand: "#1d4ed8", brandSoft: "#dbeafe", paper: "#f4f4f2" },
 
   seo: {
-    title: "Halyard — a product studio for ambitious teams.",
+    title: "Halyard, a product studio in Dallas",
     description:
-      "Halyard is a Dallas product studio for web and mobile software. See how many project slots are open this quarter.",
+      "Halyard is a Dallas product studio that designs and builds web and mobile software. See how many project slots are open this quarter.",
   },
 
   hero: {
-    tagline: "Product studio · Dallas",
-    headline: "We build the products teams bet on.",
+    headline: "Halyard designs and builds web and mobile products for funded teams that need to ship this quarter.",
     subcopy:
-      "Halyard is a small, senior team that designs and ships web and mobile software. We take on a handful of projects at a time so each launch gets the team's attention.",
+      "We are a small senior team in Dallas. We take on a few projects at a time and work in your repo from the first week.",
     ctaLabel: "Start a project",
     secondaryCtaLabel: "See our work",
   },
 
   capacity: { label: "Q3 2026", openSlots: 3 },
 
-  logos: {
-    eyebrow: "Trusted by teams at",
-    names: ["Northwind", "Lumen", "Foundry", "Atlas", "Cohort", "Vela"],
-  },
-
   services: {
-    eyebrow: "What we do",
-    headline: "One team, the whole build.",
+    headline: "What we do",
     items: [
       {
-        icon: "◆",
         title: "Product design",
-        body: "Research, flows, and interface design that turns a fuzzy idea into something people understand in seconds.",
+        body: "Research, flows, and interface design. We test a clickable prototype with real users before anything is built.",
       },
       {
-        icon: "◇",
-        title: "Web & mobile",
-        body: "Production engineering across web, iOS, and Android — typed, tested, and built to scale past launch day.",
+        title: "Web and mobile engineering",
+        body: "Production code for web, iOS, and Android. Typed, tested, and committed to your repository from day one.",
       },
       {
-        icon: "◈",
-        title: "Brand & identity",
-        body: "Naming, logo, and a system that makes a young product feel like it's been around — and worth paying for.",
+        title: "Brand and identity",
+        body: "Naming, logo, type, and a visual system with the files and rules your team needs to keep using it.",
       },
       {
-        icon: "✦",
-        title: "Fractional team",
-        body: "Embed with your team for a quarter. We plan, build, and hand off — leaving you faster than we found you.",
+        title: "Embedded team",
+        body: "Two or three of us join your team for a quarter. We plan, build, and hand off with documentation.",
       },
     ],
   },
 
   work: {
-    eyebrow: "Selected work",
-    headline: "A few things we've shipped.",
+    headline: "Work",
     items: [
       {
         title: "Ledger",
@@ -345,12 +331,11 @@ export const siteConfig: AgencyConfig = {
   },
 
   process: {
-    eyebrow: "How we work",
-    headline: "Senior, hands-on, and fast.",
+    headline: "How a project runs",
     steps: [
       {
         title: "Scope",
-        body: "A focused kickoff week. We pin down the real problem, the riskiest unknowns, and what a great launch looks like.",
+        body: "One week. We agree on the problem, the riskiest unknowns, and what launch has to include.",
       },
       {
         title: "Design",
@@ -358,18 +343,17 @@ export const siteConfig: AgencyConfig = {
       },
       {
         title: "Build",
-        body: "Weekly shipping you can watch. Typed, reviewed code in your repo from day one, no black box.",
+        body: "We ship every week to a staging build you can open. All code lives in your repository.",
       },
       {
-        title: "Launch & hand off",
-        body: "We ship it, document it, and leave your team able to run and extend it without us.",
+        title: "Launch and hand off",
+        body: "We release, write the docs, and stay for two weeks after launch to fix what comes up.",
       },
     ],
   },
 
   team: {
-    eyebrow: "Who you'll work with",
-    headline: "A small, senior team.",
+    headline: "Who you will work with",
     members: [
       { name: "Claire Donovan", role: "Principal, Design" },
       { name: "Marcus Lee", role: "Principal, Engineering" },
@@ -378,18 +362,17 @@ export const siteConfig: AgencyConfig = {
   },
 
   testimonials: {
-    eyebrow: "Kind words",
-    headline: "Teams we've worked with.",
+    headline: "From clients",
     items: [
       {
         quote:
-          "Halyard shipped in a quarter what our last agency couldn't in a year. Senior people, no hand-offs, no drama.",
+          "Halyard shipped in a quarter what our last agency could not in a year. Senior people, no hand-offs.",
         name: "Erin Caldwell",
         role: "CEO, Ledger",
       },
       {
         quote:
-          "They felt like our team, not a vendor. The work was sharp and the launch was the smoothest we've had.",
+          "They worked like part of our team. The rollout had zero downtime, which we had never managed before.",
         name: "Tom Reyes",
         role: "VP Product, Atlas Health",
       },
@@ -403,13 +386,12 @@ export const siteConfig: AgencyConfig = {
   },
 
   contact: {
-    eyebrow: "Start a project",
-    headline: "Tell us what you're building.",
+    headline: "Tell us what you are building",
     subcopy:
-      "We take on a few projects at a time. Send a note and we'll reply within two business days — if we're full, we'll tell you straight and point you somewhere good.",
+      "We take on a few projects at a time. Send a note and we reply within two business days. If we are full, we say so and suggest another studio.",
     projectTypes: ["New product (0→1)", "Existing product", "Rebrand", "Not sure yet"],
     budgets: ["$25–50k", "$50–100k", "$100k+", "Let's talk"],
     confirmationMessage:
-      "Thanks — your note's in. We'll get back to you within two business days.",
+      "Thanks. Your note is in. We reply within two business days.",
   },
 };

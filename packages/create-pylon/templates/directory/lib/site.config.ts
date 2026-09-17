@@ -36,21 +36,18 @@ export type SeedListing = {
 };
 
 export type DirectoryConfig = BaseConfig & {
-  hero: {
-    tagline: string;
-    headline: string;
-    subcopy: string;
+  // The page opens with the brand name, this one line, and the search box.
+  intro: {
+    description: string;
     ctaLabel: string;
     searchPlaceholder: string;
   };
-  browse: { eyebrow: string; headline: string };
   // The facet values offered in the submit form's category select. The browse
   // facet sidebar is built live from the data, so this only needs to cover what
   // submitters can pick.
   categories: string[];
   seedListings: SeedListing[];
   submit: {
-    eyebrow: string;
     headline: string;
     subcopy: string;
     confirmationMessage: string;
@@ -77,26 +74,19 @@ export const siteConfig: DirectoryConfig = {
     ],
   },
 
-  colors: { brand: "#7c3aed", brandSoft: "#ede9fe", paper: "#faf9fc" },
+  colors: { brand: "#1d4ed8", brandSoft: "#eff6ff", paper: "#ffffff" },
 
   seo: {
-    title: "Stacked — the developer tools directory.",
+    title: "Stacked, a developer tools directory",
     description:
-      "A searchable, community-voted directory of developer tools. Full-text search, filter by category, upvote your favorites, and submit the ones we're missing.",
+      "A searchable, community-voted directory of developer tools. Full-text search, category filters, upvotes, and a submit form.",
   },
 
-  hero: {
-    tagline: "The dev tools directory",
-    headline: "Developer tools, checked by hand.",
-    subcopy:
-      "Search a hand-checked directory, filter by category, and upvote useful tools. Results and vote counts update live, and browsing requires no account.",
+  intro: {
+    description:
+      "A hand-checked directory of developer tools. Search, filter by category, and upvote. No account needed.",
     ctaLabel: "Submit a tool",
-    searchPlaceholder: "Search tools — try “database”, “deploy”, “auth”…",
-  },
-
-  browse: {
-    eyebrow: "Browse",
-    headline: "Find your next tool.",
+    searchPlaceholder: "search: database, deploy, auth",
   },
 
   categories: ["Database", "Hosting", "Auth", "AI", "Analytics", "Design", "Productivity", "DevOps"],
@@ -119,10 +109,9 @@ export const siteConfig: DirectoryConfig = {
   ],
 
   submit: {
-    eyebrow: "Submit a tool",
-    headline: "Know one we're missing?",
+    headline: "Submit a tool",
     subcopy:
-      "Send it over. Submissions land in the curator's queue — once it's approved it shows up in the directory for everyone.",
-    confirmationMessage: "Thanks — your submission's in the queue. We review new tools a few times a week.",
+      "Submissions go to the review queue. Approved tools appear in the directory.",
+    confirmationMessage: "Your submission is in the queue. We review new tools a few times a week.",
   },
 };

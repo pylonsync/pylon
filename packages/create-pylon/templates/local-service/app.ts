@@ -143,6 +143,15 @@ const manifest = buildManifest({
       display: "swap",
       preload: true,
     }),
+    // The condensed display face for the headline, service names, and pull quotes.
+    font({
+      family: "Bebas Neue",
+      variable: "--font-display",
+      weights: ["400"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
   ],
   routes: await discoverAppRoutes(),
 });

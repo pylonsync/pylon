@@ -11,14 +11,16 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* shadcn/ui design tokens (new-york / zinc) + the marketing brand accent. The
-   three brand vars are defaults — app/layout.tsx overrides them from
-   lib/site.config.ts on <html>, so re-theming the whole page is one edit there. */
+/* shadcn/ui design tokens (new-york / zinc) + the marketing site colors. The
+   marketing page is white with black type; `--brand` is used for links only,
+   `--paper` is the light grey band behind the contact form. app/layout.tsx
+   overrides these three from lib/site.config.ts on <html>. */
 :root {
   --radius: 0.625rem;
-  --brand: #4f46e5;
-  --brand-soft: #eef2ff;
-  --paper: #fafafa;
+  --ink: #111111;
+  --brand: #1d4ed8;
+  --brand-soft: #dbeafe;
+  --paper: #f4f4f2;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -109,6 +111,7 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-ink: var(--ink);
   --color-brand: var(--brand);
   --color-brand-soft: var(--brand-soft);
   --color-paper: var(--paper);
@@ -152,4 +155,10 @@
   button {
     cursor: pointer;
   }
+}
+
+/* Headlines on the marketing pages. Instrument Serif is declared in app.ts. */
+.font-display {
+  font-family: var(--font-display, "Iowan Old Style", "Palatino Linotype", Georgia, serif);
+  font-weight: 400;
 }

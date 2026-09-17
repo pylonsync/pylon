@@ -296,6 +296,16 @@ const manifest = buildManifest({
       display: "swap",
       preload: true,
     }),
+    // The display face for headlines. Normal weight, set large.
+    font({
+      family: "Instrument Serif",
+      variable: "--font-display",
+      weights: ["400"],
+      styles: ["normal", "italic"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
   ],
   routes: await discoverAppRoutes(),
 });

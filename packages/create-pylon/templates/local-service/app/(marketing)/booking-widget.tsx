@@ -91,7 +91,7 @@ function Picker() {
   }
 
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm sm:p-7">
+    <div className="border border-ink bg-cream p-5 text-ink sm:p-7">
       {/* Service picker */}
       <div className="flex flex-wrap gap-2">
         {services.items.map((s) => {
@@ -106,14 +106,14 @@ function Picker() {
                 setConfirmed(null);
               }}
               className={
-                "rounded-full border px-3.5 py-1.5 text-[13px] font-medium transition-colors " +
+                "border px-3.5 py-1.5 text-[13px] font-medium transition-colors " +
                 (active
-                  ? "border-zinc-900 bg-zinc-900 text-white"
-                  : "border-zinc-300 text-zinc-700 hover:border-zinc-400")
+                  ? "border-ink bg-ink text-cream"
+                  : "border-ink/40 text-ink hover:border-ink")
               }
             >
               {s.name}
-              <span className={active ? "ml-1.5 text-white/60" : "ml-1.5 text-zinc-400"}>
+              <span className={active ? "ml-1.5 text-cream/60" : "ml-1.5 text-ink/50"}>
                 {s.price} · {s.durationMin}m
               </span>
             </button>
@@ -135,18 +135,18 @@ function Picker() {
                 setConfirmed(null);
               }}
               className={
-                "flex shrink-0 flex-col items-center rounded-xl border px-3 py-2 transition-colors " +
+                "flex shrink-0 flex-col items-center border px-3 py-2 transition-colors " +
                 (active
                   ? "border-brand bg-brand-soft"
-                  : "border-zinc-200 hover:border-zinc-300")
+                  : "border-ink/40 hover:border-ink")
               }
             >
-              <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
+              <span className="text-[11px] font-medium uppercase tracking-wide text-ink/50">
                 {dowOfKey(key)}
               </span>
               <span
                 className={
-                  "text-[15px] font-semibold " + (active ? "text-brand" : "text-zinc-900")
+                  "text-[15px] font-semibold " + (active ? "text-brand" : "text-ink")
                 }
               >
                 {dayOfKey(key)}
@@ -157,12 +157,12 @@ function Picker() {
       </div>
 
       {/* Slots */}
-      <div className="mt-5 border-t border-zinc-100 pt-5">
+      <div className="mt-5 border-t border-ink/40 pt-5">
         {loading ? (
           <SlotsSkeleton />
         ) : slots.length === 0 ? (
-          <p className="py-6 text-center text-sm text-zinc-500">
-            Closed that day — pick another.
+          <p className="py-6 text-center text-sm text-ink/60">
+            Closed that day. Pick another.
           </p>
         ) : (
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
@@ -176,12 +176,12 @@ function Picker() {
                   onClick={() => pick(slot)}
                   aria-pressed={isSelected}
                   className={
-                    "rounded-lg border py-2 text-[13px] font-medium tabular-nums transition-colors " +
+                    "border py-2 text-[13px] font-medium tabular-nums transition-colors " +
                     (!slot.available
-                      ? "cursor-not-allowed border-zinc-100 bg-zinc-50 text-zinc-300 line-through"
+                      ? "cursor-not-allowed border-ink/20 bg-paper text-ink/30 line-through"
                       : isSelected
-                        ? "border-brand bg-brand text-white"
-                        : "border-zinc-200 text-zinc-800 hover:border-brand hover:text-brand")
+                        ? "border-brand bg-brand text-cream"
+                        : "border-ink/40 text-ink hover:border-brand hover:text-brand")
                   }
                 >
                   {labelTime(slot.startsAt)}
@@ -190,19 +190,19 @@ function Picker() {
             })}
           </div>
         )}
-        <p className="mt-3 text-[12px] text-zinc-400">
-          Greyed-out times are already booked — this updates live as others book.
+        <p className="mt-3 text-[12px] text-ink/60">
+          Greyed-out times are booked. The list updates live as others book.
         </p>
       </div>
 
       {/* Confirmation persists after a successful booking… */}
       {confirmed ? (
-        <div className="mt-6 rounded-xl border border-brand/30 bg-brand-soft/60 p-5 text-center">
-          <p className="text-[15px] font-semibold text-zinc-900">
+        <div className="mt-6 border border-brand bg-brand-soft p-5 text-center">
+          <p className="text-[15px] font-semibold text-ink">
             {confirmed.serviceName} · {labelDow(confirmed.slot.startsAt)}{" "}
             {labelDay(confirmed.slot.startsAt)} at {labelTime(confirmed.slot.startsAt)}
           </p>
-          <p className="mt-2 text-[14px] text-zinc-600">
+          <p className="mt-2 text-[14px] text-ink/70">
             {siteConfig.booking.confirmationMessage}
           </p>
         </div>
@@ -280,16 +280,16 @@ function BookingForm({
   }
 
   return (
-    <form onSubmit={submit} className="mt-6 rounded-xl border border-zinc-200 bg-paper p-5">
+    <form onSubmit={submit} className="mt-6 border border-ink/40 bg-paper p-5">
       <div className="flex items-center justify-between">
-        <div className="text-[14px] font-medium text-zinc-900">
+        <div className="text-[14px] font-medium text-ink">
           {service.name} · {labelDow(slot.startsAt)} {labelDay(slot.startsAt)} at{" "}
           {labelTime(slot.startsAt)}
         </div>
         <button
           type="button"
           onClick={onClear}
-          className="text-[13px] text-zinc-400 transition-colors hover:text-zinc-700"
+          className="text-[13px] text-ink/60 transition-colors hover:text-ink"
         >
           Change
         </button>
@@ -326,11 +326,11 @@ function BookingForm({
       <button
         type="submit"
         disabled={status === "booking"}
-        className="mt-4 inline-flex h-10 w-full items-center justify-center rounded-lg bg-brand text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+        className="mt-4 inline-flex h-11 w-full items-center justify-center bg-brand font-display text-[20px] tracking-[0.04em] text-cream transition-opacity hover:opacity-90 disabled:opacity-60"
       >
         {status === "booking" ? "Booking…" : "Confirm booking"}
       </button>
-      <p className="mt-2 text-center text-[12px] text-zinc-400">
+      <p className="mt-2 text-center text-[12px] text-ink/60">
         No payment now — pay at the shop.
       </p>
     </form>
@@ -338,7 +338,7 @@ function BookingForm({
 }
 
 const inputCls =
-  "h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20";
+  "h-10 w-full border border-ink/40 bg-white px-3 text-sm text-ink outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20";
 
 /* ------------------------------ labels -------------------------------- */
 
@@ -372,15 +372,15 @@ function dayOfKey(key: string) {
 
 function PickerSkeleton() {
   return (
-    <div className="rounded-2xl border border-zinc-200 bg-white p-7">
+    <div className="border border-ink bg-cream p-7">
       <div className="flex gap-2">
         {[0, 1, 2, 3].map((i) => (
-          <div key={i} className="h-8 w-24 animate-pulse rounded-full bg-zinc-100" />
+          <div key={i} className="h-8 w-24 animate-pulse rounded-full bg-ink/10" />
         ))}
       </div>
       <div className="mt-5 flex gap-2">
         {[0, 1, 2, 3, 4].map((i) => (
-          <div key={i} className="h-14 w-16 animate-pulse rounded-xl bg-zinc-100" />
+          <div key={i} className="h-14 w-16 animate-pulse rounded-xl bg-ink/10" />
         ))}
       </div>
       <SlotsSkeleton />
@@ -392,7 +392,7 @@ function SlotsSkeleton() {
   return (
     <div className="mt-5 grid grid-cols-3 gap-2 sm:grid-cols-4">
       {Array.from({ length: 8 }).map((_, i) => (
-        <div key={i} className="h-9 animate-pulse rounded-lg bg-zinc-100" />
+        <div key={i} className="h-9 animate-pulse rounded-lg bg-ink/10" />
       ))}
     </div>
   );

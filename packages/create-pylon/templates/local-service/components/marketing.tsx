@@ -8,14 +8,6 @@ import React from "react";
 // Shared container: a contained, centered column.
 export const WRAP = "mx-auto w-full max-w-5xl px-6";
 
-export function Eyebrow({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.14em] text-brand">
-      {children}
-    </p>
-  );
-}
-
 // "New / Coming soon"-style pill for the hero.
 export function Badge({ children }: { children: React.ReactNode }) {
   return (
@@ -26,36 +18,9 @@ export function Badge({ children }: { children: React.ReactNode }) {
   );
 }
 
+// A full-bleed rule between sections, like the rules on a printed price board.
 export function Divider() {
-  return (
-    <div className={WRAP}>
-      <div className="border-t border-zinc-200/70" />
-    </div>
-  );
-}
-
-export function SectionHead({
-  eyebrow,
-  title,
-  body,
-}: {
-  eyebrow: string;
-  title: string;
-  body?: string;
-}) {
-  return (
-    <div>
-      <Eyebrow>{eyebrow}</Eyebrow>
-      <h2 className="mt-4 text-balance text-2xl font-semibold leading-[1.15] tracking-[-0.02em] sm:text-3xl">
-        {title}
-      </h2>
-      {body ? (
-        <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-zinc-500">
-          {body}
-        </p>
-      ) : null}
-    </div>
-  );
+  return <div className="border-t border-ink" />;
 }
 
 // A grid of value props — icon + title + body.
@@ -121,7 +86,7 @@ export function ImagePlaceholder({
       : shape === "square" || shape === "circle"
         ? "aspect-square"
         : "aspect-[4/3]";
-  const radius = shape === "circle" ? "rounded-full" : "rounded-2xl";
+  const radius = shape === "circle" ? "rounded-full" : "";
   if (src) {
     return (
       <div className={`relative overflow-hidden bg-zinc-100 ${aspect} ${radius} ${className}`}>
@@ -159,7 +124,7 @@ export function ImagePlaceholder({
 // visible (e.g. "Availability updates live"). Pure decoration; no client JS.
 export function LiveBadge({ children }: { children: React.ReactNode }) {
   return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/95 px-3 py-1.5 text-[12.5px] font-medium text-zinc-700 shadow-sm backdrop-blur">
+    <span className="inline-flex items-center gap-2 border border-ink bg-cream px-3 py-1.5 text-[12.5px] font-medium text-ink">
       <span className="relative flex size-2">
         <span className="absolute inline-flex size-2 animate-ping rounded-full bg-green-500/60" />
         <span className="relative inline-flex size-2 rounded-full bg-green-600" />

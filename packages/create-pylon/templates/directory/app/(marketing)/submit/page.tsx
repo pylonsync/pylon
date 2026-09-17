@@ -5,26 +5,25 @@ import { SubmitForm } from "../submit-form";
 import { siteConfig } from "@/lib/site.config";
 
 export const metadata: Metadata = {
-  title: `Submit a tool — ${siteConfig.brand.name}`,
+  title: `Submit a tool, ${siteConfig.brand.name}`,
   description: siteConfig.submit.subcopy,
 };
 
 // `app/submit/page.tsx` → `/submit`. Server-rendered shell; the form is a client
 // island that calls the public submitListing mutation. Submissions land in the
-// owner's moderation queue (the deny-all Submission table) — not the public
-// directory — until approved.
+// owner's moderation queue (the deny-all Submission table), not the public
+// directory, until approved.
 export default function SubmitPage() {
   const { submit } = siteConfig;
   return (
-    <section className={`${WRAP} py-16`}>
-      <div className="mx-auto max-w-2xl">
-        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-brand">{submit.eyebrow}</p>
-        <h1 className="mt-4 text-balance text-3xl font-semibold tracking-[-0.02em]">{submit.headline}</h1>
-        <p className="mt-4 text-[15px] leading-relaxed text-zinc-500">{submit.subcopy}</p>
-        <div className="mt-8">
+    <div className={`${WRAP} pb-20 pt-8`}>
+      <div className="max-w-xl">
+        <h1 className="font-display text-[22px] leading-tight text-zinc-900">{submit.headline}</h1>
+        <p className="mt-1 text-[14px] leading-relaxed text-zinc-600">{submit.subcopy}</p>
+        <div className="mt-6">
           <SubmitForm />
         </div>
       </div>
-    </section>
+    </div>
   );
 }

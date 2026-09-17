@@ -147,6 +147,24 @@ const manifest = buildManifest({
       display: "swap",
       preload: true,
     }),
+    // Headlines and the product mock's window title.
+    font({
+      family: "Space Grotesk",
+      variable: "--font-display",
+      weights: ["500", "700"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
+    // Small details: the launch date, the live count, the form hint.
+    font({
+      family: "JetBrains Mono",
+      variable: "--font-mono-ui",
+      weights: ["400", "500"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: false,
+    }),
   ],
   routes: await discoverAppRoutes(),
 });

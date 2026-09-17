@@ -14,6 +14,9 @@ interface LayoutProps {
   auth: PageAuth;
 }
 
+const NAV_LINK =
+  "hidden px-3 py-1.5 text-[13px] font-medium text-ink/70 transition-colors hover:text-ink sm:inline-flex";
+
 export default function MarketingLayout({ children, auth }: LayoutProps) {
   // A guest session (minted by <EnsureGuest> for the live picker) has a
   // `guest_…` user id — that's an anonymous visitor, NOT the signed-in owner,
@@ -23,41 +26,33 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
 
   return (
     <>
-      <header className="sticky top-0 z-30 border-b border-zinc-200/70 bg-white/85 backdrop-blur">
+      <header className="sticky top-0 z-30 border-b border-ink bg-cream text-ink">
         <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-6">
-          <Link href="/" className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-              {brand.letter}
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-              {brand.name}
-            </span>
+          <Link href="/" className="font-display text-[26px] leading-none tracking-[0.02em]">
+            {brand.name}
           </Link>
-          <nav className="flex items-center gap-2">
-            <a
-              href="/#services"
-              className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex"
-            >
-              Services
+          <nav className="flex items-center gap-1 sm:gap-2">
+            <a href="/#services" className={NAV_LINK}>
+              Prices
+            </a>
+            <a href="/#visit" className={NAV_LINK}>
+              Visit
             </a>
             {signedIn ? (
               <Link
                 href="/dashboard"
-                className="inline-flex items-center rounded-full bg-zinc-900 px-3.5 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
+                className="inline-flex h-9 items-center bg-ink px-4 text-[13px] font-medium text-cream transition-opacity hover:opacity-90"
               >
                 Dashboard
               </Link>
             ) : (
               <>
-                <Link
-                  href="/login"
-                  className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex"
-                >
+                <Link href="/login" className={NAV_LINK}>
                   Sign in
                 </Link>
                 <a
                   href="/#book"
-                  className="inline-flex items-center rounded-full bg-brand px-3.5 py-1.5 text-[13px] font-medium text-white transition-colors hover:opacity-90"
+                  className="inline-flex h-9 items-center bg-brand px-4 text-[13px] font-medium text-cream transition-opacity hover:opacity-90"
                 >
                   {siteConfig.hero.ctaLabel}
                 </a>
@@ -77,38 +72,31 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
 function SiteFooter() {
   const { brand, location } = siteConfig;
   return (
-    <footer className="border-t border-zinc-200/70 bg-white">
+    <footer className="border-t border-ink bg-cream text-ink">
       <div className="mx-auto max-w-5xl px-6 py-12">
-        <div className="flex flex-col items-start justify-between gap-6 sm:flex-row">
+        <div className="flex flex-col items-start justify-between gap-8 sm:flex-row">
           <div className="max-w-sm">
-            <Link href="/" className="inline-flex items-center gap-2">
-              <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-                {brand.letter}
-              </span>
-              <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-                {brand.name}
-              </span>
+            <Link href="/" className="font-display text-[32px] leading-none tracking-[0.02em]">
+              {brand.name}
             </Link>
-            <p className="mt-3 text-[13px] leading-relaxed text-zinc-500">
-              {brand.footerBlurb}
-            </p>
+            <p className="mt-3 text-[13.5px] leading-relaxed text-ink/70">{brand.footerBlurb}</p>
           </div>
-          <div className="text-[13px] leading-relaxed text-zinc-500">
-            <div className="font-medium text-zinc-900">Visit</div>
+          <div className="text-[13.5px] leading-relaxed text-ink/70">
+            <div className="font-medium text-ink">Visit</div>
             <p className="mt-2 max-w-[14rem]">{location.address}</p>
             <p className="mt-2">{location.phone}</p>
-            <a href={`mailto:${brand.email}`} className="mt-1 inline-block hover:text-zinc-900">
+            <a href={`mailto:${brand.email}`} className="mt-1 inline-block transition-colors hover:text-ink">
               {brand.email}
             </a>
           </div>
         </div>
-        <div className="mt-10 flex flex-col items-start justify-between gap-3 border-t border-zinc-200/70 pt-6 text-[12px] text-zinc-400 sm:flex-row sm:items-center">
+        <div className="mt-10 flex flex-col items-start justify-between gap-3 border-t border-ink pt-6 text-[12px] text-ink/60 sm:flex-row sm:items-center">
           <span>
             © {new Date().getFullYear()} {brand.copyrightName}
           </span>
           <span>
             Built with{" "}
-            <a href="https://pylonsync.com" className="font-medium text-zinc-600 hover:text-zinc-900">
+            <a href="https://pylonsync.com" className="font-medium text-ink/80 hover:text-ink">
               Pylon
             </a>
           </span>

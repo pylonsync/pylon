@@ -9,7 +9,7 @@ import { siteConfig } from "@/lib/site.config";
 // row via `db.useQuery("Capacity")` — so when the owner books a project from the
 // dashboard, the "N slots open" number drops live in every open tab. No refresh.
 //
-//   • <LiveSlots>   — the hero pill ("3 project slots open · Q3 2026").
+//   • <LiveSlots>   — the hero line ("3 project slots open, Q3 2026").
 //   • <ContactForm> — the "start a project" form. submitInquiry is a public
 //                     mutation, so it works for anonymous visitors; the Inquiry
 //                     it writes is pure PII and can never be read back by a
@@ -33,7 +33,7 @@ function useSeedCapacity() {
   }, []);
 }
 
-/* ------------------------------ hero pill ------------------------------ */
+/* ------------------------------ hero line ------------------------------ */
 
 export function LiveSlots() {
   return (
@@ -65,7 +65,7 @@ function SlotsPill({
   const period = label || siteConfig.capacity.label;
   const bookedOut = open <= 0;
   return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-3.5 py-1.5 text-[13px] font-medium text-zinc-700 shadow-sm">
+    <span className="inline-flex items-center gap-2.5 text-[14px] text-zinc-700">
       {loading ? (
         <span className="inline-flex size-2 rounded-full bg-zinc-300" />
       ) : (
@@ -82,8 +82,8 @@ function SlotsPill({
         <span>Booked through {period}</span>
       ) : (
         <span>
-          <span className="tabular-nums text-zinc-900">{open}</span>{" "}
-          {open === 1 ? "project slot" : "project slots"} open · {period}
+          <span className="tabular-nums text-ink">{open}</span>{" "}
+          {open === 1 ? "project slot" : "project slots"} open, {period}
         </span>
       )}
     </span>
@@ -156,7 +156,7 @@ function FormShell({
       setError(
         /valid email|INVALID_ARGS/i.test(msg)
           ? "Please enter a valid email address."
-          : "Something went wrong — try again in a moment.",
+          : "Something went wrong. Try again in a moment.",
       );
       setStatus("idle");
     }
@@ -164,23 +164,21 @@ function FormShell({
 
   if (status === "done") {
     return (
-      <div className="rounded-2xl border border-brand/30 bg-brand-soft/50 px-6 py-8 text-center">
-        <div className="mx-auto flex size-10 items-center justify-center rounded-full bg-brand text-white">
-          <CheckIcon />
-        </div>
-        <p className="mt-3 text-[15px] font-semibold text-zinc-900">{contact.confirmationMessage}</p>
+      <div className="border-t border-ink pt-6">
+        <p className="font-display text-[1.75rem] leading-tight text-ink">Sent.</p>
+        <p className="mt-2 text-[15px] leading-relaxed text-zinc-700">{contact.confirmationMessage}</p>
       </div>
     );
   }
 
   return (
-    <form onSubmit={onSubmit} className="rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm sm:p-7">
+    <form onSubmit={onSubmit}>
       {bookedOut ? (
-        <p className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-[13px] text-amber-700">
-          We&apos;re fully booked{period ? ` through ${period}` : ""} — send a note anyway and we&apos;ll reach out when a slot opens.
+        <p className="mb-5 border-l-2 border-ink pl-3 text-[14px] text-zinc-700">
+          We are fully booked{period ? ` through ${period}` : ""}. Send a note anyway and we will write when a slot opens.
         </p>
       ) : null}
-      <div className="grid gap-3 sm:grid-cols-2">
+      <div className="grid gap-5 sm:grid-cols-2">
         <Field label="Name" required>
           <input value={form.name} onChange={set("name")} autoComplete="name" aria-label="Name" className={inputCls} disabled={disabled} />
         </Field>
@@ -199,7 +197,7 @@ function FormShell({
           </select>
         </Field>
       </div>
-      <div className="mt-3">
+      <div className="mt-5">
         <Field label="Budget">
           <select value={form.budget} onChange={set("budget")} aria-label="Budget" className={inputCls} disabled={disabled}>
             <option value="">Select…</option>
@@ -209,24 +207,24 @@ function FormShell({
           </select>
         </Field>
       </div>
-      <div className="mt-3">
+      <div className="mt-5">
         <Field label="What are you building?">
           <textarea
             value={form.message}
             onChange={set("message")}
             rows={4}
             aria-label="Message"
-            placeholder="A sentence or two about the project, timeline, and what success looks like."
-            className={inputCls + " resize-none py-2.5"}
+            placeholder="A sentence or two about the project and the timeline."
+            className={inputCls + " h-auto resize-none py-2.5"}
             disabled={disabled}
           />
         </Field>
       </div>
-      {error ? <p className="mt-3 text-[13px] text-red-600">{error}</p> : null}
+      {error ? <p className="mt-4 text-[14px] text-red-700">{error}</p> : null}
       <button
         type="submit"
         disabled={status === "sending" || disabled}
-        className="mt-5 inline-flex h-11 w-full items-center justify-center rounded-full bg-brand text-[15px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60 sm:w-auto sm:px-7"
+        className="mt-6 inline-flex h-11 w-full items-center justify-center bg-ink px-7 text-[15px] font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-60 sm:w-auto"
       >
         {status === "sending" ? "Sending…" : "Send inquiry"}
       </button>
@@ -237,9 +235,9 @@ function FormShell({
 function Field({ label, required, children }: { label: string; required?: boolean; children: React.ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1.5 block text-[12.5px] font-medium text-zinc-600">
+      <span className="mb-1.5 block text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-600">
         {label}
-        {required ? <span className="text-brand"> *</span> : null}
+        {required ? <span className="text-zinc-500"> *</span> : null}
       </span>
       {children}
     </label>
@@ -247,12 +245,4 @@ function Field({ label, required, children }: { label: string; required?: boolea
 }
 
 const inputCls =
-  "h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-[14px] text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20 disabled:opacity-60";
-
-function CheckIcon() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M20 6 9 17l-5-5" />
-    </svg>
-  );
-}
+  "h-11 w-full rounded-none border-0 border-b border-zinc-400 bg-transparent px-0 text-[15px] text-ink outline-none transition-colors placeholder:text-zinc-400 focus:border-ink disabled:opacity-60";

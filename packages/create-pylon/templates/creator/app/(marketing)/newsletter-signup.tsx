@@ -22,7 +22,7 @@ export function NewsletterSignup({ newsletter }: Props) {
   return (
     <div>
       <SubscribeForm newsletter={newsletter} />
-      <div className="mt-5">
+      <div className="mt-3">
         <LiveCounter seed={newsletter.seedCount ?? 0} label={newsletter.counterLabel} />
       </div>
     </div>
@@ -52,7 +52,7 @@ function SubscribeForm({ newsletter }: Props) {
       setError(
         /valid email|INVALID_ARGS/i.test(msg)
           ? "Enter a valid email address."
-          : "Something went wrong — try again in a moment.",
+          : "Something went wrong. Try again in a moment.",
       );
       setStatus("idle");
     }
@@ -60,17 +60,15 @@ function SubscribeForm({ newsletter }: Props) {
 
   if (status === "done") {
     return (
-      <div className="rounded-xl border border-brand/30 bg-brand-soft/50 px-5 py-4">
-        <p className="text-[15px] font-medium text-zinc-900">
-          {alreadyJoined ? "You're already subscribed." : newsletter.successMessage}
-        </p>
-      </div>
+      <p className="border-l-2 border-brand pl-4 text-[17.5px] leading-[1.65] text-ink">
+        {alreadyJoined ? "You are already subscribed." : newsletter.successMessage}
+      </p>
     );
   }
 
   return (
     <form onSubmit={onSubmit} className="max-w-md">
-      <div className="flex flex-col gap-2 sm:flex-row">
+      <div className="flex gap-2">
         <input
           type="email"
           inputMode="email"
@@ -80,21 +78,19 @@ function SubscribeForm({ newsletter }: Props) {
           placeholder={newsletter.emailPlaceholder}
           aria-label="Email address"
           required
-          className="h-11 flex-1 rounded-full border border-zinc-300 bg-white px-4 text-[15px] text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
+          className="h-11 min-w-0 flex-1 rounded-md border border-rule bg-white px-3.5 text-[16px] text-ink outline-none transition placeholder:text-ink-2/60 focus:border-brand focus:ring-2 focus:ring-brand/20"
         />
         <button
           type="submit"
           disabled={status === "sending"}
-          className="inline-flex h-11 items-center justify-center rounded-full bg-brand px-6 text-[15px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+          className="inline-flex h-11 shrink-0 items-center justify-center rounded-md bg-brand px-5 text-[16px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
         >
           {status === "sending" ? "Subscribing…" : newsletter.ctaLabel}
         </button>
       </div>
       {error ? (
-        <p className="mt-2 text-[13px] text-red-600">{error}</p>
-      ) : (
-        <p className="mt-2 text-[13px] text-zinc-400">One email a week. Unsubscribe anytime.</p>
-      )}
+        <p className="mt-2 text-[15px] text-red-700">{error}</p>
+      ) : null}
     </form>
   );
 }
@@ -118,21 +114,14 @@ function LiveCounterInner({ seed, label }: { seed: number; label: string }) {
   return <CounterView value={seed + real} label={label} live={!loading} />;
 }
 
+// Plain text under the form. The fallback shows the seed until the guest
+// session connects; `live` is set once the count is synced.
 function CounterView({ value, label, live }: { value: number; label: string; live?: boolean }) {
   const shown = useCountUp(value);
   return (
-    <div className="inline-flex items-center gap-2.5 text-[14px] text-zinc-500">
-      {live ? (
-        <span className="relative flex size-2">
-          <span className="absolute inline-flex size-2 animate-ping rounded-full bg-brand/70" />
-          <span className="relative inline-flex size-2 rounded-full bg-brand" />
-        </span>
-      ) : (
-        <span className="inline-flex size-2 rounded-full bg-zinc-300" />
-      )}
-      <span className="font-semibold tabular-nums text-zinc-900">{shown.toLocaleString()}</span>
-      {label}
-    </div>
+    <p className="text-[15px] text-ink-2" data-live={live ? "true" : undefined}>
+      <span className="tabular-nums text-ink">{shown.toLocaleString()}</span> {label}
+    </p>
   );
 }
 

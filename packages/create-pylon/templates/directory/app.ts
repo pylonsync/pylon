@@ -158,6 +158,16 @@ const manifest = buildManifest({
       display: "swap",
       preload: true,
     }),
+    // The mono face for tags, counts, and the search hint. globals.css maps it
+    // onto Tailwind's `font-mono` utility.
+    font({
+      family: "IBM Plex Mono",
+      variable: "--font-code",
+      weights: ["400", "500"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
   ],
   routes: await discoverAppRoutes(),
 });

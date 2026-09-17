@@ -2,135 +2,65 @@ import React from "react";
 import { Link } from "@pylonsync/react";
 import type { ProjectView } from "@/lib/agency";
 
-// Reusable presentational pieces for the landing page. All server-rendered —
-// no client JS. Restyle here and the whole page follows. The brand accent
-// (`text-brand`, `bg-brand-soft`) comes from CSS vars set on <html> in
-// app/layout.tsx, which read lib/site.config.ts — so re-theming is one edit.
+// Reusable presentational pieces for the marketing pages. All server-rendered,
+// no client JS. The site is white with black type; `--brand` (set on <html>
+// from lib/site.config.ts) colors links only, and `--paper` is the grey band
+// behind the contact form. Headlines use `.font-display` (Instrument Serif,
+// declared in app.ts).
 
 // Shared container: a contained, centered column.
-export const WRAP = "mx-auto w-full max-w-5xl px-6";
+export const WRAP = "mx-auto w-full max-w-6xl px-6";
 
-export function Eyebrow({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.14em] text-brand">
-      {children}
-    </p>
-  );
-}
+// A narrow measure for running text (case studies, intros).
+export const WRAP_NARROW = "mx-auto w-full max-w-2xl px-6";
 
-// "New / Coming soon"-style pill for the hero.
-export function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white py-1 pl-1.5 pr-3 text-[13px] text-zinc-600 shadow-sm">
-      <span className="inline-block size-1.5 rounded-full bg-brand" />
-      {children}
-    </span>
-  );
-}
+// A text link: black, underlined, brand color on hover.
+export const TEXT_LINK =
+  "underline decoration-zinc-300 underline-offset-[5px] transition-colors hover:text-brand hover:decoration-brand";
 
 export function Divider() {
   return (
     <div className={WRAP}>
-      <div className="border-t border-zinc-200/70" />
+      <div className="border-t border-zinc-200" />
     </div>
   );
 }
 
-export function SectionHead({
-  eyebrow,
-  title,
-  body,
-}: {
-  eyebrow: string;
-  title: string;
-  body?: string;
-}) {
+// A section heading: one large serif line, optionally a short paragraph.
+export function SectionTitle({ title, body }: { title: string; body?: string }) {
   return (
     <div>
-      <Eyebrow>{eyebrow}</Eyebrow>
-      <h2 className="mt-4 text-balance text-2xl font-semibold leading-[1.15] tracking-[-0.02em] sm:text-3xl">
+      <h2 className="font-display text-balance text-[2.25rem] leading-[1.05] tracking-[-0.01em] text-ink sm:text-[2.75rem]">
         {title}
       </h2>
-      {body ? (
-        <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-zinc-500">
-          {body}
-        </p>
-      ) : null}
+      {body ? <p className="mt-4 max-w-xl text-[16px] leading-relaxed text-zinc-600">{body}</p> : null}
     </div>
   );
 }
 
-// A grid of value props — icon + title + body.
-export function FeatureGrid({
-  items,
-}: {
-  items: { title: string; body: string; icon?: string }[];
-}) {
-  return (
-    <div className="grid gap-6 sm:grid-cols-3">
-      {items.map((f) => (
-        <div key={f.title}>
-          {f.icon ? (
-            <span className="flex size-9 items-center justify-center rounded-lg bg-brand-soft text-brand">
-              {f.icon}
-            </span>
-          ) : null}
-          <h3 className="mt-4 text-[15px] font-semibold text-zinc-900">
-            {f.title}
-          </h3>
-          <p className="mt-2 text-[14px] leading-relaxed text-zinc-500">
-            {f.body}
-          </p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// Initials for testimonial avatars, so the cards look finished without a photo.
-export function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
-
-// A linked portfolio card — the project's cover, title, client label, summary,
-// and tag chips, linking to its /work/[slug] case study. Used on the homepage
-// "Selected work" grid and the full /work index, so both stay in lockstep.
+// A linked portfolio entry: the 4:3 cover, then the title, client label, and
+// a one-line summary in small type. Used on the homepage work grid and the
+// full /work index, so both stay in lockstep.
 export function ProjectCard({ p }: { p: ProjectView }) {
   return (
     <Link href={`/work/${p.slug}`} className="group block">
       {/* Case-study cover: public/images/work/<slug>.jpg. */}
-      <ImagePlaceholder shape="landscape" title={`${p.title} — project shot`} src={`/images/work/${p.slug}.jpg`} />
-      <div className="mt-4 flex items-baseline justify-between gap-3">
-        <h3 className="text-[16px] font-semibold text-zinc-900 transition-colors group-hover:text-brand">
+      <ImagePlaceholder shape="landscape" title={`${p.title} product shot`} src={`/images/work/${p.slug}.jpg`} />
+      <div className="mt-4 flex items-baseline justify-between gap-4">
+        <h3 className="font-display text-[1.5rem] leading-none text-ink transition-colors group-hover:text-brand">
           {p.title}
         </h3>
-        <span className="shrink-0 font-mono text-[11px] uppercase tracking-wide text-zinc-400">
+        <span className="shrink-0 text-[13px] text-zinc-500">
           {p.client}
+          {p.year ? `, ${p.year}` : ""}
         </span>
       </div>
-      <p className="mt-1.5 text-[14px] leading-relaxed text-zinc-500">{p.summary}</p>
-      {p.tags.length > 0 ? (
-        <div className="mt-3 flex flex-wrap gap-1.5">
-          {p.tags.map((t) => (
-            <span key={t} className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-[11px] font-medium text-zinc-600">
-              {t}
-            </span>
-          ))}
-        </div>
-      ) : null}
-      <span className="mt-3 inline-flex items-center gap-1 text-[13px] font-medium text-brand opacity-0 transition-opacity group-hover:opacity-100">
-        Read case study →
-      </span>
+      <p className="mt-2 text-[14px] leading-relaxed text-zinc-600">{p.summary}</p>
     </Link>
   );
 }
 
-// A deliberately-obvious image placeholder for spots where a real photo belongs:
+// A clearly marked image placeholder for spots where a real photo belongs:
 // dashed border, a photo glyph, and a one-line "swap this" instruction.
 //
 //   shape  — "landscape" | "portrait" | "square" | "circle"
@@ -152,11 +82,11 @@ export function ImagePlaceholder({
 }) {
   const aspect =
     shape === "portrait"
-      ? "aspect-[4/5]"
+      ? "aspect-[3/4]"
       : shape === "square" || shape === "circle"
         ? "aspect-square"
         : "aspect-[4/3]";
-  const radius = shape === "circle" ? "rounded-full" : "rounded-2xl";
+  const radius = shape === "circle" ? "rounded-full" : "rounded-sm";
   if (src) {
     return (
       <div className={`relative overflow-hidden bg-zinc-100 ${aspect} ${radius} ${className}`}>
@@ -166,7 +96,7 @@ export function ImagePlaceholder({
   }
   return (
     <div
-      className={`relative grid place-items-center overflow-hidden border-2 border-dashed border-zinc-300 bg-zinc-50 ${aspect} ${radius} ${className}`}
+      className={`relative grid place-items-center overflow-hidden border border-dashed border-zinc-300 bg-zinc-50 ${aspect} ${radius} ${className}`}
     >
       <div className="px-4 text-center">
         <svg

@@ -19,6 +19,9 @@
   --brand: #4f46e5;
   --brand-soft: #eef2ff;
   --paper: #fafafa;
+  /* The marketing pages: a cream poster, near-black type. Set from lib/site.config.ts. */
+  --ink: #161412;
+  --cream: #f4efe6;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -112,6 +115,8 @@
   --color-brand: var(--brand);
   --color-brand-soft: var(--brand-soft);
   --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-cream: var(--cream);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -152,4 +157,10 @@
   button {
     cursor: pointer;
   }
+}
+
+/* Headlines, service names, and pull quotes. Bebas Neue is declared in app.ts. */
+.font-display {
+  font-family: var(--font-display, "Oswald", "Arial Narrow", Impact, sans-serif);
+  text-transform: uppercase;
 }

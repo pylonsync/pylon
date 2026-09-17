@@ -1,101 +1,30 @@
 import React from "react";
 
-// Reusable presentational pieces for the landing page. All server-rendered —
-// no client JS. Restyle here and the whole page follows. The brand accent
-// (`text-brand`, `bg-brand-soft`) comes from CSS vars set on <html> in
-// app/layout.tsx, which read lib/site.config.ts — so re-theming is one edit.
+// Presentational pieces for the marketing pages. All server-rendered, no client
+// JS. Colors come from CSS vars set on <html> in app/layout.tsx, which read
+// lib/site.config.ts, so re-theming is one edit there.
 
-// Shared container: a contained, centered column.
-export const WRAP = "mx-auto w-full max-w-3xl px-6";
+// One narrow column, left aligned, like a well-set essay page.
+export const WRAP = "mx-auto w-full max-w-[40rem] px-6";
 
-export function Eyebrow({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.14em] text-brand">
-      {children}
-    </p>
-  );
-}
-
-// "New / Coming soon"-style pill for the hero.
-export function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white py-1 pl-1.5 pr-3 text-[13px] text-zinc-600 shadow-sm">
-      <span className="inline-block size-1.5 rounded-full bg-brand" />
-      {children}
-    </span>
-  );
-}
-
+// A rule between sections.
 export function Divider() {
   return (
     <div className={WRAP}>
-      <div className="border-t border-zinc-200/70" />
+      <hr className="border-0 border-t border-rule" />
     </div>
   );
 }
 
-export function SectionHead({
-  eyebrow,
-  title,
-  body,
-}: {
-  eyebrow: string;
-  title: string;
-  body?: string;
-}) {
-  return (
-    <div>
-      <Eyebrow>{eyebrow}</Eyebrow>
-      <h2 className="mt-4 text-balance text-2xl font-semibold leading-[1.15] tracking-[-0.02em] sm:text-3xl">
-        {title}
-      </h2>
-      {body ? (
-        <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-zinc-500">
-          {body}
-        </p>
-      ) : null}
-    </div>
-  );
+// Section heading. One size, one weight, no label above it.
+export function SectionTitle({ children }: { children: React.ReactNode }) {
+  return <h2 className="text-[1.5rem] font-medium leading-[1.2] text-ink">{children}</h2>;
 }
 
-// A grid of value props — icon + title + body.
-export function FeatureGrid({
-  items,
-}: {
-  items: { title: string; body: string; icon?: string }[];
-}) {
-  return (
-    <div className="grid gap-6 sm:grid-cols-3">
-      {items.map((f) => (
-        <div key={f.title}>
-          {f.icon ? (
-            <span className="flex size-9 items-center justify-center rounded-lg bg-brand-soft text-brand">
-              {f.icon}
-            </span>
-          ) : null}
-          <h3 className="mt-4 text-[15px] font-semibold text-zinc-900">
-            {f.title}
-          </h3>
-          <p className="mt-2 text-[14px] leading-relaxed text-zinc-500">
-            {f.body}
-          </p>
-        </div>
-      ))}
-    </div>
-  );
-}
+// Running text: 17.5px with generous leading, the same serif as the headings.
+export const PROSE = "text-[17.5px] leading-[1.65] text-ink-2";
 
-// Initials for testimonial avatars, so the cards look finished without a photo.
-export function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
-}
-
-// A deliberately-obvious image placeholder — dashed border, photo glyph, and a
+// A deliberately-obvious image placeholder: dashed border, photo glyph, and a
 // "swap this" hint. Real sites drop a photo here.
 //
 //   shape  — "landscape" | "portrait" | "square" | "circle"
@@ -121,21 +50,21 @@ export function ImagePlaceholder({
       : shape === "square" || shape === "circle"
         ? "aspect-square"
         : "aspect-[4/3]";
-  const radius = shape === "circle" ? "rounded-full" : "rounded-2xl";
+  const radius = shape === "circle" ? "rounded-full" : "rounded-lg";
   if (src) {
     return (
-      <div className={`relative overflow-hidden bg-zinc-100 ${aspect} ${radius} ${className}`}>
-        <img src={src} alt={title} className="absolute inset-0 size-full object-cover" loading="lazy" />
+      <div className={`relative overflow-hidden bg-rule ${aspect} ${radius} ${className}`}>
+        <img src={src} alt={title} className="absolute inset-0 size-full object-cover" />
       </div>
     );
   }
   return (
     <div
-      className={`relative grid place-items-center overflow-hidden border-2 border-dashed border-zinc-300 bg-zinc-50 ${aspect} ${radius} ${className}`}
+      className={`relative grid place-items-center overflow-hidden border-2 border-dashed border-rule bg-paper ${aspect} ${radius} ${className}`}
     >
       <div className="px-4 text-center">
         <svg
-          className="mx-auto size-7 text-zinc-300"
+          className="mx-auto size-7 text-rule"
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -148,8 +77,8 @@ export function ImagePlaceholder({
           <circle cx="9" cy="9" r="1.6" />
           <path d="m21 15-4.5-4.5L7 20" />
         </svg>
-        <p className="mt-2 text-[12.5px] font-medium text-zinc-500">{title}</p>
-        {hint ? <p className="mt-1 text-[11px] leading-snug text-zinc-400">{hint}</p> : null}
+        <p className="mt-2 text-[12.5px] font-medium text-ink-2">{title}</p>
+        {hint ? <p className="mt-1 text-[11px] leading-snug text-ink-2/70">{hint}</p> : null}
       </div>
     </div>
   );

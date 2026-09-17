@@ -18,28 +18,31 @@ export type BaseConfig = {
     copyrightName: string;
     socials: Social[];
   };
-  colors: { brand: string; brandSoft: string; paper: string };
+  // brand: the one accent. paper: page background. ink: running text.
+  colors: { brand: string; brandSoft: string; paper: string; ink: string };
   seo: { title: string; description: string };
 };
 
 export type Offering = { title: string; body: string; price?: string };
 export type Testimonial = { quote: string; name: string; role: string };
 export type LinkItem = { label: string; href: string; note?: string };
+export type Issue = { title: string; date: string; href: string; summary?: string };
 
 export type CreatorConfig = BaseConfig & {
   hero: {
-    badge: string;
     name: string; // the person / personal brand
     tagline: string; // one-line "what you do"
-    intro: string; // a short paragraph
+    intro: string; // two sentences of running text under the name
   };
-  about: { eyebrow: string; headline: string; paragraphs: string[] };
-  offerings: { eyebrow: string; headline: string; items: Offering[] };
-  testimonials?: { eyebrow: string; headline: string; items: Testimonial[] };
-  // The realtime feature: a live newsletter subscriber count.
+  about: { headline: string; paragraphs: string[] };
+  offerings: { headline: string; items: Offering[] };
+  // Recent newsletter issues or posts. Omit to hide the section.
+  writing?: { headline: string; items: Issue[] };
+  testimonials?: { headline: string; items: Testimonial[] };
+  // The realtime feature: a live newsletter subscriber count. The form sits in
+  // the hero, under the introduction.
   newsletter: {
-    eyebrow: string;
-    headline: string;
+    name: string; // the newsletter's name, e.g. "The Studio Notes"
     subcopy: string;
     emailPlaceholder: string;
     ctaLabel: string;
@@ -47,7 +50,7 @@ export type CreatorConfig = BaseConfig & {
     counterLabel: string; // e.g. "readers subscribed"
     seedCount?: number; // vanity baseline added to the real live count
   };
-  links?: { eyebrow: string; headline: string; items: LinkItem[] };
+  links?: { headline: string; body: string; items: LinkItem[] };
 };
 
 /* ----------------------------- config ---------------------------- */
@@ -75,7 +78,7 @@ export const siteConfig: CreatorConfig = {
     ],
   },
 
-  colors: { brand: "#0d9488", brandSoft: "#ccfbf1", paper: "#fafafa" },
+  colors: { brand: "#4a6b3f", brandSoft: "#e6ecdf", paper: "#f7f3ec", ink: "#2a2622" },
 
   seo: {
     title: "Maya Rivera — product design coach & writer",
@@ -84,16 +87,14 @@ export const siteConfig: CreatorConfig = {
   },
 
   hero: {
-    badge: "Now coaching · 2 spots open",
     name: "Maya Rivera",
     tagline: "Product design coach & writer.",
     intro:
-      "I help product designers get unstuck, sharpen their portfolios, and do the bravest work of their careers. Fifteen years in the room; now I spend it in yours.",
+      "I help product designers get unstuck, sharpen their portfolios, and do the bravest work of their careers. I spent fifteen years leading design teams, and now I spend that time with you.",
   },
 
   about: {
-    eyebrow: "About",
-    headline: "Hi, I'm Maya.",
+    headline: "About",
     paragraphs: [
       "I've led design at two startups and a public company, shipped products to millions, and mentored designers who now lead teams of their own.",
       "These days I coach one-on-one, review portfolios, and write a weekly newsletter about the craft and the career. Every issue focuses on practical ways to move the work forward.",
@@ -101,8 +102,7 @@ export const siteConfig: CreatorConfig = {
   },
 
   offerings: {
-    eyebrow: "Work with me",
-    headline: "Three ways I can help.",
+    headline: "What I do",
     items: [
       {
         title: "1:1 coaching",
@@ -117,14 +117,37 @@ export const siteConfig: CreatorConfig = {
       {
         title: "Team workshops",
         body: "Half-day workshops on critique, design systems, and shipping faster without lowering the bar.",
-        price: "let's talk",
+        price: "priced per team",
+      },
+    ],
+  },
+
+  writing: {
+    headline: "Recent issues",
+    items: [
+      {
+        title: "Critique is a skill, not a meeting",
+        date: "Sep 7, 2026",
+        href: "#",
+        summary: "How to run a critique that ends with decisions instead of notes.",
+      },
+      {
+        title: "Your portfolio has too many projects",
+        date: "Aug 31, 2026",
+        href: "#",
+        summary: "Three case studies, told well, beat twelve told badly.",
+      },
+      {
+        title: "What senior designers stop asking permission for",
+        date: "Aug 24, 2026",
+        href: "#",
+        summary: "The small decisions that mark the change from mid-level to senior.",
       },
     ],
   },
 
   testimonials: {
-    eyebrow: "Kind words",
-    headline: "From people I've worked with.",
+    headline: "From people I have worked with",
     items: [
       {
         quote:
@@ -148,24 +171,23 @@ export const siteConfig: CreatorConfig = {
   },
 
   newsletter: {
-    eyebrow: "The Studio Notes",
-    headline: "A weekly letter on the craft and the career.",
-    subcopy:
-      "One short, useful email every Sunday — on design, taste, and doing brave work. No spam, unsubscribe anytime.",
+    name: "The Studio Notes",
+    subcopy: "One short email every Sunday on design, taste, and doing brave work.",
     emailPlaceholder: "you@email.com",
     ctaLabel: "Subscribe",
-    successMessage: "You're in — watch your inbox this Sunday.",
+    successMessage: "You are in. The next issue arrives on Sunday.",
     counterLabel: "designers reading",
     seedCount: 2400,
   },
 
   links: {
-    eyebrow: "Elsewhere",
-    headline: "Find me around the web.",
+    headline: "Work with me",
+    body:
+      "If you want coaching or a portfolio review, book a short intro call first. We talk through what you need, and I tell you whether I can help.",
     items: [
-      { label: "Portfolio", href: "#", note: "Selected work, 2010–today" },
-      { label: "Read the archive", href: "#", note: "Every past issue of The Studio Notes" },
       { label: "Book a free intro call", href: "#", note: "15 minutes, no pitch" },
+      { label: "Read the archive", href: "#", note: "Every past issue of The Studio Notes" },
+      { label: "Portfolio", href: "#", note: "Selected work, 2010 to today" },
     ],
   },
 };

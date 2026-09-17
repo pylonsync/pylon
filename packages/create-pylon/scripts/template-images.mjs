@@ -67,13 +67,23 @@ function token() {
 async function generate(tok, prompt, aspect) {
   const input = { prompt, aspect_ratio: aspect, quality: "high", output_format: "jpeg", output_compression: 85 };
   if (process.env.OPENAI_API_KEY) input.openai_api_key = process.env.OPENAI_API_KEY;
-  const res = await fetch(`https://api.replicate.com/v1/models/${MODEL}/predictions`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json", Prefer: "wait=60" },
-    body: JSON.stringify({ input }),
-  });
-  if (!res.ok) throw new Error(`replicate ${res.status}: ${(await res.text()).slice(0, 400)}`);
-  let prediction = await res.json();
+  let prediction;
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`https://api.replicate.com/v1/models/${MODEL}/predictions`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json", Prefer: "wait=60" },
+      body: JSON.stringify({ input }),
+    });
+    if (res.status === 429 && attempt < 12) {
+      // Accounts under $5 of credit are limited to one request every ten seconds.
+      const body = await res.json().catch(() => ({}));
+      await new Promise((r) => setTimeout(r, ((body.retry_after ?? 10) + 1) * 1000));
+      continue;
+    }
+    if (!res.ok) throw new Error(`replicate ${res.status}: ${(await res.text()).slice(0, 400)}`);
+    prediction = await res.json();
+    break;
+  }
   for (let i = 0; i < 240 && prediction.status !== "succeeded" && prediction.status !== "failed" && prediction.status !== "canceled"; i++) {
     await new Promise((r) => setTimeout(r, 2000));
     const poll = await fetch(`https://api.replicate.com/v1/predictions/${prediction.id}`, { headers: { Authorization: `Bearer ${tok}` } });

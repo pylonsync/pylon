@@ -15,10 +15,10 @@
    three brand vars are defaults — app/layout.tsx overrides them from
    lib/site.config.ts on <html>, so re-theming the whole page is one edit there. */
 :root {
-  --radius: 0.625rem;
-  --brand: #4f46e5;
-  --brand-soft: #eef2ff;
-  --paper: #fafafa;
+  --radius: 0.125rem;
+  --brand: #1d4ed8;
+  --brand-soft: #eff6ff;
+  --paper: #ffffff;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -125,6 +125,8 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  /* `font-mono` utility. IBM Plex Mono is declared in app.ts as --font-code. */
+  --font-mono: var(--font-code, "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 @layer base {
@@ -152,4 +154,13 @@
   button {
     cursor: pointer;
   }
+}
+
+/* Headings. The page uses Inter semibold at modest sizes; no separate display
+   face. Kept as a class so a template fork can swap the heading font in one
+   place (declare it in app.ts as --font-display). */
+.font-display {
+  font-family: var(--font-display, var(--font-sans, Inter, ui-sans-serif, system-ui, sans-serif));
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }

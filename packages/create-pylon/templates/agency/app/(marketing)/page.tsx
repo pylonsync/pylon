@@ -1,14 +1,6 @@
 import React, { Suspense, use } from "react";
 import { Link, type Metadata, type PageProps, type ServerData } from "@pylonsync/react";
-import {
-  WRAP,
-  Eyebrow,
-  Divider,
-  SectionHead,
-  ImagePlaceholder,
-  ProjectCard,
-  initials,
-} from "@/components/marketing";
+import { WRAP, TEXT_LINK, Divider, SectionTitle, ImagePlaceholder, ProjectCard } from "@/components/marketing";
 import { LiveSlots, ContactForm } from "./contact-form";
 import { SeedProjects } from "./seeder";
 import { siteConfig } from "@/lib/site.config";
@@ -20,10 +12,10 @@ export const metadata: Metadata = {
   openGraph: { title: siteConfig.seo.title, description: siteConfig.seo.description, type: "website" },
 };
 
-// The homepage "Selected work" grid reads the live Project portfolio on the
-// server (the `selected` + `published` ones, ordered), so curating it in the
-// dashboard re-curates the homepage. Before the portfolio is seeded, it falls
-// back to the config case studies so the section is never empty on first paint.
+// The homepage work grid reads the live Project portfolio on the server (the
+// `selected` + `published` ones, ordered), so curating it in the dashboard
+// re-curates the homepage. Before the portfolio is seeded, it falls back to the
+// config case studies so the section is never empty on first paint.
 function selectedFromConfig(): ProjectView[] {
   return siteConfig.work.items
     .filter((c) => c.selected)
@@ -37,6 +29,8 @@ function selectedFromConfig(): ProjectView[] {
     }));
 }
 
+const WORK_GRID = "grid gap-x-8 gap-y-12 sm:grid-cols-2";
+
 function SelectedWork({ serverData }: { serverData: ServerData }) {
   const rows = use(serverData.list<ProjectRow>("Project"));
   const fromDb = rows
@@ -46,7 +40,7 @@ function SelectedWork({ serverData }: { serverData: ServerData }) {
   const projects = fromDb.length > 0 ? fromDb : selectedFromConfig();
 
   return (
-    <div className="mt-10 grid gap-6 sm:grid-cols-2">
+    <div className={WORK_GRID}>
       {projects.map((p) => (
         <ProjectCard key={p.slug} p={p} />
       ))}
@@ -54,129 +48,92 @@ function SelectedWork({ serverData }: { serverData: ServerData }) {
   );
 }
 
-// `app/page.tsx` → `/`. Server-rendered studio site. Hero, services, work,
-// process, team, and testimonials are static server HTML (SEO + first paint);
-// the live "slots open" pill and the contact form (#contact) are client islands
-// driven by the public Capacity row. The "Selected work" grid reads the Project
-// portfolio server-side. All other copy comes from siteConfig.
+function WorkSkeleton({ count }: { count: number }) {
+  return (
+    <div className={WORK_GRID}>
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i}>
+          <div className="aspect-[4/3] animate-pulse rounded-sm bg-zinc-100" />
+          <div className="mt-4 h-5 w-1/3 animate-pulse rounded bg-zinc-100" />
+          <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-zinc-100" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// `app/page.tsx` → `/`. Server-rendered studio site. The hero is one serif
+// sentence, then the work grid, services, process, team, testimonials, and
+// contact. The live "slots open" line and the contact form (#contact) are
+// client islands driven by the public Capacity row. All copy comes from
+// siteConfig.
 export default function LandingPage({ serverData }: PageProps) {
-  const { hero, logos, services, work, process, team, testimonials, contact } = siteConfig;
+  const { hero, services, work, process, team, testimonials, contact } = siteConfig;
 
   return (
-    <div className="bg-white text-zinc-900">
+    <div className="bg-white text-ink">
       {/* ============================== HERO ============================== */}
-      <section className={`${WRAP} pt-16 pb-14 sm:pt-20`}>
-        <div className="grid items-center gap-10 lg:grid-cols-2 lg:gap-14">
-          <div>
-            <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-brand">{hero.tagline}</p>
-            <h1 className="mt-4 text-balance text-[2.5rem] font-semibold leading-[1.04] tracking-[-0.02em] sm:text-[3.25rem]">
-              {hero.headline}
-            </h1>
-            <p className="mt-5 max-w-xl text-[17px] leading-relaxed text-zinc-500">{hero.subcopy}</p>
-            <div className="mt-7 flex flex-wrap items-center gap-4">
-              <a href="#contact" className="inline-flex items-center rounded-full bg-brand px-5 py-2.5 text-sm font-medium text-white transition-opacity hover:opacity-90">
+      <section className={`${WRAP} pt-14 pb-16 sm:pt-20 sm:pb-20`}>
+        <h1 className="font-display max-w-5xl text-balance text-[2.75rem] leading-[1.02] tracking-[-0.015em] sm:text-[4rem] lg:text-[5rem]">
+          {hero.headline}
+        </h1>
+        <div className="mt-8 grid gap-6 sm:mt-10 sm:grid-cols-[1fr_auto] sm:items-end">
+          <div className="max-w-xl">
+            <p className="text-[17px] leading-relaxed text-zinc-700">{hero.subcopy}</p>
+            <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-2 text-[15px]">
+              <a href="#contact" className={TEXT_LINK}>
                 {hero.ctaLabel}
               </a>
-              <a href="#work" className="text-sm font-medium text-zinc-700 hover:text-zinc-900">
-                {hero.secondaryCtaLabel} →
+              <a href="#work" className={TEXT_LINK}>
+                {hero.secondaryCtaLabel}
               </a>
             </div>
-            <div className="mt-8">
-              <LiveSlots />
-            </div>
           </div>
-
-          {/* Hero photo. Ships as public/images/hero.jpg; swap it for the studio,
-              the team at work, or a flagship project. */}
-          <div className="relative mx-auto w-full max-w-sm lg:max-w-none">
-            <ImagePlaceholder
-              shape="portrait"
-              title="The studio at work"
-              src="/images/hero.jpg"
-            />
-          </div>
+          <LiveSlots />
         </div>
       </section>
 
-      {/* ============================== LOGOS ============================= */}
-      <section className={`${WRAP} pb-6`}>
-        <p className="text-center font-mono text-[11px] uppercase tracking-[0.16em] text-zinc-400">
-          {logos.eyebrow}
-        </p>
-        <div className="mt-5 flex flex-wrap items-center justify-center gap-x-10 gap-y-4">
-          {logos.names.map((n) => (
-            <span key={n} className="text-[15px] font-semibold tracking-tight text-zinc-300">
-              {n}
-            </span>
-          ))}
+      {/* ============================== WORK ============================= */}
+      <section id="work" className={`${WRAP} pb-20`}>
+        <Suspense fallback={<WorkSkeleton count={2} />}>
+          <SelectedWork serverData={serverData} />
+        </Suspense>
+        <div className="mt-10 text-[15px]">
+          <Link href="/work" className={TEXT_LINK}>
+            All work
+          </Link>
         </div>
       </section>
 
       {/* ============================ SERVICES =========================== */}
       <Divider />
-      <section id="services" className={`${WRAP} py-16`}>
-        <SectionHead eyebrow={services.eyebrow} title={services.headline} />
-        <div className="mt-10 grid gap-x-8 gap-y-10 sm:grid-cols-2">
-          {services.items.map((s) => (
-            <div key={s.title}>
-              {s.icon ? (
-                <span className="flex size-9 items-center justify-center rounded-lg bg-brand-soft text-brand">
-                  {s.icon}
-                </span>
-              ) : null}
-              <h3 className="mt-4 text-[16px] font-semibold text-zinc-900">{s.title}</h3>
-              <p className="mt-2 max-w-md text-[14px] leading-relaxed text-zinc-500">{s.body}</p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* ============================== WORK ============================= */}
-      <Divider />
-      <section id="work" className={`${WRAP} py-16`}>
-        <div className="flex items-end justify-between gap-4">
-          <SectionHead eyebrow={work.eyebrow} title={work.headline} />
-          <Link
-            href="/work"
-            className="hidden shrink-0 text-[13.5px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex"
-          >
-            All work →
-          </Link>
-        </div>
-        <Suspense
-          fallback={
-            <div className="mt-10 grid gap-6 sm:grid-cols-2">
-              {[0, 1].map((i) => (
-                <div key={i}>
-                  <div className="aspect-[4/3] animate-pulse rounded-2xl bg-zinc-100" />
-                  <div className="mt-4 h-4 w-1/3 animate-pulse rounded bg-zinc-100" />
-                  <div className="mt-2 h-3 w-3/4 animate-pulse rounded bg-zinc-100" />
+      <section id="services" className={`${WRAP} py-16 sm:py-20`}>
+        <div className="grid gap-10 lg:grid-cols-[1fr_2fr]">
+          <SectionTitle title={services.headline} />
+          <ol className="divide-y divide-zinc-200 border-y border-zinc-200">
+            {services.items.map((s, i) => (
+              <li key={s.title} className="grid gap-2 py-6 sm:grid-cols-[3rem_1fr] sm:gap-6">
+                <span className="text-[13px] tabular-nums text-zinc-500">{String(i + 1).padStart(2, "0")}</span>
+                <div>
+                  <h3 className="font-display text-[1.5rem] leading-tight">{s.title}</h3>
+                  <p className="mt-2 max-w-lg text-[15px] leading-relaxed text-zinc-600">{s.body}</p>
                 </div>
-              ))}
-            </div>
-          }
-        >
-          <SelectedWork serverData={serverData} />
-        </Suspense>
-        <div className="mt-8 sm:hidden">
-          <Link href="/work" className="text-[14px] font-medium text-brand">
-            See all work →
-          </Link>
+              </li>
+            ))}
+          </ol>
         </div>
       </section>
 
       {/* ============================ PROCESS ============================ */}
       <Divider />
-      <section className={`${WRAP} py-16`}>
-        <SectionHead eyebrow={process.eyebrow} title={process.headline} />
-        <ol className="mt-10 grid gap-8 sm:grid-cols-2 lg:grid-cols-4">
+      <section className={`${WRAP} py-16 sm:py-20`}>
+        <SectionTitle title={process.headline} />
+        <ol className="mt-10 grid gap-8 border-t border-zinc-200 pt-8 sm:grid-cols-2 lg:grid-cols-4">
           {process.steps.map((step, i) => (
             <li key={step.title}>
-              <span className="flex size-8 items-center justify-center rounded-full bg-zinc-900 font-mono text-[12px] font-semibold text-white">
-                {i + 1}
-              </span>
-              <h3 className="mt-4 text-[15px] font-semibold text-zinc-900">{step.title}</h3>
-              <p className="mt-2 text-[14px] leading-relaxed text-zinc-500">{step.body}</p>
+              <span className="text-[13px] tabular-nums text-zinc-500">{String(i + 1).padStart(2, "0")}</span>
+              <h3 className="font-display mt-2 text-[1.5rem] leading-tight">{step.title}</h3>
+              <p className="mt-2 text-[15px] leading-relaxed text-zinc-600">{step.body}</p>
             </li>
           ))}
         </ol>
@@ -184,15 +141,15 @@ export default function LandingPage({ serverData }: PageProps) {
 
       {/* ============================== TEAM ============================= */}
       <Divider />
-      <section className={`${WRAP} py-16`}>
-        <SectionHead eyebrow={team.eyebrow} title={team.headline} />
-        <div className="mt-10 grid gap-8 sm:grid-cols-3">
+      <section className={`${WRAP} py-16 sm:py-20`}>
+        <SectionTitle title={team.headline} />
+        <div className="mt-10 grid grid-cols-2 gap-6 sm:grid-cols-3 sm:gap-8">
           {team.members.map((m) => (
             <div key={m.name}>
               {/* Team headshot: public/images/team/<name>.jpg. */}
-              <ImagePlaceholder shape="square" title={m.name} src={`/images/team/${slugify(m.name)}.jpg`} className="max-w-[200px]" />
-              <h3 className="mt-4 text-[15px] font-semibold text-zinc-900">{m.name}</h3>
-              <p className="text-[13.5px] text-zinc-500">{m.role}</p>
+              <ImagePlaceholder shape="square" title={m.name} src={`/images/team/${slugify(m.name)}.jpg`} />
+              <h3 className="mt-4 text-[15px] font-medium">{m.name}</h3>
+              <p className="text-[14px] text-zinc-500">{m.role}</p>
             </div>
           ))}
         </div>
@@ -202,20 +159,15 @@ export default function LandingPage({ serverData }: PageProps) {
       {testimonials ? (
         <>
           <Divider />
-          <section className={`${WRAP} py-16`}>
-            <SectionHead eyebrow={testimonials.eyebrow} title={testimonials.headline} />
-            <div className="mt-10 grid gap-6 sm:grid-cols-3">
+          <section className={`${WRAP} py-16 sm:py-20`}>
+            <SectionTitle title={testimonials.headline} />
+            <div className="mt-10 grid gap-10 border-t border-zinc-200 pt-8 sm:grid-cols-3 sm:gap-8">
               {testimonials.items.map((t) => (
-                <figure key={t.name} className="flex flex-col rounded-2xl border border-zinc-200 bg-paper p-6">
-                  <blockquote className="flex-1 text-[14px] leading-relaxed text-zinc-700">“{t.quote}”</blockquote>
-                  <figcaption className="mt-5 flex items-center gap-3">
-                    <span className="flex size-9 items-center justify-center rounded-full bg-zinc-200 text-[11px] font-semibold text-zinc-500">
-                      {initials(t.name)}
-                    </span>
-                    <span className="text-[13px] leading-tight">
-                      <span className="block font-medium text-zinc-900">{t.name}</span>
-                      <span className="text-zinc-500">{t.role}</span>
-                    </span>
+                <figure key={t.name}>
+                  <blockquote className="font-display text-[1.375rem] leading-snug">“{t.quote}”</blockquote>
+                  <figcaption className="mt-4 text-[14px] leading-tight">
+                    <span className="block font-medium">{t.name}</span>
+                    <span className="text-zinc-500">{t.role}</span>
                   </figcaption>
                 </figure>
               ))}
@@ -225,20 +177,17 @@ export default function LandingPage({ serverData }: PageProps) {
       ) : null}
 
       {/* ============================= CONTACT =========================== */}
-      <Divider />
-      <section id="contact" className={`${WRAP} py-16`}>
-        <div className="grid gap-10 lg:grid-cols-[0.9fr_1.1fr]">
-          <div>
-            <Eyebrow>{contact.eyebrow}</Eyebrow>
-            <h2 className="mt-4 text-balance text-2xl font-semibold leading-[1.15] tracking-[-0.02em] sm:text-3xl">
-              {contact.headline}
-            </h2>
-            <p className="mt-4 max-w-md text-[15px] leading-relaxed text-zinc-500">{contact.subcopy}</p>
-            <div className="mt-6">
-              <LiveSlots />
+      <section id="contact" className="bg-paper">
+        <div className={`${WRAP} py-16 sm:py-20`}>
+          <div className="grid gap-10 lg:grid-cols-[1fr_1.2fr] lg:gap-16">
+            <div>
+              <SectionTitle title={contact.headline} body={contact.subcopy} />
+              <div className="mt-6">
+                <LiveSlots />
+              </div>
             </div>
+            <ContactForm />
           </div>
-          <ContactForm />
         </div>
       </section>
 

@@ -143,6 +143,16 @@ const manifest = buildManifest({
       display: "swap",
       preload: true,
     }),
+    // The marketing pages are set in a serif, headings and running text alike.
+    font({
+      family: "Source Serif 4",
+      variable: "--font-display",
+      weights: ["400", "500", "600"],
+      styles: ["normal", "italic"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
   ],
   routes: await discoverAppRoutes(),
 });

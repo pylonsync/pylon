@@ -31,7 +31,6 @@ export type Faq = { q: string; a: string };
 
 export type RestaurantConfig = BaseConfig & {
   hero: {
-    tagline: string;
     headline: string;
     subcopy: string;
     ctaLabel: string;
@@ -41,10 +40,9 @@ export type RestaurantConfig = BaseConfig & {
   };
   /** The photo band under the hero: public/images/*.jpg with a caption each. */
   gallery: Array<{ src: string; caption: string }>;
-  menu: { eyebrow: string; headline: string; sections: MenuSection[] };
+  menu: { headline: string; sections: MenuSection[] };
   reservations: {
     enabled: boolean;
-    eyebrow: string;
     headline: string;
     subcopy: string;
     slotMinutes: number; // gap between seatings, e.g. 30
@@ -55,9 +53,8 @@ export type RestaurantConfig = BaseConfig & {
     hours: Record<number, DayHours>; // 0=Sun … 6=Sat; null = closed
     confirmationMessage: string;
   };
-  reviews?: { eyebrow: string; headline: string; items: Review[] };
+  reviews?: { headline: string; items: Review[] };
   location: {
-    eyebrow: string;
     headline: string;
     address: string;
     mapEmbedUrl?: string;
@@ -65,7 +62,7 @@ export type RestaurantConfig = BaseConfig & {
     phone: string;
     email: string;
   };
-  faq?: { eyebrow: string; headline: string; items: Faq[] };
+  faq?: { headline: string; items: Faq[] };
 };
 
 /* ----------------------------- config ---------------------------- */
@@ -97,7 +94,6 @@ export const siteConfig: RestaurantConfig = {
   },
 
   hero: {
-    tagline: "Dallas · Bishop Arts",
     headline: "A table by the fire, whenever you're ready.",
     subcopy:
       "Seasonal small plates, wood-fired mains, and a short natural-wine list. The reservation calendar shows current table availability.",
@@ -117,7 +113,6 @@ export const siteConfig: RestaurantConfig = {
   ],
 
   menu: {
-    eyebrow: "Menu",
     headline: "Short, seasonal, wood-fired.",
     sections: [
       {
@@ -150,7 +145,6 @@ export const siteConfig: RestaurantConfig = {
 
   reservations: {
     enabled: true,
-    eyebrow: "Reserve",
     headline: "Find a table that's open.",
     subcopy:
       "Pick a date, time, and party size from the live table calendar. We'll hold the reservation for you.",
@@ -173,7 +167,6 @@ export const siteConfig: RestaurantConfig = {
   },
 
   reviews: {
-    eyebrow: "Reviews",
     headline: "Regulars keep coming back.",
     items: [
       {
@@ -198,7 +191,6 @@ export const siteConfig: RestaurantConfig = {
   },
 
   location: {
-    eyebrow: "Visit",
     headline: "Find us in Bishop Arts.",
     address: "412 N Bishop Ave, Dallas, TX 75208",
     mapEmbedUrl: "",
@@ -208,7 +200,6 @@ export const siteConfig: RestaurantConfig = {
   },
 
   faq: {
-    eyebrow: "Questions",
     headline: "Good to know.",
     items: [
       {

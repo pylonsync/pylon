@@ -28,7 +28,6 @@ export default function LandingPage() {
         <img src={hero.image} alt="" className="absolute inset-0 -z-20 size-full object-cover" />
         <div className="absolute inset-0 -z-10 bg-gradient-to-t from-[var(--ink)] via-[var(--ink)]/60 to-[var(--ink)]/20" />
         <div className={`${WRAP} flex min-h-[88vh] flex-col justify-end pb-16 pt-32`}>
-          <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-[var(--cream-2)]">{hero.tagline}</p>
           <h1 className="font-display mt-5 max-w-3xl text-balance text-[3rem] font-medium leading-[1.02] tracking-[-0.01em] sm:text-[4.5rem]">
             {hero.headline}
           </h1>
@@ -79,8 +78,7 @@ export default function LandingPage() {
       {/* MENU */}
       <section id="menu" className={`${WRAP} py-16`}>
         <div className="max-w-2xl">
-          <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-brand">{menu.eyebrow}</p>
-          <h2 className="font-display mt-3 text-balance text-[2.25rem] leading-[1.08] sm:text-[3rem]">{menu.headline}</h2>
+          <h2 className="font-display text-balance text-[2.25rem] leading-[1.08] sm:text-[3rem]">{menu.headline}</h2>
         </div>
         <div className="mt-12 grid gap-12 md:grid-cols-3">
           {menu.sections.map((sec) => (
@@ -118,8 +116,7 @@ export default function LandingPage() {
           <div className={`${WRAP} py-16`}>
             <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
               <div className="max-w-xl">
-                <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-brand">{reservations.eyebrow}</p>
-                <h2 className="font-display mt-3 text-balance text-[2.25rem] leading-[1.08] sm:text-[3rem]">{reservations.headline}</h2>
+                <h2 className="font-display text-balance text-[2.25rem] leading-[1.08] sm:text-[3rem]">{reservations.headline}</h2>
                 <p className="mt-4 text-[15px] leading-relaxed text-zinc-600">{reservations.subcopy}</p>
               </div>
               <p className="text-[13px] text-zinc-500">
@@ -139,7 +136,7 @@ export default function LandingPage() {
       {/* REVIEWS: one voice at a time. */}
       {reviews && reviews.items.length > 0 ? (
         <section className={`${WRAP} py-16`}>
-          <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-brand">{reviews.eyebrow}</p>
+          <h2 className="font-display text-[2rem] leading-[1.1]">{reviews.headline}</h2>
           <div className="mt-6 divide-y divide-white/10">
             {reviews.items.map((r) => (
               <figure key={r.name} className="grid gap-4 py-8 sm:grid-cols-[1fr_auto] sm:items-end">
@@ -160,8 +157,7 @@ export default function LandingPage() {
       <section id="visit" className="border-t border-white/10">
         <div className={`${WRAP} grid gap-10 py-16 lg:grid-cols-2`}>
           <div>
-            <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-brand">{location.eyebrow}</p>
-            <h2 className="font-display mt-3 text-balance text-[2.25rem] leading-[1.08] sm:text-[3rem]">{location.headline}</h2>
+            <h2 className="font-display text-balance text-[2.25rem] leading-[1.08] sm:text-[3rem]">{location.headline}</h2>
             <div className="mt-6 space-y-2 text-[15px] leading-relaxed text-[var(--cream-2)]">
               <p className="text-[var(--cream)]">{location.address}</p>
               <p>{location.hoursText}</p>
@@ -190,8 +186,7 @@ export default function LandingPage() {
       {faq && faq.items.length > 0 ? (
         <section className="border-t border-white/10">
           <div className={`${WRAP} py-16`}>
-            <p className="font-mono text-[11px] uppercase tracking-[0.2em] text-brand">{faq.eyebrow}</p>
-            <h2 className="font-display mt-3 text-[2rem] leading-[1.1]">{faq.headline}</h2>
+            <h2 className="font-display text-[2rem] leading-[1.1]">{faq.headline}</h2>
             <div className="mt-8 max-w-3xl divide-y divide-white/10 border-y border-white/10">
               {faq.items.map((f) => (
                 <details key={f.q} className="group py-5">

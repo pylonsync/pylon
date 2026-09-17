@@ -7,7 +7,7 @@ import {
   type ServerData,
   type SsrResponse,
 } from "@pylonsync/react";
-import { ImagePlaceholder } from "@/components/marketing";
+import { WRAP, WRAP_NARROW, TEXT_LINK, ImagePlaceholder } from "@/components/marketing";
 import { SeedProjects } from "../../seeder";
 import { siteConfig } from "@/lib/site.config";
 import { slugify, viewFromRow, type ProjectRow, type ProjectView } from "@/lib/agency";
@@ -58,8 +58,6 @@ export const generateMetadata: GenerateMetadata = async ({
 // so a click off the work grid hits cache instead of a live render.
 export const revalidate = 300;
 
-const WRAP_NARROW = "mx-auto w-full max-w-3xl px-6";
-
 function CaseStudy({
   serverData,
   response,
@@ -74,79 +72,79 @@ function CaseStudy({
   if (!p) {
     response.setStatus(404);
     return (
-      <div className={`${WRAP_NARROW} py-24 text-center`}>
-        <p className="text-[15px] font-medium text-zinc-900">That case study doesn&apos;t exist.</p>
-        <Link href="/work" className="mt-2 inline-block text-[14px] font-medium text-brand">
-          ← Back to all work
+      <div className={`${WRAP_NARROW} py-24`}>
+        <p className="font-display text-[2rem]">That case study does not exist.</p>
+        <Link href="/work" className={`mt-4 inline-block text-[15px] ${TEXT_LINK}`}>
+          All work
         </Link>
       </div>
     );
   }
 
   return (
-    <article className={`${WRAP_NARROW} py-14`}>
-      <Link href="/work" className="text-[13.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-900">
-        ← All work
-      </Link>
-
-      <header className="mt-6">
-        <p className="font-mono text-[11px] uppercase tracking-[0.16em] text-brand">
-          {p.client}
-          {p.year ? ` · ${p.year}` : ""}
-        </p>
-        <h1 className="mt-3 text-balance text-[2rem] font-semibold leading-[1.08] tracking-[-0.02em] sm:text-[2.5rem]">
+    <article className="pt-10 pb-20 sm:pt-14">
+      <header className={WRAP}>
+        <Link href="/work" className={`text-[14px] ${TEXT_LINK}`}>
+          All work
+        </Link>
+        <h1 className="font-display mt-8 max-w-4xl text-balance text-[2.75rem] leading-[1.02] tracking-[-0.015em] sm:text-[4rem]">
           {p.title}
         </h1>
-        <p className="mt-4 max-w-2xl text-[17px] leading-relaxed text-zinc-500">{p.summary}</p>
-        {p.tags.length > 0 ? (
-          <div className="mt-5 flex flex-wrap gap-1.5">
-            {p.tags.map((t) => (
-              <span key={t} className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-[11px] font-medium text-zinc-600">
-                {t}
-              </span>
-            ))}
-          </div>
-        ) : null}
-        {p.liveUrl ? (
-          <a
-            href={p.liveUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="mt-6 inline-flex items-center rounded-full border border-zinc-300 px-4 py-2 text-[13.5px] font-medium text-zinc-700 transition-colors hover:border-zinc-400 hover:text-zinc-900"
-          >
-            Visit live site ↗
-          </a>
-        ) : null}
+        <div className="mt-6 grid gap-6 sm:grid-cols-[1fr_auto] sm:items-end">
+          <p className="max-w-xl text-[17px] leading-relaxed text-zinc-700">{p.summary}</p>
+          <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-1 text-[14px] sm:text-right">
+            <dt className="text-zinc-500">Client</dt>
+            <dd>{p.client}</dd>
+            {p.year ? (
+              <>
+                <dt className="text-zinc-500">Year</dt>
+                <dd>{p.year}</dd>
+              </>
+            ) : null}
+            {p.tags.length > 0 ? (
+              <>
+                <dt className="text-zinc-500">Scope</dt>
+                <dd>{p.tags.join(", ")}</dd>
+              </>
+            ) : null}
+            {p.liveUrl ? (
+              <>
+                <dt className="text-zinc-500">Site</dt>
+                <dd>
+                  <a href={p.liveUrl} target="_blank" rel="noopener noreferrer" className={TEXT_LINK}>
+                    Visit
+                  </a>
+                </dd>
+              </>
+            ) : null}
+          </dl>
+        </div>
+
+        {/* Product shot: public/images/work/<slug>.jpg. */}
+        <div className="mt-10">
+          <ImagePlaceholder shape="landscape" title={`${p.title} product shot`} src={`/images/work/${p.slug}.jpg`} />
+        </div>
       </header>
 
-      {/* Hero shot — drop in a real project image. */}
-      <div className="mt-10">
-        <ImagePlaceholder shape="landscape" title={`${p.title} — hero shot`} src={`/images/work/${p.slug}.jpg`} />
-      </div>
-
-      <div className="mt-12 space-y-10">
-        <CaseSection label="The challenge" body={p.challenge} />
-        <CaseSection label="Our approach" body={p.approach} />
-        <CaseSection label="The outcome" body={p.outcome} />
+      <div className={`${WRAP_NARROW} mt-14 space-y-12`}>
+        <CaseSection title="The challenge" body={p.challenge} />
+        <CaseSection title="Our approach" body={p.approach} />
+        <CaseSection title="The outcome" body={p.outcome} />
         {!p.challenge && !p.approach && !p.outcome ? (
-          <p className="text-[15px] leading-relaxed text-zinc-500">
-            A full write-up is on the way. In the meantime, {p.summary.toLowerCase()}
+          <p className="text-[17px] leading-relaxed text-zinc-700">
+            The full write-up is not published yet. In short, {p.summary.charAt(0).toLowerCase() + p.summary.slice(1)}
           </p>
         ) : null}
-      </div>
 
-      {/* Contact CTA */}
-      <div className="mt-14 rounded-2xl border border-zinc-200 bg-paper p-8 text-center">
-        <h2 className="text-[18px] font-semibold tracking-tight text-zinc-900">Have something like this in mind?</h2>
-        <p className="mx-auto mt-2 max-w-md text-[14px] leading-relaxed text-zinc-500">
-          We take on a few projects at a time. Tell us what you&apos;re building.
-        </p>
-        <Link
-          href="/#contact"
-          className="mt-5 inline-flex items-center rounded-full bg-brand px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
-        >
-          Start a project
-        </Link>
+        <div className="border-t border-zinc-200 pt-10">
+          <h2 className="font-display text-[2rem] leading-tight">Have a project like this?</h2>
+          <p className="mt-3 text-[16px] leading-relaxed text-zinc-600">
+            We take on a few projects at a time. Tell us what you are building.
+          </p>
+          <Link href="/#contact" className={`mt-4 inline-block text-[15px] ${TEXT_LINK}`}>
+            Start a project
+          </Link>
+        </div>
       </div>
 
       <SeedProjects />
@@ -154,12 +152,12 @@ function CaseStudy({
   );
 }
 
-function CaseSection({ label, body }: { label: string; body?: string | null }) {
+function CaseSection({ title, body }: { title: string; body?: string | null }) {
   if (!body) return null;
   return (
     <section>
-      <h2 className="font-mono text-[11px] uppercase tracking-[0.16em] text-zinc-400">{label}</h2>
-      <p className="mt-3 whitespace-pre-wrap text-[16px] leading-relaxed text-zinc-700">{body}</p>
+      <h2 className="font-display text-[2rem] leading-tight">{title}</h2>
+      <p className="mt-4 whitespace-pre-wrap text-[17px] leading-relaxed text-zinc-700">{body}</p>
     </section>
   );
 }
@@ -169,14 +167,14 @@ function CaseSection({ label, body }: { label: string; body?: string | null }) {
 // unknown or the project is a draft.
 export default function CaseStudyPage({ params, serverData, response }: PageProps) {
   return (
-    <div className="bg-white text-zinc-900">
+    <div className="bg-white text-ink">
       <Suspense
         fallback={
-          <div className={`${WRAP_NARROW} py-14`}>
-            <div className="h-4 w-20 animate-pulse rounded bg-zinc-100" />
-            <div className="mt-6 h-10 w-2/3 animate-pulse rounded bg-zinc-100" />
-            <div className="mt-4 h-4 w-full animate-pulse rounded bg-zinc-100" />
-            <div className="mt-10 aspect-[4/3] animate-pulse rounded-2xl bg-zinc-100" />
+          <div className={`${WRAP} pt-10 sm:pt-14`}>
+            <div className="h-4 w-16 animate-pulse rounded bg-zinc-100" />
+            <div className="mt-8 h-14 w-2/3 animate-pulse rounded bg-zinc-100" />
+            <div className="mt-6 h-4 w-1/2 animate-pulse rounded bg-zinc-100" />
+            <div className="mt-10 aspect-[4/3] animate-pulse rounded-sm bg-zinc-100" />
           </div>
         }
       >

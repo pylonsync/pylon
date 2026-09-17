@@ -20,7 +20,8 @@ export type BaseConfig = {
     copyrightName: string;
     socials: Social[];
   };
-  colors: { brand: string; brandSoft: string; paper: string };
+  // brand: the one accent (deep red). ink/cream: the poster's type and page colors.
+  colors: { brand: string; brandSoft: string; paper: string; ink: string; cream: string };
   seo: { title: string; description: string };
 };
 
@@ -46,13 +47,11 @@ export type LocalServiceConfig = BaseConfig & {
     quickFacts: { hours: string; area: string; phone: string };
   };
   services: {
-    eyebrow: string;
     headline: string;
     items: ServiceItem[];
   };
   booking: {
     enabled: boolean;
-    eyebrow: string;
     headline: string;
     subcopy: string;
     slotMinutes: number; // granularity of offered start times, e.g. 30
@@ -62,9 +61,8 @@ export type LocalServiceConfig = BaseConfig & {
     hours: Record<number, DayHours>;
     confirmationMessage: string;
   };
-  reviews?: { eyebrow: string; headline: string; items: Review[] };
+  reviews?: { headline: string; items: Review[] };
   location: {
-    eyebrow: string;
     headline: string;
     address: string;
     mapEmbedUrl?: string;
@@ -72,7 +70,7 @@ export type LocalServiceConfig = BaseConfig & {
     phone: string;
     email: string;
   };
-  faq?: { eyebrow: string; headline: string; items: Faq[] };
+  faq?: { headline: string; items: Faq[] };
 };
 
 /* ----------------------------- config ---------------------------- */
@@ -84,7 +82,7 @@ export const siteConfig: LocalServiceConfig = {
     domain: "northgatebarbers.com",
     email: "hello@northgatebarbers.example",
     footerBlurb:
-      "A neighborhood barbershop in Dallas. Classic cuts, hot-towel shaves, and a chair that's always ready. Book in ten seconds.",
+      "A neighborhood barbershop in Dallas. Haircuts, beard trims, and hot-towel shaves. Book a chair online.",
     copyrightName: "Northgate Barbers",
     socials: [
       {
@@ -95,7 +93,7 @@ export const siteConfig: LocalServiceConfig = {
     ],
   },
 
-  colors: { brand: "#b45309", brandSoft: "#fef3c7", paper: "#fafaf9" },
+  colors: { brand: "#9b1c1c", brandSoft: "#f6dcd7", paper: "#ebe4d6", ink: "#161412", cream: "#f4efe6" },
 
   seo: {
     title: "Northgate Barbers — classic cuts in Dallas. Book online.",
@@ -105,9 +103,9 @@ export const siteConfig: LocalServiceConfig = {
 
   hero: {
     tagline: "Dallas · est. 2014",
-    headline: "A proper haircut, booked in ten seconds.",
+    headline: "Haircuts, beard trims, and hot-towel shaves.",
     subcopy:
-      "Classic cuts, beard work, and hot-towel shaves from experienced barbers. The booking calendar updates as chairs fill.",
+      "A neighborhood barbershop on Lower Greenville since 2014. Walk in or book a chair online. The calendar updates as chairs fill.",
     ctaLabel: "Book a chair",
     quickFacts: {
       hours: "Tue–Sat, 9–6",
@@ -117,8 +115,7 @@ export const siteConfig: LocalServiceConfig = {
   },
 
   services: {
-    eyebrow: "Services",
-    headline: "Services and prices, up front.",
+    headline: "Prices",
     items: [
       {
         slug: "haircut",
@@ -153,8 +150,7 @@ export const siteConfig: LocalServiceConfig = {
 
   booking: {
     enabled: true,
-    eyebrow: "Book",
-    headline: "Find a time that's open.",
+    headline: "Book a chair",
     subcopy:
       "Pick a service and a day from the live availability calendar. Book without creating an account or making a phone call.",
     slotMinutes: 30,
@@ -174,8 +170,7 @@ export const siteConfig: LocalServiceConfig = {
   },
 
   reviews: {
-    eyebrow: "Reviews",
-    headline: "Regulars say it best.",
+    headline: "What regulars say",
     items: [
       {
         quote:
@@ -199,8 +194,7 @@ export const siteConfig: LocalServiceConfig = {
   },
 
   location: {
-    eyebrow: "Visit",
-    headline: "Find us on Greenville.",
+    headline: "Find us",
     address: "1845 Greenville Ave, Dallas, TX 75206",
     mapEmbedUrl: "",
     hoursText: "Tue–Wed 9–6 · Thu–Fri 9–7 · Sat 9–4 · Sun–Mon closed",
@@ -209,20 +203,19 @@ export const siteConfig: LocalServiceConfig = {
   },
 
   faq: {
-    eyebrow: "Questions",
-    headline: "Good to know.",
+    headline: "Questions",
     items: [
       {
         q: "Do you take walk-ins?",
-        a: "When a chair's open, sure — but booking online guarantees your time, and you can see exactly what's free.",
+        a: "Yes, when a chair is open. Booking online holds your time, and you can see what is free.",
       },
       {
         q: "What if I need to cancel?",
-        a: "Just give us a call. No charge for cancellations with a few hours' notice.",
+        a: "Call the shop. There is no charge for cancellations with a few hours' notice.",
       },
       {
         q: "How should I pay?",
-        a: "Cash or card in the shop. Booking online doesn't charge you anything — you pay after the cut.",
+        a: "Cash or card in the shop. Booking online does not charge you. You pay after the cut.",
       },
     ],
   },

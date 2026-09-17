@@ -1,11 +1,12 @@
 import React from "react";
 import { Link, type PageAuth } from "@pylonsync/react";
 import { siteConfig } from "@/lib/site.config";
+import { WRAP } from "@/components/marketing";
 
 // `(marketing)` is a ROUTE GROUP: the parens segment is stripped from every
 // URL (so `(marketing)/page.tsx` still serves `/`), and this layout wraps
-// only the pages inside the group — a slim nav up top and a footer below,
-// both driven by lib/site.config.ts. Routes outside the group (/login,
+// only the pages inside the group — a plain text nav up top and a footer
+// below, both driven by lib/site.config.ts. Routes outside the group (/login,
 // /dashboard) render bare in the root shell. `auth.user_id` is resolved
 // server-side from the session cookie before any HTML is sent, so the nav
 // shows "Dashboard" once the owner is signed in and "Sign in" otherwise —
@@ -14,6 +15,8 @@ interface LayoutProps {
   children: React.ReactNode;
   auth: PageAuth;
 }
+
+const NAV_LINK = "text-[14px] text-zinc-700 transition-colors hover:text-ink";
 
 export default function MarketingLayout({ children, auth }: LayoutProps) {
   // A guest session (minted by <EnsureGuest> for the live counter) has a
@@ -24,43 +27,29 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
 
   return (
     <>
-      <header className="sticky top-0 z-30 border-b border-zinc-200/70 bg-white/85 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-6">
-          <Link href="/" className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-              {brand.letter}
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-              {brand.name}
-            </span>
+      <header className="bg-white">
+        <div className={`${WRAP} flex h-16 items-center justify-between`}>
+          <Link href="/" className="font-display text-[1.5rem] leading-none text-ink">
+            {brand.name}
           </Link>
-          <nav className="flex items-center gap-1 sm:gap-2">
-            <a href="/work" className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex">
+          <nav className="flex items-center gap-5 sm:gap-7">
+            <a href="/work" className={NAV_LINK}>
               Work
             </a>
-            <a href="/#services" className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex">
+            <a href="/#services" className={`hidden sm:inline ${NAV_LINK}`}>
               Services
             </a>
             {signedIn ? (
-              <Link
-                href="/dashboard"
-                className="inline-flex items-center rounded-full bg-zinc-900 px-3.5 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
-              >
+              <Link href="/dashboard" className={NAV_LINK}>
                 Dashboard
               </Link>
             ) : (
               <>
-                <Link
-                  href="/login"
-                  className="hidden rounded-full px-3 py-1.5 text-[13px] font-medium text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex"
-                >
+                <Link href="/login" className={`hidden sm:inline ${NAV_LINK}`}>
                   Sign in
                 </Link>
-                <a
-                  href="/#contact"
-                  className="inline-flex items-center rounded-full bg-brand px-3.5 py-1.5 text-[13px] font-medium text-white transition-opacity hover:opacity-90"
-                >
-                  {siteConfig.hero.ctaLabel}
+                <a href="/#contact" className={NAV_LINK}>
+                  Contact
                 </a>
               </>
             )}
@@ -78,54 +67,37 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
 function SiteFooter() {
   const { brand } = siteConfig;
   return (
-    <footer className="border-t border-zinc-200/70 bg-white">
-      <div className="mx-auto max-w-5xl px-6 py-12">
-        <div className="flex flex-col items-start justify-between gap-6 sm:flex-row">
+    <footer className="border-t border-zinc-200 bg-white text-ink">
+      <div className={`${WRAP} py-12`}>
+        <div className="grid gap-8 sm:grid-cols-[1fr_auto]">
           <div className="max-w-sm">
-            <Link href="/" className="inline-flex items-center gap-2">
-              <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-                {brand.letter}
-              </span>
-              <span className="text-[15px] font-semibold tracking-tight text-zinc-900">
-                {brand.name}
-              </span>
+            <Link href="/" className="font-display text-[1.5rem] leading-none">
+              {brand.name}
             </Link>
-            <p className="mt-3 text-[13px] leading-relaxed text-zinc-500">
-              {brand.footerBlurb}
-            </p>
+            <p className="mt-3 text-[14px] leading-relaxed text-zinc-600">{brand.footerBlurb}</p>
           </div>
-          <div className="flex items-center gap-4">
-            {brand.socials.map((s) => (
-              <a
-                key={s.label}
-                href={s.href}
-                aria-label={s.label}
-                className="text-zinc-400 transition-colors hover:text-zinc-900"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-                  <path d={s.path} />
-                </svg>
+          <ul className="flex flex-col gap-2 text-[14px] sm:text-right">
+            <li>
+              <a href={`mailto:${brand.email}`} className="text-zinc-700 transition-colors hover:text-ink">
+                {brand.email}
               </a>
+            </li>
+            {brand.socials.map((s) => (
+              <li key={s.label}>
+                <a href={s.href} className="text-zinc-700 transition-colors hover:text-ink">
+                  {s.label}
+                </a>
+              </li>
             ))}
-            <a
-              href={`mailto:${brand.email}`}
-              aria-label="Email"
-              className="text-zinc-400 transition-colors hover:text-zinc-900"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <rect x="3" y="5" width="18" height="14" rx="2" />
-                <path d="m3 7 9 6 9-6" />
-              </svg>
-            </a>
-          </div>
+          </ul>
         </div>
-        <div className="mt-10 flex flex-col items-start justify-between gap-3 border-t border-zinc-200/70 pt-6 text-[12px] text-zinc-400 sm:flex-row sm:items-center">
+        <div className="mt-10 flex flex-col gap-2 border-t border-zinc-200 pt-6 text-[13px] text-zinc-500 sm:flex-row sm:justify-between">
           <span>
             © {new Date().getFullYear()} {brand.copyrightName}
           </span>
           <span>
             Built with{" "}
-            <a href="https://pylonsync.com" className="font-medium text-zinc-600 hover:text-zinc-900">
+            <a href="https://pylonsync.com" className="text-zinc-700 hover:text-ink">
               Pylon
             </a>
           </span>

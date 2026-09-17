@@ -22,21 +22,26 @@ export type BaseConfig = {
     socials: Social[];
   };
   // Marketing accent + surfaces. Applied as CSS vars on <html> in layout.tsx.
-  colors: { brand: string; brandSoft: string; paper: string };
+  // `ink` is the page background, `paper` the raised panel color, `brand` the
+  // one accent, `brandSoft` the accent's dim fill.
+  colors: { brand: string; brandSoft: string; paper: string; ink: string };
   seo: { title: string; description: string };
 };
 
-export type ValueProp = { title: string; body: string; icon?: string };
-export type Quote = { quote: string; name: string; role: string };
+export type Fact = { title: string; body: string };
 export type Faq = { q: string; a: string };
+
+// A row in the product mock (a task or a note), drawn with plain divs.
+export type MockRow = { title: string; tag: string; done?: boolean };
 
 export type WaitlistConfig = BaseConfig & {
   hero: {
-    badge: string;
+    launchNote: string; // one short line, set in mono: when it ships
     headline: string;
     subcopy: string;
     emailPlaceholder: string;
     ctaLabel: string;
+    formHint: string;
     successMessage: string;
   };
   counter: {
@@ -46,13 +51,15 @@ export type WaitlistConfig = BaseConfig & {
     // page doesn't read "0". Set to 0 to show only genuine signups.
     seedCount?: number;
   };
-  valueProps: { eyebrow: string; headline: string; items: ValueProp[] };
-  socialProof?: {
-    label: string;
-    logos?: string[];
-    quotes?: Quote[];
+  // The HTML/CSS product window on the right of the hero. No screenshot.
+  mock: {
+    windowTitle: string;
+    sidebar: string[];
+    activeSidebarIndex: number;
+    rows: MockRow[];
   };
-  faq?: { eyebrow: string; headline: string; items: Faq[] };
+  facts: { headline: string; items: Fact[] };
+  faq?: { headline: string; items: Faq[] };
 };
 
 /* ----------------------------- config ---------------------------- */
@@ -64,7 +71,7 @@ export const siteConfig: WaitlistConfig = {
     domain: "lumo.app",
     email: "hello@lumo.example",
     footerBlurb:
-      "Lumo keeps projects, notes, and tasks in one focused workspace. Join the list for an early invite.",
+      "Lumo keeps projects, notes, and tasks in one workspace. Join the list for an early invite.",
     copyrightName: "Lumo, Inc.",
     socials: [
       {
@@ -80,95 +87,81 @@ export const siteConfig: WaitlistConfig = {
     ],
   },
 
-  colors: { brand: "#4f46e5", brandSoft: "#eef2ff", paper: "#fafafa" },
+  // Near-black page, one electric blue accent.
+  colors: { brand: "#4f6bff", brandSoft: "#141a3d", paper: "#121214", ink: "#0b0b0c" },
 
   seo: {
-    title: "Lumo — the calm home for your work. Coming soon.",
+    title: "Lumo — projects, notes, and tasks in one workspace. Coming soon.",
     description:
-      "Lumo brings your projects, notes, and tasks into one quiet, focused space. We're launching soon — join the waitlist for an early invite.",
+      "Lumo puts your projects, notes, and tasks in one workspace. It launches this fall. Join the waitlist for an early invite.",
   },
 
   hero: {
-    badge: "Launching this fall",
-    headline: "Projects, notes, and tasks in one calm place.",
+    launchNote: "Launch: fall 2026",
+    headline: "Projects, notes, and tasks in one workspace.",
     subcopy:
-      "Lumo keeps your projects, notes, and tasks together in a focused workspace. Join the list for an early invite.",
+      "Lumo is one app for the plan, the notes behind it, and the tasks that come out of it. Join the list and we send an invite before the public launch.",
     emailPlaceholder: "you@work.com",
     ctaLabel: "Join the waitlist",
-    successMessage: "You're on the list — we'll email your invite soon.",
+    formHint: "One invite email. No newsletter.",
+    successMessage: "You are on the list. We will email your invite.",
   },
 
   counter: {
     enabled: true,
-    label: "people already waiting",
+    label: "people on the list",
     seedCount: 1200,
   },
 
-  valueProps: {
-    eyebrow: "Why Lumo",
-    headline: "Keep your attention on the work.",
-    items: [
-      {
-        icon: "◇",
-        title: "One quiet space",
-        body: "Projects, notes, and tasks live together — so nothing gets lost between five different apps.",
-      },
-      {
-        icon: "◎",
-        title: "For people who make things",
-        body: "Designers, founders, writers, builders. If your work needs deep focus, Lumo is built for you.",
-      },
-      {
-        icon: "✦",
-        title: "Calm by default",
-        body: "Lumo keeps notifications and feeds quiet, then shows the work that needs attention now.",
-      },
+  mock: {
+    windowTitle: "Site redesign",
+    sidebar: ["Inbox", "Site redesign", "Q4 plan", "Reading", "Archive"],
+    activeSidebarIndex: 1,
+    rows: [
+      { title: "Draft the homepage copy", tag: "Today", done: true },
+      { title: "Review nav on mobile", tag: "Today" },
+      { title: "Pick the display face", tag: "Note" },
+      { title: "Send pricing page to Priya", tag: "Tomorrow" },
+      { title: "Set up the launch checklist", tag: "Next week" },
     ],
   },
 
-  socialProof: {
-    label: "Loved by early testers",
-    quotes: [
+  facts: {
+    headline: "What Lumo does",
+    items: [
       {
-        quote:
-          "I've tried every productivity app out there. Lumo is the first one that leaves me calmer after planning my week.",
-        name: "Maya Chen",
-        role: "Product designer",
+        title: "One place for a project",
+        body: "Each project holds its plan, its notes, and its tasks. Nothing lives in a second app.",
       },
       {
-        quote:
-          "All my half-finished projects are in one place. I check it every morning and know what to do next.",
-        name: "Daniel Reyes",
-        role: "Indie founder",
+        title: "Notes turn into tasks",
+        body: "Select a line in a note and make it a task. The task keeps a link back to the note.",
       },
       {
-        quote:
-          "It's fast, it's quiet, and it stays out of my way. I joined the waitlist the day I saw the first demo.",
-        name: "Hannah Brooks",
-        role: "Writer",
+        title: "No feed, no badges",
+        body: "Lumo has no activity feed. You see the tasks due today and the project you opened last.",
       },
     ],
   },
 
   faq: {
-    eyebrow: "Questions",
-    headline: "Good to know.",
+    headline: "Questions",
     items: [
       {
         q: "When does Lumo launch?",
-        a: "We're aiming for this fall. Waitlist members get an invite before the public launch.",
+        a: "Fall 2026. People on the waitlist get an invite before the public launch.",
       },
       {
         q: "What do I get for joining?",
-        a: "An early invite, founding-member pricing, and a direct line to shape what we build next.",
+        a: "An early invite and founding-member pricing on paid plans.",
       },
       {
         q: "How much will it cost?",
-        a: "There'll be a generous free tier. Waitlist members lock in founding-member pricing on paid plans.",
+        a: "There is a free tier. Paid plans are priced at launch. Waitlist members keep the founding-member price.",
       },
       {
         q: "Will my email be shared?",
-        a: "Never. We only use it to send your invite and the occasional launch update. Unsubscribe anytime.",
+        a: "No. We use it for the invite and launch updates only. You can unsubscribe at any time.",
       },
     ],
   },
