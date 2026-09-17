@@ -6,6 +6,7 @@
    markup elsewhere. */
 @source "../app/**/*.{tsx,ts,jsx,js}";
 @source "../components/**/*.{tsx,ts,jsx,js}";
+@source "../node_modules/@pylonsync/client/**/*.{tsx,ts,jsx,js}";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -15,6 +16,9 @@
    on <html>. */
 :root {
   --radius: 0.625rem;
+  /* The app's own colors: links and the follow button, and a liked heart. */
+  --brand: #2563eb;
+  --like: #e11d48;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -83,6 +87,8 @@
 }
 
 @theme inline {
+  --color-brand: var(--brand);
+  --color-like: var(--like);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -132,8 +138,27 @@
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+    font-family: var(--font-sans, Inter, ui-sans-serif, system-ui, -apple-system, sans-serif);
+    -webkit-font-smoothing: antialiased;
   }
   button {
     cursor: pointer;
   }
+}
+
+/* The wordmark. Instrument Serif is declared in app.ts. */
+.font-display {
+  font-family: var(--font-display, "Iowan Old Style", Georgia, serif);
+}
+
+/* The heart that pops over a photo on a double tap. */
+@keyframes heart-pop {
+  0% { transform: scale(0.2); opacity: 0; }
+  15% { transform: scale(1.15); opacity: 1; }
+  30% { transform: scale(0.95); }
+  45%, 80% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1); opacity: 0; }
+}
+.heart-pop {
+  animation: heart-pop 900ms ease-out forwards;
 }

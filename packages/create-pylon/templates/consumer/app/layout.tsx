@@ -4,8 +4,8 @@ interface LayoutProps {
   children: React.ReactNode;
 }
 
-// The root layout wraps every page: a header and a centered column. The page
-// renders server-side first, then the feed hydrates into a live view.
+// The document shell. The app chrome (sidebar and mobile bars) lives in
+// `(app)/layout.tsx`, so a page outside that group renders bare.
 export default function RootLayout({ children }: LayoutProps) {
   return (
     <html lang="en">
@@ -14,14 +14,7 @@ export default function RootLayout({ children }: LayoutProps) {
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>__APP_NAME__</title>
       </head>
-      <body className="min-h-screen bg-background text-foreground antialiased">
-        <header className="sticky top-0 z-10 border-b bg-background/80 backdrop-blur">
-          <div className="mx-auto max-w-lg px-4 py-3 text-sm font-semibold tracking-tight">
-            __APP_NAME__
-          </div>
-        </header>
-        <main className="mx-auto max-w-lg px-4 py-8">{children}</main>
-      </body>
+      <body className="min-h-screen bg-background text-foreground antialiased">{children}</body>
     </html>
   );
 }

@@ -106,7 +106,7 @@ const TEMPLATE_REGISTRY = {
 	},
 	consumer: {
 		blurb:
-			"Social feed — live posts + likes, public-read, owner-write. One SSR app.",
+			"Photo sharing — feed, explore, post pages, profiles, follows, likes, comments, and saves. One SSR app.",
 		platforms: [],
 		unified: true,
 	},

@@ -11,7 +11,7 @@ import { Button } from "@/components/ui/button";
 export default function Error({ error, reset }: ErrorBoundaryProps) {
   const [tries, setTries] = React.useState(0);
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-md space-y-6 px-6 py-24">
       <section>
         <h1 className="text-2xl font-semibold tracking-tight">
           Something went wrong
