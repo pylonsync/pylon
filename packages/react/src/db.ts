@@ -31,6 +31,7 @@ import {
   uploadFile,
   uploadFileMultipart,
   type UploadedFile,
+  type UploadFileOptions,
 } from "./index";
 
 // ---------------------------------------------------------------------------
@@ -331,15 +332,15 @@ export const db = {
     return streamFn(name, args);
   },
 
-  /** Upload a file to /api/files/upload. */
+  /** Upload a file through /api/files/init, a PUT, and /api/files/confirm. */
   uploadFile(
     input: File | Blob | ArrayBuffer | Uint8Array,
-    options?: { filename?: string; contentType?: string }
+    options?: UploadFileOptions
   ): Promise<UploadedFile> {
     return uploadFile(input, options);
   },
 
-  /** Upload via multipart/form-data with extra fields. */
+  /** @deprecated Use `uploadFile`; extra fields were never stored. */
   uploadFileMultipart(
     file: File | Blob,
     fields?: Record<string, string>

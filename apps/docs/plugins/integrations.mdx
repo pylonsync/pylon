@@ -49,6 +49,7 @@ const init = await fetch("/api/files/init", {
     filename: file.name,
     mimeType: file.type,
     size: file.size,
+    visibility: "private", // or "public"; see below
   }),
 }).then((r) => r.json());
 
@@ -79,8 +80,28 @@ The shape is identical for every backend. Clients do not special-case Stack0 vs 
 - `GET /api/files/<id>` serves the bytes. For CDN backends pylon 302-redirects to the CDN URL; for local it streams from disk.
 - `DELETE /api/files/<id>` removes the asset. Owner-gated: only the user who confirmed the upload (or an admin).
 
+From the browser, `uploadFile` in `@pylonsync/react` runs all three steps, and `<FileUpload>` in `@pylonsync/client` wraps it:
+
+```ts
+import { uploadFile } from "@pylonsync/react";
+
+const photo = await uploadFile(file, { visibility: "public" });
+await db.insert("Post", { imageUrl: photo.url, caption });
+```
+
+### Visibility
+
+`visibility` on `/api/files/init` decides who can read the file through `GET /api/files/<id>` on backends that track ownership (local disk, a private S3 bucket):
+
+| Value | Who can read |
+| --- | --- |
+| `"private"` (default) | The uploader, an unscoped admin, or anyone holding a [signed URL](/concepts/functions#signed-file-urls) |
+| `"public"` | Anyone, signed in or not |
+
+Use `"public"` for files every visitor sees, such as feed photos or listing images. Writes and deletes stay with the uploader either way. Any other value is refused with `400 INVALID_VISIBILITY`. On Stack0 and on a public bucket, `stored.url` is a CDN URL that anyone can load, whatever the visibility.
+
 <Note>
-The multipart `POST /api/files/upload` was removed in 0.3.91 — it now returns `410 Gone`. Use the 3-step flow above.
+The multipart `POST /api/files/upload` was removed in 0.3.91 and returns `410 Gone`. `uploadFile` used it until 0.11.2; update `@pylonsync/react` if `<FileUpload>` fails with that status.
 </Note>
 
 ## Email

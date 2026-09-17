@@ -2161,6 +2161,8 @@ impl pylon_router::FileOps for FileOpsAdapter {
         // as 404 to avoid leaking which IDs exist in another user's space.
         if !is_admin {
             match self.storage.owner_of(id) {
+                // The uploader made it public: readable by anyone.
+                Ok(Some(owner)) if owner.public => {}
                 Ok(Some(owner)) => match requester_user_id {
                     Some(uid) if uid == owner.user_id => {}
                     _ => {
@@ -2382,6 +2384,7 @@ mod file_ownership_tests {
                 &FileOwner {
                     user_id: "u-alice".into(),
                     tenant_id: None,
+                    public: false,
                 },
             )
             .unwrap();
@@ -2403,6 +2406,33 @@ mod file_ownership_tests {
     }
 
     #[test]
+    fn public_file_is_readable_by_anyone() {
+        let (storage, dir) = temp_storage("public_file");
+        let stored = storage.store("a.jpg", b"photo", "image/jpeg").unwrap();
+        storage
+            .record_owner(
+                &stored.id,
+                &FileOwner {
+                    user_id: "u-alice".into(),
+                    tenant_id: None,
+                    public: true,
+                },
+            )
+            .unwrap();
+
+        let adapter = FileOpsAdapter {
+            storage: storage.clone(),
+        };
+
+        let (status, _) = adapter.get_file(&stored.id, Some("u-bob"), false);
+        assert_eq!(status, 200);
+        let (status, _) = adapter.get_file(&stored.id, None, false);
+        assert_eq!(status, 200);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn allows_owner_and_admin() {
         let (storage, dir) = temp_storage("allows_owner_admin");
         let stored = storage.store("a.txt", b"hello", "text/plain").unwrap();
@@ -2412,6 +2442,7 @@ mod file_ownership_tests {
                 &FileOwner {
                     user_id: "u-alice".into(),
                     tenant_id: None,
+                    public: false,
                 },
             )
             .unwrap();

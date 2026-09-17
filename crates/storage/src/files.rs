@@ -17,6 +17,11 @@ pub struct FileOwner {
     pub user_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_id: Option<String>,
+    /// The uploader asked for `visibility: "public"` at `/api/files/init`:
+    /// anyone may read the file, signed in or not. Writes and deletes stay
+    /// owner-only. Sidecars written before this field read as private.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub public: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1081,7 @@ mod tests {
                 &FileOwner {
                     user_id: "u-alice".into(),
                     tenant_id: Some("t-1".into()),
+                    public: false,
                 },
             )
             .unwrap();
@@ -1102,6 +1108,7 @@ mod tests {
         let bad_owner = FileOwner {
             user_id: "u".into(),
             tenant_id: None,
+            public: false,
         };
         assert!(storage.record_owner("../escape", &bad_owner).is_err());
         assert!(storage.owner_of("../escape").is_err());

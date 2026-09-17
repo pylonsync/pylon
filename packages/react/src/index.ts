@@ -73,6 +73,7 @@ import {
   defaultStorage,
   pylonFetch,
   pylonFetchRaw,
+  PylonHttpError,
   type Storage as PylonStorage,
 } from "@pylonsync/sync";
 import { peekActiveEngine } from "./engine-registry";
@@ -911,94 +912,131 @@ export async function listFns(): Promise<
 
 export interface UploadedFile {
   id: string;
+  /** Where to read the file. Store this on your row. */
   url: string;
   size: number;
 }
 
 /**
- * Upload a file (File/Blob or raw bytes) to /api/files/upload.
+ * Who can read an uploaded file through `url`.
+ *   - "private" (default): only the uploader.
+ *   - "public": anyone, signed in or not. Use it for content every visitor
+ *     sees, such as feed photos or listing images.
+ * Writes and deletes stay with the uploader either way. On a CDN-backed
+ * store (Stack0, a public bucket) every file is served by its URL, so the
+ * setting only changes reads that go through `/api/files/<id>`.
+ */
+export type FileVisibility = "private" | "public";
+
+export interface UploadFileOptions {
+  filename?: string;
+  contentType?: string;
+  token?: string;
+  visibility?: FileVisibility;
+}
+
+/**
+ * Upload a file (File, Blob, or raw bytes) in three steps:
+ *   1. POST /api/files/init with the name, type, size, and visibility;
+ *   2. PUT the bytes to the returned upload URL;
+ *   3. POST /api/files/confirm, which returns `{ id, url, size }`.
  *
- * For File / Blob inputs this sends a single raw binary request with the
- * filename and content-type as headers (the server short-circuits on this
- * shape so uploads avoid being coerced through string-based handling).
+ * The upload URL is either pylon's own receiver (local disk), which needs
+ * the session like any API call, or a presigned storage URL, whose
+ * signature is the credential. The session is never sent to a presigned
+ * URL on another origin.
  *
  * @example
  * ```ts
- * const uploaded = await uploadFile(fileFromInput);
- * console.log(uploaded.url, uploaded.id, uploaded.size);
+ * const photo = await uploadFile(fileFromInput, { visibility: "public" });
+ * await db.insert("Post", { imageUrl: photo.url, caption });
  * ```
  */
 export async function uploadFile(
   input: File | Blob | ArrayBuffer | Uint8Array,
-  options: {
-    filename?: string;
-    contentType?: string;
-    token?: string;
-  } = {}
+  options: UploadFileOptions = {}
 ): Promise<UploadedFile> {
   let body: BodyInit;
+  let size: number;
   let filename = options.filename;
   let contentType = options.contentType;
 
   if (typeof File !== "undefined" && input instanceof File) {
     body = input;
+    size = input.size;
     filename ??= input.name;
     contentType ??= input.type || "application/octet-stream";
   } else if (typeof Blob !== "undefined" && input instanceof Blob) {
     body = input;
+    size = input.size;
     contentType ??= input.type || "application/octet-stream";
   } else if (input instanceof ArrayBuffer) {
     body = input;
+    size = input.byteLength;
   } else {
     // Newer TS lib types refuse `Uint8Array<ArrayBufferLike>` as BodyInit
     // directly even though every runtime accepts it. Hand fetch the
     // underlying ArrayBuffer slice to sidestep the type narrowing.
     const u8 = input as Uint8Array;
     body = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) as ArrayBuffer;
+    size = u8.byteLength;
   }
 
   filename ??= "upload";
   contentType ??= "application/octet-stream";
 
-  return pylonFetch<UploadedFile>(
-    {
-      baseUrl: getBaseUrl(),
-      getToken: () => options.token ?? currentAuthToken() ?? undefined,
-    },
-    "/api/files/upload",
+  const transport = {
+    baseUrl: getBaseUrl(),
+    getToken: () => options.token ?? currentAuthToken() ?? undefined,
+  };
+
+  const slot = await pylonFetch<{ uploadUrl: string; assetId: string }>(
+    transport,
+    "/api/files/init",
     {
       method: "POST",
-      body,
-      headers: {
-        "Content-Type": contentType,
-        "X-Filename": filename,
+      json: {
+        filename,
+        mimeType: contentType,
+        size,
+        visibility: options.visibility ?? "private",
       },
     },
   );
+
+  const base = new URL(getBaseUrl() || "http://localhost");
+  const target = new URL(slot.uploadUrl, base);
+  const put =
+    target.origin === base.origin
+      ? await pylonFetchRaw(transport, `${target.pathname}${target.search}`, {
+          method: "PUT",
+          body,
+          headers: { "Content-Type": contentType },
+        })
+      : await fetch(target.toString(), {
+          method: "PUT",
+          body,
+          headers: { "Content-Type": contentType },
+        });
+  if (!put.ok) {
+    throw new PylonHttpError(`Upload of ${filename} failed: ${put.status}`, put.status);
+  }
+
+  return pylonFetch<UploadedFile>(transport, "/api/files/confirm", {
+    method: "POST",
+    json: { assetId: slot.assetId },
+  });
 }
 
 /**
- * Upload via multipart/form-data. Useful when the app needs to pass extra
- * fields alongside the file (captions, categories, etc.), though only the
- * first file part is stored today.
+ * @deprecated The multipart endpoint was removed in pylon 0.3.91 and never
+ * stored the extra fields. This uploads the file with `uploadFile` and
+ * ignores `fields`; send those to your own function instead.
  */
 export async function uploadFileMultipart(
   file: File | Blob,
-  fields: Record<string, string> = {},
-  options: { token?: string } = {}
+  _fields: Record<string, string> = {},
+  options: { token?: string; visibility?: FileVisibility } = {}
 ): Promise<UploadedFile> {
-  const form = new FormData();
-  for (const [k, v] of Object.entries(fields)) {
-    form.append(k, v);
-  }
-  form.append("file", file);
-
-  return pylonFetch<UploadedFile>(
-    {
-      baseUrl: getBaseUrl(),
-      getToken: () => options.token ?? currentAuthToken() ?? undefined,
-    },
-    "/api/files/upload",
-    { method: "POST", body: form },
-  );
+  return uploadFile(file, options);
 }

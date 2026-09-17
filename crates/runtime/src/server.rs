@@ -938,6 +938,27 @@ fn file_confirm_authorized(
     )
 }
 
+/// `visibility` on `POST /api/files/init`: absent or `"private"` keeps the
+/// owner-only read rule; `"public"` lets anyone read the file. Anything else
+/// is refused rather than guessed.
+fn parse_file_visibility(raw: &serde_json::Value) -> Result<bool, &'static str> {
+    match raw {
+        serde_json::Value::Null => Ok(false),
+        serde_json::Value::String(v) if v == "private" => Ok(false),
+        serde_json::Value::String(v) if v == "public" => Ok(true),
+        _ => Err("visibility must be \"public\" or \"private\""),
+    }
+}
+
+/// Whether `GET /api/files/<id>` may serve without a session or owner match:
+/// only when the recorded owner marked the file public. A missing or
+/// unreadable sidecar is private (fail closed).
+fn file_is_public(
+    owner: &Result<Option<pylon_storage::files::FileOwner>, pylon_storage::files::FileStorageError>,
+) -> bool {
+    matches!(owner, Ok(Some(o)) if o.public)
+}
+
 const DEFAULT_UPLOAD_MAX_BYTES: usize = 200 * 1024 * 1024;
 
 fn upload_max_bytes_from(value: Option<&str>) -> usize {
@@ -958,9 +979,9 @@ fn upload_size_allowed(actual: usize, maximum: usize) -> bool {
 #[cfg(test)]
 mod file_auth_tests {
     use super::{
-        ephemeral_sessions_boot_check, file_confirm_authorized, file_read_authorized,
-        local_put_owned_by_other, upload_max_bytes_from, upload_size_allowed,
-        DEFAULT_UPLOAD_MAX_BYTES,
+        ephemeral_sessions_boot_check, file_confirm_authorized, file_is_public,
+        file_read_authorized, local_put_owned_by_other, parse_file_visibility,
+        upload_max_bytes_from, upload_size_allowed, DEFAULT_UPLOAD_MAX_BYTES,
     };
     use pylon_storage::files::{FileOwner, FileStorageError};
 
@@ -968,6 +989,7 @@ mod file_auth_tests {
         Ok(Some(FileOwner {
             user_id: uid.into(),
             tenant_id: None,
+            public: false,
         }))
     }
 
@@ -978,7 +1000,56 @@ mod file_auth_tests {
         Ok(Some(FileOwner {
             user_id: uid.into(),
             tenant_id: tenant.map(str::to_owned),
+            public: false,
         }))
+    }
+
+    #[test]
+    fn file_visibility_parses_strictly() {
+        assert_eq!(parse_file_visibility(&serde_json::Value::Null), Ok(false));
+        assert_eq!(
+            parse_file_visibility(&serde_json::json!("private")),
+            Ok(false)
+        );
+        assert_eq!(
+            parse_file_visibility(&serde_json::json!("public")),
+            Ok(true)
+        );
+        assert!(parse_file_visibility(&serde_json::json!("PUBLIC")).is_err());
+        assert!(parse_file_visibility(&serde_json::json!(true)).is_err());
+        assert!(parse_file_visibility(&serde_json::json!("")).is_err());
+    }
+
+    #[test]
+    fn only_a_recorded_public_owner_opens_a_file() {
+        let public = Ok(Some(FileOwner {
+            user_id: "u1".into(),
+            tenant_id: None,
+            public: true,
+        }));
+        assert!(file_is_public(&public));
+        assert!(!file_is_public(&owner("u1")));
+        // No sidecar, or an unreadable one: private.
+        assert!(!file_is_public(&Ok(None)));
+        assert!(!file_is_public(&Err(FileStorageError {
+            code: "OWNERSHIP_READ_FAILED".into(),
+            message: "io".into(),
+        })));
+        // Public never grants a write: the put gate ignores the flag.
+        assert!(local_put_owned_by_other(&public, "u2", None, false));
+    }
+
+    #[test]
+    fn legacy_owner_sidecars_read_as_private() {
+        let owner: FileOwner = serde_json::from_str(r#"{"user_id":"u1"}"#).unwrap();
+        assert!(!owner.public);
+        let written = serde_json::to_string(&FileOwner {
+            user_id: "u1".into(),
+            tenant_id: None,
+            public: false,
+        })
+        .unwrap();
+        assert_eq!(written, r#"{"user_id":"u1"}"#);
     }
 
     #[test]
@@ -4941,6 +5012,29 @@ fn start_server(
             let filename = v["filename"].as_str().unwrap_or("upload");
             let mime_type = v["mimeType"].as_str().unwrap_or("application/octet-stream");
             let size = v["size"].as_u64().unwrap_or(0) as usize;
+            let public = match parse_file_visibility(&v["visibility"]) {
+                Ok(public) => public,
+                Err(message) => {
+                    let err = json_error("INVALID_VISIBILITY", message);
+                    let response = with_security_headers(
+                        Response::from_string(&err)
+                            .with_status_code(400u16)
+                            .with_header(
+                                Header::from_bytes("Content-Type", "application/json").unwrap(),
+                            )
+                            .with_header(
+                                Header::from_bytes(
+                                    "Access-Control-Allow-Origin",
+                                    cors_origin.as_bytes().to_vec(),
+                                )
+                                .unwrap(),
+                            ),
+                    );
+                    let _ = request.respond(response);
+                    mt.record_request("POST", 400);
+                    return;
+                }
+            };
 
             // Enforce upload-max BEFORE handing out the URL. S3 binds this
             // declared size into the presigned PUT's Content-Length, while
@@ -4991,6 +5085,7 @@ fn start_server(
                                 &pylon_storage::files::FileOwner {
                                     user_id: uid.clone(),
                                     tenant_id: auth_ctx.tenant_id.clone(),
+                                    public,
                                 },
                             ),
                             None => Err(pylon_storage::files::FileStorageError {
@@ -5187,9 +5282,12 @@ fn start_server(
                             serde_json::to_string(&stored).unwrap_or_else(|_| "{}".into()),
                         )
                     } else if let Some(uid) = auth_ctx.user_id.as_ref() {
+                        // Backends without owner checks serve by URL; the
+                        // flag has no effect there.
                         let owner = pylon_storage::files::FileOwner {
                             user_id: uid.clone(),
                             tenant_id: auth_ctx.tenant_id.clone(),
+                            public: false,
                         };
                         if let Err(e) = storage.record_owner(&stored.id, &owner) {
                             tracing::error!(
@@ -5365,6 +5463,7 @@ fn start_server(
                             let owner = pylon_storage::files::FileOwner {
                                 user_id: caller.clone(),
                                 tenant_id: auth_ctx.tenant_id.clone(),
+                                public: false,
                             };
                             let _ = local.record_owner(asset_id, &owner);
                         }
@@ -5570,7 +5669,18 @@ fn start_server(
                         .and_then(|(_, q)| crate::file_urls::sig_params(q))
                         .map(|(sig, exp)| crate::file_urls::verify(asset_id, &exp, &sig))
                         .unwrap_or(false);
-                    if !signed_ok && auth_ctx.user_id.is_none() {
+                    let storage = pylon_storage::files::select_from_env();
+                    let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
+                    // Ownership-tracking backends: read the owner once. A file
+                    // its uploader marked public (`visibility: "public"` at
+                    // /api/files/init) is served to anyone, signed in or not.
+                    let owner_lookup = if !signed_ok && storage.requires_owner_check() {
+                        Some(storage.owner_of(asset_id))
+                    } else {
+                        None
+                    };
+                    let public_ok = owner_lookup.as_ref().is_some_and(file_is_public);
+                    if !signed_ok && !public_ok && auth_ctx.user_id.is_none() {
                         let err = json_error(
                             "AUTH_REQUIRED",
                             "GET /api/files requires an authenticated session",
@@ -5593,8 +5703,6 @@ fn start_server(
                         mt.record_request("GET", 401);
                         return;
                     }
-                    let storage = pylon_storage::files::select_from_env();
-                    let storage: &dyn pylon_storage::files::FileStorage = storage.as_ref();
                     // Owner check for backends that track ownership. FAIL
                     // CLOSED: serve only when the asset has a recorded owner
                     // that matches the caller. Previously this denied only on
@@ -5609,13 +5717,18 @@ fn start_server(
                     // acting within a tenant context stays scoped to the owner
                     // check (#354/#355). Only an admin with no active tenant
                     // gets the cross-owner read bypass.
-                    if !signed_ok && storage.requires_owner_check() && !auth_ctx.is_unscoped_admin()
+                    if !signed_ok
+                        && !public_ok
+                        && storage.requires_owner_check()
+                        && !auth_ctx.is_unscoped_admin()
                     {
-                        let owned_by_caller = file_read_authorized(
-                            &storage.owner_of(asset_id),
-                            auth_ctx.user_id.as_deref(),
-                            auth_ctx.tenant_id.as_deref(),
-                        );
+                        let owned_by_caller = owner_lookup.as_ref().is_some_and(|lookup| {
+                            file_read_authorized(
+                                lookup,
+                                auth_ctx.user_id.as_deref(),
+                                auth_ctx.tenant_id.as_deref(),
+                            )
+                        });
                         if !owned_by_caller {
                             {
                                 let err = json_error("NOT_FOUND", "File not found");
@@ -5699,11 +5812,18 @@ fn start_server(
                         Ok(content) => {
                             let ct = stored_content_type(storage, asset_id);
                             mt.record_request("GET", 200);
+                            // A public file is the same bytes for every
+                            // reader, so shared caches may keep it briefly.
+                            let cache = if public_ok {
+                                "public, max-age=300"
+                            } else {
+                                "private, max-age=0, must-revalidate"
+                            };
                             crate::frontend::respond_static_file(
                                 request,
                                 content,
                                 &ct,
-                                "private, max-age=0, must-revalidate",
+                                cache,
                                 &cors_origin,
                             );
                             return;

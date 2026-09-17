@@ -84,7 +84,7 @@ export default action({
 ```
 
 - **It's `db.useQueryOne`, not `useOne`.** Validators and field types have aliases: `v.bool`/`v.boolean`, `v.float`/`v.number`.
-- **Use the supported file and scheduling APIs.** Files go through `<FileUpload>` and `/api/files/*`; there is no `ctx.files`. One-shot work uses `ctx.scheduler.runAfter`, `runAt`, or `cancel`; there is no `defineWorkflow` or `defineJob`. Recurring work uses `cron("0 * * * *", "fnName")` in `buildManifest({ crons: [...] })`, imported from `@pylonsync/sdk`. Make the target function `internal: true`. It runs with anonymous auth, but its own `ctx.db.*` calls are server-side and bypass policies. Use `ctx.auth.elevate({ admin: true, reason: "..." })`, with a mandatory reason, only when chaining another internal function through `ctx.scheduler`.
+- **Use the supported file and scheduling APIs.** Files go through `<FileUpload>` and `/api/files/*`; an upload is readable by its uploader only, so pass `visibility: "public"` to `uploadFile` or `<FileUpload>` for files every visitor sees; there is no `ctx.files`. One-shot work uses `ctx.scheduler.runAfter`, `runAt`, or `cancel`; there is no `defineWorkflow` or `defineJob`. Recurring work uses `cron("0 * * * *", "fnName")` in `buildManifest({ crons: [...] })`, imported from `@pylonsync/sdk`. Make the target function `internal: true`. It runs with anonymous auth, but its own `ctx.db.*` calls are server-side and bypass policies. Use `ctx.auth.elevate({ admin: true, reason: "..." })`, with a mandatory reason, only when chaining another internal function through `ctx.scheduler`.
 
 ## Testing
 

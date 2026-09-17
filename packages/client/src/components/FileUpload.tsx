@@ -9,7 +9,7 @@ import {
 	useRef,
 	useState,
 } from "react";
-import { uploadFile, type UploadedFile } from "@pylonsync/react";
+import { uploadFile, type FileVisibility, type UploadedFile } from "@pylonsync/react";
 import { cn } from "../lib/cn";
 
 export interface FileUploadProps {
@@ -23,6 +23,11 @@ export interface FileUploadProps {
 	multiple?: boolean;
 	/** Max file size in bytes — files exceeding this are rejected client-side. */
 	maxSizeBytes?: number;
+	/**
+	 * Who can read the uploaded files. "private" (default): the uploader
+	 * only. "public": anyone, for content every visitor sees.
+	 */
+	visibility?: FileVisibility;
 	/** Override the headline. */
 	label?: ReactNode;
 	/** Override the helper text. */
@@ -38,10 +43,9 @@ export interface FileUploadResult {
 }
 
 /**
- * Drop-in drag-and-drop file picker. Streams each file to
- * `/api/files/upload` via the existing `uploadFile` helper, surfaces
- * per-file progress + errors, and emits `onUploaded` as each file
- * lands.
+ * Drop-in drag-and-drop file picker. Uploads each file with `uploadFile`
+ * (init, PUT, confirm), shows per-file progress and errors, and emits
+ * `onUploaded` as each file lands.
  *
  * Pure UI shell — no provider configuration of its own. Pylon's file
  * router handles where bytes actually go (local disk for self-host,
@@ -53,6 +57,7 @@ export function FileUpload({
 	accept,
 	multiple,
 	maxSizeBytes,
+	visibility,
 	label = "Drop files to upload",
 	helperText = "or click to browse",
 	className,
@@ -81,7 +86,7 @@ export function FileUpload({
 				initial.map(async (entry) => {
 					if (entry.status === "error") return entry;
 					try {
-						const uploaded = await uploadFile(entry.file);
+						const uploaded = await uploadFile(entry.file, { visibility });
 						onUploaded?.(uploaded, entry.file);
 						return { ...entry, uploaded } satisfies FileUploadResult;
 					} catch (err) {
@@ -105,7 +110,7 @@ export function FileUpload({
 			});
 			onComplete?.(settled);
 		},
-		[maxSizeBytes, onComplete, onUploaded],
+		[maxSizeBytes, onComplete, onUploaded, visibility],
 	);
 
 	function onDrop(e: DragEvent<HTMLDivElement>) {

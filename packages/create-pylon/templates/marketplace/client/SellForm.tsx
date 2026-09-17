@@ -39,10 +39,12 @@ async function uploadListingPhoto(file: File) {
   const initResponse = await fetch("/api/files/init", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    // Every buyer sees the listing photo, signed in or not.
     body: JSON.stringify({
       filename: file.name,
       mimeType: file.type,
       size: file.size,
+      visibility: "public",
     }),
   });
   if (!initResponse.ok) throw new Error("Could not prepare that upload.");

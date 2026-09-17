@@ -79,7 +79,7 @@ ctx.files.signedUrl(fileId, { ttlSecs: 300 })  // mint a short-lived signed down
 
 ### Signed file URLs
 
-`GET /api/files/<id>` serves a file only to its owner (or an unscoped admin). When your app's own rules say someone else should see it — an organizer reviewing a member's upload — mint a signed URL from a function that enforces those rules:
+`GET /api/files/<id>` serves a private file only to its owner (or an unscoped admin). A file uploaded with `visibility: "public"` needs no signed URL. When your app's own rules say someone else should see it — an organizer reviewing a member's upload — mint a signed URL from a function that enforces those rules:
 
 ```ts
 export default query({
