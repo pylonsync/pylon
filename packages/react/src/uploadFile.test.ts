@@ -4,19 +4,25 @@
 // goes to pylon, never to a presigned storage URL on another origin.
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { configureClient, uploadFile } from "./index";
+import { getBaseUrl, uploadFile } from "./index";
 
 type Seen = { url: string; method: string; headers: Record<string, string>; body: unknown };
 
 describe("uploadFile", () => {
   const realFetch = globalThis.fetch;
+  const realWindow = (globalThis as { window?: unknown }).window;
   let seen: Seen[];
   let uploadUrl: string;
+  // Whatever origin the client resolves to. Another test file in the same
+  // process may have configured one, and this test must not set one itself:
+  // configureClient is process-wide and would leak into those tests.
+  let base: string;
 
   beforeEach(() => {
     seen = [];
     uploadUrl = "/api/files/local-put/f_1";
-    configureClient({ baseUrl: "https://app.example" });
+    (globalThis as { window?: unknown }).window = { location: { origin: "https://app.example" } };
+    base = getBaseUrl();
     globalThis.fetch = (async (input: any, init: any = {}) => {
       const url = String(input?.url ?? input);
       seen.push({ url, method: init.method ?? "GET", headers: (init.headers ?? {}) as Record<string, string>, body: init.body });
@@ -29,6 +35,7 @@ describe("uploadFile", () => {
 
   afterEach(() => {
     globalThis.fetch = realFetch;
+    (globalThis as { window?: unknown }).window = realWindow;
   });
 
   test("init, put, confirm, with the visibility on init", async () => {
@@ -36,9 +43,9 @@ describe("uploadFile", () => {
     const out = await uploadFile(file, { visibility: "public", token: "tok" });
     expect(out).toEqual({ id: "f_1", url: "/api/files/f_1", size: 5 });
     expect(seen.map((r) => `${r.method} ${r.url}`)).toEqual([
-      "POST https://app.example/api/files/init",
-      "PUT https://app.example/api/files/local-put/f_1",
-      "POST https://app.example/api/files/confirm",
+      `POST ${base}/api/files/init`,
+      `PUT ${base}/api/files/local-put/f_1`,
+      `POST ${base}/api/files/confirm`,
     ]);
     expect(JSON.parse(String(seen[0].body))).toEqual({ filename: "cat.png", mimeType: "image/png", size: 5, visibility: "public" });
     expect(seen[1].headers.Authorization).toBe("Bearer tok");
