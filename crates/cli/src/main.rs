@@ -296,7 +296,9 @@ fn print_command_help(cmd: &str) -> bool {
             println!("error. `get <id>` prints the full error text.");
             println!();
             println!("Options:");
-            println!("  --status <s>      pending | running | completed | failed | retrying | dead");
+            println!(
+                "  --status <s>      pending | running | completed | failed | retrying | dead"
+            );
             println!("  --queue <q>       Only jobs on this queue");
             println!("  --limit <n>       Rows to return (default: 50, max: 500)");
             println!("  --project <slug>  Override the active project");
@@ -461,7 +463,9 @@ fn print_usage() {
     println!("  deployments [list|logs|rollback] List, tail build logs, roll back");
     println!("  members  [list|invite]    Org members");
     println!("  fn <name> [k=v ...]       Call any Pylon Cloud function by name");
-    println!("  jobs [list|failed|dead|stats|get <id>] Read the project's job queue and job errors");
+    println!(
+        "  jobs [list|failed|dead|stats|get <id>] Read the project's job queue and job errors"
+    );
     println!("  status                    One-glance project health");
     println!("  restart                   Restart the project's machines without rebuilding");
     println!("  billing                   Plan, this month's usage + projected charge, invoices");
