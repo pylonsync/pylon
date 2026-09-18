@@ -287,7 +287,8 @@ impl PgJobStore {
                     COUNT(*) FILTER (WHERE status IN ('pending','retrying')),
                     COUNT(*) FILTER (WHERE status='running'),
                     COUNT(*) FILTER (WHERE status='completed'),
-                    COUNT(*) FILTER (WHERE status='dead')
+                    COUNT(*) FILTER (WHERE status='dead'),
+                    COUNT(*) FILTER (WHERE status='failed')
                  FROM _pylon_jobs",
                 &[],
             )?;
@@ -295,7 +296,7 @@ impl PgJobStore {
                 pending: count_to_usize(row.get::<_, i64>(0)),
                 running: count_to_usize(row.get::<_, i64>(1)),
                 completed: row.get::<_, i64>(2).max(0) as u64,
-                failed: row.get::<_, i64>(3).max(0) as u64,
+                failed: row.get::<_, i64>(4).max(0) as u64,
                 dead: count_to_usize(row.get::<_, i64>(3)),
                 handlers: handlers.clone(),
             })

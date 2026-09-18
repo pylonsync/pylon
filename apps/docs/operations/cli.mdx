@@ -180,6 +180,19 @@ pylon status --json                # structured output for monitoring scripts
 
 One-glance project health — same surface the dashboard's project overview shows.
 
+## Jobs
+
+```bash
+pylon jobs                         # 50 most recent jobs: name, status, tries, start, first error line
+pylon jobs failed                  # only failed jobs
+pylon jobs dead                    # the dead-letter queue
+pylon jobs stats                   # pending / running / completed / failed / dead counts
+pylon jobs get <id>                # one job with the full error text
+pylon jobs --status retrying --queue mail --limit 200
+```
+
+Reads `/admin/jobs` on the project's machine through Pylon Cloud. Owner / admin only. A cron that stopped writing shows up here as a failed row with its function name and error.
+
 ## JSON mode
 
 Every command accepts `--json` and emits parseable output for scripts:

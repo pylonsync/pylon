@@ -104,6 +104,7 @@ fn run() -> ExitCode {
         Some("env") => commands::env::run(&args, json_mode),
         Some("explain") => commands::explain::run(&args, json_mode),
         Some("fn") => commands::cloud_fn::run(&args, json_mode),
+        Some("jobs") => commands::cloud_jobs::run(&args, json_mode),
         Some("init") => commands::init::run(&args, json_mode),
         Some("link") => commands::link::run(&args, json_mode),
         Some("lint") => commands::lint::run(&args, json_mode),
@@ -186,7 +187,7 @@ fn run() -> ExitCode {
 // Known commands for did-you-mean suggestions
 // ---------------------------------------------------------------------------
 
-const TOP_LEVEL_COMMANDS: [&str; 45] = [
+const TOP_LEVEL_COMMANDS: [&str; 46] = [
     "backup",
     "billing",
     "build",
@@ -204,6 +205,7 @@ const TOP_LEVEL_COMMANDS: [&str; 45] = [
     "explain",
     "fn",
     "init",
+    "jobs",
     "link",
     "lint",
     "mcp",
@@ -277,6 +279,33 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  pylon dev");
             println!("  pylon dev --port 3000");
             println!("  pylon dev app.ts --json");
+            true
+        }
+        "jobs" => {
+            println!("pylon jobs — read the project's job queue");
+            println!();
+            println!("Usage:");
+            println!("  pylon jobs [list] [--status <s>] [--queue <q>] [--limit <n>] [--json]");
+            println!("  pylon jobs failed [--limit <n>]");
+            println!("  pylon jobs dead");
+            println!("  pylon jobs stats");
+            println!("  pylon jobs get <id>");
+            println!();
+            println!("Reads /admin/jobs on the project's machine through Pylon Cloud. Each row");
+            println!("shows the job name, status, tries, start time, and the first line of the");
+            println!("error. `get <id>` prints the full error text.");
+            println!();
+            println!("Options:");
+            println!("  --status <s>      pending | running | completed | failed | retrying | dead");
+            println!("  --queue <q>       Only jobs on this queue");
+            println!("  --limit <n>       Rows to return (default: 50, max: 500)");
+            println!("  --project <slug>  Override the active project");
+            println!("  --json            Print the raw rows");
+            println!("  -h, --help        Show this help");
+            println!();
+            println!("Examples:");
+            println!("  pylon jobs failed");
+            println!("  pylon jobs get job_7f3a --project acme");
             true
         }
         "start" => {
@@ -432,6 +461,7 @@ fn print_usage() {
     println!("  deployments [list|logs|rollback] List, tail build logs, roll back");
     println!("  members  [list|invite]    Org members");
     println!("  fn <name> [k=v ...]       Call any Pylon Cloud function by name");
+    println!("  jobs [list|failed|dead|stats|get <id>] Read the project's job queue and job errors");
     println!("  status                    One-glance project health");
     println!("  restart                   Restart the project's machines without rebuilding");
     println!("  billing                   Plan, this month's usage + projected charge, invoices");
