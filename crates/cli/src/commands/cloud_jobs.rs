@@ -297,7 +297,12 @@ pub fn format_job_table(rows: &[JobRow]) -> String {
     ));
     for r in rows {
         let tries = format!("{}/{}", r.retry_count, r.max_retries);
-        let started = display_time(r.started_at.as_deref().or(r.created_at.as_deref()).unwrap_or(""));
+        let started = display_time(
+            r.started_at
+                .as_deref()
+                .or(r.created_at.as_deref())
+                .unwrap_or(""),
+        );
         out.push_str(&format!(
             "{:<26} {:<28} {:<10} {:<8} {:<20} {}\n",
             truncate(&r.id, 26),
