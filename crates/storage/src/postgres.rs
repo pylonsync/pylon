@@ -5,7 +5,8 @@ use pylon_kernel::AppManifest;
 // Type mapping: manifest field types -> PostgreSQL column types
 //
 //   string    -> TEXT
-//   int       -> INTEGER
+//   int       -> BIGINT   (64-bit, like SQLite's INTEGER; a Postgres
+//                          INTEGER is 32-bit and overflowed at 2^31)
 //   float     -> DOUBLE PRECISION
 //   bool      -> BOOLEAN
 //   datetime  -> TIMESTAMPTZ
@@ -16,7 +17,7 @@ use pylon_kernel::AppManifest;
 fn pg_column_type(field_type: &str) -> &'static str {
     match field_type {
         "string" => "TEXT",
-        "int" => "INTEGER",
+        "int" => "BIGINT",
         "float" => "DOUBLE PRECISION",
         "bool" => "BOOLEAN",
         "datetime" => "TIMESTAMPTZ",
@@ -34,6 +35,15 @@ fn pg_column_type(field_type: &str) -> &'static str {
         _ if field_type.starts_with("id(") => "TEXT",
         _ => "TEXT",
     }
+}
+
+/// True when a manifest `int` field sits on a live 32-bit column. Pylon
+/// created `int` fields as INTEGER before it created them as BIGINT; the
+/// planner widens those columns in place. `live_type` is the
+/// information_schema spelling ("integer"), so a SQLite snapshot
+/// ("INTEGER", already 64-bit) never matches.
+pub fn needs_int_widening(field_type: &str, live_type: &str) -> bool {
+    field_type == "int" && live_type == "integer"
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +321,15 @@ pub fn plan_to_sql(plan: &SchemaPlan) -> Result<Vec<String>, StorageError> {
                 // has no way to know — Postgres will fail the migration
                 // if it can't and the operator gets a clear error from
                 // the apply step.
+                if needs_int_widening(&target.field_type, &previous.field_type) {
+                    // Widening INTEGER to BIGINT keeps every value. Postgres
+                    // rewrites the table under an ACCESS EXCLUSIVE lock, once.
+                    statements.push(format!(
+                        "ALTER TABLE {} ALTER COLUMN {} TYPE BIGINT",
+                        quote_ident(entity),
+                        quote_ident(&target.name)
+                    ));
+                }
                 if previous.optional && !target.optional {
                     statements.push(format!(
                         "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL",
@@ -662,6 +681,11 @@ impl JsonParam {
 }
 
 #[cfg(feature = "postgres-live")]
+fn out_of_range(value: f64, column: &str) -> Box<dyn std::error::Error + Sync + Send> {
+    format!("value {value} is out of range for a {column} column").into()
+}
+
+#[cfg(feature = "postgres-live")]
 impl postgres::types::ToSql for JsonParam {
     fn to_sql(
         &self,
@@ -686,16 +710,34 @@ impl postgres::types::ToSql for JsonParam {
         match (self, ty) {
             (JsonParam::Bool(b), &Type::BOOL) => b.to_sql(ty, out),
 
-            (JsonParam::Int(n), &Type::INT2) => (*n as i16).to_sql(ty, out),
-            (JsonParam::Int(n), &Type::INT4) => (*n as i32).to_sql(ty, out),
+            // Out-of-range values are an error, never a wrap: `as i32` turned
+            // 2_500_000_000 into a negative number and stored it without a
+            // word (the Stack0 Cloud usage ledger, 2026-09).
+            (JsonParam::Int(n), &Type::INT2) => i16::try_from(*n)
+                .map_err(|_| out_of_range(*n as f64, "SMALLINT"))?
+                .to_sql(ty, out),
+            (JsonParam::Int(n), &Type::INT4) => i32::try_from(*n)
+                .map_err(|_| out_of_range(*n as f64, "INTEGER"))?
+                .to_sql(ty, out),
             (JsonParam::Int(n), &Type::INT8) => n.to_sql(ty, out),
             (JsonParam::Int(n), &Type::FLOAT4) => (*n as f32).to_sql(ty, out),
             (JsonParam::Int(n), &Type::FLOAT8) => (*n as f64).to_sql(ty, out),
 
             (JsonParam::Float(f), &Type::FLOAT4) => (*f as f32).to_sql(ty, out),
             (JsonParam::Float(f), &Type::FLOAT8) => f.to_sql(ty, out),
-            (JsonParam::Float(f), &Type::INT4) => (*f as i32).to_sql(ty, out),
-            (JsonParam::Float(f), &Type::INT8) => (*f as i64).to_sql(ty, out),
+            (JsonParam::Float(f), &Type::INT4) => {
+                if !(f.is_finite() && *f >= i32::MIN as f64 && *f <= i32::MAX as f64) {
+                    return Err(out_of_range(*f, "INTEGER"));
+                }
+                (*f as i32).to_sql(ty, out)
+            }
+            (JsonParam::Float(f), &Type::INT8) => {
+                // i64::MAX as f64 rounds up to 2^63, so the bound is exclusive.
+                if !(f.is_finite() && *f >= i64::MIN as f64 && *f < i64::MAX as f64) {
+                    return Err(out_of_range(*f, "BIGINT"));
+                }
+                (*f as i64).to_sql(ty, out)
+            }
 
             (JsonParam::Text(s), &Type::TEXT)
             | (JsonParam::Text(s), &Type::VARCHAR)
@@ -2462,7 +2504,7 @@ mod tests {
     #[test]
     fn pg_type_mapping() {
         assert_eq!(pg_column_type("string"), "TEXT");
-        assert_eq!(pg_column_type("int"), "INTEGER");
+        assert_eq!(pg_column_type("int"), "BIGINT");
         assert_eq!(pg_column_type("float"), "DOUBLE PRECISION");
         assert_eq!(pg_column_type("bool"), "BOOLEAN");
         assert_eq!(pg_column_type("datetime"), "TIMESTAMPTZ");
@@ -2502,7 +2544,7 @@ mod tests {
         let sql = create_table_sql("User", &fields);
         assert_eq!(
             sql,
-            "CREATE TABLE IF NOT EXISTS \"User\" (id TEXT PRIMARY KEY NOT NULL, \"email\" TEXT NOT NULL UNIQUE, \"age\" INTEGER)"
+            "CREATE TABLE IF NOT EXISTS \"User\" (id TEXT PRIMARY KEY NOT NULL, \"email\" TEXT NOT NULL UNIQUE, \"age\" BIGINT)"
         );
     }
 
@@ -2594,7 +2636,7 @@ mod tests {
         let sql = add_column_sql("Render", &field);
         assert_eq!(
             sql,
-            "ALTER TABLE \"Render\" ADD COLUMN \"count\" INTEGER NOT NULL DEFAULT 0"
+            "ALTER TABLE \"Render\" ADD COLUMN \"count\" BIGINT NOT NULL DEFAULT 0"
         );
     }
 

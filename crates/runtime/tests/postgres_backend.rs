@@ -1586,3 +1586,71 @@ fn vector_field_round_trips_and_searches_on_postgres() {
         .unwrap_err();
     assert_eq!(err.code, "VECTOR_INVALID");
 }
+
+/// A Postgres INTEGER column under an `int` field: an out-of-range write is an
+/// error (it used to wrap silently), and the next migration widens the column
+/// to BIGINT so the same write succeeds and reads back unchanged.
+#[test]
+fn legacy_integer_column_rejects_overflow_then_widens() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "Ledger".into(),
+            fields: vec![ManifestField {
+                name: "amountMicro".into(),
+                field_type: "int".into(),
+                optional: false,
+                unique: false,
+                crdt: None,
+                server_only: false,
+                readonly: false,
+                default: None,
+                enum_values: None,
+                encrypted: false,
+                sync_omit: false,
+            }],
+            indexes: vec![],
+            relations: vec![],
+            crdt: false,
+            sync: true,
+            search: None,
+            ..Default::default()
+        }],
+        ..empty_manifest()
+    };
+    let big: i64 = 6_287_500_000; // $628.75 in micro-cents, past i32::MAX
+
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+    adapter
+        .exec_raw("DROP TABLE IF EXISTS \"Ledger\" CASCADE")
+        .unwrap();
+    // The table as an older Pylon created it.
+    adapter
+        .exec_raw(
+            "CREATE TABLE \"Ledger\" (id TEXT PRIMARY KEY NOT NULL, \"amountMicro\" INTEGER NOT NULL)",
+        )
+        .unwrap();
+
+    {
+        let rt = Runtime::open_postgres(&url, manifest.clone()).unwrap();
+        let err = rt
+            .insert("Ledger", &serde_json::json!({ "amountMicro": big }))
+            .expect_err("an out-of-range write must fail, not wrap");
+        assert!(
+            format!("{err:?}").contains("out of range"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    let plan = adapter.plan_from_live(&manifest).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+
+    let rt = Runtime::open_postgres(&url, manifest).unwrap();
+    let id = rt
+        .insert("Ledger", &serde_json::json!({ "amountMicro": big }))
+        .expect("insert after widening");
+    let row = rt.get_by_id("Ledger", &id).unwrap().unwrap();
+    assert_eq!(row["amountMicro"], big);
+}

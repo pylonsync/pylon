@@ -301,13 +301,19 @@ pub fn plan_from_snapshot(snapshot: &SchemaSnapshot, target: &AppManifest) -> Sc
                             // Detect nullable-shape drift between the live
                             // column and the manifest. Existing column's
                             // `notnull = true` ≡ manifest's `optional = false`.
-                            // We DON'T re-derive type/unique here — type
-                            // changes need a destructive plan we don't
-                            // attempt automatically, and unique-add lives in
-                            // the AddIndex path.
+                            // Other type changes need a destructive plan we
+                            // don't attempt automatically, and unique-add
+                            // lives in the AddIndex path.
                             let existing_optional = !existing.notnull;
                             let target_optional = field.optional;
-                            if existing_optional != target_optional {
+                            // The one type change planned automatically:
+                            // widening a Postgres INTEGER under an `int` field
+                            // to BIGINT (see postgres::needs_int_widening).
+                            let widen = crate::postgres::needs_int_widening(
+                                &field.field_type,
+                                &existing.column_type,
+                            );
+                            if existing_optional != target_optional || widen {
                                 let target_spec = FieldSpec {
                                     name: field.name.clone(),
                                     field_type: field.field_type.clone(),
@@ -1735,6 +1741,79 @@ mod tests {
             connections: vec![],
             crons: vec![],
             fonts: vec![],
+        }
+    }
+
+    /// An `int` field on a live Postgres INTEGER column is widened to BIGINT.
+    /// Pylon created `int` fields as 32-bit INTEGER before, and a value past
+    /// 2^31 wrapped on write (the Stack0 Cloud usage ledger, 2026-09).
+    fn usage_snapshot(amount_type: &str, amount_notnull: bool) -> (SchemaSnapshot, AppManifest) {
+        let snapshot = SchemaSnapshot {
+            tables: vec![TableSnapshot {
+                name: "Usage".into(),
+                columns: vec![
+                    ColumnSnapshot {
+                        name: "id".into(),
+                        column_type: "text".into(),
+                        notnull: true,
+                        primary_key: true,
+                        has_default: false,
+                    },
+                    ColumnSnapshot {
+                        name: "amount".into(),
+                        column_type: amount_type.into(),
+                        notnull: amount_notnull,
+                        primary_key: false,
+                        has_default: true,
+                    },
+                ],
+                indexes: vec![],
+            }],
+        };
+        let mut entity = post_entity_no_search();
+        entity.name = "Usage".into();
+        entity.fields[0].name = "amount".into();
+        entity.fields[0].field_type = "int".into();
+        (snapshot, manifest_with(vec![entity]))
+    }
+
+    #[test]
+    fn plan_widens_postgres_integer_under_int_field() {
+        let (snapshot, manifest) = usage_snapshot("integer", true);
+        let plan = plan_from_snapshot(&snapshot, &manifest);
+        assert_eq!(
+            crate::postgres::plan_to_sql(&plan).unwrap(),
+            vec!["ALTER TABLE \"Usage\" ALTER COLUMN \"amount\" TYPE BIGINT".to_string()],
+        );
+    }
+
+    #[test]
+    fn plan_widens_and_relaxes_in_one_pass() {
+        let (snapshot, mut manifest) = usage_snapshot("integer", true);
+        manifest.entities[0].fields[0].optional = true;
+        let sql = crate::postgres::plan_to_sql(&plan_from_snapshot(&snapshot, &manifest)).unwrap();
+        assert_eq!(
+            sql,
+            vec![
+                "ALTER TABLE \"Usage\" ALTER COLUMN \"amount\" TYPE BIGINT".to_string(),
+                "ALTER TABLE \"Usage\" ALTER COLUMN \"amount\" DROP NOT NULL".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn plan_leaves_bigint_and_sqlite_integer_alone() {
+        for live in ["bigint", "INTEGER"] {
+            let (snapshot, manifest) = usage_snapshot(live, true);
+            let plan = plan_from_snapshot(&snapshot, &manifest);
+            assert!(
+                !plan
+                    .operations
+                    .iter()
+                    .any(|op| matches!(op, SchemaOperation::AlterField { .. })),
+                "{live}: unexpected AlterField in {:?}",
+                plan.operations
+            );
         }
     }
 
