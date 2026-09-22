@@ -3734,8 +3734,13 @@ fn start_server(
                     && (h.value.as_str().contains("text/plain")
                         || h.value.as_str().contains("application/openmetrics-text"))
             });
+            let memory = crate::memory::snapshot();
             let (body, content_type) = if prefers_prometheus {
-                (mt.prometheus(), "text/plain; version=0.0.4")
+                let mut text = mt.prometheus();
+                if let Some(m) = &memory {
+                    text.push_str(&m.prometheus());
+                }
+                (text, "text/plain; version=0.0.4")
             } else {
                 // Augment the bare HTTP snapshot with live operational
                 // stats so the Studio Overview can render jobs/workflows/
@@ -3797,6 +3802,9 @@ fn start_server(
                             "sse_connections": sse_hub.client_count(),
                         }),
                     );
+                    if let Some(m) = &memory {
+                        obj.insert("memory".to_string(), m.to_json());
+                    }
                 }
                 (snap.to_string(), "application/json")
             };
