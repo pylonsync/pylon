@@ -431,6 +431,15 @@ export interface EntityDefinition {
    * can read" and "nothing".
    */
   sync?: boolean | SyncScope;
+  /**
+   * Per-row CRDT (Loro) documents. Default `true`: every write merges through
+   * a document, and offline edits from several devices converge. Set `false`
+   * for rows only the server writes and that nobody edits concurrently:
+   * rollups, counters, metering windows, audit logs. Those pay a document read
+   * and write on every change for nothing, and a row rewritten every few
+   * minutes carries a snapshot that grows with each write.
+   */
+  crdt?: boolean;
 }
 
 /**
@@ -477,6 +486,9 @@ export function entity(
      *  which rows reach it. Mirrors {@link EntityDefinition.sync} — this is
      *  the type callers actually hit, so the two must not drift. */
     sync?: boolean | SyncScope;
+    /** `false` for server-written rows that need no CRDT document. Mirrors
+     *  {@link EntityDefinition.crdt}. */
+    crdt?: boolean;
   },
 ): EntityDefinition {
   return {
@@ -486,6 +498,7 @@ export function entity(
     relations: options?.relations,
     search: options?.search,
     sync: options?.sync,
+    crdt: options?.crdt,
   };
 }
 
@@ -728,6 +741,8 @@ export interface ManifestEntity {
    */
   sync_scope?: string;
   sync_limit?: number;
+  /** CRDT mode; omitted when true (the runtime default). */
+  crdt?: boolean;
 }
 
 export interface ManifestRoute {
@@ -1051,6 +1066,10 @@ export function entitiesToManifest(
       const scope = e.sync;
       if (scope.where !== undefined) result.sync_scope = scope.where;
       if (scope.limit !== undefined) result.sync_limit = scope.limit;
+    }
+    // Emit only when opted OUT — the runtime defaults crdt to true.
+    if (e.crdt === false) {
+      result.crdt = false;
     }
     return result;
   });
