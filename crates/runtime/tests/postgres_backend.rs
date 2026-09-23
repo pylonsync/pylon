@@ -1654,3 +1654,82 @@ fn legacy_integer_column_rejects_overflow_then_widens() {
     let row = rt.get_by_id("Ledger", &id).unwrap().unwrap();
     assert_eq!(row["amountMicro"], big);
 }
+
+/// Prune on Postgres removes orphaned snapshots and snapshots of entities
+/// that are not CRDT-backed, and keeps the snapshot of a live CRDT row.
+#[test]
+fn prune_crdt_snapshots_on_postgres() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    let field = |name: &str| ManifestField {
+        name: name.into(),
+        field_type: "string".into(),
+        optional: false,
+        unique: false,
+        crdt: None,
+        server_only: false,
+        readonly: false,
+        default: None,
+        enum_values: None,
+        encrypted: false,
+        sync_omit: false,
+    };
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "PruneNote".into(),
+            fields: vec![field("title")],
+            indexes: vec![],
+            relations: vec![],
+            crdt: true,
+            sync: true,
+            search: None,
+            ..Default::default()
+        }],
+        ..empty_manifest()
+    };
+
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(&url).unwrap();
+    adapter
+        .exec_raw("DROP TABLE IF EXISTS \"PruneNote\" CASCADE")
+        .unwrap();
+    let plan = adapter.plan_from_live(&manifest).unwrap();
+    adapter.apply_plan(&plan).unwrap();
+
+    let rt = Runtime::open_postgres(&url, manifest).unwrap();
+    adapter
+        .exec_raw("DELETE FROM _pylon_crdt_snapshots WHERE entity IN ('PruneNote', 'PruneGone')")
+        .unwrap();
+    let live = rt
+        .insert("PruneNote", &serde_json::json!({ "title": "keep" }))
+        .unwrap();
+    adapter
+        .exec_raw(
+            "INSERT INTO _pylon_crdt_snapshots (entity, row_id, snapshot, updated_at) VALUES \
+             ('PruneNote', 'gone-1', '\\x00', now()), ('PruneGone', 'x', '\\x00', now())",
+        )
+        .unwrap();
+
+    let report = rt
+        .prune_crdt_snapshots(1, std::time::Duration::ZERO)
+        .unwrap();
+    // The shared test database also holds other tests' snapshots, which are
+    // not in this manifest and are pruned too; check this test's entities.
+    let by = |e: &str| {
+        report
+            .by_entity
+            .iter()
+            .find(|(n, _)| n == e)
+            .map(|(_, c)| *c)
+    };
+    assert_eq!(by("PruneNote"), Some(1), "{report:?}");
+    assert_eq!(by("PruneGone"), Some(1), "{report:?}");
+    let rt_live = rt.get_by_id("PruneNote", &live).unwrap();
+    assert!(rt_live.is_some());
+    assert_eq!(
+        rt.prune_crdt_snapshots(100, std::time::Duration::ZERO)
+            .unwrap()
+            .deleted,
+        0
+    );
+}

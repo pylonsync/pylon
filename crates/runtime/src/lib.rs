@@ -7,6 +7,7 @@ pub mod change_log_persister;
 pub mod change_log_store;
 pub mod config;
 pub mod connections;
+pub mod crdt_cache;
 pub mod cron;
 pub mod datastore;
 pub mod dev_diagnostics;
@@ -21,6 +22,26 @@ pub mod leader;
 pub mod llm;
 pub mod log;
 pub mod log_ring;
+
+/// What [`Runtime::prune_crdt_snapshots`] removed, per entity.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CrdtPruneReport {
+    pub deleted: usize,
+    pub by_entity: Vec<(String, usize)>,
+}
+
+impl CrdtPruneReport {
+    fn record(&mut self, entity: &str, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.deleted += n;
+        match self.by_entity.iter_mut().find(|(e, _)| e == entity) {
+            Some((_, total)) => *total += n,
+            None => self.by_entity.push((entity.to_string(), n)),
+        }
+    }
+}
 pub mod loro_store;
 pub mod magic_code_backend;
 pub mod markdown;
@@ -1540,6 +1561,8 @@ impl Runtime {
             let fts_sql = format!("DELETE FROM {}", quote_ident(&format!("{name}_fts")));
             let _ = conn.execute(&fts_sql, []);
         }
+        let _ = conn.execute("DELETE FROM _pylon_crdt_snapshots", []);
+        self.crdt_store().clear_cache();
         Ok(())
     }
 
@@ -2801,8 +2824,101 @@ impl Runtime {
                 code: "DELETE_FAILED".into(),
                 message: format!("Delete {entity}/{id} failed: {e}"),
             })?;
+        if ent.crdt {
+            self.delete_crdt_snapshot(&conn, entity, id)?;
+        }
 
         Ok(affected > 0)
+    }
+
+    /// Remove CRDT snapshots nothing reads: those whose row was deleted
+    /// (the SQLite delete paths left them behind before 0.11.5), and every
+    /// snapshot of an entity that is no longer CRDT-backed or no longer in
+    /// the manifest. Works in batches of `batch` rows, taking the write
+    /// lock (SQLite) or a pooled client (Postgres) per batch and pausing
+    /// between batches so live writes keep flowing. Idempotent; safe to run
+    /// on several replicas at once.
+    pub fn prune_crdt_snapshots(
+        &self,
+        batch: usize,
+        pause: std::time::Duration,
+    ) -> Result<CrdtPruneReport, RuntimeError> {
+        use crate::loro_store::PruneScope;
+        let storage_err = |e: String| RuntimeError {
+            code: "CRDT_PRUNE_FAILED".into(),
+            message: e,
+        };
+        let scope_for = |entity: &str| match self.entities.get(entity) {
+            Some(e) if e.crdt => PruneScope::Orphans,
+            _ => PruneScope::All,
+        };
+        let batch = batch.max(1);
+        let mut report = CrdtPruneReport::default();
+
+        if let Some(pg) = self.pg_backend() {
+            let entities = pg
+                .store
+                .with_client(|c| crate::pg_loro_store::snapshot_entities(c))
+                .map_err(|e: crate::loro_store::LoroStoreError| storage_err(e.to_string()))?;
+            for entity in entities {
+                let scope = scope_for(&entity);
+                loop {
+                    let n = pg
+                        .store
+                        .with_client(|c| {
+                            crate::pg_loro_store::prune_batch(c, &entity, scope, batch as i64)
+                        })
+                        .map_err(|e: crate::loro_store::LoroStoreError| {
+                            storage_err(e.to_string())
+                        })? as usize;
+                    report.record(&entity, n);
+                    if n < batch {
+                        break;
+                    }
+                    std::thread::sleep(pause);
+                }
+            }
+            return Ok(report);
+        }
+
+        let entities = {
+            let conn = self.lock_write_conn()?;
+            crate::loro_store::snapshot_entities(&conn).map_err(|e| storage_err(e.to_string()))?
+        };
+        for entity in entities {
+            let scope = scope_for(&entity);
+            loop {
+                let n = {
+                    let conn = self.lock_write_conn()?;
+                    crate::loro_store::prune_batch(&conn, &entity, scope, batch)
+                        .map_err(|e| storage_err(e.to_string()))?
+                };
+                report.record(&entity, n);
+                if n < batch {
+                    break;
+                }
+                std::thread::sleep(pause);
+            }
+        }
+        Ok(report)
+    }
+
+    /// Drop a deleted row's CRDT snapshot and cached doc, on the same
+    /// connection as the row DELETE (so inside its transaction when there
+    /// is one). The Postgres paths already did this; the SQLite ones left
+    /// the snapshot behind, one orphan per deleted row.
+    fn delete_crdt_snapshot(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        id: &str,
+    ) -> Result<(), RuntimeError> {
+        self.crdt_store()
+            .delete_row(conn, entity, id)
+            .map_err(|e| RuntimeError {
+                code: "CRDT_SIDECAR_DELETE_FAILED".into(),
+                message: format!("delete crdt snapshot {entity}/{id}: {e}"),
+            })
     }
 
     /// Lookup a single row by a field value (e.g., email).
@@ -3482,6 +3598,9 @@ impl Runtime {
                 code: "DELETE_FAILED".into(),
                 message: format!("Delete {entity}/{id} failed: {e}"),
             })?;
+        if ent.crdt {
+            self.delete_crdt_snapshot(conn, entity, id)?;
+        }
         Ok(affected > 0)
     }
 
@@ -5509,6 +5628,114 @@ mod tests {
 
     /// Entities with `crdt: false` skip the LoroDoc entirely — no sidecar
     /// row, no Loro cache entry. Proves the opt-out actually opts out.
+    fn snapshot_count(rt: &Runtime, entity: &str, id: &str) -> i64 {
+        let conn = rt.lock_write_conn().unwrap();
+        conn.query_row(
+            "SELECT COUNT(*) FROM _pylon_crdt_snapshots WHERE entity = ?1 AND row_id = ?2",
+            rusqlite::params![entity, id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Deleting a CRDT row removes its snapshot and cached doc. The SQLite
+    /// paths used to leave both behind; Stack0 Analytics collected 1.37M
+    /// orphaned snapshots (95% of its database) before this.
+    #[test]
+    fn crdt_delete_removes_snapshot_and_cached_doc() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "d@y.com", "displayName": "D"}),
+            )
+            .unwrap();
+        assert_eq!(snapshot_count(&rt, "User", &id), 1);
+        let cached = rt.crdt_store().cached_rows();
+
+        assert!(rt.delete("User", &id).unwrap());
+        assert_eq!(snapshot_count(&rt, "User", &id), 0);
+        assert_eq!(rt.crdt_store().cached_rows(), cached - 1);
+    }
+
+    /// Same for the connection-scoped delete that mutations use.
+    #[test]
+    fn crdt_delete_with_conn_removes_snapshot() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let id = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "t@y.com", "displayName": "T"}),
+            )
+            .unwrap();
+        {
+            let conn = rt.lock_write_conn().unwrap();
+            assert!(rt.delete_with_conn(&conn, "User", &id).unwrap());
+        }
+        assert_eq!(snapshot_count(&rt, "User", &id), 0);
+    }
+
+    /// Prune removes snapshots of deleted rows, of entities that are no
+    /// longer CRDT-backed, and of entities no longer in the manifest, and
+    /// keeps the snapshots of live CRDT rows.
+    #[test]
+    fn prune_removes_only_unused_snapshots() {
+        let mut manifest = test_manifest();
+        let lww = {
+            let mut e = manifest.entities[0].clone();
+            e.name = "Lww".into();
+            e.crdt = false;
+            e
+        };
+        manifest.entities.push(lww);
+        let rt = Runtime::in_memory(manifest).unwrap();
+        let live = rt
+            .insert(
+                "User",
+                &serde_json::json!({"email": "l@y.com", "displayName": "L"}),
+            )
+            .unwrap();
+        {
+            let conn = rt.lock_write_conn().unwrap();
+            for (entity, row) in [
+                ("User", "gone-1"),
+                ("User", "gone-2"),
+                ("Lww", "x"),
+                ("Removed", "y"),
+            ] {
+                conn.execute(
+                    "INSERT INTO _pylon_crdt_snapshots (entity, row_id, snapshot, updated_at)
+                     VALUES (?1, ?2, x'00', '2026-09-23T00:00:00Z')",
+                    rusqlite::params![entity, row],
+                )
+                .unwrap();
+            }
+        }
+
+        // Batch of 1 exercises the loop.
+        let report = rt
+            .prune_crdt_snapshots(1, std::time::Duration::ZERO)
+            .unwrap();
+        assert_eq!(report.deleted, 4);
+        assert_eq!(snapshot_count(&rt, "User", &live), 1);
+        let conn = rt.lock_write_conn().unwrap();
+        let left: i64 = conn
+            .query_row("SELECT COUNT(*) FROM _pylon_crdt_snapshots", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(left, 1);
+        drop(conn);
+
+        // A second run finds nothing.
+        assert_eq!(
+            rt.prune_crdt_snapshots(100, std::time::Duration::ZERO)
+                .unwrap()
+                .deleted,
+            0
+        );
+    }
+
     #[test]
     fn crdt_false_skips_loro_store() {
         let mut manifest = test_manifest();

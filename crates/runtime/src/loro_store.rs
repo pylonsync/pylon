@@ -59,7 +59,6 @@
 //! are the helpers the broadcast path uses; the router's
 //! `broadcast_change_with_crdt` owns the per-row "last VV" map.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use pylon_crdt::{
@@ -86,6 +85,57 @@ CREATE TABLE IF NOT EXISTS _pylon_crdt_snapshots (
     PRIMARY KEY (entity, row_id)
 )
 ";
+
+/// Which snapshots a prune batch removes for one entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PruneScope {
+    /// Snapshots whose row no longer exists in the entity table.
+    Orphans,
+    /// Every snapshot of the entity: it is no longer CRDT-backed, or no
+    /// longer in the manifest.
+    All,
+}
+
+/// Delete up to `batch` snapshots of `entity` in `scope`; returns how many.
+/// Callers loop until it returns 0, taking the write lock per batch.
+pub fn prune_batch(
+    conn: &Connection,
+    entity: &str,
+    scope: PruneScope,
+    batch: usize,
+) -> Result<usize, LoroStoreError> {
+    let sql = match scope {
+        PruneScope::Orphans => format!(
+            "DELETE FROM _pylon_crdt_snapshots WHERE rowid IN (
+                SELECT s.rowid FROM _pylon_crdt_snapshots s
+                WHERE s.entity = ?1
+                  AND NOT EXISTS (SELECT 1 FROM {} t WHERE t.\"id\" = s.row_id)
+                LIMIT ?2)",
+            quote_sqlite_ident(entity)
+        ),
+        PruneScope::All => "DELETE FROM _pylon_crdt_snapshots WHERE rowid IN (
+                SELECT rowid FROM _pylon_crdt_snapshots WHERE entity = ?1 LIMIT ?2)"
+            .to_string(),
+    };
+    conn.execute(&sql, params![entity, batch as i64])
+        .map_err(|e| LoroStoreError::Storage(format!("prune snapshots of {entity}: {e}")))
+}
+
+/// Entities that have at least one snapshot.
+pub fn snapshot_entities(conn: &Connection) -> Result<Vec<String>, LoroStoreError> {
+    let mut stmt = conn
+        .prepare("SELECT DISTINCT entity FROM _pylon_crdt_snapshots")
+        .map_err(|e| LoroStoreError::Storage(format!("list snapshot entities: {e}")))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| LoroStoreError::Storage(format!("list snapshot entities: {e}")))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| LoroStoreError::Storage(format!("list snapshot entities: {e}")))
+}
+
+fn quote_sqlite_ident(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
 
 /// Create the sidecar table. Safe to call repeatedly.
 pub fn ensure_sidecar(conn: &Connection) -> Result<(), LoroStoreError> {
@@ -140,16 +190,15 @@ impl From<pylon_http::DataError> for LoroStoreError {
 
 /// Server-side per-row LoroDoc cache + persistence layer.
 ///
-/// One instance per Runtime. Cheap to clone via [`Arc`]; internally
-/// guards a `HashMap` of doc handles, each itself behind a `Mutex` so
+/// One instance per Runtime. Holds a bounded cache of doc handles
+/// (see [`crate::crdt_cache`]), each behind its own `Mutex` so
 /// concurrent access to *different* rows doesn't contend.
 #[derive(Default)]
 pub struct LoroStore {
-    /// Per-row cache. The outer Mutex guards lookup; the inner Mutex
-    /// guards mutation of the specific doc. We hold the outer briefly
-    /// (insert/lookup), then release before doing any Loro work, so two
-    /// requests targeting different rows never block each other.
-    docs: Mutex<HashMap<(String, String), Arc<Mutex<LoroDoc>>>>,
+    /// Per-row cache. The cache lock is held only for lookup/insert;
+    /// Loro work happens under the per-doc Mutex, so two requests
+    /// targeting different rows never block each other.
+    docs: crate::crdt_cache::DocCache,
 }
 
 impl LoroStore {
@@ -165,14 +214,9 @@ impl LoroStore {
         entity: &str,
         row_id: &str,
     ) -> Result<Arc<Mutex<LoroDoc>>, LoroStoreError> {
-        let key = (entity.to_string(), row_id.to_string());
-
         // Fast path: already cached.
-        {
-            let guard = self.docs.lock().unwrap();
-            if let Some(doc) = guard.get(&key) {
-                return Ok(Arc::clone(doc));
-            }
+        if let Some(doc) = self.docs.get(entity, row_id) {
+            return Ok(doc);
         }
 
         // Slow path: hydrate (or create fresh) outside the cache lock.
@@ -201,11 +245,9 @@ impl LoroStore {
         }
         let handle = Arc::new(Mutex::new(doc));
 
-        // Re-acquire cache lock and publish, but defer to whatever's
-        // already there if we lost the race.
-        let mut guard = self.docs.lock().unwrap();
-        let entry = guard.entry(key).or_insert_with(|| Arc::clone(&handle));
-        Ok(Arc::clone(entry))
+        // Publish, but defer to whatever's already there if we lost the
+        // race.
+        Ok(self.docs.get_or_insert(entity, row_id, handle))
     }
 
     /// Persist the current snapshot for a row to the sidecar. Called
@@ -331,19 +373,42 @@ impl LoroStore {
         Ok(Some(encode_update_since(&doc, &parsed)))
     }
 
-    /// Drop a row's doc from the in-memory cache. Useful for tests and
-    /// for the eventual eviction policy. Doesn't touch the sidecar; the
-    /// next read will re-hydrate from disk.
+    /// Drop a row's doc from the in-memory cache. Doesn't touch the
+    /// sidecar; the next read will re-hydrate from disk.
     pub fn evict(&self, entity: &str, row_id: &str) {
-        self.docs
-            .lock()
-            .unwrap()
-            .remove(&(entity.to_string(), row_id.to_string()));
+        self.docs.remove(entity, row_id);
+    }
+
+    /// Delete a row's snapshot from the sidecar and drop its cached doc.
+    /// Call on the same connection (and transaction) as the entity-row
+    /// DELETE. Without this every deleted CRDT row left its snapshot
+    /// behind: an app whose crons replace rollup rows hourly had 1.37M
+    /// orphaned snapshots, 95% of its database (Stack0 Analytics,
+    /// 2026-09). Evicting before commit is safe either way: a rollback
+    /// leaves the sidecar row, which the next read re-hydrates.
+    pub fn delete_row(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<(), LoroStoreError> {
+        conn.execute(
+            "DELETE FROM _pylon_crdt_snapshots WHERE entity = ?1 AND row_id = ?2",
+            params![entity, row_id],
+        )
+        .map_err(|e| LoroStoreError::Storage(format!("delete snapshot: {e}")))?;
+        self.evict(entity, row_id);
+        Ok(())
+    }
+
+    /// Drop every cached doc. Tests only (`reset_for_tests`).
+    pub fn clear_cache(&self) {
+        self.docs.clear();
     }
 
     /// Number of rows currently held in memory. Diagnostic.
     pub fn cached_rows(&self) -> usize {
-        self.docs.lock().unwrap().len()
+        self.docs.len()
     }
 }
 

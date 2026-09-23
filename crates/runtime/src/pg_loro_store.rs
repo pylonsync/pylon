@@ -14,7 +14,6 @@
 //! commit or all roll back, so a crash mid-write can't desync the
 //! CRDT snapshot from the materialized columns.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use postgres::Client;
@@ -47,12 +46,50 @@ pub fn ensure_sidecar(client: &mut Client) -> Result<(), LoroStoreError> {
         .map_err(|e| LoroStoreError::Storage(format!("create pg sidecar: {e}")))
 }
 
+/// Postgres counterpart of [`crate::loro_store::prune_batch`].
+pub fn prune_batch(
+    client: &mut Client,
+    entity: &str,
+    scope: crate::loro_store::PruneScope,
+    batch: i64,
+) -> Result<u64, LoroStoreError> {
+    let result = match scope {
+        crate::loro_store::PruneScope::Orphans => client.execute(
+            format!(
+                "DELETE FROM _pylon_crdt_snapshots WHERE (entity, row_id) IN (
+                    SELECT s.entity, s.row_id FROM _pylon_crdt_snapshots s
+                    WHERE s.entity = $1
+                      AND NOT EXISTS (SELECT 1 FROM {} t WHERE t.id = s.row_id)
+                    LIMIT $2)",
+                format!("\"{}\"", entity.replace('"', "\"\""))
+            )
+            .as_str(),
+            &[&entity, &batch],
+        ),
+        crate::loro_store::PruneScope::All => client.execute(
+            "DELETE FROM _pylon_crdt_snapshots WHERE (entity, row_id) IN (
+                SELECT entity, row_id FROM _pylon_crdt_snapshots WHERE entity = $1 LIMIT $2)",
+            &[&entity, &batch],
+        ),
+    };
+    result.map_err(|e| LoroStoreError::Storage(format!("prune pg snapshots of {entity}: {e}")))
+}
+
+/// Entities that have at least one snapshot.
+pub fn snapshot_entities(client: &mut Client) -> Result<Vec<String>, LoroStoreError> {
+    client
+        .query("SELECT DISTINCT entity FROM _pylon_crdt_snapshots", &[])
+        .map(|rows| rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
+        .map_err(|e| LoroStoreError::Storage(format!("list pg snapshot entities: {e}")))
+}
+
 /// PG analogue of `LoroStore`. Lives on the Postgres-backed runtime;
 /// holds the per-row LoroDoc cache (mutated only behind the inner
 /// per-row Mutex) and persists snapshots to the PG sidecar table.
 #[derive(Default)]
 pub struct PgLoroStore {
-    docs: Mutex<HashMap<(String, String), Arc<Mutex<LoroDoc>>>>,
+    /// Bounded; see [`crate::crdt_cache`].
+    docs: crate::crdt_cache::DocCache,
 }
 
 impl PgLoroStore {
@@ -137,14 +174,9 @@ impl PgLoroStore {
         entity: &str,
         row_id: &str,
     ) -> Result<Arc<Mutex<LoroDoc>>, LoroStoreError> {
-        let key = (entity.to_string(), row_id.to_string());
-
         // Fast path: already cached.
-        {
-            let guard = self.docs.lock().unwrap();
-            if let Some(doc) = guard.get(&key) {
-                return Ok(Arc::clone(doc));
-            }
+        if let Some(doc) = self.docs.get(entity, row_id) {
+            return Ok(doc);
         }
 
         let snapshot: Option<Vec<u8>> = conn
@@ -160,10 +192,7 @@ impl PgLoroStore {
             crdt_apply_update(&doc, &bytes).map_err(LoroStoreError::Decode)?;
         }
         let handle = Arc::new(Mutex::new(doc));
-
-        let mut guard = self.docs.lock().unwrap();
-        let entry = guard.entry(key).or_insert_with(|| Arc::clone(&handle));
-        Ok(Arc::clone(entry))
+        Ok(self.docs.get_or_insert(entity, row_id, handle))
     }
 
     /// Persist the current snapshot via UPSERT. Called after every
@@ -350,23 +379,18 @@ impl PgLoroStore {
             self.evict(entity, row_id);
             return;
         }
-        let handle = Arc::new(Mutex::new(doc));
-        let mut guard = self.docs.lock().unwrap();
-        guard.insert((entity.to_string(), row_id.to_string()), handle);
+        self.docs.insert(entity, row_id, Arc::new(Mutex::new(doc)));
     }
 
     /// Drop a row's cached doc. Next access re-hydrates from the PG
     /// sidecar.
     pub fn evict(&self, entity: &str, row_id: &str) {
-        self.docs
-            .lock()
-            .unwrap()
-            .remove(&(entity.to_string(), row_id.to_string()));
+        self.docs.remove(entity, row_id);
     }
 
     /// Diagnostic — number of rows cached in memory.
     pub fn cached_rows(&self) -> usize {
-        self.docs.lock().unwrap().len()
+        self.docs.len()
     }
 }
 

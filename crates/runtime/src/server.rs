@@ -3090,6 +3090,30 @@ fn start_server(
     // No-op on SQLite (never acquired).
     crate::pg_boot_guard::release();
 
+    // Remove CRDT snapshots nothing reads (see Runtime::prune_crdt_snapshots).
+    // Once per boot, off the request path, after boot settles. Opt out with
+    // PYLON_CRDT_PRUNE=0.
+    let prune_enabled = std::env::var("PYLON_CRDT_PRUNE")
+        .map(|v| v.trim() != "0")
+        .unwrap_or(true);
+    if prune_enabled && !runtime.is_in_memory() {
+        let rt = Arc::clone(&runtime);
+        let _ = std::thread::Builder::new()
+            .name("pylon-crdt-prune".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                match rt.prune_crdt_snapshots(5_000, std::time::Duration::from_millis(50)) {
+                    Ok(report) if report.deleted > 0 => tracing::info!(
+                        deleted = report.deleted,
+                        by_entity = ?report.by_entity,
+                        "[crdt] pruned unused CRDT snapshots"
+                    ),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("[crdt] snapshot prune failed: {}", e.message),
+                }
+            });
+    }
+
     tracing::info!("pylon dev server listening on http://localhost:{port}");
     tracing::info!("  WebSocket: ws://localhost:{ws_port}");
     tracing::info!("  Studio: http://localhost:{port}/studio");
