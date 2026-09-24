@@ -1166,11 +1166,19 @@ export async function discoverAppRoutes(opts?: {
 
   // Resolve the first existing `<base>.{tsx,ts,jsx,js}` in `dir` and
   // return it as a cwd-relative, extension-less module path (or null).
+  // Component paths always use "/", on Windows too: they are manifest keys,
+  // client-bundle import specifiers, and the input to the SSR runtime's
+  // boundary walk, all of which split on "/".
   const findModule = (dir: string, base: string): string | null => {
     const hit = [`${base}.tsx`, `${base}.ts`, `${base}.jsx`, `${base}.js`]
       .map((n: string) => path.join(dir, n))
       .find((p: string) => fs.existsSync(p));
-    return hit ? path.relative(cwd, hit).replace(/\.(tsx?|jsx?)$/, "") : null;
+    return hit
+      ? path
+          .relative(cwd, hit)
+          .replace(/\.(tsx?|jsx?)$/, "")
+          .replace(/\\/g, "/")
+      : null;
   };
 
   function walk(dir: string, segments: string[], layouts: string[]): void {
