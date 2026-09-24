@@ -319,7 +319,8 @@ fn the_budget_covers_the_whole_tick_not_each_call() {
             },
         )
     };
-    // Calibrate: iterations that take about 15 ms on this machine.
+    // Calibrate: iterations that take about 50 ms on this machine. The
+    // fastest of three probes, so a noisy runner does not inflate it.
     let probe = kind_with(10_000);
     let s = Shard::new(
         "p",
@@ -328,27 +329,31 @@ fn the_budget_covers_the_whole_tick_not_each_call() {
     );
     join(&s, "u1");
     let probe_iters: u64 = 20_000_000;
-    send(
-        &s,
-        "u1",
-        json!({ "input": { "burn": { "iters": probe_iters } } }),
-    )
-    .unwrap();
-    let start = Instant::now();
-    s.run_tick();
-    let per_iter = start.elapsed().as_secs_f64() / probe_iters as f64;
-    let iters = (0.015 / per_iter) as u64;
+    let mut fastest = Duration::MAX;
+    for _ in 0..3 {
+        send(
+            &s,
+            "u1",
+            json!({ "input": { "burn": { "iters": probe_iters } } }),
+        )
+        .unwrap();
+        let start = Instant::now();
+        s.run_tick();
+        fastest = fastest.min(start.elapsed());
+    }
+    let per_iter = fastest.as_secs_f64() / probe_iters as f64;
+    let iters = (0.050 / per_iter) as u64;
 
-    // Eight inputs of ~15 ms each: every call fits a 60 ms budget, the tick
-    // does not.
-    let k = kind_with(60);
+    // 32 inputs of ~50 ms in one tick (~1.6 s) against a 400 ms budget:
+    // each call fits, the tick does not, with a 4x margin for a slow runner.
+    let k = kind_with(400);
     let s = Shard::new(
         "a1",
         k.instantiate("a1", &json!({})).unwrap(),
         k.config().clone(),
     );
     join(&s, "u1");
-    for _ in 0..8 {
+    for _ in 0..32 {
         send(&s, "u1", json!({ "input": { "burn": { "iters": iters } } })).unwrap();
     }
     s.run_tick();
@@ -356,7 +361,7 @@ fn the_budget_covers_the_whole_tick_not_each_call() {
     let failure = s.with_state(|sim| sim.failure()).unwrap();
     assert!(failure.contains("time budget"), "{failure}");
 
-    // One such input per tick runs fine, tick after tick.
+    // One such input per tick runs fine, tick after tick (8x margin).
     let s = Shard::new(
         "a2",
         k.instantiate("a2", &json!({})).unwrap(),
