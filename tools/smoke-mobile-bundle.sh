@@ -63,6 +63,35 @@ echo "→ bun install"
 	exit 1
 }
 
+# Dependencies the local packages added since the last release. Installed
+# before the overlay, since an install relinks @pylonsync/* from the store.
+for app in apps/expo apps/api; do
+	extra_deps="$(node "$ROOT/tools/missing-local-deps.mjs" "$APP/$app" \
+		"$ROOT/packages/react" "$ROOT/packages/react-native" "$ROOT/packages/sdk" \
+		"$ROOT/packages/sync" "$ROOT/packages/functions")"
+	if [[ -n "$extra_deps" ]]; then
+		echo "→ $app: add dependencies of the local packages: $(echo $extra_deps)"
+		# shellcheck disable=SC2086 # one argument per line of output
+		(cd "$APP/$app" && bun add $extra_deps >>"$TMP/install.log" 2>&1) || {
+			tail -50 "$TMP/install.log" >&2
+			exit 1
+		}
+	fi
+done
+
+# Link the local package's dependencies next to its real (store) directory,
+# where module resolution from the package finds them. Only the ones missing
+# there and installed in the app: the dependencies added above.
+link_extra_deps() {
+	local app_nm="$1" real="$2" src="$3" name target
+	for name in $(node -e 'for (const d of Object.keys(require(process.argv[1]).dependencies ?? {})) console.log(d)' "$src/package.json"); do
+		target="$(dirname "$(dirname "$real")")/$name"
+		[[ -e "$target" || ! -e "$app_nm/$name" ]] && continue
+		mkdir -p "$(dirname "$target")"
+		ln -s "$(realpath "$app_nm/$name")" "$target"
+	done
+}
+
 # Copy a local package over the installed one. Bun links workspace apps
 # to a shared store, so follow the symlink to the real directory.
 overlay() {
@@ -75,6 +104,7 @@ overlay() {
 	cp -R "$src/src" "$real/src"
 	[[ -d "$src/dist" ]] && cp -R "$src/dist" "$real/dist"
 	cp "$src/package.json" "$real/package.json"
+	link_extra_deps "$APP/$app/node_modules" "$real" "$src"
 }
 echo "→ overlay local @pylonsync packages"
 for app in apps/expo apps/api; do
