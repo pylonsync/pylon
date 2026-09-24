@@ -1,6 +1,8 @@
 use std::io::Result as IoResult;
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::connection::Connection;
 #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
@@ -86,6 +88,45 @@ pub struct RefinedTcpStream {
     stream: Stream,
     close_read: bool,
     close_write: bool,
+    /// Pylon patch: shared by both halves. Set when a request hands the
+    /// socket to other code ([`crate::Request::upgrade_detached`]): from
+    /// then on tiny_http reads EOF from it and does not shut it down on
+    /// drop, so the new owner keeps a working socket.
+    detached: Arc<AtomicBool>,
+}
+
+/// Pylon patch: what a request needs to take over a plain-TCP connection.
+#[derive(Clone)]
+pub(crate) struct DetachHandle {
+    #[cfg(unix)]
+    pub(crate) raw: std::os::unix::io::RawFd,
+    #[cfg(windows)]
+    pub(crate) raw: std::os::windows::io::RawSocket,
+    pub(crate) flag: Arc<AtomicBool>,
+}
+
+impl DetachHandle {
+    /// A new, independent handle to the same socket (dup / WSADuplicateSocket).
+    #[allow(unsafe_code)]
+    pub(crate) fn clone_socket(&self) -> IoResult<std::net::TcpStream> {
+        #[cfg(unix)]
+        {
+            // SAFETY: the connection owns this fd and is alive while the
+            // request that holds this handle exists.
+            let fd = unsafe { std::os::unix::io::BorrowedFd::borrow_raw(self.raw) };
+            Ok(std::net::TcpStream::from(fd.try_clone_to_owned()?))
+        }
+        #[cfg(windows)]
+        {
+            // SAFETY: as above, for the socket handle.
+            let s = unsafe { std::os::windows::io::BorrowedSocket::borrow_raw(self.raw) };
+            Ok(std::net::TcpStream::from(s.try_clone_to_owned()?))
+        }
+    }
+
+    pub(crate) fn set_detached(&self) {
+        self.flag.store(true, Ordering::Release);
+    }
 }
 
 impl RefinedTcpStream {
@@ -96,20 +137,41 @@ impl RefinedTcpStream {
         let stream: Stream = stream.into();
 
         let (read, write) = (stream.clone(), stream);
+        let detached = Arc::new(AtomicBool::new(false));
 
         let read = RefinedTcpStream {
             stream: read,
             close_read: true,
             close_write: false,
+            detached: Arc::clone(&detached),
         };
 
         let write = RefinedTcpStream {
             stream: write,
             close_read: false,
             close_write: true,
+            detached,
         };
 
         (read, write)
+    }
+
+    /// Pylon patch: the handle a request uses to take over this connection.
+    /// Plain TCP only; `None` for TLS and Unix sockets.
+    pub(crate) fn detach_handle(&self) -> Option<DetachHandle> {
+        match &self.stream {
+            Stream::Http(crate::connection::Connection::Tcp(s)) => {
+                #[cfg(unix)]
+                let raw = std::os::unix::io::AsRawFd::as_raw_fd(s);
+                #[cfg(windows)]
+                let raw = std::os::windows::io::AsRawSocket::as_raw_socket(s);
+                Some(DetachHandle {
+                    raw,
+                    flag: Arc::clone(&self.detached),
+                })
+            }
+            _ => None,
+        }
     }
 
     /// Returns true if this struct wraps around a secure connection.
@@ -125,6 +187,9 @@ impl RefinedTcpStream {
 
 impl Drop for RefinedTcpStream {
     fn drop(&mut self) {
+        if self.detached.load(Ordering::Acquire) {
+            return;
+        }
         if self.close_read {
             self.stream.shutdown(Shutdown::Read).ok();
         }
@@ -137,6 +202,9 @@ impl Drop for RefinedTcpStream {
 
 impl Read for RefinedTcpStream {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<usize> {
+        if self.detached.load(Ordering::Acquire) {
+            return Ok(0);
+        }
         self.stream.read(buf)
     }
 }

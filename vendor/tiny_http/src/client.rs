@@ -34,6 +34,10 @@ pub struct ClientConnection {
 
     // true if the connection goes through SSL
     secure: bool,
+
+    // Pylon patch: lets a request take over this connection
+    // (Request::upgrade_detached). None for TLS and Unix sockets.
+    detach: Option<crate::util::refined_tcp_stream::DetachHandle>,
 }
 
 /// Error that can happen when reading a request.
@@ -63,6 +67,7 @@ impl ClientConnection {
         }))
         .unwrap_or(Ok(None));
         let secure = read_socket.secure();
+        let detach = read_socket.detach_handle();
 
         let mut source = SequentialReaderBuilder::new(BufReader::with_capacity(1024, read_socket));
         let first_header = source.next().unwrap();
@@ -74,6 +79,7 @@ impl ClientConnection {
             next_header_source: first_header,
             no_more_requests: false,
             secure,
+            detach,
         }
     }
 
@@ -174,7 +180,7 @@ impl ClientConnection {
         })?;
 
         // return the request
-        Ok(request)
+        Ok(request.with_detach(self.detach.clone()))
     }
 }
 

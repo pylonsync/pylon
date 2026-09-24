@@ -2532,7 +2532,7 @@ const WS_GUID: &[u8] = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Compute the `Sec-WebSocket-Accept` header value per RFC 6455 §4.2.2.
 /// Returns a base64-encoded sha1 of `<client-key><GUID>`.
-fn ws_accept_value(client_key: &str) -> String {
+pub(crate) fn ws_accept_value(client_key: &str) -> String {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use sha1::{Digest, Sha1};
     let mut hasher = Sha1::new();

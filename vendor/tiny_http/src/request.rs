@@ -74,6 +74,9 @@ pub struct Request {
 
     // If Some, a message must be sent after responding
     notify_when_responded: Option<Sender<()>>,
+
+    // Pylon patch: set for plain-TCP requests; see `upgrade_detached`.
+    detach: Option<crate::util::refined_tcp_stream::DetachHandle>,
 }
 
 struct NotifyOnDrop<R> {
@@ -238,6 +241,7 @@ where
         body_length: content_length,
         must_send_continue: expects_continue,
         notify_when_responded: None,
+        detach: None,
     })
 }
 
@@ -513,6 +517,58 @@ impl Request {
             ErrorKind::ConnectionReset => Ok(()),
             _ => Err(err),
         })
+    }
+
+    pub(crate) fn with_detach(
+        mut self,
+        detach: Option<crate::util::refined_tcp_stream::DetachHandle>,
+    ) -> Self {
+        self.detach = detach;
+        self
+    }
+
+    /// Pylon patch: send `response` (a 101) and take the connection out of
+    /// tiny_http as a plain `TcpStream`.
+    ///
+    /// Unlike [`Request::upgrade`], no tiny_http thread stays tied to the
+    /// connection: tiny_http sees EOF, finishes the connection, and leaves
+    /// the socket open for the returned stream. Plain TCP only; for a TLS or
+    /// Unix-socket request it returns the request unchanged, with nothing
+    /// written, so the caller can fall back to `upgrade` or respond.
+    pub fn upgrade_detached<R: Read>(
+        mut self,
+        protocol: &str,
+        response: Response<R>,
+    ) -> Result<std::net::TcpStream, Request> {
+        let handle = match (&self.detach, self.secure) {
+            (Some(h), false) => h.clone(),
+            _ => return Err(self),
+        };
+        // Clone the socket first: if that fails, nothing has been written.
+        let stream = match handle.clone_socket() {
+            Ok(s) => s,
+            Err(_) => return Err(self),
+        };
+        response
+            .raw_print(
+                self.response_writer.as_mut().unwrap().by_ref(),
+                self.http_version.clone(),
+                &self.headers,
+                false,
+                Some(protocol),
+            )
+            .ok();
+        self.response_writer.as_mut().unwrap().flush().ok();
+        handle.set_detached();
+        // Answered: drop both halves without the default 500 (Drop only
+        // responds while `response_writer` is set). Dropping the reader lets
+        // the connection's next header read run; it sees EOF and ends.
+        self.response_writer = None;
+        self.data_reader = None;
+        if let Some(sender) = self.notify_when_responded.take() {
+            let _ = sender.send(());
+        }
+        Ok(stream)
     }
 
     pub(crate) fn with_notify_sender(mut self, sender: Sender<()>) -> Self {

@@ -3559,6 +3559,102 @@ fn start_server(
             }
         }
 
+        // --- Shard WebSocket on the main HTTP port: /shard ---
+        //
+        // Same protocol and auth as the dedicated shard port (port + 3),
+        // reachable through any proxy that forwards WebSocket upgrades on
+        // 443. The socket leaves tiny_http after the 101 (upgrade_detached)
+        // and runs on the shard connection runtime, so thousands of game
+        // connections do not each hold an HTTP worker thread.
+        if (url == "/shard" || url.starts_with("/shard?")) && method == Method::Get {
+            let respond_json = |request: tiny_http::Request, status: u16, code: &str, msg: &str| {
+                let response = with_security_headers(
+                    Response::from_string(json_error(code, msg))
+                        .with_status_code(status)
+                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+                );
+                let _ = request.respond(response);
+            };
+            let Some(registry) = shards_ref.clone() else {
+                respond_json(request, 503, "SHARDS_NOT_AVAILABLE", "Shard system is not configured");
+                mt.record_request("GET", 503);
+                return;
+            };
+            let header = |name: &'static str| {
+                request
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv(name))
+                    .map(|h| h.value.as_str().to_string())
+            };
+            let key = header("Sec-WebSocket-Key");
+            let is_upgrade = header("Upgrade").is_some_and(|v| v.eq_ignore_ascii_case("websocket"));
+            let Some(key) = key.filter(|_| is_upgrade) else {
+                respond_json(request, 400, "BAD_UPGRADE", "Sec-WebSocket-Key + Upgrade headers required");
+                mt.record_request("GET", 400);
+                return;
+            };
+            let Some(guard) = crate::shard_ws::admit_main_port(dispatch_peer_ip) else {
+                respond_json(
+                    request,
+                    429,
+                    "TOO_MANY_CONNECTIONS",
+                    "Too many shard connections from this address (PYLON_SHARD_WS_MAX_PER_IP)",
+                );
+                mt.record_request("GET", 429);
+                return;
+            };
+            let headers: Vec<(String, String)> = request
+                .headers()
+                .iter()
+                .map(|h| (h.field.as_str().to_string(), h.value.as_str().to_string()))
+                .collect();
+            let mut response = tiny_http::Response::empty(101)
+                .with_header(Header::from_bytes(&b"Upgrade"[..], &b"websocket"[..]).unwrap())
+                .with_header(Header::from_bytes(&b"Connection"[..], &b"Upgrade"[..]).unwrap())
+                .with_header(
+                    Header::from_bytes(
+                        &b"Sec-WebSocket-Accept"[..],
+                        crate::ws::ws_accept_value(&key).as_bytes(),
+                    )
+                    .unwrap(),
+                );
+            if let Some(proto) = crate::shard_ws::chosen_subprotocol(
+                headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+            ) {
+                if let Ok(h) = Header::from_bytes(&b"Sec-WebSocket-Protocol"[..], proto.as_bytes()) {
+                    response = response.with_header(h);
+                }
+            }
+            let uri = url.to_string();
+            match request.upgrade_detached("websocket", response) {
+                Ok(stream) => {
+                    crate::shard_ws::serve_upgraded(
+                        stream,
+                        guard,
+                        uri,
+                        headers,
+                        registry,
+                        Arc::clone(&session_store),
+                    );
+                    mt.record_request("GET", 101);
+                }
+                // TLS terminated by pylon itself, or a Unix socket: the
+                // socket cannot leave tiny_http. Terminate TLS at a proxy,
+                // or connect to the shard port.
+                Err(request) => {
+                    respond_json(
+                        request,
+                        501,
+                        "SHARD_UPGRADE_UNSUPPORTED",
+                        "Shard WebSockets on this port need plain HTTP behind a TLS proxy; connect to the shard port (HTTP port + 3) instead",
+                    );
+                    mt.record_request("GET", 501);
+                }
+            }
+            return;
+        }
+
         // --- WebSocket multiplex on the main HTTP port ---
         //
         // Reverse proxies that pass `Upgrade: websocket` through (Cloudflare,

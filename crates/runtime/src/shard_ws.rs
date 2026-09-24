@@ -35,7 +35,7 @@ use tokio_tungstenite::tungstenite::{
     Message,
 };
 
-use crate::ip_limit::IpConnCounter;
+use crate::ip_limit::{IpConnCounter, IpConnGuard};
 
 /// The server sends a ping this often.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
@@ -93,6 +93,89 @@ fn worker_threads() -> usize {
         .clamp(2, 8)
 }
 
+/// The runtime every shard connection runs on, whichever port it came in
+/// on. Built on first use.
+fn runtime() -> Option<&'static tokio::runtime::Runtime> {
+    static RT: std::sync::OnceLock<Option<tokio::runtime::Runtime>> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads())
+            .thread_name("shard-ws")
+            .enable_all()
+            .build()
+            .map_err(|e| tracing::warn!("[shard-ws] could not start the connection runtime: {e}"))
+            .ok()
+    })
+    .as_ref()
+}
+
+fn ip_counter(max_per_ip: u32) -> Arc<IpConnCounter> {
+    Arc::new(IpConnCounter::new(if max_per_ip == 0 {
+        u32::MAX
+    } else {
+        max_per_ip
+    }))
+}
+
+/// The per-IP counter for shard connections on the main HTTP port
+/// (`PYLON_SHARD_WS_MAX_PER_IP`).
+fn main_port_ip_counter() -> &'static Arc<IpConnCounter> {
+    static C: std::sync::OnceLock<Arc<IpConnCounter>> = std::sync::OnceLock::new();
+    C.get_or_init(|| ip_counter(max_connections_per_ip_from_env()))
+}
+
+/// Reserve a main-port shard connection slot for `ip`. `None` when the IP
+/// is at its cap; the caller answers 429 before upgrading.
+pub fn admit_main_port(ip: std::net::IpAddr) -> Option<IpConnGuard> {
+    main_port_ip_counter().acquire(ip)
+}
+
+/// Run a shard connection that arrived on the main HTTP port at `/shard`.
+/// The server has already sent the 101 and detached `stream` from its HTTP
+/// stack; `uri` and `headers` are the upgrade request's.
+pub fn serve_upgraded(
+    stream: std::net::TcpStream,
+    guard: IpConnGuard,
+    uri: String,
+    headers: Vec<(String, String)>,
+    registry: Arc<dyn DynShardRegistry>,
+    sessions: Arc<SessionStore>,
+) {
+    let Some(rt) = runtime() else { return };
+    if let Err(e) = stream.set_nonblocking(true) {
+        tracing::warn!("[shard-ws] could not make the socket non-blocking: {e}");
+        return;
+    }
+    let _ = stream.set_nodelay(true);
+    rt.spawn(async move {
+        let _guard = guard;
+        let stream = match tokio::net::TcpStream::from_std(stream) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("[shard-ws] could not register the socket: {e}");
+                return;
+            }
+        };
+        let (params, _) =
+            read_handshake(uri, headers.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
+            stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Server,
+            None,
+        )
+        .await;
+        if let Err(e) = run_connection(ws, params, registry, sessions).await {
+            tracing::warn!("[shard-ws] connection error: {e}");
+        }
+    });
+}
+
+/// The subprotocol to echo in a shard upgrade response, when the request
+/// offered a `bearer.` or `ticket.` one.
+pub fn chosen_subprotocol<'a>(headers: impl Iterator<Item = (&'a str, &'a str)>) -> Option<String> {
+    read_handshake(String::new(), headers).1
+}
+
 /// Accept shard connections on `listener` until the process exits.
 /// `max_per_ip` caps concurrent connections from one IP (0 = no cap).
 pub fn serve(
@@ -101,26 +184,10 @@ pub fn serve(
     sessions: Arc<SessionStore>,
     max_per_ip: u32,
 ) {
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads())
-        .thread_name("shard-ws")
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(e) => {
-            tracing::warn!("[shard-ws] could not start the connection runtime: {e}");
-            return;
-        }
-    };
-
+    let Some(runtime) = runtime() else { return };
     // Per-IP cap so a single client can't open a swarm of shard WS
     // connections.
-    let ip_counter = Arc::new(IpConnCounter::new(if max_per_ip == 0 {
-        u32::MAX
-    } else {
-        max_per_ip
-    }));
+    let ip_counter = ip_counter(max_per_ip);
 
     loop {
         // Panic-proof accept: libstd's accept/peer_addr assert (panic) on a
@@ -182,51 +249,12 @@ async fn handle_connection(
     let ws = tokio_tungstenite::accept_hdr_async(
         stream,
         move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
-            let uri = req.uri().to_string();
-            let mut p = params_clone.lock().unwrap();
-            p.uri = uri;
-            let mut selected_protocol: Option<String> = None;
-            for (name, value) in req.headers() {
-                let lower = name.as_str().to_ascii_lowercase();
-                if lower == "authorization" {
-                    if let Ok(v) = value.to_str() {
-                        p.auth_header = Some(v.to_string());
-                    }
-                } else if lower == "x-pylon-shard-ticket" {
-                    if let Ok(v) = value.to_str() {
-                        p.ticket = Some(v.to_string());
-                    }
-                } else if lower == "sec-websocket-protocol" {
-                    // Accept a `bearer.<url-encoded-token>` subprotocol as an
-                    // alternative to the Authorization header. Browsers can't
-                    // set WebSocket headers directly, so this is how a web
-                    // client carries a bearer token without putting it in the
-                    // URL. Pick the first token that matches our prefix; echo
-                    // the exact chosen subprotocol back in the handshake
-                    // response, per RFC 6455 §11.3.4 (otherwise some browsers
-                    // refuse the connection).
-                    // A `ticket.<url-encoded-ticket>` subprotocol carries a
-                    // shard ticket the same way. Only one subprotocol can be
-                    // selected in the response; the bearer one wins.
-                    if let Ok(v) = value.to_str() {
-                        for proto in v.split(',').map(str::trim) {
-                            if let Some(encoded) = proto.strip_prefix("bearer.") {
-                                if p.bearer_from_subprotocol.is_none() {
-                                    if let Ok(decoded) = urldecode_strict(encoded) {
-                                        p.bearer_from_subprotocol = Some(decoded);
-                                        selected_protocol = Some(proto.to_string());
-                                    }
-                                }
-                            } else if let Some(encoded) = proto.strip_prefix("ticket.") {
-                                if let Ok(decoded) = urldecode_strict(encoded) {
-                                    p.ticket = Some(decoded);
-                                    selected_protocol.get_or_insert_with(|| proto.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let headers = req
+                .headers()
+                .iter()
+                .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str(), v)));
+            let (p, selected_protocol) = read_handshake(req.uri().to_string(), headers);
+            *params_clone.lock().unwrap() = p;
             if let Some(chosen) = selected_protocol {
                 if let Ok(hv) = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&chosen)
                 {
@@ -240,6 +268,63 @@ async fn handle_connection(
     .map_err(|e| format!("handshake: {e}"))?;
 
     let params = params.lock().unwrap().clone();
+    run_connection(ws, params, registry, sessions).await
+}
+
+/// Read the shard parameters from an upgrade request's URI and headers.
+/// Returns them and the subprotocol to echo back, if any.
+fn read_handshake<'a>(
+    uri: String,
+    headers: impl Iterator<Item = (&'a str, &'a str)>,
+) -> (HandshakeParams, Option<String>) {
+    let mut p = HandshakeParams {
+        uri,
+        ..Default::default()
+    };
+    let mut selected_protocol: Option<String> = None;
+    for (name, v) in headers {
+        let lower = name.to_ascii_lowercase();
+        if lower == "authorization" {
+            p.auth_header = Some(v.to_string());
+        } else if lower == "x-pylon-shard-ticket" {
+            p.ticket = Some(v.to_string());
+        } else if lower == "sec-websocket-protocol" {
+            // Accept a `bearer.<url-encoded-token>` subprotocol as an
+            // alternative to the Authorization header. Browsers can't set
+            // WebSocket headers directly, so this is how a web client carries
+            // a bearer token without putting it in the URL. The exact chosen
+            // subprotocol is echoed back in the handshake response, per RFC
+            // 6455 §11.3.4 (otherwise some browsers refuse the connection).
+            // A `ticket.<url-encoded-ticket>` subprotocol carries a shard
+            // ticket the same way. Only one subprotocol can be selected in
+            // the response; the bearer one wins.
+            for proto in v.split(',').map(str::trim) {
+                if let Some(encoded) = proto.strip_prefix("bearer.") {
+                    if p.bearer_from_subprotocol.is_none() {
+                        if let Ok(decoded) = urldecode_strict(encoded) {
+                            p.bearer_from_subprotocol = Some(decoded);
+                            selected_protocol = Some(proto.to_string());
+                        }
+                    }
+                } else if let Some(encoded) = proto.strip_prefix("ticket.") {
+                    if let Ok(decoded) = urldecode_strict(encoded) {
+                        p.ticket = Some(decoded);
+                        selected_protocol.get_or_insert_with(|| proto.to_string());
+                    }
+                }
+            }
+        }
+    }
+    (p, selected_protocol)
+}
+
+/// One shard connection after the WebSocket handshake.
+async fn run_connection(
+    ws: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    params: HandshakeParams,
+    registry: Arc<dyn DynShardRegistry>,
+    sessions: Arc<SessionStore>,
+) -> Result<(), String> {
     let query = params
         .uri
         .split_once('?')

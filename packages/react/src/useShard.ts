@@ -56,9 +56,12 @@ export interface UseShardOptions {
    * authorization hooks.
    */
   ticket?: string;
-  /** Override the base URL. Defaults to `window.location.host`. */
+  /** Host (and port) of the Pylon server. Defaults to `window.location.host`. */
   baseUrl?: string;
-  /** Override the shard WS port (default: HTTP port + 3). */
+  /**
+   * Connect to the dedicated shard port instead of `/shard` on the main
+   * port (the dedicated port is the HTTP port + 3, e.g. 4324).
+   */
   wsPort?: number;
   /** Explicit WebSocket URL. Overrides baseUrl/wsPort. */
   wsUrl?: string;
@@ -144,10 +147,6 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
   const buildWsUrl = (): string => {
     if (options.wsUrl) return options.wsUrl;
-    const host =
-      options.baseUrl ||
-      (typeof window !== "undefined" ? window.location.hostname : "localhost");
-    const port = options.wsPort ?? 4324; // default: pylon HTTP port + 3 (4321 + 3)
     const proto =
       typeof window !== "undefined" && window.location.protocol === "https:"
         ? "wss"
@@ -159,7 +158,17 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       sid: options.subscriberId,
       v: String(SHARD_PROTOCOL_VERSION),
     });
-    return `${proto}://${host}:${port}/?${params.toString()}`;
+    if (options.wsPort !== undefined) {
+      const hostname =
+        (options.baseUrl ?? (typeof window !== "undefined" ? window.location.hostname : "localhost"))
+          .replace(/:\d+$/, "");
+      return `${proto}://${hostname}:${options.wsPort}/?${params.toString()}`;
+    }
+    // Default: `/shard` on the page's own origin, which any proxy that
+    // forwards WebSocket upgrades on 443 already reaches.
+    const host =
+      options.baseUrl || (typeof window !== "undefined" ? window.location.host : "localhost:4321");
+    return `${proto}://${host}/shard?${params.toString()}`;
   };
 
   const connect = () => {

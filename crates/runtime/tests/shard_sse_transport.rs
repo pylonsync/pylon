@@ -219,3 +219,92 @@ fn http_inputs_over_the_subscriber_limit_get_429() {
         "then 429: {statuses:?}"
     );
 }
+
+/// Open a shard WebSocket on the MAIN port at `/shard`.
+fn main_port_ws(port: u16, token: &str, sid: &str) -> tungstenite::WebSocket<TcpStream> {
+    use tungstenite::client::IntoClientRequest;
+    let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut req = format!("ws://127.0.0.1:{port}/shard?shard=zone&sid={sid}")
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        format!("bearer.{token}").parse().unwrap(),
+    );
+    let (ws, resp) = tungstenite::client(req, stream).expect("handshake on /shard");
+    assert_eq!(
+        resp.headers()
+            .get("Sec-WebSocket-Protocol")
+            .and_then(|v| v.to_str().ok()),
+        Some(format!("bearer.{token}").as_str()),
+        "the bearer subprotocol is echoed"
+    );
+    ws
+}
+
+fn thread_count() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_dir("/proc/self/task").unwrap().count()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-M", "-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .count()
+            .saturating_sub(1)
+    }
+}
+
+#[test]
+fn shard_websockets_are_served_on_the_main_port_at_slash_shard() {
+    unsafe {
+        std::env::set_var("PYLON_SHARD_WS_MAX_PER_IP", "0");
+    }
+    let (port, registry) = start(ShardConfig {
+        tick_rate_hz: 20,
+        idle_ticks_before_shutdown: 0,
+        max_subscribers: 1000,
+        ..Default::default()
+    });
+    let shard = registry.get("zone").unwrap();
+
+    let (token, id) = guest(port);
+    let mut ws = main_port_ws(port, &token, &id);
+    let first = ws.read().expect("a snapshot frame");
+    assert!(matches!(first, tungstenite::Message::Binary(ref b) if b.len() > 8));
+
+    // The HTTP port still answers ordinary requests on new connections.
+    let (status, _) = http(port, "GET", "/health", None, "");
+    assert_eq!(status, 200);
+
+    // Connections on the main port do not each hold an HTTP worker thread.
+    let before = thread_count();
+    let mut conns = Vec::new();
+    for _ in 0..200 {
+        let (t, sid) = guest(port);
+        conns.push(main_port_ws(port, &t, &sid));
+    }
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while shard.subscriber_count() < 201 {
+        assert!(
+            Instant::now() < deadline,
+            "only {} subscribers",
+            shard.subscriber_count()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let after = thread_count();
+    assert!(
+        after < before + 20,
+        "200 main-port shard connections grew the process from {before} to {after} threads"
+    );
+    drop(conns);
+}

@@ -88,7 +88,8 @@ public enum ShardWire {
 
 public struct ShardClientConfig: Sendable {
     public var baseURL: URL
-    /// WebSocket port. `pylon dev` exposes shards on `port + 3`.
+    /// Connect to the dedicated shard port (the HTTP port + 3) instead of
+    /// `/shard` on `baseURL`'s port.
     public var wsPort: Int?
     /// Override the full WebSocket URL (overrides `baseURL` + `wsPort`).
     public var wsURL: URL?
@@ -279,9 +280,14 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         var components = URLComponents(url: config.baseURL, resolvingAgainstBaseURL: false)!
         let isHttps = components.scheme == "https"
         components.scheme = isHttps ? "wss" : "ws"
-        let basePort = components.port ?? (isHttps ? 443 : 80)
-        components.port = config.wsPort ?? (basePort + 3)
-        components.path = "/"
+        if let port = config.wsPort {
+            // The dedicated shard port.
+            components.port = port
+            components.path = "/"
+        } else {
+            // `/shard` on the server's main port.
+            components.path = "/shard"
+        }
         components.queryItems = [
             URLQueryItem(name: "shard", value: shardId),
             URLQueryItem(name: "sid", value: config.subscriberId),
