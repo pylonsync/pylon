@@ -426,6 +426,11 @@ pub enum TsMessage {
     #[serde(rename = "sign_shard_ticket")]
     SignShardTicket(SignShardTicketMessage),
 
+    /// `ctx.shards.create/stop/get/list` — manage the app's WebAssembly
+    /// shards. `create` and `stop` are refused outside actions.
+    #[serde(rename = "shard_op")]
+    ShardOp(ShardOpMessage),
+
     /// Send a transactional email via the runtime's configured provider.
     /// Only valid from action handlers — mutations + queries reject by
     /// the time the dispatcher hands the message off.
@@ -534,6 +539,7 @@ impl TsMessage {
             TsMessage::RunFn(m) => Some(&m.call_id),
             TsMessage::SignFileUrl(m) => Some(&m.call_id),
             TsMessage::SignShardTicket(m) => Some(&m.call_id),
+            TsMessage::ShardOp(m) => Some(&m.call_id),
             TsMessage::SendEmail(m) => Some(&m.call_id),
             TsMessage::LlmComplete(m) => Some(&m.call_id),
             TsMessage::LlmStream(m) => Some(&m.call_id),
@@ -781,6 +787,23 @@ pub struct SignShardTicketMessage {
     /// Lifetime in seconds. `None` → the host default; the host clamps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_secs: Option<u64>,
+}
+
+/// See [`TsMessage::ShardOp`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardOpMessage {
+    pub call_id: String,
+    /// "create" | "stop" | "get" | "list"
+    pub op: String,
+    /// The shard kind (`create`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The shard id (`create`, `stop`, `get`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Passed to the module's init (`create`).
+    #[serde(default)]
+    pub params: serde_json::Value,
 }
 
 /// Send a transactional email via the runtime's configured provider.

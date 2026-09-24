@@ -1878,6 +1878,7 @@ mod tests {
         AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

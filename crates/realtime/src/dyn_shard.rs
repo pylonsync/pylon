@@ -7,20 +7,17 @@
 
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
-
 use crate::outbound::OutboundQueue;
 use crate::shard::{Shard, ShardAuth, ShardError, SimState};
 use crate::snapshot::SnapshotFormat;
 use crate::subscriber::{SnapshotSink, Subscriber, SubscriberId};
-use crate::wire::{decode_input_envelope, peek_client_seq, InputEnvelope, InputRejection};
+use crate::wire::{peek_client_seq, InputEnvelope, InputRejection, ShardInput};
 
 // ---------------------------------------------------------------------------
 // DynShard — object-safe wrapper over Shard<S>
 // ---------------------------------------------------------------------------
 
-/// Type-erased shard operations. Implemented for every `Shard<S>` whose
-/// `SimState::Input` is deserializable from JSON.
+/// Type-erased shard operations. Implemented for every `Shard<S>`.
 ///
 /// The router and HTTP layer work exclusively with `Arc<dyn DynShard>` —
 /// they never see the concrete simulation type.
@@ -88,11 +85,7 @@ pub trait DynShard: Send + Sync {
     fn stop(&self);
 }
 
-impl<S: SimState> DynShard for Shard<S>
-where
-    S::Input: DeserializeOwned,
-    S::Snapshot: serde::Serialize + Clone,
-{
+impl<S: SimState> DynShard for Shard<S> {
     fn id(&self) -> &str {
         Shard::id(self)
     }
@@ -123,11 +116,13 @@ where
         auth: &ShardAuth,
     ) -> Result<u64, InputRejection> {
         let envelope: InputEnvelope<S::Input> =
-            decode_input_envelope(format, bytes).map_err(|message| InputRejection {
-                client_seq: peek_client_seq(format, bytes),
-                code: "invalid".into(),
-                message,
-            })?;
+            S::Input::decode_envelope(format, self.config().snapshot_format, bytes).map_err(
+                |message| InputRejection {
+                    client_seq: peek_client_seq(format, bytes),
+                    code: "invalid".into(),
+                    message,
+                },
+            )?;
         let client_seq = envelope.client_seq;
         Shard::push_input_authorized(self, subscriber_id, envelope.input, client_seq, auth)
             .map_err(|e| rejection_for(client_seq, &e))
@@ -140,8 +135,8 @@ where
         client_seq: Option<u64>,
         auth: &ShardAuth,
     ) -> Result<u64, ShardError> {
-        let input: S::Input = serde_json::from_str(body)
-            .map_err(|e| ShardError::Other(format!("invalid input JSON: {e}")))?;
+        let input = S::Input::decode_json(body, self.config().snapshot_format)
+            .map_err(ShardError::Other)?;
         Shard::push_input_authorized(self, subscriber_id, input, client_seq, auth)
     }
 
@@ -198,11 +193,7 @@ pub trait DynShardRegistry: Send + Sync {
     fn len(&self) -> usize;
 }
 
-impl<S: SimState> DynShardRegistry for crate::registry::ShardRegistry<S>
-where
-    S::Input: DeserializeOwned,
-    S::Snapshot: serde::Serialize + Clone,
-{
+impl<S: SimState> DynShardRegistry for crate::registry::ShardRegistry<S> {
     fn get(&self, id: &str) -> Option<Arc<dyn DynShard>> {
         crate::registry::ShardRegistry::<S>::get(self, id).map(|s| s as Arc<dyn DynShard>)
     }

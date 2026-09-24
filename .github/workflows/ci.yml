@@ -131,7 +131,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+      # wasm32: crates/runtime/tests/shard_wasm.rs builds the example guest.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - uses: oven-sh/setup-bun@v2
         with:
@@ -463,6 +466,32 @@ jobs:
       - name: swift test
         run: swift test --parallel
 
+  # examples/shard-arena: shard logic in Rust compiled to WebAssembly, run
+  # by the stock binary from source and from a `pylon build` artifact, with
+  # two TS clients over /shard on the main port.
+  wasm-shard-smoke:
+    name: WebAssembly shard smoke
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
+      - name: Install xmlsec1 + libxml2
+        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
+      - run: bun install --frozen-lockfile
+      - run: cargo build -p pylon-cli
+      - run: bash tools/smoke-wasm-shard.sh target/debug/pylon
+
   ci-passed:
     name: CI passed
     needs:
@@ -478,6 +507,7 @@ jobs:
       - create-pylon-smoke
       - production-build-smoke
       - shard-codecs
+      - wasm-shard-smoke
       - audit
       - swift
     if: always()

@@ -24,7 +24,7 @@
 #   FROM pylon
 #   COPY ./my-app.ts /app/app.ts
 
-ARG RUST_VERSION=1.89
+ARG RUST_VERSION=1.98
 
 # ---- Studio UI stage --------------------------------------------------------
 # `pylon-studio-api`'s build.rs hard-fails the cargo build if

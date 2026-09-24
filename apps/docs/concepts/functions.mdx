@@ -76,6 +76,11 @@ ctx.rooms.broadcast(room, topic, data) // push → every subscriber of a presenc
 // All three flavors:
 ctx.files.signedUrl(fileId, { ttlSecs: 300 })  // mint a short-lived signed download URL
 ctx.shards.ticket(shardId, { subscriberId, claims, ttlSecs })  // mint a signed realtime shard ticket
+ctx.shards.get(shardId) / ctx.shards.list()                    // running shards
+
+// Actions only:
+ctx.shards.create(kind, shardId, params)  // start a WebAssembly shard (see Realtime shards)
+ctx.shards.stop(shardId)                  // stop it and close its connections
 ```
 
 ### Signed file URLs
@@ -123,7 +128,7 @@ The client passes the ticket when it connects: `connectShard(shard, { subscriber
 
 The three flavors expose different context surfaces:
 
-- **Query** — `ctx.db` (read-only), `ctx.auth`, `ctx.env`, `ctx.requireMember`, `ctx.files`, `ctx.shards`.
+- **Query** — `ctx.db` (read-only), `ctx.auth`, `ctx.env`, `ctx.requireMember`, `ctx.files`, `ctx.shards` (`ticket`, `get`, `list`).
 - **Mutation** — the above plus writes on `ctx.db`, `ctx.scheduler`, `ctx.error`, `ctx.llm`, `ctx.connections`, `ctx.stream`, `ctx.rooms`.
 - **Action** — no `ctx.db`. Reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` (each runs as its own transaction). Actions also get `ctx.scheduler`, `ctx.error`, `ctx.email`, `ctx.llm`, `ctx.stream`, `ctx.rooms`, `ctx.connections`, and `ctx.request` (raw HTTP request, the only ctx that has it, so webhook signature checks live in actions).
 

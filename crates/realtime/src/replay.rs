@@ -93,7 +93,8 @@ impl<I: Clone + Send + Sync + 'static> ReplayLog<I> {
 
 /// Replay recorded inputs against a fresh initial state through tick
 /// `final_tick`, in the live shard's order: for each tick `n` from 1, apply
-/// the inputs recorded for tick `n`, then call `state.tick(dt_per_tick)`.
+/// the inputs recorded for tick `n`, then call `state.tick(dt_per_tick)`,
+/// then stop if `state.is_finished()`.
 /// Pass the shard's [`Shard::fixed_dt`] as `dt_per_tick` and its
 /// [`Shard::tick_number`] as `final_tick`.
 ///
@@ -119,6 +120,11 @@ where
             next += 1;
         }
         state.tick(dt_per_tick);
+        // The live shard checks this after every tick and runs no more ticks
+        // once it is true.
+        if state.is_finished() {
+            break;
+        }
     }
     state
 }

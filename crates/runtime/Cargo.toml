@@ -28,6 +28,11 @@ pylon-functions = { path = "../functions", version = "0.12.0" }  # x-release-ple
 pylon-migrate = { path = "../migrate", version = "0.12.0" }  # x-release-please-version
 pylon-observability = { path = "../observability", version = "0.12.0" }  # x-release-please-version
 pylon-realtime = { path = "../realtime", version = "0.12.0", features = ["msgpack"] }  # x-release-please-version
+# Runs shard logic an app ships as a WebAssembly module (shard_wasm.rs).
+# Cranelift compiles the module once at boot; epoch interruption bounds each
+# tick. No WASI, component model, GC, or threads: a shard module gets memory
+# and one log import.
+wasmtime = { version = "49", default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
 # Cross-machine fanout. Default build links the Noop bus only; the
 # `redis-bus` feature pulls the Redis impl so operators running
 # horizontally-scaled deploys can enable PYLON_CLUSTER_BUS=redis://...
@@ -112,6 +117,9 @@ libc = "0.2"
 
 [dev-dependencies]
 rand = { workspace = true }
+# shard_wasm tests write small modules in the text format.
+wat = "1"
+rmp-serde = "1.3"
 tempfile = "3"
 # tests/native_signin.rs signs a Sign-in-with-Apple-shaped id_token with a
 # locally generated RSA key and seeds the JWKS cache with its public half.

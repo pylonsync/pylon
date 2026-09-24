@@ -146,6 +146,39 @@ pub fn decode_input_envelope<I: DeserializeOwned>(
     }
 }
 
+/// A shard input type: how the shard turns wire bytes into `Self`.
+///
+/// Every `DeserializeOwned` type is a `ShardInput` through
+/// [`decode_input_envelope`]. [`crate::raw::RawInput`] implements it by hand
+/// to keep the input bytes undecoded for a WebAssembly shard.
+pub trait ShardInput: Sized + Send + 'static {
+    /// Decode an envelope `{ input, client_seq? }` that arrived in `wire`
+    /// (JSON for a text frame, the shard's codec for a binary frame).
+    /// `shard` is the shard's codec.
+    fn decode_envelope(
+        wire: SnapshotFormat,
+        shard: SnapshotFormat,
+        bytes: &[u8],
+    ) -> Result<InputEnvelope<Self>, String>;
+
+    /// Decode a bare JSON input (the HTTP input route).
+    fn decode_json(body: &str, shard: SnapshotFormat) -> Result<Self, String>;
+}
+
+impl<T: DeserializeOwned + Send + 'static> ShardInput for T {
+    fn decode_envelope(
+        wire: SnapshotFormat,
+        _shard: SnapshotFormat,
+        bytes: &[u8],
+    ) -> Result<InputEnvelope<Self>, String> {
+        decode_input_envelope(wire, bytes)
+    }
+
+    fn decode_json(body: &str, _shard: SnapshotFormat) -> Result<Self, String> {
+        serde_json::from_str(body).map_err(|e| format!("invalid input JSON: {e}"))
+    }
+}
+
 /// Only the `client_seq` of an envelope, for reporting a rejection when the
 /// input itself does not decode.
 pub fn peek_client_seq(format: SnapshotFormat, bytes: &[u8]) -> Option<u64> {

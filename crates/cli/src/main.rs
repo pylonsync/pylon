@@ -127,6 +127,7 @@ fn run() -> ExitCode {
         Some("restart") => commands::cloud_restart::run(&args, json_mode),
         Some("runtime") => commands::cloud_runtime::run(&args, json_mode),
         Some("secrets") => commands::cloud_secrets::run(&args, json_mode),
+        Some("shards") => commands::shards::run(&args, json_mode),
         Some("status") => commands::cloud_status::run(&args, json_mode),
         Some("studio") => commands::studio::run(&args, json_mode),
         Some("plugins") => commands::plugins::run(&args, json_mode),
@@ -331,6 +332,21 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  PYLON_CORS_ORIGIN Allowed CORS origin for the API");
             true
         }
+        "shards" => {
+            println!("pylon shards — build WebAssembly shard modules");
+            println!();
+            println!("Usage:");
+            println!("  pylon shards build [app.ts] [--json]");
+            println!();
+            println!("Runs `cargo build --release --target wasm32-unknown-unknown` for each");
+            println!("shard in app.ts that sets `crate`, and copies the module to its `wasm`");
+            println!("path. `pylon dev` runs this at start and when a crate's source changes.");
+            println!("Commit the .wasm files: `pylon build` and `pylon deploy` ship them as-is.");
+            println!();
+            println!("Needs Rust and the wasm32-unknown-unknown target:");
+            println!("  rustup target add wasm32-unknown-unknown");
+            true
+        }
         "build" => {
             println!("pylon build — build for production");
             println!();
@@ -448,6 +464,7 @@ fn print_usage() {
   add <analytics|feedback>  Wire a Stack0 suite app into this project"
     );
     println!("  build                     Build for production");
+    println!("  shards build              Build WebAssembly shard modules from their Rust crates");
     println!(
         "  deploy                    Deploy to Pylon Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
     );

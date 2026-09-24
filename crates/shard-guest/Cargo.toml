@@ -1,0 +1,21 @@
+[package]
+name = "pylon-shard-guest"
+description = "Write Pylon realtime shard logic in Rust and compile it to WebAssembly."
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["pylon", "realtime", "game", "wasm", "shard"]
+categories = ["game-development", "wasm"]
+version.workspace = true
+
+# Only serde crates, so the guest builds for wasm32-unknown-unknown with no
+# system dependencies.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+rmp-serde = "1.3"
+
+[[example]]
+name = "arena"
+crate-type = ["cdylib"]

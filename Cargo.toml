@@ -17,6 +17,7 @@ members = [
   "crates/router",
   "crates/runtime",
   "crates/schema",
+  "crates/shard-guest",
   "crates/staticgen",
   "crates/storage",
   "crates/studio_api",

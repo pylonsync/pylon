@@ -861,6 +861,45 @@ export interface Shards {
     shardId: string,
     opts?: { subscriberId?: string; claims?: Record<string, unknown>; ttlSecs?: number },
   ): Promise<string>;
+
+  /**
+   * Start shard `shardId` of a kind declared with `shard({...})` in app.ts.
+   * `params` reach the module's `init`. Actions only: a mutation's
+   * rollback cannot undo it.
+   *
+   * Throws `SHARD_EXISTS` when the id is running, `SHARD_LIMIT_REACHED`
+   * at the kind's `maxInstances`, `SHARD_KIND_NOT_FOUND`,
+   * `SHARD_ID_INVALID`, or `SHARD_INIT_FAILED` when `init` refuses.
+   */
+  create(kind: string, shardId: string, params?: unknown): Promise<ShardInfo>;
+
+  /** Stop a shard and close its subscribers' connections. Resolves to
+   *  `false` when no shard has that id. Actions only. */
+  stop(shardId: string): Promise<boolean>;
+
+  /** A running shard, or `null`. */
+  get(shardId: string): Promise<ShardInfo | null>;
+
+  /** Every running shard. */
+  list(): Promise<ShardInfo[]>;
+}
+
+/** `ctx.shards` in a query or mutation: tickets and reads, no start or stop. */
+export type ShardsReader = Pick<Shards, "ticket" | "get" | "list">;
+
+/** A running shard, from `ctx.shards.create`, `get`, or `list`. */
+export interface ShardInfo {
+  id: string;
+  /** The shard kind's name. */
+  kind: string;
+  /** Ticks run so far. */
+  tick: number;
+  subscribers: number;
+  /** False once the shard stopped (finished, idle, or failed) and before
+   *  the host removes it. */
+  running: boolean;
+  /** Why the module stopped, when it trapped. */
+  error?: string;
 }
 
 /** Context for query handlers (read-only).
@@ -888,8 +927,8 @@ export interface QueryCtx<R extends AuthRequirement = "optional"> {
   requireMember: RequireMember;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
-  /** Shard tickets — see {@link Shards}. */
-  shards: Shards;
+  /** Shard tickets and reads — see {@link Shards}. */
+  shards: ShardsReader;
   /**
    * Fires when the host cancels this call (idle timeout exceeded).
    * Thread it into `fetch(url, { signal: ctx.signal })` or SDK calls so
@@ -918,8 +957,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   workflows: Workflows;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
-  /** Shard tickets — see {@link Shards}. */
-  shards: Shards;
+  /** Shard tickets and reads — see {@link Shards}. */
+  shards: ShardsReader;
   /** Create a typed error that triggers rollback. */
   error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */
@@ -1093,7 +1132,7 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   env: Record<string, string>;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
-  /** Shard tickets — see {@link Shards}. */
+  /** Shard tickets, reads, and start/stop — see {@link Shards}. */
   shards: Shards;
   /** Run a registered query within its own read transaction. */
   runQuery<T = unknown>(

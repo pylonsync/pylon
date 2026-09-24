@@ -378,7 +378,21 @@ async fn run_connection(
     };
 
     let subscriber_id = SubscriberId::new(sid);
-    let queue = match shard.add_queued_subscriber(subscriber_id.clone(), &shard_auth) {
+    // The authorize hook runs under the shard's state lock and may run
+    // module code (a WebAssembly shard), so keep it off the async workers.
+    let joined = {
+        let (shard, sid, auth) = (
+            Arc::clone(&shard),
+            subscriber_id.clone(),
+            shard_auth.clone(),
+        );
+        tokio::task::spawn_blocking(move || shard.add_queued_subscriber(sid, &auth)).await
+    };
+    let joined = match joined {
+        Ok(r) => r,
+        Err(e) => Err(ShardError::Other(format!("subscribe task failed: {e}"))),
+    };
+    let queue = match joined {
         Ok(q) => q,
         Err(ShardError::Unauthorized(reason)) => {
             close_with(
@@ -485,9 +499,10 @@ async fn run_connection(
                     &subscriber_id,
                     &shard_auth,
                     SnapshotFormat::Json,
-                    text.as_bytes(),
+                    text.as_bytes().to_vec(),
                     version,
-                );
+                )
+                .await;
             }
             // Binary frames are in the shard's codec in version 2, JSON in
             // version 1.
@@ -503,9 +518,10 @@ async fn run_connection(
                     &subscriber_id,
                     &shard_auth,
                     format,
-                    &bytes,
+                    bytes.to_vec(),
                     version,
-                );
+                )
+                .await;
             }
             Message::Close(_) => break Ok(()),
             // tungstenite answers pings itself; pongs only prove liveness.
@@ -538,19 +554,32 @@ async fn close_with(sink: &mut WsSink, code: CloseCode, reason: String) {
 
 /// Queue one input envelope. In version 2 a refused input gets an
 /// input-rejected frame on this connection.
-fn process_input(
+///
+/// The push runs the authorize hook under the shard's state lock, which a
+/// tick holds, and it may run module code: it runs on a blocking thread, so
+/// a slow shard does not stall the async workers every connection shares.
+/// The reader awaits it, so one connection's inputs stay in order.
+async fn process_input(
     shard: &Arc<dyn pylon_realtime::DynShard>,
     queue: &Arc<OutboundQueue>,
     subscriber_id: &SubscriberId,
     shard_auth: &ShardAuth,
     format: SnapshotFormat,
-    bytes: &[u8],
+    bytes: Vec<u8>,
     version: u8,
 ) {
-    let Err(rejection) =
-        shard.push_input_envelope(subscriber_id.clone(), format, bytes, shard_auth)
-    else {
-        return;
+    let pushed = {
+        let (shard, sid, auth) = (Arc::clone(shard), subscriber_id.clone(), shard_auth.clone());
+        tokio::task::spawn_blocking(move || shard.push_input_envelope(sid, format, &bytes, &auth))
+            .await
+    };
+    let rejection = match pushed {
+        Ok(Ok(_)) => return,
+        Ok(Err(rejection)) => rejection,
+        Err(e) => {
+            tracing::warn!("[shard-ws] input task failed: {e}");
+            return;
+        }
     };
     if version != 2 {
         return;

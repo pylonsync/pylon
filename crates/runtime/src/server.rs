@@ -1782,6 +1782,7 @@ mod change_log_wiring_tests {
         AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "t".into(),
             version: "0.1.0".into(),
@@ -1947,6 +1948,24 @@ fn start_server(
     // refresh. Always-on (memory cost is ~200 KB), gated only by
     // the route's admin-auth check.
     crate::log_ring::init_log_ring();
+
+    // Shard kinds the app declares in app.ts, compiled before the listener
+    // binds so a missing or invalid module fails the boot.
+    let app_root =
+        std::env::current_dir().map_err(|e| format!("cannot read the app directory: {e}"))?;
+    let wasm_shards =
+        crate::shard_wasm::load_manifest_shards(&runtime.manifest().shards, &app_root)?;
+    let shard_registry = match (shard_registry, &wasm_shards) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "app.ts declares shards, and the embedding program passed its own shard registry; use one or the other"
+                    .into(),
+            )
+        }
+        (Some(reg), None) => Some(reg),
+        (None, Some(host)) => Some(Arc::clone(host) as Arc<dyn pylon_realtime::DynShardRegistry>),
+        (None, None) => None,
+    };
 
     // Bind the HTTP listener (dual-stack `[::]`, v4-only fallback). `mut`
     // because the recv loop below rebuilds it in place if tiny_http gives up
@@ -2542,6 +2561,8 @@ fn start_server(
             // /api/rooms routes and the WS push path use, so a
             // server-originated event reaches the identical subscribers.
             Arc::clone(&room_mgr),
+            // Backs ctx.shards.create/stop/get/list.
+            wasm_shards.clone(),
         )
     };
     if std::env::var("PYLON_DEV_TIMING").is_ok() {
@@ -8426,6 +8447,9 @@ fn start_server(
     let start = Instant::now();
 
     // Stop any running shards so their tick loops exit.
+    if let Some(host) = &wasm_shards {
+        host.stop_all();
+    }
     if let Some(reg) = &shard_registry {
         for id in reg.ids() {
             if let Some(shard) = reg.get(&id) {

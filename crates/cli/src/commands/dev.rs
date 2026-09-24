@@ -297,6 +297,20 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         };
     dev_timing(boot_kind, "codegen+bun_install", t_codegen.elapsed());
 
+    // Shard modules built from Rust crates: build them before the server
+    // compiles them, and watch the crates and modules below.
+    let shard_watch = match &manifest {
+        Some(m) => {
+            if m.shards.iter().any(|s| s.crate_dir.is_some()) {
+                if let Err(e) = super::shards::build_all(m, watch_dir, json_mode) {
+                    eprintln!("[dev] shard build failed: {e}");
+                }
+            }
+            super::shards::ShardWatch::new(m, watch_dir)
+        }
+        None => super::shards::ShardWatch::default(),
+    };
+
     // Start dev server in background if initial build succeeded.
     if let Some(m) = manifest {
         // Keep the project root clean: machine-local dev data lives in a
@@ -571,6 +585,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                 json_mode,
                 rebuild_count,
                 last_manifest_json,
+                &shard_watch,
             );
         }
     };
@@ -593,8 +608,12 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         }
 
         let mut changed: HashSet<PathBuf> = HashSet::new();
+        let mut shard_change = ShardChange::default();
         match first {
-            Ok(Ok(ev)) => collect_watched_paths(&ev, &base, &mut changed),
+            Ok(Ok(ev)) => {
+                shard_change.note(&ev.paths, &shard_watch);
+                collect_watched_paths(&ev, &base, &mut changed)
+            }
             Ok(Err(_)) => {} // backend error event — ignore
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -605,6 +624,7 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
                     json_mode,
                     rebuild_count,
                     last_manifest_json,
+                    &shard_watch,
                 );
             }
         }
@@ -615,11 +635,16 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         let deadline = Instant::now() + Duration::from_millis(80);
         while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match rx.recv_timeout(remaining) {
-                Ok(Ok(ev)) => collect_watched_paths(&ev, &base, &mut changed),
+                Ok(Ok(ev)) => {
+                    shard_change.note(&ev.paths, &shard_watch);
+                    collect_watched_paths(&ev, &base, &mut changed)
+                }
                 Ok(Err(_)) => {}
                 Err(_) => break,
             }
         }
+
+        shard_change.apply(entry_file, watch_dir, json_mode);
 
         if changed.is_empty() {
             continue; // only generated / vendored files touched
@@ -1260,6 +1285,46 @@ fn is_css_only(changed: &HashSet<PathBuf>) -> bool {
 
 /// Insert every watched source path carried by an fs event into `out`.
 /// `base` is the canonical watch root — exclusions are judged relative to it.
+/// Shard files a batch of events touched.
+#[derive(Default)]
+struct ShardChange {
+    crate_source: bool,
+    module: bool,
+}
+
+impl ShardChange {
+    fn note(&mut self, paths: &[PathBuf], watch: &super::shards::ShardWatch) {
+        for p in paths {
+            self.crate_source |= watch.is_crate_source(p);
+            self.module |= watch.is_module(p);
+        }
+    }
+
+    /// Rebuild and restart for a crate change; restart for a module change.
+    /// A failed rebuild leaves the running server up.
+    fn apply(&self, entry_file: &str, watch_dir: &Path, json_mode: bool) {
+        if self.crate_source {
+            let built = crate::bun::run_bun_codegen(entry_file, false)
+                .map_err(|d| d.message)
+                .and_then(|json| {
+                    serde_json::from_str::<pylon_kernel::AppManifest>(&json)
+                        .map_err(|e| e.to_string())
+                })
+                .and_then(|m| super::shards::build_all(&m, watch_dir, json_mode));
+            match built {
+                Ok(_) => {
+                    print_reload_reason("shard crate changed", json_mode);
+                    exec_restart(json_mode);
+                }
+                Err(e) => eprintln!("[dev] shard build failed: {e}"),
+            }
+        } else if self.module {
+            print_reload_reason("shard module changed", json_mode);
+            exec_restart(json_mode);
+        }
+    }
+}
+
 fn collect_watched_paths(ev: &notify::Event, base: &Path, out: &mut HashSet<PathBuf>) {
     for p in &ev.paths {
         if is_watched_source(p, base) {
@@ -1287,8 +1352,10 @@ fn run_poll_watch(
     json_mode: bool,
     mut rebuild_count: u32,
     mut last_manifest_json: String,
+    shard_watch: &super::shards::ShardWatch,
 ) -> ExitCode {
     let mut last_mtimes = collect_ts_mtimes(watch_dir);
+    let mut last_shard_mtimes = shard_watch.mtimes();
     let env_watch = env_watch_paths();
     let mut last_env_mtimes = collect_env_mtimes(&env_watch);
 
@@ -1298,6 +1365,19 @@ fn run_poll_watch(
         let current_env_mtimes = collect_env_mtimes(&env_watch);
         let env_changed = current_env_mtimes != last_env_mtimes;
         last_env_mtimes = current_env_mtimes;
+
+        let current_shard_mtimes = shard_watch.mtimes();
+        if current_shard_mtimes != last_shard_mtimes {
+            let mut shard_change = ShardChange::default();
+            let moved: Vec<PathBuf> = current_shard_mtimes
+                .iter()
+                .filter(|entry| !last_shard_mtimes.contains(entry))
+                .map(|(p, _)| p.clone())
+                .collect();
+            shard_change.note(&moved, shard_watch);
+            last_shard_mtimes = current_shard_mtimes;
+            shard_change.apply(entry_file, watch_dir, json_mode);
+        }
 
         let current_mtimes = collect_ts_mtimes(watch_dir);
         if env_changed {

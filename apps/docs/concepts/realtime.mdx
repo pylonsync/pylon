@@ -20,7 +20,7 @@ maps the options, and each primitive has its own page with full detail.
 | Presence — cursors, typing, "who's here", broadcast | `useRoom` | ❌ ephemeral | [React client](/clients/react#presence--rooms) |
 | Server-generated output streamed to everyone watching (agent tokens, job progress) | `ctx.rooms.broadcast` — server side | ❌ ephemeral | [Functions](/concepts/functions#server-push-to-a-room) |
 | Server-generated output streamed back to the one client that called | `ctx.stream.write` — server side | ❌ ephemeral | [Functions](/concepts/functions#streaming-llm-output) |
-| Authoritative multiplayer sim (game / MMO tick loop) | `useShard` | ❌ in-memory sim | [React client](/clients/react#multiplayer-shards) |
+| Authoritative multiplayer sim (game / MMO tick loop) | `useShard` | ❌ in-memory sim | [Realtime shards](/concepts/shards) |
 | A connection / sync status indicator | `useSyncStatus` | — | [React client](/clients/react) |
 
 ## Two layers: synced data and ephemeral signals

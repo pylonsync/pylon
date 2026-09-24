@@ -5136,6 +5136,7 @@ pub fn try_spawn_functions(
     plugins: Arc<pylon_plugin::PluginRegistry>,
     policy_engine: Arc<pylon_policy::PolicyEngine>,
     rooms: Arc<crate::rooms::RoomManager>,
+    shards: Option<Arc<crate::shard_wasm::WasmShardHost>>,
 ) -> Option<Arc<FnOpsImpl>> {
     let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
     // A `pylon build` artifact (`PYLON_SERVER_BUNDLE`, set by `pylon start
@@ -5382,6 +5383,14 @@ pub fn try_spawn_functions(
                 ))
             },
         ));
+        // `ctx.shards.create/stop/get/list` — only when app.ts declares shards;
+        // without the hook the runner answers SHARDS_NOT_CONFIGURED.
+        if let Some(host) = &shards {
+            let host = Arc::clone(host);
+            runner.set_shard_op_hook(Box::new(move |req| {
+                crate::shard_wasm::handle_shard_op(&host, req)
+            }));
+        }
     }
     register_function_job_handlers(&ops, &job_queue_for_handlers);
     spawn_runtime_supervisor(Arc::clone(&ops));

@@ -875,6 +875,8 @@ export interface AppManifest {
   requiredEnv?: ManifestRequiredEnv[];
   /** Production build settings (`pylon build`). */
   build?: BuildConfig;
+  /** Realtime shard kinds whose simulation is a WebAssembly module. */
+  shards?: ManifestShard[];
 }
 
 /**
@@ -962,6 +964,116 @@ function validateBuildConfig(build: BuildConfig): void {
       fail(`${field} must be a list of non-empty strings`);
     }
   }
+}
+
+/** One realtime shard kind. See {@link shard}. */
+export interface ManifestShard {
+  /** The kind name `ctx.shards.create(kind, id)` takes. */
+  name: string;
+  /** The compiled module, relative to the app root. */
+  wasm: string;
+  /** A Cargo crate, relative to the app root, that `pylon shards build`
+   *  compiles to `wasm`. `pylon dev` runs that build at start. */
+  crate?: string;
+  /** Snapshot and input codec. Default `"json"`. */
+  codec?: "json" | "msgpack";
+  /** Ticks per second. `0` ticks only when inputs arrive. Default 20. */
+  tickRate?: number;
+  /** Pass `tick` a constant `1 / tickRate` instead of the measured time,
+   *  so a replay gives the same result. Default `true`. */
+  fixedTimestep?: boolean;
+  /** Subscribers one shard admits. Default 256. */
+  maxSubscribers?: number;
+  /** Shards of this kind that may run at once. Default 64. */
+  maxInstances?: number;
+  /** Memory cap per shard, in MiB. Default 64. */
+  memoryMb?: number;
+  /** Time budget for one tick (its inputs, `tick`, and the snapshots) or
+   *  one authorize call, in milliseconds. A tick that runs longer stops the
+   *  shard. Default 100. */
+  tickBudgetMs?: number;
+  /** Stop a shard after this many seconds with no subscribers and no
+   *  inputs. `0` never stops it. Default 90. */
+  idleShutdownSecs?: number;
+  /** Per-subscriber input limits. */
+  input?: {
+    /** Sustained inputs per second. Default 120. */
+    ratePerSec?: number;
+    /** Inputs above the rate a subscriber may send in a burst. Default 240. */
+    burst?: number;
+    /** Inputs one subscriber may have queued. Default 256. */
+    maxQueued?: number;
+    /** Inputs applied per subscriber per tick. Default 32. */
+    maxPerTick?: number;
+  };
+}
+
+/**
+ * Declare a realtime shard kind whose simulation is a WebAssembly module.
+ * Build the module with the `pylon-shard-guest` Rust crate (or any
+ * toolchain that implements its ABI). The stock `pylon` binary runs it, on
+ * Pylon Cloud too.
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   shards: [
+ *     shard({ name: "arena", wasm: "shards/arena.wasm", crate: "shards/arena", tickRate: 30 }),
+ *   ],
+ * });
+ * ```
+ *
+ * A function starts a shard with `ctx.shards.create("arena", matchId, params)`
+ * and mints tickets with `ctx.shards.ticket(matchId)`. Clients connect with
+ * `useShard(matchId, { ticket })`.
+ */
+export function shard(def: ManifestShard): ManifestShard {
+  validateShard(def);
+  return def;
+}
+
+const SHARD_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
+
+/** Throws when a shard kind has a value the runtime cannot use. */
+function validateShard(def: ManifestShard): void {
+  const fail = (msg: string): never => {
+    throw new Error(`shard(${JSON.stringify(def?.name ?? "")}): ${msg}`);
+  };
+  if (typeof def?.name !== "string" || !SHARD_NAME.test(def.name)) {
+    fail("name must start with a letter and hold up to 64 letters, digits, '_', '-'");
+  }
+  const checkPath = (value: unknown, field: string) => {
+    if (typeof value !== "string" || value === "") fail(`${field} must be a non-empty path`);
+    const p = (value as string).replace(/\\/g, "/");
+    if (p.startsWith("/") || /^[A-Za-z]:/.test(p) || p.split("/").includes("..")) {
+      fail(`${field} must be relative to the app root, without ".."`);
+    }
+  };
+  checkPath(def.wasm, "wasm");
+  if (!def.wasm.endsWith(".wasm")) fail(`wasm must name a .wasm file`);
+  if (def.crate !== undefined) checkPath(def.crate, "crate");
+  if (def.codec !== undefined && def.codec !== "json" && def.codec !== "msgpack") {
+    fail(`codec must be "json" or "msgpack"`);
+  }
+  if (def.fixedTimestep !== undefined && typeof def.fixedTimestep !== "boolean") {
+    fail("fixedTimestep must be a boolean");
+  }
+  const checkInt = (value: unknown, field: string, min: number, max: number) => {
+    if (value === undefined) return;
+    if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+      fail(`${field} must be an integer from ${min} to ${max}`);
+    }
+  };
+  checkInt(def.tickRate, "tickRate", 0, 1000);
+  checkInt(def.maxSubscribers, "maxSubscribers", 1, 1_000_000);
+  checkInt(def.maxInstances, "maxInstances", 1, 100_000);
+  checkInt(def.memoryMb, "memoryMb", 1, 4096);
+  checkInt(def.tickBudgetMs, "tickBudgetMs", 1, 60_000);
+  checkInt(def.idleShutdownSecs, "idleShutdownSecs", 0, 31_536_000);
+  checkInt(def.input?.ratePerSec, "input.ratePerSec", 1, 100_000);
+  checkInt(def.input?.burst, "input.burst", 1, 100_000);
+  checkInt(def.input?.maxQueued, "input.maxQueued", 1, 100_000);
+  checkInt(def.input?.maxPerTick, "input.maxPerTick", 1, 100_000);
 }
 
 /** One environment variable the app declares it needs. */
@@ -2241,6 +2353,8 @@ export function buildManifest(options: {
   requiredEnv?: ManifestRequiredEnv[];
   /** Production build settings for `pylon build`. See `BuildConfig`. */
   build?: BuildConfig;
+  /** Realtime shard kinds. See `shard`. */
+  shards?: ManifestShard[];
   /** Set by `discoverFunctions()` (spread its result into this call).
    *  When true, the framework's AgentRun/AgentMessage entities and
    *  their owner-scoping policies are appended to the manifest —
@@ -2262,6 +2376,14 @@ export function buildManifest(options: {
   // derive from the entity + a counter so two attached policies
   // don't collide.
   if (options.build) validateBuildConfig(options.build);
+  const shardNames = new Set<string>();
+  for (const def of options.shards ?? []) {
+    validateShard(def);
+    if (shardNames.has(def.name)) {
+      throw new Error(`buildManifest: two shard kinds are named "${def.name}"`);
+    }
+    shardNames.add(def.name);
+  }
   const attached: PolicyDefinition[] = [];
   for (const ent of options.entities) {
     const extracted = extractAttachedPolicies(ent);
@@ -2327,6 +2449,9 @@ export function buildManifest(options: {
       : {}),
     ...(options.build && Object.keys(options.build).length > 0
       ? { build: options.build }
+      : {}),
+    ...(options.shards && options.shards.length > 0
+      ? { shards: options.shards }
       : {}),
   };
 }

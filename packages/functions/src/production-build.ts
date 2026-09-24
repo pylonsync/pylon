@@ -234,6 +234,18 @@ export async function buildProduction(
     if (!fs.existsSync(src)) throw new Error(`build.include: "${inc}" does not exist`);
     fs.cpSync(src, path.join(outDir, rel), { recursive: true, dereference: true });
   }
+  // Shard modules, at the paths app.ts gives, which the runtime reads at boot.
+  for (const def of (manifest.shards ?? []) as Array<{ name: string; wasm: string }>) {
+    const src = path.resolve(cwd, def.wasm);
+    const rel = checkInclude(path, cwd, outDir, def.wasm, src, `shard "${def.name}" wasm`);
+    if (!fs.existsSync(src)) {
+      throw new Error(
+        `shard "${def.name}": ${def.wasm} does not exist; run \`pylon shards build\` first`,
+      );
+    }
+    fs.mkdirSync(path.dirname(path.join(outDir, rel)), { recursive: true });
+    fs.copyFileSync(src, path.join(outDir, rel));
+  }
 
   fs.writeFileSync(path.join(outDir, "pylon.manifest.json"), manifestRaw, "utf8");
   const pkg = JSON.parse(fs.readFileSync(path.join(here, "..", "package.json"), "utf8"));
@@ -317,21 +329,22 @@ export function checkInclude(
   outDir: string,
   inc: string,
   src: string,
+  label = "build.include",
 ): string {
   const rel = path.relative(cwd, src);
   const isOutside = (r: string) =>
     r === ".." || r.startsWith(`..${path.sep}`) || r.startsWith("../") || path.isAbsolute(r);
-  if (rel === "") throw new Error(`build.include: "${inc}" is the project directory`);
+  if (rel === "") throw new Error(`${label}: "${inc}" is the project directory`);
   if (isOutside(rel)) {
-    throw new Error(`build.include: "${inc}" is outside the project directory`);
+    throw new Error(`${label}: "${inc}" is outside the project directory`);
   }
   // Neither the output directory nor anything that contains it or is in it.
   if (!isOutside(path.relative(src, outDir)) || !isOutside(path.relative(outDir, src))) {
-    throw new Error(`build.include: "${inc}" overlaps the output directory`);
+    throw new Error(`${label}: "${inc}" overlaps the output directory`);
   }
   const top = rel.split(/[\\/]/)[0];
   if (RESERVED_INCLUDE_NAMES.has(top)) {
-    throw new Error(`build.include: "${inc}" would write into the artifact's own "${top}"`);
+    throw new Error(`${label}: "${inc}" would write into the artifact's own "${top}"`);
   }
   return rel;
 }

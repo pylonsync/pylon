@@ -2764,6 +2764,7 @@ mod field_gate_tests {
         AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -2836,6 +2837,7 @@ mod field_gate_tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -2880,6 +2882,7 @@ mod field_gate_tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -2980,6 +2983,7 @@ mod field_gate_tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -3318,6 +3322,7 @@ mod auth_gate_tests {
         AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -3570,6 +3575,7 @@ mod auth_gate_tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -4840,6 +4846,7 @@ mod auth_gate_tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -5221,6 +5228,7 @@ mod auth_gate_tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -5437,6 +5445,7 @@ mod auth_gate_tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -5733,6 +5742,7 @@ mod auth_gate_tests {
         AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -6163,6 +6173,7 @@ mod auth_gate_tests {
         let m = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0.0.0".into(),
@@ -6598,6 +6609,7 @@ mod user_projection_tests {
         let manifest = pylon_kernel::AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

@@ -38,6 +38,21 @@ impl std::fmt::Display for EncodeError {
 
 impl std::error::Error for EncodeError {}
 
+/// A snapshot type: how the shard turns `Self` into wire bytes.
+///
+/// Every `Serialize` type is an `EncodeSnapshot` through [`encode_snapshot`].
+/// [`crate::raw::RawSnapshot`] implements it by hand for bytes that are
+/// already in the shard's codec.
+pub trait EncodeSnapshot {
+    fn encode_as(&self, format: SnapshotFormat) -> Result<Vec<u8>, EncodeError>;
+}
+
+impl<T: Serialize> EncodeSnapshot for T {
+    fn encode_as(&self, format: SnapshotFormat) -> Result<Vec<u8>, EncodeError> {
+        encode_snapshot(self, format)
+    }
+}
+
 /// Encode a snapshot using the chosen format.
 ///
 /// JSON is always available. MessagePack requires the `msgpack` feature,

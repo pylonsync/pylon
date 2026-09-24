@@ -165,6 +165,83 @@ pub struct AppManifest {
     /// stay out of the server bundle.
     #[serde(default, skip_serializing_if = "ManifestBuildConfig::is_default")]
     pub build: ManifestBuildConfig,
+    /// Realtime shard kinds whose simulation is a WebAssembly module, from
+    /// the SDK's `shard({...})` helper. The runtime compiles each module at
+    /// boot; `ctx.shards.create(kind, id)` starts a shard of that kind.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shards: Vec<ManifestShard>,
+}
+
+/// One shard kind. Emitted by the SDK's `shard({...})` helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestShard {
+    /// The kind name `ctx.shards.create` takes.
+    pub name: String,
+    /// The module, relative to the app root.
+    pub wasm: String,
+    /// A Cargo crate, relative to the app root, that `pylon shards build`
+    /// compiles to `wasm`.
+    #[serde(default, rename = "crate", skip_serializing_if = "Option::is_none")]
+    pub crate_dir: Option<String>,
+    /// Snapshot and input codec.
+    #[serde(default)]
+    pub codec: ManifestShardCodec,
+    /// Ticks per second. 0 ticks only when inputs arrive.
+    #[serde(default = "default_shard_tick_rate")]
+    pub tick_rate: u32,
+    /// Pass `tick` a constant `1 / tickRate` instead of the measured time.
+    #[serde(default = "default_true")]
+    pub fixed_timestep: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_subscribers: Option<u32>,
+    /// Shards of this kind that may run at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_instances: Option<u32>,
+    /// Memory cap per shard, in MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<u32>,
+    /// Time budget for one tick (inputs, `tick`, snapshots) or one
+    /// authorize call, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tick_budget_ms: Option<u32>,
+    /// Stop a shard after this many seconds with no subscribers and no
+    /// inputs. 0 never stops it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_shutdown_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<ManifestShardInput>,
+}
+
+fn default_shard_tick_rate() -> u32 {
+    20
+}
+
+/// `codec: "json" | "msgpack"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManifestShardCodec {
+    #[default]
+    Json,
+    Msgpack,
+}
+
+/// Per-subscriber input limits for a shard kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestShardInput {
+    /// Sustained inputs per second per subscriber.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_per_sec: Option<u32>,
+    /// Inputs a subscriber may send in a burst above the rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<u32>,
+    /// Inputs one subscriber may have queued.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_queued: Option<u32>,
+    /// Inputs applied per subscriber per tick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_per_tick: Option<u32>,
 }
 
 /// Production build settings. Emitted by the SDK's `buildManifest({ build })`.

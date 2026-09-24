@@ -39,6 +39,7 @@ pub mod policy_test;
 pub mod schema;
 pub mod seed;
 pub mod self_update;
+pub mod shards;
 pub mod start;
 pub mod studio;
 pub mod test;

@@ -179,6 +179,14 @@ pub type ShardTicketSigner = Box<
         + Sync,
 >;
 
+/// Callback for `ctx.shards.create/stop/get/list`. Installed by the runtime
+/// when the app declares WebAssembly shards.
+pub type ShardOpHook = Box<ShardOpHookFn>;
+
+pub type ShardOpHookFn = dyn Fn(&crate::protocol::ShardOpMessage) -> Result<serde_json::Value, (String, String)>
+    + Send
+    + Sync;
+
 /// Callback invoked when an action calls `ctx.email.send(to, subject, body)`.
 /// Returns Ok(()) on transport success, Err(reason) on failure.
 ///
@@ -394,6 +402,9 @@ pub struct FnRunner {
     nested_call_hook: Mutex<Option<NestedCallHook>>,
     file_url_signer: Mutex<Option<FileUrlSigner>>,
     shard_ticket_signer: Mutex<Option<ShardTicketSigner>>,
+    /// An `Arc` so a call runs after the lock is released: a hook that
+    /// panics must not poison it for every later `ctx.shards` call.
+    shard_op_hook: Mutex<Option<std::sync::Arc<ShardOpHookFn>>>,
     /// Optional handler for `ctx.email.send(...)`. Apps that don't configure
     /// an email transport see `ctx.email.send` reject with an explicit
     /// error so silently-dropped invite emails surface in the action's
@@ -460,6 +471,7 @@ impl FnRunner {
             nested_call_hook: Mutex::new(None),
             file_url_signer: Mutex::new(None),
             shard_ticket_signer: Mutex::new(None),
+            shard_op_hook: Mutex::new(None),
             email_hook: Mutex::new(None),
             llm_hook: Mutex::new(None),
             llm_stream_hook: Mutex::new(None),
@@ -571,6 +583,11 @@ impl FnRunner {
     /// The runtime installs this with a closure over its signing secret.
     pub fn set_shard_ticket_signer(&self, hook: ShardTicketSigner) {
         *self.shard_ticket_signer.lock().unwrap() = Some(hook);
+    }
+
+    /// Install the hook backing `ctx.shards.create/stop/get/list`.
+    pub fn set_shard_op_hook(&self, hook: ShardOpHook) {
+        *self.shard_op_hook.lock().unwrap() = Some(std::sync::Arc::from(hook));
     }
 
     pub fn set_file_url_signer(&self, hook: FileUrlSigner) {
@@ -1735,6 +1752,40 @@ impl FnRunner {
                             "SHARD_TICKETS_NOT_CONFIGURED",
                             "this host does not sign shard tickets",
                         ),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::ShardOp(req) if req.call_id == call_id => {
+                    // Starting or stopping a shard is a side effect outside
+                    // the database: a query re-runs whenever its reads
+                    // change, and a mutation's rollback cannot undo it.
+                    let reply = if !matches!(fn_type, crate::protocol::FnType::Action)
+                        && matches!(req.op.as_str(), "create" | "stop")
+                    {
+                        DbResultMessage::err(
+                            call_id.clone(),
+                            "SHARD_OP_ACTIONS_ONLY",
+                            "ctx.shards.create and ctx.shards.stop are available in actions only (a mutation's rollback cannot undo them)",
+                        )
+                    } else {
+                        let hook = self
+                            .shard_op_hook
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .clone();
+                        let result = hook.map(|cb| cb(&req));
+                        match result {
+                            Some(Ok(value)) => DbResultMessage::ok(call_id.clone(), value),
+                            Some(Err((code, msg))) => {
+                                DbResultMessage::err(call_id.clone(), &code, &msg)
+                            }
+                            None => DbResultMessage::err(
+                                call_id.clone(),
+                                "SHARDS_NOT_CONFIGURED",
+                                "this app declares no shards; add `shards: [shard({ name, wasm })]` to buildManifest in app.ts",
+                            ),
+                        }
                     };
                     self.send(&reply)?;
                 }

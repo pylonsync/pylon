@@ -67,6 +67,7 @@ pub mod seq_allocator;
 pub mod server;
 pub mod session_backend;
 pub mod shard_tickets;
+pub mod shard_wasm;
 pub mod shard_ws;
 pub mod sse;
 pub mod ssr_cache;
@@ -4796,6 +4797,7 @@ mod tests {
         AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "Test".into(),
             version: "0.1.0".into(),
@@ -5940,6 +5942,7 @@ mod tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "Test".into(),
             version: "0.1.0".into(),
@@ -6065,6 +6068,7 @@ mod tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "G".into(),
             version: "0".into(),

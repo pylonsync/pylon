@@ -459,6 +459,7 @@ mod tests {
             fonts: vec![],
             required_env: vec![],
             build: Default::default(),
+            shards: Vec::new(),
         }
     }
 

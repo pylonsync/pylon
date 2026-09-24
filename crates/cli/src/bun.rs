@@ -23,7 +23,12 @@ use crate::manifest::parse_manifest;
 /// deploy/prod (`pylon start` / `build`) so the resolved tree is reproducible.
 pub fn run_bun_codegen(entry_file: &str, frozen: bool) -> Result<String, Diagnostic> {
     ensure_npm_deps_installed(entry_file, frozen)?;
+    eval_manifest(entry_file)
+}
 
+/// Evaluate `entry_file` with Bun and return its manifest JSON, with the
+/// dependencies as they are (no install).
+pub fn eval_manifest(entry_file: &str) -> Result<String, Diagnostic> {
     // `--` before the entry file stops Bun from interpreting a filename
     // that starts with `-` as a flag. Without this, an attacker able to
     // smuggle a crafted filename into this call could inject flags like

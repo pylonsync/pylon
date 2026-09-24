@@ -1,0 +1,628 @@
+//! WebAssembly shards: the arena guest from `crates/shard-guest/examples`
+//! under the real tick code, plus module checks on hand-written modules.
+//!
+//! Needs the `wasm32-unknown-unknown` target
+//! (`rustup target add wasm32-unknown-unknown`).
+
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+
+use pylon_realtime::{
+    DynShard, FrameKind, InputRejection, Shard, ShardAuth, ShardConfig, ShardError, ShardTicket,
+    SnapshotFormat, SubscriberId,
+};
+use pylon_runtime::shard_wasm::{CreateError, WasmLimits, WasmShardHost, WasmShardKind, WasmSim};
+use serde_json::{json, Value};
+
+/// Build the arena guest once per test binary.
+fn arena_wasm() -> &'static [u8] {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    WASM.get_or_init(|| {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        // A target dir of its own, so this build never waits on the lock the
+        // outer `cargo test` holds.
+        let target_dir = root.join("target/shard-guest-tests");
+        let status = Command::new(env!("CARGO"))
+            .current_dir(&root)
+            .args([
+                "build",
+                "-p",
+                "pylon-shard-guest",
+                "--example",
+                "arena",
+                "--release",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--target-dir",
+            ])
+            .arg(&target_dir)
+            .status()
+            .expect("run cargo");
+        assert!(
+            status.success(),
+            "building the arena guest failed; is wasm32-unknown-unknown installed?"
+        );
+        std::fs::read(target_dir.join("wasm32-unknown-unknown/release/examples/arena.wasm"))
+            .expect("read arena.wasm")
+    })
+}
+
+fn config(format: SnapshotFormat) -> ShardConfig {
+    ShardConfig {
+        tick_rate_hz: 20,
+        idle_ticks_before_shutdown: 0,
+        snapshot_format: format,
+        ..Default::default()
+    }
+}
+
+fn kind(format: SnapshotFormat, limits: WasmLimits) -> WasmShardKind {
+    WasmShardKind::compile("arena", arena_wasm(), config(format), limits).unwrap()
+}
+
+fn shard(format: SnapshotFormat, params: Value) -> Arc<Shard<WasmSim>> {
+    let k = kind(format, WasmLimits::default());
+    let sim = k.instantiate("a1", &params).unwrap();
+    Shard::new("a1", sim, k.config().clone())
+}
+
+fn user(id: &str) -> ShardAuth {
+    ShardAuth {
+        user_id: Some(id.into()),
+        ..Default::default()
+    }
+}
+
+fn join(s: &Arc<Shard<WasmSim>>, id: &str) -> Arc<pylon_realtime::OutboundQueue> {
+    DynShard::add_queued_subscriber(s.as_ref(), SubscriberId::new(id), &user(id)).unwrap()
+}
+
+fn send(s: &Arc<Shard<WasmSim>>, id: &str, body: Value) -> Result<u64, InputRejection> {
+    DynShard::push_input_envelope(
+        s.as_ref(),
+        SubscriberId::new(id),
+        SnapshotFormat::Json,
+        body.to_string().as_bytes(),
+        &user(id),
+    )
+}
+
+/// The newest snapshot in the queue, decoded, and any rejections before it.
+fn drain(q: &pylon_realtime::OutboundQueue, format: SnapshotFormat) -> (Value, Vec<Value>, u64) {
+    let decode = |b: &[u8]| -> Value {
+        match format {
+            SnapshotFormat::MessagePack => rmp_serde::from_slice(b).unwrap(),
+            _ => serde_json::from_slice(b).unwrap(),
+        }
+    };
+    let mut snap = Value::Null;
+    let mut ack = 0;
+    let mut rejections = Vec::new();
+    while let Some(f) = q.pop() {
+        match f.kind {
+            FrameKind::Snapshot => {
+                snap = decode(&f.bytes);
+                ack = f.ack;
+            }
+            FrameKind::InputRejected => rejections.push(decode(&f.bytes)),
+        }
+    }
+    (snap, rejections, ack)
+}
+
+#[test]
+fn inputs_ticks_and_snapshots_in_json() {
+    let s = shard(SnapshotFormat::Json, json!({ "label": "north" }));
+    let q = join(&s, "u1");
+    for seq in 1..=3 {
+        send(
+            &s,
+            "u1",
+            json!({ "input": { "move": { "dx": 1, "dy": 2 } }, "client_seq": seq }),
+        )
+        .unwrap();
+    }
+    s.run_tick();
+    let (snap, rejections, ack) = drain(&q, SnapshotFormat::Json);
+    assert!(rejections.is_empty(), "{rejections:?}");
+    assert_eq!(ack, 3);
+    assert_eq!(snap["label"], "north");
+    assert_eq!(snap["players"], json!([{ "id": "u1", "x": 3, "y": 6 }]));
+    // Fixed timestep: one tick at 20 Hz is 50 ms.
+    assert_eq!(snap["elapsed_ms"], 50);
+}
+
+#[test]
+fn msgpack_shard_takes_json_and_binary_inputs() {
+    let s = shard(SnapshotFormat::MessagePack, json!({}));
+    let q = join(&s, "u1");
+    // A JSON text frame is re-encoded for the module.
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "move": { "dx": 2, "dy": 0 } }, "client_seq": 1 }),
+    )
+    .unwrap();
+    // A binary frame in the shard's codec passes through.
+    let bin = rmp_serde::to_vec_named(
+        &json!({ "input": { "move": { "dx": 0, "dy": 5 } }, "client_seq": 2 }),
+    )
+    .unwrap();
+    DynShard::push_input_envelope(
+        s.as_ref(),
+        SubscriberId::new("u1"),
+        SnapshotFormat::MessagePack,
+        &bin,
+        &user("u1"),
+    )
+    .unwrap();
+    s.run_tick();
+    let (snap, _, ack) = drain(&q, SnapshotFormat::MessagePack);
+    assert_eq!(ack, 2);
+    assert_eq!(snap["players"], json!([{ "id": "u1", "x": 2, "y": 5 }]));
+}
+
+#[test]
+fn a_refused_input_comes_back_as_a_rejection() {
+    let s = shard(SnapshotFormat::Json, json!({}));
+    let q = join(&s, "u1");
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "move": { "dx": 99, "dy": 0 } }, "client_seq": 7 }),
+    )
+    .unwrap();
+    // An input the module cannot decode is refused before it is queued.
+    let bad = send(
+        &s,
+        "u1",
+        json!({ "input": { "teleport": {} }, "client_seq": 8 }),
+    )
+    .unwrap_err();
+    assert_eq!(bad.code, "unauthorized");
+    assert!(bad.message.contains("invalid input"), "{}", bad.message);
+    s.run_tick();
+    let (snap, rejections, ack) = drain(&q, SnapshotFormat::Json);
+    assert_eq!(ack, 7);
+    assert_eq!(rejections.len(), 1);
+    assert_eq!(rejections[0]["code"], "apply_failed");
+    assert_eq!(rejections[0]["client_seq"], 7);
+    assert!(rejections[0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("too far"));
+    assert_eq!(snap["players"], json!([]));
+    assert!(s.is_running());
+}
+
+#[test]
+fn snapshot_for_hides_other_players() {
+    let s = shard(SnapshotFormat::Json, json!({ "fog": true }));
+    let q1 = join(&s, "u1");
+    let q2 = join(&s, "u2");
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "move": { "dx": 1, "dy": 1 } } }),
+    )
+    .unwrap();
+    send(
+        &s,
+        "u2",
+        json!({ "input": { "move": { "dx": 2, "dy": 2 } } }),
+    )
+    .unwrap();
+    s.run_tick();
+    let (a, _, _) = drain(&q1, SnapshotFormat::Json);
+    let (b, _, _) = drain(&q2, SnapshotFormat::Json);
+    assert_eq!(a["players"], json!([{ "id": "u1", "x": 1, "y": 1 }]));
+    assert_eq!(b["players"], json!([{ "id": "u2", "x": 2, "y": 2 }]));
+}
+
+#[test]
+fn authorization_hooks_run_in_the_module() {
+    let s = shard(SnapshotFormat::Json, json!({}));
+    // Default subscribe rule: the user id must be the subscriber id.
+    let Err(err) =
+        DynShard::add_queued_subscriber(s.as_ref(), SubscriberId::new("u2"), &user("u1"))
+    else {
+        panic!("u1 subscribed as u2");
+    };
+    assert!(
+        matches!(err, ShardError::Unauthorized(ref m) if m.contains("does not match")),
+        "{err:?}"
+    );
+
+    // A ticket admits a subscriber; the arena refuses inputs from a
+    // spectator ticket.
+    let spectator = ShardAuth {
+        user_id: Some("u9".into()),
+        ticket: Some(ShardTicket {
+            shard: "a1".into(),
+            sid: "watcher".into(),
+            user_id: Some("u9".into()),
+            exp: u64::MAX,
+            claims: json!({ "role": "spectator" }),
+        }),
+        ..Default::default()
+    };
+    DynShard::add_queued_subscriber(s.as_ref(), SubscriberId::new("watcher"), &spectator).unwrap();
+    let rejection = DynShard::push_input_envelope(
+        s.as_ref(),
+        SubscriberId::new("watcher"),
+        SnapshotFormat::Json,
+        br#"{"input":{"move":{"dx":1,"dy":1}},"client_seq":1}"#,
+        &spectator,
+    )
+    .unwrap_err();
+    assert_eq!(rejection.code, "unauthorized");
+    assert!(rejection.message.contains("spectators"));
+}
+
+#[test]
+fn a_panic_stops_the_shard_with_its_message() {
+    let s = shard(SnapshotFormat::Json, json!({}));
+    let q = join(&s, "u1");
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "move": { "dx": 1, "dy": 1 } } }),
+    )
+    .unwrap();
+    s.run_tick();
+    drain(&q, SnapshotFormat::Json);
+    send(&s, "u1", json!({ "input": "panic" })).unwrap();
+    s.run_tick();
+    assert!(!s.is_running());
+    let failure = s.with_state(|sim| sim.failure()).unwrap();
+    assert!(failure.contains("asked to panic"), "{failure}");
+    // Subscribers got the last good snapshot, not an empty frame.
+    let (snap, _, _) = drain(&q, SnapshotFormat::Json);
+    assert_eq!(snap["players"], json!([{ "id": "u1", "x": 1, "y": 1 }]));
+}
+
+#[test]
+fn a_tick_past_its_budget_stops_the_shard() {
+    let k = kind(
+        SnapshotFormat::Json,
+        WasmLimits {
+            budget: Duration::from_millis(50),
+            ..Default::default()
+        },
+    );
+    let s = Shard::new(
+        "a1",
+        k.instantiate("a1", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    join(&s, "u1");
+    send(&s, "u1", json!({ "input": "spin" })).unwrap();
+    let start = Instant::now();
+    s.run_tick();
+    let took = start.elapsed();
+    assert!(took < Duration::from_secs(2), "the spin ran for {took:?}");
+    assert!(!s.is_running());
+    let failure = s.with_state(|sim| sim.failure()).unwrap();
+    assert!(failure.contains("time budget"), "{failure}");
+}
+
+#[test]
+fn the_budget_covers_the_whole_tick_not_each_call() {
+    let kind_with = |ms: u64| {
+        kind(
+            SnapshotFormat::Json,
+            WasmLimits {
+                budget: Duration::from_millis(ms),
+                ..Default::default()
+            },
+        )
+    };
+    // Calibrate: iterations that take about 15 ms on this machine.
+    let probe = kind_with(10_000);
+    let s = Shard::new(
+        "p",
+        probe.instantiate("p", &json!({})).unwrap(),
+        probe.config().clone(),
+    );
+    join(&s, "u1");
+    let probe_iters: u64 = 20_000_000;
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "burn": { "iters": probe_iters } } }),
+    )
+    .unwrap();
+    let start = Instant::now();
+    s.run_tick();
+    let per_iter = start.elapsed().as_secs_f64() / probe_iters as f64;
+    let iters = (0.015 / per_iter) as u64;
+
+    // Eight inputs of ~15 ms each: every call fits a 60 ms budget, the tick
+    // does not.
+    let k = kind_with(60);
+    let s = Shard::new(
+        "a1",
+        k.instantiate("a1", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    join(&s, "u1");
+    for _ in 0..8 {
+        send(&s, "u1", json!({ "input": { "burn": { "iters": iters } } })).unwrap();
+    }
+    s.run_tick();
+    assert!(!s.is_running());
+    let failure = s.with_state(|sim| sim.failure()).unwrap();
+    assert!(failure.contains("time budget"), "{failure}");
+
+    // One such input per tick runs fine, tick after tick.
+    let s = Shard::new(
+        "a2",
+        k.instantiate("a2", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    join(&s, "u1");
+    for _ in 0..8 {
+        send(&s, "u1", json!({ "input": { "burn": { "iters": iters } } })).unwrap();
+        s.run_tick();
+    }
+    assert!(s.is_running(), "{:?}", s.with_state(|sim| sim.failure()));
+}
+
+#[test]
+fn memory_past_the_cap_stops_the_shard() {
+    let k = kind(
+        SnapshotFormat::Json,
+        WasmLimits {
+            memory_bytes: 16 << 20,
+            ..Default::default()
+        },
+    );
+    let s = Shard::new(
+        "a1",
+        k.instantiate("a1", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    join(&s, "u1");
+    send(&s, "u1", json!({ "input": "grow" })).unwrap();
+    s.run_tick();
+    assert!(!s.is_running());
+    let failure = s.with_state(|sim| sim.failure()).unwrap();
+    assert!(
+        failure.contains("trapped") && failure.contains("memory"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn a_finished_module_stops_the_shard() {
+    let s = shard(SnapshotFormat::Json, json!({}));
+    join(&s, "u1");
+    send(&s, "u1", json!({ "input": "finish" })).unwrap();
+    s.run_tick();
+    assert!(!s.is_running());
+    assert_eq!(s.with_state(|sim| sim.failure()), None);
+}
+
+#[test]
+fn identical_inputs_give_identical_snapshots() {
+    let run = || {
+        let s = shard(SnapshotFormat::MessagePack, json!({}));
+        let q = join(&s, "u1");
+        for i in 0..50 {
+            send(
+                &s,
+                "u1",
+                json!({ "input": { "move": { "dx": i % 7 - 3, "dy": i % 5 - 2 } } }),
+            )
+            .unwrap();
+            s.run_tick();
+        }
+        let mut last = None;
+        while let Some(f) = q.pop() {
+            last = Some(f.bytes);
+        }
+        last.unwrap()
+    };
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn host_creates_limits_and_stops_shards() {
+    let host = WasmShardHost::new(vec![kind(
+        SnapshotFormat::Json,
+        WasmLimits {
+            max_instances: 2,
+            ..Default::default()
+        },
+    )]);
+    let info = host.create("arena", "m1", &json!({})).unwrap();
+    assert_eq!((info.kind.as_str(), info.running), ("arena", true));
+    assert_eq!(
+        host.create("arena", "m1", &json!({})).unwrap_err(),
+        CreateError::Exists("m1".into())
+    );
+    host.create("arena", "m2", &json!({})).unwrap();
+    assert!(matches!(
+        host.create("arena", "m3", &json!({})),
+        Err(CreateError::LimitReached { max: 2, .. })
+    ));
+    assert!(matches!(
+        host.create("nope", "m3", &json!({})),
+        Err(CreateError::UnknownKind(_))
+    ));
+    assert!(matches!(
+        host.create("arena", "bad id", &json!({})),
+        Err(CreateError::InvalidId(_))
+    ));
+    // The module's init can refuse its params.
+    host.stop("m2");
+    match host.create("arena", "m3", &json!({ "label": "" })) {
+        Err(CreateError::Init(why)) => assert!(why.contains("label must not be empty"), "{why}"),
+        other => panic!("expected an init failure, got {other:?}"),
+    }
+    // Stopping frees a slot, and the tick loop runs the shard.
+    host.create("arena", "m3", &json!({})).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let m1 = host.info("m1").unwrap();
+    assert!(m1.tick > 0, "{m1:?}");
+    assert!(host.stop("m1"));
+    assert!(host.info("m1").is_none());
+    assert_eq!(
+        host.list()
+            .iter()
+            .map(|i| i.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["m3"]
+    );
+    host.stop_all();
+}
+
+fn wat_module(body: &str) -> Vec<u8> {
+    wat::parse_str(body).unwrap()
+}
+
+#[test]
+fn modules_with_other_imports_or_missing_exports_are_refused() {
+    let wasi = wat_module(
+        r#"(module (import "wasi_snapshot_preview1" "fd_write" (func (param i32 i32 i32 i32) (result i32)))
+                   (memory (export "memory") 1))"#,
+    );
+    let err = WasmShardKind::compile(
+        "w",
+        &wasi,
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("may import only pylon.log"), "{err}");
+
+    let empty = wat_module(r#"(module (memory (export "memory") 1))"#);
+    let err = WasmShardKind::compile(
+        "e",
+        &empty,
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        err.contains("missing exports") && err.contains("pylon_tick"),
+        "{err}"
+    );
+
+    let err = WasmShardKind::compile(
+        "b",
+        b"not wasm",
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("invalid WebAssembly"), "{err}");
+
+    let err = WasmShardKind::compile(
+        "c",
+        arena_wasm(),
+        config(SnapshotFormat::Bincode),
+        WasmLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("bincode"), "{err}");
+}
+
+/// A module with every export. `abi` is what pylon_shard_abi returns;
+/// `apply_input` is the body of pylon_apply_input (returns i32); `extra` is
+/// added at module level.
+fn full_module(abi: i32, apply_input: &str, extra: &str) -> Vec<u8> {
+    let mut exports = String::new();
+    for (name, sig) in [
+        ("pylon_shard_abi", format!("(result i32) i32.const {abi}")),
+        (
+            "pylon_scratch",
+            "(param i32) (result i32) i32.const 1024".into(),
+        ),
+        ("pylon_output_ptr", "(result i32) i32.const 0".into()),
+        ("pylon_output_len", "(result i32) i32.const 0".into()),
+        (
+            "pylon_init",
+            "(param i32 i32 i32) (result i32) i32.const 0".into(),
+        ),
+        (
+            "pylon_apply_input",
+            format!("(param i32 i32 i32 i32) (result i32) {apply_input}"),
+        ),
+        ("pylon_tick", "(param i64)".into()),
+        ("pylon_snapshot", "(result i32) i32.const 0".into()),
+        (
+            "pylon_snapshot_for",
+            "(param i32 i32) (result i32) i32.const 2".into(),
+        ),
+        ("pylon_is_finished", "(result i32) i32.const 0".into()),
+        (
+            "pylon_authorize_subscribe",
+            "(param i32 i32 i32 i32) (result i32) i32.const 0".into(),
+        ),
+        (
+            "pylon_authorize_input",
+            "(param i32 i32 i32 i32 i32 i32) (result i32) i32.const 0".into(),
+        ),
+    ] {
+        exports.push_str(&format!("(func (export \"{name}\") {sig})\n"));
+    }
+    wat_module(&format!(
+        "(module (memory (export \"memory\") 1) {extra} {exports})"
+    ))
+}
+
+#[test]
+fn a_module_that_claims_another_abi_is_refused() {
+    let wasm = full_module(2, "i32.const 0", "");
+    let k = WasmShardKind::compile(
+        "v2",
+        &wasm,
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap();
+    let err = k.instantiate("x", &json!({})).err().unwrap();
+    assert!(err.contains("shard ABI 2"), "{err}");
+}
+
+#[test]
+fn deep_recursion_on_a_small_stack_stops_the_shard_not_the_process() {
+    // Recursion on the native wasm stack, not a shadow stack in memory.
+    let wasm = full_module(
+        1,
+        "i32.const 0 call $down drop i32.const 0",
+        "(func $down (param i32) (result i32) local.get 0 i32.const 1 i32.add call $down)",
+    );
+    let k = WasmShardKind::compile(
+        "deep",
+        &wasm,
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap();
+    let s = Shard::new(
+        "d",
+        k.instantiate("d", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    join(&s, "u1");
+    send(&s, "u1", json!({ "input": 1 })).unwrap();
+    // HTTP workers that run authorize hooks have 512 KiB stacks.
+    let s2 = Arc::clone(&s);
+    std::thread::Builder::new()
+        .stack_size(512 << 10)
+        .spawn(move || s2.run_tick())
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(!s.is_running());
+    let failure = s.with_state(|sim| sim.failure()).unwrap();
+    assert!(failure.contains("call stack exhausted"), "{failure}");
+}

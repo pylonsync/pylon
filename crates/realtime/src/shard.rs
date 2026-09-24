@@ -5,12 +5,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::{de::DeserializeOwned, Serialize};
-
 use crate::outbound::{OutboundConfig, OutboundQueue};
+use crate::snapshot::EncodeSnapshot;
 use crate::subscriber::{Subscriber, SubscriberId};
 use crate::ticket::ShardTicket;
-use crate::wire::InputRejection;
+use crate::wire::{InputRejection, ShardInput};
 
 // ---------------------------------------------------------------------------
 // ShardAuth — auth context passed to authorization hooks
@@ -79,8 +78,8 @@ impl ShardAuth {
 /// - `snapshot_for` lets each subscriber get a filtered view (area-of-interest,
 ///   fog-of-war, role-based visibility). Default: same snapshot for everyone.
 pub trait SimState: Send + 'static {
-    type Input: DeserializeOwned + Send + 'static;
-    type Snapshot: Serialize + Send + Clone + 'static;
+    type Input: ShardInput;
+    type Snapshot: EncodeSnapshot + Send + Clone + 'static;
     type Error: std::fmt::Debug + Send + 'static;
 
     /// Apply a player/client input.
@@ -439,6 +438,12 @@ impl<S: SimState> Shard<S> {
     /// channel rather than calling this on every read.
     pub fn snapshot(&self) -> S::Snapshot {
         self.state.lock().unwrap().snapshot()
+    }
+
+    /// Run `f` with the simulation state. Holds the state lock, so a tick
+    /// waits until `f` returns.
+    pub fn with_state<R>(&self, f: impl FnOnce(&S) -> R) -> R {
+        f(&self.state.lock().unwrap())
     }
 
     pub fn subscriber_count(&self) -> usize {

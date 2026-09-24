@@ -25,6 +25,7 @@ fn empty_manifest() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
+        shards: Vec::new(),
         manifest_version: 1,
         name: "pg_test".into(),
         version: "1".into(),

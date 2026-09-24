@@ -55,7 +55,7 @@ pylon projects use ""              # clear the context
 `pylon projects create <slug>` provisions a project on Pylon Cloud without the
 dashboard. It creates the project in your org, waits for the machine to start
 (usually under a minute; `--db postgres` adds a managed-database provision first),
-pins the slug as your local context, and prints the live `https://<slug>.smallware.run` URL.
+pins the slug as your local context, and prints the live `https://<slug>.stack0.app` URL.
 
 ```bash
 pylon projects create my-app                       # SQLite, region iad, waits until live
@@ -67,7 +67,7 @@ pylon projects create my-app --no-wait             # return immediately; check w
 ```
 
 With `--json` the final line is a single machine-readable object
-(`{"ok":true,"slug":"my-app","status":"running","url":"https://my-app.smallware.run",...}`),
+(`{"ok":true,"slug":"my-app","status":"running","url":"https://my-app.stack0.app",...}`),
 so agents and scripts can chain directly into `pylon deploy`.
 
 ## Test

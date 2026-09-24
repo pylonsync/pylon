@@ -142,6 +142,7 @@ fn manifest() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
         build: Default::default(),
+        shards: Vec::new(),
         manifest_version: 1,
         name: "design-variant".into(),
         version: "0.1.0".into(),

@@ -1,0 +1,259 @@
+---
+title: "Realtime Shards"
+description: "Authoritative game and simulation logic in Rust, compiled to WebAssembly and run by the stock pylon binary on a fixed tick."
+---
+
+A shard is one running simulation: a match, a zone, a room. The server owns
+its state. Clients send inputs, the shard applies them on its tick, and every
+subscriber gets a snapshot after each tick.
+
+You write the simulation in Rust with the `pylon-shard-guest` crate and
+compile it to WebAssembly. The `pylon` binary loads the module at boot. You
+do not build a custom server binary, so the same app runs on `pylon dev`,
+`pylon start`, a Docker image, and Pylon Cloud.
+
+The complete example is [`examples/shard-arena`](https://github.com/pylonsync/pylon/tree/main/examples/shard-arena).
+
+## Set up
+
+Install the WebAssembly target once:
+
+```bash
+rustup target add wasm32-unknown-unknown
+```
+
+Make a library crate inside the app, for example `shards/arena`:
+
+```toml shards/arena/Cargo.toml
+[package]
+name = "arena-shard"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pylon-shard-guest = "0.12"
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+```
+
+If the app is inside a Cargo workspace, add an empty `[workspace]` table so
+the crate builds on its own.
+
+## Write the simulation
+
+Implement `Shard` and export it with `export_shard!`:
+
+```rust shards/arena/src/lib.rs
+use std::time::Duration;
+
+use pylon_shard_guest::{export_shard, Shard};
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct Params {
+    width: f32,
+    height: f32,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Input {
+    MoveTo { x: f32, y: f32 },
+}
+
+#[derive(Serialize, Clone)]
+struct Player {
+    id: String,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Serialize)]
+struct Snapshot {
+    players: Vec<Player>,
+}
+
+struct Arena {
+    width: f32,
+    height: f32,
+    players: Vec<Player>,
+}
+
+impl Shard for Arena {
+    type Params = Params;
+    type Input = Input;
+    type Snapshot = Snapshot;
+
+    fn init(_shard_id: &str, p: Params) -> Result<Self, String> {
+        Ok(Arena { width: p.width, height: p.height, players: Vec::new() })
+    }
+
+    fn apply_input(&mut self, sid: &str, input: Input) -> Result<(), String> {
+        let Input::MoveTo { x, y } = input;
+        if x < 0.0 || x > self.width || y < 0.0 || y > self.height {
+            return Err("outside the arena".into());
+        }
+        match self.players.iter_mut().find(|p| p.id == sid) {
+            Some(p) => (p.x, p.y) = (x, y),
+            None => self.players.push(Player { id: sid.into(), x, y }),
+        }
+        Ok(())
+    }
+
+    fn tick(&mut self, _dt: Duration) {}
+
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { players: self.players.clone() }
+    }
+}
+
+export_shard!(Arena);
+```
+
+The trait has these methods:
+
+| Method | Called | Default |
+| --- | --- | --- |
+| `init(shard_id, params)` | Once, from `ctx.shards.create`. An error refuses the create. | Required |
+| `apply_input(subscriber, input)` | On the tick, once per queued input, in arrival order. An error goes back to the sender as an `apply_failed` rejection. | Required |
+| `tick(dt)` | At the tick rate. `dt` is `1 / tickRate` with `fixedTimestep`. | Required |
+| `snapshot()` | After each tick. | Required |
+| `snapshot_for(subscriber)` | After each tick, per subscriber. Return `Some` for area of interest or fog of war. | `None`: the subscriber gets `snapshot()` |
+| `is_finished()` | After each tick. `true` stops the shard. | `false` |
+| `authorize_subscribe(subscriber, auth)` | When a client connects. | Admits an admin, a ticket holder, or a user whose id is the subscriber id |
+| `authorize_input(subscriber, auth, input)` | Before an input is queued. | Admits all |
+
+`auth` carries `user_id`, `is_admin`, `roles`, `tenant_id`, and the verified
+ticket. Read ticket claims with `auth.claim("realm")`.
+
+The module has no clock, no random source, and no I/O. Put a seed in
+`params` when the game needs random numbers. The same inputs then give the
+same state, which a replay needs. `pylon_shard_guest::log(Level::Info, "…")`
+writes to the server log.
+
+## Declare the shard kind
+
+Add the kind to `buildManifest` in `app.ts`:
+
+```ts app.ts
+import { buildManifest, shard } from "@pylonsync/sdk";
+
+export default buildManifest({
+  // ...
+  shards: [
+    shard({
+      name: "arena",
+      wasm: "shards/arena.wasm",
+      crate: "shards/arena",
+      codec: "msgpack",
+      tickRate: 20,
+    }),
+  ],
+});
+```
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `name` | The kind name `ctx.shards.create` takes. | Required |
+| `wasm` | The module, relative to the app root. | Required |
+| `crate` | A Cargo crate that `pylon shards build` compiles to `wasm`. | None |
+| `codec` | `"json"` or `"msgpack"`, for inputs and snapshots. | `"json"` |
+| `tickRate` | Ticks per second. `0` ticks only when inputs arrive. | 20 |
+| `fixedTimestep` | Pass `tick` a constant `dt`. | `true` |
+| `maxSubscribers` | Subscribers per shard. | 256 |
+| `maxInstances` | Shards of this kind that may run at once. | 64 |
+| `memoryMb` | Memory cap per shard. | 64 |
+| `tickBudgetMs` | Time limit for one tick (inputs, `tick`, snapshots), or for one authorize call. | 100 |
+| `idleShutdownSecs` | Stop a shard with no subscribers after this long. `0` never stops it. | 90 |
+| `input` | `ratePerSec`, `burst`, `maxQueued`, `maxPerTick` per subscriber. | 120, 240, 256, 32 |
+
+## Build the module
+
+```bash
+pylon shards build
+```
+
+The command runs `cargo build --release --target wasm32-unknown-unknown` for
+each kind with a `crate`, and copies the module to its `wasm` path.
+`pylon dev` runs the same build at start. It builds again and restarts the
+server when a `.rs` file or `Cargo.toml` in the crate changes.
+
+Commit the `.wasm` file. `pylon build` copies it into the artifact, and
+`pylon deploy` uploads it even when `.gitignore` lists it. When `cargo` is on
+the path, `pylon deploy` builds the crates first. A GitHub deploy uses the
+committed file, because the Cloud builder has no Rust toolchain.
+
+## Start a shard and join it
+
+An action starts a shard and gives the player a ticket:
+
+```ts functions/joinArena.ts
+import { action } from "@pylonsync/functions";
+
+export default action({
+  args: {},
+  async handler(ctx) {
+    const id = "arena-main";
+    if (!(await ctx.shards.get(id))) {
+      await ctx.shards.create("arena", id, { width: 800, height: 500 });
+    }
+    const ticket = await ctx.shards.ticket(id);
+    return { shardId: id, subscriberId: ctx.auth.userId, ticket };
+  },
+});
+```
+
+`ctx.shards` has these calls:
+
+| Call | Result |
+| --- | --- |
+| `create(kind, id, params)` | Starts shard `id`. Throws `SHARD_EXISTS`, `SHARD_LIMIT_REACHED`, `SHARD_KIND_NOT_FOUND`, `SHARD_ID_INVALID`, or `SHARD_INIT_FAILED`. Actions only. |
+| `stop(id)` | Stops the shard and closes its connections. Actions only. |
+| `get(id)` | `{ id, kind, tick, subscribers, running, error? }`, or `null`. |
+| `list()` | Every running shard. |
+| `ticket(id, opts)` | A signed ticket. See [shard tickets](/concepts/functions#shard-tickets). |
+
+A shard id is 1 to 128 letters, digits, `-`, `_`, `.`, or `:`.
+
+The client connects with the ticket:
+
+```tsx
+import { useShard } from "@pylonsync/react";
+
+const { snapshot, send, lastRejection } = useShard<Snapshot, Input>(shardId, {
+  subscriberId,
+  ticket,
+});
+
+send({ move_to: { x: 120, y: 80 } });
+```
+
+The client connects to `/shard` on the app's own origin, so it needs no
+extra port or proxy rule. See [React client](/clients/react#multiplayer-shards)
+for acks, rejections, and custom decoders.
+
+## Limits and failures
+
+- A tick that runs past `tickBudgetMs` stops the shard.
+- A module that grows past `memoryMb` stops the shard.
+- A panic stops the shard. The server log shows the panic message.
+- `ctx.shards.get(id)` returns the reason in `error` until the host removes
+  the stopped shard (within a few seconds).
+- A module may import only `pylon.log`. The server refuses a module built for
+  WASI or with any other import, and the boot fails.
+- Shard state is in memory. A restart or a deploy ends every shard.
+
+## Hosted on Stack0 Cloud
+
+[Stack0 Cloud](/cloud) runs shards with no extra setup. Clients connect to
+`wss://your-app.stack0.app/shard`, or to `/shard` on your custom domain.
+
+- An open shard connection keeps the app's machine running.
+- A machine with autostop on can stop when no client is connected. Its
+  shards end, like on any restart.

@@ -2,10 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde::Serialize;
-
 use crate::outbound::OutboundQueue;
-use crate::snapshot::{encode_snapshot, SnapshotFormat};
+use crate::snapshot::{encode_snapshot, EncodeSnapshot, SnapshotFormat};
 use crate::wire::InputRejection;
 
 // ---------------------------------------------------------------------------
@@ -80,7 +78,7 @@ pub struct Subscriber<T> {
     _phantom: std::marker::PhantomData<fn(&T)>,
 }
 
-impl<T: Serialize> Subscriber<T> {
+impl<T: EncodeSnapshot> Subscriber<T> {
     /// A subscriber that receives frames through a direct sink.
     pub fn new(id: SubscriberId, sink: SnapshotSink) -> Self {
         Self::build(id, Delivery::Sink(sink))
@@ -157,7 +155,7 @@ impl<T: Serialize> Subscriber<T> {
     /// the diff on subsequent ticks. When the queue is full the push drops
     /// the queued frames, so the frame that replaces them is a full one.
     pub fn send(&self, tick: u64, snapshot: &T, format: SnapshotFormat, ack: u64) {
-        let encoded = match encode_snapshot(snapshot, format) {
+        let encoded = match snapshot.encode_as(format) {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::warn!("[realtime] snapshot encode failed for {}: {}", self.id, e);

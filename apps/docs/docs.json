@@ -45,6 +45,7 @@
               "concepts/agents",
               "concepts/streaming",
               "concepts/realtime",
+              "concepts/shards",
               "concepts/live-queries",
               "concepts/reactive-queries",
               "concepts/optimistic-updates",

@@ -2270,6 +2270,7 @@ mod tests {
         AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "todo-app".into(),
             version: "0.1.0".into(),
@@ -2301,6 +2302,7 @@ mod tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2362,6 +2364,7 @@ mod tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2430,6 +2433,7 @@ mod tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2528,6 +2532,7 @@ mod tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "t".into(),
             version: "0".into(),
@@ -2639,6 +2644,7 @@ mod tests {
         let m = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -2691,6 +2697,7 @@ mod tests {
         let m = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: 1,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -3226,6 +3233,7 @@ mod tests {
         let manifest = AppManifest {
             required_env: Vec::new(),
             build: Default::default(),
+            shards: Vec::new(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),

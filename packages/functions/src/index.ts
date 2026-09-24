@@ -74,6 +74,8 @@ export type {
   RequireMember,
   RequireMemberOptions,
   Shards,
+  ShardsReader,
+  ShardInfo,
   MemberRow,
   Workflows,
   VectorSearchQuery,

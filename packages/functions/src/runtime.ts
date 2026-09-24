@@ -23,6 +23,7 @@ import type {
   EmailSender,
   Files,
   Shards,
+  ShardInfo,
   Stream,
   Scheduler,
   Llm,
@@ -534,6 +535,24 @@ function buildShards(callId: string): Shards {
         claims: opts?.claims ?? {},
         ttl_secs: opts?.ttlSecs,
       }) as Promise<string>;
+    },
+    async create(kind, shardId, params) {
+      return rpc(callId, {
+        type: "shard_op",
+        op: "create",
+        kind,
+        id: shardId,
+        params: params ?? {},
+      }) as Promise<ShardInfo>;
+    },
+    async stop(shardId) {
+      return rpc(callId, { type: "shard_op", op: "stop", id: shardId }) as Promise<boolean>;
+    },
+    async get(shardId) {
+      return rpc(callId, { type: "shard_op", op: "get", id: shardId }) as Promise<ShardInfo | null>;
+    },
+    async list() {
+      return rpc(callId, { type: "shard_op", op: "list" }) as Promise<ShardInfo[]>;
     },
   };
 }

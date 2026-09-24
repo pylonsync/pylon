@@ -537,6 +537,7 @@ fn empty_manifest() -> pylon_kernel::AppManifest {
         fonts: vec![],
         required_env: vec![],
         build: Default::default(),
+        shards: Vec::new(),
     }
 }
 

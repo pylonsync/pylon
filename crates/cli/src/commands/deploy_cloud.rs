@@ -210,10 +210,19 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             );
         }
     }
+    // Shard modules ship even when gitignored or under a crate's target/.
+    // Built first from their crates, so the upload matches the Rust source.
+    let shard_modules = match prepare_shard_modules(&cwd, json_mode) {
+        Ok(m) => m,
+        Err(e) => {
+            output::print_error(&e);
+            return ExitCode::Error;
+        }
+    };
     let tarball = match workspace
         .as_ref()
-        .map(build_workspace_tarball)
-        .unwrap_or_else(|| build_tarball(&cwd))
+        .map(|ws| build_workspace_tarball(ws, &shard_modules))
+        .unwrap_or_else(|| build_tarball(&cwd, &shard_modules))
     {
         Ok(t) => t,
         Err(e) => {
@@ -612,16 +621,110 @@ struct UploadResponse {
 // Tarball builder
 // ---------------------------------------------------------------------------
 
-fn build_tarball(root: &Path) -> io::Result<Vec<u8>> {
+fn build_tarball(root: &Path, forced: &[PathBuf]) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     {
         let gz = GzEncoder::new(&mut buf, Compression::default());
         let mut tar = tar::Builder::new(gz);
         let gitignore = load_gitignore(root);
-        walk_into_tar(&mut tar, root, root, &gitignore)?;
+        walk_into_tar(&mut tar, root, root, &gitignore, forced)?;
+        append_forced(&mut tar, root, forced)?;
         tar.into_inner()?.finish()?;
     }
     Ok(buf)
+}
+
+/// Append files that ship whatever the ignore rules say (shard modules).
+/// `walk_into_tar` skips them, so each appears once.
+fn append_forced<W: Write>(
+    tar: &mut tar::Builder<W>,
+    root: &Path,
+    forced: &[PathBuf],
+) -> io::Result<()> {
+    let root = root.canonicalize()?;
+    for path in forced {
+        let rel = path.strip_prefix(&root).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is outside {}", path.display(), root.display()),
+            )
+        })?;
+        tar.append_path_with_name(path, rel)?;
+    }
+    Ok(())
+}
+
+/// Build shard modules from their crates when cargo is installed, and
+/// return every module path the app declares (canonical, deduplicated).
+///
+/// Deploy never installs packages and does not require bun. It reads the
+/// shard list from app.ts when bun and node_modules are present (so a shard
+/// added since the last `pylon dev` counts), and from pylon.manifest.json
+/// otherwise.
+fn prepare_shard_modules(app_dir: &Path, json_mode: bool) -> Result<Vec<PathBuf>, String> {
+    let Some(manifest) = deploy_manifest(app_dir, json_mode) else {
+        return Ok(Vec::new());
+    };
+    if manifest.shards.is_empty() {
+        return Ok(Vec::new());
+    }
+    if manifest.shards.iter().any(|s| s.crate_dir.is_some()) {
+        let has_cargo = std::process::Command::new("cargo")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if has_cargo {
+            crate::commands::shards::build_all(&manifest, app_dir, json_mode)?;
+        } else if !json_mode {
+            println!("  cargo not found; shipping the shard modules already on disk");
+        }
+    }
+    let mut modules = manifest
+        .shards
+        .iter()
+        .map(|s| {
+            app_dir.join(&s.wasm).canonicalize().map_err(|e| {
+                format!(
+                    "shard \"{}\": {} is missing ({e}); run `pylon shards build`",
+                    s.name, s.wasm
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    // Two kinds may share one module.
+    modules.sort();
+    modules.dedup();
+    Ok(modules)
+}
+
+/// The app's manifest for deploy purposes, or None when neither source is
+/// available.
+fn deploy_manifest(app_dir: &Path, json_mode: bool) -> Option<pylon_kernel::AppManifest> {
+    let entry = app_dir.join("app.ts");
+    if app_dir.join("node_modules").is_dir() {
+        match crate::bun::eval_manifest(&entry.to_string_lossy()) {
+            Ok(json) => match serde_json::from_str(&json) {
+                Ok(m) => return Some(m),
+                Err(e) => {
+                    if !json_mode {
+                        println!("  could not parse the manifest from app.ts ({e}); using pylon.manifest.json");
+                    }
+                }
+            },
+            Err(d) => {
+                if !json_mode {
+                    println!(
+                        "  could not evaluate app.ts ({}); using pylon.manifest.json",
+                        d.message.lines().next().unwrap_or("")
+                    );
+                }
+            }
+        }
+    }
+    let path = app_dir.join("pylon.manifest.json");
+    crate::manifest::load_manifest(&path.to_string_lossy()).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -783,7 +886,7 @@ fn read_dep_names(pkg: &Path) -> Vec<String> {
 /// to the packed members, so `bun install` doesn't look for trimmed ones) + each
 /// member dir at its workspace-relative path. No lockfile — the builder
 /// fresh-resolves the pruned set (the monorepo lock references trimmed members).
-fn build_workspace_tarball(ws: &WorkspaceDeploy) -> io::Result<Vec<u8>> {
+fn build_workspace_tarball(ws: &WorkspaceDeploy, forced: &[PathBuf]) -> io::Result<Vec<u8>> {
     let mut buf = Vec::new();
     {
         let gz = GzEncoder::new(&mut buf, Compression::default());
@@ -798,8 +901,9 @@ fn build_workspace_tarball(ws: &WorkspaceDeploy) -> io::Result<Vec<u8>> {
         tar.append_data(&mut header, "package.json", root_pkg.as_slice())?;
 
         for dir in &ws.member_dirs {
-            walk_into_tar(&mut tar, &ws.root, dir, &gitignore)?;
+            walk_into_tar(&mut tar, &ws.root, dir, &gitignore, forced)?;
         }
+        append_forced(&mut tar, &ws.root, forced)?;
         tar.into_inner()?.finish()?;
     }
     Ok(buf)
@@ -827,6 +931,7 @@ fn walk_into_tar<W: Write>(
     root: &Path,
     dir: &Path,
     gitignore: &[String],
+    forced: &[PathBuf],
 ) -> io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -845,9 +950,18 @@ fn walk_into_tar<W: Write>(
             if matches_gitignore(&path, root, gitignore) {
                 continue;
             }
-            walk_into_tar(tar, root, &path, gitignore)?;
+            walk_into_tar(tar, root, &path, gitignore, forced)?;
         } else if ft.is_file() {
             if EXCLUDE_FILES.iter().any(|f| *f == name) {
+                continue;
+            }
+            // Appended by append_forced. Canonicalize only files whose name
+            // matches one, not every file in the tree.
+            if forced
+                .iter()
+                .any(|f| f.file_name() == Some(file_name.as_os_str()))
+                && path.canonicalize().is_ok_and(|p| forced.contains(&p))
+            {
                 continue;
             }
             if name.starts_with(".env.") && !name.ends_with(".example") {
@@ -1334,7 +1448,7 @@ mod workspace_deploy_tests {
         use flate2::read::GzDecoder;
         let root = fake_workspace("tarball");
         let ws = detect_workspace(&root.join("packages/app")).unwrap();
-        let tar_bytes = build_workspace_tarball(&ws).unwrap();
+        let tar_bytes = build_workspace_tarball(&ws, &[]).unwrap();
         let mut ar = tar::Archive::new(GzDecoder::new(&tar_bytes[..]));
         let mut paths = Vec::new();
         let mut root_pkg = String::new();
@@ -1562,7 +1676,7 @@ mod tests {
         // Both gitignored — but the manifest is required build input.
         std::fs::write(dir.join(".gitignore"), "pylon.manifest.json\nnotes.txt\n").unwrap();
 
-        let tarball = build_tarball(&dir).unwrap();
+        let tarball = build_tarball(&dir, &[]).unwrap();
         let names = tar_entry_names(&tarball);
         assert!(
             names.iter().any(|n| n == "pylon.manifest.json"),
@@ -1572,6 +1686,34 @@ mod tests {
             !names.iter().any(|n| n == "notes.txt"),
             "other gitignored files must stay excluded: {names:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tarball_ships_shard_modules_once_whatever_the_ignore_rules() {
+        let dir = std::env::temp_dir().join(format!("pylon-tar-shards-{}", std::process::id()));
+        let krate = dir.join("shards/arena");
+        let built = krate.join("target/wasm32-unknown-unknown/release");
+        std::fs::create_dir_all(&built).unwrap();
+        std::fs::write(dir.join("app.ts"), "export {};").unwrap();
+        std::fs::write(krate.join("Cargo.toml"), "[package]").unwrap();
+        std::fs::write(built.join("arena.wasm"), b"\0asm").unwrap();
+        std::fs::write(dir.join("shards/arena.wasm"), b"\0asm").unwrap();
+        std::fs::write(dir.join(".gitignore"), "*.wasm\n").unwrap();
+
+        let forced = vec![
+            dir.join("shards/arena.wasm").canonicalize().unwrap(),
+            built.join("arena.wasm").canonicalize().unwrap(),
+        ];
+        let names = tar_entry_names(&build_tarball(&dir, &forced).unwrap());
+        let count = |n: &str| names.iter().filter(|x| *x == n).count();
+        assert_eq!(count("shards/arena.wasm"), 1, "{names:?}");
+        assert_eq!(
+            count("shards/arena/target/wasm32-unknown-unknown/release/arena.wasm"),
+            1,
+            "{names:?}"
+        );
+        assert_eq!(count("app.ts"), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1603,7 +1745,7 @@ mod tests {
         std::fs::write(dir.join("build/bundle.js"), "//").unwrap();
         std::fs::write(dir.join("node_modules/pkg/index.js"), "//").unwrap();
 
-        let names = tar_entry_names(&build_tarball(&dir).unwrap());
+        let names = tar_entry_names(&build_tarball(&dir, &[]).unwrap());
         assert!(
             names.iter().any(|n| n == "app/build/page.tsx"),
             "a route directory named `build` is source, not output: {names:?}"
@@ -1643,7 +1785,7 @@ mod tests {
         std::fs::write(dir.join("app.ts"), "export {};").unwrap();
         std::fs::write(dir.join("build/page.tsx"), "export default () => null;").unwrap();
 
-        let names = tar_entry_names(&build_tarball(&dir).unwrap());
+        let names = tar_entry_names(&build_tarball(&dir, &[]).unwrap());
         assert!(
             names.iter().any(|n| n == "build/page.tsx"),
             "no package.json means `build` is not output: {names:?}"
