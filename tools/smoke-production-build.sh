@@ -27,6 +27,8 @@ PYLON="${1:-$ROOT/target/debug/pylon}"
 	echo "::error::no pylon binary at $PYLON (cargo build -p pylon-cli first)" >&2
 	exit 1
 }
+# Absolute, because the steps below run from other directories.
+PYLON="$(cd "$(dirname "$PYLON")" && pwd)/$(basename "$PYLON")"
 PORT="${PYLON_SMOKE_PORT:-4791}"
 TMP="$(mktemp -d -t pylon-prod-smoke.XXXXXX)"
 SERVER_PID=""
