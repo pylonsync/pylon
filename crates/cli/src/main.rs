@@ -292,7 +292,7 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  pylon jobs stats");
             println!("  pylon jobs get <id>");
             println!();
-            println!("Reads /admin/jobs on the project's machine through Pylon Cloud. Each row");
+            println!("Reads /admin/jobs on the project's machine through Stack0 Cloud. Each row");
             println!("shows the job name, status, tries, start time, and the first line of the");
             println!("error. `get <id>` prints the full error text.");
             println!();
@@ -434,7 +434,7 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  pylon deploy [--target <target>] [--project <slug>]");
             println!();
             println!("Targets:");
-            println!("  cloud (default)      Pylon Cloud");
+            println!("  cloud (default)      Stack0 Cloud");
             println!("  docker | fly | compose | workers | systemd | manifest");
             println!();
             println!("Options:");
@@ -466,15 +466,15 @@ fn print_usage() {
     println!("  build                     Build for production");
     println!("  shards build              Build WebAssembly shard modules from their Rust crates");
     println!(
-        "  deploy                    Deploy to Pylon Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
+        "  deploy                    Deploy to Stack0 Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
     );
     println!("  cache                     Run standalone cache server");
     println!("  admin <create|list|passwd|rm>  Manage Studio operator accounts");
     println!("  test [filter]             Run *.test.ts files against an in-memory Pylon");
     println!("  test:security             Adversarial security probe against a running app");
     println!();
-    println!("  login                     Authenticate against Pylon Cloud");
-    println!("  logout                    Remove stored Pylon Cloud credentials");
+    println!("  login                     Authenticate against Stack0 Cloud");
+    println!("  logout                    Remove stored Stack0 Cloud credentials");
     println!("  whoami                    Show the signed-in account, cloud, and active project");
     println!("  link                      Connect this project to a GitHub repo for auto-deploy");
     println!("  projects [list|create|use|current] List / create / set / show cloud projects");
@@ -485,7 +485,7 @@ fn print_usage() {
     println!("  data     [entities|list|get] Browse entity rows from the shell");
     println!("  deployments [list|logs|rollback] List, tail build logs, roll back");
     println!("  members  [list|invite]    Org members");
-    println!("  fn <name> [k=v ...]       Call any Pylon Cloud function by name");
+    println!("  fn <name> [k=v ...]       Call any Stack0 Cloud function by name");
     println!(
         "  jobs [list|failed|dead|stats|get <id>] Read the project's job queue and job errors"
     );

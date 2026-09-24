@@ -422,9 +422,9 @@ Logs ship to CloudWatch automatically. For richer observability:
 - **Metrics**: Pylon exposes `/metrics` in Prometheus format. Scrape with [AWS Managed Prometheus](https://aws.amazon.com/prometheus/) or [Grafana Cloud](https://grafana.com/products/cloud/).
 - **Traces**: add OpenTelemetry exporter environment variables, and SST injects the right IAM permissions for X-Ray.
 
-## Compared to Pylon Cloud
+## Compared to Stack0 Cloud
 
-If you are not committed to AWS, [Pylon Cloud](/cloud) gives you the same managed Postgres, S3, TLS, and WebSocket-aware load balancing with one CLI command (`pylon deploy --target cloud`) and per-use pricing. SST is the right choice when:
+If you are not committed to AWS, [Stack0 Cloud](/cloud) gives you the same managed Postgres, S3, TLS, and WebSocket-aware load balancing with one CLI command (`pylon deploy --target cloud`) and per-use pricing. SST is the right choice when:
 
 - You must run in AWS (compliance, existing infrastructure, reserved instance commitments)
 - You want to compose Pylon with other AWS services (Bedrock, SageMaker, IoT Core, Kinesis)
@@ -458,7 +458,7 @@ Both are valid. Pylon's wire protocol is identical regardless of how you host it
 | CloudWatch logs | ~$0.50/GB | Set `retention: "7 days"` for non-prod |
 | Secrets Manager | $0.40/secret/mo | Few secrets; minor cost |
 
-A bare-bones non-production stack runs about $30/mo. Production with NAT and multi-AZ runs about $80 to $150/mo, depending on traffic. For low-traffic apps, [Pylon Cloud](/cloud) is often cheaper than the AWS minimums.
+A bare-bones non-production stack runs about $30/mo. Production with NAT and multi-AZ runs about $80 to $150/mo, depending on traffic. For low-traffic apps, [Stack0 Cloud](/cloud) is often cheaper than the AWS minimums.
 
 ## Reference config
 

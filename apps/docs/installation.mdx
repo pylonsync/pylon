@@ -5,7 +5,7 @@ description: "Install the Pylon CLI and runtime."
 
 ## Requirements
 
-- **Bun** ≥ 1.0 is a runtime dependency. The `pylon` server binary spawns Bun as a child process to run TypeScript functions and render React SSR. Every install path below except Pylon Cloud needs Bun on the host.
+- **Bun** ≥ 1.0 is a runtime dependency. The `pylon` server binary spawns Bun as a child process to run TypeScript functions and render React SSR. Every install path below except Stack0 Cloud needs Bun on the host.
 - **Rust:** a recent stable toolchain (edition 2021). You need it only if you build the CLI from source. The prebuilt binary and Docker image need no Rust.
 - **Node.js** ≥ 18 (optional, for client tooling)
 
@@ -21,9 +21,9 @@ npm run dev
 
 This scaffolds a full-stack SSR app (schema, policies, functions, and file-based React routes under `app/`). `npm run dev` runs the bundled CLI. Install the standalone CLI below if you want `pylon` on your `PATH` for other projects or CI.
 
-## Skip the install: use Pylon Cloud
+## Skip the install: use Stack0 Cloud
 
-If you do not want to manage a binary or a server, [Pylon Cloud](/cloud) hosts the same backend you would run yourself. Sign up at [www.pylonsync.com/dashboard](https://www.pylonsync.com/dashboard), then:
+If you do not want to manage a binary or a server, [Stack0 Cloud](/cloud) hosts the same backend you would run yourself. Sign up at [www.pylonsync.com/dashboard](https://www.pylonsync.com/dashboard), then:
 
 ```bash
 pylon login
@@ -146,7 +146,7 @@ my-app/
 | `PYLON_JOBS_DB` | next to the app database | SQLite job-queue sidecar. Postgres ignores this setting. |
 | `PYLON_WORKFLOWS_DB` | next to the app database | SQLite workflow sidecar. Postgres ignores this setting. |
 | `PYLON_JOB_WORKERS` | `2` | Number of local job workers. Shared Postgres claims prevent duplicate concurrent ownership. |
-| `PYLON_CLUSTER_BUS` | *(unset)* | Redis URL for realtime fanout between self-hosted replicas. Pylon Cloud supplies a managed relay. |
+| `PYLON_CLUSTER_BUS` | *(unset)* | Redis URL for realtime fanout between self-hosted replicas. Stack0 Cloud supplies a managed relay. |
 | `PYLON_CLUSTER_REQUIRED` | `false` | Refuse to start without the shared Postgres runtime stores and a cluster bus. |
 | `PYLON_FILES_DIR` | `.pylon/uploads` | File upload storage |
 | `PYLON_CORS_ORIGIN` | from `manifest.auth.trustedOrigins` | CORS allowlist override (comma-separated). `*` only in dev. Loopback always auto-trusted. |

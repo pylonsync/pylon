@@ -289,7 +289,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                     ),
                     span: None,
                     hint: Some(
-                        "Default (no flag) deploys to Pylon Cloud. Use --target docker|fly|compose|workers|systemd to generate IaaS config, or --target manifest for just the bindings.".into(),
+                        "Default (no flag) deploys to Stack0 Cloud. Use --target docker|fly|compose|workers|systemd to generate IaaS config, or --target manifest for just the bindings.".into(),
                     ),
                 }],
                 json_mode,

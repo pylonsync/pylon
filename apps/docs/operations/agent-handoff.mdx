@@ -1,9 +1,9 @@
 ---
 title: Agent handoff
-description: "Sign your coding agent into Pylon Cloud with a one-time paste."
+description: "Sign your coding agent into Stack0 Cloud with a one-time paste."
 ---
 
-The Pylon Cloud dashboard mints a one-time 8-character code. The code signs a coding agent into your account, installs the Pylon skill, and gives the agent an opening prompt. It works with any agent that runs shell commands from a markdown prompt (Claude Code, OpenAI Codex CLI, OpenCode, Cursor, Aider, grok build). You paste the code once and type nothing.
+The Stack0 Cloud dashboard mints a one-time 8-character code. The code signs a coding agent into your account, installs the Pylon skill, and gives the agent an opening prompt. It works with any agent that runs shell commands from a markdown prompt (Claude Code, OpenAI Codex CLI, OpenCode, Cursor, Aider, grok build). You paste the code once and type nothing.
 
 ## Use it
 
@@ -58,12 +58,12 @@ Or use the regular `pylon login` paste flow when you already have a token. The c
 The full prompt the dashboard generates:
 
 ```
-I just signed up for Pylon Cloud and want you to help me build. Please run these steps in order:
+I just signed up for Stack0 Cloud and want you to help me build. Please run these steps in order:
 
 1. Install the Pylon CLI:
    curl -fsSL https://www.pylonsync.com/install.sh | bash
 
-2. Sign in to my Pylon Cloud account (single-use code, expires in 5 min):
+2. Sign in to my Stack0 Cloud account (single-use code, expires in 5 min):
    pylon login --code ABCD-1234
 
 3. Load https://www.pylonsync.com/pylon-skill.md as your reference for Pylon

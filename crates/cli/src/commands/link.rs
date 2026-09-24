@@ -478,7 +478,7 @@ fn install_github_app(
     };
 
     println!();
-    println!("→ Install the Pylon Cloud GitHub App:");
+    println!("→ Install the Stack0 Cloud GitHub App:");
     println!("  {full_install_url}");
     if no_browser {
         println!("  (--no-browser: open the URL above to continue)");
@@ -598,7 +598,7 @@ fn resolve_repo(
         let default = match_.map(|r| r.default_branch.clone());
         if match_.is_none() && !repos.is_empty() {
             eprintln!(
-                "  Warning: repo \"{canonical}\" not visible to the installed Pylon Cloud App."
+                "  Warning: repo \"{canonical}\" not visible to the installed Stack0 Cloud App."
             );
             eprintln!("  Manage the App's access: open the GitHub App settings.");
         }

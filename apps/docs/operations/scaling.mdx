@@ -31,7 +31,7 @@ overhead.
 Pylon provides two production transports:
 
 - Redis PUB/SUB for self-hosted deployments.
-- The PylonSync Durable Object relay for Pylon Cloud.
+- The PylonSync Durable Object relay for Stack0 Cloud.
 
 Multi-machine deployments must use Postgres. SQLite cannot be shared
 safely by multiple Pylon processes.
@@ -47,7 +47,7 @@ Postgres stores the entities, sessions, global sync sequence, and
 persistent change log. Redis carries low-latency events between the
 running processes.
 
-Pylon Cloud uses the built-in relay. It does not add Redis to a
+Stack0 Cloud uses the built-in relay. It does not add Redis to a
 customer project. The control plane gives each project a derived relay
 key. It never gives a customer machine the relay root key.
 
@@ -187,9 +187,9 @@ too:
   rare cases where two tabs need to see each other's writes without a
   real cluster bus.
 
-## Pylon Cloud
+## Stack0 Cloud
 
-Pylon Cloud supports multiple application machines for Postgres
+Stack0 Cloud supports multiple application machines for Postgres
 projects. The control plane configures the managed Durable Object relay,
 copies the current image and inline files to each new replica, and fans
 deploys and secret updates to all replicas. It also disables autostop
@@ -200,6 +200,6 @@ Postgres before you request replicas.
 
 ## Backend choice
 
-Use Redis for self-hosted apps. Pylon Cloud uses the managed Durable
+Use Redis for self-hosted apps. Stack0 Cloud uses the managed Durable
 Object relay. `ClusterBus` remains transport-agnostic, so other
 transports can be added without API changes for callers.

@@ -1,5 +1,5 @@
 ---
-title: Pylon Cloud
+title: Stack0 Cloud
 description: "Hosted Pylon on Stack0 Cloud."
 ---
 
@@ -28,7 +28,7 @@ There are two ways to deploy to Cloud:
 
 ### 1. Push to GitHub (recommended)
 
-Install the Pylon Cloud GitHub App on your repo from the project settings page. Every push to your project's default branch triggers a build and deploy. Pull-request pushes get a preview environment that tears down on merge.
+Install the Stack0 Cloud GitHub App on your repo from the project settings page. Every push to your project's default branch triggers a build and deploy. Pull-request pushes get a preview environment that tears down on merge.
 
 ```sh
 git push origin main
@@ -54,11 +54,11 @@ Project page → **Settings** → **Environment**. Set per-project secrets witho
 
 ### Hand off to a coding agent
 
-Every org page in Pylon Cloud has a **Hand off to your coding agent** card. Click it and paste the generated prompt into Claude Code (or Codex, OpenCode, Cursor, Aider, or grok build). The agent installs the CLI, signs in, loads the Pylon skill, and asks what you want to build. Pylon exchanges the session token through a 5-minute single-use code, so your `pk.*` API key never appears in the chat history. See [Agent handoff](/operations/agent-handoff) for the full flow.
+Every org page in Stack0 Cloud has a **Hand off to your coding agent** card. Click it and paste the generated prompt into Claude Code (or Codex, OpenCode, Cursor, Aider, or grok build). The agent installs the CLI, signs in, loads the Pylon skill, and asks what you want to build. Pylon exchanges the session token through a 5-minute single-use code, so your `pk.*` API key never appears in the chat history. See [Agent handoff](/operations/agent-handoff) for the full flow.
 
 ### Pair with Vercel for the frontend
 
-The standard Pylon production stack runs the frontend on Vercel and the backend on Pylon Cloud. Vercel builds and serves your Next.js, SvelteKit, or other frontend on its global edge network. Pylon Cloud runs the realtime backend, database, and auth.
+The standard Pylon production stack runs the frontend on Vercel and the backend on Stack0 Cloud. Vercel builds and serves your Next.js, SvelteKit, or other frontend on its global edge network. Stack0 Cloud runs the realtime backend, database, and auth.
 
 Set `PYLON_TARGET=https://your-app.stack0.app` (your project's Cloud URL) in Vercel's project environment variables. The Next.js template's rewrite then forwards `/api/*` to your Pylon backend. The browser talks to one origin, so session cookies work with no CORS setup needed.
 
@@ -79,7 +79,7 @@ Full checklist: [Deploying to Vercel](/operations/vercel).
 
 ## Scaling
 
-Pylon Cloud runs on Fly Machines. Every dashboard setting maps to a real infrastructure call:
+Stack0 Cloud runs on Fly Machines. Every dashboard setting maps to a real infrastructure call:
 
 - **Machine size:** `shared-cpu-1x · 512 MB` baseline. Resize up to 4 GB on Pro, 8 GB on Team.
 - **Volume size:** up to 100 GB on Pro, 500 GB on Team.
@@ -196,7 +196,7 @@ There is no lock-in. The binary and the data format are the same either way.
 
 ## Troubleshooting
 
-**Push did not trigger a deploy.** Confirm the Pylon Cloud GitHub App is installed on the repo (Project Settings → GitHub) and the push is to the configured default branch. The Deployments tab shows webhook receipt. If nothing arrived there, the webhook never fired.
+**Push did not trigger a deploy.** Confirm the Stack0 Cloud GitHub App is installed on the repo (Project Settings → GitHub) and the push is to the configured default branch. The Deployments tab shows webhook receipt. If nothing arrived there, the webhook never fired.
 
 **Custom domain stuck on "verifying".** DNS propagation can take up to 24 hours. `dig CNAME app.example.com` should show `customers.stack0.app`.
 

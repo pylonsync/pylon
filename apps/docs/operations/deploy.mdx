@@ -1,9 +1,9 @@
 ---
 title: Deploy
-description: "Deploy Pylon to a single VPS, AWS ECS, Cloudflare Workers, or Pylon Cloud."
+description: "Deploy Pylon to a single VPS, AWS ECS, Cloudflare Workers, or Stack0 Cloud."
 ---
 
-Pylon runs as a Rust binary (plus Bun, which runs your TypeScript and SSR) behind a TLS-terminating reverse proxy. This page covers the supported self-hosted deploy shapes and the experimental Workers path. To skip self-hosting, [Pylon Cloud](/cloud) hosts the same binary.
+Pylon runs as a Rust binary (plus Bun, which runs your TypeScript and SSR) behind a TLS-terminating reverse proxy. This page covers the supported self-hosted deploy shapes and the experimental Workers path. To skip self-hosting, [Stack0 Cloud](/cloud) hosts the same binary.
 
 Each shape can run your source (`pylon start app.ts`) or a [production build](/operations/build) (`pylon start dist`). The production build needs no source tree and no `node_modules` on the server.
 
@@ -179,7 +179,7 @@ See **[Deploy with SST](/operations/sst)** for the full walkthrough:
 
 Workers does not yet support realtime shards (tick-based sims). They need persistent state that Workers alone cannot hold efficiently. Use shape 1 or 2 for game shards.
 
-## Shape 5: Pylon Cloud
+## Shape 5: Stack0 Cloud
 
 ```bash
 pylon login
@@ -225,13 +225,13 @@ Native clients hit the same HTTP and WebSocket endpoints as browsers. Keep these
 
 ## Scale-out
 
-Pylon supports multiple processes behind a load balancer. Use Postgres for shared entities, auth state, jobs, workflows, and sync state. Configure `PYLON_CLUSTER_BUS` for live change, presence, and CRDT fanout between self-hosted processes. Pylon Cloud configures its managed relay for you.
+Pylon supports multiple processes behind a load balancer. Use Postgres for shared entities, auth state, jobs, workflows, and sync state. Configure `PYLON_CLUSTER_BUS` for live change, presence, and CRDT fanout between self-hosted processes. Stack0 Cloud configures its managed relay for you.
 
 Jobs and workflow steps use at-least-once execution. Make their handlers idempotent. SQLite remains a single-machine backend.
 
 See [Horizontal scaling](/operations/scaling) for the full setup and failure model.
 
-For multi-region on Pylon Cloud, set the workspace region during signup. Self-hosted multi-region is a manual setup: one Pylon process per region, with app-level routing.
+For multi-region on Stack0 Cloud, set the workspace region during signup. Self-hosted multi-region is a manual setup: one Pylon process per region, with app-level routing.
 
 ## What about Docker?
 

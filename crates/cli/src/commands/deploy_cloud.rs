@@ -308,7 +308,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                             (tarball.len() as f64 * 4.0 / 3.0) / 1_048_576.0,
                         );
                         eprintln!(
-                            "  On Pylon Cloud: deploy via the connected git repo instead \
+                            "  On Stack0 Cloud: deploy via the connected git repo instead \
                              (Settings → Git), or trim large static assets out of the upload."
                         );
                         eprintln!(

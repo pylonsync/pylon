@@ -108,7 +108,7 @@ const CODES: &[CodeEntry] = &[
     },
     CodeEntry {
         code: "UPGRADE_APPROVAL_REQUIRED",
-        summary: "Pylon Cloud paywalled this resize behind admin approval.",
+        summary: "Stack0 Cloud paywalled this resize behind admin approval.",
         fix: "Submit an upgrade request from the dashboard — admin reviews and approves before the resize lands.",
     },
 

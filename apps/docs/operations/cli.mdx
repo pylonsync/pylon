@@ -3,7 +3,7 @@ title: CLI reference
 description: "Every pylon command, what it does, when to use it."
 ---
 
-The `pylon` binary covers every operator task: the dev loop, deploys, secrets, logs, db, data, domains, deployments, members, and project health. Anything you do from the Pylon Cloud dashboard, you can do from the CLI and pipe to other shell tools.
+The `pylon` binary covers every operator task: the dev loop, deploys, secrets, logs, db, data, domains, deployments, members, and project health. Anything you do from the Stack0 Cloud dashboard, you can do from the CLI and pipe to other shell tools.
 
 ```bash
 pylon --help        # full command list
@@ -31,7 +31,7 @@ pylon login --code XXXX-XXXX
 pylon logout       # delete ~/.config/pylon/credentials.json
 ```
 
-`PYLON_CLOUD_URL` overrides the default `https://www.pylonsync.com` for staging or self-hosted Pylon Cloud installs.
+`PYLON_CLOUD_URL` overrides the default `https://www.pylonsync.com` for staging or self-hosted Stack0 Cloud installs.
 
 ## Project context
 
@@ -52,7 +52,7 @@ pylon projects use ""              # clear the context
 
 ### Create
 
-`pylon projects create <slug>` provisions a project on Pylon Cloud without the
+`pylon projects create <slug>` provisions a project on Stack0 Cloud without the
 dashboard. It creates the project in your org, waits for the machine to start
 (usually under a minute; `--db postgres` adds a managed-database provision first),
 pins the slug as your local context, and prints the live `https://<slug>.stack0.app` URL.
@@ -85,7 +85,7 @@ pylon test:security --target https://api.example.com --json
 ## Deploy
 
 ```bash
-pylon deploy                       # default → Pylon Cloud (packages local
+pylon deploy                       # default → Stack0 Cloud (packages local
                                    # source, uploads via the cli-tokens flow)
 
 pylon deploy --target docker       # generate Dockerfile to ./deploy/
@@ -191,7 +191,7 @@ pylon jobs get <id>                # one job with the full error text
 pylon jobs --status retrying --queue mail --limit 200
 ```
 
-Reads `/admin/jobs` on the project's machine through Pylon Cloud. Owner / admin only. A cron that stopped writing shows up here as a failed row with its function name and error.
+Reads `/admin/jobs` on the project's machine through Stack0 Cloud. Owner / admin only. A cron that stopped writing shows up here as a failed row with its function name and error.
 
 ## JSON mode
 

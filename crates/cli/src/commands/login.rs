@@ -243,7 +243,7 @@ fn verify_minted_token(cloud: &str, token: &str) -> Result<(), String> {
             "The cloud minted a token that does not authenticate ({e}). \
              This is a server-side persistence problem — the key was \
              handed out but never stored. Nothing was saved locally; \
-             check the Pylon Cloud deployment's database connection \
+             check the Stack0 Cloud deployment's database connection \
              and try again."
         )
     })
@@ -262,7 +262,7 @@ fn device_poll_fatal(msg: &str) -> Option<String> {
     if msg.contains("AUTH_REQUIRED") {
         return Some(format!(
             "Sign-in failed: the cloud rejected the unauthenticated poll — its \
-             exchangeCliAuthCode function is not public. Update the Pylon Cloud \
+             exchangeCliAuthCode function is not public. Update the Stack0 Cloud \
              install (the code, not a session, is the auth for this endpoint). \
              ({msg})"
         ));
