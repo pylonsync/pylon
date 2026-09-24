@@ -25,6 +25,8 @@ import {
   buildClientBundle,
   buildTailwind,
   assertNotServerOnly,
+  componentPathFor,
+  _doBuildInner,
   discoverLoadingModules,
   generateLoadingRegistry,
   type PylonBundleManifest,
@@ -232,6 +234,55 @@ describe("ssr-client-bundler (Phase 1.5e)", () => {
         expect(imp).not.toMatch(/^\.\.\//);
       }
     }
+  });
+
+  test("Windows separators: the build succeeds and every manifest path uses /", async () => {
+    // node:path on Windows returns "\"-separated relative paths. They used to
+    // reach the generated entries as `import Page from "../app\page"`, where
+    // `\p` is a string escape, so Bun.build failed with "Bundle failed" and
+    // every page shipped without hydration (#15).
+    tempDir = makeFixture(
+      {
+        "page.tsx": PAGE_BODY("Home"),
+        "blog/page.tsx": PAGE_BODY("Blog"),
+        "not-found.tsx": PAGE_BODY("Missing"),
+        "loading.tsx": LOADING_BODY,
+      },
+      { "layout.tsx": LAYOUT_BODY },
+    );
+    const winPath = {
+      ...path,
+      relative: (from: string, to: string) =>
+        path.relative(from, to).replace(/\//g, "\\"),
+    };
+
+    const { manifestPath } = await _doBuildInner(fs, winPath, tempDir, "app");
+    const manifest = JSON.parse(
+      fs.readFileSync(manifestPath, "utf8"),
+    ) as PylonBundleManifest;
+
+    expect(Object.keys(manifest.routes).sort()).toEqual([
+      "app/blog/page",
+      "app/not-found",
+      "app/page",
+    ]);
+    expect(manifest.outdir).toBe(".pylon/client-build");
+    for (const route of Object.values(manifest.routes)) {
+      expect(route.file).not.toContain("\\");
+      for (const imp of route.imports) expect(imp).not.toContain("\\");
+    }
+    const entry = fs.readFileSync(
+      path.join(tempDir, ".pylon", "client-entry-app__blog__page.tsx"),
+      "utf8",
+    );
+    expect(entry).toContain('import Page from "../app/blog/page";');
+    expect(entry).toContain('import L0 from "../app/layout";');
+  });
+
+  test("componentPathFor returns a /-separated path for win32 input", () => {
+    expect(
+      componentPathFor(path.win32, "C:\\proj", "C:\\proj\\app\\(shop)\\cart\\page.tsx"),
+    ).toBe("app/(shop)/cart/page");
   });
 
   test("adding a route grows the manifest by one and stays small per-entry", async () => {

@@ -142,6 +142,20 @@ export function assertNotServerOnly(specifier: string, importer: string): void {
 }
 
 /**
+ * A module file → its project-relative, extension-less component path
+ * (`<cwd>/app/blog/page.tsx` → `app/blog/page`). Always "/"-separated, on
+ * Windows too: the result is a manifest key, the input to the SSR boundary
+ * walk, and is spliced into generated `import` specifiers, where a backslash
+ * is a string escape (`"../app\page"` resolves `../apppage`).
+ */
+export function componentPathFor(path: any, cwd: string, file: string): string {
+  return path
+    .relative(cwd, file)
+    .replace(/\.(tsx?|jsx?)$/, "")
+    .replace(/\\/g, "/");
+}
+
+/**
  * Synchronously walk the route dir (`<appDirRel>` under cwd, e.g.
  * `app` or `web/app`) and return one entry per discovered page, each
  * carrying its layout chain (root → leaf). `appDirRel` MUST match the
@@ -182,7 +196,7 @@ function discoverRoutes(
       .map((n: string) => path.join(dir, n))
       .find((p: string) => fs.existsSync(p));
     const nextLayouts = layoutHere
-      ? [...layouts, path.relative(cwd, layoutHere).replace(/\.(tsx?|jsx?)$/, "")]
+      ? [...layouts, componentPathFor(path, cwd, layoutHere)]
       : layouts;
     const pageHere = ["page.tsx", "page.ts", "page.jsx", "page.js"]
       .map((n: string) => path.join(dir, n))
@@ -190,7 +204,7 @@ function discoverRoutes(
     if (pageHere) {
       pages.push({
         segments: [...segments],
-        component: path.relative(cwd, pageHere).replace(/\.(tsx?|jsx?)$/, ""),
+        component: componentPathFor(path, cwd, pageHere),
         layouts: nextLayouts,
         // e.g. [] → "/", ["p","[slug]"] → "/p/[slug]".
         pattern: "/" + segments.join("/"),
@@ -207,7 +221,7 @@ function discoverRoutes(
       if (bHere) {
         pages.push({
           segments: [...segments],
-          component: path.relative(cwd, bHere).replace(/\.(tsx?|jsx?)$/, ""),
+          component: componentPathFor(path, cwd, bHere),
           layouts: nextLayouts,
         });
       }
@@ -255,9 +269,7 @@ export function discoverLoadingModules(
       .map((n: string) => path.join(dir, n))
       .find((p: string) => fs.existsSync(p));
     if (here) {
-      found.push(
-        path.relative(cwd, here).replace(/\.(tsx?|jsx?)$/, "").replace(/\\/g, "/"),
-      );
+      found.push(componentPathFor(path, cwd, here));
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
@@ -1381,7 +1393,9 @@ export async function buildTailwind(
   return stylesName;
 }
 
-async function _doBuildInner(
+// Exported for the Windows-separator regression test (ssr-client-bundler.test.ts),
+// which injects a `path` whose `relative` returns "\"-separated paths.
+export async function _doBuildInner(
   fs: any,
   path: any,
   cwd: string,
@@ -1557,7 +1571,10 @@ async function _doBuildInner(
     //   - chunks (kind === "chunk") — looked up by basename when
     //     scanning entry files for static `import "./chunks/..."`
     //     specifiers.
-    const outdirRel = path.relative(cwd, outdir);
+    // Manifest paths are URL paths under `public_prefix` ("/"-separated). The
+    // runtime's /_pylon/build/ handler rejects any request with a backslash.
+    const toUrlPath = (p: string) => p.replace(/\\/g, "/");
+    const outdirRel = toUrlPath(path.relative(cwd, outdir));
     const entriesByStem = new Map<
       string,
       { absPath: string; relPath: string }
@@ -1568,7 +1585,7 @@ async function _doBuildInner(
     >();
     for (const o of result.outputs) {
       const absPath: string = o.path;
-      const relPath = path.relative(outdir, absPath);
+      const relPath = toUrlPath(path.relative(outdir, absPath));
       const base = path.basename(absPath);
       // Strip `-<hash>.js` to recover the entry source's stem
       // (e.g. `client-entry-app__hello__page`). The hash is
