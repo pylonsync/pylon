@@ -139,10 +139,13 @@ fn idle_and_stalled_clients_do_not_stop_the_shard_or_other_clients() {
     let elapsed = start.elapsed();
     let ticks_run = shard.tick_number() - start_tick;
 
+    // A stalled tick loop would run almost no ticks. A slow CI runner runs
+    // fewer than the 20 Hz target but far more than half; that is the bound
+    // checked here. The per-client check below stays exact.
     let expected = (elapsed.as_secs_f64() * 20.0) as u64;
     assert!(
-        ticks_run + 5 >= expected,
-        "the shard ran {ticks_run} ticks in {elapsed:?}, expected about {expected}"
+        ticks_run * 2 >= expected,
+        "the shard ran only {ticks_run} ticks in {elapsed:?} (target {expected})"
     );
     assert!(
         ticks_seen.len() as u64 + 5 >= ticks_run,

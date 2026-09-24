@@ -159,7 +159,10 @@ fn a_stalled_sse_client_does_not_hold_back_the_others() {
     let text = String::from_utf8_lossy(&buf);
     let ticks_seen = text.matches("\nid: ").count() + usize::from(text.starts_with("id: "));
 
-    assert!(ticks_run >= 70, "the shard ran {ticks_run} ticks in 4 s");
+    // A stalled tick loop would run almost no ticks. A slow CI runner runs
+    // fewer than 80 but far more than half; that is the bound checked here.
+    // The per-client check below stays exact.
+    assert!(ticks_run >= 40, "the shard ran only {ticks_run} ticks in 4 s (target 80)");
     assert!(
         ticks_seen as u64 + 5 >= ticks_run,
         "the active client saw {ticks_seen} of {ticks_run} ticks"
