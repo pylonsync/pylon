@@ -627,9 +627,13 @@ mod tests {
             artifact_data_path(&project, &artifact, "pylon.db"),
             Some(project.join("pylon.db"))
         );
+        // An absolute path elsewhere is kept as given. (A second temp dir, so
+        // the path is absolute on Windows too: `/data` is drive-relative there.)
+        let elsewhere = tempfile::tempdir().unwrap();
+        let abs_db = elsewhere.path().join("pylon.db");
         assert_eq!(
-            artifact_data_path(&project, &artifact, "/data/pylon.db"),
-            Some(std::path::PathBuf::from("/data/pylon.db"))
+            artifact_data_path(&project, &artifact, abs_db.to_str().unwrap()),
+            Some(abs_db.clone())
         );
         // Anything that resolves inside the artifact is refused.
         assert_eq!(

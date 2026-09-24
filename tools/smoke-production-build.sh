@@ -117,8 +117,22 @@ fs.writeFileSync(file, src.replace("  routes: await discoverAppRoutes(),", block
 ' "$APP/app.ts"
 
 echo "→ bun install"
-(cd "$APP" && bun add ms core-js >"$TMP/install.log" 2>&1 &&
-	bun add -d @swc/core browserslist lightningcss >>"$TMP/install.log" 2>&1) || {
+# Right after a release, `latest` names a version the registry CDN may not
+# serve yet, and bun caches the stale package index it fetched. Retry with a
+# fresh cache each time.
+installed=""
+for attempt in 1 2 3 4 5; do
+	export BUN_INSTALL_CACHE_DIR="$TMP/bun-cache-$attempt"
+	if (cd "$APP" && bun add ms core-js >"$TMP/install.log" 2>&1 &&
+		bun add -d @swc/core browserslist lightningcss >>"$TMP/install.log" 2>&1); then
+		installed=1
+		break
+	fi
+	echo "  install attempt $attempt failed; retrying in 30s" >&2
+	tail -3 "$TMP/install.log" >&2
+	sleep 30
+done
+[[ -n "$installed" ]] || {
 	tail -50 "$TMP/install.log" >&2
 	exit 1
 }
