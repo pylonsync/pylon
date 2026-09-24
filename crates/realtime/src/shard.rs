@@ -136,6 +136,15 @@ pub trait SimState: Send + 'static {
 pub struct ShardConfig {
     /// Tick rate in Hz. `0` means event-driven (ticks only when inputs arrive).
     pub tick_rate_hz: u32,
+    /// Pass `SimState::tick` a constant `dt` of `1 / tick_rate_hz` instead
+    /// of the measured time since the last tick, so cooldowns and
+    /// damage-over-time do not drift with server load and a replay
+    /// reproduces the run. Ignored when `tick_rate_hz` is 0.
+    pub fixed_timestep: bool,
+    /// When the tick loop falls behind, run at most this many extra ticks
+    /// back to back to catch up; further missed ticks are skipped and
+    /// counted in [`Shard::overrun_ticks`].
+    pub max_catch_up_ticks: u32,
     /// Max subscribers permitted. 0 = unlimited.
     pub max_subscribers: usize,
     /// Shut down the shard after this many consecutive empty ticks
@@ -170,6 +179,8 @@ impl Default for ShardConfig {
     fn default() -> Self {
         Self {
             tick_rate_hz: 20,
+            fixed_timestep: true,
+            max_catch_up_ticks: 5,
             max_subscribers: 256,
             idle_ticks_before_shutdown: 60 * 30, // 30s at 20Hz
             max_input_queue: 10_000,
@@ -252,6 +263,8 @@ struct SubscriberInputs {
     last_log: Option<Instant>,
 }
 
+type InputRecorder<I> = Box<dyn Fn(u64, &SubscriberId, &I) + Send + Sync>;
+
 /// Log dropped inputs for one subscriber at most this often.
 const DROP_LOG_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -293,6 +306,11 @@ pub struct Shard<S: SimState> {
     /// Optional hook: user callback invoked after each tick, while the
     /// state lock is held. See [`Shard::set_on_tick`].
     on_tick: Mutex<Option<Box<dyn Fn(&S, u64) + Send + Sync>>>,
+    /// Optional hook: called with every input just before it is applied,
+    /// with its tick number. See [`crate::ReplayLog::attach`].
+    input_recorder: Mutex<Option<InputRecorder<S::Input>>>,
+    /// Ticks the tick loop skipped because it fell too far behind.
+    overrun_ticks: std::sync::atomic::AtomicU64,
 }
 
 impl<S: SimState> Shard<S> {
@@ -317,6 +335,8 @@ impl<S: SimState> Shard<S> {
             last_tick_at: Mutex::new(None),
             idle_ticks: Mutex::new(0),
             on_tick: Mutex::new(None),
+            input_recorder: Mutex::new(None),
+            overrun_ticks: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -338,6 +358,41 @@ impl<S: SimState> Shard<S> {
     /// writes it from a separate thread.
     pub fn set_on_tick(&self, callback: impl Fn(&S, u64) + Send + Sync + 'static) {
         *self.on_tick.lock().unwrap() = Some(Box::new(callback));
+    }
+
+    /// Call `record` with each input, its subscriber, and the tick it is
+    /// applied on, just before it is applied. Runs under the state lock, so
+    /// it must only copy the input. [`crate::ReplayLog::attach`] uses it.
+    pub fn set_input_recorder(
+        &self,
+        record: impl Fn(u64, &SubscriberId, &S::Input) + Send + Sync + 'static,
+    ) {
+        *self.input_recorder.lock().unwrap() = Some(Box::new(record));
+    }
+
+    /// Ticks skipped so far because the tick loop fell more than
+    /// `max_catch_up_ticks` behind.
+    pub fn overrun_ticks(&self) -> u64 {
+        self.overrun_ticks.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn record_overrun(&self, skipped: u64) {
+        let total = self.overrun_ticks.fetch_add(skipped, Ordering::Relaxed) + skipped;
+        tracing::warn!(
+            "[realtime] shard {} fell behind and skipped {skipped} tick(s) ({total} so far)",
+            self.id
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn state_for_test(&self) -> std::sync::MutexGuard<'_, S> {
+        self.state.lock().unwrap()
+    }
+
+    /// The `dt` passed to `SimState::tick` under `fixed_timestep`.
+    pub fn fixed_dt(&self) -> Option<Duration> {
+        (self.config.fixed_timestep && self.config.tick_rate_hz > 0)
+            .then(|| Duration::from_nanos(1_000_000_000 / self.config.tick_rate_hz as u64))
     }
 
     pub fn is_running(&self) -> bool {
@@ -607,13 +662,14 @@ impl<S: SimState> Shard<S> {
         }
 
         let now = Instant::now();
-        let dt = self
+        let measured = self
             .last_tick_at
             .lock()
             .unwrap()
             .map(|prev| now.duration_since(prev))
             .unwrap_or_default();
         *self.last_tick_at.lock().unwrap() = Some(now);
+        let dt = self.fixed_dt().unwrap_or(measured);
 
         let mut tick_no_guard = self.tick_no.lock().unwrap();
         *tick_no_guard += 1;
@@ -631,7 +687,11 @@ impl<S: SimState> Shard<S> {
         let (snapshots, finished) = {
             let mut state = self.state.lock().unwrap();
             let mut acks = self.acks.lock().unwrap();
+            let recorder = self.input_recorder.lock().unwrap();
             for pending in drained {
+                if let Some(record) = &*recorder {
+                    record(tick_number, &pending.subscriber_id, &pending.input);
+                }
                 if let Some(seq) = pending.seq {
                     let ack = acks.entry(pending.subscriber_id.clone()).or_insert(0);
                     *ack = (*ack).max(seq);
@@ -651,6 +711,7 @@ impl<S: SimState> Shard<S> {
                 }
             }
             drop(acks);
+            drop(recorder);
 
             state.tick(dt);
 

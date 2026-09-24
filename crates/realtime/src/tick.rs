@@ -85,20 +85,39 @@ fn run_loop<S: SimState>(weak: Weak<Shard<S>>, interval: Duration, event_driven:
             if shard.input_queue_len() > 0 {
                 shard.run_tick();
             }
+            next_tick += interval;
         } else {
             shard.run_tick();
+            next_tick += interval;
+            catch_up(&shard, &mut next_tick, interval);
         }
 
         drop(shard);
 
         // Sleep until the next tick, correcting for drift.
         precise_sleep_until(next_tick);
-        next_tick += interval;
-
-        // If we've fallen badly behind, reset so we don't spin.
-        if next_tick + interval < Instant::now() {
+        if event_driven && next_tick + interval < Instant::now() {
             next_tick = Instant::now() + interval;
         }
+    }
+}
+
+/// When ticks are overdue, run up to `max_catch_up_ticks` of them back to
+/// back (each with the same fixed `dt`, so simulated time keeps pace with
+/// wall time), then skip the rest and count them as an overrun.
+fn catch_up<S: SimState>(shard: &Shard<S>, next_tick: &mut Instant, interval: Duration) {
+    let max = shard.config().max_catch_up_ticks;
+    let mut ran = 0;
+    while *next_tick <= Instant::now() && ran < max && shard.is_running() {
+        shard.run_tick();
+        *next_tick += interval;
+        ran += 1;
+    }
+    let now = Instant::now();
+    if *next_tick <= now {
+        let behind = now.duration_since(*next_tick).as_nanos() / interval.as_nanos().max(1) + 1;
+        *next_tick += interval * behind as u32;
+        shard.record_overrun(behind as u64);
     }
 }
 
@@ -147,6 +166,110 @@ mod tests {
         fn snapshot(&self) -> Self::Snapshot {
             0
         }
+    }
+
+    /// Records every dt; every third tick sleeps past the 50 ms interval.
+    struct SlowTicker {
+        dts: Vec<Duration>,
+    }
+    impl SimState for SlowTicker {
+        type Input = ();
+        type Snapshot = u64;
+        type Error = String;
+        fn apply_input(&mut self, _s: &SubscriberId, _i: (), _n: Instant) -> Result<(), String> {
+            Ok(())
+        }
+        fn tick(&mut self, dt: Duration) {
+            self.dts.push(dt);
+            if self.dts.len() % 3 == 0 {
+                std::thread::sleep(Duration::from_millis(80));
+            }
+        }
+        fn snapshot(&self) -> u64 {
+            0
+        }
+    }
+
+    #[test]
+    fn fixed_timestep_gives_every_tick_the_same_dt_even_when_ticks_run_late() {
+        let config = ShardConfig {
+            tick_rate_hz: 20,
+            idle_ticks_before_shutdown: 0,
+            ..Default::default()
+        };
+        let shard = Shard::new("t", SlowTicker { dts: Vec::new() }, config);
+        let handle = TickLoop::spawn(Arc::clone(&shard));
+        std::thread::sleep(Duration::from_millis(1200));
+        shard.stop();
+        handle.join();
+
+        let state = shard.state_for_test();
+        // 24 at the target rate; catch-up ticks keep it close despite the
+        // slow ticks. The bound leaves room for a loaded CI runner.
+        assert!(
+            state.dts.len() >= 15,
+            "ran {} ticks in 1.2 s",
+            state.dts.len()
+        );
+        assert!(
+            state.dts.iter().all(|dt| *dt == Duration::from_millis(50)),
+            "dts: {:?}",
+            state.dts
+        );
+    }
+
+    /// Position integrates velocity over dt; inputs set the velocity.
+    #[derive(Clone, PartialEq, Debug)]
+    struct Mover {
+        pos: f64,
+        vel: f64,
+    }
+    impl SimState for Mover {
+        type Input = f64;
+        type Snapshot = f64;
+        type Error = String;
+        fn apply_input(&mut self, _s: &SubscriberId, v: f64, _n: Instant) -> Result<(), String> {
+            self.vel = v;
+            Ok(())
+        }
+        fn tick(&mut self, dt: Duration) {
+            self.pos += self.vel * dt.as_secs_f64();
+        }
+        fn snapshot(&self) -> f64 {
+            self.pos
+        }
+    }
+
+    #[test]
+    fn a_replay_of_the_recorded_inputs_matches_the_live_run() {
+        use crate::replay::{replay_to, ReplayLog};
+        let config = ShardConfig {
+            tick_rate_hz: 50,
+            idle_ticks_before_shutdown: 0,
+            ..Default::default()
+        };
+        let initial = Mover { pos: 0.0, vel: 0.0 };
+        let shard = Shard::new("t", initial.clone(), config);
+        let log: Arc<ReplayLog<f64>> = ReplayLog::new(0);
+        log.attach(&shard);
+        let handle = TickLoop::spawn(Arc::clone(&shard));
+        for v in [1.0, -0.5, 3.25, 0.0, 2.0] {
+            shard.push_input(SubscriberId::new("p"), v, None).unwrap();
+            std::thread::sleep(Duration::from_millis(73));
+        }
+        shard.stop();
+        handle.join();
+
+        let live = shard.state_for_test().clone();
+        let replayed = replay_to(
+            initial,
+            &log.entries(),
+            shard.fixed_dt().unwrap(),
+            shard.tick_number(),
+        );
+        assert_eq!(log.len(), 5);
+        assert!(live.pos != 0.0);
+        assert_eq!(replayed, live);
     }
 
     #[test]

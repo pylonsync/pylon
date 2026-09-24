@@ -3,21 +3,23 @@
 //!
 //! How this works:
 //! - [`ReplayLog<I>`] is a bounded in-memory buffer of `(tick, subscriber_id, input)` triples.
-//! - `ReplayLog::record()` is wired into `SimState::apply_input` by the user
-//!   (or automatically via [`RecordingState`]).
-//! - [`replay`] takes an initial state + the recorded inputs and re-applies
-//!   them deterministically against a fresh simulation.
+//! - [`ReplayLog::attach`] makes a shard record every input with the tick
+//!   it is applied on.
+//! - [`replay_to`] re-runs the recorded inputs against a fresh state in the
+//!   same order as the live shard: on tick `n`, apply tick `n`'s inputs,
+//!   then advance time by `dt`.
 //!
-//! Determinism is the caller's responsibility — if your `SimState::tick` uses
-//! `rand::random()` you won't reproduce the same state. Use seeded RNGs
-//! anchored to the tick number.
+//! A replay reproduces the live run when the shard uses `fixed_timestep`
+//! (every tick gets the same `dt`) and the simulation is deterministic: no
+//! wall-clock reads (including `apply_input`'s `now` argument) and no
+//! unseeded randomness. Seed RNGs from the tick number.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::shard::SimState;
+use crate::shard::{Shard, SimState};
 use crate::subscriber::SubscriberId;
 
 // ---------------------------------------------------------------------------
@@ -74,39 +76,64 @@ impl<I: Clone> ReplayLog<I> {
     }
 }
 
+impl<I: Clone + Send + Sync + 'static> ReplayLog<I> {
+    /// Record every input `shard` applies, with its tick number.
+    pub fn attach<S>(self: &Arc<Self>, shard: &Shard<S>)
+    where
+        S: SimState<Input = I>,
+    {
+        let log = Arc::clone(self);
+        shard.set_input_recorder(move |tick, id, input| log.record(tick, id, input.clone()));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Replay helper
 // ---------------------------------------------------------------------------
 
-/// Replay a sequence of recorded inputs against a fresh initial state.
+/// Replay recorded inputs against a fresh initial state through tick
+/// `final_tick`, in the live shard's order: for each tick `n` from 1, apply
+/// the inputs recorded for tick `n`, then call `state.tick(dt_per_tick)`.
+/// Pass the shard's [`Shard::fixed_dt`] as `dt_per_tick` and its
+/// [`Shard::tick_number`] as `final_tick`.
 ///
-/// Between entries, calls `state.tick(dt_per_tick)` for each tick that
-/// elapsed — this mirrors the live simulation's cadence.
-pub fn replay<S: SimState>(
+/// An `apply_input` error is not fatal, as in the live shard (the input is
+/// rejected and the tick goes on).
+pub fn replay_to<S: SimState>(
     initial: S,
     entries: &[ReplayEntry<S::Input>],
     dt_per_tick: Duration,
-) -> Result<S, String>
+    final_tick: u64,
+) -> S
 where
     S::Input: Clone,
 {
     let mut state = initial;
     let now = Instant::now();
-    let mut last_tick = 0u64;
-
-    for entry in entries {
-        // Tick forward to the entry's tick number.
-        while last_tick < entry.tick {
-            state.tick(dt_per_tick);
-            last_tick += 1;
+    let mut next = 0;
+    for tick in 1..=final_tick {
+        while next < entries.len() && entries[next].tick <= tick {
+            let entry = &entries[next];
+            let sid = SubscriberId::new(entry.subscriber_id.clone());
+            let _ = state.apply_input(&sid, entry.input.clone(), now);
+            next += 1;
         }
-        let sid = SubscriberId::new(entry.subscriber_id.clone());
-        state
-            .apply_input(&sid, entry.input.clone(), now)
-            .map_err(|e| format!("replay apply_input failed at tick {}: {:?}", entry.tick, e))?;
+        state.tick(dt_per_tick);
     }
+    state
+}
 
-    Ok(state)
+/// [`replay_to`] through the tick of the last entry.
+pub fn replay<S: SimState>(
+    initial: S,
+    entries: &[ReplayEntry<S::Input>],
+    dt_per_tick: Duration,
+) -> S
+where
+    S::Input: Clone,
+{
+    let last = entries.last().map(|e| e.tick).unwrap_or(0);
+    replay_to(initial, entries, dt_per_tick, last)
 }
 
 #[cfg(test)]
@@ -180,7 +207,7 @@ mod tests {
                 input: -3i64,
             },
         ];
-        let replayed = replay(Counter { value: 0 }, &entries, Duration::from_millis(50)).unwrap();
+        let replayed = replay(Counter { value: 0 }, &entries, Duration::from_millis(50));
         assert_eq!(replayed.value, 12);
     }
 

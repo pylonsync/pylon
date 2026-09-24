@@ -60,7 +60,7 @@ pub use outbound::{Frame, FrameKind, OutboundConfig, OutboundQueue, PushOutcome}
 pub use persistence::{persist_every_ticks, restore_or_init};
 pub use prediction::{InputAck, Reconciliation};
 pub use registry::ShardRegistry;
-pub use replay::{replay, ReplayEntry, ReplayLog};
+pub use replay::{replay, replay_to, ReplayEntry, ReplayLog};
 pub use shard::{Shard, ShardAuth, ShardConfig, ShardError, SimState};
 pub use snapshot::{encode_snapshot, SnapshotFormat};
 pub use subscriber::{SnapshotSink, Subscriber, SubscriberId};
