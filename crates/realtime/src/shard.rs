@@ -1,12 +1,13 @@
 //! The core [`Shard`] abstraction.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{de::DeserializeOwned, Serialize};
 
+use crate::outbound::{OutboundConfig, OutboundQueue};
 use crate::subscriber::{Subscriber, SubscriberId};
 
 // ---------------------------------------------------------------------------
@@ -139,8 +140,27 @@ pub struct ShardConfig {
     /// Shut down the shard after this many consecutive empty ticks
     /// (no inputs, no subscribers). 0 = never.
     pub idle_ticks_before_shutdown: u32,
-    /// Drop inputs if the queue exceeds this. 0 = unlimited (careful).
+    /// Drop inputs if the shard's whole queue exceeds this. The last guard
+    /// behind the per-subscriber limits below. 0 = unlimited (careful).
     pub max_input_queue: usize,
+    /// Inputs one subscriber may have queued. Further inputs from that
+    /// subscriber are dropped until the tick drains some. 0 = unlimited.
+    pub max_queued_inputs_per_subscriber: usize,
+    /// Inputs applied per subscriber per tick. The rest wait for the next
+    /// tick, in order. 0 = unlimited.
+    pub max_inputs_per_subscriber_per_tick: usize,
+    /// Sustained inputs per second per subscriber (token bucket refill
+    /// rate). 0 = unlimited.
+    pub input_rate_per_subscriber: f64,
+    /// Token bucket size: inputs a subscriber may send in a burst above the
+    /// sustained rate.
+    pub input_burst_per_subscriber: f64,
+    /// Frames each queued subscriber's outbound queue holds before snapshots
+    /// are dropped for newer ones.
+    pub outbound_queue_frames: usize,
+    /// Disconnect a subscriber whose outbound queue filled and whose writer
+    /// then took no frame for this long.
+    pub slow_subscriber_timeout: Duration,
     /// Snapshot format used on the wire.
     pub snapshot_format: crate::snapshot::SnapshotFormat,
 }
@@ -152,7 +172,23 @@ impl Default for ShardConfig {
             max_subscribers: 256,
             idle_ticks_before_shutdown: 60 * 30, // 30s at 20Hz
             max_input_queue: 10_000,
+            max_queued_inputs_per_subscriber: 256,
+            max_inputs_per_subscriber_per_tick: 32,
+            input_rate_per_subscriber: 120.0,
+            input_burst_per_subscriber: 240.0,
+            outbound_queue_frames: 64,
+            slow_subscriber_timeout: Duration::from_secs(10),
             snapshot_format: crate::snapshot::SnapshotFormat::Json,
+        }
+    }
+}
+
+impl ShardConfig {
+    /// The outbound queue settings for one subscriber.
+    pub fn outbound(&self) -> OutboundConfig {
+        OutboundConfig {
+            max_frames: self.outbound_queue_frames,
+            disconnect_after: self.slow_subscriber_timeout,
         }
     }
 }
@@ -165,6 +201,9 @@ impl Default for ShardConfig {
 pub enum ShardError {
     Full,
     InputQueueFull,
+    /// This subscriber is over its own input limits. Other subscribers are
+    /// not affected.
+    InputRateLimited,
     Stopped,
     SubscriberNotFound,
     Unauthorized(String),
@@ -176,6 +215,7 @@ impl std::fmt::Display for ShardError {
         match self {
             Self::Full => write!(f, "shard is at max subscribers"),
             Self::InputQueueFull => write!(f, "shard input queue is full"),
+            Self::InputRateLimited => write!(f, "too many inputs from this subscriber"),
             Self::Stopped => write!(f, "shard is stopped"),
             Self::SubscriberNotFound => write!(f, "subscriber not found"),
             Self::Unauthorized(reason) => write!(f, "unauthorized: {reason}"),
@@ -200,6 +240,28 @@ struct PendingInput<I> {
     received_at: Instant,
 }
 
+/// Per-subscriber input accounting.
+struct SubscriberInputs {
+    /// Inputs this subscriber has in the queue.
+    queued: usize,
+    /// Token bucket for `input_rate_per_subscriber`.
+    tokens: f64,
+    last_refill: Instant,
+    /// Inputs dropped since the last log line for this subscriber.
+    dropped_since_log: u64,
+    last_log: Option<Instant>,
+}
+
+/// Log dropped inputs for one subscriber at most this often.
+const DROP_LOG_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The shard's input queue plus the per-subscriber accounting, under one
+/// lock so the counts always match the queue.
+struct InputQueue<I> {
+    queue: VecDeque<PendingInput<I>>,
+    per_subscriber: HashMap<SubscriberId, SubscriberInputs>,
+}
+
 // ---------------------------------------------------------------------------
 // Shard
 // ---------------------------------------------------------------------------
@@ -212,8 +274,8 @@ pub struct Shard<S: SimState> {
     id: String,
     config: ShardConfig,
     state: Mutex<S>,
-    inputs: Mutex<VecDeque<PendingInput<S::Input>>>,
-    subscribers: Mutex<Vec<Subscriber<S::Snapshot>>>,
+    inputs: Mutex<InputQueue<S::Input>>,
+    subscribers: Mutex<Vec<Arc<Subscriber<S::Snapshot>>>>,
     running: AtomicBool,
     /// Monotonically increasing tick number. Used for reconciliation and
     /// lockstep protocols.
@@ -225,8 +287,8 @@ pub struct Shard<S: SimState> {
     last_tick_at: Mutex<Option<Instant>>,
     /// Count of consecutive idle ticks (no inputs, no subscribers).
     idle_ticks: Mutex<u32>,
-    /// Optional hook: user callback invoked after each tick. Useful for
-    /// persistence (save state to pylon every N ticks).
+    /// Optional hook: user callback invoked after each tick, while the
+    /// state lock is held. See [`Shard::set_on_tick`].
     on_tick: Mutex<Option<Box<dyn Fn(&S, u64) + Send + Sync>>>,
 }
 
@@ -238,7 +300,10 @@ impl<S: SimState> Shard<S> {
             id: id.into(),
             config,
             state: Mutex::new(initial),
-            inputs: Mutex::new(VecDeque::new()),
+            inputs: Mutex::new(InputQueue {
+                queue: VecDeque::new(),
+                per_subscriber: HashMap::new(),
+            }),
             subscribers: Mutex::new(Vec::new()),
             running: AtomicBool::new(true),
             tick_no: Mutex::new(0),
@@ -259,8 +324,14 @@ impl<S: SimState> Shard<S> {
         &self.config
     }
 
-    /// Register a callback that runs after every tick — use to persist state
-    /// via pylon, push metrics, or trigger side effects.
+    /// Register a callback that runs after every tick with the state and the
+    /// tick number.
+    ///
+    /// It runs on the tick thread while the state lock is held, so it must
+    /// not do I/O or anything else that can wait: the whole shard stops for
+    /// as long as it runs. To save state, use
+    /// [`crate::persist_every_ticks`], which copies the state here and
+    /// writes it from a separate thread.
     pub fn set_on_tick(&self, callback: impl Fn(&S, u64) + Send + Sync + 'static) {
         *self.on_tick.lock().unwrap() = Some(Box::new(callback));
     }
@@ -293,7 +364,7 @@ impl<S: SimState> Shard<S> {
     }
 
     pub fn input_queue_len(&self) -> usize {
-        self.inputs.lock().unwrap().len()
+        self.inputs.lock().unwrap().queue.len()
     }
 
     // -----------------------------------------------------------------------
@@ -318,7 +389,7 @@ impl<S: SimState> Shard<S> {
         if self.config.max_subscribers > 0 && subs.len() >= self.config.max_subscribers {
             return Err(ShardError::Full);
         }
-        subs.push(sub);
+        subs.push(Arc::new(sub));
         Ok(())
     }
 
@@ -337,11 +408,45 @@ impl<S: SimState> Shard<S> {
         self.add_subscriber(sub)
     }
 
+    /// Add a subscriber that receives frames through a new outbound queue,
+    /// sized from the shard config, after the authorization hook. The
+    /// transport drains the returned queue.
+    pub fn add_queued_subscriber_authorized(
+        &self,
+        id: SubscriberId,
+        auth: &ShardAuth,
+    ) -> Result<Arc<OutboundQueue>, ShardError> {
+        let queue = OutboundQueue::new(self.config.outbound());
+        self.add_subscriber_authorized(Subscriber::with_queue(id, Arc::clone(&queue)), auth)?;
+        Ok(queue)
+    }
+
     pub fn remove_subscriber(&self, id: &SubscriberId) -> bool {
-        let mut subs = self.subscribers.lock().unwrap();
-        let before = subs.len();
-        subs.retain(|s| s.id() != id);
-        before != subs.len()
+        let removed = {
+            let mut subs = self.subscribers.lock().unwrap();
+            let before = subs.len();
+            subs.retain(|s| {
+                if s.id() == id {
+                    // Wake the transport's writer so it ends too.
+                    if let Some(q) = s.queue() {
+                        q.close();
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            before != subs.len()
+        };
+        if removed {
+            // Keep the entry while inputs from this subscriber are still
+            // queued; the tick removes it once they drain.
+            let mut inputs = self.inputs.lock().unwrap();
+            if inputs.per_subscriber.get(id).is_some_and(|e| e.queued == 0) {
+                inputs.per_subscriber.remove(id);
+            }
+        }
+        removed
     }
 
     // -----------------------------------------------------------------------
@@ -367,24 +472,73 @@ impl<S: SimState> Shard<S> {
             return Err(ShardError::Stopped);
         }
 
+        let now = Instant::now();
+        {
+            let mut q = self.inputs.lock().unwrap();
+            let cfg = &self.config;
+            let entry = q
+                .per_subscriber
+                .entry(subscriber_id.clone())
+                .or_insert_with(|| SubscriberInputs {
+                    queued: 0,
+                    tokens: cfg.input_burst_per_subscriber.max(1.0),
+                    last_refill: now,
+                    dropped_since_log: 0,
+                    last_log: None,
+                });
+
+            // This subscriber's limits first, so one client flooding the
+            // shard only loses its own inputs.
+            let mut limited = cfg.max_queued_inputs_per_subscriber > 0
+                && entry.queued >= cfg.max_queued_inputs_per_subscriber;
+            if !limited && cfg.input_rate_per_subscriber > 0.0 {
+                let burst = cfg.input_burst_per_subscriber.max(1.0);
+                let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
+                entry.tokens = (entry.tokens + elapsed * cfg.input_rate_per_subscriber).min(burst);
+                entry.last_refill = now;
+                if entry.tokens >= 1.0 {
+                    entry.tokens -= 1.0;
+                } else {
+                    limited = true;
+                }
+            }
+            if limited {
+                entry.dropped_since_log += 1;
+                if entry
+                    .last_log
+                    .is_none_or(|t| now.duration_since(t) >= DROP_LOG_INTERVAL)
+                {
+                    tracing::warn!(
+                        "[realtime] shard {}: dropped {} input(s) from subscriber {} over its input limit",
+                        self.id,
+                        entry.dropped_since_log,
+                        subscriber_id
+                    );
+                    entry.dropped_since_log = 0;
+                    entry.last_log = Some(now);
+                }
+                return Err(ShardError::InputRateLimited);
+            }
+
+            if cfg.max_input_queue > 0 && q.queue.len() >= cfg.max_input_queue {
+                return Err(ShardError::InputQueueFull);
+            }
+            q.per_subscriber
+                .get_mut(&subscriber_id)
+                .expect("entry inserted above")
+                .queued += 1;
+            q.queue.push_back(PendingInput {
+                subscriber_id,
+                input,
+                seq: client_seq,
+                received_at: now,
+            });
+        }
+        *self.last_input_at.lock().unwrap() = now;
+
         let mut seq_guard = self.input_seq.lock().unwrap();
         *seq_guard += 1;
-        let seq = *seq_guard;
-        drop(seq_guard);
-
-        let mut q = self.inputs.lock().unwrap();
-        if self.config.max_input_queue > 0 && q.len() >= self.config.max_input_queue {
-            return Err(ShardError::InputQueueFull);
-        }
-        q.push_back(PendingInput {
-            subscriber_id,
-            input,
-            seq: client_seq,
-            received_at: Instant::now(),
-        });
-        *self.last_input_at.lock().unwrap() = Instant::now();
-
-        Ok(seq)
+        Ok(*seq_guard)
     }
 
     /// Queue an input after running the user's authorization hook.
@@ -425,11 +579,18 @@ impl<S: SimState> Shard<S> {
     // -----------------------------------------------------------------------
 
     /// Advance the shard by one tick:
-    /// 1. Drain the input queue, applying each input to state.
+    /// 1. Drain the input queue, applying each input to state (at most
+    ///    `max_inputs_per_subscriber_per_tick` per subscriber; the rest wait
+    ///    for the next tick).
     /// 2. Advance simulation time by `dt`.
-    /// 3. Broadcast a per-subscriber snapshot.
-    /// 4. Run the user's `on_tick` hook if set.
-    /// 5. Check finish / idle-shutdown conditions.
+    /// 3. Run the user's `on_tick` hook if set.
+    /// 4. Take a per-subscriber snapshot.
+    /// 5. Release the state lock, then encode and deliver the snapshots.
+    /// 6. Check finish / idle-shutdown conditions.
+    ///
+    /// Only steps 1-4 hold the state lock. Delivery never waits on a client:
+    /// a queued subscriber's frame goes into its outbound queue, and a
+    /// subscriber whose queue closed is removed.
     pub fn run_tick(&self) {
         if !self.is_running() {
             return;
@@ -449,15 +610,14 @@ impl<S: SimState> Shard<S> {
         let tick_number = *tick_no_guard;
         drop(tick_no_guard);
 
-        // Drain all pending inputs first, before ticking.
-        let drained: Vec<PendingInput<S::Input>> = {
-            let mut q = self.inputs.lock().unwrap();
-            q.drain(..).collect()
-        };
+        let drained = self.drain_inputs();
         let had_inputs = !drained.is_empty();
-        let sub_count = self.subscriber_count();
+        // Clone the list so delivery below runs without the subscribers
+        // lock: a transport can add or remove subscribers meanwhile.
+        let subs: Vec<Arc<Subscriber<S::Snapshot>>> = self.subscribers.lock().unwrap().clone();
+        let sub_count = subs.len();
 
-        {
+        let (snapshots, finished) = {
             let mut state = self.state.lock().unwrap();
             for pending in drained {
                 if let Err(e) =
@@ -469,25 +629,42 @@ impl<S: SimState> Shard<S> {
 
             state.tick(dt);
 
-            // Run the persistence / side-effect hook.
             if let Some(cb) = &*self.on_tick.lock().unwrap() {
                 cb(&state, tick_number);
             }
 
-            // Broadcast.
-            if sub_count > 0 {
-                let subs = self.subscribers.lock().unwrap();
-                for sub in subs.iter() {
-                    let snap = state.snapshot_for(sub.id());
-                    sub.send(tick_number, &snap, self.config.snapshot_format);
-                }
-            }
+            let snapshots: Vec<S::Snapshot> = subs
+                .iter()
+                .map(|sub| state.snapshot_for(sub.id()))
+                .collect();
+            (snapshots, state.is_finished())
+        };
 
-            // Check finish.
-            if state.is_finished() {
-                self.running.store(false, Ordering::Release);
-                return;
-            }
+        // Encode and deliver outside the state lock.
+        let mut closed = false;
+        for (sub, snap) in subs.iter().zip(snapshots.iter()) {
+            sub.send(tick_number, snap, self.config.snapshot_format);
+            closed |= sub.is_closed();
+        }
+        if closed {
+            let mut all = self.subscribers.lock().unwrap();
+            all.retain(|s| {
+                if s.is_closed() {
+                    tracing::warn!(
+                        "[realtime] shard {}: disconnecting subscriber {} (outbound queue closed)",
+                        self.id,
+                        s.id()
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+
+        if finished {
+            self.running.store(false, Ordering::Release);
+            return;
         }
 
         // Idle tracking.
@@ -502,6 +679,47 @@ impl<S: SimState> Shard<S> {
                 self.running.store(false, Ordering::Release);
             }
         }
+    }
+
+    /// Take this tick's inputs off the queue: all of them, except that a
+    /// subscriber over `max_inputs_per_subscriber_per_tick` keeps the rest
+    /// queued, in order, for the next tick.
+    fn drain_inputs(&self) -> Vec<PendingInput<S::Input>> {
+        let limit = self.config.max_inputs_per_subscriber_per_tick;
+        let mut q = self.inputs.lock().unwrap();
+        let InputQueue {
+            queue,
+            per_subscriber,
+        } = &mut *q;
+        let mut taken = Vec::with_capacity(queue.len());
+        if limit == 0 {
+            taken.extend(queue.drain(..));
+        } else {
+            let mut this_tick: HashMap<SubscriberId, usize> = HashMap::new();
+            let mut carry = VecDeque::new();
+            for pending in queue.drain(..) {
+                let n = this_tick.entry(pending.subscriber_id.clone()).or_insert(0);
+                if *n < limit {
+                    *n += 1;
+                    taken.push(pending);
+                } else {
+                    carry.push_back(pending);
+                }
+            }
+            *queue = carry;
+        }
+        for pending in &taken {
+            if let Some(e) = per_subscriber.get_mut(&pending.subscriber_id) {
+                e.queued = e.queued.saturating_sub(1);
+            }
+        }
+        // Forget subscribers that left and have nothing queued. An attached
+        // subscriber keeps its entry (and its token bucket).
+        if !taken.is_empty() {
+            let attached = self.subscribers.lock().unwrap();
+            per_subscriber.retain(|id, e| e.queued > 0 || attached.iter().any(|s| s.id() == id));
+        }
+        taken
     }
 }
 
@@ -704,6 +922,175 @@ mod tests {
             is_admin: true,
         };
         shard.add_subscriber_authorized(sub, &admin).unwrap();
+    }
+
+    fn counter() -> Counter {
+        Counter {
+            value: 0,
+            finished: false,
+        }
+    }
+
+    #[test]
+    fn one_flooding_subscriber_does_not_crowd_out_another() {
+        let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), ShardConfig::default());
+        let a = SubscriberId::new("a");
+        let b = SubscriberId::new("b");
+        let mut a_rejected = 0;
+        for _ in 0..50_000 {
+            if shard.push_input(a.clone(), 1, None).is_err() {
+                a_rejected += 1;
+            }
+        }
+        assert!(
+            a_rejected > 49_000,
+            "a's flood was limited ({a_rejected} rejected)"
+        );
+        shard.push_input(b.clone(), 1_000_000, None).unwrap();
+
+        shard.run_tick();
+        let value = shard.state.lock().unwrap().value;
+        assert!(
+            value >= 1_000_000,
+            "b's input was applied on this tick (value {value})"
+        );
+    }
+
+    #[test]
+    fn inputs_over_the_per_tick_limit_wait_for_the_next_tick_in_order() {
+        let config = ShardConfig {
+            max_inputs_per_subscriber_per_tick: 3,
+            ..Default::default()
+        };
+        let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), config);
+        let a = SubscriberId::new("a");
+        for i in 0..5 {
+            shard.push_input(a.clone(), 10_i64.pow(i), None).unwrap();
+        }
+        shard
+            .push_input(SubscriberId::new("b"), 100_000, None)
+            .unwrap();
+        shard.run_tick();
+        // a: 1 + 10 + 100; b: 100000. a's 1000 and 10000 wait.
+        assert_eq!(shard.state.lock().unwrap().value, 100_111);
+        assert_eq!(shard.input_queue_len(), 2);
+        shard.run_tick();
+        assert_eq!(shard.state.lock().unwrap().value, 111_111);
+        assert_eq!(shard.input_queue_len(), 0);
+    }
+
+    #[test]
+    fn the_token_bucket_refills_over_time() {
+        let config = ShardConfig {
+            input_rate_per_subscriber: 1000.0,
+            input_burst_per_subscriber: 5.0,
+            max_queued_inputs_per_subscriber: 0,
+            ..Default::default()
+        };
+        let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), config);
+        let a = SubscriberId::new("a");
+        let accepted = (0..20)
+            .filter(|_| shard.push_input(a.clone(), 1, None).is_ok())
+            .count();
+        assert_eq!(accepted, 5, "the burst allows 5");
+        assert!(matches!(
+            shard.push_input(a.clone(), 1, None),
+            Err(ShardError::InputRateLimited)
+        ));
+        std::thread::sleep(Duration::from_millis(10)); // ~10 tokens at 1000/s
+        assert!(shard.push_input(a, 1, None).is_ok());
+    }
+
+    #[test]
+    fn a_stalled_client_does_not_slow_the_tick_or_other_subscribers() {
+        use crate::outbound::OutboundQueue;
+        let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), ShardConfig::default());
+
+        // A queued subscriber whose writer takes 2 s per frame.
+        let slow = OutboundQueue::new(shard.config().outbound());
+        let slow_writer = Arc::clone(&slow);
+        std::thread::spawn(move || {
+            while slow_writer.pop_blocking(Duration::from_secs(5)).is_some() {
+                std::thread::sleep(Duration::from_secs(2));
+            }
+        });
+        shard
+            .add_subscriber(Subscriber::with_queue(
+                SubscriberId::new("slow"),
+                Arc::clone(&slow),
+            ))
+            .unwrap();
+
+        // A healthy direct subscriber counts the frames it gets.
+        let got = Arc::new(AtomicU64::new(0));
+        let g = Arc::clone(&got);
+        shard
+            .add_subscriber(Subscriber::new(
+                SubscriberId::new("ok"),
+                Box::new(move |_t, _b| {
+                    g.fetch_add(1, Ordering::Relaxed);
+                }),
+            ))
+            .unwrap();
+
+        let mut worst = Duration::ZERO;
+        for _ in 0..100 {
+            let start = Instant::now();
+            shard.run_tick();
+            worst = worst.max(start.elapsed());
+        }
+        assert!(worst < Duration::from_millis(5), "a tick took {worst:?}");
+        assert_eq!(
+            got.load(Ordering::Relaxed),
+            100,
+            "the healthy subscriber got every tick"
+        );
+        // The slow queue is at its cap with only the newest snapshots.
+        assert!(slow.len() <= shard.config().outbound_queue_frames);
+        assert!(slow.dropped_snapshots() > 0);
+    }
+
+    #[test]
+    fn a_subscriber_whose_queue_closes_is_removed() {
+        use crate::outbound::OutboundQueue;
+        let config = ShardConfig {
+            outbound_queue_frames: 2,
+            slow_subscriber_timeout: Duration::from_millis(20),
+            ..Default::default()
+        };
+        let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), config);
+        let queue: Arc<OutboundQueue> = shard
+            .add_queued_subscriber_authorized(
+                SubscriberId::new("admin"),
+                &ShardAuth {
+                    user_id: None,
+                    is_admin: true,
+                },
+            )
+            .unwrap();
+        // Nobody drains the queue.
+        for _ in 0..3 {
+            shard.run_tick();
+        }
+        assert_eq!(shard.subscriber_count(), 1);
+        std::thread::sleep(Duration::from_millis(30));
+        shard.run_tick();
+        assert!(queue.is_closed());
+        assert_eq!(shard.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn remove_subscriber_closes_its_queue() {
+        let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), ShardConfig::default());
+        let admin = ShardAuth {
+            user_id: None,
+            is_admin: true,
+        };
+        let q = shard
+            .add_queued_subscriber_authorized(SubscriberId::new("x"), &admin)
+            .unwrap();
+        assert!(shard.remove_subscriber(&SubscriberId::new("x")));
+        assert!(q.is_closed());
     }
 
     #[test]

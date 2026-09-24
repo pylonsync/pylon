@@ -107,6 +107,12 @@ pub(crate) fn handle(
                         Err(pylon_realtime::ShardError::Unauthorized(reason)) => {
                             (403, json_error("UNAUTHORIZED", &reason))
                         }
+                        // Over this subscriber's input limit, or the shard's
+                        // whole queue is full: slow down and retry.
+                        Err(
+                            e @ (pylon_realtime::ShardError::InputRateLimited
+                            | pylon_realtime::ShardError::InputQueueFull),
+                        ) => (429, json_error("INPUT_RATE_LIMITED", &e.to_string())),
                         Err(e) => (400, json_error("INPUT_REJECTED", &e.to_string())),
                     },
                 );

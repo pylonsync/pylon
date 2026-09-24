@@ -4,25 +4,41 @@
 //!
 //! 1. Parses the request path for `?shard=<id>&sid=<subscriber>`.
 //! 2. Looks up the shard in the [`DynShardRegistry`].
-//! 3. Runs the subscribe authorization hook.
-//! 4. Registers a [`SnapshotSink`] that writes binary frames to the socket.
-//! 5. Reads text/binary frames from the client and pushes them as inputs.
-//! 6. Cleans up on disconnect.
+//! 3. Runs the subscribe authorization hook, and gets the subscriber's
+//!    outbound queue from the shard.
+//! 4. Runs two tasks: a writer that drains the queue into the socket, and a
+//!    reader that turns client frames into shard inputs.
+//! 5. Removes the subscriber when either side ends.
 //!
-//! Each client gets its own dedicated thread. For larger deployments,
-//! swap in an async runtime; for pylon's current scale, thread-per-conn
-//! is simpler and fine.
+//! The tick thread only pushes into the queue, so no client can stall the
+//! shard: an idle client (the reader waits, the writer does not) or a slow
+//! one (its queue drops old snapshots, then closes) affects only itself.
+//!
+//! Connections run as tasks on a small tokio runtime, so an idle connection
+//! costs memory, not a thread. Accept stays on one blocking thread with
+//! [`crate::accept_tcp`], which avoids the macOS dual-stack accept panic.
 
-use std::net::TcpStream;
+use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::Duration;
 
+use futures_util::{SinkExt, StreamExt};
 use pylon_auth::SessionStore;
 use pylon_realtime::{DynShardRegistry, ShardAuth, ShardError, SubscriberId};
-use tungstenite::{accept_hdr, handshake::server::Request, Message};
+use tokio::sync::Notify;
+use tokio_tungstenite::tungstenite::{
+    handshake::server::{ErrorResponse, Request, Response},
+    protocol::{frame::coding::CloseCode, CloseFrame},
+    Message,
+};
 
 use crate::ip_limit::IpConnCounter;
+
+/// The server sends a ping this often.
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+/// A connection that sends nothing (not even a pong) for this long is
+/// closed. Covers clients that vanished without closing the socket.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // Start
@@ -47,11 +63,61 @@ pub fn start_shard_ws_server(
         }
     };
     tracing::warn!("[shard-ws] listening on ws://[::]:{port} (dual-stack)");
+    serve(
+        listener,
+        registry,
+        sessions,
+        max_connections_per_ip_from_env(),
+    );
+}
+
+/// `PYLON_SHARD_WS_MAX_PER_IP`: concurrent shard connections one IP may
+/// hold (default 64; 0 = no cap). Raise it when players reach the server
+/// through a proxy or a shared NAT that presents one address.
+fn max_connections_per_ip_from_env() -> u32 {
+    std::env::var("PYLON_SHARD_WS_MAX_PER_IP")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(crate::ip_limit::DEFAULT_MAX_CONNECTIONS_PER_IP)
+}
+
+/// Worker threads for the connection runtime: the machine's cores, between
+/// 2 and 8. Connections mostly wait; the shard tick threads do the work.
+fn worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .clamp(2, 8)
+}
+
+/// Accept shard connections on `listener` until the process exits.
+/// `max_per_ip` caps concurrent connections from one IP (0 = no cap).
+pub fn serve(
+    listener: TcpListener,
+    registry: Arc<dyn DynShardRegistry>,
+    sessions: Arc<SessionStore>,
+    max_per_ip: u32,
+) {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(worker_threads())
+        .thread_name("shard-ws")
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            tracing::warn!("[shard-ws] could not start the connection runtime: {e}");
+            return;
+        }
+    };
 
     // Per-IP cap so a single client can't open a swarm of shard WS
-    // connections to exhaust the per-thread resource budget. Games with
-    // many tabs/devices per household still get 64 concurrent shards.
-    let ip_counter = Arc::new(IpConnCounter::default());
+    // connections.
+    let ip_counter = Arc::new(IpConnCounter::new(if max_per_ip == 0 {
+        u32::MAX
+    } else {
+        max_per_ip
+    }));
 
     loop {
         // Panic-proof accept: libstd's accept/peer_addr assert (panic) on a
@@ -61,7 +127,7 @@ pub fn start_shard_ws_server(
             Err(_) => {
                 // Transient accept error — keep serving. A 1ms nap avoids a
                 // hot spin if the error is sticky (e.g. fd pressure).
-                thread::sleep(std::time::Duration::from_millis(1));
+                std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
         };
@@ -72,13 +138,25 @@ pub fn start_shard_ws_server(
             Some(g) => g,
             None => continue,
         };
+        if let Err(e) = stream.set_nonblocking(true) {
+            tracing::warn!("[shard-ws] could not make the socket non-blocking: {e}");
+            continue;
+        }
+        let _ = stream.set_nodelay(true);
         let registry = Arc::clone(&registry);
         let sessions = Arc::clone(&sessions);
-        thread::spawn(move || {
-            // Holding `_guard` for the life of this thread (which lives for
-            // the full connection) is what ties the IP slot to the socket.
+        runtime.spawn(async move {
+            // The guard lives as long as the task, which lives for the full
+            // connection: that ties the IP slot to the socket.
             let _guard = guard;
-            if let Err(e) = handle_connection(stream, registry, sessions) {
+            let stream = match tokio::net::TcpStream::from_std(stream) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("[shard-ws] could not register the socket: {e}");
+                    return;
+                }
+            };
+            if let Err(e) = handle_connection(stream, registry, sessions).await {
                 tracing::warn!("[shard-ws] connection error: {e}");
             }
         });
@@ -89,19 +167,18 @@ pub fn start_shard_ws_server(
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
-fn handle_connection(
-    stream: TcpStream,
+async fn handle_connection(
+    stream: tokio::net::TcpStream,
     registry: Arc<dyn DynShardRegistry>,
     sessions: Arc<SessionStore>,
 ) -> Result<(), String> {
     // Capture the HTTP handshake so we can read the Request-URI and headers.
-    let params = std::sync::Arc::new(Mutex::new(HandshakeParams::default()));
+    let params = Arc::new(Mutex::new(HandshakeParams::default()));
     let params_clone = Arc::clone(&params);
 
-    use tungstenite::handshake::server::{ErrorResponse, Response};
-    let ws = accept_hdr(
+    let ws = tokio_tungstenite::accept_hdr_async(
         stream,
-        |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
+        move |req: &Request, mut resp: Response| -> Result<Response, ErrorResponse> {
             let uri = req.uri().to_string();
             let mut p = params_clone.lock().unwrap();
             p.uri = uri;
@@ -135,13 +212,15 @@ fn handle_connection(
                 }
             }
             if let Some(chosen) = selected_protocol {
-                if let Ok(hv) = tungstenite::http::HeaderValue::from_str(&chosen) {
+                if let Ok(hv) = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&chosen)
+                {
                     resp.headers_mut().insert("Sec-WebSocket-Protocol", hv);
                 }
             }
             Ok(resp)
         },
     )
+    .await
     .map_err(|e| format!("handshake: {e}"))?;
 
     let params = params.lock().unwrap().clone();
@@ -173,65 +252,103 @@ fn handle_connection(
         is_admin: auth_ctx.is_admin,
     };
 
-    let shard = registry
-        .get(&shard_id)
-        .ok_or_else(|| format!("shard \"{shard_id}\" not found"))?;
+    let (mut sink, mut source) = ws.split();
 
-    let ws = Arc::new(Mutex::new(ws));
-    let subscriber_id = SubscriberId::new(sid.clone());
-
-    // Build the sink: every snapshot broadcast becomes a WS binary frame.
-    let ws_for_sink = Arc::clone(&ws);
-    let sink: pylon_realtime::SnapshotSink = Box::new(move |tick, bytes| {
-        let mut payload = Vec::with_capacity(8 + bytes.len() + 2);
-        payload.extend_from_slice(&tick.to_be_bytes());
-        payload.extend_from_slice(bytes);
-        if let Ok(mut s) = ws_for_sink.lock() {
-            let _ = s.send(Message::Binary(payload.into()));
+    let shard = match registry.get(&shard_id) {
+        Some(s) => s,
+        None => {
+            close_with(
+                &mut sink,
+                CloseCode::Policy,
+                format!("shard \"{shard_id}\" not found"),
+            )
+            .await;
+            return Ok(());
         }
-    });
+    };
 
-    // Register the subscriber, respecting auth.
-    match shard.add_subscriber(subscriber_id.clone(), sink, &shard_auth) {
-        Ok(()) => {}
+    let subscriber_id = SubscriberId::new(sid);
+    let queue = match shard.add_queued_subscriber(subscriber_id.clone(), &shard_auth) {
+        Ok(q) => q,
         Err(ShardError::Unauthorized(reason)) => {
-            let _ = ws
-                .lock()
-                .unwrap()
-                .close(Some(tungstenite::protocol::CloseFrame {
-                    code: tungstenite::protocol::frame::coding::CloseCode::Policy,
-                    reason: format!("unauthorized: {reason}").into(),
-                }));
+            close_with(
+                &mut sink,
+                CloseCode::Policy,
+                format!("unauthorized: {reason}"),
+            )
+            .await;
             return Ok(());
         }
         Err(e) => {
-            let _ = ws
-                .lock()
-                .unwrap()
-                .close(Some(tungstenite::protocol::CloseFrame {
-                    code: tungstenite::protocol::frame::coding::CloseCode::Again,
-                    reason: e.to_string().into(),
-                }));
+            close_with(&mut sink, CloseCode::Again, e.to_string()).await;
             return Ok(());
         }
+    };
+
+    // Writer: drain the queue into the socket. The tick thread wakes it
+    // through the notifier; `Notify` keeps a wakeup that arrives while the
+    // writer is busy, so none is lost.
+    let wake = Arc::new(Notify::new());
+    {
+        let wake = Arc::clone(&wake);
+        queue.set_notifier(move || wake.notify_one());
     }
-
-    // Read loop — inbound messages from the client become shard inputs.
-    // Each message is JSON: {"input": ..., "client_seq"?: N}
-    let read_result = loop {
-        let msg = {
-            let mut s = match ws.lock() {
-                Ok(s) => s,
-                Err(_) => break Err("ws lock poisoned".to_string()),
-            };
-            match s.read() {
-                Ok(m) => m,
-                Err(tungstenite::Error::ConnectionClosed) => break Ok(()),
-                Err(tungstenite::Error::AlreadyClosed) => break Ok(()),
-                Err(e) => break Err(format!("ws read: {e}")),
+    let writer_queue = Arc::clone(&queue);
+    let mut writer = tokio::spawn(async move {
+        let mut ping = tokio::time::interval(PING_INTERVAL);
+        ping.tick().await; // the first tick fires at once
+        loop {
+            while let Some(frame) = writer_queue.pop() {
+                let mut payload = Vec::with_capacity(8 + frame.bytes.len());
+                payload.extend_from_slice(&frame.tick.to_be_bytes());
+                payload.extend_from_slice(&frame.bytes);
+                if sink.send(Message::Binary(payload)).await.is_err() {
+                    return;
+                }
             }
-        };
+            if writer_queue.is_closed() {
+                close_with(&mut sink, CloseCode::Again, "client too slow".into()).await;
+                return;
+            }
+            tokio::select! {
+                _ = wake.notified() => {}
+                _ = ping.tick() => {
+                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        }
+    });
 
+    // Reader: inbound messages become shard inputs. Each message is JSON:
+    // {"input": ..., "client_seq"?: N}. Any inbound frame, including the
+    // pongs to the writer's pings, counts as activity for the idle timeout.
+    let mut check = tokio::time::interval(Duration::from_millis(500));
+    let mut last_activity = tokio::time::Instant::now();
+    let read_result = loop {
+        let next = tokio::select! {
+            // The writer ended (socket error, or it saw the queue close).
+            _ = &mut writer => break Ok(()),
+            // The queue closed while the writer is stuck in a send to a
+            // client that stopped reading; or the client went silent.
+            _ = check.tick() => {
+                if queue.is_closed() {
+                    break Err("client too slow; outbound queue closed".to_string());
+                }
+                if last_activity.elapsed() >= IDLE_TIMEOUT {
+                    break Err("idle timeout".to_string());
+                }
+                continue;
+            }
+            next = source.next() => next,
+        };
+        last_activity = tokio::time::Instant::now();
+        let msg = match next {
+            None => break Ok(()),
+            Some(Err(e)) => break Err(format!("ws read: {e}")),
+            Some(Ok(m)) => m,
+        };
         match msg {
             Message::Text(text) => {
                 process_input(&shard, &subscriber_id, &shard_auth, text.as_str());
@@ -240,21 +357,33 @@ fn handle_connection(
                 let text = String::from_utf8_lossy(&bytes).to_string();
                 process_input(&shard, &subscriber_id, &shard_auth, &text);
             }
-            Message::Ping(payload) => {
-                let _ = ws.lock().unwrap().send(Message::Pong(payload));
-            }
             Message::Close(_) => break Ok(()),
+            // tungstenite answers pings itself; pongs only prove liveness.
             _ => {}
         }
     };
 
-    // Clean up.
+    // Removing the subscriber closes its queue. A writer that is still in a
+    // send (to a client that stopped reading) is aborted; the socket closes
+    // when both halves drop.
     shard.remove_subscriber(&subscriber_id);
-    if let Err(e) = read_result {
-        Err(e)
-    } else {
-        Ok(())
-    }
+    queue.close();
+    writer.abort();
+    read_result
+}
+
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    Message,
+>;
+
+async fn close_with(sink: &mut WsSink, code: CloseCode, reason: String) {
+    let _ = sink
+        .send(Message::Close(Some(CloseFrame {
+            code,
+            reason: reason.into(),
+        })))
+        .await;
 }
 
 fn process_input(
@@ -359,12 +488,6 @@ fn url_decode(s: &str) -> String {
         }
     }
     out
-}
-
-// Silence timeout warnings when clients hold connections open briefly.
-#[allow(dead_code)]
-fn apply_read_timeout(stream: &TcpStream, dur: Duration) {
-    let _ = stream.set_read_timeout(Some(dur));
 }
 
 #[cfg(test)]

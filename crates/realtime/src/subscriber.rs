@@ -1,9 +1,10 @@
 //! Subscribers — clients connected to a shard that receive snapshots.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 
+use crate::outbound::OutboundQueue;
 use crate::snapshot::{encode_snapshot, SnapshotFormat};
 
 // ---------------------------------------------------------------------------
@@ -48,9 +49,18 @@ impl From<String> for SubscriberId {
 /// Delivers encoded snapshot bytes to a connected client.
 ///
 /// `tick` is the shard's tick number; `bytes` is the encoded snapshot.
-/// Transport implementations write these to a WebSocket, WebTransport
-/// stream, or similar.
+///
+/// The shard calls a sink on its tick thread (after it releases the state
+/// lock), once per subscriber per tick. A sink must not block: a network
+/// transport that can stall uses an [`OutboundQueue`] instead (see
+/// [`Subscriber::with_queue`]). Sinks suit in-process consumers and
+/// transports whose send never blocks, such as a Durable Object WebSocket.
 pub type SnapshotSink = Box<dyn Fn(u64, &[u8]) + Send + Sync>;
+
+enum Delivery {
+    Sink(SnapshotSink),
+    Queue(Arc<OutboundQueue>),
+}
 
 // ---------------------------------------------------------------------------
 // Subscriber
@@ -58,20 +68,33 @@ pub type SnapshotSink = Box<dyn Fn(u64, &[u8]) + Send + Sync>;
 
 pub struct Subscriber<T> {
     id: SubscriberId,
-    sink: SnapshotSink,
+    delivery: Delivery,
     /// When `delta_mode` is on, the previous encoded snapshot bytes are kept
     /// here; subsequent `send()` calls emit only the JSON patch from the
     /// previous to current snapshot.
     last_snapshot: Mutex<Option<Vec<u8>>>,
     delta_mode: bool,
-    _phantom: std::marker::PhantomData<T>,
+    /// The subscriber never holds a `T`, only encodes one passed to `send`,
+    /// so it stays Send + Sync whatever the snapshot type is.
+    _phantom: std::marker::PhantomData<fn(&T)>,
 }
 
 impl<T: Serialize> Subscriber<T> {
+    /// A subscriber that receives frames through a direct sink.
     pub fn new(id: SubscriberId, sink: SnapshotSink) -> Self {
+        Self::build(id, Delivery::Sink(sink))
+    }
+
+    /// A subscriber that receives frames through an outbound queue. The
+    /// transport drains the queue from its own thread or task.
+    pub fn with_queue(id: SubscriberId, queue: Arc<OutboundQueue>) -> Self {
+        Self::build(id, Delivery::Queue(queue))
+    }
+
+    fn build(id: SubscriberId, delivery: Delivery) -> Self {
         Self {
             id,
-            sink,
+            delivery,
             last_snapshot: Mutex::new(None),
             delta_mode: false,
             _phantom: std::marker::PhantomData,
@@ -90,32 +113,53 @@ impl<T: Serialize> Subscriber<T> {
         &self.id
     }
 
+    /// The outbound queue, for a queued subscriber.
+    pub fn queue(&self) -> Option<&Arc<OutboundQueue>> {
+        match &self.delivery {
+            Delivery::Queue(q) => Some(q),
+            Delivery::Sink(_) => None,
+        }
+    }
+
+    /// True when the subscriber's queue has closed (the client fell too far
+    /// behind or disconnected). The shard drops closed subscribers.
+    pub fn is_closed(&self) -> bool {
+        self.queue().is_some_and(|q| q.is_closed())
+    }
+
+    fn deliver(&self, tick: u64, frame: Vec<u8>) {
+        match &self.delivery {
+            Delivery::Sink(sink) => sink(tick, &frame),
+            Delivery::Queue(q) => {
+                q.push_snapshot(tick, Arc::from(frame));
+            }
+        }
+    }
+
     /// Encode a snapshot in the shard's configured format and send it.
     ///
     /// In delta mode, sends a full snapshot on the first tick, then only
-    /// the diff on subsequent ticks.
+    /// the diff on subsequent ticks. When the queue is full the push drops
+    /// the queued frames, so the frame that replaces them is a full one.
     pub fn send(&self, tick: u64, snapshot: &T, format: SnapshotFormat) {
         let encoded = match encode_snapshot(snapshot, format) {
             Ok(bytes) => bytes,
             Err(e) => {
-                eprintln!("[realtime] snapshot encode failed for {}: {}", self.id, e);
+                tracing::warn!("[realtime] snapshot encode failed for {}: {}", self.id, e);
                 return;
             }
         };
 
         if !self.delta_mode {
-            (self.sink)(tick, &encoded);
+            self.deliver(tick, encoded);
             return;
         }
 
         // Delta mode: compute field-level diff against the previous snapshot.
         let mut last = self.last_snapshot.lock().unwrap();
+        let resync = self.queue().is_some_and(|q| q.is_full());
         let frame = match &*last {
-            None => {
-                // First tick: send full snapshot.
-                encoded.clone()
-            }
-            Some(prev) => {
+            Some(prev) if !resync => {
                 // Emit a small JSON envelope: {"delta": {...changed fields...}}
                 // Falls back to full snapshot if either side isn't JSON-parsable.
                 match (
@@ -135,10 +179,13 @@ impl<T: Serialize> Subscriber<T> {
                     _ => encoded.clone(),
                 }
             }
+            // First tick, or a resync after dropped frames: send it whole.
+            _ => encoded.clone(),
         };
 
         *last = Some(encoded);
-        (self.sink)(tick, &frame);
+        drop(last);
+        self.deliver(tick, frame);
     }
 }
 

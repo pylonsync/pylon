@@ -16,8 +16,10 @@
 //!   simulation time, and broadcasts a snapshot to subscribers.
 //!
 //! - **Transport-agnostic.** The shard itself doesn't know about HTTP or
-//!   WebSocket. Transports implement the [`SnapshotSink`] trait and the
-//!   server layer wires them in.
+//!   WebSocket. A network transport gives each client an [`OutboundQueue`]
+//!   and drains it from its own thread or task; the tick thread only
+//!   enqueues, so a slow client never stalls the shard. In-process
+//!   consumers can use a [`SnapshotSink`] instead.
 //!
 //! - **Binary by default.** Snapshots encode through a pluggable format
 //!   (JSON for debugging, bincode / MessagePack for production).
@@ -36,6 +38,7 @@
 pub mod aoi;
 pub mod dyn_shard;
 pub mod matchmaker;
+pub mod outbound;
 pub mod persistence;
 pub mod prediction;
 pub mod registry;
@@ -52,6 +55,7 @@ pub use matchmaker::{
     fixed_size_match, MatchAssignment, MatchFn, Matchmaker, MatchmakerConfig, PlayerStatus,
     QueuedPlayer, ShardFactory,
 };
+pub use outbound::{Frame, FrameKind, OutboundConfig, OutboundQueue, PushOutcome};
 pub use persistence::{persist_every_ticks, restore_or_init};
 pub use prediction::{InputAck, Reconciliation};
 pub use registry::ShardRegistry;

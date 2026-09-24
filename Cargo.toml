@@ -57,6 +57,12 @@ rustls-pemfile = "2"
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 tungstenite = "0.24"
+# Async runtime for the shard WebSocket server: thousands of mostly idle
+# game connections on a few worker threads instead of one thread each.
+# tokio-tungstenite must stay on the same minor as `tungstenite` above.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 # Loro — Rust-native CRDT library used as Pylon's local-first substrate.
 # Same library powers Remboard's iOS (loro-swift) and web (loro-crdt npm)
 # clients, so all three platforms speak the same wire format.

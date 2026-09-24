@@ -39,6 +39,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tiny_http = { workspace = true }
 tungstenite = { workspace = true }
+tokio = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = { workspace = true }
 tracing = { workspace = true }
 # HTTP client for the optional Tinybird request-log shipper. Lives
 # under feature `tinybird` so the dep is opt-in but enabled by default

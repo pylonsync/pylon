@@ -6114,93 +6114,86 @@ fn start_server(
 
                     let (tx, streaming_body) =
                         bounded_stream(SHARD_STREAM_BUFFER_CAPACITY);
-                    let (disconnect_tx, disconnect_rx) =
-                        std::sync::mpsc::sync_channel::<()>(1);
-
-                    let tx_clone = tx.clone();
-                    let sink: pylon_realtime::SnapshotSink =
-                        Box::new(move |tick: u64, bytes: &[u8]| {
-                            // Format as SSE with an id: line carrying the tick
-                            // number so clients can resume with Last-Event-ID.
-                            let mut frame = format!("id: {tick}\ndata: ").into_bytes();
-                            frame.extend_from_slice(bytes);
-                            frame.extend_from_slice(b"\n\n");
-                            match tx_clone.try_send(frame) {
-                                Ok(()) => {}
-                                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                                    // Never block a shard tick on a slow HTTP
-                                    // client. The cleanup thread removes this
-                                    // subscriber and closes the stream.
-                                    let _ = disconnect_tx.try_send(());
-                                }
-                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                    let _ = disconnect_tx.try_send(());
-                                }
-                            }
-                        });
 
                     let shard_auth = pylon_realtime::ShardAuth {
                         user_id: auth_ctx.user_id.clone(),
                         is_admin: auth_ctx.is_admin,
                     };
-                    if let Err(e) = shard.add_subscriber(subscriber_id.clone(), sink, &shard_auth) {
-                        let (status, code) = match &e {
-                            pylon_realtime::ShardError::Unauthorized(_) => (403u16, "UNAUTHORIZED"),
-                            _ => (429u16, "SUBSCRIBE_FAILED"),
-                        };
-                        let err = json_error(code, &e.to_string());
-                        let response = with_security_headers(
-                            Response::from_string(&err)
-                                .with_status_code(status)
-                                .with_header(
-                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
-                                )
-                                .with_header(
-                                    Header::from_bytes(
-                                        "Access-Control-Allow-Origin",
-                                        cors_origin.as_bytes().to_vec(),
+                    let queue = match shard.add_queued_subscriber(subscriber_id.clone(), &shard_auth) {
+                        Ok(q) => q,
+                        Err(e) => {
+                            let (status, code) = match &e {
+                                pylon_realtime::ShardError::Unauthorized(_) => {
+                                    (403u16, "UNAUTHORIZED")
+                                }
+                                _ => (429u16, "SUBSCRIBE_FAILED"),
+                            };
+                            let err = json_error(code, &e.to_string());
+                            let response = with_security_headers(
+                                Response::from_string(&err)
+                                    .with_status_code(status)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
                                     )
-                                    .unwrap(),
-                                ),
-                        );
-                        let _ = request.respond(response);
-                        mt.record_request("GET", status);
-                        return;
-                    }
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("GET", status);
+                            return;
+                        }
+                    };
 
-                    // Auto-unsubscribe when the client disconnects: we watch
-                    // for mpsc channel disconnection in a sentinel thread.
+                    // Pump: move frames from the subscriber's outbound queue
+                    // into the HTTP stream. The tick thread only pushes into
+                    // the queue, so a slow HTTP client never stalls the shard;
+                    // its queue drops old snapshots and, if it stops reading
+                    // entirely, closes. A heartbeat keeps idle proxies from
+                    // cutting the stream.
                     {
                         let shard_cleanup = Arc::clone(&shard);
                         let sub_id_cleanup = subscriber_id.clone();
-                        let tx_liveness = tx.clone();
                         std::thread::spawn(move || {
-                            // A full snapshot queue means the client is too
-                            // slow to receive current state. Disconnect it so
-                            // memory stays bounded and the client can resume.
-                            loop {
-                                match disconnect_rx
-                                    .recv_timeout(std::time::Duration::from_secs(30))
-                                {
-                                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                                        shard_cleanup.remove_subscriber(&sub_id_cleanup);
-                                        return;
+                            'pump: loop {
+                                let chunk = match queue.pop_blocking(std::time::Duration::from_secs(30)) {
+                                    Some(frame) => {
+                                        // Format as SSE with an id: line carrying the tick
+                                        // number so clients can resume with Last-Event-ID.
+                                        let mut chunk = format!("id: {}\ndata: ", frame.tick).into_bytes();
+                                        chunk.extend_from_slice(&frame.bytes);
+                                        chunk.extend_from_slice(b"\n\n");
+                                        chunk
                                     }
-                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                                        match tx_liveness.try_send(b": heartbeat\n\n".to_vec()) {
-                                            Ok(()) => {}
-                                            Err(std::sync::mpsc::TrySendError::Full(_))
-                                            | Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                                                shard_cleanup.remove_subscriber(&sub_id_cleanup);
-                                                return;
+                                    None if queue.is_closed() || !shard_cleanup.is_running() => break,
+                                    None => b": heartbeat\n\n".to_vec(),
+                                };
+                                // The HTTP writer drains `tx`; when the client is
+                                // slow it fills. Wait, but stop once the queue
+                                // closes (the client stopped reading).
+                                let mut pending = chunk;
+                                loop {
+                                    match tx.try_send(pending) {
+                                        Ok(()) => break,
+                                        Err(std::sync::mpsc::TrySendError::Full(back)) => {
+                                            if queue.is_closed() {
+                                                break 'pump;
                                             }
+                                            pending = back;
+                                            std::thread::sleep(std::time::Duration::from_millis(20));
                                         }
-                                        if !shard_cleanup.is_running() {
-                                            return;
+                                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                            break 'pump;
                                         }
                                     }
                                 }
                             }
+                            shard_cleanup.remove_subscriber(&sub_id_cleanup);
                         });
                     }
 

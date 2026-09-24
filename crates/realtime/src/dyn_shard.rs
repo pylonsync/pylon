@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use serde::de::DeserializeOwned;
 
+use crate::outbound::OutboundQueue;
 use crate::shard::{Shard, ShardAuth, ShardError, SimState};
 use crate::subscriber::{SnapshotSink, Subscriber, SubscriberId};
 
@@ -43,8 +44,19 @@ pub trait DynShard: Send + Sync {
         auth: &ShardAuth,
     ) -> Result<u64, ShardError>;
 
-    /// Subscribe a transport (WebSocket / SSE writer) to snapshots, after
-    /// running `SimState::authorize_subscribe`.
+    /// Subscribe a network transport after running
+    /// `SimState::authorize_subscribe`. The shard pushes this subscriber's
+    /// frames into the returned queue; the transport drains it from its own
+    /// thread or task, so a slow client never stalls the tick.
+    fn add_queued_subscriber(
+        &self,
+        id: SubscriberId,
+        auth: &ShardAuth,
+    ) -> Result<Arc<OutboundQueue>, ShardError>;
+
+    /// Subscribe through a direct sink, after running
+    /// `SimState::authorize_subscribe`. The sink runs on the tick thread and
+    /// must not block; see [`SnapshotSink`].
     fn add_subscriber(
         &self,
         id: SubscriberId,
@@ -90,6 +102,14 @@ where
         let input: S::Input = serde_json::from_str(body)
             .map_err(|e| ShardError::Other(format!("invalid input JSON: {e}")))?;
         Shard::push_input_authorized(self, subscriber_id, input, client_seq, auth)
+    }
+
+    fn add_queued_subscriber(
+        &self,
+        id: SubscriberId,
+        auth: &ShardAuth,
+    ) -> Result<Arc<OutboundQueue>, ShardError> {
+        Shard::add_queued_subscriber_authorized(self, id, auth)
     }
 
     fn add_subscriber(
