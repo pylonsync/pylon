@@ -222,14 +222,33 @@ fn start_stub_server(calls: Arc<Mutex<Vec<RenderCall>>>) -> u16 {
     std::thread::spawn(move || {
         let _ = pylon_runtime::server::start_server_for_test_with_fn_ops(rt, port, fn_ops);
     });
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // Wait for a served response, not only a bound port: the listener binds
+    // before the request workers start, and on a loaded CI runner the first
+    // request could wait out `get`'s read timeout in the accept backlog.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
-        if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+        if health_ok(port) {
             return port;
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    panic!("test server never bound 127.0.0.1:{port}");
+    panic!("test server on 127.0.0.1:{port} never answered GET /health");
+}
+
+fn health_ok(port: u16) -> bool {
+    let Ok(mut stream) = TcpStream::connect(format!("127.0.0.1:{port}")) else {
+        return false;
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+    if stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    raw.starts_with(b"HTTP/1.1 200")
 }
 
 struct Resp {
@@ -255,7 +274,7 @@ fn get(port: u16, path: &str, extra_headers: &[(&str, &str)]) -> Resp {
     }
     request.push_str("Connection: close\r\n\r\n");
     let mut stream = TcpStream::connect(&host_port).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
     stream.write_all(request.as_bytes()).expect("write");
     let mut raw = Vec::new();
     let _ = stream.read_to_end(&mut raw);
