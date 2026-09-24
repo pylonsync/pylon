@@ -20,6 +20,16 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import {
+  SHARD_PROTOCOL_VERSION,
+  ShardFrameKind,
+  decodeShardPayload,
+  decodeShardRejection,
+  encodeShardInput,
+  parseShardFrame,
+  type ShardInputRejection,
+  type ShardPayloadDecoder,
+} from "./shardWire";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,11 +61,24 @@ export interface UseShardOptions {
   autoReconnect?: boolean;
   /** Reconnect backoff in ms (default: starts at 500, maxes at 10_000). */
   reconnectBackoffMs?: number;
+  /**
+   * Decoder for a payload codec the client does not know: bincode (`2`) or
+   * a game's own codec (`3`). JSON and MessagePack are built in.
+   */
+  decode?: ShardPayloadDecoder;
 }
 
 export interface UseShardReturn<TSnapshot = unknown, TInput = unknown> {
   snapshot: TSnapshot | null;
   tick: number;
+  /**
+   * The highest `send()` sequence number the shard has processed (applied
+   * or rejected) as of `snapshot`. Drop local predictions up to it and
+   * replay the rest on top of `snapshot`.
+   */
+  ack: number;
+  /** The most recent input the shard refused, if any. */
+  lastRejection: ShardInputRejection | null;
   connected: boolean;
   error: Error | null;
   /** Send an input to the shard. Returns a client sequence number. */
@@ -69,7 +92,10 @@ export interface UseShardReturn<TSnapshot = unknown, TInput = unknown> {
 // ---------------------------------------------------------------------------
 
 export interface ShardClient<TSnapshot = unknown, TInput = unknown> {
-  onSnapshot: (fn: (snapshot: TSnapshot, tick: number) => void) => void;
+  /** `ack` is the highest `send()` sequence number the shard has processed. */
+  onSnapshot: (fn: (snapshot: TSnapshot, tick: number, ack: number) => void) => void;
+  /** Called when the shard refuses an input (see `ShardInputRejection.code`). */
+  onInputRejected: (fn: (rejection: ShardInputRejection) => void) => void;
   onError: (fn: (err: Error) => void) => void;
   onOpen: (fn: () => void) => void;
   onClose: (fn: () => void) => void;
@@ -92,14 +118,18 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   let connected = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let backoff = options.reconnectBackoffMs ?? 500;
+  // The shard's codec, learned from the first frame. Until then inputs go
+  // as JSON text, which every shard accepts.
+  let codec: number | null = null;
 
-  const snapshotHandlers: Array<(s: TSnapshot, t: number) => void> = [];
+  const snapshotHandlers: Array<(s: TSnapshot, t: number, ack: number) => void> = [];
+  const rejectionHandlers: Array<(r: ShardInputRejection) => void> = [];
   const errorHandlers: Array<(e: Error) => void> = [];
   const openHandlers: Array<() => void> = [];
   const closeHandlers: Array<() => void> = [];
 
-  const dispatchSnapshot = (snapshot: TSnapshot, tick: number) => {
-    for (const h of snapshotHandlers) h(snapshot, tick);
+  const dispatchSnapshot = (snapshot: TSnapshot, tick: number, ack: number) => {
+    for (const h of snapshotHandlers) h(snapshot, tick, ack);
   };
   const dispatchError = (err: Error) => {
     for (const h of errorHandlers) h(err);
@@ -120,6 +150,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     const params = new URLSearchParams({
       shard: shardId,
       sid: options.subscriberId,
+      v: String(SHARD_PROTOCOL_VERSION),
     });
     return `${proto}://${host}:${port}/?${params.toString()}`;
   };
@@ -149,37 +180,23 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     };
 
     ws.onmessage = (event) => {
-      // Binary format: 8 bytes (u64 BE) tick + JSON snapshot bytes.
-      if (event.data instanceof ArrayBuffer) {
-        const view = new DataView(event.data);
-        const hi = view.getUint32(0);
-        const lo = view.getUint32(4);
-        const tick = hi * 0x100000000 + lo;
-        const jsonBytes = new Uint8Array(event.data, 8);
-        const jsonStr = new TextDecoder().decode(jsonBytes);
-        try {
-          const snapshot = JSON.parse(jsonStr) as TSnapshot;
-          dispatchSnapshot(snapshot, tick);
-        } catch (e) {
-          dispatchError(
-            e instanceof Error ? e : new Error("Failed to parse snapshot")
-          );
+      if (!(event.data instanceof ArrayBuffer)) return;
+      try {
+        const frame = parseShardFrame(event.data);
+        codec = frame.codec;
+        if (frame.kind === ShardFrameKind.Snapshot) {
+          const snapshot = decodeShardPayload(
+            frame.codec,
+            frame.payload,
+            options.decode,
+          ) as TSnapshot;
+          dispatchSnapshot(snapshot, frame.tick, frame.ack);
+        } else if (frame.kind === ShardFrameKind.InputRejected) {
+          const rejection = decodeShardRejection(frame.codec, frame.payload, options.decode);
+          for (const h of rejectionHandlers) h(rejection);
         }
-      } else if (typeof event.data === "string") {
-        // Text frame (e.g., JSON fallback format).
-        try {
-          const wrapped = JSON.parse(event.data) as {
-            tick?: number;
-            snapshot?: TSnapshot;
-          };
-          if (typeof wrapped.tick === "number" && wrapped.snapshot !== undefined) {
-            dispatchSnapshot(wrapped.snapshot, wrapped.tick);
-          }
-        } catch (e) {
-          dispatchError(
-            e instanceof Error ? e : new Error("Failed to parse snapshot")
-          );
-        }
+      } catch (e) {
+        dispatchError(e instanceof Error ? e : new Error("Failed to decode shard frame"));
       }
     };
 
@@ -207,6 +224,9 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     onSnapshot(fn) {
       snapshotHandlers.push(fn);
     },
+    onInputRejected(fn) {
+      rejectionHandlers.push(fn);
+    },
     onError(fn) {
       errorHandlers.push(fn);
     },
@@ -219,7 +239,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     send(input: TInput): number {
       clientSeq += 1;
       const seq = clientSeq;
-      const payload = JSON.stringify({ input, client_seq: seq });
+      const payload = encodeShardInput(codec, input, seq);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(payload);
       } else {
@@ -253,6 +273,8 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
 ): UseShardReturn<TSnapshot, TInput> {
   const [snapshot, setSnapshot] = useState<TSnapshot | null>(null);
   const [tick, setTick] = useState<number>(0);
+  const [ack, setAck] = useState<number>(0);
+  const [lastRejection, setLastRejection] = useState<ShardInputRejection | null>(null);
   const [connected, setConnected] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
 
@@ -273,10 +295,12 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
     const client = connectShard<TSnapshot, TInput>(shardId, options);
     clientRef.current = client;
 
-    client.onSnapshot((snap, t) => {
+    client.onSnapshot((snap, t, a) => {
       setSnapshot(snap);
       setTick(t);
+      setAck(a);
     });
+    client.onInputRejected((r) => setLastRejection(r));
     client.onOpen(() => setConnected(true));
     client.onClose(() => setConnected(false));
     client.onError((e) => setError(e));
@@ -297,5 +321,5 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
     if (clientRef.current) clientRef.current.close();
   };
 
-  return { snapshot, tick, connected, error, send, close };
+  return { snapshot, tick, ack, lastRejection, connected, error, send, close };
 }

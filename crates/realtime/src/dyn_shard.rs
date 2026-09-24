@@ -11,7 +11,9 @@ use serde::de::DeserializeOwned;
 
 use crate::outbound::OutboundQueue;
 use crate::shard::{Shard, ShardAuth, ShardError, SimState};
+use crate::snapshot::SnapshotFormat;
 use crate::subscriber::{SnapshotSink, Subscriber, SubscriberId};
+use crate::wire::{decode_input_envelope, peek_client_seq, InputEnvelope, InputRejection};
 
 // ---------------------------------------------------------------------------
 // DynShard — object-safe wrapper over Shard<S>
@@ -28,6 +30,21 @@ pub trait DynShard: Send + Sync {
     fn tick_number(&self) -> u64;
     fn subscriber_count(&self) -> usize;
     fn input_queue_len(&self) -> usize;
+    /// The codec of this shard's snapshots (and of binary input frames).
+    fn snapshot_format(&self) -> SnapshotFormat;
+    /// The highest `client_seq` processed for a subscriber (0 = none).
+    fn ack(&self, id: &SubscriberId) -> u64;
+
+    /// Decode an input envelope `{ input, client_seq? }` encoded in
+    /// `format`, authorize it, and queue it. On failure, returns the
+    /// rejection to send back to the client.
+    fn push_input_envelope(
+        &self,
+        subscriber_id: SubscriberId,
+        format: SnapshotFormat,
+        bytes: &[u8],
+        auth: &ShardAuth,
+    ) -> Result<u64, InputRejection>;
 
     /// Parse a JSON body as an input and queue it after authorization.
     ///
@@ -91,6 +108,30 @@ where
     fn input_queue_len(&self) -> usize {
         Shard::input_queue_len(self)
     }
+    fn snapshot_format(&self) -> SnapshotFormat {
+        self.config().snapshot_format
+    }
+    fn ack(&self, id: &SubscriberId) -> u64 {
+        Shard::ack(self, id)
+    }
+
+    fn push_input_envelope(
+        &self,
+        subscriber_id: SubscriberId,
+        format: SnapshotFormat,
+        bytes: &[u8],
+        auth: &ShardAuth,
+    ) -> Result<u64, InputRejection> {
+        let envelope: InputEnvelope<S::Input> =
+            decode_input_envelope(format, bytes).map_err(|message| InputRejection {
+                client_seq: peek_client_seq(format, bytes),
+                code: "invalid".into(),
+                message,
+            })?;
+        let client_seq = envelope.client_seq;
+        Shard::push_input_authorized(self, subscriber_id, envelope.input, client_seq, auth)
+            .map_err(|e| rejection_for(client_seq, &e))
+    }
 
     fn push_input_json(
         &self,
@@ -128,6 +169,22 @@ where
 
     fn stop(&self) {
         Shard::stop(self);
+    }
+}
+
+/// The rejection sent to a client for a push error.
+pub fn rejection_for(client_seq: Option<u64>, err: &ShardError) -> InputRejection {
+    let code = match err {
+        ShardError::Unauthorized(_) => "unauthorized",
+        ShardError::InputRateLimited => "rate_limited",
+        ShardError::InputQueueFull => "queue_full",
+        ShardError::Stopped => "stopped",
+        ShardError::Full | ShardError::SubscriberNotFound | ShardError::Other(_) => "invalid",
+    };
+    InputRejection {
+        client_seq,
+        code: code.into(),
+        message: err.to_string(),
     }
 }
 

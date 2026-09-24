@@ -24,7 +24,10 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use pylon_auth::SessionStore;
-use pylon_realtime::{DynShardRegistry, ShardAuth, ShardError, SubscriberId};
+use pylon_realtime::{
+    wire, DynShardRegistry, FrameKind, OutboundQueue, ShardAuth, ShardError, SnapshotFormat,
+    SubscriberId,
+};
 use tokio::sync::Notify;
 use tokio_tungstenite::tungstenite::{
     handshake::server::{ErrorResponse, Request, Response},
@@ -232,6 +235,12 @@ async fn handle_connection(
 
     let shard_id = query_param(&query, "shard").ok_or("missing ?shard= parameter")?;
     let sid = query_param(&query, "sid").unwrap_or_else(|| "anon".to_string());
+    // Wire protocol version (see pylon_realtime::wire): `?v=2`, else 1.
+    let version: u8 = if query_param(&query, "v").as_deref() == Some("2") {
+        2
+    } else {
+        1
+    };
 
     // Resolve auth token. Preference order:
     //   1. Authorization: Bearer ...   (native clients)
@@ -294,14 +303,31 @@ async fn handle_connection(
         queue.set_notifier(move || wake.notify_one());
     }
     let writer_queue = Arc::clone(&queue);
+    let codec = wire::codec_byte(shard.snapshot_format());
     let mut writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.tick().await; // the first tick fires at once
         loop {
             while let Some(frame) = writer_queue.pop() {
-                let mut payload = Vec::with_capacity(8 + frame.bytes.len());
-                payload.extend_from_slice(&frame.tick.to_be_bytes());
-                payload.extend_from_slice(&frame.bytes);
+                let payload = match (version, frame.kind) {
+                    (2, FrameKind::Snapshot) => wire::frame_v2(
+                        wire::kind::SNAPSHOT,
+                        codec,
+                        frame.tick,
+                        frame.ack,
+                        &frame.bytes,
+                    ),
+                    (2, FrameKind::InputRejected) => wire::frame_v2(
+                        wire::kind::INPUT_REJECTED,
+                        codec,
+                        frame.tick,
+                        frame.ack,
+                        &frame.bytes,
+                    ),
+                    (_, FrameKind::Snapshot) => wire::frame_v1(frame.tick, &frame.bytes),
+                    // Version 1 has no rejection frame.
+                    (_, FrameKind::InputRejected) => continue,
+                };
                 if sink.send(Message::Binary(payload)).await.is_err() {
                     return;
                 }
@@ -350,12 +376,35 @@ async fn handle_connection(
             Some(Ok(m)) => m,
         };
         match msg {
+            // Text frames are JSON in every version.
             Message::Text(text) => {
-                process_input(&shard, &subscriber_id, &shard_auth, text.as_str());
+                process_input(
+                    &shard,
+                    &queue,
+                    &subscriber_id,
+                    &shard_auth,
+                    SnapshotFormat::Json,
+                    text.as_bytes(),
+                    version,
+                );
             }
+            // Binary frames are in the shard's codec in version 2, JSON in
+            // version 1.
             Message::Binary(bytes) => {
-                let text = String::from_utf8_lossy(&bytes).to_string();
-                process_input(&shard, &subscriber_id, &shard_auth, &text);
+                let format = if version == 2 {
+                    shard.snapshot_format()
+                } else {
+                    SnapshotFormat::Json
+                };
+                process_input(
+                    &shard,
+                    &queue,
+                    &subscriber_id,
+                    &shard_auth,
+                    format,
+                    &bytes,
+                    version,
+                );
             }
             Message::Close(_) => break Ok(()),
             // tungstenite answers pings itself; pongs only prove liveness.
@@ -386,25 +435,35 @@ async fn close_with(sink: &mut WsSink, code: CloseCode, reason: String) {
         .await;
 }
 
+/// Queue one input envelope. In version 2 a refused input gets an
+/// input-rejected frame on this connection.
 fn process_input(
     shard: &Arc<dyn pylon_realtime::DynShard>,
+    queue: &Arc<OutboundQueue>,
     subscriber_id: &SubscriberId,
     shard_auth: &ShardAuth,
-    text: &str,
+    format: SnapshotFormat,
+    bytes: &[u8],
+    version: u8,
 ) {
-    // Envelope shape: { input, client_seq? }
-    let envelope: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(_) => return,
+    let Err(rejection) =
+        shard.push_input_envelope(subscriber_id.clone(), format, bytes, shard_auth)
+    else {
+        return;
     };
-    let input = envelope
-        .get("input")
-        .cloned()
-        .unwrap_or(serde_json::Value::Null);
-    let client_seq = envelope.get("client_seq").and_then(|v| v.as_u64());
-    let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "null".into());
-
-    let _ = shard.push_input_json(subscriber_id.clone(), &input_str, client_seq, shard_auth);
+    if version != 2 {
+        return;
+    }
+    match pylon_realtime::encode_snapshot(&rejection, shard.snapshot_format()) {
+        Ok(encoded) => {
+            queue.push_rejection(
+                shard.tick_number(),
+                shard.ack(subscriber_id),
+                Arc::from(encoded),
+            );
+        }
+        Err(e) => tracing::warn!("[shard-ws] rejection encode failed: {e}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

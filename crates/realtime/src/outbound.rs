@@ -10,7 +10,7 @@
 //! against the previous frame, see [`crate::Subscriber`]). When the queue is
 //! full, the queued snapshot frames are dropped and the new one takes their
 //! place, so the client gets the newest state as soon as it catches up.
-//! Control frames are never dropped. A queue closes when it fills and the
+//! Other frames (input rejections) are never dropped. A queue closes when it fills and the
 //! writer then takes no frame for [`OutboundConfig::disconnect_after`], or
 //! when it fills with control frames alone; the transport then disconnects
 //! the client. A slow writer that still takes frames stays connected and
@@ -46,8 +46,8 @@ pub enum FrameKind {
     /// A snapshot (or snapshot delta). Replaced by a newer one when the
     /// queue is full.
     Snapshot,
-    /// A frame the client must receive, such as an input acknowledgement.
-    Control,
+    /// An [`crate::wire::InputRejection`]. Never dropped.
+    InputRejected,
 }
 
 /// One frame for the transport to write.
@@ -56,6 +56,9 @@ pub struct Frame {
     /// The shard tick the frame belongs to.
     pub tick: u64,
     pub kind: FrameKind,
+    /// The highest `client_seq` the shard has processed for this
+    /// subscriber (0 = none). See [`crate::wire`].
+    pub ack: u64,
     /// The encoded payload, without transport framing.
     pub bytes: Arc<[u8]>,
 }
@@ -156,20 +159,22 @@ impl OutboundQueue {
     }
 
     /// Queue a snapshot frame, dropping older snapshots when full.
-    pub fn push_snapshot(&self, tick: u64, bytes: Arc<[u8]>) -> PushOutcome {
+    pub fn push_snapshot(&self, tick: u64, ack: u64, bytes: Arc<[u8]>) -> PushOutcome {
         self.push(Frame {
             tick,
             kind: FrameKind::Snapshot,
+            ack,
             bytes,
         })
     }
 
-    /// Queue a control frame. Control frames are never dropped; a queue that
+    /// Queue an input-rejected frame. It is never dropped; a queue that
     /// cannot take one closes.
-    pub fn push_control(&self, tick: u64, bytes: Arc<[u8]>) -> PushOutcome {
+    pub fn push_rejection(&self, tick: u64, ack: u64, bytes: Arc<[u8]>) -> PushOutcome {
         self.push(Frame {
             tick,
-            kind: FrameKind::Control,
+            kind: FrameKind::InputRejected,
+            ack,
             bytes,
         })
     }
@@ -263,9 +268,12 @@ mod tests {
             disconnect_after: Duration::from_secs(60),
         });
         for t in 1..=3 {
-            assert_eq!(q.push_snapshot(t, bytes("s")), PushOutcome::Queued);
+            assert_eq!(q.push_snapshot(t, 0, bytes("s")), PushOutcome::Queued);
         }
-        assert_eq!(q.push_snapshot(4, bytes("newest")), PushOutcome::Coalesced);
+        assert_eq!(
+            q.push_snapshot(4, 0, bytes("newest")),
+            PushOutcome::Coalesced
+        );
         assert_eq!(q.len(), 1);
         assert_eq!(q.dropped_snapshots(), 3);
         let f = q.pop().unwrap();
@@ -275,33 +283,33 @@ mod tests {
     }
 
     #[test]
-    fn control_frames_survive_coalescing() {
+    fn rejection_frames_survive_coalescing() {
         let q = OutboundQueue::new(OutboundConfig {
             max_frames: 3,
             disconnect_after: Duration::from_secs(60),
         });
-        q.push_snapshot(1, bytes("s1"));
-        q.push_control(1, bytes("ack"));
-        q.push_snapshot(2, bytes("s2"));
-        assert_eq!(q.push_snapshot(3, bytes("s3")), PushOutcome::Coalesced);
+        q.push_snapshot(1, 0, bytes("s1"));
+        q.push_rejection(1, 0, bytes("ack"));
+        q.push_snapshot(2, 0, bytes("s2"));
+        assert_eq!(q.push_snapshot(3, 0, bytes("s3")), PushOutcome::Coalesced);
         let kinds: Vec<_> = std::iter::from_fn(|| q.pop())
             .map(|f| (f.kind, f.tick))
             .collect();
         assert_eq!(
             kinds,
-            vec![(FrameKind::Control, 1), (FrameKind::Snapshot, 3)]
+            vec![(FrameKind::InputRejected, 1), (FrameKind::Snapshot, 3)]
         );
     }
 
     #[test]
-    fn a_queue_full_of_control_frames_closes() {
+    fn a_queue_full_of_rejections_closes() {
         let q = OutboundQueue::new(OutboundConfig {
             max_frames: 2,
             disconnect_after: Duration::from_secs(60),
         });
-        q.push_control(1, bytes("a"));
-        q.push_control(2, bytes("b"));
-        assert_eq!(q.push_control(3, bytes("c")), PushOutcome::Closed);
+        q.push_rejection(1, 0, bytes("a"));
+        q.push_rejection(2, 0, bytes("b"));
+        assert_eq!(q.push_rejection(3, 0, bytes("c")), PushOutcome::Closed);
         assert!(q.is_closed());
     }
 
@@ -311,10 +319,10 @@ mod tests {
             max_frames: 1,
             disconnect_after: Duration::from_millis(30),
         });
-        q.push_snapshot(1, bytes("a"));
-        assert_eq!(q.push_snapshot(2, bytes("b")), PushOutcome::Coalesced);
+        q.push_snapshot(1, 0, bytes("a"));
+        assert_eq!(q.push_snapshot(2, 0, bytes("b")), PushOutcome::Coalesced);
         std::thread::sleep(Duration::from_millis(40));
-        assert_eq!(q.push_snapshot(3, bytes("c")), PushOutcome::Closed);
+        assert_eq!(q.push_snapshot(3, 0, bytes("c")), PushOutcome::Closed);
         assert!(q.is_closed());
         // The writer still drains what was queued, then sees the close.
         assert!(q.pop_blocking(Duration::from_millis(10)).is_some());
@@ -327,12 +335,12 @@ mod tests {
             max_frames: 1,
             disconnect_after: Duration::from_millis(30),
         });
-        q.push_snapshot(1, bytes("a"));
-        q.push_snapshot(2, bytes("b")); // full → timer starts
+        q.push_snapshot(1, 0, bytes("a"));
+        q.push_snapshot(2, 0, bytes("b")); // full → timer starts
         std::thread::sleep(Duration::from_millis(40));
         q.pop(); // the writer caught up
-        q.push_snapshot(3, bytes("c"));
-        assert_eq!(q.push_snapshot(4, bytes("d")), PushOutcome::Coalesced);
+        q.push_snapshot(3, 0, bytes("c"));
+        assert_eq!(q.push_snapshot(4, 0, bytes("d")), PushOutcome::Coalesced);
         assert!(!q.is_closed());
     }
 
@@ -347,7 +355,7 @@ mod tests {
         let q2 = Arc::clone(&q);
         let h = std::thread::spawn(move || q2.pop_blocking(Duration::from_secs(5)));
         std::thread::sleep(Duration::from_millis(20));
-        q.push_snapshot(7, bytes("x"));
+        q.push_snapshot(7, 0, bytes("x"));
         assert_eq!(h.join().unwrap().unwrap().tick, 7);
         assert_eq!(fired.load(Ordering::Relaxed), 1);
     }

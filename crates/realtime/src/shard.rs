@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::outbound::{OutboundConfig, OutboundQueue};
 use crate::subscriber::{Subscriber, SubscriberId};
+use crate::wire::InputRejection;
 
 // ---------------------------------------------------------------------------
 // ShardAuth — auth context passed to authorization hooks
@@ -233,9 +234,8 @@ impl std::error::Error for ShardError {}
 struct PendingInput<I> {
     subscriber_id: SubscriberId,
     input: I,
-    /// Optional sequence number so the client can reconcile predictions.
-    /// Read via the `InputAck` envelope — not traced yet at the Shard level.
-    #[allow(dead_code)]
+    /// The client's sequence number, echoed back as the subscriber's ack
+    /// (see [`crate::wire`]).
     seq: Option<u64>,
     received_at: Instant,
 }
@@ -282,6 +282,9 @@ pub struct Shard<S: SimState> {
     tick_no: Mutex<u64>,
     /// Monotonic input sequence counter (global per shard).
     input_seq: Mutex<u64>,
+    /// Per subscriber, the highest `client_seq` processed so far (applied
+    /// or rejected by `apply_input`). Sent in each snapshot frame.
+    acks: Mutex<HashMap<SubscriberId, u64>>,
     created_at: Instant,
     last_input_at: Mutex<Instant>,
     last_tick_at: Mutex<Option<Instant>>,
@@ -308,6 +311,7 @@ impl<S: SimState> Shard<S> {
             running: AtomicBool::new(true),
             tick_no: Mutex::new(0),
             input_seq: Mutex::new(0),
+            acks: Mutex::new(HashMap::new()),
             created_at: now,
             last_input_at: Mutex::new(now),
             last_tick_at: Mutex::new(None),
@@ -361,6 +365,11 @@ impl<S: SimState> Shard<S> {
 
     pub fn subscriber_count(&self) -> usize {
         self.subscribers.lock().unwrap().len()
+    }
+
+    /// The highest `client_seq` processed for a subscriber (0 = none).
+    pub fn ack(&self, id: &SubscriberId) -> u64 {
+        self.acks.lock().unwrap().get(id).copied().unwrap_or(0)
     }
 
     pub fn input_queue_len(&self) -> usize {
@@ -439,6 +448,7 @@ impl<S: SimState> Shard<S> {
             before != subs.len()
         };
         if removed {
+            self.acks.lock().unwrap().remove(id);
             // Keep the entry while inputs from this subscriber are still
             // queued; the tick removes it once they drain.
             let mut inputs = self.inputs.lock().unwrap();
@@ -617,15 +627,30 @@ impl<S: SimState> Shard<S> {
         let subs: Vec<Arc<Subscriber<S::Snapshot>>> = self.subscribers.lock().unwrap().clone();
         let sub_count = subs.len();
 
+        let mut failed: Vec<(SubscriberId, InputRejection)> = Vec::new();
         let (snapshots, finished) = {
             let mut state = self.state.lock().unwrap();
+            let mut acks = self.acks.lock().unwrap();
             for pending in drained {
+                if let Some(seq) = pending.seq {
+                    let ack = acks.entry(pending.subscriber_id.clone()).or_insert(0);
+                    *ack = (*ack).max(seq);
+                }
                 if let Err(e) =
                     state.apply_input(&pending.subscriber_id, pending.input, pending.received_at)
                 {
                     tracing::warn!("[realtime] apply_input error in shard {}: {:?}", self.id, e);
+                    failed.push((
+                        pending.subscriber_id,
+                        InputRejection {
+                            client_seq: pending.seq,
+                            code: "apply_failed".into(),
+                            message: format!("{e:?}"),
+                        },
+                    ));
                 }
             }
+            drop(acks);
 
             state.tick(dt);
 
@@ -640,10 +665,29 @@ impl<S: SimState> Shard<S> {
             (snapshots, state.is_finished())
         };
 
-        // Encode and deliver outside the state lock.
+        // Encode and deliver outside the state lock. Rejections go first so
+        // the client learns about a failed input before the snapshot that
+        // acks it.
+        let acks = self.acks.lock().unwrap().clone();
+        let ack_of = |id: &SubscriberId| acks.get(id).copied().unwrap_or(0);
+        for (id, rejection) in &failed {
+            if let Some(sub) = subs.iter().find(|s| s.id() == id) {
+                sub.reject(
+                    tick_number,
+                    ack_of(id),
+                    rejection,
+                    self.config.snapshot_format,
+                );
+            }
+        }
         let mut closed = false;
         for (sub, snap) in subs.iter().zip(snapshots.iter()) {
-            sub.send(tick_number, snap, self.config.snapshot_format);
+            sub.send(
+                tick_number,
+                snap,
+                self.config.snapshot_format,
+                ack_of(sub.id()),
+            );
             closed |= sub.is_closed();
         }
         if closed {
@@ -1091,6 +1135,84 @@ mod tests {
             .unwrap();
         assert!(shard.remove_subscriber(&SubscriberId::new("x")));
         assert!(q.is_closed());
+    }
+
+    fn admin() -> ShardAuth {
+        ShardAuth {
+            user_id: None,
+            is_admin: true,
+        }
+    }
+
+    #[test]
+    fn each_snapshot_carries_the_subscribers_own_ack() {
+        let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), ShardConfig::default());
+        let qa = shard
+            .add_queued_subscriber_authorized(SubscriberId::new("a"), &admin())
+            .unwrap();
+        let qb = shard
+            .add_queued_subscriber_authorized(SubscriberId::new("b"), &admin())
+            .unwrap();
+        for seq in 1..=5 {
+            shard
+                .push_input(SubscriberId::new("a"), 1, Some(seq))
+                .unwrap();
+        }
+        shard
+            .push_input(SubscriberId::new("b"), 1, Some(42))
+            .unwrap();
+        shard.run_tick();
+
+        let fa = qa.pop().unwrap();
+        let fb = qb.pop().unwrap();
+        assert_eq!((fa.kind, fa.ack), (crate::outbound::FrameKind::Snapshot, 5));
+        assert_eq!(fb.ack, 42);
+        // The ack persists on later ticks with no new input.
+        shard.run_tick();
+        assert_eq!(qa.pop().unwrap().ack, 5);
+    }
+
+    #[test]
+    fn a_failed_apply_sends_a_rejection_before_the_snapshot() {
+        struct Picky;
+        impl SimState for Picky {
+            type Input = i64;
+            type Snapshot = u64;
+            type Error = String;
+            fn apply_input(
+                &mut self,
+                _s: &SubscriberId,
+                i: i64,
+                _n: Instant,
+            ) -> Result<(), String> {
+                if i < 0 {
+                    Err("negative".into())
+                } else {
+                    Ok(())
+                }
+            }
+            fn tick(&mut self, _dt: Duration) {}
+            fn snapshot(&self) -> u64 {
+                0
+            }
+        }
+        let shard: Arc<Shard<Picky>> = Shard::new("t", Picky, ShardConfig::default());
+        let q = shard
+            .add_queued_subscriber_authorized(SubscriberId::new("a"), &admin())
+            .unwrap();
+        shard
+            .push_input(SubscriberId::new("a"), -1, Some(7))
+            .unwrap();
+        shard.run_tick();
+
+        let rej = q.pop().unwrap();
+        assert_eq!(rej.kind, crate::outbound::FrameKind::InputRejected);
+        let body: crate::wire::InputRejection = serde_json::from_slice(&rej.bytes).unwrap();
+        assert_eq!(body.client_seq, Some(7));
+        assert_eq!(body.code, "apply_failed");
+        assert!(body.message.contains("negative"));
+        // The failed input still counts as processed.
+        assert_eq!(q.pop().unwrap().ack, 7);
     }
 
     #[test]

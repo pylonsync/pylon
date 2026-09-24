@@ -388,6 +388,28 @@ jobs:
         shell: bash
         run: bash tools/smoke-production-build.sh target/debug/pylon
 
+  # The TS and Swift shard clients against a real MessagePack shard (wire
+  # protocol v2): snapshots decode, binary inputs apply, acks advance, and a
+  # refused input comes back as a rejection frame. macOS, for swift.
+  shard-codecs:
+    name: shard client codecs (TS + Swift)
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true' || needs.changes.outputs.swift == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        run: bun install --frozen-lockfile && bun run build
+      - run: brew install libxml2 libxmlsec1 || true
+      - run: bun install --frozen-lockfile
+      - run: bash tools/smoke-shard-codecs.sh
+
   audit:
     name: cargo audit
     needs: changes
@@ -455,6 +477,7 @@ jobs:
       - typescript
       - create-pylon-smoke
       - production-build-smoke
+      - shard-codecs
       - audit
       - swift
     if: always()

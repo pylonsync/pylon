@@ -48,6 +48,7 @@ pub mod snapshot;
 pub mod subscriber;
 pub mod tick;
 pub mod transport;
+pub mod wire;
 
 pub use aoi::AreaOfInterest;
 pub use dyn_shard::{DynShard, DynShardRegistry};
@@ -65,3 +66,4 @@ pub use snapshot::{encode_snapshot, SnapshotFormat};
 pub use subscriber::{SnapshotSink, Subscriber, SubscriberId};
 pub use tick::TickLoop;
 pub use transport::{sse_info, websocket_info, webtransport_info, ShardTransport, TransportInfo};
+pub use wire::{InputEnvelope, InputRejection};

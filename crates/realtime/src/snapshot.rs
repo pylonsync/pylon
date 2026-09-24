@@ -15,8 +15,9 @@ pub enum SnapshotFormat {
     /// pretty JSON and parseable in any language.
     JsonCompact,
 
-    /// MessagePack via `rmp_serde` if wired. Falls back to JSON when the
-    /// feature isn't enabled.
+    /// MessagePack via `rmp_serde` (the `msgpack` feature). Structs encode
+    /// as maps with field names, so clients in any language decode them into
+    /// keyed objects.
     MessagePack,
 
     /// Bincode via `bincode` if wired. Falls back to JSON when the feature
@@ -57,7 +58,7 @@ pub fn encode_snapshot<T: Serialize>(
         SnapshotFormat::MessagePack => {
             #[cfg(feature = "msgpack")]
             {
-                rmp_serde::to_vec(snapshot).map_err(|e| EncodeError {
+                rmp_serde::to_vec_named(snapshot).map_err(|e| EncodeError {
                     message: format!("msgpack: {e}"),
                 })
             }

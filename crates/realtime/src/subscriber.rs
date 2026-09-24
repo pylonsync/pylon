@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::outbound::OutboundQueue;
 use crate::snapshot::{encode_snapshot, SnapshotFormat};
+use crate::wire::InputRejection;
 
 // ---------------------------------------------------------------------------
 // SubscriberId
@@ -127,21 +128,35 @@ impl<T: Serialize> Subscriber<T> {
         self.queue().is_some_and(|q| q.is_closed())
     }
 
-    fn deliver(&self, tick: u64, frame: Vec<u8>) {
+    fn deliver(&self, tick: u64, ack: u64, frame: Vec<u8>) {
         match &self.delivery {
             Delivery::Sink(sink) => sink(tick, &frame),
             Delivery::Queue(q) => {
-                q.push_snapshot(tick, Arc::from(frame));
+                q.push_snapshot(tick, ack, Arc::from(frame));
             }
         }
     }
 
+    /// Tell a queued subscriber that one of its inputs did not take effect.
+    /// A sink subscriber gets nothing: a sink only carries snapshots.
+    pub fn reject(&self, tick: u64, ack: u64, rejection: &InputRejection, format: SnapshotFormat) {
+        let Some(q) = self.queue() else { return };
+        match encode_snapshot(rejection, format) {
+            Ok(bytes) => {
+                q.push_rejection(tick, ack, Arc::from(bytes));
+            }
+            Err(e) => tracing::warn!("[realtime] rejection encode failed for {}: {}", self.id, e),
+        }
+    }
+
     /// Encode a snapshot in the shard's configured format and send it.
+    /// `ack` is the highest `client_seq` the shard has processed for this
+    /// subscriber (0 = none); queued transports put it in the frame header.
     ///
     /// In delta mode, sends a full snapshot on the first tick, then only
     /// the diff on subsequent ticks. When the queue is full the push drops
     /// the queued frames, so the frame that replaces them is a full one.
-    pub fn send(&self, tick: u64, snapshot: &T, format: SnapshotFormat) {
+    pub fn send(&self, tick: u64, snapshot: &T, format: SnapshotFormat, ack: u64) {
         let encoded = match encode_snapshot(snapshot, format) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -151,7 +166,7 @@ impl<T: Serialize> Subscriber<T> {
         };
 
         if !self.delta_mode {
-            self.deliver(tick, encoded);
+            self.deliver(tick, ack, encoded);
             return;
         }
 
@@ -185,7 +200,7 @@ impl<T: Serialize> Subscriber<T> {
 
         *last = Some(encoded);
         drop(last);
-        self.deliver(tick, frame);
+        self.deliver(tick, ack, frame);
     }
 }
 

@@ -5,12 +5,85 @@ import PylonClient
 import FoundationNetworking
 #endif
 
-/// One snapshot tick from a shard. The server frames each broadcast as
-/// `[tick: u64 BE | snapshot: JSON bytes]`. Decode the snapshot to your
-/// own `Decodable` shard state.
+/// One snapshot tick from a shard, decoded to your own `Decodable` state.
 public struct ShardSnapshot<State: Decodable & Sendable>: Sendable {
     public let tick: UInt64
+    /// The highest `send` sequence number the shard has processed (applied
+    /// or rejected) as of this snapshot. Drop local predictions up to it and
+    /// replay the rest on top of `state`.
+    public let ack: UInt64
     public let state: State
+}
+
+/// An input the shard refused.
+public struct ShardInputRejection: Sendable, Equatable, Decodable {
+    public let clientSeq: UInt64?
+    /// `unauthorized`, `rate_limited`, `queue_full`, `invalid`, `stopped`,
+    /// or `apply_failed`.
+    public let code: String
+    public let message: String
+
+    enum CodingKeys: String, CodingKey {
+        case clientSeq = "client_seq"
+        case code
+        case message
+    }
+}
+
+/// The shard wire protocol, version 2 (`pylon_realtime::wire`). Each server
+/// message is an 18-byte header (kind, codec, tick, ack) and a payload.
+public enum ShardWire {
+    public static let version = 2
+    public static let headerLength = 18
+
+    public enum Kind: UInt8, Sendable {
+        case snapshot = 1
+        case inputRejected = 2
+    }
+
+    public enum Codec: UInt8, Sendable {
+        case json = 0
+        case messagePack = 1
+        case bincode = 2
+        case custom = 3
+    }
+
+    public struct Frame: Sendable {
+        public let kind: UInt8
+        public let codec: UInt8
+        public let tick: UInt64
+        public let ack: UInt64
+        public let payload: Data
+    }
+
+    public enum WireError: Error, Equatable {
+        case tooShort(Int)
+        case unsupportedCodec(UInt8)
+    }
+
+    public static func parse(_ data: Data) throws -> Frame {
+        guard data.count >= headerLength else { throw WireError.tooShort(data.count) }
+        let bytes = [UInt8](data.prefix(headerLength))
+        func u64(_ at: Int) -> UInt64 {
+            bytes[at..<(at + 8)].reduce(0) { ($0 << 8) | UInt64($1) }
+        }
+        return Frame(
+            kind: bytes[0],
+            codec: bytes[1],
+            tick: u64(2),
+            ack: u64(10),
+            payload: data.subdata(in: (data.startIndex + headerLength)..<data.endIndex)
+        )
+    }
+
+    /// Decode a payload in JSON or MessagePack.
+    public static func decode<T: Decodable>(_ type: T.Type, codec: UInt8, payload: Data) throws -> T {
+        switch Codec(rawValue: codec) {
+        case .json: return try JSONDecoder().decode(type, from: payload)
+        case .messagePack: return try MessagePackDecoder().decode(type, from: payload)
+        default: throw WireError.unsupportedCodec(codec)
+        }
+    }
 }
 
 public struct ShardClientConfig: Sendable {
@@ -48,8 +121,9 @@ public struct ShardClientConfig: Sendable {
 /// in `packages/react/src/useShard.ts`.
 ///
 /// Snapshot stream: `for await snap in client.snapshots() { ... }`
-/// Input send: `try await client.send(input)` — encoded as JSON, wrapped
-/// in `{ input, client_seq }`.
+/// Input send: `try await client.send(input)` — wrapped in
+/// `{ input, client_seq }`, MessagePack for MessagePack shards, else JSON.
+/// Refused inputs: `for await r in client.rejections() { ... }`.
 public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendable> {
     public let config: ShardClientConfig
     public let shardId: String
@@ -57,6 +131,10 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     private var task: URLSessionWebSocketTask?
     private var session: URLSession
     private var snapshotContinuation: AsyncStream<ShardSnapshot<State>>.Continuation?
+    private var rejectionContinuation: AsyncStream<ShardInputRejection>.Continuation?
+    /// The shard's codec, learned from the first frame. Until then inputs go
+    /// as JSON text, which every shard accepts.
+    private var codec: UInt8?
     private var stateContinuation: AsyncStream<ConnectionState>.Continuation?
     private var clientSeq: UInt64 = 0
     private var reconnectAttempts = 0
@@ -88,6 +166,11 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         AsyncStream { cont in self.snapshotContinuation = cont }
     }
 
+    /// Inputs the shard refused.
+    public func rejections() -> AsyncStream<ShardInputRejection> {
+        AsyncStream { cont in self.rejectionContinuation = cont }
+    }
+
     public func connectionStates() -> AsyncStream<ConnectionState> {
         AsyncStream { cont in self.stateContinuation = cont }
     }
@@ -105,20 +188,29 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         task?.cancel(with: .normalClosure, reason: nil)
         task = nil
         snapshotContinuation?.finish()
+        rejectionContinuation?.finish()
         stateContinuation?.finish()
     }
 
-    /// Send an input. The framing wraps your `Input` value as
-    /// `{ "input": <input>, "client_seq": <n> }` (matches the TS hook).
-    public func send(_ input: Input) async throws {
+    /// Send an input, wrapped as `{ "input": <input>, "client_seq": <n> }`
+    /// (matches the TS client). A MessagePack shard gets a binary frame;
+    /// otherwise the envelope goes as JSON text. Returns the sequence number,
+    /// which later snapshots acknowledge.
+    @discardableResult
+    public func send(_ input: Input) async throws -> UInt64 {
         clientSeq += 1
         let envelope = InputEnvelope(input: input, client_seq: clientSeq)
-        let data = try encoder.encode(envelope)
-        guard let text = String(data: data, encoding: .utf8) else { return }
         guard let task else {
             throw URLError(.notConnectedToInternet)
         }
-        try await task.send(.string(text))
+        if codec == ShardWire.Codec.messagePack.rawValue {
+            try await task.send(.data(try MessagePackEncoder().encode(envelope)))
+        } else {
+            let data = try encoder.encode(envelope)
+            guard let text = String(data: data, encoding: .utf8) else { return clientSeq }
+            try await task.send(.string(text))
+        }
+        return clientSeq
     }
 
     // MARK: - Internals
@@ -150,9 +242,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
                 let message = try await task.receive()
                 switch message {
                 case .data(let data):
-                    if let snap = decodeSnapshot(data) {
-                        snapshotContinuation?.yield(snap)
-                    }
+                    handleFrame(data)
                 case .string:
                     // Servers may emit JSON control messages; ignore for now.
                     break
@@ -187,23 +277,27 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         components.queryItems = [
             URLQueryItem(name: "shard", value: shardId),
             URLQueryItem(name: "sid", value: config.subscriberId),
+            URLQueryItem(name: "v", value: String(ShardWire.version)),
         ]
         return components.url ?? config.baseURL
     }
 
-    private func decodeSnapshot(_ data: Data) -> ShardSnapshot<State>? {
-        guard data.count >= 8 else { return nil }
-        let base = data.startIndex
-        var tick: UInt64 = 0
-        for i in 0..<8 {
-            tick = (tick << 8) | UInt64(data[base + i])
-        }
-        let payload = data.subdata(in: (base + 8)..<data.endIndex)
-        do {
-            let state = try decoder.decode(State.self, from: payload)
-            return ShardSnapshot(tick: tick, state: state)
-        } catch {
-            return nil
+    private func handleFrame(_ data: Data) {
+        guard let frame = try? ShardWire.parse(data) else { return }
+        codec = frame.codec
+        switch ShardWire.Kind(rawValue: frame.kind) {
+        case .snapshot:
+            if let state = try? ShardWire.decode(State.self, codec: frame.codec, payload: frame.payload) {
+                snapshotContinuation?.yield(ShardSnapshot(tick: frame.tick, ack: frame.ack, state: state))
+            }
+        case .inputRejected:
+            if let rejection = try? ShardWire.decode(
+                ShardInputRejection.self, codec: frame.codec, payload: frame.payload)
+            {
+                rejectionContinuation?.yield(rejection)
+            }
+        case .none:
+            break
         }
     }
 

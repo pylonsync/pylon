@@ -64,5 +64,10 @@ let package = Package(
             dependencies: ["PylonSync"],
             path: "Tests/PylonSyncTests"
         ),
+        .testTarget(
+            name: "PylonRealtimeTests",
+            dependencies: ["PylonRealtime"],
+            path: "Tests/PylonRealtimeTests"
+        ),
     ]
 )

@@ -142,6 +142,19 @@ export type {
   UseShardReturn,
   ShardClient,
 } from "./useShard";
+export {
+  SHARD_PROTOCOL_VERSION,
+  ShardCodec,
+  ShardFrameKind,
+  parseShardFrame,
+  decodeShardPayload,
+  encodeShardInput,
+} from "./shardWire";
+export type {
+  ShardFrame,
+  ShardInputRejection,
+  ShardPayloadDecoder,
+} from "./shardWire";
 
 // Session hook — server-resolved user + tenant identity
 export { useSession } from "./useSession";

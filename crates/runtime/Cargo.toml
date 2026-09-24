@@ -27,7 +27,7 @@ pylon-crdt = { path = "../crdt", version = "0.11.6" }  # x-release-please-versio
 pylon-functions = { path = "../functions", version = "0.11.6" }  # x-release-please-version
 pylon-migrate = { path = "../migrate", version = "0.11.6" }  # x-release-please-version
 pylon-observability = { path = "../observability", version = "0.11.6" }  # x-release-please-version
-pylon-realtime = { path = "../realtime", version = "0.11.6" }  # x-release-please-version
+pylon-realtime = { path = "../realtime", version = "0.11.6", features = ["msgpack"] }  # x-release-please-version
 # Cross-machine fanout. Default build links the Noop bus only; the
 # `redis-bus` feature pulls the Redis impl so operators running
 # horizontally-scaled deploys can enable PYLON_CLUSTER_BUS=redis://...

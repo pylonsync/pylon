@@ -6093,6 +6093,35 @@ fn start_server(
                         }
                     };
 
+                    // SSE carries text: a shard with a binary codec is WebSocket-only.
+                    if !matches!(
+                        shard.snapshot_format(),
+                        pylon_realtime::SnapshotFormat::Json
+                            | pylon_realtime::SnapshotFormat::JsonCompact
+                    ) {
+                        let err = json_error(
+                            "SHARD_CODEC_NOT_SSE",
+                            "This shard encodes snapshots in a binary codec; connect over the shard WebSocket",
+                        );
+                        let response = with_security_headers(
+                            Response::from_string(&err)
+                                .with_status_code(406u16)
+                                .with_header(
+                                    Header::from_bytes("Content-Type", "application/json").unwrap(),
+                                )
+                                .with_header(
+                                    Header::from_bytes(
+                                        "Access-Control-Allow-Origin",
+                                        cors_origin.as_bytes().to_vec(),
+                                    )
+                                    .unwrap(),
+                                ),
+                        );
+                        let _ = request.respond(response);
+                        mt.record_request("GET", 406);
+                        return;
+                    }
+
                     // Subscriber ID from ?sid= query param, else the authed user,
                     // else a generated anonymous ID.
                     let sub_id = url
