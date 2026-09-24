@@ -5,6 +5,8 @@ description: "Deploy Pylon to a single VPS, AWS ECS, Cloudflare Workers, or Pylo
 
 Pylon runs as a Rust binary (plus Bun, which runs your TypeScript and SSR) behind a TLS-terminating reverse proxy. This page covers the supported self-hosted deploy shapes and the experimental Workers path. To skip self-hosting, [Pylon Cloud](/cloud) hosts the same binary.
 
+Each shape can run your source (`pylon start app.ts`) or a [production build](/operations/build) (`pylon start dist`). The production build needs no source tree and no `node_modules` on the server.
+
 ## Required environment
 
 ```sh
@@ -244,3 +246,5 @@ docker run -d \
 Same env vars apply. Mount the data volume so it survives container restarts.
 
 For a self-contained image (no runtime mount) or a docker-compose setup with a Postgres sidecar, run `pylon deploy --target docker` or `pylon deploy --target compose` in your project. Both commands generate a Dockerfile that copies your app onto the runtime image and serves it with `pylon start`.
+
+To ship only the build output, see the multi-stage Dockerfile in [Production build](/operations/build#docker).

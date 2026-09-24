@@ -5131,7 +5131,11 @@ pub fn try_spawn_functions(
     rooms: Arc<crate::rooms::RoomManager>,
 ) -> Option<Arc<FnOpsImpl>> {
     let fn_dir = std::env::var("PYLON_FUNCTIONS_DIR").unwrap_or_else(|_| "functions".into());
-    let fn_dir_exists = std::path::Path::new(&fn_dir).exists();
+    // A `pylon build` artifact (`PYLON_SERVER_BUNDLE`, set by `pylon start
+    // <dir>`) has no functions/ dir: its functions are inside the bundled
+    // runner, so treat it as present.
+    let fn_dir_exists = std::path::Path::new(&fn_dir).exists()
+        || std::env::var("PYLON_SERVER_BUNDLE").is_ok_and(|v| v == "1");
     // A pure-SSR app (file-based `app/**/page.tsx` routes + entity CRUD, no
     // server functions) has no `functions/` dir — but native SSR rendering
     // still runs through this same Bun runner, so we must spawn it whenever
@@ -5249,7 +5253,11 @@ pub fn try_spawn_functions(
     let registry = Arc::new(FnRegistry::new());
     let count = defs.len();
     registry.replace_all(defs);
-    tracing::info!("[functions] Loaded {count} function(s) from {fn_dir}");
+    if std::env::var("PYLON_SERVER_BUNDLE").is_ok_and(|v| v == "1") {
+        tracing::info!("[functions] Loaded {count} function(s) from the server bundle");
+    } else {
+        tracing::info!("[functions] Loaded {count} function(s) from {fn_dir}");
+    }
     // Register schedule + email hooks on EVERY runner in the pool.
     // Logic is identical across runners (calls the same downstream
     // adapters); only the closure-captured Arcs differ per

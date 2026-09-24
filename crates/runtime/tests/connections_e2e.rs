@@ -22,6 +22,7 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn manifest_with_google() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
+        build: Default::default(),
         manifest_version: 1,
         name: "connections-e2e".into(),
         version: "0.1.0".into(),

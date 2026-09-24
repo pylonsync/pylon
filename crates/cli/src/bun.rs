@@ -760,7 +760,7 @@ fn find_workspace_package_dir(dep: &str, source_web_dir: &Path) -> Option<PathBu
 }
 
 /// Does `path` (a package.json) declare a `build` script?
-fn package_json_has_build_script(path: &Path) -> bool {
+pub(crate) fn package_json_has_build_script(path: &Path) -> bool {
     let Ok(text) = std::fs::read_to_string(path) else {
         return false;
     };

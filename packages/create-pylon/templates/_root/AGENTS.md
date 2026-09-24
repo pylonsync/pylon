@@ -74,7 +74,8 @@ this pass before the user has to ask.
 | Inspect data / entities | `pylon data entities` \| `pylon data list <Entity>` |
 | Call a function | `pylon fn <name> key=value` |
 | Health snapshot | `pylon status` |
-| Build for prod | `pylon build` |
+| Build for prod (writes `dist/`) | `pylon build` |
+| Run the production build | `pylon start dist` |
 | Wire in Stack0 Analytics or Feedback | `pylon add analytics --site-key <KEY>` \| `pylon add feedback` |
 | Deploy (Pylon Cloud by default) | `pylon deploy` |
 | Look up an error code | `pylon explain <CODE>` |

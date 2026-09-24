@@ -347,6 +347,47 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bash tools/smoke-mobile-bundle.sh
 
+  # `pylon build` must write an artifact that `pylon start <dir>` runs with
+  # no source tree and no node_modules. The smoke script scaffolds the
+  # barebones template, overlays the local packages, builds with a browser
+  # target, polyfills, an external package, and an include dir, then serves
+  # the artifact from another directory. Windows is in the matrix because
+  # path separators broke the client bundle there once (#15).
+  production-build-smoke:
+    name: production build smoke (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.ts == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - name: Build Studio UI bundle
+        working-directory: crates/studio_api/web
+        shell: bash
+        run: bun install --frozen-lockfile && bun run build
+      - name: Install xmlsec1 + libxml2 (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libxml2-dev libxmlsec1-dev libxmlsec1-openssl
+      - name: Set up xmlsec1 (Windows)
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 45
+        uses: ./.github/actions/setup-xmlsec-windows
+      - run: cargo build -p pylon-cli
+      - name: Smoke test
+        shell: bash
+        run: bash tools/smoke-production-build.sh target/debug/pylon
+
   audit:
     name: cargo audit
     needs: changes
@@ -413,6 +454,7 @@ jobs:
       - wasm32-workers
       - typescript
       - create-pylon-smoke
+      - production-build-smoke
       - audit
       - swift
     if: always()

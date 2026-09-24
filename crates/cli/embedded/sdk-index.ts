@@ -873,6 +873,95 @@ export interface AppManifest {
    *  `pylon deploy` refuses to ship when one is missing from the
    *  project's secrets. */
   requiredEnv?: ManifestRequiredEnv[];
+  /** Production build settings (`pylon build`). */
+  build?: BuildConfig;
+}
+
+/**
+ * Production build settings for `pylon build`. Dev (`pylon dev`) ignores the
+ * browser settings; they apply to the artifact and to `pylon start` builds.
+ *
+ * ```ts
+ * buildManifest({
+ *   // ...
+ *   build: {
+ *     target: ["chrome >= 90", "safari >= 14", "firefox >= 90"],
+ *     polyfill: "usage",
+ *     server: { external: ["sharp"] },
+ *   },
+ * });
+ * ```
+ */
+export interface BuildConfig {
+  /** Browser target for client JavaScript: an ECMAScript edition
+   *  (`"es2018"` to `"es2022"`) or browserslist queries. Unset: modern
+   *  output, no lowering. Needs `@swc/core` and `browserslist` in the app's
+   *  devDependencies. The client runtime needs ES modules and dynamic
+   *  `import()`, so browsers older than Chrome 63, Firefox 67, and Safari
+   *  11.1 cannot run it at any target. */
+  target?: string | string[];
+  /** core-js polyfills for `target`. `"usage"` adds the features the bundle
+   *  uses; `"entry"` adds every feature the target lacks. Needs `core-js` in
+   *  the app's dependencies. Default `false`. */
+  polyfill?: false | "usage" | "entry";
+  css?: {
+    /** CSS target (prefixes, nesting, color syntax), same forms as
+     *  `target`. Default: `target`. Needs `lightningcss` and `browserslist`. */
+    target?: string | string[];
+  };
+  /** Emit source maps for the client and server bundles. Default `false`. */
+  sourcemap?: boolean;
+  server?: {
+    /** Bundle npm packages into the server output. `false` ships every
+     *  dependency in `server/node_modules`. Default `true`. */
+    bundle?: boolean;
+    /** Packages to leave out of the server bundle and ship in
+     *  `server/node_modules` with their dependencies: native modules and
+     *  packages that read their own files at run time. */
+    external?: string[];
+  };
+  /** Project files or directories to copy into the artifact, for files the
+   *  app reads from disk at run time (content/, data/). `public/` and image
+   *  files under `app/` are always copied. */
+  include?: string[];
+}
+
+/** Throws when `build` has a value `pylon build` cannot use. */
+function validateBuildConfig(build: BuildConfig): void {
+  const fail = (msg: string): never => {
+    throw new Error(`buildManifest: build.${msg}`);
+  };
+  const checkTarget = (t: unknown, field: string) => {
+    if (t === undefined) return;
+    const list = Array.isArray(t) ? t : [t];
+    if (list.length === 0 || list.some((x) => typeof x !== "string" || x.trim() === "")) {
+      fail(`${field} must be a non-empty string or a list of non-empty strings`);
+    }
+  };
+  checkTarget(build.target, "target");
+  checkTarget(build.css?.target, "css.target");
+  const pf = build.polyfill;
+  if (pf !== undefined && pf !== false && pf !== "usage" && pf !== "entry") {
+    fail(`polyfill must be false, "usage", or "entry"`);
+  }
+  if (pf && build.target === undefined) {
+    fail(`polyfill needs build.target (the browsers to polyfill for)`);
+  }
+  if (build.sourcemap !== undefined && typeof build.sourcemap !== "boolean") {
+    fail(`sourcemap must be a boolean`);
+  }
+  if (build.server?.bundle !== undefined && typeof build.server.bundle !== "boolean") {
+    fail(`server.bundle must be a boolean`);
+  }
+  for (const [field, list] of [
+    ["server.external", build.server?.external],
+    ["include", build.include],
+  ] as const) {
+    if (list === undefined) continue;
+    if (!Array.isArray(list) || list.some((x) => typeof x !== "string" || x === "")) {
+      fail(`${field} must be a list of non-empty strings`);
+    }
+  }
 }
 
 /** One environment variable the app declares it needs. */
@@ -2150,6 +2239,8 @@ export function buildManifest(options: {
    *  ```
    */
   requiredEnv?: ManifestRequiredEnv[];
+  /** Production build settings for `pylon build`. See `BuildConfig`. */
+  build?: BuildConfig;
   /** Set by `discoverFunctions()` (spread its result into this call).
    *  When true, the framework's AgentRun/AgentMessage entities and
    *  their owner-scoping policies are appended to the manifest —
@@ -2170,6 +2261,7 @@ export function buildManifest(options: {
   // can `.policies(policy({ allowRead: "..." }))` without one. Auto-
   // derive from the entity + a counter so two attached policies
   // don't collide.
+  if (options.build) validateBuildConfig(options.build);
   const attached: PolicyDefinition[] = [];
   for (const ent of options.entities) {
     const extracted = extractAttachedPolicies(ent);
@@ -2232,6 +2324,9 @@ export function buildManifest(options: {
       : {}),
     ...(options.requiredEnv && options.requiredEnv.length > 0
       ? { requiredEnv: options.requiredEnv }
+      : {}),
+    ...(options.build && Object.keys(options.build).length > 0
+      ? { build: options.build }
       : {}),
   };
 }

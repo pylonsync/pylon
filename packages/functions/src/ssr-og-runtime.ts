@@ -25,6 +25,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { serverBundle } from "./server-bundle";
 
 // Satori's font descriptor.
 export interface OgFont {
@@ -68,9 +69,15 @@ function loadResvg() {
 	if (!resvgReady) {
 		resvgReady = (async () => {
 			const mod = await import("@resvg/resvg-wasm");
-			// Locate the wasm binary next to the package entry and init once.
-			const entry = fileURLToPath(import.meta.resolve("@resvg/resvg-wasm"));
-			const wasmPath = entry.replace(/index\.[^/]+$/, "index_bg.wasm");
+			// Locate the wasm binary next to the package entry (or in the
+			// production server bundle) and init once.
+			const bundled = serverBundle()?.ogAssets.resvgWasm;
+			const wasmPath =
+				bundled ??
+				fileURLToPath(import.meta.resolve("@resvg/resvg-wasm")).replace(
+					/index\.[^/]+$/,
+					"index_bg.wasm",
+				);
 			await mod.initWasm(readFileSync(wasmPath));
 			return mod;
 		})();
@@ -83,18 +90,23 @@ function loadResvg() {
 let defaultFonts: OgFont[] | null = null;
 function loadDefaultFonts(): OgFont[] {
 	if (defaultFonts) return defaultFonts;
+	const bundled = serverBundle()?.ogAssets;
 	const read = (rel: string) =>
 		readFileSync(fileURLToPath(new URL(rel, import.meta.url)));
 	defaultFonts = [
 		{
 			name: "Inter",
-			data: read("../assets/fonts/Inter-Regular.ttf"),
+			data: bundled
+				? readFileSync(bundled.interRegular)
+				: read("../assets/fonts/Inter-Regular.ttf"),
 			weight: 400,
 			style: "normal",
 		},
 		{
 			name: "Inter",
-			data: read("../assets/fonts/Inter-SemiBold.ttf"),
+			data: bundled
+				? readFileSync(bundled.interSemiBold)
+				: read("../assets/fonts/Inter-SemiBold.ttf"),
 			weight: 600,
 			style: "normal",
 		},

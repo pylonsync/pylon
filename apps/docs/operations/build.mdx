@@ -1,0 +1,166 @@
+---
+title: Production build
+description: "Build an app into a directory that runs without its source tree or node_modules."
+---
+
+`pylon build` writes a production artifact to `dist/`. `pylon start dist` runs it. The artifact does not need the source tree, `node_modules`, or a package install on the server.
+
+```bash
+pylon build
+pylon start dist
+```
+
+## What the artifact holds
+
+| Path | Contents |
+| --- | --- |
+| `pylon-build.json` | Build information. `pylon start` uses it to identify an artifact. |
+| `pylon.manifest.json` | The app manifest. |
+| `server/runner.js`, `server/chunks/` | Your functions, workflows, page modules, and the Pylon runtime. |
+| `server/assets/` | Files the server reads at run time, such as the OG image fonts. |
+| `server/node_modules/` | Only the packages in `build.server.external`, with their dependencies and peers. |
+| `client/` | The hydration bundle and CSS, served under `/_pylon/build/`. |
+| `public/` | A copy of `public/`. |
+| `app/` | Image and text files from `app/` (icons, social images). |
+| `static/` | Pages for routes with `mode: "static"`. |
+| `web/dist/` | The build of a `web/` SPA, when the project has one. |
+| `bin/` | The `pylon` and `bun` binaries, with `--compile` only. |
+
+Dev mode (`pylon dev`) does not change. It runs your source files.
+
+## Data paths
+
+`pylon start dist` stores data next to the artifact, not in it. The next `pylon build` deletes `dist/`.
+
+- The SQLite database defaults to `pylon.db` in the directory where you run the command.
+- Uploads default to `uploads/` in that directory.
+- Relative values of `PYLON_DB_PATH` and `PYLON_FILES_DIR` resolve from that directory.
+- `PYLON_SESSION_DB`, `PYLON_JOBS_DB`, `PYLON_WORKFLOWS_DB`, and a SQLite `DATABASE_URL` follow the same rules.
+- `pylon start` refuses a data path inside the artifact.
+
+In production, set absolute paths:
+
+```bash
+PYLON_DB_PATH=/data/pylon.db PYLON_FILES_DIR=/data/uploads pylon start dist
+```
+
+The server keeps caches in `dist/.pylon/` (rendered pages, resized images). A new build starts them empty.
+
+Signed file URLs use `PYLON_JWT_SECRET`. Without it, the server keeps a generated secret in `dist/.pylon/`, and a new build changes it, so older signed URLs stop working. Set `PYLON_JWT_SECRET` in production.
+
+## Build settings
+
+Put build settings in the `build` block of `buildManifest` in `app.ts`:
+
+```ts
+const manifest = buildManifest({
+  // ...
+  build: {
+    target: ["chrome >= 90", "safari >= 14", "firefox >= 90"],
+    polyfill: "usage",
+    css: { target: ["safari >= 14"] },
+    sourcemap: false,
+    server: { external: ["sharp"] },
+    include: ["content"],
+  },
+});
+```
+
+`pylon dev` ignores `target`, `polyfill`, and `css`. They apply to `pylon build`, and to `pylon start app.ts`, which builds the client bundle when it starts.
+
+### Browser targets
+
+`target` sets the browsers the client JavaScript must run in. Use an ECMAScript edition (`"es2018"` to `"es2022"`) or browserslist queries. Without a target, the build ships modern JavaScript.
+
+The build lowers the syntax with SWC after Bun bundles the code. Add the tools to the app:
+
+```bash
+bun add -d @swc/core browserslist
+```
+
+The Pylon client runtime loads pages as ES modules with dynamic `import()`. Browsers older than Chrome 63, Firefox 67, and Safari 11.1 cannot run it at any target. The build prints a warning when your target includes such a browser.
+
+### Polyfills
+
+`polyfill` adds core-js polyfills for the target:
+
+- `false` (default): no polyfills.
+- `"usage"`: the features that the bundle uses and the target lacks.
+- `"entry"`: every feature that the target lacks.
+
+The build puts the polyfills in one file. Each page loads that file before its own code. Add core-js to the app:
+
+```bash
+bun add core-js
+```
+
+### CSS targets
+
+`css.target` sets the browsers for the compiled CSS. It defaults to `target`. Lightning CSS adds vendor prefixes and lowers nesting and new color syntax. It also minifies the CSS. Add the tools:
+
+```bash
+bun add -d lightningcss browserslist
+```
+
+### Server bundle
+
+The build bundles your npm packages into the server output. Some packages cannot be bundled:
+
+- native modules (`.node` files), such as `sharp`,
+- packages that read their own files at run time.
+
+List them in `server.external`. The build copies each one, its dependencies, and its peer dependencies into `server/node_modules/`.
+
+A package in `server/node_modules/` loads its own copy of a peer such as `react`, and the bundle has another copy. If the package shares state with the bundled copy (hooks, context), put both in `server.external`.
+
+Set `server.bundle` to `false` to bundle only your own code. The build then copies every dependency in `package.json` into `server/node_modules/`.
+
+### Files your code reads
+
+The build copies `public/` and the image files under `app/`. If your code reads other files at run time, such as `content/` or `data/`, list them in `include`. Paths are relative to the project directory.
+
+### Source maps
+
+`sourcemap: true` writes source maps for the client and server bundles. The client maps are public under `/_pylon/build/`.
+
+## Flags
+
+| Flag | Effect |
+| --- | --- |
+| `--out <dir>` | Write the artifact to `<dir>` instead of `dist`. |
+| `--compile` | Copy the `pylon` and `bun` binaries into `<dir>/bin/`. |
+| `--no-bundle` | Write the manifest and typed client only, and render static routes into `--out`. |
+
+`pylon build` refuses to write into a directory that has files but no `pylon-build.json`. It does not delete data it did not create.
+
+## Standalone artifact
+
+`pylon build --compile` adds `bin/pylon` and `bin/bun`. Run the artifact on a host that has neither installed:
+
+```bash
+./dist/bin/pylon start dist
+```
+
+The binaries are for the platform that ran the build. To build for Linux, run the build on Linux, for example in a Docker build stage.
+
+On Linux, the `pylon` binary loads libxml2 and libxmlsec1 at start (SAML signature checks). The host must have them. On Debian and Ubuntu, install `libxml2 libxmlsec1 libxmlsec1-openssl`.
+
+## Docker
+
+Build in the Pylon image, then copy only the artifact into the runtime image. Use the same version for both stages and for `@pylonsync/*` in `package.json`.
+
+```dockerfile
+FROM ghcr.io/pylonsync/pylon:0.12.0 AS build
+USER root
+WORKDIR /src
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY . .
+RUN pylon build
+
+FROM ghcr.io/pylonsync/pylon:0.12.0
+COPY --from=build /src/dist /app
+CMD ["pylon", "start", "/app"]
+```
+
+The Pylon image sets `PYLON_DB_PATH=/data/pylon.db` and `PYLON_FILES_DIR=/data/uploads`. Mount a volume at `/data`.

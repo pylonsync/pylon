@@ -27,6 +27,184 @@ use crate::output::{print_diagnostics, print_json};
 use crate::studio_config;
 
 const DEFAULT_PORT: u16 = 4321;
+/// Marks a `pylon build` artifact directory (written by
+/// `@pylonsync/functions/src/production-build.ts`).
+const BUILD_INFO_FILE: &str = "pylon-build.json";
+const MANIFEST_FILE: &str = "pylon.manifest.json";
+
+/// Prepare the process to run the `pylon build` artifact in `dir`, then
+/// enter it. The runtime serves the artifact's files relative to the working
+/// directory, so it has to be `dir`.
+///
+///   - The functions runner is the bundled `server/runner.js`, whatever
+///     `PYLON_FUNCTIONS_RUNTIME` said (the runtime image points it at the
+///     source runtime).
+///   - SQLite and upload paths resolve against the directory the command ran
+///     in, before the directory change, and must not point inside the
+///     artifact: the next `pylon build` deletes it.
+///   - `bin/` from `pylon build --compile` goes first on PATH, so the runner
+///     starts with the bundled bun.
+fn enter_build_artifact(dir: &Path) -> Result<(), Box<Diagnostic>> {
+    let err = |code: &str, message: String, hint: Option<&str>| {
+        Box::new(Diagnostic {
+            severity: Severity::Error,
+            code: code.into(),
+            message,
+            span: None,
+            hint: hint.map(str::to_string),
+        })
+    };
+    let invocation = std::env::current_dir().map_err(|e| {
+        err(
+            "START_ARTIFACT_DIR",
+            format!("could not read the working directory: {e}"),
+            None,
+        )
+    })?;
+    let root = dir.canonicalize().map_err(|e| {
+        err(
+            "START_ARTIFACT_DIR",
+            format!("could not resolve {}: {e}", dir.display()),
+            None,
+        )
+    })?;
+    let runner = root.join("server").join("runner.js");
+    if !runner.is_file() {
+        return Err(err(
+            "START_ARTIFACT_INCOMPLETE",
+            format!(
+                "{} is missing; the artifact is incomplete",
+                runner.display()
+            ),
+            Some("run `pylon build` again"),
+        ));
+    }
+
+    // Every path the runtime stores data at, with its default. Unset
+    // variables without a default derive from PYLON_DB_PATH (the jobs,
+    // workflows, and sessions databases sit next to it), which is resolved
+    // here too.
+    let database_url = std::env::var("DATABASE_URL").ok();
+    let uses_pg = database_url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("postgres://") || u.starts_with("postgresql://"));
+    let mut data_paths: Vec<(&str, String)> = vec![(
+        "PYLON_FILES_DIR",
+        std::env::var("PYLON_FILES_DIR").unwrap_or_else(|_| "uploads".into()),
+    )];
+    match (&database_url, uses_pg) {
+        // A non-Postgres DATABASE_URL is a SQLite path, and it wins over
+        // PYLON_DB_PATH.
+        (Some(url), false) => {
+            if !url.contains("://") {
+                data_paths.push(("DATABASE_URL", url.clone()));
+            }
+        }
+        (_, true) => {}
+        (None, false) => data_paths.push((
+            "PYLON_DB_PATH",
+            std::env::var("PYLON_DB_PATH").unwrap_or_else(|_| "pylon.db".into()),
+        )),
+    }
+    for var in ["PYLON_SESSION_DB", "PYLON_JOBS_DB", "PYLON_WORKFLOWS_DB"] {
+        if let Ok(v) = std::env::var(var) {
+            if !v.is_empty() && !v.contains("://") {
+                data_paths.push((var, v));
+            }
+        }
+    }
+    for (var, value) in data_paths {
+        let abs = artifact_data_path(&invocation, &root, &value).ok_or_else(|| {
+            err(
+                "START_ARTIFACT_DATA_PATH",
+                format!(
+                    "{var} resolves to {value:?} inside the artifact directory {}; \
+                     the next `pylon build` deletes it",
+                    root.display()
+                ),
+                Some("set it to a path outside the artifact, e.g. PYLON_DB_PATH=/data/pylon.db"),
+            )
+        })?;
+        std::env::set_var(var, abs);
+    }
+
+    std::env::set_var("PYLON_FUNCTIONS_RUNTIME", &runner);
+    std::env::set_var("PYLON_SERVER_BUNDLE", "1");
+    let bin = root.join("bin");
+    if bin
+        .join(format!("bun{}", std::env::consts::EXE_SUFFIX))
+        .is_file()
+    {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let joined =
+            std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(&path)))
+                .map_err(|e| {
+                    err(
+                        "START_ARTIFACT_DIR",
+                        format!("could not extend PATH: {e}"),
+                        None,
+                    )
+                })?;
+        std::env::set_var("PATH", joined);
+    }
+    std::env::set_current_dir(&root).map_err(|e| {
+        err(
+            "START_ARTIFACT_CHDIR",
+            format!("could not enter {}: {e}", root.display()),
+            None,
+        )
+    })
+}
+
+/// `value` resolved against `invocation`, or None when it lands inside the
+/// artifact `root`.
+fn artifact_data_path(invocation: &Path, root: &Path, value: &str) -> Option<std::path::PathBuf> {
+    let abs = invocation.join(value);
+    // Normalize `.` and `..` without touching the disk: the file may not
+    // exist yet.
+    let mut norm = std::path::PathBuf::new();
+    for c in abs.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                norm.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => norm.push(other),
+        }
+    }
+    // Compare canonical forms on both sides. Canonical paths resolve
+    // symlinks, and on Windows they carry the `\\?\` prefix, so a canonical
+    // root never matches a plain path.
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    if canonical_prefix(&norm).starts_with(&root_canon) {
+        None
+    } else {
+        Some(norm)
+    }
+}
+
+/// `path` with its longest existing ancestor canonicalized and the rest (the
+/// parts that do not exist yet) appended.
+fn canonical_prefix(path: &Path) -> std::path::PathBuf {
+    let mut existing = path;
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    loop {
+        if let Ok(canon) = existing.canonicalize() {
+            let mut out = canon;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+}
 
 pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // Prebuilt-artifact boot (Pylon Cloud build pipeline). When the control
@@ -78,7 +256,22 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     let positional: Vec<&str> = collect_positional(args, "start");
 
+    // `pylon start <dir>`: run a `pylon build` artifact. It carries the
+    // manifest and the bundled server, so there is no app.ts to evaluate.
+    let build_artifact = positional
+        .first()
+        .map(Path::new)
+        .filter(|p| p.join(BUILD_INFO_FILE).is_file())
+        .map(Path::to_path_buf);
+    if let Some(dir) = &build_artifact {
+        if let Err(d) = enter_build_artifact(dir) {
+            print_diagnostics(&[*d], json_mode);
+            return ExitCode::Error;
+        }
+    }
+
     let entry_file = match positional.first() {
+        Some(_) if build_artifact.is_some() => MANIFEST_FILE.to_string(),
         Some(f) => f.to_string(),
         None => {
             if Path::new("app.ts").exists() {
@@ -114,12 +307,32 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         return ExitCode::Error;
     }
 
-    // Build the manifest once. Production never re-reads app.ts.
-    let manifest_json = match crate::bun::run_bun_codegen(&entry_file, true) {
-        Ok(json) => json,
-        Err(diag) => {
-            print_diagnostics(&[diag], json_mode);
-            return ExitCode::Error;
+    // Build the manifest once. Production never re-reads app.ts. An
+    // artifact ships it.
+    let manifest_json = if build_artifact.is_some() {
+        match std::fs::read_to_string(MANIFEST_FILE) {
+            Ok(json) => json,
+            Err(e) => {
+                print_diagnostics(
+                    &[Diagnostic {
+                        severity: Severity::Error,
+                        code: "START_ARTIFACT_MANIFEST".into(),
+                        message: format!("could not read the artifact's {MANIFEST_FILE}: {e}"),
+                        span: None,
+                        hint: None,
+                    }],
+                    json_mode,
+                );
+                return ExitCode::Error;
+            }
+        }
+    } else {
+        match crate::bun::run_bun_codegen(&entry_file, true) {
+            Ok(json) => json,
+            Err(diag) => {
+                print_diagnostics(&[diag], json_mode);
+                return ExitCode::Error;
+            }
         }
     };
 
@@ -143,51 +356,55 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // to the real SPA. The fast path (warm boot with dist/.pylon-build-
     // marker present) returns Ok within ~5ms anyway and the user
     // sees the SPA from the first request.
+    //
+    // An artifact ships its SPA prebuilt (`<dir>/web/dist`), so it skips this.
     let entry_file_clone = entry_file.clone();
     let build_state = pylon_runtime::frontend::shared_build_state();
-    pylon_runtime::frontend::mark_build_in_progress(&build_state);
-    std::thread::Builder::new()
-        .name("pylon-frontend-build".into())
-        .spawn({
-            let build_state = build_state.clone();
-            move || {
-                // Wrap the entire build in catch_unwind so a panic
-                // anywhere in ensure_frontend_built (FS quirk on
-                // /data, bun.lock metadata race, std::fs::* unwrap,
-                // etc.) flips the BuildState to Failed instead of
-                // leaving InProgress forever. Without this guard,
-                // a thread panic terminates the worker silently and
-                // the operator sees an infinite "Building..." page
-                // with no way to know what went wrong.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    crate::bun::ensure_frontend_built(&entry_file_clone, true)
-                }));
-                match result {
-                    Ok(Ok(())) => {
-                        pylon_runtime::frontend::mark_build_ready(&build_state);
-                    }
-                    Ok(Err(diag)) => {
-                        eprintln!("[frontend] build failed ({}): {}", diag.code, diag.message);
-                        pylon_runtime::frontend::mark_build_failed(&build_state, diag.message);
-                    }
-                    Err(panic) => {
-                        let msg = if let Some(s) = panic.downcast_ref::<String>() {
-                            s.clone()
-                        } else if let Some(s) = panic.downcast_ref::<&str>() {
-                            (*s).to_string()
-                        } else {
-                            "build thread panicked with non-string payload".to_string()
-                        };
-                        eprintln!("[frontend] build panicked: {msg}");
-                        pylon_runtime::frontend::mark_build_failed(
-                            &build_state,
-                            format!("build thread panicked: {msg}"),
-                        );
+    if build_artifact.is_none() {
+        pylon_runtime::frontend::mark_build_in_progress(&build_state);
+        std::thread::Builder::new()
+            .name("pylon-frontend-build".into())
+            .spawn({
+                let build_state = build_state.clone();
+                move || {
+                    // Wrap the entire build in catch_unwind so a panic
+                    // anywhere in ensure_frontend_built (FS quirk on
+                    // /data, bun.lock metadata race, std::fs::* unwrap,
+                    // etc.) flips the BuildState to Failed instead of
+                    // leaving InProgress forever. Without this guard,
+                    // a thread panic terminates the worker silently and
+                    // the operator sees an infinite "Building..." page
+                    // with no way to know what went wrong.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        crate::bun::ensure_frontend_built(&entry_file_clone, true)
+                    }));
+                    match result {
+                        Ok(Ok(())) => {
+                            pylon_runtime::frontend::mark_build_ready(&build_state);
+                        }
+                        Ok(Err(diag)) => {
+                            eprintln!("[frontend] build failed ({}): {}", diag.code, diag.message);
+                            pylon_runtime::frontend::mark_build_failed(&build_state, diag.message);
+                        }
+                        Err(panic) => {
+                            let msg = if let Some(s) = panic.downcast_ref::<String>() {
+                                s.clone()
+                            } else if let Some(s) = panic.downcast_ref::<&str>() {
+                                (*s).to_string()
+                            } else {
+                                "build thread panicked with non-string payload".to_string()
+                            };
+                            eprintln!("[frontend] build panicked: {msg}");
+                            pylon_runtime::frontend::mark_build_failed(
+                                &build_state,
+                                format!("build thread panicked: {msg}"),
+                            );
+                        }
                     }
                 }
-            }
-        })
-        .expect("spawn frontend build thread");
+            })
+            .expect("spawn frontend build thread");
+    }
 
     let manifest = match parse_manifest(&manifest_json, &entry_file) {
         Ok(m) => m,
@@ -208,8 +425,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     // bad studio.config.ts can't take down a production server.
     let entry_dir = Path::new(&entry_file).parent().unwrap_or(Path::new("."));
     let studio_data_dir = entry_dir.join(".pylon");
-    if studio_config::locate_config(&entry_file).is_some()
-        || studio_config::locate_entry(&entry_file).is_some()
+    // An artifact carries the studio files `pylon build` wrote.
+    if build_artifact.is_none()
+        && (studio_config::locate_config(&entry_file).is_some()
+            || studio_config::locate_entry(&entry_file).is_some())
     {
         if let Err(diags) = studio_config::build_artefacts(&entry_file, &studio_data_dir) {
             let warnings: Vec<Diagnostic> = diags
@@ -390,4 +609,47 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     }
 
     ExitCode::Ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::artifact_data_path;
+
+    #[test]
+    fn data_paths_resolve_from_the_invocation_dir_and_stay_out_of_the_artifact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().canonicalize().unwrap();
+        let artifact = project.join("dist");
+        std::fs::create_dir_all(artifact.join("server")).unwrap();
+
+        // `pylon start dist` from the project root: the default lands next to dist/.
+        assert_eq!(
+            artifact_data_path(&project, &artifact, "pylon.db"),
+            Some(project.join("pylon.db"))
+        );
+        assert_eq!(
+            artifact_data_path(&project, &artifact, "/data/pylon.db"),
+            Some(std::path::PathBuf::from("/data/pylon.db"))
+        );
+        // Anything that resolves inside the artifact is refused.
+        assert_eq!(
+            artifact_data_path(&project, &artifact, "dist/pylon.db"),
+            None
+        );
+        assert_eq!(artifact_data_path(&artifact, &artifact, "pylon.db"), None);
+        assert_eq!(
+            artifact_data_path(&project, &artifact, "x/../dist/uploads"),
+            None
+        );
+        // A missing directory under the artifact is still inside it.
+        assert_eq!(
+            artifact_data_path(&project, &artifact, "dist/data/uploads"),
+            None
+        );
+        // `..` out of the artifact is fine.
+        assert_eq!(
+            artifact_data_path(&artifact, &artifact, "../pylon.db"),
+            Some(project.join("pylon.db"))
+        );
+    }
 }

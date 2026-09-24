@@ -20,6 +20,7 @@ use serde_json::Value;
 fn test_manifest() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
+        build: Default::default(),
         manifest_version: 1,
         name: "sync-proto".into(),
         version: "0.1.0".into(),

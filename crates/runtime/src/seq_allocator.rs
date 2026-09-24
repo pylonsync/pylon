@@ -272,6 +272,7 @@ mod tests {
         use pylon_kernel::*;
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: 1,
             name: "t".into(),
             version: "0.1.0".into(),

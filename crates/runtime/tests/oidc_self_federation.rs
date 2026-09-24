@@ -67,6 +67,7 @@ fn entity(name: &str, fields: Vec<ManifestField>) -> ManifestEntity {
 fn test_manifest() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
+        build: Default::default(),
         manifest_version: 1,
         name: "oidc-self-federation".into(),
         version: "0.1.0".into(),

@@ -159,6 +159,110 @@ pub struct AppManifest {
     /// nowhere.
     #[serde(default, rename = "requiredEnv", skip_serializing_if = "Vec::is_empty")]
     pub required_env: Vec<ManifestRequiredEnv>,
+    /// Production build settings, from `buildManifest({ build: {...} })`.
+    /// `pylon build` reads them when it writes the artifact: browser targets
+    /// and polyfills for the client bundle, CSS targets, and which packages
+    /// stay out of the server bundle.
+    #[serde(default, skip_serializing_if = "ManifestBuildConfig::is_default")]
+    pub build: ManifestBuildConfig,
+}
+
+/// Production build settings. Emitted by the SDK's `buildManifest({ build })`.
+/// The `@pylonsync/functions` build step applies them; the runtime only
+/// carries them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ManifestBuildConfig {
+    /// Browser target for client JavaScript: an ECMAScript edition
+    /// (`"es2019"`) or browserslist queries (`["safari >= 14"]`). Unset: no
+    /// syntax lowering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<BuildTarget>,
+    /// core-js polyfills for the target: off, `usage` (features the bundle
+    /// uses), or `entry` (every feature the target lacks).
+    #[serde(default, skip_serializing_if = "BuildPolyfill::is_off")]
+    pub polyfill: BuildPolyfill,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub css: Option<ManifestBuildCss>,
+    /// Emit source maps for the client and server bundles.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sourcemap: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ManifestBuildServer>,
+    /// Extra project files or directories to copy into the artifact, for
+    /// files the app reads from disk at run time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+}
+
+impl ManifestBuildConfig {
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
+    }
+}
+
+/// A build target: one value or a list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BuildTarget {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// `polyfill: false | "usage" | "entry"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BuildPolyfill {
+    #[default]
+    Off,
+    Usage,
+    Entry,
+}
+
+impl BuildPolyfill {
+    pub fn is_off(&self) -> bool {
+        *self == BuildPolyfill::Off
+    }
+}
+
+impl Serialize for BuildPolyfill {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            BuildPolyfill::Off => s.serialize_bool(false),
+            BuildPolyfill::Usage => s.serialize_str("usage"),
+            BuildPolyfill::Entry => s.serialize_str("entry"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for BuildPolyfill {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::Bool(false) | serde_json::Value::Null => Ok(BuildPolyfill::Off),
+            serde_json::Value::String(s) if s == "usage" => Ok(BuildPolyfill::Usage),
+            serde_json::Value::String(s) if s == "entry" => Ok(BuildPolyfill::Entry),
+            other => Err(serde::de::Error::custom(format!(
+                "build.polyfill must be false, \"usage\", or \"entry\" (got {other})"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ManifestBuildCss {
+    /// CSS target, same forms as `build.target`. Unset: `build.target`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<BuildTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestBuildServer {
+    /// Bundle npm packages into the server output. `false` ships every
+    /// dependency in `server/node_modules` instead.
+    #[serde(default = "default_true")]
+    pub bundle: bool,
+    /// Packages to leave out of the bundle and ship in `server/node_modules`
+    /// (native modules, packages that read their own files at run time).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external: Vec<String>,
 }
 
 /// One environment variable the app cannot run correctly without.
@@ -1159,6 +1263,50 @@ pub struct ManifestPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_config_round_trips_and_stays_out_of_default_manifests() {
+        let json = serde_json::json!({
+            "target": ["safari >= 14", "chrome >= 90"],
+            "polyfill": "usage",
+            "css": { "target": "es2019" },
+            "sourcemap": true,
+            "server": { "external": ["sharp"] },
+            "include": ["content"]
+        });
+        let cfg: ManifestBuildConfig = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            cfg.target,
+            Some(BuildTarget::Many(vec![
+                "safari >= 14".into(),
+                "chrome >= 90".into()
+            ]))
+        );
+        assert_eq!(cfg.polyfill, BuildPolyfill::Usage);
+        assert!(
+            cfg.server.as_ref().unwrap().bundle,
+            "bundle defaults to true"
+        );
+        let back = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(back["polyfill"], "usage");
+        assert_eq!(back["css"]["target"], "es2019");
+        assert_eq!(back["server"]["external"][0], "sharp");
+
+        let off: ManifestBuildConfig =
+            serde_json::from_value(serde_json::json!({ "polyfill": false })).unwrap();
+        assert!(off.is_default());
+        assert!(serde_json::from_value::<ManifestBuildConfig>(
+            serde_json::json!({ "polyfill": "all" })
+        )
+        .is_err());
+
+        let m = AppManifest::default();
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(
+            v.get("build").is_none(),
+            "an app with no build block serializes none"
+        );
+    }
 
     fn field(name: &str, unique: bool) -> ManifestField {
         ManifestField {

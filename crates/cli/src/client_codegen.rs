@@ -510,6 +510,7 @@ mod tests {
             crons: vec![],
             fonts: vec![],
             required_env: vec![],
+            build: Default::default(),
         }
     }
 

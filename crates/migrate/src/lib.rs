@@ -457,6 +457,7 @@ mod tests {
     fn manifest(entities: Vec<ManifestEntity>) -> AppManifest {
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

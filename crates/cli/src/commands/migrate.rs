@@ -536,6 +536,7 @@ fn empty_manifest() -> pylon_kernel::AppManifest {
         crons: vec![],
         fonts: vec![],
         required_env: vec![],
+        build: Default::default(),
     }
 }
 

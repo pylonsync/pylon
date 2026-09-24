@@ -2269,6 +2269,7 @@ mod tests {
         };
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: 1,
             name: "todo-app".into(),
             version: "0.1.0".into(),
@@ -2299,6 +2300,7 @@ mod tests {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2359,6 +2361,7 @@ mod tests {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2426,6 +2429,7 @@ mod tests {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),
@@ -2523,6 +2527,7 @@ mod tests {
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: 1,
             name: "t".into(),
             version: "0".into(),
@@ -2633,6 +2638,7 @@ mod tests {
         // rule = deny.
         let m = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: 1,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -2684,6 +2690,7 @@ mod tests {
         // pre-fix default behavior, scoped to one entity.
         let m = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: 1,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -3218,6 +3225,7 @@ mod tests {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0".into(),

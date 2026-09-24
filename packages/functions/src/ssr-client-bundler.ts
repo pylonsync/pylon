@@ -34,6 +34,14 @@
 //   - CSS chunking. No CSS support in SSR yet.
 
 import { buildFonts, readManifestFonts, type ManifestFonts } from "./ssr-fonts";
+import {
+  applyClientCompat,
+  resolveClientCompat,
+  transformCss,
+  type ClientCompat,
+  type ManifestBuildConfig,
+} from "./build-compat";
+import { serverBundle } from "./server-bundle";
 
 type Send = (msg: Record<string, unknown>) => void;
 
@@ -88,7 +96,7 @@ declare const Bun: {
     target?: "browser" | "bun" | "node";
     format?: "esm" | "iife";
     minify?: boolean;
-    sourcemap?: "none" | "inline" | "external";
+    sourcemap?: "none" | "inline" | "external" | "linked";
     define?: Record<string, string>;
     external?: string[];
     splitting?: boolean;
@@ -1149,8 +1157,12 @@ function slugForComponent(component: string): string {
 export interface PylonBundleManifest {
   /** Build identity — bumps every successful build. */
   build_id: string;
-  /** Output root, relative to cwd (always `.pylon/client-build`). */
+  /** Output root, relative to cwd: `.pylon/client-build`, or `client` in a
+   *  `pylon build` artifact. */
   outdir: string;
+  /** core-js polyfill bundle (relative to outdir), loaded before any route
+   *  entry. Present when `build.polyfill` is set and the targets need one. */
+  polyfills?: string;
   /** Public URL prefix the Rust host serves chunks under. */
   public_prefix: string;
   /** routeComponentPath → file + imports for that route. */
@@ -1208,7 +1220,7 @@ async function _prebuiltBundle(): Promise<BuildOutput | null> {
   const pathMod: any = await import("node:path");
   const fs = fsMod.default ?? fsMod;
   const path = pathMod.default ?? pathMod;
-  const outdir = path.join(process.cwd(), ".pylon", "client-build");
+  const outdir = path.join(process.cwd(), clientBuildDir());
   const manifestPath = path.join(outdir, "manifest.json");
   if (!fs.existsSync(manifestPath)) return null;
 
@@ -1269,6 +1281,48 @@ export async function buildClientBundle(
   return _inflightBuild;
 }
 
+/** Default client bundle directory, relative to the project root. */
+export const CLIENT_BUILD_DIR = ".pylon/client-build";
+
+/** The client bundle directory, relative to cwd. A production server bundle
+ *  names its own; source mode uses `CLIENT_BUILD_DIR`. */
+export function clientBuildDir(): string {
+  return serverBundle()?.clientDir ?? CLIENT_BUILD_DIR;
+}
+
+export interface ClientBuildOptions {
+  /** Absolute output directory. Default: `<cwd>/.pylon/client-build`. */
+  outdir?: string;
+  /** The manifest's `outdir` value. Default: `outdir` relative to cwd. A
+   *  `pylon build` artifact sets `client`, its path at run time. */
+  manifestOutdir?: string;
+  /** The `build` block to apply. Default: read from `pylon.manifest.json`,
+   *  except in dev (`NODE_ENV=development`), which applies none. `null`
+   *  applies none. */
+  buildConfig?: ManifestBuildConfig | null;
+  /** Fail on a CSS or font build error instead of shipping without it. */
+  strict?: boolean;
+  /** The app manifest (fonts, build settings). Default
+   *  `<cwd>/pylon.manifest.json`. */
+  manifestPath?: string;
+}
+
+/** The `build` block of `<cwd>/pylon.manifest.json`, if any. */
+export function readManifestBuildConfig(
+  fs: any,
+  path: any,
+  cwd: string,
+): ManifestBuildConfig | undefined {
+  const manifestPath = path.join(cwd, "pylon.manifest.json");
+  if (!fs.existsSync(manifestPath)) return undefined;
+  try {
+    const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    return m && typeof m.build === "object" && m.build !== null ? m.build : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function _doBuild(appDirRel: string): Promise<BuildOutput> {
   // node:* are available in Bun, but `globalThis.require` is
   // not defined in ESM. Use dynamic import; Bun fast-paths these.
@@ -1300,6 +1354,7 @@ export async function buildTailwind(
   cwd: string,
   outdir: string,
   appDirRel: string,
+  cssTargets?: string[],
 ): Promise<string | null> {
   const globalsPath = path.join(cwd, appDirRel, "globals.css");
   if (!fs.existsSync(globalsPath)) return null;
@@ -1360,7 +1415,13 @@ export async function buildTailwind(
     throw new Error(`tailwindcss build failed (exit ${exitCode}): ${err}`);
   }
 
-  const out = fs.readFileSync(tmpPath, "utf8");
+  let out = fs.readFileSync(tmpPath, "utf8");
+  if (cssTargets && cssTargets.length > 0) {
+    // Hash the TRANSFORMED output (below), so a CSS target change changes
+    // the file name.
+    out = await transformCss(cwd, out, "globals.css", cssTargets);
+    fs.writeFileSync(tmpPath, out, "utf8");
+  }
   let hash = 0;
   for (let i = 0; i < out.length; i++) {
     hash = (hash * 31 + out.charCodeAt(i)) >>> 0;
@@ -1400,7 +1461,20 @@ export async function _doBuildInner(
   path: any,
   cwd: string,
   appDirRel: string,
+  opts: ClientBuildOptions = {},
 ): Promise<BuildOutput> {
+  // Production settings from the manifest's `build` block. Dev builds skip
+  // them: lowering and polyfills cost build time and change nothing a modern
+  // dev browser needs.
+  const buildConfig =
+    opts.buildConfig !== undefined
+      ? opts.buildConfig
+      : process.env.NODE_ENV === "development"
+        ? undefined
+        : readManifestBuildConfig(fs, path, cwd);
+  const compat = resolveClientCompat(buildConfig ?? undefined);
+  const manifestFile = opts.manifestPath ?? path.join(cwd, "pylon.manifest.json");
+  const sourcemap = buildConfig?.sourcemap === true;
   const routes = discoverRoutes(fs, path, cwd, appDirRel);
     if (routes.length === 0) {
       throw new Error(
@@ -1423,7 +1497,7 @@ export async function _doBuildInner(
         }
       }
     }
-    const outdir = path.join(stageDir, "client-build");
+    const outdir = opts.outdir ?? path.join(cwd, CLIENT_BUILD_DIR);
     try {
       fs.rmSync(outdir, { recursive: true, force: true });
     } catch {
@@ -1522,7 +1596,7 @@ export async function _doBuildInner(
       target: "browser",
       format: "esm",
       minify: true,
-      sourcemap: "none",
+      sourcemap: sourcemap ? "linked" : "none",
       splitting: true,
       // The browser has no `process`. React, next-themes, sonner, and most
       // npm UI deps reference `process.env.NODE_ENV` (and migrated Next code
@@ -1574,7 +1648,35 @@ export async function _doBuildInner(
     // Manifest paths are URL paths under `public_prefix` ("/"-separated). The
     // runtime's /_pylon/build/ handler rejects any request with a backslash.
     const toUrlPath = (p: string) => p.replace(/\\/g, "/");
-    const outdirRel = toUrlPath(path.relative(cwd, outdir));
+    const outdirRel =
+      opts.manifestOutdir ?? toUrlPath(path.relative(cwd, outdir));
+
+    // Browser compatibility pass (build.target): lowers syntax, collects
+    // polyfills, and renames the .js outputs. Later steps read the renamed
+    // paths.
+    let outputs: Array<{ path: string; kind: string }> = result.outputs.map(
+      (o) => ({ path: o.path, kind: o.kind }),
+    );
+    let polyfills: string | undefined;
+    if (compat && compat.jsTargets.length > 0) {
+      const jsFiles = outputs
+        .filter((o) => o.path.endsWith(".js"))
+        .map((o) => toUrlPath(path.relative(outdir, o.path)));
+      const res = await applyClientCompat({ fs, path, cwd, outdir, jsFiles, compat });
+      if (res.unsupported.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[pylon build] build.target includes browsers that cannot run the Pylon client runtime ` +
+            `(it needs ES modules and dynamic import()): ${res.unsupported.join(", ")}`,
+        );
+      }
+      outputs = outputs.map((o) => {
+        const rel = toUrlPath(path.relative(outdir, o.path));
+        const next = res.renamed.get(rel);
+        return next ? { ...o, path: path.join(outdir, next) } : o;
+      });
+      polyfills = res.polyfills;
+    }
     const entriesByStem = new Map<
       string,
       { absPath: string; relPath: string }
@@ -1583,7 +1685,7 @@ export async function _doBuildInner(
       string,
       { absPath: string; relPath: string }
     >();
-    for (const o of result.outputs) {
+    for (const o of outputs) {
       const absPath: string = o.path;
       const relPath = toUrlPath(path.relative(outdir, absPath));
       const base = path.basename(absPath);
@@ -1608,7 +1710,7 @@ export async function _doBuildInner(
     // the binary next to the entries AND into chunks/ so the runtime URL
     // resolves from either an entry or a split chunk.
     try {
-      const referencesLoroWasm = result.outputs.some((o) => {
+      const referencesLoroWasm = outputs.some((o) => {
         if (!o.path.endsWith(".js")) return false;
         try {
           return fs.readFileSync(o.path, "utf8").includes("loro_wasm_bg.wasm");
@@ -1682,6 +1784,7 @@ export async function _doBuildInner(
       outdir: outdirRel,
       public_prefix: "/_pylon/build/",
       routes: {},
+      ...(polyfills ? { polyfills } : {}),
     };
     for (const r of routes) {
       const slug = slugForComponent(r.component);
@@ -1735,7 +1838,7 @@ export async function _doBuildInner(
     // pylon.manifest.json from cwd. It's generated output — commonly
     // gitignored — so when it's absent the bundle still builds but
     // silently loses those features. Say so, loudly, instead.
-    if (!fs.existsSync(path.join(cwd, "pylon.manifest.json"))) {
+    if (!fs.existsSync(manifestFile)) {
       // eslint-disable-next-line no-console
       console.warn(
         "[pylon ssr] pylon.manifest.json not found — building the client " +
@@ -1750,7 +1853,14 @@ export async function _doBuildInner(
     // array so SSR head injection emits `<link rel="stylesheet">`.
     let stylesRel: string | null = null;
     try {
-      const styles = await buildTailwind(fs, path, cwd, outdir, appDirRel);
+      const styles = await buildTailwind(
+        fs,
+        path,
+        cwd,
+        outdir,
+        appDirRel,
+        compat?.cssTargets,
+      );
       if (styles) {
         stylesRel = styles;
         for (const r of Object.values(manifest.routes)) {
@@ -1769,6 +1879,7 @@ export async function _doBuildInner(
         /\u001b\[[0-9;]*m/g,
         "",
       );
+      if (opts.strict) throw new Error(`CSS build failed: ${cssMsg}`);
       manifest.css_error = cssMsg;
       // eslint-disable-next-line no-console
       console.warn(`[pylon ssr] tailwind compile failed: ${cssMsg}`);
@@ -1782,12 +1893,13 @@ export async function _doBuildInner(
     // the prebuilt artifact. A fetch/parse failure degrades to a variable-only
     // entry — it never kills the build.
     try {
-      const declaredFonts = readManifestFonts(fs, path, cwd);
+      const declaredFonts = readManifestFonts(fs, path, cwd, manifestFile);
       if (declaredFonts.length > 0) {
         const builtFonts = await buildFonts(fs, path, cwd, outdir, declaredFonts);
         if (builtFonts) manifest.fonts = builtFonts;
       }
     } catch (fErr: any) {
+      if (opts.strict) throw new Error(`font build failed: ${fErr?.message ?? fErr}`);
       // eslint-disable-next-line no-console
       console.warn(`[pylon ssr] font build failed: ${fErr?.message ?? fErr}`);
     }
@@ -1863,7 +1975,7 @@ export async function getManifest(): Promise<PylonBundleManifest> {
   const fs = fsMod.default ?? fsMod;
   const path = pathMod.default ?? pathMod;
   const cwd = process.cwd();
-  const manifestPath = path.join(cwd, ".pylon", "client-build", "manifest.json");
+  const manifestPath = path.join(cwd, clientBuildDir(), "manifest.json");
 
   if (fs.existsSync(manifestPath)) {
     const stat = fs.statSync(manifestPath);

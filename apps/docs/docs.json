@@ -120,6 +120,7 @@
             "group": "Operations",
             "pages": [
               "operations/deploy",
+              "operations/build",
               "operations/vercel",
               "operations/cli",
               "operations/agent-handoff",

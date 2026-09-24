@@ -7,6 +7,8 @@
 // the dispatch arm) so projects without SSR routes pay nothing — no
 // react-dom dependency requirement, no startup cost.
 
+import { moduleKey, serverBundle } from "./server-bundle";
+
 // Bun runtime global. This module runs under Bun but is type-checked by
 // consuming apps under node/DOM (no `Bun` global) — declare the surface used.
 declare const Bun: {
@@ -716,8 +718,19 @@ export function renderMetadata(React: any, m: SsrMetadata | undefined): any {
 
 const MODULE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
 
-/** Import a project-relative module, trying each common extension. */
+/**
+ * Import a project-relative module, trying each common extension. A
+ * production server bundle serves it from the bundle's module registry.
+ */
 export async function importModule(cwd: string, relPath: string): Promise<any> {
+  const bundle = serverBundle();
+  if (bundle) {
+    const load = bundle.modules[moduleKey(relPath)];
+    if (load === undefined) {
+      throw new Error(`module "${relPath}" is not in the server bundle`);
+    }
+    return load();
+  }
   const base = `${cwd}/${relPath}`;
   let lastErr: unknown = null;
   for (const ext of MODULE_EXTS) {
@@ -728,6 +741,58 @@ export async function importModule(cwd: string, relPath: string): Promise<any> {
     }
   }
   throw lastErr ?? new Error(`could not import module "${relPath}"`);
+}
+
+/**
+ * True when the project has a module at `<dir>/<name>` with any code
+ * extension. `dir` is project-relative and "/"-separated. A production server
+ * bundle answers from its module registry; source mode checks the disk.
+ */
+export function moduleExistsIn(
+  fs: any,
+  path: any,
+  cwd: string,
+  dir: string,
+  name: string,
+): boolean {
+  const bundle = serverBundle();
+  if (bundle) return moduleKey(`${dir}/${name}`) in bundle.modules;
+  return MODULE_EXTS.some((ext) =>
+    fs.existsSync(path.join(cwd, dir, `${name}${ext}`)),
+  );
+}
+
+/**
+ * The route-group directories (`(name)`) directly under the project-relative
+ * `dir`, sorted by name. A production server bundle derives them from its
+ * module registry keys; source mode reads the directory.
+ */
+function routeGroupDirsIn(fs: any, path: any, cwd: string, dir: string): string[] {
+  const isGroup = (n: string) => n.startsWith("(") && n.endsWith(")");
+  const bundle = serverBundle();
+  if (bundle) {
+    const prefix = `${dir}/`;
+    const found = new Set<string>();
+    for (const key of Object.keys(bundle.modules)) {
+      if (!key.startsWith(prefix)) continue;
+      const child = key.slice(prefix.length).split("/")[0];
+      // A key with no "/" after the prefix is a module file, not a directory.
+      if (key.slice(prefix.length).includes("/") && isGroup(child)) {
+        found.add(child);
+      }
+    }
+    return [...found].sort();
+  }
+  let entries: any[];
+  try {
+    entries = fs.readdirSync(path.join(cwd, dir), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((e: any) => e.isDirectory() && isGroup(e.name))
+    .map((e: any) => e.name as string)
+    .sort();
 }
 
 /**
@@ -829,25 +894,10 @@ function boundaryInDirOrGroups(
   dir: string,
   fileName: string,
 ): string | null {
-  for (const ext of MODULE_EXTS) {
-    if (fs.existsSync(path.join(cwd, dir, `${fileName}${ext}`))) {
-      return `${dir}/${fileName}`;
-    }
+  if (moduleExistsIn(fs, path, cwd, dir, fileName)) {
+    return `${dir}/${fileName}`;
   }
-  let entries: any[];
-  try {
-    entries = fs.readdirSync(path.join(cwd, dir), { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  const groups = entries
-    .filter(
-      (e: any) =>
-        e.isDirectory() && e.name.startsWith("(") && e.name.endsWith(")"),
-    )
-    .map((e: any) => e.name as string)
-    .sort();
-  for (const g of groups) {
+  for (const g of routeGroupDirsIn(fs, path, cwd, dir)) {
     const hit = boundaryInDirOrGroups(fs, path, cwd, `${dir}/${g}`, fileName);
     if (hit) return hit;
   }
@@ -891,8 +941,6 @@ function findColocatedImage(
   }
   return null;
 }
-
-const OG_IMAGE_CODE_EXTS = [".tsx", ".ts", ".jsx", ".js"];
 
 /**
  * Walk up from a page's directory to the nearest colocated dynamic OG
@@ -938,14 +986,12 @@ function findColocatedOgImageRoute(
     return below.filter((s) => !(s.startsWith("(") && s.endsWith(")"))).length;
   };
   while (dir && dir !== "." && dir !== "/") {
-    for (const ext of OG_IMAGE_CODE_EXTS) {
-      if (fs.existsSync(path.join(cwd, dir, `opengraph-image${ext}`))) {
-        const prefix =
-          dir === pageDir && !isBoundary
-            ? urlSegs
-            : urlSegs.slice(0, nonGroupDepth(dir));
-        return "/" + [...prefix, "opengraph-image"].join("/");
-      }
+    if (moduleExistsIn(fs, path, cwd, dir, "opengraph-image")) {
+      const prefix =
+        dir === pageDir && !isBoundary
+          ? urlSegs
+          : urlSegs.slice(0, nonGroupDepth(dir));
+      return "/" + [...prefix, "opengraph-image"].join("/");
     }
     const slash = dir.lastIndexOf("/");
     dir = slash >= 0 ? dir.slice(0, slash) : "";
@@ -2098,6 +2144,9 @@ export function buildHydrationTail(args: {
   manifestRoute: { file: string; imports: string[]; css: string[] } | null;
   publicPrefix: string;
   manifestErr: string | null;
+  /** core-js polyfill bundle (relative to `publicPrefix`), from the bundle
+   *  manifest. Loaded before the route entry. */
+  polyfills?: string;
   kind?: "error" | "not-found";
   errorForClient?: { message: string; digest?: string };
   // PPR Phase 0 (auth-bucketed caching): when set, this render is being stored
@@ -2181,6 +2230,11 @@ export function buildHydrationTail(args: {
     // reusable (no double fetch) and surfaces load errors. No-op for the
     // same-origin `/_pylon/build/` default.
     const co = /^https?:\/\//i.test(args.publicPrefix) ? " crossorigin" : "";
+    // Module scripts run in document order, so the polyfills are in place
+    // before the entry (and the shared chunk it imports) runs.
+    if (args.polyfills) {
+      tail += `<script type="module"${co} src="${args.publicPrefix}${args.polyfills}"></script>`;
+    }
     tail += `<script type="module"${co} src="${args.publicPrefix}${args.manifestRoute.file}"></script>`;
   } else {
     // Executable script → the serialized message MUST be script-escaped
@@ -2258,11 +2312,8 @@ function resolveLayoutChain(componentRelPath: string, cwd: string): string[] {
   let acc = "";
   for (const part of parts) {
     acc = acc ? `${acc}/${part}` : part;
-    for (const ext of MODULE_EXTS) {
-      if (fs.existsSync(path.join(cwd, acc, `layout${ext}`))) {
-        layouts.push(`${acc}/layout`);
-        break;
-      }
+    if (moduleExistsIn(fs, path, cwd, acc, "layout")) {
+      layouts.push(`${acc}/layout`);
     }
   }
   return layouts;
@@ -2321,6 +2372,7 @@ async function renderBoundaryToClient(
     | { file: string; imports: string[]; css: string[] }
     | null = null;
   let publicPrefix = "/_pylon/build/";
+  let polyfills: string | undefined;
   let headBlob = "";
   if (tail) {
     try {
@@ -2328,6 +2380,7 @@ async function renderBoundaryToClient(
       const manifest = await getManifest();
       publicPrefix = manifest.public_prefix || publicPrefix;
       manifestRoute = manifest.routes[tail.component] ?? null;
+      polyfills = manifest.polyfills;
     } catch {
       manifestRoute = null;
     }
@@ -2374,6 +2427,7 @@ async function renderBoundaryToClient(
       manifestRoute,
       publicPrefix,
       manifestErr: null,
+      polyfills,
       kind: tail.kind,
       errorForClient: tail.errorForClient,
     });
@@ -3201,22 +3255,30 @@ export async function handleRenderRoute(
     // `react-dom/server` (which is Node-stream-style). Try browser
     // first, fall back to the default entry for environments that
     // re-route it (Next runs a custom dist).
+    //
+    // A production server bundle carries the app's React, bundled with the
+    // page modules, so there is nothing to resolve.
+    const bundle = serverBundle();
     let reactDomServerImport: any;
-    try {
+    let reactImport: any;
+    if (bundle) {
+      reactDomServerImport = bundle.reactDomServer;
+      reactImport = bundle.react;
+    } else {
+      try {
+        // @ts-ignore — user-dep, resolved at runtime
+        reactDomServerImport = await import(
+          /* @vite-ignore */ resolveFromUser("react-dom/server.browser")
+        );
+      } catch {
+        // @ts-ignore — user-dep, resolved at runtime
+        reactDomServerImport = await import(
+          /* @vite-ignore */ resolveFromUser("react-dom/server")
+        );
+      }
       // @ts-ignore — user-dep, resolved at runtime
-      reactDomServerImport = await import(
-        /* @vite-ignore */ resolveFromUser("react-dom/server.browser")
-      );
-    } catch {
-      // @ts-ignore — user-dep, resolved at runtime
-      reactDomServerImport = await import(
-        /* @vite-ignore */ resolveFromUser("react-dom/server")
-      );
+      reactImport = await import(/* @vite-ignore */ resolveFromUser("react"));
     }
-    // @ts-ignore — user-dep, resolved at runtime
-    const reactImport = await import(
-      /* @vite-ignore */ resolveFromUser("react")
-    );
     React = reactImport.default ?? reactImport;
     renderToReadableStream =
       reactDomServerImport.renderToReadableStream ??
@@ -3700,11 +3762,13 @@ export async function handleRenderRoute(
       | null = null;
     let preloadManifestErr: string | null = null;
     let preloadPublicPrefix = "/_pylon/build/";
+    let preloadPolyfills: string | undefined;
     try {
       const { getManifest } = await import("./ssr-client-bundler");
       const manifest = await getManifest();
       preloadPublicPrefix = manifest.public_prefix || preloadPublicPrefix;
       preloadManifestRoute = manifest.routes[msg.component] ?? null;
+      preloadPolyfills = manifest.polyfills;
       if (!preloadManifestRoute) {
         preloadManifestErr = `manifest has no entry for "${msg.component}"`;
       }
@@ -3866,6 +3930,7 @@ export async function handleRenderRoute(
         manifestRoute: preloadManifestRoute,
         publicPrefix: preloadPublicPrefix,
         manifestErr: preloadManifestErr,
+        polyfills: preloadPolyfills,
         kind: isBoundaryComponent
           ? /(^|\/)error$/.test(msg.component)
             ? "error"

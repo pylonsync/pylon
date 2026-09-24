@@ -865,6 +865,7 @@ mod tests {
     fn minimal_manifest() -> AppManifest {
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -955,6 +956,7 @@ mod tests {
         let adapter = DryRunAdapter;
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "empty".into(),
             version: "0.1.0".into(),
@@ -1218,6 +1220,7 @@ mod tests {
         let snapshot = SchemaSnapshot { tables: vec![] };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -1262,6 +1265,7 @@ mod tests {
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -1342,6 +1346,7 @@ mod tests {
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -1440,6 +1445,7 @@ mod tests {
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -1556,6 +1562,7 @@ mod tests {
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -1629,6 +1636,7 @@ mod tests {
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -1728,6 +1736,7 @@ mod tests {
     fn manifest_with(entities: Vec<ManifestEntity>) -> AppManifest {
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

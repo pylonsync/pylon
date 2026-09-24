@@ -621,8 +621,8 @@ export function readManifestFonts(
   fs: any,
   path: any,
   cwd: string,
+  manifestPath: string = path.join(cwd, "pylon.manifest.json"),
 ): ManifestFontInput[] {
-  const manifestPath = path.join(cwd, "pylon.manifest.json");
   if (!fs.existsSync(manifestPath)) return [];
   try {
     const m = JSON.parse(fs.readFileSync(manifestPath, "utf8"));

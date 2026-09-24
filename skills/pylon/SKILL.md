@@ -935,7 +935,10 @@ pylon dev
 
 That's it — no second terminal for the UI. `pylon dev` watches `app.ts` + `functions/` + `app/`, recompiles Tailwind, and live-reloads the browser. (A backend-only app runs the same `pylon dev`.) The first run creates `.pylon/dev.db` (SQLite) and auto-migrates. Set `DATABASE_URL=postgres://...` to target Postgres instead — the adapter is chosen at startup, and all schema/policy/function/SSR code is identical either way.
 
-In production, use `pylon start app.ts` instead of `pylon dev` (run `pylon build` first — it compiles the manifest, typed client, and SSR bundle; the deploy targets below do this for you). Same server, no file watcher, blocks on the server thread so a fatal error exits the process and lets the supervisor (systemd / Docker / Fly init) restart cleanly.
+In production, use `pylon start` instead of `pylon dev`. Same server, no file watcher, blocks on the server thread so a fatal error exits the process and lets the supervisor (systemd / Docker / Fly init) restart cleanly. Two ways to run it:
+
+- `pylon start app.ts` runs the source. The server needs the project and its `node_modules`.
+- `pylon build` writes a production artifact to `dist/` (server bundle, client bundle, `public/`, manifest), and `pylon start dist` runs it with no source tree and no `node_modules`. Data paths (`PYLON_DB_PATH`, default `pylon.db`) resolve outside `dist/`. Browser targets, polyfills, CSS targets, and server externals go in `buildManifest({ build: { target, polyfill, css, server: { external }, include } })`. `pylon build --compile` also copies the `pylon` and `bun` binaries into `dist/bin/`. Docs: https://docs.pylonsync.com/operations/build
 
 ### Debugging — the dev HUD + `pylon diagnostics` (read this when iterating)
 

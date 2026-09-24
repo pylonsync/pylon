@@ -24,6 +24,7 @@ fn pg_url() -> Option<String> {
 fn empty_manifest() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
+        build: Default::default(),
         manifest_version: 1,
         name: "pg_test".into(),
         version: "1".into(),

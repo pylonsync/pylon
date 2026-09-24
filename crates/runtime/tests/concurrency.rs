@@ -21,6 +21,7 @@ use pylon_runtime::Runtime;
 fn counter_manifest() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
+        build: Default::default(),
         manifest_version: 1,
         name: "concurrency-test".into(),
         version: "0.1.0".into(),

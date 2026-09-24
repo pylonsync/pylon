@@ -3,6 +3,7 @@ node_modules/
 pylon.manifest.json
 pylon.client.ts
 web/dist/
+dist/
 *.db
 *.db-*
 .env

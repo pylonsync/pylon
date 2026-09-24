@@ -2756,6 +2756,7 @@ mod field_gate_tests {
     fn org_with_secret_field() -> AppManifest {
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -2827,6 +2828,7 @@ mod field_gate_tests {
         };
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -2870,6 +2872,7 @@ mod field_gate_tests {
         // PublicPost has no serverOnly fields — every column passes through.
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -2969,6 +2972,7 @@ mod field_gate_tests {
     fn reject_readonly_no_op_on_unmarked_entity() {
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.0.1".into(),
@@ -3306,6 +3310,7 @@ mod auth_gate_tests {
     pub(crate) fn empty_manifest() -> AppManifest {
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -3557,6 +3562,7 @@ mod auth_gate_tests {
     fn auth_session_hides_server_only_user_fields() {
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -4826,6 +4832,7 @@ mod auth_gate_tests {
 
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -5206,6 +5213,7 @@ mod auth_gate_tests {
 
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -5421,6 +5429,7 @@ mod auth_gate_tests {
 
         let manifest = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -5716,6 +5725,7 @@ mod auth_gate_tests {
         };
         AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),
@@ -6145,6 +6155,7 @@ mod auth_gate_tests {
         use pylon_kernel::{AppManifest, ManifestPolicy, MANIFEST_VERSION};
         let m = AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "t".into(),
             version: "0.0.0".into(),
@@ -6579,6 +6590,7 @@ mod user_projection_tests {
 
         let manifest = pylon_kernel::AppManifest {
             required_env: Vec::new(),
+            build: Default::default(),
             manifest_version: MANIFEST_VERSION,
             name: "test".into(),
             version: "0.1.0".into(),

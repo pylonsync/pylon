@@ -94,6 +94,7 @@ fn purge_marker(store: &PostgresDataStore, marker: &str) {
 fn test_manifest() -> AppManifest {
     AppManifest {
         required_env: Vec::new(),
+        build: Default::default(),
         manifest_version: 1,
         name: "pg_live_test".into(),
         version: "0.1.0".into(),

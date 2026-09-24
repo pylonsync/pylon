@@ -46,6 +46,8 @@ import { normalizeAuthClaims } from "./auth";
 import { makeRequireMember } from "./member";
 import { isDevMode } from "./ssr-runtime";
 import { validateArgs } from "./validators";
+import { serverBundle } from "./server-bundle";
+import { fenceStdout } from "./stdout-fence";
 import { readdirSync } from "fs";
 import { join, basename } from "path";
 
@@ -109,61 +111,6 @@ function send(msg: Record<string, unknown>): void {
   if (flushed && typeof (flushed as Promise<number>).then === "function") {
     (flushed as Promise<number>).then(undefined, () => {});
   }
-}
-
-/**
- * Redirect console.* from user code to stderr so handlers can't accidentally
- * emit a line that looks like a protocol frame and confuse the Rust reader.
- *
- * Before this guard, a handler calling `console.log('{"type":"return",...}')`
- * — either intentionally or by logging an object shaped that way — would be
- * parsed by the host as a real protocol message. Moving all console output
- * to stderr keeps stdout reserved for NDJSON protocol frames only.
- *
- * The original console methods are saved on the console object as
- * `__stdoutLog` etc. in case the runtime itself needs to write diagnostics
- * to stdout for some reason (it currently doesn't).
- */
-function fenceStdout(): void {
-  const toStderr = (prefix: string) => (...args: unknown[]) => {
-    const line = args
-      .map((a) => {
-        if (typeof a === "string") return a;
-        // Error: JSON.stringify yields `{}` because message/stack are
-        // non-enumerable. That made `console.error("x:", err)` log as `x: {}`,
-        // hiding the real failure from operators. Unwrap by hand.
-        if (a instanceof Error) {
-          const parts = [a.stack || `${a.name}: ${a.message}`];
-          const code = (a as { code?: unknown }).code;
-          if (code !== undefined) parts.push(`code=${String(code)}`);
-          const cause = (a as { cause?: unknown }).cause;
-          if (cause !== undefined) {
-            try {
-              parts.push(`cause=${cause instanceof Error ? cause.stack || cause.message : JSON.stringify(cause)}`);
-            } catch {
-              parts.push(`cause=${String(cause)}`);
-            }
-          }
-          return parts.join(" ");
-        }
-        try {
-          return JSON.stringify(a);
-        } catch {
-          return String(a);
-        }
-      })
-      .join(" ");
-    Bun.write(Bun.stderr, `${prefix}${line}\n`);
-  };
-  // Intentional: we want console.* for user handlers to go to stderr.
-  // Overwrite the globals before any user code is loaded.
-  const c = globalThis.console as unknown as Record<string, unknown>;
-  c.__stdoutLog = c.log;
-  c.log = toStderr("");
-  c.info = toStderr("");
-  c.warn = toStderr("[warn] ");
-  c.error = toStderr("[error] ");
-  c.debug = toStderr("[debug] ");
 }
 
 // ---------------------------------------------------------------------------
@@ -1474,6 +1421,30 @@ function firstStackFrame(err: unknown): string {
 // Startup: scan functions dir, send ready, then start reader loop
 // ---------------------------------------------------------------------------
 
+/**
+ * The `.ts` / `.js` modules directly inside `dir`, each with its name (file
+ * name without extension) and a loader. A missing directory yields none: a
+ * pure-SSR app has no `functions/`, and most apps have no `workflows/`. The
+ * runner must still send `ready` and serve renders in that case.
+ */
+function listModuleFiles(
+  dir: string,
+): Array<{ name: string; file: string; load: () => Promise<any> }> {
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter(
+      (f) => f.endsWith(".ts") || f.endsWith(".js"),
+    );
+  } catch {
+    return [];
+  }
+  return files.map((file) => ({
+    name: basename(file, file.endsWith(".ts") ? ".ts" : ".js"),
+    file,
+    load: () => import(join(dir, file)),
+  }));
+}
+
 async function main() {
   // Fence user `console.*` away from stdout BEFORE any user code is
   // imported — the import side-effects alone could print a stray line
@@ -1481,27 +1452,21 @@ async function main() {
   fenceStdout();
 
   const fnDir = process.argv[2] || "./functions";
+  const bundle = serverBundle();
 
-  let files: string[];
-  try {
-    files = readdirSync(fnDir).filter(
-      (f) => f.endsWith(".ts") || f.endsWith(".js")
-    );
-  } catch {
-    // No `functions/` directory. Legitimate for a pure-SSR app (file-based
-    // `app/**/page.tsx` routes + entity CRUD, no server functions) — the host
-    // still spawns this runner to execute SSR renders. Load zero functions and
-    // fall through so we send `ready` AND start the reader loop; returning here
-    // would leave the runner unable to serve renders (silent 404s).
-    files = [];
-  }
+  const fnSources = bundle
+    ? Object.keys(bundle.functions).map((name) => ({
+        name,
+        file: `${name} (bundled)`,
+        load: bundle.functions[name],
+      }))
+    : listModuleFiles(join(process.cwd(), fnDir));
 
   const { isAgentDefinition, AGENT_MARKER } = await import("./agent");
   let agentsPresent = false;
-  for (const file of files) {
-    const name = basename(file, file.endsWith(".ts") ? ".ts" : ".js");
+  for (const { name, file, load } of fnSources) {
     try {
-      const mod = await import(join(process.cwd(), fnDir, file));
+      const mod = await load();
       const def = mod.default as FnDefinition | undefined;
       // Runtime shape check — a misnamed/malformed export should
       // log + skip, not crash the loader. TS narrows `def.handler`
@@ -1547,18 +1512,16 @@ async function main() {
   );
   type WorkflowDefinition = import("./workflows").WorkflowDefinition;
   const workflowRegistry = new Map<string, WorkflowDefinition>();
-  const wfDir = join(process.cwd(), "workflows");
-  let wfFiles: string[] = [];
-  try {
-    wfFiles = readdirSync(wfDir).filter(
-      (f) => f.endsWith(".ts") || f.endsWith(".js"),
-    );
-  } catch {
-    // No workflows/ directory — the common case; declare nothing.
-  }
-  for (const file of wfFiles) {
+  const wfSources = bundle
+    ? Object.keys(bundle.workflows).map((name) => ({
+        name,
+        file: `${name} (bundled)`,
+        load: bundle.workflows[name],
+      }))
+    : listModuleFiles(join(process.cwd(), "workflows"));
+  for (const { file, load } of wfSources) {
     try {
-      const mod = await import(join(wfDir, file));
+      const mod = await load();
       const def = mod.default;
       if (isWorkflowDefinition(def)) {
         if (workflowRegistry.has(def.name)) {
