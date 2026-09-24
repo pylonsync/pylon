@@ -222,3 +222,79 @@ fn thread_count() -> usize {
             .saturating_sub(1)
     }
 }
+
+/// Connect as `user`, subscribing as `sid`, with an optional ticket header,
+/// and return the first message the server sends.
+fn first_message(server: &Server, user: &str, sid: &str, ticket: Option<&str>) -> Message {
+    let token = server.sessions.create(user.to_string()).token;
+    let stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut req = format!("ws://127.0.0.1:{}/?shard=zone&sid={sid}", server.port)
+        .into_client_request()
+        .unwrap();
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    if let Some(t) = ticket {
+        req.headers_mut()
+            .insert("X-Pylon-Shard-Ticket", t.parse().unwrap());
+    }
+    let (mut ws, _) = tungstenite::client(req, stream).expect("handshake");
+    ws.read().expect("a first message")
+}
+
+fn is_policy_close(msg: &Message) -> bool {
+    matches!(msg, Message::Close(Some(f)) if f.code == tungstenite::protocol::frame::coding::CloseCode::Policy)
+}
+
+#[test]
+fn a_ticket_admits_a_character_id_and_a_bad_ticket_is_refused() {
+    use pylon_runtime::shard_tickets::mint;
+    let server = start();
+    let claims = serde_json::json!({ "realm": "north" });
+
+    // Without a ticket, user u_1 cannot subscribe as char_12.
+    assert!(is_policy_close(&first_message(
+        &server, "u_1", "char_12", None
+    )));
+
+    // With a ticket for this shard and sid, it can.
+    let good = mint("zone", "char_12", Some("u_1".into()), claims.clone(), None);
+    assert!(matches!(
+        first_message(&server, "u_1", "char_12", Some(&good)),
+        Message::Binary(_)
+    ));
+
+    // A ticket for another shard, or with a changed payload, is refused.
+    let other_shard = mint(
+        "zone-9",
+        "char_12",
+        Some("u_1".into()),
+        claims.clone(),
+        None,
+    );
+    assert!(is_policy_close(&first_message(
+        &server,
+        "u_1",
+        "char_12",
+        Some(&other_shard)
+    )));
+    let mut parts: Vec<&str> = good.split('.').collect();
+    let forged_payload = {
+        use base64::Engine;
+        let e = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&e.decode(parts[1]).unwrap()).unwrap();
+        v["sid"] = "char_13".into();
+        e.encode(serde_json::to_vec(&v).unwrap())
+    };
+    parts[1] = &forged_payload;
+    let forged = parts.join(".");
+    assert!(is_policy_close(&first_message(
+        &server,
+        "u_1",
+        "char_13",
+        Some(&forged)
+    )));
+}

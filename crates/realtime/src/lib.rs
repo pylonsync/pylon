@@ -47,6 +47,7 @@ pub mod shard;
 pub mod snapshot;
 pub mod subscriber;
 pub mod tick;
+pub mod ticket;
 pub mod transport;
 pub mod wire;
 
@@ -65,5 +66,6 @@ pub use shard::{Shard, ShardAuth, ShardConfig, ShardError, SimState};
 pub use snapshot::{encode_snapshot, SnapshotFormat};
 pub use subscriber::{SnapshotSink, Subscriber, SubscriberId};
 pub use tick::TickLoop;
+pub use ticket::{sign_ticket, verify_ticket, ShardTicket, TicketError};
 pub use transport::{sse_info, websocket_info, webtransport_info, ShardTransport, TransportInfo};
 pub use wire::{InputEnvelope, InputRejection};

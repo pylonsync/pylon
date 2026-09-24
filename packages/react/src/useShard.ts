@@ -49,6 +49,13 @@ export interface UseShardOptions {
    * scheduled for removal in a future release).
    */
   token?: string;
+  /**
+   * Shard ticket from a server function (`ctx.shards.ticket(...)`). Sent as
+   * a `ticket.<ticket>` WebSocket subprotocol. The shard checks it names
+   * this shard and `subscriberId`, and passes its claims to the game's
+   * authorization hooks.
+   */
+  ticket?: string;
   /** Override the base URL. Defaults to `window.location.host`. */
   baseUrl?: string;
   /** Override the shard WS port (default: HTTP port + 3). */
@@ -163,10 +170,10 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       // doesn't get captured by every proxy / devtools pane that logs URLs.
       // Subprotocol values must be a token per RFC 6455; encode the bearer
       // so spaces/punctuation don't break the handshake.
-      const protocols = options.token
-        ? [`bearer.${encodeURIComponent(options.token)}`]
-        : undefined;
-      ws = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
+      const protocols: string[] = [];
+      if (options.token) protocols.push(`bearer.${encodeURIComponent(options.token)}`);
+      if (options.ticket) protocols.push(`ticket.${encodeURIComponent(options.ticket)}`);
+      ws = protocols.length ? new WebSocket(url, protocols) : new WebSocket(url);
     } catch (e) {
       dispatchError(e instanceof Error ? e : new Error(String(e)));
       return;
@@ -286,6 +293,7 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
   // excluded `options` entirely, so a user logging out would keep the
   // old socket alive under the old identity until `shardId` changed.
   const token = options.token;
+  const ticket = options.ticket;
   const subscriberId = options.subscriberId;
   const baseUrl = options.baseUrl;
   const wsUrl = options.wsUrl;
@@ -310,7 +318,7 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
       clientRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [shardId, token, subscriberId, baseUrl, wsUrl, wsPort]);
+  }, [shardId, token, ticket, subscriberId, baseUrl, wsUrl, wsPort]);
 
   const send = (input: TInput): number => {
     if (clientRef.current) return clientRef.current.send(input);

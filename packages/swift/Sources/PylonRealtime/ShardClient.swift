@@ -94,6 +94,9 @@ public struct ShardClientConfig: Sendable {
     public var wsURL: URL?
     public var subscriberId: String
     public var token: String?
+    /// Shard ticket from a server function (`ctx.shards.ticket(...)`), sent
+    /// as the `X-Pylon-Shard-Ticket` header.
+    public var ticket: String?
     public var autoReconnect: Bool
     public var reconnectBaseDelay: TimeInterval
 
@@ -101,6 +104,7 @@ public struct ShardClientConfig: Sendable {
         baseURL: URL,
         subscriberId: String,
         token: String? = nil,
+        ticket: String? = nil,
         wsPort: Int? = nil,
         wsURL: URL? = nil,
         autoReconnect: Bool = true,
@@ -109,6 +113,7 @@ public struct ShardClientConfig: Sendable {
         self.baseURL = baseURL
         self.subscriberId = subscriberId
         self.token = token
+        self.ticket = ticket
         self.wsPort = wsPort
         self.wsURL = wsURL
         self.autoReconnect = autoReconnect
@@ -227,6 +232,9 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         var req = URLRequest(url: url)
         if !protocols.isEmpty {
             req.setValue(protocols.joined(separator: ", "), forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        }
+        if let ticket = config.ticket, !ticket.isEmpty {
+            req.setValue(ticket, forHTTPHeaderField: "X-Pylon-Shard-Ticket")
         }
         let task = session.webSocketTask(with: req)
         self.task = task

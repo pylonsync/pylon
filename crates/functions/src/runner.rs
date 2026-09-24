@@ -167,6 +167,18 @@ pub type NestedCallHook = Box<
 pub type FileUrlSigner =
     Box<dyn Fn(&str, Option<u64>) -> Result<String, (String, String)> + Send + Sync>;
 
+/// Callback for `ctx.shards.ticket(...)`. Takes the request and the calling
+/// user's id, returns the signed ticket (or an error pair). Installed by the
+/// runtime, which owns the ticket secret.
+pub type ShardTicketSigner = Box<
+    dyn Fn(
+            &crate::protocol::SignShardTicketMessage,
+            Option<&str>,
+        ) -> Result<String, (String, String)>
+        + Send
+        + Sync,
+>;
+
 /// Callback invoked when an action calls `ctx.email.send(to, subject, body)`.
 /// Returns Ok(()) on transport success, Err(reason) on failure.
 ///
@@ -381,6 +393,7 @@ pub struct FnRunner {
     /// mutations — documented limitation).
     nested_call_hook: Mutex<Option<NestedCallHook>>,
     file_url_signer: Mutex<Option<FileUrlSigner>>,
+    shard_ticket_signer: Mutex<Option<ShardTicketSigner>>,
     /// Optional handler for `ctx.email.send(...)`. Apps that don't configure
     /// an email transport see `ctx.email.send` reject with an explicit
     /// error so silently-dropped invite emails surface in the action's
@@ -446,6 +459,7 @@ impl FnRunner {
             schedule_hook: Mutex::new(None),
             nested_call_hook: Mutex::new(None),
             file_url_signer: Mutex::new(None),
+            shard_ticket_signer: Mutex::new(None),
             email_hook: Mutex::new(None),
             llm_hook: Mutex::new(None),
             llm_stream_hook: Mutex::new(None),
@@ -555,6 +569,10 @@ impl FnRunner {
 
     /// Install the signed-file-URL minter backing `ctx.files.signedUrl`.
     /// The runtime installs this with a closure over its signing secret.
+    pub fn set_shard_ticket_signer(&self, hook: ShardTicketSigner) {
+        *self.shard_ticket_signer.lock().unwrap() = Some(hook);
+    }
+
     pub fn set_file_url_signer(&self, hook: FileUrlSigner) {
         *self.file_url_signer.lock().unwrap() = Some(hook);
     }
@@ -1691,6 +1709,31 @@ impl FnRunner {
                             call_id.clone(),
                             "FILES_SIGNING_NOT_CONFIGURED",
                             "this host does not support signed file URLs",
+                        ),
+                    };
+                    self.send(&reply)?;
+                }
+
+                TsMessage::SignShardTicket(req) if req.call_id == call_id => {
+                    // `ctx.shards.ticket` — the calling function decides who
+                    // gets a ticket for what; the runner just signs.
+                    let result: Option<Result<String, (String, String)>> = {
+                        let signer = self.shard_ticket_signer.lock().unwrap();
+                        signer
+                            .as_ref()
+                            .map(|cb| cb(&req, caller_user_id.as_deref()))
+                    };
+                    let reply = match result {
+                        Some(Ok(ticket)) => {
+                            DbResultMessage::ok(call_id.clone(), serde_json::json!(ticket))
+                        }
+                        Some(Err((code, msg))) => {
+                            DbResultMessage::err(call_id.clone(), &code, &msg)
+                        }
+                        None => DbResultMessage::err(
+                            call_id.clone(),
+                            "SHARD_TICKETS_NOT_CONFIGURED",
+                            "this host does not sign shard tickets",
                         ),
                     };
                     self.send(&reply)?;

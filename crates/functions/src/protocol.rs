@@ -420,6 +420,12 @@ pub enum TsMessage {
     #[serde(rename = "sign_file_url")]
     SignFileUrl(SignFileUrlMessage),
 
+    /// `ctx.shards.ticket(shardId, {subscriberId, claims, ttlSecs})` — mint
+    /// a signed shard ticket. The host signs with its ticket secret; the
+    /// shard transports verify it. See `pylon_realtime::ticket`.
+    #[serde(rename = "sign_shard_ticket")]
+    SignShardTicket(SignShardTicketMessage),
+
     /// Send a transactional email via the runtime's configured provider.
     /// Only valid from action handlers — mutations + queries reject by
     /// the time the dispatcher hands the message off.
@@ -527,6 +533,7 @@ impl TsMessage {
             TsMessage::CancelSchedule(m) => Some(&m.call_id),
             TsMessage::RunFn(m) => Some(&m.call_id),
             TsMessage::SignFileUrl(m) => Some(&m.call_id),
+            TsMessage::SignShardTicket(m) => Some(&m.call_id),
             TsMessage::SendEmail(m) => Some(&m.call_id),
             TsMessage::LlmComplete(m) => Some(&m.call_id),
             TsMessage::LlmStream(m) => Some(&m.call_id),
@@ -757,6 +764,21 @@ pub struct SignFileUrlMessage {
     pub file_id: String,
     /// Requested lifetime in seconds. `None` → the host default (300);
     /// the host clamps to its maximum regardless.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignShardTicketMessage {
+    pub call_id: String,
+    pub shard: String,
+    /// The subscriber id the ticket admits. `None` → the calling user's id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscriber_id: Option<String>,
+    /// App claims the shard's authorization hooks read.
+    #[serde(default)]
+    pub claims: serde_json::Value,
+    /// Lifetime in seconds. `None` → the host default; the host clamps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl_secs: Option<u64>,
 }

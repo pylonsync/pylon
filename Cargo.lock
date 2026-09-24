@@ -2905,11 +2905,14 @@ dependencies = [
 name = "pylon-realtime"
 version = "0.11.6"
 dependencies = [
+ "base64",
  "bincode",
+ "hmac 0.12.1",
  "pylon-kernel",
  "rmp-serde",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tracing",
 ]
 

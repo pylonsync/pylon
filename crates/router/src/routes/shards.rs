@@ -89,9 +89,26 @@ pub(crate) fn handle(
                     .unwrap_or(serde_json::Value::Null);
                 let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "null".into());
 
+                // A shard ticket (X-Pylon-Shard-Ticket) carries the claims
+                // authorize_input may need, as on the WebSocket.
+                let ticket = match ctx
+                    .request_headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("x-pylon-shard-ticket"))
+                    .map(|(_, v)| shards.verify_ticket(v))
+                {
+                    Some(Ok(t)) => Some(t),
+                    Some(Err(e)) => {
+                        return Some((401, json_error("INVALID_TICKET", &e.to_string())))
+                    }
+                    None => None,
+                };
                 let shard_auth = pylon_realtime::ShardAuth {
                     user_id: ctx.auth_ctx.user_id.clone(),
                     is_admin: ctx.auth_ctx.is_admin,
+                    roles: ctx.auth_ctx.roles.clone(),
+                    tenant_id: ctx.auth_ctx.tenant_id.clone(),
+                    ticket,
                 };
                 return Some(
                     match shard.push_input_json(

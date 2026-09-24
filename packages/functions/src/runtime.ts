@@ -22,6 +22,7 @@ import type {
   EmailOptions,
   EmailSender,
   Files,
+  Shards,
   Stream,
   Scheduler,
   Llm,
@@ -522,6 +523,21 @@ export function buildDbReader(callId: string, ssrRead = false): DbReader {
  * op_id) is correct here: concurrent calls queue settle-chained on the one
  * call_id, matching how ctx.runQuery behaves inside a function.
  */
+/** `ctx.shards` — shard tickets, signed host-side. */
+function buildShards(callId: string): Shards {
+  return {
+    async ticket(shardId, opts) {
+      return rpc(callId, {
+        type: "sign_shard_ticket",
+        shard: shardId,
+        subscriber_id: opts?.subscriberId,
+        claims: opts?.claims ?? {},
+        ttl_secs: opts?.ttlSecs,
+      }) as Promise<string>;
+    },
+  };
+}
+
 /** `ctx.files` — signed download URLs, minted host-side. */
 function buildFiles(callId: string): Files {
   return {
@@ -1139,6 +1155,7 @@ function buildActionCtx(
       return err;
     },
     files: buildFiles(callId),
+    shards: buildShards(callId),
     // Actions have no ctx.db; read membership via the built-in internal query.
     requireMember: makeRequireMember(auth.userId, (entity, filter) =>
       rpc(callId, {
@@ -1291,6 +1308,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
           reader.query(entity, { ...filter, $limit: 1 }),
         ),
         files: buildFiles(msg.call_id),
+        shards: buildShards(msg.call_id),
       };
       break;
     }
@@ -1315,6 +1333,7 @@ async function handleCall(msg: CallMessage): Promise<void> {
           writer.query(entity, { ...filter, $limit: 1 }),
         ),
         files: buildFiles(msg.call_id),
+        shards: buildShards(msg.call_id),
       };
       break;
     }

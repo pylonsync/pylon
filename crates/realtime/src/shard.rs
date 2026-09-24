@@ -9,6 +9,7 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::outbound::{OutboundConfig, OutboundQueue};
 use crate::subscriber::{Subscriber, SubscriberId};
+use crate::ticket::ShardTicket;
 use crate::wire::InputRejection;
 
 // ---------------------------------------------------------------------------
@@ -20,19 +21,41 @@ use crate::wire::InputRejection;
 /// Mirrors the HTTP auth context but shaped for shard-level checks.
 /// Implementations of `SimState::authorize_subscribe` and
 /// `SimState::authorize_input` use it to decide whether a subscriber
-/// can join a match or submit a given input.
-#[derive(Debug, Clone)]
+/// can join a match or submit a given input, without a database call.
+#[derive(Debug, Clone, Default)]
 pub struct ShardAuth {
     pub user_id: Option<String>,
     pub is_admin: bool,
+    /// The session's roles, as policies see them.
+    pub roles: Vec<String>,
+    /// The session's active tenant (organization), if any.
+    pub tenant_id: Option<String>,
+    /// A shard ticket the client presented, with a verified signature.
+    /// The shard has already checked that it names this shard and this
+    /// subscriber and has not expired. See [`crate::ticket`].
+    pub ticket: Option<ShardTicket>,
 }
 
 impl ShardAuth {
     pub fn anonymous() -> Self {
+        Self::default()
+    }
+
+    /// Admin context: passes the default authorization hooks.
+    pub fn admin() -> Self {
         Self {
-            user_id: None,
-            is_admin: false,
+            is_admin: true,
+            ..Self::default()
         }
+    }
+
+    pub fn has_role(&self, role: &str) -> bool {
+        self.roles.iter().any(|r| r == role)
+    }
+
+    /// One app claim from the ticket, by key.
+    pub fn claim(&self, key: &str) -> Option<&serde_json::Value> {
+        self.ticket.as_ref().and_then(|t| t.claim(key))
     }
 }
 
@@ -91,17 +114,17 @@ pub trait SimState: Send + 'static {
 
     /// Authorize a subscriber joining this shard. Return `Err(reason)` to reject.
     ///
-    /// Default: require that the caller's `auth.user_id` matches the requested
-    /// `subscriber_id`, OR the caller is admin. Previously this allowed any
-    /// authenticated user to subscribe with any sid, letting Alice impersonate
-    /// Bob and receive events intended for him. Apps that want looser coupling
-    /// (e.g. spectator mode) should override this hook explicitly.
+    /// Default: allow an admin; allow a caller with a ticket (the shard has
+    /// already checked it names this shard and this subscriber id); else
+    /// require that `auth.user_id` matches the requested `subscriber_id`, so
+    /// Alice cannot subscribe as Bob. Apps that want looser coupling (e.g.
+    /// spectator mode) or that require a ticket override this hook.
     fn authorize_subscribe(
         &self,
         subscriber_id: &SubscriberId,
         auth: &ShardAuth,
     ) -> Result<(), String> {
-        if auth.is_admin {
+        if auth.is_admin || auth.ticket.is_some() {
             return Ok(());
         }
         match &auth.user_id {
@@ -458,11 +481,36 @@ impl<S: SimState> Shard<S> {
     }
 
     /// Add a subscriber after running the user's authorization hook.
+    ///
+    /// A ticket in `auth` must name this shard and this subscriber id and
+    /// must not have expired; otherwise the subscribe fails before the hook
+    /// runs.
     pub fn add_subscriber_authorized(
         &self,
         sub: Subscriber<S::Snapshot>,
         auth: &ShardAuth,
     ) -> Result<(), ShardError> {
+        if let Some(ticket) = &auth.ticket {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if ticket.shard != self.id {
+                return Err(ShardError::Unauthorized(format!(
+                    "ticket is for shard \"{}\"",
+                    ticket.shard
+                )));
+            }
+            if ticket.sid != sub.id().as_str() {
+                return Err(ShardError::Unauthorized(format!(
+                    "ticket is for subscriber \"{}\"",
+                    ticket.sid
+                )));
+            }
+            if ticket.is_expired(now) {
+                return Err(ShardError::Unauthorized("ticket has expired".into()));
+            }
+        }
         {
             let state = self.state.lock().unwrap();
             state
@@ -987,7 +1035,7 @@ mod tests {
         let sub = Subscriber::new(SubscriberId::new("bob"), Box::new(|_tick, _bytes| {}));
         let alice = ShardAuth {
             user_id: Some("alice".into()),
-            is_admin: false,
+            ..Default::default()
         };
         let err = shard.add_subscriber_authorized(sub, &alice);
         assert!(matches!(err, Err(ShardError::Unauthorized(_))));
@@ -1006,7 +1054,7 @@ mod tests {
         let sub = Subscriber::new(SubscriberId::new("alice"), Box::new(|_tick, _bytes| {}));
         let alice = ShardAuth {
             user_id: Some("alice".into()),
-            is_admin: false,
+            ..Default::default()
         };
         shard.add_subscriber_authorized(sub, &alice).unwrap();
     }
@@ -1022,10 +1070,7 @@ mod tests {
             ShardConfig::default(),
         );
         let sub = Subscriber::new(SubscriberId::new("whoever"), Box::new(|_tick, _bytes| {}));
-        let admin = ShardAuth {
-            user_id: None,
-            is_admin: true,
-        };
+        let admin = ShardAuth::admin();
         shard.add_subscriber_authorized(sub, &admin).unwrap();
     }
 
@@ -1165,13 +1210,7 @@ mod tests {
         };
         let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), config);
         let queue: Arc<OutboundQueue> = shard
-            .add_queued_subscriber_authorized(
-                SubscriberId::new("admin"),
-                &ShardAuth {
-                    user_id: None,
-                    is_admin: true,
-                },
-            )
+            .add_queued_subscriber_authorized(SubscriberId::new("admin"), &ShardAuth::admin())
             .unwrap();
         // Nobody drains the queue.
         for _ in 0..3 {
@@ -1187,10 +1226,7 @@ mod tests {
     #[test]
     fn remove_subscriber_closes_its_queue() {
         let shard: Arc<Shard<Counter>> = Shard::new("t", counter(), ShardConfig::default());
-        let admin = ShardAuth {
-            user_id: None,
-            is_admin: true,
-        };
+        let admin = ShardAuth::admin();
         let q = shard
             .add_queued_subscriber_authorized(SubscriberId::new("x"), &admin)
             .unwrap();
@@ -1199,10 +1235,7 @@ mod tests {
     }
 
     fn admin() -> ShardAuth {
-        ShardAuth {
-            user_id: None,
-            is_admin: true,
-        }
+        ShardAuth::admin()
     }
 
     #[test]
@@ -1274,6 +1307,77 @@ mod tests {
         assert!(body.message.contains("negative"));
         // The failed input still counts as processed.
         assert_eq!(q.pop().unwrap().ack, 7);
+    }
+
+    /// Admits only tickets whose `realm` claim is "north".
+    struct Realm;
+    impl SimState for Realm {
+        type Input = i64;
+        type Snapshot = u64;
+        type Error = String;
+        fn apply_input(&mut self, _s: &SubscriberId, _i: i64, _n: Instant) -> Result<(), String> {
+            Ok(())
+        }
+        fn tick(&mut self, _dt: Duration) {}
+        fn snapshot(&self) -> u64 {
+            0
+        }
+        fn authorize_subscribe(&self, _sid: &SubscriberId, auth: &ShardAuth) -> Result<(), String> {
+            match auth.claim("realm").and_then(|v| v.as_str()) {
+                Some("north") => Ok(()),
+                other => Err(format!("realm {other:?} may not enter")),
+            }
+        }
+    }
+
+    fn with_ticket(shard: &str, sid: &str, exp: u64, realm: &str) -> ShardAuth {
+        ShardAuth {
+            user_id: Some("u_1".into()),
+            ticket: Some(ShardTicket {
+                shard: shard.into(),
+                sid: sid.into(),
+                user_id: Some("u_1".into()),
+                exp,
+                claims: serde_json::json!({ "realm": realm }),
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tickets_are_checked_against_the_shard_subscriber_and_clock() {
+        let shard: Arc<Shard<Realm>> = Shard::new("zone-3", Realm, ShardConfig::default());
+        let later = 4_000_000_000; // 2096
+        let sub = |sid: &str| Subscriber::new(SubscriberId::new(sid), Box::new(|_t, _b| {}));
+        let unauthorized =
+            |r: Result<(), ShardError>| matches!(r, Err(ShardError::Unauthorized(_)));
+
+        // Another shard, another subscriber, expired: refused before the hook.
+        assert!(unauthorized(shard.add_subscriber_authorized(
+            sub("char_12"),
+            &with_ticket("zone-9", "char_12", later, "north")
+        )));
+        assert!(unauthorized(shard.add_subscriber_authorized(
+            sub("char_99"),
+            &with_ticket("zone-3", "char_12", later, "north")
+        )));
+        assert!(unauthorized(shard.add_subscriber_authorized(
+            sub("char_12"),
+            &with_ticket("zone-3", "char_12", 1, "north")
+        )));
+        // The game's hook reads the claims: wrong realm refused.
+        assert!(unauthorized(shard.add_subscriber_authorized(
+            sub("char_12"),
+            &with_ticket("zone-3", "char_12", later, "south")
+        )));
+        // A valid ticket admits a character id that is not the user id.
+        shard
+            .add_subscriber_authorized(
+                sub("char_12"),
+                &with_ticket("zone-3", "char_12", later, "north"),
+            )
+            .unwrap();
+        assert_eq!(shard.subscriber_count(), 1);
     }
 
     #[test]

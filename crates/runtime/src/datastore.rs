@@ -2321,6 +2321,13 @@ impl pylon_router::ShardOps for ShardOpsAdapter {
     fn shard_count(&self) -> usize {
         self.registry.len()
     }
+
+    fn verify_ticket(
+        &self,
+        token: &str,
+    ) -> Result<pylon_realtime::ShardTicket, pylon_realtime::TicketError> {
+        crate::shard_tickets::verify(token)
+    }
 }
 
 #[cfg(test)]
@@ -5346,6 +5353,35 @@ pub fn try_spawn_functions(
             }
             Ok(crate::file_urls::signed_path(file_id, ttl_secs))
         }));
+        // `ctx.shards.ticket` — same pattern: the runtime owns the secret.
+        runner.set_shard_ticket_signer(Box::new(
+            |req: &pylon_functions::protocol::SignShardTicketMessage, caller: Option<&str>| {
+                if req.shard.is_empty() {
+                    return Err(("INVALID_SHARD".into(), "shard id is required".into()));
+                }
+                let sid = match req.subscriber_id.as_deref().or(caller) {
+                    Some(s) if !s.is_empty() => s.to_string(),
+                    _ => {
+                        return Err((
+                            "SUBSCRIBER_REQUIRED".into(),
+                            "pass subscriberId, or call from a signed-in user's function".into(),
+                        ))
+                    }
+                };
+                let claims = if req.claims.is_null() {
+                    serde_json::json!({})
+                } else {
+                    req.claims.clone()
+                };
+                Ok(crate::shard_tickets::mint(
+                    &req.shard,
+                    &sid,
+                    caller.map(str::to_string),
+                    claims,
+                    req.ttl_secs,
+                ))
+            },
+        ));
     }
     register_function_job_handlers(&ops, &job_queue_for_handlers);
     spawn_runtime_supervisor(Arc::clone(&ops));

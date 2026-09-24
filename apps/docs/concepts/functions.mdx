@@ -75,6 +75,7 @@ ctx.rooms.broadcast(room, topic, data) // push → every subscriber of a presenc
 
 // All three flavors:
 ctx.files.signedUrl(fileId, { ttlSecs: 300 })  // mint a short-lived signed download URL
+ctx.shards.ticket(shardId, { subscriberId, claims, ttlSecs })  // mint a signed realtime shard ticket
 ```
 
 ### Signed file URLs
@@ -94,9 +95,35 @@ export default query({
 
 The returned path (`/api/files/<id>?sig=<hmac>&exp=<unix>`) is anonymously fetchable until it expires. It works in `<img src>` and download links. `ttlSecs` defaults to 300 and is capped at 24 hours; a signed URL is a bearer capability, so keep lifetimes short. Invalid or expired signatures fall back to the ordinary owner check, so nothing new becomes enumerable.
 
+### Shard tickets
+
+A shard ticket lets a client join one realtime shard as a given subscriber id, with claims the shard's authorization hooks read without a database call. Check what the user may do in the function, then mint the ticket:
+
+```ts
+export default mutation({
+  args: { characterId: v.id("Character") },
+  async handler(ctx, args) {
+    const c = await ctx.db.get("Character", args.characterId);
+    if (c?.ownerId !== ctx.auth.userId) throw ctx.error("FORBIDDEN", "not your character");
+    const shard = `zone-${c.zone}`;
+    const ticket = await ctx.shards.ticket(shard, {
+      subscriberId: c.id,
+      claims: { character: c.id, realm: c.realm },
+    });
+    return { shard, ticket };
+  },
+});
+```
+
+The client passes the ticket when it connects: `connectShard(shard, { subscriberId: c.id, token, ticket })` in TypeScript, or `ShardClientConfig(ticket:)` in Swift. The shard refuses a ticket for another shard or another subscriber id, or one past its expiry. In Rust, `SimState::authorize_subscribe` and `authorize_input` read the claims with `auth.claim("realm")`.
+
+- `subscriberId` defaults to the calling user's id.
+- `ttlSecs` defaults to 60 and is capped at 3600. The ticket only gates joining. A subscriber stays connected after its ticket expires.
+- The host signs tickets with `PYLON_SHARD_TICKET_SECRET`, or a key derived from `PYLON_JWT_SECRET`. When shards run on several machines, set one of them to the same value on every machine.
+
 The three flavors expose different context surfaces:
 
-- **Query** — `ctx.db` (read-only), `ctx.auth`, `ctx.env`, `ctx.requireMember`.
+- **Query** — `ctx.db` (read-only), `ctx.auth`, `ctx.env`, `ctx.requireMember`, `ctx.files`, `ctx.shards`.
 - **Mutation** — the above plus writes on `ctx.db`, `ctx.scheduler`, `ctx.error`, `ctx.llm`, `ctx.connections`, `ctx.stream`, `ctx.rooms`.
 - **Action** — no `ctx.db`. Reach the database through `ctx.runQuery(name, args)` / `ctx.runMutation(name, args)` (each runs as its own transaction). Actions also get `ctx.scheduler`, `ctx.error`, `ctx.email`, `ctx.llm`, `ctx.stream`, `ctx.rooms`, `ctx.connections`, and `ctx.request` (raw HTTP request, the only ctx that has it, so webhook signature checks live in actions).
 

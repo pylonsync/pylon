@@ -389,6 +389,13 @@ pub trait ShardOps: Send + Sync {
 
     /// Number of active shards.
     fn shard_count(&self) -> usize;
+
+    /// Verify a shard ticket's signature and expiry with the host's ticket
+    /// secret. See `pylon_realtime::ticket`.
+    fn verify_ticket(
+        &self,
+        token: &str,
+    ) -> Result<pylon_realtime::ShardTicket, pylon_realtime::TicketError>;
 }
 
 /// Generates the OpenAPI spec JSON string for the manifest.

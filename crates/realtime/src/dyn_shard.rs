@@ -263,6 +263,7 @@ mod tests {
         let admin = ShardAuth {
             user_id: Some("a".into()),
             is_admin: true,
+            ..Default::default()
         };
         let seq = dyn_shard
             .push_input_json(SubscriberId::new("p1"), "5", None, &admin)
@@ -280,6 +281,7 @@ mod tests {
         let admin = ShardAuth {
             user_id: Some("a".into()),
             is_admin: true,
+            ..Default::default()
         };
         let err = dyn_shard
             .push_input_json(SubscriberId::new("p1"), "not json", None, &admin)

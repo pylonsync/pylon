@@ -827,6 +827,42 @@ export interface Files {
   signedUrl(fileId: string, opts?: { ttlSecs?: number }): Promise<string>;
 }
 
+/**
+ * Shard tickets: short-lived, signed permission to join one realtime shard,
+ * with claims the shard's authorization hooks read without a database
+ * call. Check what the user may do here, then mint:
+ *
+ * ```ts
+ * export default mutation({
+ *   args: { characterId: v.id("Character") },
+ *   async handler(ctx, args) {
+ *     const c = await ctx.db.get("Character", args.characterId);
+ *     if (c?.ownerId !== ctx.auth.userId) throw ctx.error("FORBIDDEN", "not your character");
+ *     const shard = `zone-${c.zone}`;
+ *     const ticket = await ctx.shards.ticket(shard, {
+ *       subscriberId: c.id,
+ *       claims: { character: c.id, realm: c.realm },
+ *     });
+ *     return { shard, ticket };
+ *   },
+ * });
+ * ```
+ *
+ * The client passes the ticket when it connects (`connectShard(shard, {
+ * ticket })`). The shard rejects a ticket for another shard, another
+ * subscriber id, or past its expiry.
+ */
+export interface Shards {
+  /**
+   * Mint a ticket for `shardId`. `subscriberId` defaults to the calling
+   * user's id; `ttlSecs` defaults to 60 and is capped at 3600 by the host.
+   */
+  ticket(
+    shardId: string,
+    opts?: { subscriberId?: string; claims?: Record<string, unknown>; ttlSecs?: number },
+  ): Promise<string>;
+}
+
 /** Context for query handlers (read-only).
  *
  * NOTE: `ctx.llm` is NOT exposed here. Queries are reactive: a
@@ -852,6 +888,8 @@ export interface QueryCtx<R extends AuthRequirement = "optional"> {
   requireMember: RequireMember;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
+  /** Shard tickets — see {@link Shards}. */
+  shards: Shards;
   /**
    * Fires when the host cancels this call (idle timeout exceeded).
    * Thread it into `fetch(url, { signal: ctx.signal })` or SDK calls so
@@ -880,6 +918,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   workflows: Workflows;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
+  /** Shard tickets — see {@link Shards}. */
+  shards: Shards;
   /** Create a typed error that triggers rollback. */
   error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */
@@ -1053,6 +1093,8 @@ export interface ActionCtx<R extends AuthRequirement = "optional"> {
   env: Record<string, string>;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
+  /** Shard tickets — see {@link Shards}. */
+  shards: Shards;
   /** Run a registered query within its own read transaction. */
   runQuery<T = unknown>(
     fnName: string,

@@ -6144,9 +6144,43 @@ fn start_server(
                     let (tx, streaming_body) =
                         bounded_stream(SHARD_STREAM_BUFFER_CAPACITY);
 
-                    let shard_auth = pylon_realtime::ShardAuth {
-                        user_id: auth_ctx.user_id.clone(),
-                        is_admin: auth_ctx.is_admin,
+                    // A shard ticket from X-Pylon-Shard-Ticket or `?ticket=`
+                    // (EventSource cannot set headers; tickets are short-lived).
+                    let ticket = request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("X-Pylon-Shard-Ticket"))
+                        .map(|h| h.value.as_str().to_string())
+                        .or_else(|| {
+                            url.split_once('?').and_then(|(_, q)| {
+                                q.split('&').find_map(|kv| {
+                                    kv.strip_prefix("ticket=").map(percent_decode_str)
+                                })
+                            })
+                        });
+                    let shard_auth = match crate::shard_tickets::shard_auth(&auth_ctx, ticket.as_deref()) {
+                        Ok(a) => a,
+                        Err(e) => {
+                            let err = json_error("INVALID_TICKET", &e.to_string());
+                            let response = with_security_headers(
+                                Response::from_string(&err)
+                                    .with_status_code(401u16)
+                                    .with_header(
+                                        Header::from_bytes("Content-Type", "application/json")
+                                            .unwrap(),
+                                    )
+                                    .with_header(
+                                        Header::from_bytes(
+                                            "Access-Control-Allow-Origin",
+                                            cors_origin.as_bytes().to_vec(),
+                                        )
+                                        .unwrap(),
+                                    ),
+                            );
+                            let _ = request.respond(response);
+                            mt.record_request("GET", 401);
+                            return;
+                        }
                     };
                     let queue = match shard.add_queued_subscriber(subscriber_id.clone(), &shard_auth) {
                         Ok(q) => q,

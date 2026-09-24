@@ -192,6 +192,10 @@ async fn handle_connection(
                     if let Ok(v) = value.to_str() {
                         p.auth_header = Some(v.to_string());
                     }
+                } else if lower == "x-pylon-shard-ticket" {
+                    if let Ok(v) = value.to_str() {
+                        p.ticket = Some(v.to_string());
+                    }
                 } else if lower == "sec-websocket-protocol" {
                     // Accept a `bearer.<url-encoded-token>` subprotocol as an
                     // alternative to the Authorization header. Browsers can't
@@ -201,13 +205,22 @@ async fn handle_connection(
                     // the exact chosen subprotocol back in the handshake
                     // response, per RFC 6455 §11.3.4 (otherwise some browsers
                     // refuse the connection).
+                    // A `ticket.<url-encoded-ticket>` subprotocol carries a
+                    // shard ticket the same way. Only one subprotocol can be
+                    // selected in the response; the bearer one wins.
                     if let Ok(v) = value.to_str() {
                         for proto in v.split(',').map(str::trim) {
                             if let Some(encoded) = proto.strip_prefix("bearer.") {
+                                if p.bearer_from_subprotocol.is_none() {
+                                    if let Ok(decoded) = urldecode_strict(encoded) {
+                                        p.bearer_from_subprotocol = Some(decoded);
+                                        selected_protocol = Some(proto.to_string());
+                                    }
+                                }
+                            } else if let Some(encoded) = proto.strip_prefix("ticket.") {
                                 if let Ok(decoded) = urldecode_strict(encoded) {
-                                    p.bearer_from_subprotocol = Some(decoded);
-                                    selected_protocol = Some(proto.to_string());
-                                    break;
+                                    p.ticket = Some(decoded);
+                                    selected_protocol.get_or_insert_with(|| proto.to_string());
                                 }
                             }
                         }
@@ -256,12 +269,15 @@ async fn handle_connection(
         .map(|t| t.to_string())
         .or_else(|| params.bearer_from_subprotocol.clone());
     let auth_ctx = sessions.resolve(token.as_deref());
-    let shard_auth = ShardAuth {
-        user_id: auth_ctx.user_id.clone(),
-        is_admin: auth_ctx.is_admin,
-    };
-
     let (mut sink, mut source) = ws.split();
+    let shard_auth: ShardAuth =
+        match crate::shard_tickets::shard_auth(&auth_ctx, params.ticket.as_deref()) {
+            Ok(a) => a,
+            Err(e) => {
+                close_with(&mut sink, CloseCode::Policy, format!("unauthorized: {e}")).await;
+                return Ok(());
+            }
+        };
 
     let shard = match registry.get(&shard_id) {
         Some(s) => s,
@@ -475,6 +491,8 @@ struct HandshakeParams {
     uri: String,
     auth_header: Option<String>,
     bearer_from_subprotocol: Option<String>,
+    /// A shard ticket from `X-Pylon-Shard-Ticket` or a `ticket.` subprotocol.
+    ticket: Option<String>,
 }
 
 /// Strict percent-decode: fails on malformed input. Used for the WS

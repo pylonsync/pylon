@@ -73,6 +73,7 @@ export type {
   InferArgs,
   RequireMember,
   RequireMemberOptions,
+  Shards,
   MemberRow,
   Workflows,
   VectorSearchQuery,
