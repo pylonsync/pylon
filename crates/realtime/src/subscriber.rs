@@ -126,12 +126,26 @@ impl<T: EncodeSnapshot> Subscriber<T> {
         self.queue().is_some_and(|q| q.is_closed())
     }
 
-    fn deliver(&self, tick: u64, ack: u64, frame: Vec<u8>) {
+    fn deliver(&self, tick: u64, ack: u64, frame: Arc<[u8]>) {
         match &self.delivery {
             Delivery::Sink(sink) => sink(tick, &frame),
             Delivery::Queue(q) => {
-                q.push_snapshot(tick, ack, Arc::from(frame));
+                q.push_snapshot(tick, ack, frame);
             }
+        }
+    }
+
+    pub fn is_delta_mode(&self) -> bool {
+        self.delta_mode
+    }
+
+    /// Send a snapshot encoded elsewhere (one encoding shared by several
+    /// subscribers). A delta-mode subscriber diffs it like `send` does.
+    pub fn send_encoded(&self, tick: u64, encoded: Arc<[u8]>, ack: u64) {
+        if self.delta_mode {
+            self.send_delta(tick, encoded.to_vec(), ack);
+        } else {
+            self.deliver(tick, ack, encoded);
         }
     }
 
@@ -164,10 +178,13 @@ impl<T: EncodeSnapshot> Subscriber<T> {
         };
 
         if !self.delta_mode {
-            self.deliver(tick, ack, encoded);
+            self.deliver(tick, ack, Arc::from(encoded));
             return;
         }
+        self.send_delta(tick, encoded, ack);
+    }
 
+    fn send_delta(&self, tick: u64, encoded: Vec<u8>, ack: u64) {
         // Delta mode: compute field-level diff against the previous snapshot.
         let mut last = self.last_snapshot.lock().unwrap();
         let resync = self.queue().is_some_and(|q| q.is_full());
@@ -198,7 +215,7 @@ impl<T: EncodeSnapshot> Subscriber<T> {
 
         *last = Some(encoded);
         drop(last);
-        self.deliver(tick, ack, frame);
+        self.deliver(tick, ack, Arc::from(frame));
     }
 }
 

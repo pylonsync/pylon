@@ -222,6 +222,88 @@ fn snapshot_for_hides_other_players() {
 }
 
 #[test]
+fn interest_management_runs_in_the_module() {
+    let s = shard(SnapshotFormat::Json, json!({ "view_radius": 20.0 }));
+    let names = ["u1", "u2", "ghost", "u3"];
+    let queues: Vec<_> = names.iter().map(|n| join(&s, n)).collect();
+    // A seer watches from u1's position and sees ghosts.
+    let seer = DynShard::add_queued_subscriber(
+        s.as_ref(),
+        SubscriberId::new("seer-u1"),
+        &ShardAuth::admin(),
+    )
+    .unwrap();
+    let mv = |who: &str, dx: i64, dy: i64| {
+        send(
+            &s,
+            who,
+            json!({ "input": { "move": { "dx": dx, "dy": dy } } }),
+        )
+        .unwrap();
+    };
+    mv("u1", 1, 1);
+    mv("u2", 2, 2);
+    mv("ghost", 5, 5);
+    for _ in 0..10 {
+        mv("u3", 10, 0); // ends at (100, 0), out of everyone's range
+    }
+    // Ten inputs per subscriber fit the per-tick limit, so one tick applies
+    // them all; the second tick snapshots the final positions.
+    s.run_tick();
+    s.run_tick();
+
+    let ids = |q: &Arc<pylon_realtime::OutboundQueue>| -> (Vec<String>, Arc<[u8]>) {
+        let mut last = None;
+        while let Some(f) = q.pop() {
+            if f.kind == FrameKind::Snapshot {
+                last = Some(f.bytes);
+            }
+        }
+        let bytes = last.expect("a snapshot");
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        let mut names: Vec<String> = v["players"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        (names, bytes)
+    };
+    let (u1, b1) = ids(&queues[0]);
+    let (u2, b2) = ids(&queues[1]);
+    let (ghost, _) = ids(&queues[2]);
+    let (u3, _) = ids(&queues[3]);
+    let (seen_by_seer, _) = ids(&seer);
+    // The ghost is in range of u1 and u2 but hidden from them.
+    assert_eq!(u1, vec!["u1", "u2"]);
+    assert_eq!(u2, vec!["u1", "u2"]);
+    assert_eq!(seen_by_seer, vec!["ghost", "u1", "u2"]);
+    assert_eq!(ghost, vec!["u1", "u2"]);
+    assert_eq!(u3, vec!["u3"]);
+    // u1 and u2 see the same players: one snapshot, one encoding.
+    assert!(Arc::ptr_eq(&b1, &b2));
+}
+
+#[test]
+fn a_module_with_part_of_the_interest_exports_is_refused() {
+    let wasm = full_module(
+        1,
+        "i32.const 0",
+        r#"(func (export "pylon_interest") (result i32) i32.const 0)"#,
+    );
+    let err = WasmShardKind::compile(
+        "half",
+        &wasm,
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(err.contains("but not all"), "{err}");
+}
+
+#[test]
 fn authorization_hooks_run_in_the_module() {
     let s = shard(SnapshotFormat::Json, json!({}));
     // Default subscribe rule: the user id must be the subscriber id.

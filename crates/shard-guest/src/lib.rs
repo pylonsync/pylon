@@ -66,6 +66,19 @@
 //! | `pylon_authorize_subscribe(sid_ptr, sid_len, auth_ptr, auth_len) -> status` | Admit or refuse a subscriber. The auth bytes are JSON ([`Auth`]). |
 //! | `pylon_authorize_input(sid_ptr, sid_len, auth_ptr, auth_len, in_ptr, in_len) -> status` | Admit or refuse an input before it is queued. |
 //!
+//!
+//! Optional exports for interest management. A module exports all five or
+//! none; `export_shard!` exports all five. Ids are u64 and floats f32, all
+//! little-endian.
+//!
+//! | Export | Meaning |
+//! | --- | --- |
+//! | `pylon_interest() -> i32` | `0` off. `1` on, output: cell size, margin, flags (u32, bit 0: shared snapshots). |
+//! | `pylon_entities() -> status` | Output: 16 bytes per entity (id, x, y). |
+//! | `pylon_interest_area(sid_ptr, sid_len) -> i32` | `0` none. `1`, output: x, y, radius. |
+//! | `pylon_filter_visible(sid_ptr, sid_len, ids_ptr, ids_len) -> status` | Output: the ids the subscriber may see, in order. |
+//! | `pylon_snapshot_visible(sid_ptr, sid_len, view_ptr, view_len) -> status` | The view is three u32 counts (visible, entered, left) and then the ids. Status `2` means "send `snapshot_for`". |
+//!
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
 //! message in the output. A trap stops the shard.
 //!
@@ -168,6 +181,76 @@ pub trait Shard: Sized + 'static {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    // -- Interest management (optional) -----------------------------------
+    //
+    // Return a config from `interest` and the host computes, each tick,
+    // which entities each subscriber sees: it puts `entities` in a grid,
+    // keeps those within the subscriber's `interest_area` (with a margin so
+    // edge entities do not flicker), drops the ones `can_see` refuses, and
+    // asks `snapshot_visible` for the subscriber's snapshot.
+
+    /// Turn interest management on. Default: off.
+    fn interest(&self) -> Option<InterestConfig> {
+        None
+    }
+
+    /// This tick's entity positions.
+    fn entities(&self, _out: &mut Vec<EntityPos>) {}
+
+    /// Where a subscriber looks from. `None` sees no entities.
+    fn interest_area(&self, _subscriber: &str) -> Option<InterestArea> {
+        None
+    }
+
+    /// Hide an entity in range from a subscriber (stealth, fog of war).
+    fn can_see(&self, _subscriber: &str, _entity: u64) -> bool {
+        true
+    }
+
+    /// The subscriber's snapshot, given its view. `None` sends what
+    /// `snapshot_for` gives.
+    fn snapshot_visible(&self, _subscriber: &str, _view: &View<'_>) -> Option<Self::Snapshot> {
+        None
+    }
+}
+
+/// Grid settings for interest management.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterestConfig {
+    /// Side of a grid cell, in world units. About the view radius works well.
+    pub cell_size: f32,
+    /// How far past the radius a visible entity may go before it leaves view.
+    pub margin: f32,
+    /// True when `snapshot_visible` depends only on `view.visible`:
+    /// subscribers that see the same entities then share one snapshot.
+    pub shared_snapshots: bool,
+}
+
+/// One entity's position this tick (2D; a 3D world passes its ground plane).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityPos {
+    pub id: u64,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// What a subscriber can see: a circle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InterestArea {
+    pub x: f32,
+    pub y: f32,
+    pub radius: f32,
+}
+
+/// A subscriber's view this tick. Every list is sorted.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct View<'a> {
+    pub visible: &'a [u64],
+    /// Visible now and not last tick.
+    pub entered: &'a [u64],
+    /// Visible last tick and not now.
+    pub left: &'a [u64],
 }
 
 /// The host's default subscribe rule.
@@ -309,6 +392,26 @@ macro_rules! export_shard {
                 il: i32,
             ) -> i32 {
                 RUNTIME.authorize_input(sp, sl, ap, al, ip, il)
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_interest() -> i32 {
+                RUNTIME.interest()
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_entities() -> i32 {
+                RUNTIME.entities()
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_interest_area(sp: i32, sl: i32) -> i32 {
+                RUNTIME.interest_area(sp, sl)
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_filter_visible(sp: i32, sl: i32, ip: i32, il: i32) -> i32 {
+                RUNTIME.filter_visible(sp, sl, ip, il)
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_snapshot_visible(sp: i32, sl: i32, vp: i32, vl: i32) -> i32 {
+                RUNTIME.snapshot_visible(sp, sl, vp, vl)
             }
         };
     };
@@ -479,6 +582,105 @@ pub mod __rt {
                 Err(e) => fail(&mut s.output, e),
             }
         }
+    }
+
+    impl<T: Shard> Runtime<T> {
+        pub fn interest(&self) -> i32 {
+            let s = self.state();
+            match shard(&mut s.shard).interest() {
+                None => 0,
+                Some(c) => {
+                    s.output.clear();
+                    s.output.extend_from_slice(&c.cell_size.to_le_bytes());
+                    s.output.extend_from_slice(&c.margin.to_le_bytes());
+                    s.output
+                        .extend_from_slice(&(c.shared_snapshots as u32).to_le_bytes());
+                    1
+                }
+            }
+        }
+
+        pub fn entities(&self) -> i32 {
+            let s = self.state();
+            let mut list = Vec::new();
+            shard(&mut s.shard).entities(&mut list);
+            s.output.clear();
+            s.output.reserve(list.len() * 16);
+            for e in list {
+                s.output.extend_from_slice(&e.id.to_le_bytes());
+                s.output.extend_from_slice(&e.x.to_le_bytes());
+                s.output.extend_from_slice(&e.y.to_le_bytes());
+            }
+            OK
+        }
+
+        pub fn interest_area(&self, sp: i32, sl: i32) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written argument in the scratch buffer.
+            let sid = unsafe { arg_str(sp, sl) };
+            match shard(&mut s.shard).interest_area(sid) {
+                None => 0,
+                Some(a) => {
+                    s.output.clear();
+                    for v in [a.x, a.y, a.radius] {
+                        s.output.extend_from_slice(&v.to_le_bytes());
+                    }
+                    1
+                }
+            }
+        }
+
+        pub fn filter_visible(&self, sp: i32, sl: i32, ip: i32, il: i32) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written arguments in the scratch buffer.
+            let (sid, ids) = unsafe { (arg_str(sp, sl), arg(ip, il)) };
+            let game = shard(&mut s.shard);
+            s.output.clear();
+            for chunk in ids.chunks_exact(8) {
+                let id = u64::from_le_bytes(chunk.try_into().unwrap());
+                if game.can_see(sid, id) {
+                    s.output.extend_from_slice(chunk);
+                }
+            }
+            OK
+        }
+
+        pub fn snapshot_visible(&self, sp: i32, sl: i32, vp: i32, vl: i32) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written arguments in the scratch buffer.
+            let (sid, raw) = unsafe { (arg_str(sp, sl), arg(vp, vl)) };
+            let Some(ids) = parse_view(raw) else {
+                return fail(&mut s.output, "malformed view".into());
+            };
+            let (nv, ne) = (ids.0, ids.1);
+            let all = &ids.3;
+            let view = View {
+                visible: &all[..nv],
+                entered: &all[nv..nv + ne],
+                left: &all[nv + ne..],
+            };
+            match shard(&mut s.shard).snapshot_visible(sid, &view) {
+                Some(snap) => encode(s.codec, &snap, &mut s.output),
+                None => SAME_AS_BROADCAST,
+            }
+        }
+    }
+
+    /// (visible count, entered count, left count, all ids).
+    fn parse_view(raw: &[u8]) -> Option<(usize, usize, usize, Vec<u64>)> {
+        let count = |i: usize| -> Option<usize> {
+            Some(u32::from_le_bytes(raw.get(i..i + 4)?.try_into().ok()?) as usize)
+        };
+        let (nv, ne, nl) = (count(0)?, count(4)?, count(8)?);
+        let body = raw.get(12..)?;
+        if body.len() != (nv + ne + nl) * 8 {
+            return None;
+        }
+        let ids = body
+            .chunks_exact(8)
+            .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        Some((nv, ne, nl, ids))
     }
 
     fn shard<T>(slot: &mut Option<T>) -> &mut T {

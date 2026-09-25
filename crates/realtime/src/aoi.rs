@@ -4,8 +4,9 @@
 //! with hundreds or thousands of players, snapshots must be filtered so
 //! each client receives only what's near them (or otherwise visible).
 //!
-//! This module provides trait + helpers; actual filtering is done by the
-//! user's [`SimState::snapshot_for`] implementation.
+//! These shape tests suit a hand-written [`crate::SimState::snapshot_for`]. For a
+//! grid with hysteresis and a visibility filter that the shard runs each
+//! tick, use [`crate::interest`].
 
 use serde::Serialize;
 

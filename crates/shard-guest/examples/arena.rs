@@ -14,7 +14,9 @@
 
 use std::time::Duration;
 
-use pylon_shard_guest::{export_shard, log, Auth, Level, Shard};
+use pylon_shard_guest::{
+    export_shard, log, Auth, EntityPos, InterestArea, InterestConfig, Level, Shard, View,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -24,6 +26,10 @@ struct Params {
     fog: bool,
     #[serde(default = "default_label")]
     label: String,
+    /// Turn on the host's interest management with this view radius.
+    /// Players named "ghost..." are hidden except from "seer..." subscribers.
+    #[serde(default)]
+    view_radius: Option<f32>,
 }
 
 fn default_label() -> String {
@@ -58,6 +64,7 @@ enum Input {
 struct Arena {
     label: String,
     fog: bool,
+    view_radius: Option<f32>,
     elapsed: Duration,
     players: Vec<Player>,
     finished: bool,
@@ -77,6 +84,7 @@ impl Shard for Arena {
         Ok(Arena {
             label: params.label,
             fog: params.fog,
+            view_radius: params.view_radius,
             elapsed: Duration::ZERO,
             players: Vec::new(),
             finished: false,
@@ -142,6 +150,49 @@ impl Shard for Arena {
         }
         let mut snap = self.snapshot();
         snap.players.retain(|p| p.id == subscriber);
+        Some(snap)
+    }
+
+    fn interest(&self) -> Option<InterestConfig> {
+        self.view_radius.map(|r| InterestConfig {
+            cell_size: r,
+            margin: 1.0,
+            shared_snapshots: true,
+        })
+    }
+
+    fn entities(&self, out: &mut Vec<EntityPos>) {
+        // Players are never removed, so the index is a stable id.
+        out.extend(self.players.iter().enumerate().map(|(i, p)| EntityPos {
+            id: i as u64,
+            x: p.x as f32,
+            y: p.y as f32,
+        }));
+    }
+
+    fn interest_area(&self, subscriber: &str) -> Option<InterestArea> {
+        let me = self
+            .players
+            .iter()
+            .find(|p| p.id == subscriber.trim_start_matches("seer-"))?;
+        Some(InterestArea {
+            x: me.x as f32,
+            y: me.y as f32,
+            radius: self.view_radius?,
+        })
+    }
+
+    fn can_see(&self, subscriber: &str, entity: u64) -> bool {
+        subscriber.starts_with("seer-") || !self.players[entity as usize].id.starts_with("ghost")
+    }
+
+    fn snapshot_visible(&self, _subscriber: &str, view: &View<'_>) -> Option<Snapshot> {
+        let mut snap = self.snapshot();
+        snap.players = view
+            .visible
+            .iter()
+            .map(|&i| self.players[i as usize].clone())
+            .collect();
         Some(snap)
     }
 

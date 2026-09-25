@@ -5,6 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::interest::{
+    EntityId, EntityPos, InterestArea, InterestConfig, InterestManager, Visibility,
+};
 use crate::outbound::{OutboundConfig, OutboundQueue};
 use crate::snapshot::EncodeSnapshot;
 use crate::subscriber::{Subscriber, SubscriberId};
@@ -147,6 +150,52 @@ pub trait SimState: Send + 'static {
         _input: &Self::Input,
     ) -> Result<(), String> {
         Ok(())
+    }
+
+    // -- Interest management (optional; see crate::interest) ---------------
+
+    /// Return a config to have the shard compute, each tick, which entities
+    /// each subscriber sees, and build snapshots with
+    /// [`SimState::snapshot_visible`] instead of `snapshot_for`.
+    /// Default: off.
+    fn interest_config(&self) -> Option<InterestConfig> {
+        None
+    }
+
+    /// This tick's entity positions. Called once per tick when interest
+    /// management is on.
+    fn entities(&self, _out: &mut Vec<EntityPos>) {}
+
+    /// Where a subscriber looks from, usually the entity it controls.
+    /// `None` sees no entities.
+    fn interest_area(&self, _subscriber_id: &SubscriberId) -> Option<InterestArea> {
+        None
+    }
+
+    /// Hide an entity in range from a subscriber (stealth, fog of war).
+    /// Default: every entity in range is visible.
+    fn can_see(&self, _subscriber_id: &SubscriberId, _entity: EntityId) -> bool {
+        true
+    }
+
+    /// Remove the ids in `ids` a subscriber must not see. Default: keep
+    /// the ids `can_see` admits. Override it to filter in one pass (a
+    /// WebAssembly shard does, to make one call per subscriber).
+    fn filter_visible(&self, subscriber_id: &SubscriberId, ids: &mut Vec<EntityId>) {
+        ids.retain(|id| self.can_see(subscriber_id, *id));
+    }
+
+    /// The snapshot for a subscriber, given its view. Default:
+    /// `snapshot_for`.
+    fn snapshot_visible(&self, subscriber_id: &SubscriberId, _view: &Visibility) -> Self::Snapshot {
+        self.snapshot_for(subscriber_id)
+    }
+
+    /// Return true when `snapshot_visible` depends only on `view.visible`
+    /// (not on the subscriber id, `entered`, or `left`). Subscribers that
+    /// see the same entities then share one snapshot and one encoding.
+    fn shares_visible_snapshots(&self) -> bool {
+        false
     }
 }
 
@@ -333,6 +382,17 @@ pub struct Shard<S: SimState> {
     input_recorder: Mutex<Option<InputRecorder<S::Input>>>,
     /// Ticks the tick loop skipped because it fell too far behind.
     overrun_ticks: std::sync::atomic::AtomicU64,
+    /// Interest management state, when the sim turns it on. Only the tick
+    /// (under the state lock) touches it.
+    interest: Mutex<Option<InterestManager>>,
+    entity_scratch: Mutex<Vec<EntityPos>>,
+}
+
+/// One subscriber's snapshot this tick: its own, or one shared with every
+/// subscriber that sees the same entities.
+enum TickSnapshot<T> {
+    Own(T),
+    Shared(usize),
 }
 
 impl<S: SimState> Shard<S> {
@@ -359,6 +419,8 @@ impl<S: SimState> Shard<S> {
             on_tick: Mutex::new(None),
             input_recorder: Mutex::new(None),
             overrun_ticks: std::sync::atomic::AtomicU64::new(0),
+            interest: Mutex::new(None),
+            entity_scratch: Mutex::new(Vec::new()),
         })
     }
 
@@ -709,6 +771,61 @@ impl<S: SimState> Shard<S> {
     /// Only steps 1-4 hold the state lock. Delivery never waits on a client:
     /// a queued subscriber's frame goes into its outbound queue, and a
     /// subscriber whose queue closed is removed.
+    /// Each subscriber's snapshot this tick, plus the snapshots shared by
+    /// subscribers with the same view. Runs under the state lock.
+    fn take_snapshots(
+        &self,
+        state: &S,
+        subs: &[Arc<Subscriber<S::Snapshot>>],
+    ) -> (Vec<TickSnapshot<S::Snapshot>>, Vec<S::Snapshot>) {
+        let Some(config) = state.interest_config() else {
+            let own = subs
+                .iter()
+                .map(|sub| TickSnapshot::Own(state.snapshot_for(sub.id())))
+                .collect();
+            return (own, Vec::new());
+        };
+        let mut guard = self.interest.lock().unwrap();
+        let manager = guard.get_or_insert_with(|| InterestManager::new(config));
+        if manager.config() != config {
+            manager.set_config(config);
+        }
+        let mut entities = self.entity_scratch.lock().unwrap();
+        entities.clear();
+        state.entities(&mut entities);
+        manager.rebuild(&entities);
+        drop(entities);
+        if subs.len() < 1024 {
+            manager.retain(|id| subs.iter().any(|s| s.id() == id));
+        } else {
+            let live: std::collections::HashSet<&SubscriberId> =
+                subs.iter().map(|s| s.id()).collect();
+            manager.retain(|id| live.contains(id));
+        }
+
+        let share = state.shares_visible_snapshots();
+        let mut shared: Vec<S::Snapshot> = Vec::new();
+        let mut groups: HashMap<Vec<EntityId>, usize> = HashMap::new();
+        let mut out = Vec::with_capacity(subs.len());
+        for sub in subs {
+            let id = sub.id();
+            let view = manager.update(id, state.interest_area(id), |ids| {
+                state.filter_visible(id, ids)
+            });
+            if share && !sub.is_delta_mode() {
+                let next = shared.len();
+                let slot = *groups.entry(view.visible.clone()).or_insert(next);
+                if slot == next {
+                    shared.push(state.snapshot_visible(id, view));
+                }
+                out.push(TickSnapshot::Shared(slot));
+            } else {
+                out.push(TickSnapshot::Own(state.snapshot_visible(id, view)));
+            }
+        }
+        (out, shared)
+    }
+
     pub fn run_tick(&self) {
         if !self.is_running() {
             return;
@@ -737,7 +854,7 @@ impl<S: SimState> Shard<S> {
         let sub_count = subs.len();
 
         let mut failed: Vec<(SubscriberId, InputRejection)> = Vec::new();
-        let (snapshots, finished) = {
+        let (snapshots, shared, finished) = {
             let mut state = self.state.lock().unwrap();
             let mut acks = self.acks.lock().unwrap();
             let recorder = self.input_recorder.lock().unwrap();
@@ -772,11 +889,8 @@ impl<S: SimState> Shard<S> {
                 cb(&state, tick_number);
             }
 
-            let snapshots: Vec<S::Snapshot> = subs
-                .iter()
-                .map(|sub| state.snapshot_for(sub.id()))
-                .collect();
-            (snapshots, state.is_finished())
+            let (snapshots, shared) = self.take_snapshots(&state, &subs);
+            (snapshots, shared, state.is_finished())
         };
 
         // Encode and deliver outside the state lock. Rejections go first so
@@ -795,13 +909,32 @@ impl<S: SimState> Shard<S> {
             }
         }
         let mut closed = false;
+        // A shared snapshot is encoded once, on first use.
+        let mut shared_bytes: Vec<Option<Option<Arc<[u8]>>>> = vec![None; shared.len()];
         for (sub, snap) in subs.iter().zip(snapshots.iter()) {
-            sub.send(
-                tick_number,
-                snap,
-                self.config.snapshot_format,
-                ack_of(sub.id()),
-            );
+            let ack = ack_of(sub.id());
+            match snap {
+                TickSnapshot::Own(snap) => {
+                    sub.send(tick_number, snap, self.config.snapshot_format, ack)
+                }
+                TickSnapshot::Shared(i) => {
+                    let bytes = shared_bytes[*i].get_or_insert_with(|| {
+                        match shared[*i].encode_as(self.config.snapshot_format) {
+                            Ok(b) => Some(Arc::from(b)),
+                            Err(e) => {
+                                tracing::warn!(
+                                    "[realtime] shard {}: snapshot encode failed: {e}",
+                                    self.id
+                                );
+                                None
+                            }
+                        }
+                    });
+                    if let Some(bytes) = bytes {
+                        sub.send_encoded(tick_number, Arc::clone(bytes), ack);
+                    }
+                }
+            }
             closed |= sub.is_closed();
         }
         if closed {

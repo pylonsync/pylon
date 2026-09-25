@@ -137,6 +137,57 @@ The module has no clock, no random source, and no I/O. Put a seed in
 same state, which a replay needs. `pylon_shard_guest::log(Level::Info, "…")`
 writes to the server log.
 
+### Send each player only what is near them
+
+In a large zone, return an `InterestConfig` from `interest`. Each tick the
+host puts your entities in a grid, keeps the ones within each subscriber's
+radius, and asks `snapshot_visible` for that subscriber's snapshot:
+
+```rust
+use pylon_shard_guest::{EntityPos, InterestArea, InterestConfig, View};
+
+impl Shard for Zone {
+    // ...
+    fn interest(&self) -> Option<InterestConfig> {
+        Some(InterestConfig { cell_size: 150.0, margin: 10.0, shared_snapshots: true })
+    }
+
+    fn entities(&self, out: &mut Vec<EntityPos>) {
+        out.extend(self.units.iter().map(|u| EntityPos { id: u.id, x: u.x, y: u.y }));
+    }
+
+    fn interest_area(&self, sid: &str) -> Option<InterestArea> {
+        let me = self.player_unit(sid)?;
+        Some(InterestArea { x: me.x, y: me.y, radius: 150.0 })
+    }
+
+    fn can_see(&self, sid: &str, entity: u64) -> bool {
+        !self.is_stealthed(entity) || self.can_detect(sid)
+    }
+
+    fn snapshot_visible(&self, _sid: &str, view: &View) -> Option<Snapshot> {
+        Some(Snapshot { units: view.visible.iter().map(|id| self.unit(*id)).collect() })
+    }
+}
+```
+
+- An entity leaves view only after it is `margin` past the radius, so an
+  entity at the edge does not flicker in and out.
+- `can_see` hides an entity in range, for stealth or fog of war.
+- `view.entered` and `view.left` list the ids that came into and went out
+  of view since the last tick.
+- With `shared_snapshots: true`, subscribers that see the same entities get
+  one snapshot, encoded once. Use it only when `snapshot_visible` reads
+  nothing but `view.visible`.
+- Positions are 2D. A 3D world passes its ground plane.
+- For 300 subscribers and 1,000 moving entities, the grid work takes about
+  0.2 ms per tick when players are spread out, and about 1.5 ms when they
+  crowd together.
+
+A Rust shard compiled into a custom binary uses the same hooks on
+`SimState`: `interest_config`, `entities`, `interest_area`, `can_see` (or
+`filter_visible`), `snapshot_visible`, and `shares_visible_snapshots`.
+
 ## Declare the shard kind
 
 Add the kind to `buildManifest` in `app.ts`:

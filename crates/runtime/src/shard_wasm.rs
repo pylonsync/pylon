@@ -29,8 +29,8 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use pylon_realtime::{
-    RawInput, RawSnapshot, Shard, ShardAuth, ShardConfig, ShardRegistry, SimState, SnapshotFormat,
-    SubscriberId,
+    EntityId, EntityPos, InterestArea, InterestConfig, RawInput, RawSnapshot, Shard, ShardAuth,
+    ShardConfig, ShardRegistry, SimState, SnapshotFormat, SubscriberId, Visibility,
 };
 use serde::Serialize;
 use wasmtime::{
@@ -143,6 +143,15 @@ const REQUIRED_EXPORTS: &[&str] = &[
     "pylon_authorize_input",
 ];
 
+/// Interest management exports: all or none (see pylon-shard-guest).
+const INTEREST_EXPORTS: &[&str] = &[
+    "pylon_interest",
+    "pylon_entities",
+    "pylon_interest_area",
+    "pylon_filter_visible",
+    "pylon_snapshot_visible",
+];
+
 impl WasmShardKind {
     /// Compile and check a module. Fails on a codec other than JSON or
     /// MessagePack, an import other than `pylon.log`, or a missing export.
@@ -176,6 +185,18 @@ impl WasmShardKind {
             return Err(format!(
                 "shard \"{name}\": the module is missing exports {}; build it with pylon-shard-guest's export_shard!",
                 missing.join(", ")
+            ));
+        }
+        let interest_present: Vec<&str> = INTEREST_EXPORTS
+            .iter()
+            .copied()
+            .filter(|n| exported.contains(n))
+            .collect();
+        if !interest_present.is_empty() && interest_present.len() != INTEREST_EXPORTS.len() {
+            return Err(format!(
+                "shard \"{name}\": the module exports {} but not all of {}",
+                interest_present.join(", "),
+                INTEREST_EXPORTS.join(", ")
             ));
         }
         let mut linker = Linker::new(engine);
@@ -268,6 +289,17 @@ impl WasmShardKind {
             is_finished: func!("pylon_is_finished"),
             authorize_subscribe: func!("pylon_authorize_subscribe"),
             authorize_input: func!("pylon_authorize_input"),
+            interest: if instance.get_export(&mut store, "pylon_interest").is_some() {
+                Some(InterestExports {
+                    config: func!("pylon_interest"),
+                    entities: func!("pylon_entities"),
+                    area: func!("pylon_interest_area"),
+                    filter: func!("pylon_filter_visible"),
+                    snapshot: func!("pylon_snapshot_visible"),
+                })
+            } else {
+                None
+            },
         };
         let mut inner = Inner {
             store,
@@ -279,6 +311,7 @@ impl WasmShardKind {
             broadcast: None,
             last_good: None,
             failed: None,
+            interest_shared: false,
         };
 
         let version = inner.call(&abi, ())?;
@@ -421,6 +454,16 @@ struct Exports {
     is_finished: TypedFunc<(), i32>,
     authorize_subscribe: TypedFunc<(i32, i32, i32, i32), i32>,
     authorize_input: TypedFunc<(i32, i32, i32, i32, i32, i32), i32>,
+    interest: Option<InterestExports>,
+}
+
+#[derive(Clone)]
+struct InterestExports {
+    config: TypedFunc<(), i32>,
+    entities: TypedFunc<(), i32>,
+    area: TypedFunc<(i32, i32), i32>,
+    filter: TypedFunc<(i32, i32, i32, i32), i32>,
+    snapshot: TypedFunc<(i32, i32, i32, i32), i32>,
 }
 
 struct Inner {
@@ -441,6 +484,8 @@ struct Inner {
     last_good: Option<RawSnapshot>,
     /// Why the module stopped. Once set, no call reaches the module again.
     failed: Option<String>,
+    /// The module's last answer: its snapshot depends only on the visible set.
+    interest_shared: bool,
 }
 
 impl Inner {
@@ -710,6 +755,152 @@ impl SimState for WasmSim {
             ),
         )?;
         inner.status(status, "pylon_authorize_input")
+    }
+
+    fn interest_config(&self) -> Option<InterestConfig> {
+        let mut inner = self.inner.borrow_mut();
+        let f = inner.exports.interest.as_ref()?.config.clone();
+        if !inner.in_tick {
+            inner.begin_op();
+        }
+        match inner.call(&f, ()).ok()? {
+            0 => None,
+            1 => {
+                let out = inner.output().ok()?;
+                if out.len() != 12 {
+                    inner.fail("pylon_interest output is not 12 bytes");
+                    return None;
+                }
+                inner.interest_shared = u32::from_le_bytes(out[8..12].try_into().unwrap()) & 1 == 1;
+                Some(InterestConfig {
+                    cell_size: f32::from_le_bytes(out[0..4].try_into().unwrap()),
+                    margin: f32::from_le_bytes(out[4..8].try_into().unwrap()),
+                })
+            }
+            other => {
+                inner.fail(&format!("pylon_interest returned {other}"));
+                None
+            }
+        }
+    }
+
+    fn entities(&self, out: &mut Vec<EntityPos>) {
+        let mut inner = self.inner.borrow_mut();
+        let Some(f) = inner.exports.interest.as_ref().map(|i| i.entities.clone()) else {
+            return;
+        };
+        let Ok(status) = inner.call(&f, ()) else {
+            return;
+        };
+        if inner.status(status, "pylon_entities").is_err() {
+            return;
+        }
+        let Ok(bytes) = inner.output() else { return };
+        if bytes.len() % 16 != 0 {
+            inner.fail("pylon_entities output is not a whole number of 16-byte entries");
+            return;
+        }
+        out.extend(bytes.chunks_exact(16).map(|c| EntityPos {
+            id: u64::from_le_bytes(c[0..8].try_into().unwrap()),
+            x: f32::from_le_bytes(c[8..12].try_into().unwrap()),
+            y: f32::from_le_bytes(c[12..16].try_into().unwrap()),
+        }));
+    }
+
+    fn interest_area(&self, subscriber_id: &SubscriberId) -> Option<InterestArea> {
+        let mut inner = self.inner.borrow_mut();
+        let f = inner.exports.interest.as_ref()?.area.clone();
+        let (sp, sl) = inner
+            .write_args(&[subscriber_id.as_str().as_bytes()])
+            .ok()?[0];
+        match inner.call(&f, (sp, sl)).ok()? {
+            0 => None,
+            1 => {
+                let out = inner.output().ok()?;
+                if out.len() != 12 {
+                    inner.fail("pylon_interest_area output is not 12 bytes");
+                    return None;
+                }
+                let f32_at = |i: usize| f32::from_le_bytes(out[i..i + 4].try_into().unwrap());
+                Some(InterestArea {
+                    x: f32_at(0),
+                    y: f32_at(4),
+                    radius: f32_at(8),
+                })
+            }
+            other => {
+                inner.fail(&format!("pylon_interest_area returned {other}"));
+                None
+            }
+        }
+    }
+
+    fn filter_visible(&self, subscriber_id: &SubscriberId, ids: &mut Vec<EntityId>) {
+        let mut inner = self.inner.borrow_mut();
+        let Some(f) = inner.exports.interest.as_ref().map(|i| i.filter.clone()) else {
+            return;
+        };
+        let packed: Vec<u8> = ids.iter().flat_map(|id| id.to_le_bytes()).collect();
+        // A module that fails here stops the shard; show the subscriber
+        // nothing rather than everything.
+        let filtered = (|| -> Result<Vec<EntityId>, String> {
+            let args = inner.write_args(&[subscriber_id.as_str().as_bytes(), &packed])?;
+            let status = inner.call(&f, (args[0].0, args[0].1, args[1].0, args[1].1))?;
+            inner.status(status, "pylon_filter_visible")?;
+            let out = inner.output()?;
+            if out.len() % 8 != 0 {
+                return Err(inner.fail("pylon_filter_visible output is not whole u64 ids"));
+            }
+            Ok(out
+                .chunks_exact(8)
+                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                .collect())
+        })();
+        match filtered {
+            Ok(kept) => *ids = kept,
+            Err(_) => ids.clear(),
+        }
+    }
+
+    fn snapshot_visible(&self, subscriber_id: &SubscriberId, view: &Visibility) -> RawSnapshot {
+        let mut inner = self.inner.borrow_mut();
+        let Some(f) = inner.exports.interest.as_ref().map(|i| i.snapshot.clone()) else {
+            drop(inner);
+            return self.snapshot_for(subscriber_id);
+        };
+        let mut packed = Vec::with_capacity(
+            12 + 8 * (view.visible.len() + view.entered.len() + view.left.len()),
+        );
+        for n in [view.visible.len(), view.entered.len(), view.left.len()] {
+            packed.extend_from_slice(&(n as u32).to_le_bytes());
+        }
+        for id in view.visible.iter().chain(&view.entered).chain(&view.left) {
+            packed.extend_from_slice(&id.to_le_bytes());
+        }
+        let result = (|| -> Result<Option<RawSnapshot>, String> {
+            let args = inner.write_args(&[subscriber_id.as_str().as_bytes(), &packed])?;
+            match inner.call(&f, (args[0].0, args[0].1, args[1].0, args[1].1))? {
+                STATUS_OK => Ok(Some(RawSnapshot::new(inner.format, inner.output()?))),
+                STATUS_SAME_AS_BROADCAST => Ok(None),
+                STATUS_ERR => {
+                    let why = format!("pylon_snapshot_visible failed: {}", inner.output_text()?);
+                    Err(inner.fail(&why))
+                }
+                other => Err(inner.fail(&format!("pylon_snapshot_visible returned {other}"))),
+            }
+        })();
+        match result {
+            Ok(Some(snap)) => snap,
+            Ok(None) => {
+                drop(inner);
+                self.snapshot_for(subscriber_id)
+            }
+            Err(_) => inner.fallback_snapshot(),
+        }
+    }
+
+    fn shares_visible_snapshots(&self) -> bool {
+        self.inner.borrow().interest_shared
     }
 }
 

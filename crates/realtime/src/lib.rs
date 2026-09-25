@@ -30,13 +30,15 @@
 //!   ticks directly.
 //! - **RTS** (lockstep): `tick_rate_hz = 10–30`, inputs ack'd with tick
 //!   numbers for synchronized execution.
-//! - **MMO** (zone-based): each zone is a shard; implement
-//!   [`SimState::snapshot_for`] to filter by area-of-interest.
+//! - **MMO** (zone-based): each zone is a shard; return an
+//!   [`InterestConfig`] from [`SimState::interest_config`] so the shard sends
+//!   each subscriber only the entities near it (see [`interest`]).
 //! - **FPS** (authoritative server): `tick_rate_hz = 60`, add input
 //!   sequence numbers so the client can reconcile.
 
 pub mod aoi;
 pub mod dyn_shard;
+pub mod interest;
 pub mod matchmaker;
 pub mod outbound;
 pub mod persistence;
@@ -54,6 +56,9 @@ pub mod wire;
 
 pub use aoi::AreaOfInterest;
 pub use dyn_shard::{DynShard, DynShardRegistry};
+pub use interest::{
+    EntityId, EntityPos, InterestArea, InterestConfig, InterestManager, SpatialGrid, Visibility,
+};
 pub use matchmaker::{
     fixed_size_match, MatchAssignment, MatchFn, Matchmaker, MatchmakerConfig, PlayerStatus,
     QueuedPlayer, ShardFactory,
