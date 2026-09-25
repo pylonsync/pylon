@@ -358,6 +358,9 @@ impl WasmShardHost {
         if !self.is_current(&t.from_shard, at) {
             return Err(TransferError::NotFound(t.from_shard.clone()));
         }
+        if cluster.is_some() && self.blocked_by_another(&t.from_shard, &t.id) {
+            return Err(Self::blocked_error(&t.from_shard));
+        }
         let saves = self.saves_state(&t.from_shard);
         let auth = back_auth(t);
         source.with_state(|sim| {
@@ -496,6 +499,7 @@ impl WasmShardHost {
         let mut waiting = self.waiting.lock().unwrap();
         if waiting.get(&t.id).is_some_and(|(_, w)| *w == at) {
             waiting.remove(&t.id);
+            self.waiting_retry.lock().unwrap().remove(&t.id);
         }
     }
 
@@ -554,6 +558,9 @@ impl WasmShardHost {
         let _save = c.save_lock.lock().unwrap();
         if !self.is_current(&t.to_shard, at) {
             return Err(not_found());
+        }
+        if self.blocked_by_another(&t.to_shard, &t.id) {
+            return Err(Self::blocked_error(&t.to_shard));
         }
         let key = (t.id.clone(), Role::Target);
         let has_copy = self.has_copy(&key, at);
@@ -688,6 +695,10 @@ impl WasmShardHost {
                 "shard \"{}\" restarted during the move",
                 t.from_shard
             )));
+        }
+        if self.blocked_by_another(&t.from_shard, &t.id) {
+            // The row keeps the player; a later round takes it back.
+            return Err(Self::blocked_error(&t.from_shard));
         }
         let key = (t.id.clone(), Role::Source);
         let has_copy = self.has_copy(&key, at);
@@ -830,15 +841,6 @@ impl WasmShardHost {
             if self.live.lock().unwrap().contains(&t.id) || self.is_unsettled(&t.id) {
                 continue;
             }
-            if self
-                .waiting_retry
-                .lock()
-                .unwrap()
-                .get(&t.id)
-                .is_some_and(|(next, _)| std::time::Instant::now() < *next)
-            {
-                continue;
-            }
             let (Some(source), Some(at)) = (
                 self.registry.get(&t.from_shard).filter(|s| s.is_running()),
                 self.instance(&t.from_shard),
@@ -856,6 +858,15 @@ impl WasmShardHost {
                 // it too when it started.
                 self.unwait(&t, old);
                 self.end_transfer(&t, old);
+                continue;
+            }
+            if self
+                .waiting_retry
+                .lock()
+                .unwrap()
+                .get(&t.id)
+                .is_some_and(|(next, _)| std::time::Instant::now() < *next)
+            {
                 continue;
             }
             let sid = SubscriberId::new(t.subscriber.as_str());
@@ -886,7 +897,7 @@ impl WasmShardHost {
                         Ok(_) => {
                             self.waiting_retry.lock().unwrap().remove(&t.id);
                         }
-                        Err(e) => {
+                        Err(e) if self.waiting.lock().unwrap().contains_key(&t.id) => {
                             let mut retry = self.waiting_retry.lock().unwrap();
                             let delay = retry
                                 .get(&t.id)
@@ -899,6 +910,11 @@ impl WasmShardHost {
                                 t.from_shard,
                                 t.id
                             );
+                        }
+                        // It ended (taken back, or settled another way).
+                        Err(e) => {
+                            self.waiting_retry.lock().unwrap().remove(&t.id);
+                            tracing::info!("[shard {}] transfer {}: {e}", t.from_shard, t.id);
                         }
                     }
                 }
@@ -1032,6 +1048,8 @@ impl WasmShardHost {
                 .lock()
                 .unwrap()
                 .insert(t.id.clone(), (t.clone(), at));
+            // A new run tries at once, whatever an earlier run's backoff.
+            self.waiting_retry.lock().unwrap().remove(&t.id);
         }
         for (t, age_ms) in &plan.recent {
             let age = (*age_ms).max(0) as u64 / 1000;
@@ -1134,6 +1152,32 @@ impl WasmShardHost {
                 at,
             },
         );
+    }
+
+    /// True when shard `id` must not be written by transfer `other`'s step:
+    /// another move on it is unsettled or holds a stranded player, and any
+    /// state written now would disagree with that move's row.
+    fn blocked_by_another(&self, id: &str, other: &str) -> bool {
+        let stepping = self.unsettled.lock().unwrap().values().any(|u| {
+            u.t.id != other
+                && match u.step.role() {
+                    Role::Source => u.t.from_shard == id,
+                    Role::Target => u.t.to_shard == id,
+                }
+        });
+        stepping
+            || self
+                .stranded
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _)| t.from_shard == id && t.id != other)
+    }
+
+    fn blocked_error(id: &str) -> TransferError {
+        TransferError::Busy(format!(
+            "another move on shard \"{id}\" is not settled yet; try again"
+        ))
     }
 
     /// True when shard `id` must not be saved: a step on it (as source or
@@ -1995,7 +2039,7 @@ mod tests {
             run,
             me,
             a,
-            b: _,
+            b,
         } = setup(&url);
         let c = host.cluster.get().unwrap();
         let at_a = host.instance(&a).unwrap();
@@ -2066,6 +2110,57 @@ mod tests {
             .map(|bytes| serde_json::from_slice(&bytes).unwrap())
             .unwrap_or_default();
         assert!(saved_a["marker"].is_null(), "saved with a player held");
+
+        // No move writes A's state either while the player is held: out of
+        // A (the step is refused, and p3 stays)...
+        source
+            .with_state(|sim| sim.transfer_in("p3", &state(3), &back_auth(&held), true))
+            .unwrap();
+        let err = host
+            .transfer(&a, "p3", &b, serde_json::Value::Null)
+            .unwrap_err();
+        assert_eq!(err.code(), "SHARD_TRANSFER_BUSY", "{err}");
+        assert!(has(&host, &a, "p3"));
+        // ...or into A (p4 goes back to b).
+        host.registry
+            .get(&b)
+            .unwrap()
+            .with_state(|sim| sim.transfer_in("p4", &state(4), &back_auth(&held), true))
+            .unwrap();
+        let err = host
+            .transfer(&b, "p4", &a, serde_json::Value::Null)
+            .unwrap_err();
+        assert_eq!(err.code(), "SHARD_TRANSFER_BUSY", "{err}");
+        assert!(has(&host, &b, "p4") && !has(&host, &a, "p4"));
+        let still: serde_json::Value = c
+            .dir
+            .load_owned_state(&a, &me, epoch)
+            .unwrap()
+            .flatten()
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+            .unwrap_or_default();
+        assert!(still["marker"].is_null() && still["p3"].is_null());
+
+        // A refused move that ends (the source takes the player back) leaves
+        // no backoff behind.
+        host.stranded.lock().unwrap().clear();
+        let refused = format!("refused-{run}");
+        c.dir
+            .pool_for_tests()
+            .with_client_once(|cl| {
+                cl.execute(
+                    "INSERT INTO _pylon_shard_transfers
+                        (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
+                     VALUES ($1, 'p5', $2, $3, $4, '{}'::jsonb, 'out',
+                             (extract(epoch from clock_timestamp()) * 1000)::bigint - 20000)",
+                    &[&refused, &a, &shut, &state(5)],
+                )
+            })
+            .unwrap();
+        host.settle_transfers(epoch);
+        assert_eq!(c.dir.transfer(&refused).unwrap().unwrap().status, "back");
+        assert!(has(&host, &a, "p5"));
+        assert!(!host.waiting_retry.lock().unwrap().contains_key(&refused));
 
         // Held for a run that ended: let go.
         host.stranded.lock().unwrap().clear();
