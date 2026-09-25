@@ -1188,14 +1188,34 @@ struct ClusterState {
     dir: PgShardDirectory,
     me: MachineConfig,
     save_every: Duration,
-    /// Shards being created here: claimed in the directory, not yet in the
-    /// registry. The round must not start them as restarted placements.
-    pending: Mutex<std::collections::HashSet<String>>,
-    /// When the heartbeat last reached the directory.
-    heartbeat_ok: Mutex<Option<Instant>>,
+    /// This machine's lease on the directory.
+    lease: Mutex<Lease>,
+    /// Shards running here, each with the epoch it was placed under. Only
+    /// these are saved and released: the fence and shutdown empty it, so a
+    /// shard either of them stopped keeps its placement for another machine.
+    owned: Mutex<HashMap<String, i64>>,
+    /// Serializes changes to what this machine holds: create, adopt, stop,
+    /// and the round's check against the directory.
+    own_lock: Mutex<()>,
     /// When each local shard's state was last saved.
     saved_at: Mutex<HashMap<String, Instant>>,
 }
+
+/// This machine's right to run shards (see [`shard_cluster::FENCE_AFTER`]).
+struct Lease {
+    /// Changes when the lease lapses, so a heartbeat already in flight
+    /// cannot renew the old one.
+    epoch: i64,
+    /// Until when shards may run here. None until a heartbeat of this epoch
+    /// reaches the directory.
+    until: Option<Instant>,
+}
+
+/// A shard starts only when the lease has at least this long left.
+const LEASE_MARGIN: Duration = Duration::from_secs(1);
+/// How often the fence checks the lease. It touches no database, so a
+/// blocked directory call never delays it.
+const FENCE_EVERY: Duration = Duration::from_millis(100);
 
 impl ClusterState {
     /// This machine as a live-machine row, before its first heartbeat lands.
@@ -1206,6 +1226,7 @@ impl ClusterState {
             fly_instance: self.me.fly_instance.clone(),
             capacity: self.me.capacity,
             load: 0,
+            epoch: self.lease.lock().unwrap().epoch,
         }
     }
 
@@ -1215,15 +1236,20 @@ impl ClusterState {
         live.into_iter().find(|m| m.id == machine_id)
     }
 
-    /// True when the heartbeat has not reached the directory for
-    /// [`shard_cluster::FENCE_AFTER`]: others may be starting this machine's
-    /// shards.
-    fn cut_off(&self) -> bool {
-        self.heartbeat_ok
-            .lock()
-            .unwrap()
-            .is_some_and(|at| at.elapsed() >= shard_cluster::FENCE_AFTER)
+    /// The lease epoch, when the lease has at least [`LEASE_MARGIN`] left.
+    fn current_epoch(&self) -> Option<i64> {
+        let lease = self.lease.lock().unwrap();
+        lease
+            .until
+            .filter(|&until| until > Instant::now() + LEASE_MARGIN)
+            .map(|_| lease.epoch)
     }
+}
+
+fn lease_error() -> CreateError {
+    CreateError::Cluster(
+        "this machine's lease on the shard directory is not current; try again".into(),
+    )
 }
 
 impl WasmShardHost {
@@ -1290,7 +1316,7 @@ impl WasmShardHost {
                     "this app runs on one machine; there is no machine \"{m}\""
                 )));
             }
-            return self.create_local(kind, id, params, None);
+            return self.create_local(kind, id, params, None, None);
         };
         if self.registry.get(id).is_some_and(|s| s.is_running()) {
             return Err(CreateError::Exists(id.to_string()));
@@ -1349,6 +1375,8 @@ impl WasmShardHost {
             .cluster
             .get()
             .expect("create_claimed runs in a cluster");
+        let _own = cluster.own_lock.lock().unwrap();
+        let epoch = cluster.current_epoch().ok_or_else(lease_error)?;
         let spec = &self.kinds[kind];
         let placement = Placement {
             shard_id: id.to_string(),
@@ -1357,11 +1385,9 @@ impl WasmShardHost {
             machine_id: cluster.me.id.clone(),
             pinned,
             failed: None,
+            epoch,
         };
-        cluster.pending.lock().unwrap().insert(id.to_string());
-        let result = self.claim_and_start(cluster, &placement, spec.limits.max_instances);
-        cluster.pending.lock().unwrap().remove(id);
-        result
+        self.claim_and_start(cluster, &placement, spec.limits.max_instances)
     }
 
     fn claim_and_start(
@@ -1385,18 +1411,22 @@ impl WasmShardHost {
                 })
             }
         }
-        self.create_local(kind, id, params, None).inspect_err(|_| {
-            let _ = cluster.dir.release(id, &cluster.me.id);
-        })
+        self.create_local(kind, id, params, None, Some(placement.epoch))
+            .inspect_err(|_| {
+                let _ = cluster.dir.release(id, &cluster.me.id, placement.epoch);
+            })
     }
 
-    /// Start the shard in this process, from `state` when given.
+    /// Start the shard in this process, from `state` when given. In a
+    /// cluster, `epoch` is the lease epoch it is placed under, and it starts
+    /// only while that lease is current.
     fn create_local(
         &self,
         kind: &str,
         id: &str,
         params: &serde_json::Value,
         state: Option<&[u8]>,
+        epoch: Option<i64>,
     ) -> Result<ShardInfo, CreateError> {
         let spec = self
             .kinds
@@ -1444,6 +1474,23 @@ impl WasmShardHost {
             error: None,
             machine: self.cluster.get().map(|c| c.me.id.clone()),
         };
+        // The lease check and the start are one step under the lease lock,
+        // which the fence takes to stop everything: a shard never starts
+        // after the fence ran.
+        let _lease = match self.cluster.get() {
+            Some(c) => {
+                let lease = c.lease.lock().unwrap();
+                let current = lease
+                    .until
+                    .is_some_and(|until| until > Instant::now() + LEASE_MARGIN);
+                let Some(epoch) = epoch.filter(|&e| current && e == lease.epoch) else {
+                    return Err(lease_error());
+                };
+                c.owned.lock().unwrap().insert(id.to_string(), epoch);
+                Some(lease)
+            }
+            None => None,
+        };
         self.kind_of
             .write()
             .unwrap()
@@ -1464,18 +1511,23 @@ impl WasmShardHost {
     /// Stop and remove a shard. Its subscribers' connections close. On
     /// several machines, the machine that runs it stops it.
     pub fn stop(&self, id: &str) -> bool {
+        let Some(c) = self.cluster.get() else {
+            return self.registry.get(id).is_some() && self.stop_local(id);
+        };
+        let own = c.own_lock.lock().unwrap();
         if self.registry.get(id).is_some() {
             let stopped = self.stop_local(id);
-            if let Some(c) = self.cluster.get() {
-                if let Err(e) = c.dir.release(id, &c.me.id) {
+            c.saved_at.lock().unwrap().remove(id);
+            let held = c.owned.lock().unwrap().remove(id);
+            if let Some(epoch) = held {
+                if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
                     tracing::warn!("[shard {id}] could not release its placement: {e}");
                 }
+                return stopped;
             }
-            return stopped;
+            // A copy the fence stopped: its placement is from an earlier
+            // lease, and is removed below.
         }
-        let Some(c) = self.cluster.get() else {
-            return false;
-        };
         let placement = match c.dir.placement(id) {
             Ok(Some(p)) => p,
             Ok(None) => return false,
@@ -1486,7 +1538,8 @@ impl WasmShardHost {
         };
         let owner = (placement.machine_id != c.me.id)
             .then(|| c.live(&placement.machine_id))
-            .flatten();
+            .flatten()
+            .filter(|m| m.epoch == placement.epoch);
         match owner {
             // Its machine runs it: that machine stops it.
             Some(Machine {
@@ -1494,6 +1547,7 @@ impl WasmShardHost {
                 address: Some(address),
                 ..
             }) => {
+                drop(own);
                 let op = RemoteOp::Stop { id: id.to_string() };
                 match shard_cluster::call(&machine, &address, &op) {
                     Ok(RemoteReply::Ok(v)) => v.as_bool().unwrap_or(false),
@@ -1506,10 +1560,14 @@ impl WasmShardHost {
                     }
                 }
             }
-            // Placed here but not running (it failed to start), or on a dead
-            // machine, or on a machine with no address: forget it so no
-            // machine starts it again.
-            _ => c.dir.forget(id).is_ok(),
+            // Placed here but not running (it failed to start, or it is from
+            // an earlier lease), on a dead machine, or on a machine with no
+            // address: remove exactly that placement, so no machine starts
+            // it again. A machine that took it over meanwhile keeps it.
+            _ => c
+                .dir
+                .release(id, &placement.machine_id, placement.epoch)
+                .unwrap_or(false),
         }
     }
 
@@ -1615,10 +1673,10 @@ impl WasmShardHost {
         ids.iter().filter_map(|id| self.info_local(id)).collect()
     }
 
-    /// Stop every shard. Called at shutdown. On several machines: ticks
-    /// stop, each shard's state is saved and its placement kept, and only
-    /// then does this machine leave the directory, so the others start its
-    /// shards at once from their latest state.
+    /// Stop every shard, for a graceful shutdown. In a cluster, each held
+    /// shard saves its state after its last tick, then this machine leaves
+    /// the directory, so the others start its shards at once from their
+    /// latest state.
     pub fn stop_all(&self) {
         self.stopped.store(true, Ordering::Release);
         let Some(c) = self.cluster.get() else {
@@ -1627,17 +1685,19 @@ impl WasmShardHost {
             }
             return;
         };
-        let ids = self.registry.ids();
-        for id in &ids {
-            if let Some(shard) = self.registry.get(id) {
+        // Take the held shards first: the sweep releases only held shards,
+        // so none of these loses its placement.
+        let held: Vec<(String, i64)> = c.owned.lock().unwrap().drain().collect();
+        for id in self.registry.ids() {
+            if let Some(shard) = self.registry.get(&id) {
                 shard.stop();
             }
         }
-        for id in &ids {
-            self.save_one(c, id);
+        for (id, epoch) in &held {
+            self.save_one(c, id, *epoch);
         }
-        for id in &ids {
-            self.stop_local(id);
+        for id in self.registry.ids() {
+            self.stop_local(&id);
         }
         if let Err(e) = c.dir.leave(&c.me.id) {
             tracing::warn!("[shards] could not leave the directory: {e}");
@@ -1647,11 +1707,11 @@ impl WasmShardHost {
     // -- Several machines ------------------------------------------------
 
     /// Run shards on several machines through the directory in Postgres.
-    /// Starts two threads: one renews this machine's heartbeat, the other
-    /// saves shard state, starts placements on this machine that are not
-    /// running (a restart), stops shards placed elsewhere or all of them
-    /// when the heartbeat is failing, and starts dead machines' shards
-    /// here when this machine is their new home.
+    /// Starts three threads: one renews this machine's lease, one stops
+    /// every shard when the lease lapses, and one saves shard state, stops
+    /// shards no longer placed here, and starts orphaned shards (their
+    /// machine died, left, restarted, or lost its lease) whose new home is
+    /// this machine.
     pub fn attach_cluster(self: &Arc<Self>, dir: PgShardDirectory, me: MachineConfig) {
         let save_every = std::env::var("PYLON_SHARD_SAVE_SECS")
             .ok()
@@ -1671,8 +1731,12 @@ impl WasmShardHost {
                 dir,
                 me,
                 save_every,
-                pending: Mutex::new(std::collections::HashSet::new()),
-                heartbeat_ok: Mutex::new(None),
+                lease: Mutex::new(Lease {
+                    epoch: shard_cluster::new_epoch(),
+                    until: None,
+                }),
+                owned: Mutex::new(HashMap::new()),
+                own_lock: Mutex::new(()),
                 saved_at: Mutex::new(HashMap::new()),
             })
             .is_err()
@@ -1688,6 +1752,16 @@ impl WasmShardHost {
                     _ => return,
                 }
                 std::thread::sleep(shard_cluster::HEARTBEAT);
+            });
+        let fence: Weak<Self> = Arc::downgrade(self);
+        let _ = std::thread::Builder::new()
+            .name("pylon-shard-fence".into())
+            .spawn(move || loop {
+                match fence.upgrade() {
+                    Some(host) if !host.stopped.load(Ordering::Acquire) => host.fence(),
+                    _ => return,
+                }
+                std::thread::sleep(FENCE_EVERY);
             });
         let round: Weak<Self> = Arc::downgrade(self);
         let _ = std::thread::Builder::new()
@@ -1706,59 +1780,96 @@ impl WasmShardHost {
         self.cluster.get().map(|c| c.me.id.as_str())
     }
 
+    /// Renew the lease. The lease runs from when the heartbeat was SENT:
+    /// the directory writes it later than that, so every other machine
+    /// counts this one live for longer than this machine runs shards.
     fn heartbeat(&self) {
         let Some(c) = self.cluster.get() else { return };
-        match c.dir.heartbeat(&c.me) {
-            Ok(()) => *c.heartbeat_ok.lock().unwrap() = Some(Instant::now()),
+        let epoch = c.lease.lock().unwrap().epoch;
+        let sent = Instant::now();
+        match c.dir.heartbeat(&c.me, epoch) {
+            Ok(()) => {
+                let until = sent + shard_cluster::FENCE_AFTER;
+                let mut lease = c.lease.lock().unwrap();
+                // A reply for a lapsed epoch, or one that arrived after its
+                // own lease ended, authorizes nothing.
+                if lease.epoch == epoch && until > Instant::now() {
+                    lease.until = Some(lease.until.map_or(until, |u| u.max(until)));
+                }
+            }
             Err(e) => tracing::warn!("[shards] heartbeat failed: {e}"),
+        }
+    }
+
+    /// Stop every shard when the lease has lapsed, and take a new epoch.
+    /// Other machines may start these shards once the directory counts this
+    /// machine dead; by then they are stopped here.
+    fn fence(&self) {
+        let Some(c) = self.cluster.get() else { return };
+        let mut lease = c.lease.lock().unwrap();
+        if lease.until.is_none_or(|until| Instant::now() < until) {
+            return;
+        }
+        lease.until = None;
+        lease.epoch = shard_cluster::new_epoch();
+        c.owned.lock().unwrap().clear();
+        for id in self.registry.ids() {
+            if let Some(shard) = self.registry.get(&id) {
+                if shard.is_running() {
+                    shard.stop();
+                    tracing::warn!(
+                        "[shard {id}] stopped: this machine's lease on the shard directory lapsed"
+                    );
+                }
+            }
         }
     }
 
     /// One pass of the cluster thread.
     fn cluster_round(&self) {
         let Some(c) = self.cluster.get() else { return };
-        // Cut off from the directory: the others will start these shards
-        // soon, so stop them here now. They start again (here or
-        // elsewhere) once the directory is back.
-        if c.cut_off() {
-            for id in self.registry.ids() {
-                if self.registry.get(&id).is_some_and(|s| s.is_running()) {
-                    tracing::warn!(
-                        "[shard {id}] stopping: this machine cannot reach the shard directory"
-                    );
+        if c.current_epoch().is_none() {
+            return;
+        }
+        // What runs here against the directory: a shard whose placement is
+        // gone or not ours (another machine released it) stops.
+        {
+            let _own = c.own_lock.lock().unwrap();
+            let placed = match c.dir.placements_on(&c.me.id) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!("[shards] directory read failed: {e}");
+                    return;
+                }
+            };
+            let valid: std::collections::HashSet<(&str, i64)> = placed
+                .iter()
+                .map(|p| (p.shard_id.as_str(), p.epoch))
+                .collect();
+            let held: Vec<(String, i64)> = c
+                .owned
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, e)| (id.clone(), *e))
+                .collect();
+            for (id, epoch) in held {
+                if !valid.contains(&(id.as_str(), epoch)) {
+                    tracing::warn!("[shard {id}] no longer placed here; stopping this copy");
+                    c.owned.lock().unwrap().remove(&id);
                     self.stop_local(&id);
                 }
             }
-            return;
-        }
-        if c.heartbeat_ok.lock().unwrap().is_none() {
-            return;
-        }
-        let round_started = Instant::now();
-        let busy = |limit: Duration| round_started.elapsed() >= limit;
-        let placed = match c.dir.placements_on(&c.me.id) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("[shards] directory read failed: {e}");
-                return;
-            }
-        };
-        let placed_ids: std::collections::HashSet<&str> =
-            placed.iter().map(|p| p.shard_id.as_str()).collect();
-        // Fencing: a shard placed elsewhere was moved while this machine
-        // was cut off. Its copy here stops without touching the placement.
-        for id in self.registry.ids() {
-            let pending = c.pending.lock().unwrap().contains(&id);
-            if !pending
-                && !placed_ids.contains(id.as_str())
-                && self.registry.get(&id).is_some_and(|s| s.is_running())
-            {
-                tracing::warn!("[shard {id}] placed on another machine now; stopping this copy");
-                self.stop_local(&id);
-            }
         }
         // Save state that is due.
-        for id in self.registry.ids() {
+        let held: Vec<(String, i64)> = c
+            .owned
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, e)| (id.clone(), *e))
+            .collect();
+        for (id, epoch) in held {
             let due = c
                 .saved_at
                 .lock()
@@ -1766,60 +1877,51 @@ impl WasmShardHost {
                 .get(&id)
                 .is_none_or(|at| at.elapsed() >= c.save_every);
             if due {
-                self.save_one(c, &id);
+                self.save_one(c, &id, epoch);
             }
         }
-        // Restarts: placements on this machine with nothing running (this
-        // process restarted under the same id, or a start failed to load
-        // its state). Failed placements wait for an operator.
-        for p in &placed {
-            if busy(Duration::from_secs(3)) {
-                break;
-            }
-            let running = self.registry.get(&p.shard_id).is_some();
-            let pending = c.pending.lock().unwrap().contains(&p.shard_id);
-            if running || pending || p.failed.is_some() {
-                continue;
-            }
-            tracing::info!(
-                "[shard {}] placed here and not running; starting it",
-                p.shard_id
-            );
-            if let Err(e) = self.adopt(p) {
-                tracing::error!("[shard {}] could not start: {e}", p.shard_id);
-            }
-        }
-        // Failover: each dead machine's shard has one new home; this
-        // machine takes the ones whose home it is.
+        // Failover: each orphan has one new home; this machine takes the
+        // ones whose home it is.
+        let round_started = Instant::now();
         let Ok(live) = c.dir.live_machines() else {
             return;
         };
-        let ids: Vec<String> = live.iter().map(|m| m.id.clone()).collect();
-        if !ids.contains(&c.me.id) {
+        let Some(epoch) = c.current_epoch() else {
+            return;
+        };
+        if !live.iter().any(|m| m.id == c.me.id && m.epoch == epoch) {
             return;
         }
-        let Ok(orphans) = c.dir.orphans(&ids) else {
+        let Ok(orphans) = c.dir.orphans() else {
             return;
         };
         for orphan in orphans {
-            if busy(Duration::from_secs(3)) {
+            if round_started.elapsed() >= Duration::from_secs(3) {
                 break;
             }
             if home(&orphan.shard_id, &live).map(|m| m.id.as_str()) != Some(c.me.id.as_str()) {
                 continue;
             }
-            match c
-                .dir
-                .take_over(&orphan.shard_id, &orphan.machine_id, &c.me.id)
-            {
+            let _own = c.own_lock.lock().unwrap();
+            let Some(epoch) = c.current_epoch() else {
+                return;
+            };
+            match c.dir.take_over(&orphan, &c.me.id, epoch) {
                 Ok(true) => {
-                    tracing::info!(
-                        "[shard {}] machine {} is dead; starting it here",
-                        orphan.shard_id,
-                        orphan.machine_id
-                    );
+                    if orphan.machine_id == c.me.id {
+                        tracing::info!(
+                            "[shard {}] placed here under an earlier lease; starting it again",
+                            orphan.shard_id
+                        );
+                    } else {
+                        tracing::info!(
+                            "[shard {}] machine {} is dead; starting it here",
+                            orphan.shard_id,
+                            orphan.machine_id
+                        );
+                    }
                     if orphan.failed.is_none() {
-                        if let Err(e) = self.adopt(&orphan) {
+                        if let Err(e) = self.adopt(&orphan, epoch) {
                             tracing::error!("[shard {}] could not start: {e}", orphan.shard_id);
                         }
                     }
@@ -1832,8 +1934,9 @@ impl WasmShardHost {
     }
 
     /// Save one local shard's state to the directory, when its module keeps
-    /// state. The shard may be stopped (shutdown saves after the last tick).
-    fn save_one(&self, c: &ClusterState, id: &str) {
+    /// state and this machine still holds it under `epoch`. The shard may be
+    /// stopped (shutdown saves after the last tick).
+    fn save_one(&self, c: &ClusterState, id: &str, epoch: i64) {
         let Some(shard) = self.registry.get(id) else {
             return;
         };
@@ -1851,9 +1954,9 @@ impl WasmShardHost {
             .unwrap()
             .insert(id.to_string(), Instant::now());
         match shard.with_state(|sim| sim.save()) {
-            Ok(Some(state)) => match c.dir.save_state(id, &c.me.id, &state) {
+            Ok(Some(state)) => match c.dir.save_state(id, &c.me.id, epoch, &state) {
                 Ok(true) => {}
-                Ok(false) => tracing::warn!("[shard {id}] not saved: placed on another machine"),
+                Ok(false) => tracing::warn!("[shard {id}] not saved: no longer placed here"),
                 Err(e) => tracing::warn!("[shard {id}] save failed: {e}"),
             },
             Ok(None) => {}
@@ -1861,26 +1964,33 @@ impl WasmShardHost {
         }
     }
 
-    /// Start a shard placed on this machine, from its saved state when there
-    /// is one. A shard that cannot start is marked failed, with its state
-    /// kept, so an operator can see why; a failure to read the directory is
-    /// left for the next round.
-    fn adopt(&self, p: &Placement) -> Result<ShardInfo, String> {
+    /// Start orphan `p`, which this machine just took over under `epoch`,
+    /// from its saved state when there is one. The caller holds the own
+    /// lock. A shard whose module cannot start it is marked failed, with its
+    /// state kept, so an operator can see why; a lapsed lease or a failed
+    /// directory read leaves it for a later round.
+    fn adopt(&self, p: &Placement, epoch: i64) -> Result<ShardInfo, String> {
         let c = self.cluster.get().expect("adopt runs in a cluster");
-        let state = c.dir.load_state(&p.shard_id)?;
+        let Some(state) = c.dir.load_owned_state(&p.shard_id, &c.me.id, epoch)? else {
+            return Err("no longer placed here".into());
+        };
         let saves = self.kinds.get(&p.kind).is_some_and(|k| k.saves_state());
-        let started = self
-            .create_local(
-                &p.kind,
-                &p.shard_id,
-                &p.params,
-                state.as_deref().filter(|_| saves),
-            )
-            .map_err(|e| e.to_string());
-        if let Err(why) = &started {
-            let _ = c.dir.mark_failed(&p.shard_id, &c.me.id, why);
+        let started = self.create_local(
+            &p.kind,
+            &p.shard_id,
+            &p.params,
+            state.as_deref().filter(|_| saves),
+            Some(epoch),
+        );
+        match started {
+            Ok(info) => Ok(info),
+            Err(e @ CreateError::Cluster(_)) => Err(e.to_string()),
+            Err(e) => {
+                let why = e.to_string();
+                let _ = c.dir.mark_failed(&p.shard_id, &c.me.id, epoch, &why);
+                Err(why)
+            }
         }
-        started
     }
 
     /// Run an operation another machine sent, on this machine only.
@@ -1944,7 +2054,7 @@ impl WasmShardHost {
     /// Where shard `id` runs, for routing a client that reached this machine.
     pub fn locate(&self, id: &str) -> pylon_realtime::ShardLocation {
         use pylon_realtime::ShardLocation;
-        if self.registry.get(id).is_some() {
+        if self.registry.get(id).is_some_and(|s| s.is_running()) {
             return ShardLocation::Local;
         }
         let Some(c) = self.cluster.get() else {
@@ -1956,7 +2066,7 @@ impl WasmShardHost {
         if p.machine_id == c.me.id {
             return ShardLocation::Unknown;
         }
-        match c.live(&p.machine_id) {
+        match c.live(&p.machine_id).filter(|m| m.epoch == p.epoch) {
             Some(m) => ShardLocation::Remote {
                 machine_id: m.id,
                 address: m.address,
@@ -2012,10 +2122,15 @@ impl WasmShardHost {
             // unless another machine runs it now.
             // `release` matches this machine, so a placement another
             // machine took over stays.
+            // Only a held shard: one the fence or shutdown stopped keeps
+            // its placement.
             if let Some(c) = self.cluster.get() {
                 c.saved_at.lock().unwrap().remove(id);
-                if let Err(e) = c.dir.release(id, &c.me.id) {
-                    tracing::warn!("[shard {id}] could not release its placement: {e}");
+                let held = c.owned.lock().unwrap().remove(id);
+                if let Some(epoch) = held {
+                    if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
+                        tracing::warn!("[shard {id}] could not release its placement: {e}");
+                    }
                 }
             }
         }

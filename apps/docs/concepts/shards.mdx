@@ -502,11 +502,16 @@ directory in the database, and shards spread across them:
 - **Restarts and deploys.** A machine that stops on SIGTERM stops ticking,
   saves its shards, and leaves the directory, so they start on another
   machine at once. A machine that comes back under the same id (a crash and
-  restart, or a deploy on Fly, where the machine id stays) starts the
-  shards still placed on it from their saved state.
-- **Fencing.** A machine that cannot reach the database for 5 seconds stops
-  its shards and closes their connections, before the others (at 10
-  seconds) start them elsewhere. Two copies of a shard never run at once.
+  restart, or a deploy on Fly, where the machine id stays) gets a new lease,
+  and its old shards move at once, from their saved state, without the
+  10-second wait. They can move back to the same machine.
+- **Fencing.** A machine may run shards for 5 seconds after it sent the last
+  heartbeat that reached the database. When no heartbeat lands in that time
+  (the database is down, slow, or unreachable, even if calls hang instead of
+  failing), a separate thread stops its shards and closes their
+  connections. The others start them only when the heartbeat is 10 seconds
+  old. Two copies of a shard never run at once, and a machine cut off from
+  the database cannot overwrite the state of the copy that replaced it.
 - A shard that cannot start (its module refuses the saved state) keeps its
   state, and `ctx.shards.get` reports why. Stopping it forgets it.
 

@@ -1,6 +1,7 @@
 // A TCP proxy for tests: `bun tools/tcp-proxy.ts <listen port> <target host> <target port>`.
-// tools/smoke-shard-cluster.sh puts it between one machine and Postgres, then
-// kills it to cut that machine off from the database.
+// tools/smoke-shard-cluster.sh puts it between one machine and Postgres. On
+// SIGUSR1 it drops every byte from then on and keeps every socket open, so
+// the machine's database calls hang instead of failing.
 
 const [listenPort, targetHost, targetPort] = process.argv.slice(2);
 if (!listenPort || !targetHost || !targetPort) {
@@ -9,6 +10,12 @@ if (!listenPort || !targetHost || !targetPort) {
 }
 
 type Pair = { upstream?: Bun.Socket<Pair>; pending: Uint8Array[] };
+
+let dropping = false;
+process.on("SIGUSR1", () => {
+  dropping = true;
+  console.log("dropping all traffic");
+});
 
 Bun.listen<Pair>({
   hostname: "127.0.0.1",
@@ -27,7 +34,7 @@ Bun.listen<Pair>({
             client.data.pending = [];
           },
           data(upstream, chunk) {
-            upstream.data.upstream?.write(chunk);
+            if (!dropping) upstream.data.upstream?.write(chunk);
           },
           close(upstream) {
             upstream.data.upstream?.end();
@@ -39,6 +46,7 @@ Bun.listen<Pair>({
       }).catch(() => client.end());
     },
     data(client, chunk) {
+      if (dropping) return;
       if (client.data.upstream) client.data.upstream.write(chunk);
       else client.data.pending.push(new Uint8Array(chunk));
     },

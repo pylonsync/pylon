@@ -17,8 +17,9 @@
 #      the shards placed on it from saved state.
 #   5. graceful leave: machine d stops (SIGTERM); its shard starts on a well
 #      before a dead machine's would.
-#   6. fencing: machine e reaches Postgres through a proxy; the proxy dies;
-#      e stops its shard before a starts it.
+#   6. fencing: machine e reaches Postgres through a proxy; the proxy starts
+#      dropping every byte without closing a socket, so e's database calls
+#      hang. e's lease lapses and it stops its shard before a starts it.
 #
 # Needs Postgres (createdb/psql on PATH, or PYLON_SMOKE_PG_URL pointing at
 # an empty database), Rust with the wasm32-unknown-unknown target, and
@@ -198,7 +199,7 @@ kill -TERM "$PID_D"
 wait_log a-restarted.log "\[shard leave-check\] machine d is dead; starting it here" 8
 (($(date +%s) - LEFT_AT < 8)) || fail "d's shard took the dead-machine delay to move"
 
-echo "→ 6. fencing: e loses Postgres, stops its shard, then a starts it"
+echo "→ 6. fencing: e's database calls hang; e stops its shard, then a starts it"
 url_part() { bun -e 'const u = new URL(process.argv[1]); console.log(process.argv[2] === "host" ? u.hostname : (u.port || "5432"))' "$DB_URL" "$1"; }
 PROXY_URL=$(bun -e 'const u = new URL(process.argv[1]); u.hostname = "127.0.0.1"; u.port = process.argv[2]; console.log(u.toString())' "$DB_URL" "$PG_PROXY_PORT")
 bun "$ROOT/tools/tcp-proxy.ts" "$PG_PROXY_PORT" "$(url_part host)" "$(url_part port)" >"$TMP/pg-proxy.log" 2>&1 &
@@ -212,12 +213,12 @@ sleep 3
 join "$PORT_A" "$TOKEN" '{"arena":"fence-check","machine":"e"}' >/dev/null ||
 	fail "joinArena pinned to e failed"
 sleep 2
-kill -9 "$PROXY_PID"
-wait_log e.log "\[shard fence-check\] stopping: this machine cannot reach the shard directory" 15
+kill -USR1 "$PROXY_PID"
+wait_log e.log "\[shard fence-check\] stopped: this machine's lease on the shard directory lapsed" 15
 wait_log a-restarted.log "\[shard fence-check\] machine e is dead; starting it here" 25
-# e stopped its copy before a started one.
+# e stopped its copy (the log line follows the stop) before a started one.
 stamp() { grep -- "$2" "$TMP/$1" | head -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1}'; }
-FENCED=$(stamp e.log "\[shard fence-check\] stopping")
+FENCED=$(stamp e.log "\[shard fence-check\] stopped")
 ADOPTED=$(stamp a-restarted.log "\[shard fence-check\] machine e is dead")
 [[ "$FENCED" < "$ADOPTED" ]] || fail "e stopped its copy at $FENCED, after a started one at $ADOPTED"
 

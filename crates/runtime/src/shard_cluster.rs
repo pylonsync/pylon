@@ -48,9 +48,11 @@ use sha2::{Digest, Sha256};
 pub const HEARTBEAT: Duration = Duration::from_secs(2);
 /// A machine silent this long is dead and its shards move.
 pub const DEAD_AFTER: Duration = Duration::from_secs(10);
-/// A machine that has not renewed its heartbeat for this long stops its
-/// shards: well before [`DEAD_AFTER`], so a machine cut off from the
-/// database is never still running a shard another machine started.
+/// A machine's lease: how long after it SENT a heartbeat that reached the
+/// directory it may run shards. The directory writes the heartbeat after it
+/// was sent, so other machines count the machine live until at least
+/// send + [`DEAD_AFTER`]; the difference is the margin that a cut-off
+/// machine has stopped its shards before another may start them.
 pub const FENCE_AFTER: Duration = Duration::from_secs(5);
 /// Signed calls older than this are refused.
 const CALL_WINDOW_MS: i64 = 30_000;
@@ -127,6 +129,8 @@ pub struct Machine {
     pub capacity: u32,
     /// Shards placed on it.
     pub load: u32,
+    /// Its current lease epoch (see [`Placement::epoch`]).
+    pub epoch: i64,
 }
 
 impl Machine {
@@ -147,6 +151,11 @@ pub struct Placement {
     /// placement keeps its saved state and is not started again until an
     /// operator stops it.
     pub failed: Option<String>,
+    /// The lease epoch of the machine when it took the shard. A machine
+    /// takes a new epoch each time it starts and each time its lease lapses,
+    /// so a placement is valid only while its machine is live with the same
+    /// epoch; any other placement is an orphan, whatever its machine id.
+    pub epoch: i64,
 }
 
 /// What [`PgShardDirectory::claim`] found.
@@ -230,15 +239,25 @@ impl PgShardDirectory {
                         address TEXT,
                         fly_instance TEXT,
                         capacity INTEGER NOT NULL,
-                        heartbeat_at BIGINT NOT NULL
+                        heartbeat_at BIGINT NOT NULL,
+                        epoch BIGINT NOT NULL DEFAULT 0
                     )",
                 )?;
             }
             if !column(&mut tx, "_pylon_shard_machines", "fly_instance")? {
                 tx.batch_execute("ALTER TABLE _pylon_shard_machines ADD COLUMN fly_instance TEXT")?;
             }
+            if !column(&mut tx, "_pylon_shard_machines", "epoch")? {
+                tx.batch_execute(
+                    "ALTER TABLE _pylon_shard_machines ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0",
+                )?;
+            }
+            // An unused column from before; kept (a machine on an older
+            // build may still write it) but no longer required.
             if column(&mut tx, "_pylon_shard_machines", "load")? {
-                tx.batch_execute("ALTER TABLE _pylon_shard_machines DROP COLUMN load")?;
+                tx.batch_execute(
+                    "ALTER TABLE _pylon_shard_machines ALTER COLUMN load DROP NOT NULL",
+                )?;
             }
             if !exists(&mut tx, "_pylon_shard_placements")? {
                 tx.batch_execute(
@@ -249,6 +268,7 @@ impl PgShardDirectory {
                         machine_id TEXT NOT NULL,
                         pinned BOOLEAN NOT NULL DEFAULT FALSE,
                         failed TEXT,
+                        epoch BIGINT NOT NULL DEFAULT 0,
                         created_at BIGINT NOT NULL,
                         moved_at BIGINT
                     );
@@ -258,6 +278,11 @@ impl PgShardDirectory {
             }
             if !column(&mut tx, "_pylon_shard_placements", "failed")? {
                 tx.batch_execute("ALTER TABLE _pylon_shard_placements ADD COLUMN failed TEXT")?;
+            }
+            if !column(&mut tx, "_pylon_shard_placements", "epoch")? {
+                tx.batch_execute(
+                    "ALTER TABLE _pylon_shard_placements ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0",
+                )?;
             }
             if !exists(&mut tx, "_pylon_shard_state")? {
                 tx.batch_execute(
@@ -295,18 +320,20 @@ impl PgShardDirectory {
         Ok(dir)
     }
 
-    /// Renew this machine's row. Times come from the database clock, so
-    /// machines with skewed clocks agree on who is alive.
-    pub fn heartbeat(&self, me: &MachineConfig) -> Result<(), String> {
+    /// Renew this machine's row under lease `epoch`. Times come from the
+    /// database clock, so machines with skewed clocks agree on who is alive.
+    pub fn heartbeat(&self, me: &MachineConfig, epoch: i64) -> Result<(), String> {
         let capacity = me.capacity as i32;
         self.pool.with_client(|c| {
             c.execute(
-                "INSERT INTO _pylon_shard_machines (machine_id, address, fly_instance, capacity, heartbeat_at)
-                 VALUES ($1, $2, $3, $4, (extract(epoch from clock_timestamp()) * 1000)::bigint)
+                "INSERT INTO _pylon_shard_machines
+                    (machine_id, address, fly_instance, capacity, heartbeat_at, epoch)
+                 VALUES ($1, $2, $3, $4, (extract(epoch from clock_timestamp()) * 1000)::bigint, $5)
                  ON CONFLICT (machine_id) DO UPDATE SET
                     address = EXCLUDED.address, fly_instance = EXCLUDED.fly_instance,
-                    capacity = EXCLUDED.capacity, heartbeat_at = EXCLUDED.heartbeat_at",
-                &[&me.id, &me.address, &me.fly_instance, &capacity],
+                    capacity = EXCLUDED.capacity, heartbeat_at = EXCLUDED.heartbeat_at,
+                    epoch = EXCLUDED.epoch",
+                &[&me.id, &me.address, &me.fly_instance, &capacity, &epoch],
             )?;
             Ok(())
         })
@@ -320,7 +347,8 @@ impl PgShardDirectory {
             let rows = c.query(
                 "SELECT m.machine_id, m.address, m.fly_instance, m.capacity,
                         (SELECT count(*) FROM _pylon_shard_placements p
-                         WHERE p.machine_id = m.machine_id)
+                         WHERE p.machine_id = m.machine_id),
+                        m.epoch
                  FROM _pylon_shard_machines m
                  WHERE m.heartbeat_at > (extract(epoch from clock_timestamp()) * 1000)::bigint - $1
                  ORDER BY m.machine_id",
@@ -334,6 +362,7 @@ impl PgShardDirectory {
                     fly_instance: r.get(2),
                     capacity: r.get::<_, i32>(3).max(0) as u32,
                     load: r.get::<_, i64>(4).clamp(0, u32::MAX as i64) as u32,
+                    epoch: r.get(5),
                 })
                 .collect())
         })
@@ -362,10 +391,10 @@ impl PgShardDirectory {
             }
             let n = tx.execute(
                 "INSERT INTO _pylon_shard_placements
-                    (shard_id, kind, params, machine_id, pinned, created_at)
-                 VALUES ($1, $2, $3, $4, $5, (extract(epoch from clock_timestamp()) * 1000)::bigint)
+                    (shard_id, kind, params, machine_id, pinned, epoch, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, (extract(epoch from clock_timestamp()) * 1000)::bigint)
                  ON CONFLICT (shard_id) DO NOTHING",
-                &[&p.shard_id, &p.kind, &p.params, &p.machine_id, &p.pinned],
+                &[&p.shard_id, &p.kind, &p.params, &p.machine_id, &p.pinned, &p.epoch],
             )?;
             tx.commit()?;
             Ok(if n == 1 { Claim::Claimed } else { Claim::Taken })
@@ -375,7 +404,7 @@ impl PgShardDirectory {
     pub fn placement(&self, shard_id: &str) -> Result<Option<Placement>, String> {
         self.pool.with_client(|c| {
             let row = c.query_opt(
-                "SELECT shard_id, kind, params, machine_id, pinned, failed
+                "SELECT shard_id, kind, params, machine_id, pinned, failed, epoch
                  FROM _pylon_shard_placements WHERE shard_id = $1",
                 &[&shard_id],
             )?;
@@ -383,14 +412,19 @@ impl PgShardDirectory {
         })
     }
 
-    /// Every placement on a machine not in `live`.
-    pub fn orphans(&self, live: &[String]) -> Result<Vec<Placement>, String> {
+    /// Every placement whose machine is not live under the placement's
+    /// epoch: the machine died, left, restarted, or had its lease lapse.
+    pub fn orphans(&self) -> Result<Vec<Placement>, String> {
+        let window = DEAD_AFTER.as_millis() as i64;
         self.pool.with_client(|c| {
             let rows = c.query(
-                "SELECT shard_id, kind, params, machine_id, pinned, failed
-                 FROM _pylon_shard_placements
-                 WHERE NOT (machine_id = ANY($1)) ORDER BY shard_id",
-                &[&live],
+                &format!(
+                    "SELECT p.shard_id, p.kind, p.params, p.machine_id, p.pinned, p.failed, p.epoch
+                     FROM _pylon_shard_placements p
+                     WHERE NOT {} ORDER BY p.shard_id",
+                    owner_live_sql("p.machine_id", "p.epoch", "$1")
+                ),
+                &[&window],
             )?;
             Ok(rows.iter().map(placement_of).collect())
         })
@@ -400,7 +434,7 @@ impl PgShardDirectory {
     pub fn placements_on(&self, machine_id: &str) -> Result<Vec<Placement>, String> {
         self.pool.with_client(|c| {
             let rows = c.query(
-                "SELECT shard_id, kind, params, machine_id, pinned, failed
+                "SELECT shard_id, kind, params, machine_id, pinned, failed, epoch
                  FROM _pylon_shard_placements WHERE machine_id = $1 ORDER BY shard_id",
                 &[&machine_id],
             )?;
@@ -408,40 +442,64 @@ impl PgShardDirectory {
         })
     }
 
-    /// Move a placement from `from` to `to`. False when another machine
-    /// moved it first (or it is gone).
-    pub fn take_over(&self, shard_id: &str, from: &str, to: &str) -> Result<bool, String> {
+    /// Move orphan `p` to machine `to` under lease `to_epoch`. False when
+    /// another machine moved it first, it is gone, or its machine is live
+    /// under its epoch again: the check and the move are one statement.
+    pub fn take_over(&self, p: &Placement, to: &str, to_epoch: i64) -> Result<bool, String> {
+        let window = DEAD_AFTER.as_millis() as i64;
         self.pool.with_client_once(|c| {
             let n = c.execute(
-                "UPDATE _pylon_shard_placements
-                 SET machine_id = $3, moved_at = (extract(epoch from clock_timestamp()) * 1000)::bigint
-                 WHERE shard_id = $1 AND machine_id = $2",
-                &[&shard_id, &from, &to],
+                &format!(
+                    "UPDATE _pylon_shard_placements p
+                     SET machine_id = $4, epoch = $5,
+                         moved_at = (extract(epoch from clock_timestamp()) * 1000)::bigint
+                     WHERE p.shard_id = $1 AND p.machine_id = $2 AND p.epoch = $3
+                       AND NOT {}",
+                    owner_live_sql("p.machine_id", "p.epoch", "$6")
+                ),
+                &[
+                    &p.shard_id,
+                    &p.machine_id,
+                    &p.epoch,
+                    &to,
+                    &to_epoch,
+                    &window,
+                ],
             )?;
             Ok(n == 1)
         })
     }
 
-    /// Record why `machine_id` could not start the shard. Its state stays.
-    pub fn mark_failed(&self, shard_id: &str, machine_id: &str, why: &str) -> Result<(), String> {
+    /// Record why the machine could not start the shard it holds under
+    /// `epoch`. Its state stays.
+    pub fn mark_failed(
+        &self,
+        shard_id: &str,
+        machine_id: &str,
+        epoch: i64,
+        why: &str,
+    ) -> Result<(), String> {
         self.pool.with_client(|c| {
             c.execute(
-                "UPDATE _pylon_shard_placements SET failed = $3
-                 WHERE shard_id = $1 AND machine_id = $2",
-                &[&shard_id, &machine_id, &why],
+                "UPDATE _pylon_shard_placements SET failed = $4
+                 WHERE shard_id = $1 AND machine_id = $2 AND epoch = $3",
+                &[&shard_id, &machine_id, &epoch, &why],
             )?;
             Ok(())
         })
     }
 
-    /// Forget a shard `machine_id` ran (it ended), with its saved state.
-    /// Placements another machine took over are left alone.
-    pub fn release(&self, shard_id: &str, machine_id: &str) -> Result<(), String> {
+    /// Forget the shard `machine_id` holds under `epoch`, with its saved
+    /// state: it ended, or an operator stopped it. A placement another
+    /// machine (or a later epoch) took over is left alone. False when
+    /// nothing matched.
+    pub fn release(&self, shard_id: &str, machine_id: &str, epoch: i64) -> Result<bool, String> {
         self.pool.with_client(|c| {
             let mut tx = c.transaction()?;
             let n = tx.execute(
-                "DELETE FROM _pylon_shard_placements WHERE shard_id = $1 AND machine_id = $2",
-                &[&shard_id, &machine_id],
+                "DELETE FROM _pylon_shard_placements
+                 WHERE shard_id = $1 AND machine_id = $2 AND epoch = $3",
+                &[&shard_id, &machine_id, &epoch],
             )?;
             if n == 1 {
                 tx.execute(
@@ -449,54 +507,62 @@ impl PgShardDirectory {
                     &[&shard_id],
                 )?;
             }
-            tx.commit()
-        })
-    }
-
-    /// Forget a shard whatever machine it is on (an operator stopped it).
-    pub fn forget(&self, shard_id: &str) -> Result<(), String> {
-        self.pool.with_client(|c| {
-            let mut tx = c.transaction()?;
-            tx.execute(
-                "DELETE FROM _pylon_shard_placements WHERE shard_id = $1",
-                &[&shard_id],
-            )?;
-            tx.execute(
-                "DELETE FROM _pylon_shard_state WHERE shard_id = $1",
-                &[&shard_id],
-            )?;
-            tx.commit()
-        })
-    }
-
-    /// Store a shard's state, only while `machine_id` still owns it: a
-    /// machine that was cut off cannot overwrite the state of the copy that
-    /// replaced it. False when it does not own the shard.
-    pub fn save_state(
-        &self,
-        shard_id: &str,
-        machine_id: &str,
-        state: &[u8],
-    ) -> Result<bool, String> {
-        self.pool.with_client(|c| {
-            let n = c.execute(
-                "INSERT INTO _pylon_shard_state (shard_id, state, saved_at)
-                 SELECT $1, $3, (extract(epoch from clock_timestamp()) * 1000)::bigint
-                 WHERE EXISTS (SELECT 1 FROM _pylon_shard_placements
-                               WHERE shard_id = $1 AND machine_id = $2)
-                 ON CONFLICT (shard_id) DO UPDATE SET
-                    state = EXCLUDED.state, saved_at = EXCLUDED.saved_at",
-                &[&shard_id, &machine_id, &state],
-            )?;
+            tx.commit()?;
             Ok(n == 1)
         })
     }
 
-    pub fn load_state(&self, shard_id: &str) -> Result<Option<Vec<u8>>, String> {
+    /// Store the state of the shard `machine_id` holds under `epoch`. The
+    /// placement row stays share-locked until the state is written, so a
+    /// takeover waits for this save and every later save by the old owner
+    /// is refused: a cut-off machine never overwrites the state of the copy
+    /// that replaced it. False when it does not hold the shard.
+    pub fn save_state(
+        &self,
+        shard_id: &str,
+        machine_id: &str,
+        epoch: i64,
+        state: &[u8],
+    ) -> Result<bool, String> {
+        self.pool.with_client(|c| {
+            let mut tx = c.transaction()?;
+            let owned = tx
+                .query_opt(
+                    "SELECT 1 FROM _pylon_shard_placements
+                     WHERE shard_id = $1 AND machine_id = $2 AND epoch = $3
+                     FOR SHARE",
+                    &[&shard_id, &machine_id, &epoch],
+                )?
+                .is_some();
+            if owned {
+                tx.execute(
+                    "INSERT INTO _pylon_shard_state (shard_id, state, saved_at)
+                     VALUES ($1, $2, (extract(epoch from clock_timestamp()) * 1000)::bigint)
+                     ON CONFLICT (shard_id) DO UPDATE SET
+                        state = EXCLUDED.state, saved_at = EXCLUDED.saved_at",
+                    &[&shard_id, &state],
+                )?;
+            }
+            tx.commit()?;
+            Ok(owned)
+        })
+    }
+
+    /// The saved state of the shard `machine_id` holds under `epoch`:
+    /// `Ok(None)` when it does not hold it (an operator stopped it, or
+    /// another machine took it), `Ok(Some(None))` when there is no state.
+    pub fn load_owned_state(
+        &self,
+        shard_id: &str,
+        machine_id: &str,
+        epoch: i64,
+    ) -> Result<Option<Option<Vec<u8>>>, String> {
         self.pool.with_client(|c| {
             let row = c.query_opt(
-                "SELECT state FROM _pylon_shard_state WHERE shard_id = $1",
-                &[&shard_id],
+                "SELECT s.state FROM _pylon_shard_placements p
+                 LEFT JOIN _pylon_shard_state s ON s.shard_id = p.shard_id
+                 WHERE p.shard_id = $1 AND p.machine_id = $2 AND p.epoch = $3",
+                &[&shard_id, &machine_id, &epoch],
             )?;
             Ok(row.map(|r| r.get(0)))
         })
@@ -535,7 +601,23 @@ fn placement_of(r: &postgres::Row) -> Placement {
         machine_id: r.get(3),
         pinned: r.get(4),
         failed: r.get(5),
+        epoch: r.get(6),
     }
+}
+
+/// SQL that is true when machine `machine` is live under `epoch`, with the
+/// liveness window in milliseconds at parameter `window`.
+fn owner_live_sql(machine: &str, epoch: &str, window: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM _pylon_shard_machines m
+                 WHERE m.machine_id = {machine} AND m.epoch = {epoch}
+                   AND m.heartbeat_at > (extract(epoch from clock_timestamp()) * 1000)::bigint - {window})"
+    )
+}
+
+/// A new lease epoch: random, so a restarted machine never reuses one.
+pub fn new_epoch() -> i64 {
+    rand::random::<i64>()
 }
 
 // ---------------------------------------------------------------------------
@@ -639,9 +721,13 @@ pub fn verify(me: &str, header: &str, payload: &[u8]) -> Result<(), &'static str
         .ok_or("this machine is not in the shard directory")?;
     let now = now_ms();
     verify_with(key, me, header, payload, now)?;
+    // Keyed by the nonce: the MAC covers it, and `verify_with` accepts only
+    // the canonical form of the rest, so a signature has one spelling.
+    let (_, rest) = header.split_once('.').ok_or("malformed signature")?;
+    let (nonce, _) = rest.split_once('.').ok_or("malformed signature")?;
     let mut seen = seen().lock().unwrap();
-    seen.retain(|_, at| now - *at <= CALL_WINDOW_MS * 2);
-    if seen.insert(header.to_string(), now).is_some() {
+    seen.retain(|_, at| now.abs_diff(*at) <= CALL_WINDOW_MS as u64 * 2);
+    if seen.insert(nonce.to_string(), now).is_some() {
         return Err("signature already used");
     }
     Ok(())
@@ -658,8 +744,13 @@ fn verify_with(
     let (Some(at), Some(nonce), Some(sig)) = (parts.next(), parts.next(), parts.next()) else {
         return Err("malformed signature");
     };
+    let at_text = at;
     let at: i64 = at.parse().map_err(|_| "malformed signature")?;
-    if (now - at).abs() > CALL_WINDOW_MS {
+    // One spelling per time ("0012" and "+12" also parse as 12).
+    if at.to_string() != at_text || nonce.is_empty() {
+        return Err("malformed signature");
+    }
+    if now.abs_diff(at) > CALL_WINDOW_MS as u64 {
         return Err("signature expired");
     }
     let at_s = at.to_string();
@@ -711,6 +802,7 @@ mod tests {
             fly_instance: None,
             capacity,
             load,
+            epoch: 0,
         }
     }
 
@@ -830,6 +922,26 @@ mod tests {
             verify_with(key, "b", &tampered, body, at),
             Err("bad signature")
         );
+        // Another spelling of the same time is refused, so a captured
+        // signature cannot be replayed under a new cache key.
+        for respelled in [format!("0{header}"), format!("+{header}")] {
+            assert_eq!(
+                verify_with(key, "b", &respelled, body, at),
+                Err("malformed signature")
+            );
+        }
+        // Extreme times are refused without overflow.
+        for at in [i64::MIN, i64::MAX] {
+            let extreme = sign_with(key, at, "n1", "b", body);
+            assert_eq!(
+                verify_with(key, "b", &extreme, body, 1_000_000),
+                Err("signature expired")
+            );
+            assert_eq!(
+                verify_with(key, "b", &extreme, body, -1_000_000),
+                Err("signature expired")
+            );
+        }
     }
 
     #[test]
@@ -875,6 +987,7 @@ mod tests {
             machine_id: machine.into(),
             pinned: false,
             failed: None,
+            epoch: 1,
         }
     }
 
@@ -886,8 +999,14 @@ mod tests {
         let run = pylon_cluster::new_instance_id();
         let (a, b) = (format!("a-{run}"), format!("b-{run}"));
         let shard = format!("s-{run}");
-        dir.heartbeat(&me(&a)).unwrap();
-        dir.heartbeat(&me(&b)).unwrap();
+        dir.heartbeat(&me(&a), 7).unwrap();
+        dir.heartbeat(&me(&b), 1).unwrap();
+        let orphan = |dir: &PgShardDirectory| {
+            dir.orphans()
+                .unwrap()
+                .into_iter()
+                .find(|o| o.shard_id == shard)
+        };
 
         let p = placement(&shard, "arena", &b);
         assert_eq!(dir.claim(&p, 10).unwrap(), Claim::Claimed);
@@ -901,48 +1020,117 @@ mod tests {
         let live = dir.live_machines().unwrap();
         assert_eq!(live.iter().find(|m| m.id == b).unwrap().load, 1);
         assert_eq!(live.iter().find(|m| m.id == a).unwrap().load, 0);
+        assert_eq!(live.iter().find(|m| m.id == b).unwrap().epoch, 1);
 
-        // Only the owner saves state.
-        assert!(dir.save_state(&shard, &b, b"state-1").unwrap());
-        assert!(!dir.save_state(&shard, &a, b"stale").unwrap());
+        // Only the owner, under its epoch, saves state.
+        assert!(dir.save_state(&shard, &b, 1, b"state-1").unwrap());
+        assert!(!dir.save_state(&shard, &a, 1, b"stale").unwrap());
+        assert!(!dir.save_state(&shard, &b, 2, b"stale").unwrap());
         assert_eq!(
-            dir.load_state(&shard).unwrap().as_deref(),
-            Some(&b"state-1"[..])
+            dir.load_owned_state(&shard, &b, 1).unwrap(),
+            Some(Some(b"state-1".to_vec()))
         );
+        assert_eq!(dir.load_owned_state(&shard, &a, 1).unwrap(), None);
 
-        // B dies: the shard is an orphan; one machine takes it over.
-        let orphans = dir.orphans(std::slice::from_ref(&a)).unwrap();
-        assert!(orphans.iter().any(|o| o.shard_id == shard));
-        assert!(dir.take_over(&shard, &b, &a).unwrap());
-        assert!(!dir.take_over(&shard, &b, &a).unwrap(), "only one wins");
+        // B is live under the placement's epoch: not an orphan, and no
+        // machine can take it.
+        assert_eq!(orphan(&dir), None);
+        assert!(!dir.take_over(&p, &a, 7).unwrap());
+
+        // B restarts under the same id (a new epoch): its placement is an
+        // orphan at once, without waiting for B to go silent.
+        dir.heartbeat(&me(&b), 2).unwrap();
+        let o = orphan(&dir).expect("an orphan after the epoch changed");
+        assert_eq!((o.machine_id.as_str(), o.epoch), (b.as_str(), 1));
+        assert!(dir.take_over(&o, &a, 7).unwrap());
+        assert!(!dir.take_over(&o, &b, 2).unwrap(), "only one wins");
+        assert_eq!(orphan(&dir), None);
         assert!(!dir
-            .save_state(&shard, &b, b"from the cut-off machine")
+            .save_state(&shard, &b, 1, b"from the cut-off machine")
             .unwrap());
-        assert!(dir.save_state(&shard, &a, b"state-2").unwrap());
+        assert!(dir.save_state(&shard, &a, 7, b"state-2").unwrap());
 
         // A cannot start it: the placement says why, and the state stays.
-        dir.mark_failed(&shard, &a, "restore refused").unwrap();
+        dir.mark_failed(&shard, &a, 7, "restore refused").unwrap();
         let failed = dir.placement(&shard).unwrap().unwrap();
         assert_eq!(failed.failed.as_deref(), Some("restore refused"));
         assert_eq!(
-            dir.load_state(&shard).unwrap().as_deref(),
-            Some(&b"state-2"[..])
+            dir.load_owned_state(&shard, &a, 7).unwrap(),
+            Some(Some(b"state-2".to_vec()))
         );
         assert_eq!(dir.placements_on(&a).unwrap().len(), 1);
 
-        // B's release of a shard it lost changes nothing; A's removes it
-        // and its state.
-        dir.release(&shard, &b).unwrap();
+        // A release by the old owner or an old epoch changes nothing; the
+        // holder's removes the placement and its state.
+        assert!(!dir.release(&shard, &b, 1).unwrap());
+        assert!(!dir.release(&shard, &a, 1).unwrap());
         assert!(dir.placement(&shard).unwrap().is_some());
-        dir.release(&shard, &a).unwrap();
+        assert!(dir.release(&shard, &a, 7).unwrap());
         assert_eq!(dir.placement(&shard).unwrap(), None);
-        assert_eq!(dir.load_state(&shard).unwrap(), None);
+        assert_eq!(dir.load_owned_state(&shard, &a, 7).unwrap(), None);
 
-        assert_eq!(dir.claim(&p, 10).unwrap(), Claim::Claimed);
-        dir.forget(&shard).unwrap();
-        assert_eq!(dir.placement(&shard).unwrap(), None);
         dir.leave(&a).unwrap();
+        dir.leave(&b).unwrap();
         assert!(!dir.live_machines().unwrap().iter().any(|m| m.id == a));
+    }
+
+    #[test]
+    fn a_takeover_waits_for_a_save_in_progress() {
+        let Some(dir) = test_dir() else { return };
+        let dir = Arc::new(dir);
+        let run = pylon_cluster::new_instance_id();
+        let (a, b) = (format!("a-{run}"), format!("b-{run}"));
+        let shard = format!("s-{run}");
+        dir.heartbeat(&me(&a), 1).unwrap();
+        let p = placement(&shard, "arena", &b);
+        assert_eq!(dir.claim(&p, 10).unwrap(), Claim::Claimed);
+        // B never heartbeat: its placement is an orphan.
+
+        // B's save holds the row lock, as save_state does, until released.
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let saver = {
+            let (dir, shard, b) = (Arc::clone(&dir), shard.clone(), b.clone());
+            std::thread::spawn(move || {
+                dir.pool
+                    .with_client_once(|c| {
+                        let mut tx = c.transaction()?;
+                        tx.query_one(
+                            "SELECT 1 FROM _pylon_shard_placements
+                             WHERE shard_id = $1 AND machine_id = $2 AND epoch = 1
+                             FOR SHARE",
+                            &[&shard, &b],
+                        )?;
+                        locked_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        tx.execute(
+                            "INSERT INTO _pylon_shard_state (shard_id, state, saved_at)
+                             VALUES ($1, 'last', 0)",
+                            &[&shard],
+                        )?;
+                        tx.commit()
+                    })
+                    .unwrap();
+            })
+        };
+        locked_rx.recv().unwrap();
+        let taker = {
+            let (dir, p, a) = (Arc::clone(&dir), p.clone(), a.clone());
+            std::thread::spawn(move || dir.take_over(&p, &a, 1).unwrap())
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!taker.is_finished(), "the takeover waits for the save");
+        release_tx.send(()).unwrap();
+        saver.join().unwrap();
+        assert!(taker.join().unwrap());
+        // The new owner reads the last save; the old owner saves no more.
+        assert_eq!(
+            dir.load_owned_state(&shard, &a, 1).unwrap(),
+            Some(Some(b"last".to_vec()))
+        );
+        assert!(!dir.save_state(&shard, &b, 1, b"late").unwrap());
+        assert!(dir.release(&shard, &a, 1).unwrap());
+        dir.leave(&a).unwrap();
     }
 
     #[test]
@@ -971,7 +1159,8 @@ mod tests {
             5
         );
         for i in 0..8 {
-            dir.forget(&format!("s{i}-{run}")).unwrap();
+            dir.release(&format!("s{i}-{run}"), &format!("m{i}"), 1)
+                .unwrap();
         }
     }
 }

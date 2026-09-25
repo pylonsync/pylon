@@ -78,11 +78,17 @@ struct Arena {
     hoard: Vec<Vec<u8>>,
 }
 
-/// What `save` keeps: the players and the time played.
+/// What `save` keeps: the players, the time played, and whether the
+/// arena finished.
 #[derive(Serialize, Deserialize)]
 struct Saved {
     elapsed_ms: u64,
+    /// The part of the time played below one millisecond.
+    #[serde(default)]
+    elapsed_sub_ms_nanos: u32,
     players: Vec<Player>,
+    #[serde(default)]
+    finished: bool,
 }
 
 impl Shard for Arena {
@@ -93,7 +99,9 @@ impl Shard for Arena {
     fn save(&self) -> Option<Vec<u8>> {
         serde_json::to_vec(&Saved {
             elapsed_ms: self.elapsed.as_millis() as u64,
+            elapsed_sub_ms_nanos: self.elapsed.subsec_nanos() % 1_000_000,
             players: self.players.clone(),
+            finished: self.finished,
         })
         .ok()
     }
@@ -101,8 +109,10 @@ impl Shard for Arena {
     fn restore(shard_id: &str, params: Params, state: &[u8]) -> Result<Self, String> {
         let saved: Saved = serde_json::from_slice(state).map_err(|e| e.to_string())?;
         let mut arena = Self::init(shard_id, params)?;
-        arena.elapsed = Duration::from_millis(saved.elapsed_ms);
+        arena.elapsed = Duration::from_millis(saved.elapsed_ms)
+            + Duration::from_nanos(u64::from(saved.elapsed_sub_ms_nanos.min(999_999)));
         arena.players = saved.players;
+        arena.finished = saved.finished;
         Ok(arena)
     }
 

@@ -985,6 +985,39 @@ fn a_saved_shard_starts_again_where_it_was() {
 }
 
 #[test]
+fn a_restored_arena_keeps_its_exact_time_and_its_end() {
+    use pylon_realtime::SimState;
+    let k = kind(SnapshotFormat::Json, WasmLimits::default());
+    let params = json!({});
+
+    // Time below a millisecond survives a save: two restores later, the
+    // copy and the original agree after the same ticks.
+    let mut original = k.instantiate("t1", &params).unwrap();
+    original.tick(Duration::from_micros(1900));
+    let mut copy = k
+        .restore("t1", &params, &original.save().unwrap().unwrap())
+        .unwrap();
+    copy = k
+        .restore("t1", &params, &copy.save().unwrap().unwrap())
+        .unwrap();
+    original.tick(Duration::from_micros(200));
+    copy.tick(Duration::from_micros(200));
+    assert_eq!(copy.save().unwrap(), original.save().unwrap());
+
+    // A finished arena is still finished after a restore.
+    let s = Shard::new(
+        "t2",
+        k.instantiate("t2", &params).unwrap(),
+        k.config().clone(),
+    );
+    let _q = join(&s, "u1");
+    send(&s, "u1", json!({ "input": "finish" })).unwrap();
+    s.run_tick();
+    let saved = s.with_state(|sim| sim.save()).unwrap().unwrap();
+    assert!(k.restore("t2", &params, &saved).unwrap().is_finished());
+}
+
+#[test]
 fn a_module_without_saved_state_saves_nothing_and_refuses_restore() {
     let k = WasmShardKind::compile(
         "field",
