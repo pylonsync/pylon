@@ -204,8 +204,9 @@ fn error_result(key: &str, code: &str, message: &str) -> CallResult {
 /// function: the call is made again, with the same key, after a delay. A
 /// mutation runs once per key, so this never runs it twice.
 pub(crate) fn retryable(code: &str) -> bool {
-    // Postgres refused the statement itself: the same call meets it again.
-    if matches!(code, "PG_REJECTED" | "PG_INVALID_DATA") {
+    // Postgres refused the statement itself, or the data was invalid: the
+    // same call meets it again.
+    if code == "PG_REJECTED" || code.starts_with("PG_INVALID") {
         return false;
     }
     ["PG_", "SQLITE_", "TX_", "RUNNER_"]
@@ -683,6 +684,8 @@ mod tests {
     struct Fns {
         /// The id of user p1's character.
         character: String,
+        /// Other users' characters, by user id.
+        by_user: Mutex<HashMap<String, String>>,
         stored: Mutex<HashMap<(String, String), serde_json::Value>>,
         runs: Mutex<HashMap<String, usize>>,
         /// grantItem fails this many more times in the database.
@@ -773,9 +776,13 @@ mod tests {
                         hold = self.released.wait(hold).unwrap();
                     }
                     drop(hold);
-                    assert_eq!(args["userId"], "p1");
+                    let user = args["userId"].as_str().unwrap_or_default();
+                    let id = match user {
+                        "p1" => self.character.clone(),
+                        other => self.by_user.lock().unwrap()[other].clone(),
+                    };
                     Ok(serde_json::json!({
-                        "id": self.character, "x": 6 + n as i64, "nextGrant": 3,
+                        "id": id, "x": 6 + n as i64, "nextGrant": 3,
                         "items": [{ "id": "i-old", "name": "old" }]
                     }))
                 }
@@ -1228,6 +1235,201 @@ mod tests {
         host.stop_all();
     }
 
+    /// Shutdown on a cluster: players keep moving while the machine stops,
+    /// and each row ends with the x of its zone's final state (no tick's
+    /// write is lost between the shard leaving `owned` and its pause).
+    #[test]
+    fn shutdown_writes_every_tick_of_every_zone() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (rt, fns) = runtime();
+        let pool =
+            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let run = pylon_cluster::new_instance_id();
+        // A kind of its own (the cluster-wide limit counts only this run),
+        // and its placements gone when the test ends.
+        let kind = format!("zone-{run}");
+        let host = WasmShardHost::new(vec![WasmShardKind::compile(
+            &kind,
+            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
+            ShardConfig::default(),
+            WasmLimits::default(),
+        )
+        .unwrap()]);
+        struct Forget(Arc<pylon_storage::pg_datastore::PgPool>, String);
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                let _ = self.0.with_client(|c| {
+                    c.execute(
+                        "DELETE FROM _pylon_shard_placements WHERE kind = $1",
+                        &[&self.1],
+                    )
+                });
+            }
+        }
+        let _forget = Forget(Arc::clone(&pool), kind.clone());
+        let me = format!("m-{run}");
+        host.attach_cluster(
+            crate::shard_cluster::PgShardDirectory::open(pool).unwrap(),
+            crate::shard_cluster::MachineConfig {
+                id: me.clone(),
+                address: None,
+                capacity: 10,
+                fly_instance: None,
+            },
+        );
+        let weak: Weak<dyn pylon_router::FnOps> =
+            Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
+        host.attach_data(Some(weak), writer(&rt));
+        let zones: Vec<(String, String, String)> = (0..12)
+            .map(|i| {
+                let user = format!("u{i}");
+                let character = rt
+                    .insert(
+                        "Character",
+                        &serde_json::json!({ "userId": user, "x": 0, "nextGrant": 0 }),
+                    )
+                    .unwrap();
+                fns.by_user
+                    .lock()
+                    .unwrap()
+                    .insert(user.clone(), character.clone());
+                (format!("sd{i}-{run}"), user, character)
+            })
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        for (zone, user, _) in &zones {
+            while host
+                .create_on(&kind, zone, &serde_json::json!({}), Some(&me))
+                .is_err()
+            {
+                assert!(Instant::now() < deadline, "no lease");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            input(&host, zone, user, "\"join\"");
+        }
+        for (zone, user, _) in &zones {
+            wait_for("the characters", || {
+                saved(&host, zone)["players"][user]["loaded"] == true
+            });
+        }
+        let shards: Vec<_> = zones
+            .iter()
+            .map(|(z, _, _)| host.registry.get(z).unwrap())
+            .collect();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mover = {
+            let (host, zones, stop) = (Arc::clone(&host), zones.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for (zone, user, _) in &zones {
+                        if let Some(s) = host.registry.get(zone) {
+                            let _ = s.push_input(
+                                SubscriberId::new(user.as_str()),
+                                RawInput::new(
+                                    SnapshotFormat::Json,
+                                    br#"{"move":{"dx":1}}"#.to_vec(),
+                                ),
+                                None,
+                            );
+                        }
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        host.stop_all();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        mover.join().unwrap();
+        for ((zone, user, character), shard) in zones.iter().zip(&shards) {
+            let x = shard.with_state(|sim| {
+                let saved: serde_json::Value =
+                    serde_json::from_slice(&sim.save().unwrap().unwrap()).unwrap();
+                saved["players"][user]["x"].clone()
+            });
+            assert_eq!(
+                rt.get_by_id("Character", character).unwrap().unwrap()["x"],
+                x,
+                "{zone}: the row lost the last moves"
+            );
+        }
+    }
+
+    /// A held zone that ended (stopped with no stop_local, as the idle stop
+    /// does) writes its last fields when the sweep removes it, before its
+    /// placement is released: the fence still finds it ours. All inside the
+    /// first 2 s, before the periodic flush.
+    #[test]
+    fn a_shard_the_sweep_ends_writes_its_last_fields() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (rt, fns) = runtime();
+        let pool =
+            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let run = pylon_cluster::new_instance_id();
+        let kind = format!("idle-{run}");
+        let host = WasmShardHost::new(vec![WasmShardKind::compile(
+            &kind,
+            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
+            ShardConfig::default(),
+            WasmLimits::default(),
+        )
+        .unwrap()]);
+        let me = format!("m-{run}");
+        host.attach_cluster(
+            crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+            crate::shard_cluster::MachineConfig {
+                id: me.clone(),
+                address: None,
+                capacity: 10,
+                fly_instance: None,
+            },
+        );
+        let weak: Weak<dyn pylon_router::FnOps> =
+            Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
+        host.attach_data(Some(weak), writer(&rt));
+        let zone = format!("idle-{run}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host
+            .create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
+            .is_err()
+        {
+            assert!(Instant::now() < deadline, "no lease");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        host.take_writes(
+            &zone,
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(33))]),
+            }],
+        );
+        let started = Instant::now();
+        host.registry.get(&zone).unwrap().stop();
+        host.sweep();
+        assert!(host.registry.get(&zone).is_none());
+        let dir = crate::shard_cluster::PgShardDirectory::open(pool).unwrap();
+        assert!(dir.placement(&zone).unwrap().is_none(), "not released");
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            33
+        );
+        assert!(started.elapsed() < WRITE_EVERY);
+        host.stop_all();
+    }
+
     #[test]
     fn retryable_codes_are_the_infrastructure_ones() {
         for code in [
@@ -1249,6 +1451,9 @@ mod tests {
             "FN_NOT_FOUND",
             "CALL_PANICKED",
             "PG_REJECTED",
+            "PG_INVALID_DATA",
+            "PG_INVALID_UPDATE",
+            "PG_INVALID_ID",
             "INSERT_FAILED",
         ] {
             assert!(!retryable(code), "{code}");

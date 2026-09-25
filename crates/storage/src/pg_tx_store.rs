@@ -205,15 +205,22 @@ pub fn pg_err_to_data(e: postgres::Error) -> DataError {
     }
 }
 
-/// `PG_REJECTED` when Postgres refused the statement for what it says (a
-/// data exception, a constraint violation, a syntax or access error:
-/// SQLSTATE classes 22, 23, 42, and 44), which the same statement meets
-/// again; else `PG_TX_QUERY_FAILED` (a lost connection, a serialization
-/// failure, a deadlock), which can pass if tried again.
+/// `PG_TX_QUERY_FAILED` when the statement can pass if tried again: no
+/// answer from the server (a lost connection), or SQLSTATE class 08
+/// (connection), 40 (serialization failure, deadlock), 53 (resources), 57
+/// (operator intervention), 58 (system error), or 55P03 (lock not
+/// available). Every other answer (a constraint, a data error, an
+/// exception a trigger raised, ...) is `PG_REJECTED`: the same statement
+/// meets it again.
 pub fn pg_error_code(e: &postgres::Error) -> &'static str {
-    match e.code().map(|c| &c.code()[..2]) {
-        Some("22" | "23" | "42" | "44") => "PG_REJECTED",
-        _ => "PG_TX_QUERY_FAILED",
+    let Some(state) = e.code() else {
+        return "PG_TX_QUERY_FAILED";
+    };
+    let code = state.code();
+    if code == "55P03" || matches!(&code[..2], "08" | "40" | "53" | "57" | "58") {
+        "PG_TX_QUERY_FAILED"
+    } else {
+        "PG_REJECTED"
     }
 }
 

@@ -43,12 +43,9 @@ pub enum WriteError {
 impl From<pylon_http::DataError> for WriteError {
     /// A store error inside a fenced write: one the database may take on a
     /// later try is kept; one it refused for what it is (a constraint, a
-    /// hook, validation) is not.
+    /// hook, validation) is not. The same rule as a shard call's retry.
     fn from(e: pylon_http::DataError) -> Self {
-        let transient = ["PG_", "SQLITE_", "TX_"]
-            .iter()
-            .any(|p| e.code.starts_with(p))
-            && e.code != "PG_REJECTED";
+        let transient = crate::shard_wasm::retryable_code(&e.code);
         let why = format!("{}: {}", e.code, e.message);
         if transient {
             WriteError::Store(why)
@@ -257,6 +254,21 @@ mod tests {
             dir.claim(&placement, 10).unwrap(),
             crate::shard_cluster::Claim::Claimed
         );
+        // Gone when the test ends (a panic too): an orphan placement could
+        // be taken over by a later test's machine.
+        struct Release(Arc<pylon_storage::pg_datastore::PgPool>, String);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = self.0.with_client(|c| {
+                    c.execute(
+                        "DELETE FROM _pylon_shard_placements WHERE shard_id = $1",
+                        &[&self.1],
+                    )
+                });
+            }
+        }
+        let pool = rt.pg_backend().unwrap().store.shared_pool();
+        let _release = Release(Arc::clone(&pool), shard.clone());
         let id = rt
             .insert(
                 "Character",
@@ -298,5 +310,88 @@ mod tests {
             .update_fenced("Character", &id, &x(8), Some(fence(&shard, &b, 21)))
             .unwrap();
         assert_eq!(rt.get_by_id("Character", &id).unwrap().unwrap()["x"], 8);
+
+        // A takeover waits for a fenced write in progress: b holds the
+        // fence in an open transaction; a's hand-over back does not land
+        // until that transaction ends.
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let (rt, shard, b) = (Arc::clone(&rt), shard.clone(), b.clone());
+            std::thread::spawn(move || {
+                let manifest = rt.manifest().clone();
+                rt.pg_backend()
+                    .unwrap()
+                    .store
+                    .with_client(|c| {
+                        let tx = c
+                            .transaction()
+                            .map_err(pylon_storage::pg_tx_store::pg_err_to_data)?;
+                        let store = pylon_storage::pg_tx_store::PgTxStore::new(tx, &manifest);
+                        assert!(store.check_shard_fence(&shard, &b, 21)?);
+                        held_tx.send(()).unwrap();
+                        end_rx.recv().unwrap();
+                        store
+                            .commit()
+                            .map_err(pylon_storage::pg_tx_store::pg_err_to_data)?;
+                        Ok::<(), pylon_http::DataError>(())
+                    })
+                    .unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let taker = {
+            let (dir, shard, a, b) = (
+                PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+                shard.clone(),
+                a.clone(),
+                b.clone(),
+            );
+            std::thread::spawn(move || {
+                done_tx
+                    .send(dir.hand_over(&shard, &b, 21, &a, 31).unwrap())
+                    .unwrap();
+            })
+        };
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(400))
+                .is_err(),
+            "the takeover did not wait for the fenced write"
+        );
+        end_tx.send(()).unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap());
+        holder.join().unwrap();
+        taker.join().unwrap();
+    }
+
+    #[test]
+    fn store_errors_are_kept_and_refusals_are_not() {
+        let err = |code: &str| {
+            WriteError::from(pylon_http::DataError {
+                code: code.into(),
+                message: "m".into(),
+            })
+        };
+        for code in [
+            "PG_TX_QUERY_FAILED",
+            "PG_POOL_TIMEOUT",
+            "SQLITE_BUSY",
+            "TX_BEGIN_FAILED",
+        ] {
+            assert!(matches!(err(code), WriteError::Store(_)), "{code}");
+        }
+        for code in [
+            "PG_REJECTED",
+            "PG_INVALID_UPDATE",
+            "PG_INVALID_DATA",
+            "HOOK_REFUSED",
+            "UPDATE_FAILED",
+        ] {
+            assert!(matches!(err(code), WriteError::Refused(_)), "{code}");
+        }
     }
 }

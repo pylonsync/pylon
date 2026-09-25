@@ -18,7 +18,6 @@
 use crate::best_effort::BestEffort;
 use crate::{new_instance_id, ClusterBus, Envelope, SubscriberHandler};
 use redis::{Client, Commands, RedisError};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -35,54 +34,43 @@ const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The same for at-most-once envelopes, which are dropped on a failure.
 const BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// A connection whose reads and writes fail after `timeout`, so a Redis
-/// that accepts the connection and stops answering cannot hang a publisher.
+/// A connection whose every step, the setup included, fails after
+/// `timeout`, so a Redis that takes the connection and stops answering
+/// cannot hang a caller. redis-rs runs its setup commands (AUTH, SELECT)
+/// before a read timeout can be set: the connection is opened with no
+/// password and no database (with `disable-client-setinfo` the setup then
+/// sends nothing), the timeouts are set, and AUTH and SELECT are sent here.
+/// The connection speaks RESP2.
 fn connect_with_timeouts(
     client: &Client,
     timeout: Duration,
 ) -> Result<redis::Connection, RedisError> {
-    let conn = client.get_connection_with_timeout(timeout)?;
+    let info = client.get_connection_info();
+    let bare = redis::ConnectionInfo {
+        addr: info.addr.clone(),
+        redis: redis::RedisConnectionInfo {
+            db: 0,
+            username: None,
+            password: None,
+            protocol: redis::ProtocolVersion::RESP2,
+        },
+    };
+    let mut conn = Client::open(bare)?.get_connection_with_timeout(timeout)?;
     conn.set_read_timeout(Some(timeout))?;
     conn.set_write_timeout(Some(timeout))?;
+    if let Some(password) = &info.redis.password {
+        let mut auth = redis::cmd("AUTH");
+        if let Some(user) = &info.redis.username {
+            auth.arg(user);
+        }
+        auth.arg(password).query::<()>(&mut conn)?;
+    }
+    if info.redis.db != 0 {
+        redis::cmd("SELECT")
+            .arg(info.redis.db)
+            .query::<()>(&mut conn)?;
+    }
     Ok(conn)
-}
-
-/// [`connect_with_timeouts`] with the whole setup bounded. redis-rs runs
-/// the setup commands (AUTH, SELECT) before a read timeout can be set, so
-/// a Redis that takes the connection and never answers would hang the
-/// caller: the connect runs on a helper thread, and one that does not end
-/// within twice `timeout` is left behind (it ends when Redis answers or
-/// drops the socket). While one is left behind, `stuck` stays set and no
-/// other starts, so a silent Redis cannot pile up threads.
-fn connect_bounded(
-    client: &Client,
-    timeout: Duration,
-    stuck: &Arc<AtomicBool>,
-) -> Result<redis::Connection, String> {
-    if stuck.load(Ordering::Acquire) {
-        return Err("an earlier connection to redis is still waiting for an answer".into());
-    }
-    let (tx, rx) = std::sync::mpsc::channel();
-    let (c, flag) = (client.clone(), Arc::clone(stuck));
-    flag.store(true, Ordering::Release);
-    thread::Builder::new()
-        .name("pylon-cluster-redis-connect".into())
-        .spawn(move || {
-            let result = connect_with_timeouts(&c, timeout);
-            flag.store(false, Ordering::Release);
-            let _ = tx.send(result);
-        })
-        .map_err(|e| {
-            stuck.store(false, Ordering::Release);
-            format!("spawn redis connect: {e}")
-        })?;
-    match rx.recv_timeout(timeout * 2) {
-        Ok(result) => result.map_err(|e| e.to_string()),
-        Err(_) => Err(format!(
-            "redis did not answer the connection setup within {:?}",
-            timeout * 2
-        )),
-    }
 }
 
 pub struct RedisBus {
@@ -94,8 +82,6 @@ pub struct RedisBus {
     /// is bounded by publish rate; pylon emits ≤O(mutations/sec) which
     /// is two orders of magnitude below the mutex's ceiling.
     publish_conn: Mutex<redis::Connection>,
-    /// Set while a publish reconnect waits on a Redis that does not answer.
-    publish_stuck: Arc<AtomicBool>,
     /// At-most-once envelopes (messages between shards), on a connection
     /// of their own, apart from committed changes.
     best_effort: BestEffort,
@@ -123,18 +109,19 @@ impl RedisBus {
             .map(|n| format!("{n}:cluster:bus"))
             .unwrap_or_else(|| DEFAULT_CHANNEL.to_string());
         let client = Client::open(url).map_err(|e| format!("redis Client::open: {e}"))?;
-        let publish_stuck = Arc::new(AtomicBool::new(false));
-        let publish_conn = connect_bounded(&client, PUBLISH_TIMEOUT, &publish_stuck)
+        let publish_conn = connect_with_timeouts(&client, PUBLISH_TIMEOUT)
             .map_err(|e| format!("redis publish connect: {e}"))?;
         let best_effort = {
             let client = client.clone();
             let channel = channel.clone();
             let mut conn: Option<redis::Connection> = None;
-            let stuck = Arc::new(AtomicBool::new(false));
             BestEffort::spawn("pylon-cluster-redis-best-effort", move |envelope| {
                 let body = serde_json::to_string(envelope).map_err(|e| e.to_string())?;
                 if conn.is_none() {
-                    conn = Some(connect_bounded(&client, BEST_EFFORT_TIMEOUT, &stuck)?);
+                    conn = Some(
+                        connect_with_timeouts(&client, BEST_EFFORT_TIMEOUT)
+                            .map_err(|e| e.to_string())?,
+                    );
                 }
                 let c = conn.as_mut().expect("connected above");
                 // Once: a PUBLISH whose reply was lost may have been
@@ -170,7 +157,6 @@ impl RedisBus {
             channel,
             instance_id,
             publish_conn: Mutex::new(publish_conn),
-            publish_stuck,
             best_effort,
             handlers,
         })
@@ -190,16 +176,12 @@ impl RedisBus {
             "[cluster] redis publish failed ({}); reconnecting + retrying",
             first.as_ref().unwrap_err()
         );
-        match connect_bounded(&self.client, PUBLISH_TIMEOUT, &self.publish_stuck) {
+        match connect_with_timeouts(&self.client, PUBLISH_TIMEOUT) {
             Ok(fresh) => {
                 *guard = fresh;
                 guard.publish(&self.channel, payload)
             }
-            Err(e) => Err(RedisError::from((
-                redis::ErrorKind::IoError,
-                "redis reconnect",
-                e,
-            ))),
+            Err(e) => Err(e),
         }
     }
 }
@@ -245,7 +227,7 @@ fn run_subscriber_loop(
     let mut backoff_secs: u64 = 1;
     loop {
         match Client::open(url) {
-            Ok(client) => match client.get_connection() {
+            Ok(client) => match connect_with_timeouts(&client, PUBLISH_TIMEOUT) {
                 Ok(conn) => {
                     backoff_secs = 1;
                     if let Err(e) = run_one_subscription(conn, channel, self_instance_id, &handlers)
@@ -278,6 +260,8 @@ fn run_one_subscription(
     // happens on connection error; the outer loop reconnects.
     let mut pubsub = conn.as_pubsub();
     pubsub.subscribe(channel)?;
+    // Subscribed: it waits for messages for as long as it takes.
+    pubsub.set_read_timeout(None)?;
     info!("[cluster] redis subscriber listening on channel \"{channel}\"");
     loop {
         let msg = pubsub.get_message()?;
@@ -413,11 +397,10 @@ mod tests {
     }
 
     /// A server that takes the connection and never answers: the connect
-    /// fails within its bound, and a second one does not start while the
-    /// first is stuck.
+    /// (with a password, so AUTH waits for an answer) fails within its
+    /// timeout, every time.
     #[test]
     fn a_silent_redis_cannot_hang_a_connect() {
-        use std::sync::atomic::AtomicBool;
         let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = silent.local_addr().unwrap().port();
         let held: Arc<Mutex<Vec<std::net::TcpStream>>> = Arc::default();
@@ -429,22 +412,22 @@ mod tests {
                 }
             });
         }
-        // A password: the setup sends AUTH and waits for its answer.
-        let client = Client::open(format!("redis://:secret@127.0.0.1:{port}/0")).unwrap();
-        let stuck = Arc::new(AtomicBool::new(false));
-        let started = std::time::Instant::now();
-        let Err(err) = connect_bounded(&client, Duration::from_millis(200), &stuck) else {
-            panic!("connected to a server that never answers");
-        };
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            started.elapsed()
-        );
-        assert!(err.contains("did not answer"), "{err}");
-        let Err(again) = connect_bounded(&client, Duration::from_millis(200), &stuck) else {
-            panic!("connected to a server that never answers");
-        };
-        assert!(again.contains("still waiting"), "{again}");
+        for url in [
+            format!("redis://:secret@127.0.0.1:{port}/0"),
+            format!("redis://127.0.0.1:{port}/3"),
+            format!("redis://:secret@127.0.0.1:{port}/0"),
+        ] {
+            let client = Client::open(url).unwrap();
+            let started = std::time::Instant::now();
+            assert!(connect_with_timeouts(&client, Duration::from_millis(200)).is_err());
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+        }
+        // No password and no database: nothing waits for an answer.
+        let client = Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        assert!(connect_with_timeouts(&client, Duration::from_millis(200)).is_ok());
     }
 }

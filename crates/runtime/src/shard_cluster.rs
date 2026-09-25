@@ -258,7 +258,8 @@ impl PgShardDirectory {
                 Ok(tx
                     .query_one(
                         "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                        WHERE table_name = $1 AND column_name = $2)",
+                                        WHERE table_schema = current_schema()
+                                          AND table_name = $1 AND column_name = $2)",
                         &[&table, &col],
                     )?
                     .get(0))
@@ -346,7 +347,27 @@ impl PgShardDirectory {
             // Insert order: a move out of a shard is written after the move
             // in that brought the player there, whatever the clocks say.
             if !column(&mut tx, "_pylon_shard_transfers", "seq")? {
-                tx.batch_execute("ALTER TABLE _pylon_shard_transfers ADD COLUMN seq BIGSERIAL")?;
+                // Existing rows are numbered by created_at (a serial column
+                // would number them in scan order, which updates shuffle);
+                // then a sequence numbers new rows. One transaction: the
+                // ALTER locks the table until the commit, so no row goes in
+                // without a number.
+                tx.batch_execute(
+                    "ALTER TABLE _pylon_shard_transfers ADD COLUMN seq BIGINT;
+                     UPDATE _pylon_shard_transfers t SET seq = o.n
+                       FROM (SELECT transfer_id,
+                                    row_number() OVER (ORDER BY created_at, transfer_id) AS n
+                             FROM _pylon_shard_transfers) o
+                      WHERE t.transfer_id = o.transfer_id;
+                     CREATE SEQUENCE _pylon_shard_transfers_seq
+                       OWNED BY _pylon_shard_transfers.seq;
+                     SELECT setval('_pylon_shard_transfers_seq',
+                                   COALESCE((SELECT max(seq) FROM _pylon_shard_transfers), 0) + 1,
+                                   false);
+                     ALTER TABLE _pylon_shard_transfers
+                       ALTER COLUMN seq SET DEFAULT nextval('_pylon_shard_transfers_seq'),
+                       ALTER COLUMN seq SET NOT NULL;",
+                )?;
             }
             if !exists(&mut tx, "_pylon_shard_transfers_age_idx")? {
                 tx.batch_execute(
@@ -1510,6 +1531,83 @@ pub(crate) mod tests {
             failed: None,
             epoch: 1,
         }
+    }
+
+    /// A table from before the insert sequence: its rows are numbered by
+    /// created_at, not in scan order, and new rows follow them.
+    #[test]
+    fn the_insert_sequence_numbers_old_rows_by_time() {
+        let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let schema = format!("mig_{}", pylon_cluster::new_instance_id().replace('-', "_"));
+        let admin = PgPool::connect(&url, 1, Duration::from_secs(5)).unwrap();
+        admin
+            .with_client(|c| c.batch_execute(&format!("CREATE SCHEMA {schema}")))
+            .unwrap();
+        let sep = if url.contains('?') { '&' } else { '?' };
+        let scoped = format!("{url}{sep}options=-c%20search_path%3D{schema}");
+        let pool = PgPool::connect(&scoped, 2, Duration::from_secs(5)).unwrap();
+        // The table as the last release made it, rows inserted out of time
+        // order and one updated (which moves it in the heap).
+        pool.with_client(|c| {
+            c.batch_execute(
+                "CREATE TABLE _pylon_shard_transfers (
+                    transfer_id TEXT PRIMARY KEY, subscriber TEXT NOT NULL,
+                    from_shard TEXT NOT NULL, to_shard TEXT NOT NULL,
+                    state BYTEA NOT NULL, auth JSONB NOT NULL,
+                    status TEXT NOT NULL, created_at BIGINT NOT NULL,
+                    refused_at BIGINT);
+                 INSERT INTO _pylon_shard_transfers VALUES
+                    ('late', 'p', 'b', 'a', '', '{}', 'out', 300, NULL),
+                    ('early', 'p', 'a', 'b', '', '{}', 'out', 100, NULL),
+                    ('middle', 'q', 'a', 'b', '', '{}', 'out', 200, NULL);
+                 UPDATE _pylon_shard_transfers SET status = 'in' WHERE transfer_id = 'early';",
+            )
+        })
+        .unwrap();
+        let dir = PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+        let order: Vec<String> = pool
+            .with_client(|c| {
+                Ok::<_, postgres::Error>(
+                    c.query(
+                        "SELECT transfer_id FROM _pylon_shard_transfers ORDER BY seq",
+                        &[],
+                    )?
+                    .iter()
+                    .map(|r| r.get(0))
+                    .collect(),
+                )
+            })
+            .unwrap();
+        assert_eq!(order, ["early", "middle", "late"]);
+        // A new row comes after them.
+        pool.with_client(|c| {
+            c.batch_execute(
+                "INSERT INTO _pylon_shard_transfers
+                    (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
+                 VALUES ('new', 'p', 'a', 'c', '', '{}', 'out', 50)",
+            )
+        })
+        .unwrap();
+        let last: String = pool
+            .with_client(|c| {
+                Ok::<_, postgres::Error>(
+                    c.query_one(
+                        "SELECT transfer_id FROM _pylon_shard_transfers ORDER BY seq DESC LIMIT 1",
+                        &[],
+                    )?
+                    .get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(last, "new");
+        drop(dir);
+        admin
+            .with_client(|c| c.batch_execute(&format!("DROP SCHEMA {schema} CASCADE")))
+            .unwrap();
     }
 
     /// A -> B, then B -> A: A's restart must not send the subscriber to B,

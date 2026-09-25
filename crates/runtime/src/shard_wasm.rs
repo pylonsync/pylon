@@ -2312,6 +2312,15 @@ impl WasmShardHost {
         // removing them from the registry.
         let held: Vec<(String, i64, Arc<Shard<WasmSim>>, bool)> = {
             let _create = self.create_lock.lock().unwrap();
+            // Every held shard stops ticking first, while it is still held:
+            // its last ticks' entity writes are buffered under its lease
+            // (a write from a shard no longer held is not taken).
+            let ids: Vec<String> = c.owned.lock().unwrap().keys().cloned().collect();
+            for id in &ids {
+                if let Some(shard) = self.registry.get(id) {
+                    shard.pause();
+                }
+            }
             let owned: Vec<(String, i64)> = c.owned.lock().unwrap().drain().collect();
             owned
                 .into_iter()
@@ -2983,6 +2992,8 @@ impl WasmShardHost {
         }
         let mut kind_of = self.kind_of.write().unwrap();
         let mut idle = self.idle_since.lock().unwrap();
+        // Held shards that ended: their writes, then their placements.
+        let mut ended: Vec<(String, i64)> = Vec::new();
         for (id, shard) in before
             .iter()
             .filter(|(id, _)| self.registry.get(id).is_none())
@@ -3016,10 +3027,23 @@ impl WasmShardHost {
                 // move out of it still open is finished by its target's
                 // machine once the placement is gone.
                 if let Some(epoch) = held {
-                    if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
-                        tracing::warn!("[shard {id}] could not release its placement: {e}");
-                    }
+                    ended.push((id.clone(), epoch));
                 }
+            }
+        }
+        drop((kind_of, idle));
+        let Some(c) = self.cluster.get() else {
+            return;
+        };
+        // Still under the create lock: a shard created under the same id
+        // (same machine, same lease) cannot lose its placement to this
+        // release.
+        for (id, epoch) in ended {
+            // Its last writes, while the placement still says it is ours
+            // (the flush's fence reads the placement).
+            self.flush_writes(data::Flush::Shard(&id));
+            if let Err(e) = c.dir.release(&id, &c.me.id, epoch) {
+                tracing::warn!("[shard {id}] could not release its placement: {e}");
             }
         }
     }
