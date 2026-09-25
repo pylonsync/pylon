@@ -218,6 +218,48 @@ fn subscribers_with_the_same_view_share_one_encoded_frame() {
 }
 
 #[test]
+fn each_connection_gets_its_own_view_history() {
+    let shard = world(
+        vec![unit(1, 0.0, 0.0, false), unit(2, 5.0, 0.0, false)],
+        false,
+    );
+    // Two connections with one subscriber id: both are told about both units.
+    let first = join(&shard, "u1");
+    let second = join(&shard, "u1");
+    shard.run_tick();
+    assert_eq!(last(&first).0.entered, vec![1, 2]);
+    assert_eq!(last(&second).0.entered, vec![1, 2]);
+
+    // A reconnect starts from an empty view, so it is told again.
+    shard.remove_subscriber(&SubscriberId::new("u1"));
+    let again = join(&shard, "u1");
+    shard.run_tick();
+    assert_eq!(last(&again).0.entered, vec![1, 2]);
+}
+
+#[test]
+fn closing_one_connection_keeps_another_with_the_same_id() {
+    let shard = world(vec![unit(1, 0.0, 0.0, false)], false);
+    let a = join(&shard, "u1");
+    let b = join(&shard, "u1");
+    assert!(shard.remove_queued_subscriber(&a));
+    assert!(a.is_closed());
+    assert!(!b.is_closed());
+    assert_eq!(shard.subscriber_count(), 1);
+    shard.run_tick();
+    assert_eq!(last(&b).0.ids, vec![1]);
+}
+
+#[test]
+fn stopping_a_shard_closes_every_subscriber_queue() {
+    let shard = world(vec![unit(1, 0.0, 0.0, false)], false);
+    let a = join(&shard, "u1");
+    let b = join(&shard, "u2");
+    shard.stop();
+    assert!(a.is_closed() && b.is_closed());
+}
+
+#[test]
 fn without_an_interest_config_snapshot_for_is_used() {
     struct Plain;
     impl SimState for Plain {

@@ -67,6 +67,9 @@ enum Delivery {
 
 pub struct Subscriber<T> {
     id: SubscriberId,
+    /// Unique per subscription in this process: two connections with one
+    /// subscriber id get different values.
+    instance: u64,
     delivery: Delivery,
     /// When `delta_mode` is on, the previous encoded snapshot bytes are kept
     /// here; subsequent `send()` calls emit only the JSON patch from the
@@ -91,8 +94,10 @@ impl<T: EncodeSnapshot> Subscriber<T> {
     }
 
     fn build(id: SubscriberId, delivery: Delivery) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             id,
+            instance: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             delivery,
             last_snapshot: Mutex::new(None),
             delta_mode: false,
@@ -110,6 +115,11 @@ impl<T: EncodeSnapshot> Subscriber<T> {
 
     pub fn id(&self) -> &SubscriberId {
         &self.id
+    }
+
+    /// This subscription's process-unique number.
+    pub fn instance(&self) -> u64 {
+        self.instance
     }
 
     /// The outbound queue, for a queued subscriber.

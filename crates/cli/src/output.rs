@@ -113,6 +113,15 @@ pub fn print_error(message: &str) {
     }
 }
 
+/// Print an ad-hoc warning to stderr with optional color.
+pub fn print_warning(message: &str) {
+    if use_color() {
+        eprintln!("{BOLD}{YELLOW}warning{RESET}: {message}");
+    } else {
+        eprintln!("warning: {message}");
+    }
+}
+
 /// Print a serde-serializable value as JSON to stdout.
 pub fn print_json<T: Serialize>(value: &T) {
     match serde_json::to_string(value) {

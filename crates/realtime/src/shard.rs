@@ -384,7 +384,7 @@ pub struct Shard<S: SimState> {
     overrun_ticks: std::sync::atomic::AtomicU64,
     /// Interest management state, when the sim turns it on. Only the tick
     /// (under the state lock) touches it.
-    interest: Mutex<Option<InterestManager>>,
+    interest: Mutex<Option<InterestManager<u64>>>,
     entity_scratch: Mutex<Vec<EntityPos>>,
 }
 
@@ -483,8 +483,27 @@ impl<S: SimState> Shard<S> {
         self.running.load(Ordering::Acquire)
     }
 
+    /// Stop the shard: no more ticks, and every subscriber's queue closes so
+    /// its transport disconnects and drops the shard.
     pub fn stop(&self) {
+        self.end();
+    }
+
+    fn end(&self) {
         self.running.store(false, Ordering::Release);
+        for sub in self.subscribers.lock().unwrap().iter() {
+            if let Some(q) = sub.queue() {
+                q.close();
+            }
+        }
+    }
+
+    /// After a hook refused, stop the shard if the state reports it is
+    /// finished (a WebAssembly module that trapped in the hook reports so),
+    /// instead of waiting for a tick that an idle event-driven shard may
+    /// never run.
+    fn end_if_finished(&self, state: &S) -> bool {
+        state.is_finished()
     }
 
     pub fn created_at(&self) -> Instant {
@@ -580,9 +599,14 @@ impl<S: SimState> Shard<S> {
         }
         {
             let state = self.state.lock().unwrap();
-            state
-                .authorize_subscribe(sub.id(), auth)
-                .map_err(ShardError::Unauthorized)?;
+            if let Err(reason) = state.authorize_subscribe(sub.id(), auth) {
+                let finished = self.end_if_finished(&state);
+                drop(state);
+                if finished {
+                    self.end();
+                }
+                return Err(ShardError::Unauthorized(reason));
+            }
         }
         self.add_subscriber(sub)
     }
@@ -600,6 +624,34 @@ impl<S: SimState> Shard<S> {
         Ok(queue)
     }
 
+    /// Remove the one subscription that delivers into `queue` (a transport
+    /// removing its own connection). Other connections with the same
+    /// subscriber id stay.
+    pub fn remove_queued_subscriber(&self, queue: &Arc<OutboundQueue>) -> bool {
+        let removed_id = {
+            let mut subs = self.subscribers.lock().unwrap();
+            let idx = subs
+                .iter()
+                .position(|s| s.queue().is_some_and(|q| Arc::ptr_eq(q, queue)));
+            idx.map(|i| subs.remove(i).id().clone())
+        };
+        queue.close();
+        let Some(id) = removed_id else {
+            return false;
+        };
+        let still_connected = self
+            .subscribers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.id() == &id);
+        if !still_connected {
+            self.forget_subscriber(&id);
+        }
+        true
+    }
+
+    /// Remove every subscription with this subscriber id.
     pub fn remove_subscriber(&self, id: &SubscriberId) -> bool {
         let removed = {
             let mut subs = self.subscribers.lock().unwrap();
@@ -618,15 +670,20 @@ impl<S: SimState> Shard<S> {
             before != subs.len()
         };
         if removed {
-            self.acks.lock().unwrap().remove(id);
-            // Keep the entry while inputs from this subscriber are still
-            // queued; the tick removes it once they drain.
-            let mut inputs = self.inputs.lock().unwrap();
-            if inputs.per_subscriber.get(id).is_some_and(|e| e.queued == 0) {
-                inputs.per_subscriber.remove(id);
-            }
+            self.forget_subscriber(id);
         }
         removed
+    }
+
+    /// Drop per-id state once no connection uses the id.
+    fn forget_subscriber(&self, id: &SubscriberId) {
+        self.acks.lock().unwrap().remove(id);
+        // Keep the entry while inputs from this subscriber are still
+        // queued; the tick removes it once they drain.
+        let mut inputs = self.inputs.lock().unwrap();
+        if inputs.per_subscriber.get(id).is_some_and(|e| e.queued == 0) {
+            inputs.per_subscriber.remove(id);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -747,9 +804,14 @@ impl<S: SimState> Shard<S> {
         }
         {
             let state = self.state.lock().unwrap();
-            state
-                .authorize_input(&subscriber_id, auth, &input)
-                .map_err(ShardError::Unauthorized)?;
+            if let Err(reason) = state.authorize_input(&subscriber_id, auth, &input) {
+                let finished = self.end_if_finished(&state);
+                drop(state);
+                if finished {
+                    self.end();
+                }
+                return Err(ShardError::Unauthorized(reason));
+            }
         }
         self.push_input(subscriber_id, input, client_seq)
     }
@@ -795,13 +857,10 @@ impl<S: SimState> Shard<S> {
         state.entities(&mut entities);
         manager.rebuild(&entities);
         drop(entities);
-        if subs.len() < 1024 {
-            manager.retain(|id| subs.iter().any(|s| s.id() == id));
-        } else {
-            let live: std::collections::HashSet<&SubscriberId> =
-                subs.iter().map(|s| s.id()).collect();
-            manager.retain(|id| live.contains(id));
-        }
+        // Views are per subscription: a reconnect or a second connection
+        // with the same id starts from an empty view.
+        let live: std::collections::HashSet<u64> = subs.iter().map(|s| s.instance()).collect();
+        manager.retain(|k| live.contains(k));
 
         let share = state.shares_visible_snapshots();
         let mut shared: Vec<S::Snapshot> = Vec::new();
@@ -809,7 +868,7 @@ impl<S: SimState> Shard<S> {
         let mut out = Vec::with_capacity(subs.len());
         for sub in subs {
             let id = sub.id();
-            let view = manager.update(id, state.interest_area(id), |ids| {
+            let view = manager.update(&sub.instance(), state.interest_area(id), |ids| {
                 state.filter_visible(id, ids)
             });
             if share && !sub.is_delta_mode() {
@@ -954,7 +1013,7 @@ impl<S: SimState> Shard<S> {
         }
 
         if finished {
-            self.running.store(false, Ordering::Release);
+            self.end();
             return;
         }
 
@@ -967,7 +1026,8 @@ impl<S: SimState> Shard<S> {
             if self.config.idle_ticks_before_shutdown > 0
                 && *idle >= self.config.idle_ticks_before_shutdown
             {
-                self.running.store(false, Ordering::Release);
+                drop(idle);
+                self.end();
             }
         }
     }

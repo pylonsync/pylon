@@ -23,8 +23,7 @@
 //! [`SimState::snapshot_visible`]: crate::SimState::snapshot_visible
 
 use std::collections::HashMap;
-
-use crate::subscriber::SubscriberId;
+use std::hash::Hash;
 
 /// A stable entity id, chosen by the simulation.
 pub type EntityId = u64;
@@ -92,13 +91,6 @@ impl SpatialGrid {
         }
     }
 
-    fn cell_of(&self, x: f32, y: f32) -> (i32, i32) {
-        (
-            (x / self.cell_size).floor() as i32,
-            (y / self.cell_size).floor() as i32,
-        )
-    }
-
     /// Replace the grid's contents with `entities`. Entities with a
     /// non-finite position are left out, and of two with one id the first
     /// is kept. The grid holds them sorted by id, so a scan in index order
@@ -122,11 +114,15 @@ impl SpatialGrid {
             );
             self.cells.entry(cell).or_default().push(idx as u32);
         }
-        // Drop cells that stayed empty, so a moving crowd does not leave a
-        // trail of empty vectors behind it.
-        if self.cells.len() > 4 * self.entities.len().max(64) {
-            self.cells.retain(|_, v| !v.is_empty());
-        }
+        // Drop cells that stayed empty, and trim cells whose buffer is far
+        // larger than their contents: a crowd moving cell to cell must not
+        // leave a trail of large, empty buffers behind it.
+        self.cells.retain(|_, v| {
+            if v.capacity() > 64 && v.capacity() > 4 * v.len() {
+                v.shrink_to(v.len() * 2);
+            }
+            !v.is_empty()
+        });
     }
 
     pub fn len(&self) -> usize {
@@ -140,17 +136,22 @@ impl SpatialGrid {
     /// Call `visit` for every entity in a cell the circle at (`x`, `y`)
     /// with radius `r` touches. Entities outside the circle may be visited.
     pub fn for_each_near(&self, x: f32, y: f32, r: f32, mut visit: impl FnMut(&EntityPos)) {
-        self.for_each_index_near(x, y, r, |i| visit(&self.entities[i]));
+        self.for_each_index_near(x as f64, y as f64, r as f64, |i| visit(&self.entities[i]));
     }
 
     /// Like `for_each_near`, with the entity's index (entities are in id
     /// order).
-    fn for_each_index_near(&self, x: f32, y: f32, r: f32, mut visit: impl FnMut(usize)) {
+    ///
+    /// Takes f64 so the bounds do not overflow for large finite f32 inputs.
+    fn for_each_index_near(&self, x: f64, y: f64, r: f64, mut visit: impl FnMut(usize)) {
         if !(x.is_finite() && y.is_finite() && r.is_finite()) || r < 0.0 {
             return;
         }
-        let (x0, y0) = self.cell_of(x - r, y - r);
-        let (x1, y1) = self.cell_of(x + r, y + r);
+        // `as i32` saturates, so bounds far outside the grid clamp.
+        let cell = self.cell_size as f64;
+        let c = |v: f64| (v / cell).floor() as i32;
+        let (x0, y0) = (c(x - r), c(y - r));
+        let (x1, y1) = (c(x + r), c(y + r));
         // A radius far larger than the world would walk millions of empty
         // cells; scan the entities directly instead.
         let span = (x1 as i128 - x0 as i128 + 1) * (y1 as i128 - y0 as i128 + 1);
@@ -180,19 +181,24 @@ fn sanitize_cell(cell_size: f32) -> f32 {
     }
 }
 
-/// Computes each subscriber's [`Visibility`] from a [`SpatialGrid`] and
-/// keeps last tick's views for hysteresis and the entered/left lists.
-#[derive(Debug, Default)]
-pub struct InterestManager {
+/// Computes each view's [`Visibility`] from a [`SpatialGrid`] and keeps
+/// last tick's views for hysteresis and the entered/left lists.
+///
+/// Views are keyed by `K`. A shard keys them by subscription (one per
+/// connection), not by subscriber id: two connections with one id, or a
+/// reconnect, each get their own history, so each sees `entered` for every
+/// entity it has not been told about.
+#[derive(Debug)]
+pub struct InterestManager<K = u64> {
     config: InterestConfig,
     grid: SpatialGrid,
-    views: HashMap<SubscriberId, Visibility>,
+    views: HashMap<K, Visibility>,
     scratch: Vec<EntityId>,
     /// One bit per grid entity: in view this update.
     bits: Vec<u64>,
 }
 
-impl InterestManager {
+impl<K: Hash + Eq + Clone> InterestManager<K> {
     pub fn new(config: InterestConfig) -> Self {
         Self {
             config,
@@ -228,26 +234,36 @@ impl InterestManager {
     /// gets the sorted ids in range and may remove some (stealth, fog).
     pub fn update(
         &mut self,
-        subscriber: &SubscriberId,
+        key: &K,
         area: Option<InterestArea>,
         filter: impl FnOnce(&mut Vec<EntityId>),
     ) -> &Visibility {
-        let margin = self.config.margin.max(0.0);
-        let view = self.views.entry(subscriber.clone()).or_default();
+        let margin = if self.config.margin.is_finite() {
+            self.config.margin.max(0.0) as f64
+        } else {
+            0.0
+        };
+        let view = self.views.entry(key.clone()).or_default();
         let next = &mut self.scratch;
         next.clear();
-        if let Some(area) = area.filter(|a| a.radius.is_finite() && a.radius >= 0.0) {
-            let r2 = area.radius * area.radius;
-            let keep = area.radius + margin;
+        let area = area.filter(|a| {
+            a.x.is_finite() && a.y.is_finite() && a.radius.is_finite() && a.radius >= 0.0
+        });
+        if let Some(area) = area {
+            // f64: squares of large finite f32 values overflow f32 to
+            // infinity, which would admit entities at any distance.
+            let (ax, ay, radius) = (area.x as f64, area.y as f64, area.radius as f64);
+            let r2 = radius * radius;
+            let keep = radius + margin;
             let keep2 = keep * keep;
             let prev = &view.visible;
             let entities = &self.grid.entities;
             let bits = &mut self.bits;
             bits.clear();
             bits.resize(entities.len().div_ceil(64), 0);
-            self.grid.for_each_index_near(area.x, area.y, keep, |i| {
+            self.grid.for_each_index_near(ax, ay, keep, |i| {
                 let e = &entities[i];
-                let (dx, dy) = (e.x - area.x, e.y - area.y);
+                let (dx, dy) = (e.x as f64 - ax, e.y as f64 - ay);
                 let d2 = dx * dx + dy * dy;
                 if d2 <= r2 || (d2 <= keep2 && prev.binary_search(&e.id).is_ok()) {
                     bits[i / 64] |= 1 << (i % 64);
@@ -276,14 +292,20 @@ impl InterestManager {
         view
     }
 
-    /// The view computed by the last `update` for this subscriber.
-    pub fn view(&self, subscriber: &SubscriberId) -> Option<&Visibility> {
-        self.views.get(subscriber)
+    /// The view computed by the last `update` for this key.
+    pub fn view(&self, key: &K) -> Option<&Visibility> {
+        self.views.get(key)
     }
 
-    /// Drop views of subscribers not in `keep` (they disconnected).
-    pub fn retain(&mut self, mut keep: impl FnMut(&SubscriberId) -> bool) {
-        self.views.retain(|id, _| keep(id));
+    /// Drop views whose key `keep` rejects (the connection closed).
+    pub fn retain(&mut self, mut keep: impl FnMut(&K) -> bool) {
+        self.views.retain(|k, _| keep(k));
+    }
+}
+
+impl<K: Hash + Eq + Clone> Default for InterestManager<K> {
+    fn default() -> Self {
+        Self::new(InterestConfig::default())
     }
 }
 
@@ -325,8 +347,8 @@ mod tests {
         EntityPos { id, x, y }
     }
 
-    fn sid(s: &str) -> SubscriberId {
-        SubscriberId::new(s)
+    fn sid(s: &str) -> String {
+        s.to_string()
     }
 
     fn area(x: f32, y: f32, radius: f32) -> Option<InterestArea> {
@@ -335,7 +357,7 @@ mod tests {
 
     #[test]
     fn sees_entities_within_the_radius_across_cells() {
-        let mut m = InterestManager::new(InterestConfig {
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig {
             cell_size: 10.0,
             margin: 0.0,
         });
@@ -354,7 +376,7 @@ mod tests {
 
     #[test]
     fn hysteresis_keeps_an_entity_until_it_passes_the_margin() {
-        let mut m = InterestManager::new(InterestConfig {
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig {
             cell_size: 10.0,
             margin: 2.0,
         });
@@ -381,7 +403,7 @@ mod tests {
 
     #[test]
     fn the_filter_hides_an_entity_in_range() {
-        let mut m = InterestManager::new(InterestConfig::default());
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig::default());
         m.rebuild(&[e(1, 1.0, 1.0), e(2, 2.0, 2.0)]);
         let v = m.update(&sid("a"), area(0.0, 0.0, 50.0), |ids| {
             ids.retain(|id| *id != 2)
@@ -394,7 +416,7 @@ mod tests {
 
     #[test]
     fn no_area_sees_nothing_and_despawned_entities_leave() {
-        let mut m = InterestManager::new(InterestConfig::default());
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig::default());
         let me = sid("a");
         m.rebuild(&[e(1, 1.0, 1.0)]);
         assert_eq!(m.update(&me, area(0.0, 0.0, 10.0), |_| {}).visible, vec![1]);
@@ -406,7 +428,7 @@ mod tests {
 
     #[test]
     fn bad_positions_and_huge_radii_do_not_panic_or_hang() {
-        let mut m = InterestManager::new(InterestConfig {
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig {
             cell_size: 1.0,
             margin: 0.0,
         });
@@ -428,6 +450,38 @@ mod tests {
             .update(&sid("a"), area(0.0, 0.0, -1.0), |_| {})
             .visible
             .is_empty());
+    }
+
+    #[test]
+    fn huge_finite_coordinates_do_not_admit_distant_entities() {
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig {
+            cell_size: 10.0,
+            margin: 0.0,
+        });
+        m.rebuild(&[e(1, 2.0e20, 0.0), e(2, 0.5e20, 0.0)]);
+        let v = m.update(&sid("a"), area(0.0, 0.0, 1.0e20), |_| {});
+        assert_eq!(v.visible, vec![2]);
+        // radius + margin past f32::MAX still finds entities in range.
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig {
+            cell_size: 10.0,
+            margin: f32::MAX,
+        });
+        m.rebuild(&[e(1, 1.0, 1.0)]);
+        assert_eq!(
+            m.update(&sid("a"), area(0.0, 0.0, f32::MAX), |_| {})
+                .visible,
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn a_crowd_moving_across_cells_leaves_no_empty_buffers() {
+        let mut g = SpatialGrid::new(1.0);
+        for step in 0..50 {
+            let crowd: Vec<EntityPos> = (0..500).map(|i| e(i, step as f32 * 3.0, 0.5)).collect();
+            g.rebuild(&crowd);
+        }
+        assert_eq!(g.cells.len(), 1);
     }
 
     #[test]

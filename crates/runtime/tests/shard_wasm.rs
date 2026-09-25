@@ -360,9 +360,11 @@ fn a_panic_stops_the_shard_with_its_message() {
     assert!(!s.is_running());
     let failure = s.with_state(|sim| sim.failure()).unwrap();
     assert!(failure.contains("asked to panic"), "{failure}");
-    // Subscribers got the last good snapshot, not an empty frame.
+    // The last frame is null, never a stale snapshot that might hold what
+    // a per-subscriber snapshot hid; then the connection closes.
     let (snap, _, _) = drain(&q, SnapshotFormat::Json);
-    assert_eq!(snap["players"], json!([{ "id": "u1", "x": 1, "y": 1 }]));
+    assert_eq!(snap, Value::Null);
+    assert!(q.is_closed());
 }
 
 #[test]
@@ -480,6 +482,70 @@ fn memory_past_the_cap_stops_the_shard() {
         failure.contains("trapped") && failure.contains("memory"),
         "{failure}"
     );
+}
+
+#[test]
+fn a_trap_in_an_authorize_hook_stops_an_idle_event_driven_shard() {
+    let k = WasmShardKind::compile(
+        "arena",
+        arena_wasm(),
+        ShardConfig {
+            tick_rate_hz: 0,
+            idle_ticks_before_shutdown: 0,
+            snapshot_format: SnapshotFormat::Json,
+            ..Default::default()
+        },
+        WasmLimits::default(),
+    )
+    .unwrap();
+    let s = Shard::new(
+        "ev",
+        k.instantiate("ev", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    let q = join(&s, "u1");
+    let rejection = send(&s, "u1", json!({ "input": "trap_auth" })).unwrap_err();
+    assert_eq!(rejection.code, "unauthorized");
+    // No tick ran, and none would: the shard stops at once and its
+    // subscribers' queues close so their transports disconnect.
+    assert!(!s.is_running());
+    assert!(q.is_closed());
+    assert!(s
+        .with_state(|sim| sim.failure())
+        .unwrap()
+        .contains("authorize_input"));
+}
+
+#[test]
+fn a_failed_subscriber_snapshot_never_falls_back_to_the_broadcast() {
+    // Fog: each subscriber sees only itself. The broadcast (all players) is
+    // cached once; then the module panics.
+    let s = shard(SnapshotFormat::Json, json!({ "fog": true }));
+    let q1 = join(&s, "u1");
+    join(&s, "u2");
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "move": { "dx": 1, "dy": 1 } } }),
+    )
+    .unwrap();
+    send(
+        &s,
+        "u2",
+        json!({ "input": { "move": { "dx": 2, "dy": 2 } } }),
+    )
+    .unwrap();
+    s.run_tick();
+    let all = s.snapshot(); // the broadcast, with both players
+    assert!(String::from_utf8_lossy(all.bytes()).contains("u2"));
+    while q1.pop().is_some() {}
+    send(&s, "u1", json!({ "input": "panic" })).unwrap();
+    s.run_tick();
+    let mut frames = Vec::new();
+    while let Some(f) = q1.pop() {
+        frames.push(String::from_utf8_lossy(&f.bytes).into_owned());
+    }
+    assert!(frames.iter().all(|f| !f.contains("u2")), "{frames:?}");
 }
 
 #[test]

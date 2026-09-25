@@ -53,12 +53,19 @@ struct Snapshot {
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Input {
-    Move { dx: i64, dy: i64 },
+    Move {
+        dx: i64,
+        dy: i64,
+    },
     Finish,
     Panic,
     Spin,
     Grow,
-    Burn { iters: u64 },
+    Burn {
+        iters: u64,
+    },
+    /// Panics in authorize_input.
+    TrapAuth,
 }
 
 struct Arena {
@@ -118,6 +125,7 @@ impl Shard for Arena {
                     n = std::hint::black_box(n.wrapping_add(1));
                 }
             }
+            Input::TrapAuth => {}
             Input::Burn { iters } => {
                 let mut n: u64 = 0;
                 for i in 0..iters {
@@ -200,12 +208,10 @@ impl Shard for Arena {
         self.finished
     }
 
-    fn authorize_input(
-        &self,
-        _subscriber: &str,
-        auth: &Auth,
-        _input: &Input,
-    ) -> Result<(), String> {
+    fn authorize_input(&self, _subscriber: &str, auth: &Auth, input: &Input) -> Result<(), String> {
+        if matches!(input, Input::TrapAuth) {
+            panic!("asked to trap in authorize_input");
+        }
         if auth.claim("role").and_then(|r| r.as_str()) == Some("spectator") {
             return Err("spectators cannot send inputs".into());
         }

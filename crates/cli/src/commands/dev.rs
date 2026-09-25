@@ -908,7 +908,7 @@ fn build_studio_artefacts(entry_file: &str, json_mode: bool) {
 /// contains either file (so monorepo roots win over per-app dirs that
 /// happen to have nothing). Process env always wins; among files,
 /// `.env.local` overrides `.env`.
-fn load_env_files() -> Vec<PathBuf> {
+pub(crate) fn load_env_files() -> Vec<PathBuf> {
     let mut loaded = Vec::new();
     let Ok(cwd) = std::env::current_dir() else {
         return loaded;
@@ -1290,6 +1290,23 @@ fn is_css_only(changed: &HashSet<PathBuf>) -> bool {
 
 /// Insert every watched source path carried by an fs event into `out`.
 /// `base` is the canonical watch root — exclusions are judged relative to it.
+/// Paths whose modification time changed, appeared, or disappeared
+/// between two `ShardWatch::mtimes` listings.
+fn changed_paths(
+    last: &[(PathBuf, Option<SystemTime>)],
+    current: &[(PathBuf, Option<SystemTime>)],
+) -> Vec<PathBuf> {
+    current
+        .iter()
+        .filter(|entry| !last.contains(entry))
+        .chain(
+            last.iter()
+                .filter(|(p, _)| !current.iter().any(|(q, _)| q == p)),
+        )
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
 /// Shard files a batch of events touched.
 #[derive(Default)]
 struct ShardChange {
@@ -1374,11 +1391,7 @@ fn run_poll_watch(
         let current_shard_mtimes = shard_watch.mtimes();
         if current_shard_mtimes != last_shard_mtimes {
             let mut shard_change = ShardChange::default();
-            let moved: Vec<PathBuf> = current_shard_mtimes
-                .iter()
-                .filter(|entry| !last_shard_mtimes.contains(entry))
-                .map(|(p, _)| p.clone())
-                .collect();
+            let moved = changed_paths(&last_shard_mtimes, &current_shard_mtimes);
             shard_change.note(&moved, shard_watch);
             last_shard_mtimes = current_shard_mtimes;
             shard_change.apply(entry_file, watch_dir, json_mode);
@@ -1425,6 +1438,30 @@ fn run_poll_watch(
 mod tests {
     use super::resolve_watch_dir;
     use std::path::PathBuf;
+
+    #[test]
+    fn changed_paths_include_deleted_files() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let t = |s| Some(UNIX_EPOCH + Duration::from_secs(s));
+        let last = vec![
+            (PathBuf::from("a.rs"), t(1)),
+            (PathBuf::from("gone.rs"), t(1)),
+        ];
+        let current = vec![
+            (PathBuf::from("a.rs"), t(2)),
+            (PathBuf::from("new.rs"), t(1)),
+        ];
+        let mut changed = super::changed_paths(&last, &current);
+        changed.sort();
+        assert_eq!(
+            changed,
+            vec![
+                PathBuf::from("a.rs"),
+                PathBuf::from("gone.rs"),
+                PathBuf::from("new.rs")
+            ]
+        );
+    }
 
     #[test]
     fn resolve_watch_dir_handles_bare_relative_entry() {

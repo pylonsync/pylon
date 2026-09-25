@@ -699,32 +699,34 @@ fn prepare_shard_modules(app_dir: &Path, json_mode: bool) -> Result<Vec<PathBuf>
     Ok(modules)
 }
 
-/// The app's manifest for deploy purposes, or None when neither source is
-/// available.
+/// The app's manifest for deploy purposes. Evaluates app.ts without
+/// installing packages (dependencies may live in a workspace root, not the
+/// app directory), then falls back to pylon.manifest.json. When neither
+/// works, says so: gitignored shard modules cannot be found then.
 fn deploy_manifest(app_dir: &Path, json_mode: bool) -> Option<pylon_kernel::AppManifest> {
     let entry = app_dir.join("app.ts");
-    if app_dir.join("node_modules").is_dir() {
-        match crate::bun::eval_manifest(&entry.to_string_lossy()) {
-            Ok(json) => match serde_json::from_str(&json) {
-                Ok(m) => return Some(m),
-                Err(e) => {
-                    if !json_mode {
-                        println!("  could not parse the manifest from app.ts ({e}); using pylon.manifest.json");
-                    }
-                }
-            },
-            Err(d) => {
-                if !json_mode {
-                    println!(
-                        "  could not evaluate app.ts ({}); using pylon.manifest.json",
-                        d.message.lines().next().unwrap_or("")
-                    );
-                }
+    let eval_error = match crate::bun::eval_manifest(&entry.to_string_lossy()) {
+        Ok(json) => match serde_json::from_str(&json) {
+            Ok(m) => return Some(m),
+            Err(e) => format!("the manifest from app.ts does not parse: {e}"),
+        },
+        Err(d) => d.message.lines().next().unwrap_or("").to_string(),
+    };
+    let path = app_dir.join("pylon.manifest.json");
+    match crate::manifest::load_manifest(&path.to_string_lossy()) {
+        Ok(m) => {
+            if !json_mode {
+                println!("  could not evaluate app.ts ({eval_error}); using pylon.manifest.json for shard modules");
             }
+            Some(m)
+        }
+        Err(_) => {
+            output::print_warning(&format!(
+                "could not evaluate app.ts ({eval_error}) and there is no pylon.manifest.json: shard modules that .gitignore excludes will not be uploaded"
+            ));
+            None
         }
     }
-    let path = app_dir.join("pylon.manifest.json");
-    crate::manifest::load_manifest(&path.to_string_lossy()).ok()
 }
 
 // ---------------------------------------------------------------------------

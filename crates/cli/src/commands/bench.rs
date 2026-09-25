@@ -152,8 +152,16 @@ impl BenchConfig {
             i += 2;
         }
         let join = join.ok_or("pass --join <function> or --shard <id>")?;
-        if bots == 0 {
-            return Err("--bots must be at least 1".into());
+        if bots == 0 || bots > 100_000 {
+            return Err("--bots must be from 1 to 100000".into());
+        }
+        // A week is far past any load test and far inside Duration's range.
+        const MAX_SECS: f64 = 7.0 * 24.0 * 3600.0;
+        if duration > MAX_SECS || ramp > MAX_SECS {
+            return Err("--duration and --ramp must be at most a week".into());
+        }
+        if rate > 1000.0 {
+            return Err("--rate must be at most 1000 inputs per second".into());
         }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err(format!(
@@ -243,6 +251,9 @@ pub struct Histogram {
     pub buckets: BTreeMap<u32, u64>,
     pub count: u64,
     pub max: u64,
+    /// The exact smallest value recorded (the buckets only know ranges).
+    #[serde(default)]
+    pub min: Option<u64>,
 }
 
 impl Histogram {
@@ -256,38 +267,74 @@ impl Histogram {
         ((shift + 1) * SUB_BUCKETS + sub) as u32
     }
 
+    /// The highest bucket index a u64 falls in.
+    fn max_bucket() -> u32 {
+        Self::bucket_of(u64::MAX)
+    }
+
     /// The midpoint of a bucket.
     fn mid_of(bucket: u32) -> u64 {
         let low = match bucket {
             0 => 0,
-            b => Self::value_of(b - 1) + 1,
+            b => Self::value_of(b - 1) as u128 + 1,
         };
-        (low + Self::value_of(bucket)) / 2
+        ((low + Self::value_of(bucket) as u128) / 2) as u64
     }
 
-    /// The upper edge of a bucket.
+    /// The upper edge of a bucket. Indexes past the last u64 bucket clamp.
     fn value_of(bucket: u32) -> u64 {
-        let b = bucket as u64;
+        let b = bucket.min(Self::max_bucket()) as u64;
         if b < SUB_BUCKETS {
             return b;
         }
         let shift = b / SUB_BUCKETS - 1;
         let sub = b % SUB_BUCKETS;
-        ((SUB_BUCKETS + sub + 1) << shift) - 1
+        let edge = ((SUB_BUCKETS + sub + 1) as u128) << shift;
+        (edge - 1).min(u64::MAX as u128) as u64
+    }
+
+    /// Reject a histogram read from a file that could not come from
+    /// `record`: bucket indexes out of range, or counts that do not add up.
+    pub fn validate(&self) -> Result<(), String> {
+        let mut total: u64 = 0;
+        for (b, c) in &self.buckets {
+            if *b > Self::max_bucket() {
+                return Err(format!("bucket {b} is out of range"));
+            }
+            total = total.checked_add(*c).ok_or("bucket counts overflow")?;
+        }
+        if total != self.count {
+            return Err(format!(
+                "buckets hold {total} values, count says {}",
+                self.count
+            ));
+        }
+        if let Some(min) = self.min {
+            if self.count == 0 || min > self.max {
+                return Err("min does not match the recorded values".into());
+            }
+        }
+        Ok(())
     }
 
     pub fn record(&mut self, v: u64) {
         *self.buckets.entry(Self::bucket_of(v)).or_insert(0) += 1;
         self.count += 1;
         self.max = self.max.max(v);
+        self.min = Some(self.min.map_or(v, |m| m.min(v)));
     }
 
     pub fn merge(&mut self, other: &Histogram) {
         for (b, c) in &other.buckets {
-            *self.buckets.entry(*b).or_insert(0) += c;
+            let slot = self.buckets.entry(*b).or_insert(0);
+            *slot = slot.saturating_add(*c);
         }
-        self.count += other.count;
+        self.count = self.count.saturating_add(other.count);
         self.max = self.max.max(other.max);
+        self.min = match (self.min, other.min) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
     }
 
     /// The value at quantile `q` (0..=1), within the bucket precision.
@@ -298,12 +345,18 @@ impl Histogram {
         if q >= 1.0 {
             return Some(self.max);
         }
+        if q <= 0.0 {
+            if let Some(min) = self.min {
+                return Some(min);
+            }
+        }
         let rank = ((q.clamp(0.0, 1.0) * self.count as f64).ceil() as u64).max(1);
         let mut seen = 0;
         for (b, c) in &self.buckets {
             seen += c;
             if seen >= rank {
-                return Some(Self::mid_of(*b).min(self.max));
+                let floor = self.min.unwrap_or(0).min(self.max);
+                return Some(Self::mid_of(*b).clamp(floor, self.max));
             }
         }
         Some(self.max)
@@ -327,6 +380,13 @@ pub struct Report {
     pub frames: u64,
     pub inputs_sent: u64,
     pub inputs_acked: u64,
+    /// Bots that got at least one of their inputs acked.
+    #[serde(default)]
+    pub bots_acked: u64,
+    /// Inputs dropped from the ack wait list because it hit its cap (the
+    /// server read them but never acked them).
+    #[serde(default)]
+    pub inputs_unacked_dropped: u64,
     pub rejections: BTreeMap<String, u64>,
     pub decode_errors: u64,
     /// Snapshot interval seen by a bot, microseconds.
@@ -361,6 +421,8 @@ impl Report {
         self.frames += other.frames;
         self.inputs_sent += other.inputs_sent;
         self.inputs_acked += other.inputs_acked;
+        self.bots_acked += other.bots_acked;
+        self.inputs_unacked_dropped += other.inputs_unacked_dropped;
         for (k, v) in &other.rejections {
             *self.rejections.entry(k.clone()).or_insert(0) += v;
         }
@@ -382,6 +444,8 @@ impl Report {
             "frames": self.frames,
             "inputs_sent": self.inputs_sent,
             "inputs_acked": self.inputs_acked,
+            "bots_acked": self.bots_acked,
+            "inputs_unacked_dropped": self.inputs_unacked_dropped,
             "rejections": self.rejections,
             "decode_errors": self.decode_errors,
             "tick_rate_hz": {
@@ -560,7 +624,11 @@ async fn run_bots(config: Arc<BenchConfig>) -> Report {
         }));
     }
     for t in tasks {
-        let _ = t.await;
+        if let Err(e) = t.await {
+            let mut r = report.lock().unwrap();
+            r.failed += 1;
+            *r.errors.entry(format!("bot task failed: {e}")).or_insert(0) += 1;
+        }
     }
     let report = report.lock().unwrap().clone();
     report
@@ -627,6 +695,7 @@ struct BotStats {
     frames: u64,
     inputs_sent: u64,
     inputs_acked: u64,
+    inputs_unacked_dropped: u64,
     rejections: BTreeMap<String, u64>,
     decode_errors: u64,
     snapshot_interval_us: Histogram,
@@ -642,6 +711,10 @@ impl BotStats {
         r.frames += self.frames;
         r.inputs_sent += self.inputs_sent;
         r.inputs_acked += self.inputs_acked;
+        r.inputs_unacked_dropped += self.inputs_unacked_dropped;
+        if self.inputs_acked > 0 {
+            r.bots_acked += 1;
+        }
         for (k, v) in self.rejections {
             *r.rejections.entry(k).or_insert(0) += v;
         }
@@ -657,6 +730,11 @@ impl BotStats {
     }
 }
 
+/// Inputs a bot keeps waiting for an ack. Past this the oldest is dropped
+/// and counted, so a server that reads inputs and never acks them cannot
+/// grow the bench's memory without bound.
+const MAX_PENDING: usize = 10_000;
+
 async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
     let join = match &config.join {
         JoinMode::Function(f) => {
@@ -666,6 +744,11 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
                 .map_err(|e| format!("join task failed: {e}"))??
         }
         JoinMode::Shard(shard) => {
+            // The key comes from the same env files `pylon dev` loads.
+            static ENV: std::sync::Once = std::sync::Once::new();
+            ENV.call_once(|| {
+                crate::commands::dev::load_env_files();
+            });
             let sid = format!("{}{bot}", config.sid_prefix);
             let ticket = pylon_runtime::shard_tickets::mint(
                 shard,
@@ -752,11 +835,24 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
                 } else {
                     Message::Text(envelope.to_string())
                 };
-                if sink.send(msg).await.is_err() {
-                    stats.dropped = true;
-                    break;
+                // Timestamp before the send: time spent sending into a slow
+                // connection is part of the latency.
+                let sent_at = Instant::now();
+                // A server that stops reading fills the socket; the send
+                // must not outlive the run.
+                match tokio::time::timeout_at(end, sink.send(msg)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        stats.dropped = true;
+                        break;
+                    }
+                    Err(_) => break,
                 }
-                pending.push_back((seq, Instant::now()));
+                if pending.len() >= MAX_PENDING {
+                    pending.pop_front();
+                    stats.inputs_unacked_dropped += 1;
+                }
+                pending.push_back((seq, sent_at));
                 stats.inputs_sent += 1;
             }
             next = stream.next() => {
@@ -792,7 +888,16 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
                     }
                     wire::kind::INPUT_REJECTED => {
                         match decode_payload::<InputRejection>(frame.codec, frame.payload) {
-                            Some(r) => *stats.rejections.entry(r.code).or_insert(0) += 1,
+                            Some(r) => {
+                                // A refused input may never be acked (refused
+                                // before it was queued); stop waiting for it.
+                                if let Some(seq) = r.client_seq {
+                                    if let Some(i) = pending.iter().position(|(s, _)| *s == seq) {
+                                        pending.remove(i);
+                                    }
+                                }
+                                *stats.rejections.entry(r.code).or_insert(0) += 1;
+                            }
                             None => stats.decode_errors += 1,
                         }
                     }
@@ -810,7 +915,7 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
         }
     }
     stats.connected_for = started.elapsed();
-    let _ = sink.send(Message::Close(None)).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), sink.send(Message::Close(None))).await;
     Ok(stats)
 }
 
@@ -882,7 +987,20 @@ fn run_merge(files: &[&str], json_mode: bool) -> ExitCode {
             .map_err(|e| e.to_string())
             .and_then(|s| serde_json::from_str::<Report>(&s).map_err(|e| e.to_string()));
         match parsed {
-            Ok(r) => total.merge(&r),
+            Ok(r) => {
+                for (name, h) in [
+                    ("snapshot_interval_us", &r.snapshot_interval_us),
+                    ("ack_latency_us", &r.ack_latency_us),
+                    ("tick_rate_mhz", &r.tick_rate_mhz),
+                    ("bytes_per_sec", &r.bytes_per_sec),
+                ] {
+                    if let Err(e) = h.validate() {
+                        output::print_error(&format!("{f}: {name}: {e}"));
+                        return ExitCode::Error;
+                    }
+                }
+                total.merge(&r)
+            }
             Err(e) => {
                 output::print_error(&format!("{f}: {e}"));
                 return ExitCode::Error;
@@ -946,6 +1064,52 @@ mod tests {
         }
         a.merge(&b);
         assert_eq!(a, both);
+    }
+
+    #[test]
+    fn min_is_exact_and_extreme_buckets_do_not_overflow() {
+        let mut h = Histogram::default();
+        h.record(19_900);
+        h.record(20_100);
+        assert_eq!(h.quantile(0.0), Some(19_900));
+        let mut big = Histogram::default();
+        big.record(u64::MAX);
+        assert_eq!(big.quantile(0.5), Some(u64::MAX));
+        assert!(Histogram::mid_of(Histogram::max_bucket()) > u64::MAX / 2);
+        assert!(big.validate().is_ok());
+    }
+
+    #[test]
+    fn imported_histograms_are_validated() {
+        let bad_bucket = Histogram {
+            buckets: [(u32::MAX, 1)].into_iter().collect(),
+            count: 1,
+            max: 1,
+            min: Some(1),
+        };
+        assert!(bad_bucket.validate().is_err());
+        let bad_count = Histogram {
+            buckets: [(3, 2)].into_iter().collect(),
+            count: 5,
+            max: 3,
+            min: None,
+        };
+        assert!(bad_count.validate().is_err());
+    }
+
+    #[test]
+    fn out_of_range_arguments_are_refused() {
+        let base = ["--shard", "s", "--rate", "0"];
+        let with = |extra: &[&'static str]| {
+            let mut v: Vec<&str> = base.to_vec();
+            v.extend_from_slice(extra);
+            BenchConfig::parse(&v)
+        };
+        assert!(with(&["--duration", "1e100"]).is_err());
+        assert!(with(&["--ramp", "1e100"]).is_err());
+        assert!(with(&["--bots", "0"]).is_err());
+        let fast = BenchConfig::parse(&["--shard", "s", "--rate", "1e20", "--input", "1"]);
+        assert!(fast.is_err());
     }
 
     #[test]

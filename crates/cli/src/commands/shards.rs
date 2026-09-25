@@ -111,13 +111,21 @@ pub fn build_all(
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
             }
-            std::fs::copy(&module, &dest).map_err(|e| {
-                format!(
-                    "cannot copy {} to {}: {e}",
-                    module.display(),
-                    dest.display()
-                )
-            })?;
+            // `wasm` may name cargo's own output; copying a file onto itself
+            // truncates it on some platforms.
+            let same = match (module.canonicalize(), dest.canonicalize()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            };
+            if !same {
+                std::fs::copy(&module, &dest).map_err(|e| {
+                    format!(
+                        "cannot copy {} to {}: {e}",
+                        module.display(),
+                        dest.display()
+                    )
+                })?;
+            }
             if !json_mode {
                 println!("  ✓ shard module {}", dest.display());
             }

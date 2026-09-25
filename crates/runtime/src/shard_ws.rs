@@ -529,11 +529,10 @@ async fn run_connection(
         }
     };
 
-    // Removing the subscriber closes its queue. A writer that is still in a
+    // Removing this connection's subscription closes its queue. A writer that is still in a
     // send (to a client that stopped reading) is aborted; the socket closes
     // when both halves drop.
-    shard.remove_subscriber(&subscriber_id);
-    queue.close();
+    shard.remove_queued_subscriber(&queue);
     writer.abort();
     read_result
 }

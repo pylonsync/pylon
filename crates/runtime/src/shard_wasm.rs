@@ -609,15 +609,24 @@ impl Inner {
         }
     }
 
-    /// What subscribers get when the module could not produce a snapshot.
+    /// What every subscriber gets when the module could not produce the
+    /// broadcast snapshot: the last broadcast it did produce, which every
+    /// subscriber was allowed to see.
     fn fallback_snapshot(&self) -> RawSnapshot {
-        self.last_good.clone().unwrap_or_else(|| {
-            let null: &[u8] = match self.format {
-                SnapshotFormat::MessagePack => &[0xc0],
-                _ => b"null",
-            };
-            RawSnapshot::new(self.format, null)
-        })
+        self.last_good
+            .clone()
+            .unwrap_or_else(|| self.null_snapshot())
+    }
+
+    /// What one subscriber gets when the module could not produce that
+    /// subscriber's snapshot. Never a broadcast: a per-subscriber snapshot
+    /// may exist to hide entities the broadcast holds.
+    fn null_snapshot(&self) -> RawSnapshot {
+        let null: &[u8] = match self.format {
+            SnapshotFormat::MessagePack => &[0xc0],
+            _ => b"null",
+        };
+        RawSnapshot::new(self.format, null)
     }
 }
 
@@ -702,7 +711,7 @@ impl SimState for WasmSim {
         }
         inner
             .snapshot_for(subscriber_id.as_str())
-            .unwrap_or_else(|_| inner.fallback_snapshot())
+            .unwrap_or_else(|_| inner.null_snapshot())
     }
 
     fn is_finished(&self) -> bool {
@@ -895,7 +904,7 @@ impl SimState for WasmSim {
                 drop(inner);
                 self.snapshot_for(subscriber_id)
             }
-            Err(_) => inner.fallback_snapshot(),
+            Err(_) => inner.null_snapshot(),
         }
     }
 

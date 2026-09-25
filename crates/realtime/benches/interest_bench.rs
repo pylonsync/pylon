@@ -41,7 +41,7 @@ fn run(name: &str, world: f32, radius: f32) {
     let subs: Vec<SubscriberId> = (0..SUBSCRIBERS)
         .map(|i| SubscriberId::new(format!("p{i}")))
         .collect();
-    let mut manager = InterestManager::new(InterestConfig {
+    let mut manager: InterestManager<SubscriberId> = InterestManager::new(InterestConfig {
         cell_size: radius,
         margin: radius * 0.1,
     });

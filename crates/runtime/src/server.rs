@@ -6338,7 +6338,6 @@ fn start_server(
                     // cutting the stream.
                     {
                         let shard_cleanup = Arc::clone(&shard);
-                        let sub_id_cleanup = subscriber_id.clone();
                         std::thread::spawn(move || {
                             'pump: loop {
                                 let chunk = match queue.pop_blocking(std::time::Duration::from_secs(30)) {
@@ -6373,7 +6372,9 @@ fn start_server(
                                     }
                                 }
                             }
-                            shard_cleanup.remove_subscriber(&sub_id_cleanup);
+                            // This connection only: another with the same
+                            // subscriber id keeps its subscription.
+                            shard_cleanup.remove_queued_subscriber(&queue);
                         });
                     }
 

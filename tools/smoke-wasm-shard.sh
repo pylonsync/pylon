@@ -99,7 +99,8 @@ node -e '
 const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
 const fail = (m) => { console.error("::error::" + m + "\n" + JSON.stringify(r, null, 2)); process.exit(1); };
 if (r.connected !== 50) fail(`${r.connected} of 50 bots connected`);
-if (!(r.inputs_acked > 0)) fail("no input was acked");
+if (r.dropped !== 0) fail(`${r.dropped} bots dropped before the end`);
+if (r.bots_acked !== 50) fail(`only ${r.bots_acked} of 50 bots got an ack`);
 if (r.decode_errors !== 0) fail(`${r.decode_errors} frames did not decode`);
 if (!(r.tick_rate_hz.p50 > 15)) fail(`bots saw ${r.tick_rate_hz.p50} Hz`);
 console.log(`  50 bots: ${r.tick_rate_hz.p50} Hz, ack p99 ${r.ack_latency_ms.p99} ms`);

@@ -78,8 +78,12 @@ pub trait DynShard: Send + Sync {
         auth: &ShardAuth,
     ) -> Result<(), ShardError>;
 
-    /// Remove a subscriber (e.g. on disconnect).
+    /// Remove every subscription with this id.
     fn remove_subscriber(&self, id: &SubscriberId) -> bool;
+
+    /// Remove the one subscription behind `queue` (a transport's own
+    /// connection closed). Other connections with the same id stay.
+    fn remove_queued_subscriber(&self, queue: &Arc<OutboundQueue>) -> bool;
 
     /// Stop the shard (no further ticks; tick loop will exit).
     fn stop(&self);
@@ -160,6 +164,10 @@ impl<S: SimState> DynShard for Shard<S> {
 
     fn remove_subscriber(&self, id: &SubscriberId) -> bool {
         Shard::remove_subscriber(self, id)
+    }
+
+    fn remove_queued_subscriber(&self, queue: &Arc<OutboundQueue>) -> bool {
+        Shard::remove_queued_subscriber(self, queue)
     }
 
     fn stop(&self) {
