@@ -801,7 +801,7 @@ pub fn call(to: &str, address: &str, op: &RemoteOp) -> Result<RemoteReply, Strin
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn m(id: &str, capacity: u32, load: u32) -> Machine {
@@ -970,6 +970,11 @@ mod tests {
         );
     }
 
+    /// Held by every test that uses the directory in Postgres: they share
+    /// its tables, and one test's live machines change where another's
+    /// shards are placed.
+    pub(crate) static DIRECTORY_TESTS: Mutex<()> = Mutex::new(());
+
     fn test_dir() -> Option<PgShardDirectory> {
         let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
             eprintln!("skipping: PYLON_TEST_PG_URL not set");
@@ -1002,6 +1007,7 @@ mod tests {
 
     #[test]
     fn the_directory_claims_moves_fences_fails_and_forgets() {
+        let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(dir) = test_dir() else { return };
         // The key is in the directory now, the same for every machine.
         assert!(sign("x", b"y").is_some());
@@ -1094,6 +1100,7 @@ mod tests {
 
     #[test]
     fn a_takeover_waits_for_a_save_in_progress() {
+        let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(dir) = test_dir() else { return };
         let dir = Arc::new(dir);
         let run = pylon_cluster::new_instance_id();
@@ -1153,6 +1160,7 @@ mod tests {
 
     #[test]
     fn concurrent_claims_never_pass_the_kind_limit() {
+        let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(dir) = test_dir() else { return };
         let dir = Arc::new(dir);
         let run = pylon_cluster::new_instance_id();

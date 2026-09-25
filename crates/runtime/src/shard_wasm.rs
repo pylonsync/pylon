@@ -162,6 +162,12 @@ impl LeaseClock {
         at.saturating_duration_since(Self::base()).as_millis() as u64
     }
 
+    /// `at` rounded down to the clock's millisecond: the lease stores its
+    /// end this way, so it and the guests' clock expire at the same instant.
+    fn floor(at: Instant) -> Instant {
+        Self::base() + Duration::from_millis(Self::millis(at))
+    }
+
     /// The lease now ends at `until`, or has ended when None.
     pub fn set(&self, until: Option<Instant>) {
         let ms = until.map_or(0, |u| Self::millis(u).max(1));
@@ -1263,6 +1269,9 @@ struct ClusterState {
     id_conflict: AtomicBool,
     /// Shutdown's final saves are done: the heartbeat stops.
     left: AtomicBool,
+    /// Held for a whole heartbeat, and by shutdown while it sets `left` and
+    /// leaves: a heartbeat in flight never writes the row back after it.
+    beat_lock: Mutex<()>,
     /// Shards running here, each with the epoch it was placed under. Only
     /// these are saved and released: the fence and shutdown empty it, so a
     /// shard either of them stopped keeps its placement for another machine.
@@ -1326,7 +1335,7 @@ impl Lease {
     /// run out. Only the fence moves past an expired lease (a new epoch), so
     /// a shard stopped by the lapse is never taken for one that ended.
     fn renew(&mut self, epoch: i64, sent: Instant, now: Instant) -> Option<Instant> {
-        let until = sent + shard_cluster::FENCE_AFTER;
+        let until = LeaseClock::floor(sent + shard_cluster::FENCE_AFTER);
         let expired = self.until.is_some_and(|u| u <= now);
         if self.epoch != epoch || until <= now || expired {
             return None;
@@ -1566,10 +1575,15 @@ impl WasmShardHost {
             None => spec.instantiate(id, params),
         }
         .map_err(|why| {
-            // The lease ran out during init or restore: the module did not
-            // refuse, so the start can be tried again.
-            let lapsed = self.cluster.get().is_some_and(|c| c.clock.expired());
-            if lapsed {
+            // The lease ran out during init or restore, or changed since this
+            // start was authorized: the module did not refuse, so the start
+            // can be tried again. A module's own errors always carry a
+            // prefix, so it cannot produce the bare lease message.
+            let lease_changed = self
+                .cluster
+                .get()
+                .is_some_and(|c| Some(c.lease.lock().unwrap().epoch) != epoch);
+            if why == LEASE_LAPSED || lease_changed {
                 lease_error()
             } else {
                 CreateError::Init(why)
@@ -1827,10 +1841,11 @@ impl WasmShardHost {
                 self.save_shard(c, id, *epoch, shard);
             }
         }
-        c.left.store(true, Ordering::Release);
         for id in self.registry.ids() {
             self.stop_local(&id);
         }
+        let _beat = c.beat_lock.lock().unwrap();
+        c.left.store(true, Ordering::Release);
         let epoch = c.lease.lock().unwrap().epoch;
         if let Err(e) = c.dir.leave(&c.me.id, epoch) {
             tracing::warn!("[shards] could not leave the directory: {e}");
@@ -1877,6 +1892,7 @@ impl WasmShardHost {
                 save_lock: Mutex::new(()),
                 id_conflict: AtomicBool::new(false),
                 left: AtomicBool::new(false),
+                beat_lock: Mutex::new(()),
                 owned: Mutex::new(HashMap::new()),
                 own_lock: Mutex::new(()),
                 saved_at: Mutex::new(HashMap::new()),
@@ -1935,6 +1951,10 @@ impl WasmShardHost {
     /// counts this one live for longer than this machine runs shards.
     fn heartbeat(&self) {
         let Some(c) = self.cluster.get() else { return };
+        let _beat = c.beat_lock.lock().unwrap();
+        if c.left.load(Ordering::Acquire) {
+            return;
+        }
         let epoch = c.lease.lock().unwrap().epoch;
         let sent = Instant::now();
         match c.dir.heartbeat(&c.me, epoch) {
@@ -2318,13 +2338,21 @@ impl WasmShardHost {
         // Under the create lock, so a shard created under a stopped id is
         // not swept with it.
         let _guard = self.create_lock.lock().unwrap();
-        let before = self.registry.ids();
+        let before: HashMap<String, Arc<Shard<WasmSim>>> = self
+            .registry
+            .ids()
+            .into_iter()
+            .filter_map(|id| self.registry.get(&id).map(|s| (id, s)))
+            .collect();
         if self.registry.sweep_finished() == 0 {
             return;
         }
         let mut kind_of = self.kind_of.write().unwrap();
         let mut idle = self.idle_since.lock().unwrap();
-        for id in before.iter().filter(|id| self.registry.get(id).is_none()) {
+        for (id, shard) in before
+            .iter()
+            .filter(|(id, _)| self.registry.get(id).is_none())
+        {
             kind_of.remove(id);
             idle.remove(id);
             tracing::info!("[shard {id}] removed after it stopped");
@@ -2339,11 +2367,14 @@ impl WasmShardHost {
                 // A shard stops on its own when its lease lapses (its guest
                 // calls are refused) before the fence runs: that is not an
                 // ending, and it keeps its placement.
+                let lapsed = shard
+                    .with_state(|sim| sim.failure())
+                    .is_some_and(|why| why == LEASE_LAPSED);
                 let held = {
                     let lease = c.lease.lock().unwrap();
                     let in_force = lease.until.is_some_and(|until| Instant::now() < until);
                     let held = c.owned.lock().unwrap().remove(id);
-                    held.filter(|&epoch| in_force && epoch == lease.epoch)
+                    held.filter(|&epoch| in_force && !lapsed && epoch == lease.epoch)
                 };
                 if let Some(epoch) = held {
                     if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
@@ -2562,6 +2593,9 @@ mod lease_tests {
             eprintln!("skipping: PYLON_TEST_PG_URL not set");
             return;
         };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let pool = PgPool::connect(&url, 4, Duration::from_secs(5)).expect("test Postgres pool");
         let dir = PgShardDirectory::open(Arc::clone(&pool)).expect("directory");
         let check = PgShardDirectory::open(pool).expect("directory");
@@ -2589,16 +2623,43 @@ mod lease_tests {
         );
         let c = host.cluster.get().unwrap();
         wait_for("a lease", 10, || c.current_epoch().is_some());
-        host.create(
+        host.create_on(
             "arena",
             &shard,
             &serde_json::json!({ "width": 800, "height": 600 }),
+            Some(&format!("m-{run}")),
         )
         .unwrap();
         let first = c.lease.lock().unwrap().epoch;
         host.save_one(c, &shard, first);
 
+        let players = |shard: &Shard<WasmSim>| {
+            String::from_utf8(shard.with_state(|sim| sim.save()).unwrap().unwrap()).unwrap()
+        };
+        let running = |id: &str| host.registry.get(id).filter(|s| s.is_running());
+
+        // The guests' clock says the lease ended while the lease itself
+        // was renewed (the order a late heartbeat reply produces). The
+        // shard stops on its own; the sweep must not take that for an
+        // ending, and the machine starts it again from saved state.
+        let saved = r#"[{"id":"p1","x":1.0,"y":2.0,"tx":1.0,"ty":2.0,"hue":7}]"#;
+        let machine = format!("m-{run}");
+        assert!(check
+            .save_state(&shard, &machine, first, saved.as_bytes())
+            .unwrap());
+        c.clock.set(None);
+        wait_for("the shard to stop", 5, || running(&shard).is_none());
+        c.clock.set(c.lease.lock().unwrap().until);
+        std::thread::sleep(Duration::from_millis(2500));
+        assert!(check.placement(&shard).unwrap().is_some(), "not released");
+        wait_for("the shard back", 10, || running(&shard).is_some());
+        assert!(players(&running(&shard).unwrap()).contains("\"p1\""));
+
         // The lease runs out (the directory stopped answering).
+        let saved = r#"[{"id":"p2","x":3.0,"y":4.0,"tx":3.0,"ty":4.0,"hue":9}]"#;
+        assert!(check
+            .save_state(&shard, &machine, first, saved.as_bytes())
+            .unwrap());
         c.lease.lock().unwrap().until = Some(Instant::now());
         wait_for("the fence", 5, || {
             !host.registry.get(&shard).is_some_and(|s| s.is_running())
@@ -2617,12 +2678,13 @@ mod lease_tests {
             .expect("still ours")
             .is_some());
 
-        // The old epoch goes silent; the machine takes the shard back.
-        wait_for("the shard back", 30, || {
-            host.registry.get(&shard).is_some_and(|s| s.is_running())
-        });
+        // The old epoch goes silent; the machine takes the shard back, from
+        // the state saved under the old epoch.
+        wait_for("the shard back", 30, || running(&shard).is_some());
         let placed = check.placement(&shard).unwrap().unwrap();
         assert_eq!(placed.epoch, c.lease.lock().unwrap().epoch);
+        let now = players(&running(&shard).unwrap());
+        assert!(now.contains("\"p2\"") && !now.contains("\"p1\""), "{now}");
 
         assert!(host.stop(&shard));
         assert_eq!(check.placement(&shard).unwrap(), None);
@@ -2641,13 +2703,15 @@ mod lease_tests {
     fn a_lease_renews_from_the_send_time_and_never_after_it_lapsed() {
         let t0 = Instant::now();
         let s = Duration::from_secs;
+        let end = |sent: Instant| LeaseClock::floor(sent + shard_cluster::FENCE_AFTER);
 
-        // First heartbeat of the epoch: the lease runs from the send time.
+        // First heartbeat of the epoch: the lease runs from the send time,
+        // rounded down to the guests' clock.
         let mut l = lease(None);
-        assert_eq!(l.renew(7, t0, t0 + s(1)), Some(t0 + s(5)));
+        assert_eq!(l.renew(7, t0, t0 + s(1)), Some(end(t0)));
         // A later one extends it; an earlier-sent reply never shortens it.
-        assert_eq!(l.renew(7, t0 + s(2), t0 + s(3)), Some(t0 + s(7)));
-        assert_eq!(l.renew(7, t0 + s(1), t0 + s(4)), Some(t0 + s(7)));
+        assert_eq!(l.renew(7, t0 + s(2), t0 + s(3)), Some(end(t0 + s(2))));
+        assert_eq!(l.renew(7, t0 + s(1), t0 + s(4)), Some(end(t0 + s(2))));
 
         // A reply for another epoch authorizes nothing.
         assert_eq!(l.renew(8, t0 + s(4), t0 + s(4)), None);
@@ -2659,8 +2723,24 @@ mod lease_tests {
 
         // Once the lease has run out, even a fresh heartbeat of the same
         // epoch does not revive it: the fence must move to a new epoch.
-        let mut l = lease(Some(t0 + s(5)));
+        let mut l = lease(Some(end(t0)));
         assert_eq!(l.renew(7, t0 + s(5), t0 + s(6)), None);
-        assert_eq!(l.until, Some(t0 + s(5)));
+        assert_eq!(l.until, Some(end(t0)));
+
+        // The lease and the guests' clock expire together, to the
+        // millisecond: no reply revives a lease the guests saw expire.
+        let until = end(t0);
+        let clock = LeaseClock::default();
+        clock.set(Some(until));
+        let mut l = lease(Some(until));
+        for step in 0..3u64 {
+            let now = until + Duration::from_micros(step * 400);
+            assert!(clock_expired_at(&clock, now));
+            assert_eq!(l.renew(7, now, now), None);
+        }
+    }
+
+    fn clock_expired_at(clock: &LeaseClock, now: Instant) -> bool {
+        LeaseClock::millis(now) >= clock.until_ms.load(Ordering::Acquire)
     }
 }
