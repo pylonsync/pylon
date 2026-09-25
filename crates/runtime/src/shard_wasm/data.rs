@@ -39,6 +39,8 @@ const MAX_FN_NAME: usize = 128;
 pub(super) const MAX_DIRTY_ROWS: usize = 100_000;
 /// Flushes a row that fails with a store error is tried in.
 const WRITE_ATTEMPTS: u32 = 5;
+/// Flushes of an ended shard's last writes before its placement goes.
+pub(super) const FINAL_WRITE_ATTEMPTS: u32 = 3;
 /// The most call workers (see [`default_workers`]).
 const MAX_CALL_WORKERS: usize = 4;
 /// How often buffered writes are flushed, unless
@@ -1379,6 +1381,18 @@ mod tests {
             pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
         let run = pylon_cluster::new_instance_id();
         let kind = format!("idle-{run}");
+        struct Forget(Arc<pylon_storage::pg_datastore::PgPool>, String);
+        impl Drop for Forget {
+            fn drop(&mut self) {
+                let _ = self.0.with_client(|c| {
+                    c.execute(
+                        "DELETE FROM _pylon_shard_placements WHERE kind = $1",
+                        &[&self.1],
+                    )
+                });
+            }
+        }
+        let _forget = Forget(Arc::clone(&pool), kind.clone());
         let host = WasmShardHost::new(vec![WasmShardKind::compile(
             &kind,
             include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
@@ -1416,7 +1430,8 @@ mod tests {
                 set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(33))]),
             }],
         );
-        let started = Instant::now();
+        // Still buffered: no periodic flush wrote it yet.
+        assert_eq!(host.dirty_rows(&zone), 1);
         host.registry.get(&zone).unwrap().stop();
         host.sweep();
         assert!(host.registry.get(&zone).is_none());
@@ -1426,7 +1441,14 @@ mod tests {
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             33
         );
-        assert!(started.elapsed() < WRITE_EVERY);
+        // While an ended shard's writes and release are in progress, no
+        // run starts under its id.
+        host.ending.lock().unwrap().insert(zone.clone());
+        assert!(matches!(
+            host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me)),
+            Err(crate::shard_wasm::CreateError::Exists(_))
+        ));
+        host.ending.lock().unwrap().remove(&zone);
         host.stop_all();
     }
 

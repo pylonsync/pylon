@@ -314,6 +314,9 @@ mod tests {
         // A takeover waits for a fenced write in progress: b holds the
         // fence in an open transaction; a's hand-over back does not land
         // until that transaction ends.
+        // Two connections at least: the takeover must wait for the row
+        // lock, not for a pool connection.
+        assert!(pool.max_size() >= 2, "a pool of {}", pool.max_size());
         let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
         let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
         let holder = {

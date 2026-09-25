@@ -205,19 +205,34 @@ pub fn pg_err_to_data(e: postgres::Error) -> DataError {
     }
 }
 
-/// `PG_TX_QUERY_FAILED` when the statement can pass if tried again: no
-/// answer from the server (a lost connection), or SQLSTATE class 08
-/// (connection), 40 (serialization failure, deadlock), 53 (resources), 57
-/// (operator intervention), 58 (system error), or 55P03 (lock not
-/// available). Every other answer (a constraint, a data error, an
-/// exception a trigger raised, ...) is `PG_REJECTED`: the same statement
-/// meets it again.
+/// `PG_TX_QUERY_FAILED` when the statement can pass if tried again: the
+/// connection closed or failed on I/O, or SQLSTATE class 08 (connection),
+/// 40 (serialization failure, deadlock), 53 (resources), 57 (operator
+/// intervention), 58 (system error), XX (internal error; poolers such as
+/// Supavisor send it when their pool runs out), 55P03 (lock not
+/// available), or 25P03 (idle in transaction timeout). Every other error (a
+/// constraint, a data error, an exception a trigger raised, a value that
+/// does not convert) is `PG_REJECTED`: the same statement meets it again.
 pub fn pg_error_code(e: &postgres::Error) -> &'static str {
+    use std::error::Error as _;
     let Some(state) = e.code() else {
-        return "PG_TX_QUERY_FAILED";
+        let mut source = e.source();
+        let io = std::iter::from_fn(|| {
+            let s = source?;
+            source = s.source();
+            Some(s)
+        })
+        .any(|s| s.is::<std::io::Error>());
+        return if e.is_closed() || io {
+            "PG_TX_QUERY_FAILED"
+        } else {
+            "PG_REJECTED"
+        };
     };
     let code = state.code();
-    if code == "55P03" || matches!(&code[..2], "08" | "40" | "53" | "57" | "58") {
+    if matches!(code, "55P03" | "25P03")
+        || matches!(&code[..2], "08" | "40" | "53" | "57" | "58" | "XX")
+    {
         "PG_TX_QUERY_FAILED"
     } else {
         "PG_REJECTED"

@@ -289,16 +289,19 @@ mod tests {
             assert_eq!(dup.code, "PG_REJECTED");
             assert!(!crate::shard_wasm::retryable_code(&dup.code));
         });
-        // An exception a trigger or function raises is refused, not retried.
-        in_tx(false, &|s| {
-            let raised = s.check_shard_fence("x", "y", 0).and_then(|_| {
-                pg.store.with_client(|c| {
-                    c.batch_execute("DO $$ BEGIN RAISE EXCEPTION 'no'; END $$")
-                        .map_err(pylon_storage::pg_tx_store::pg_err_to_data)
-                })
-            });
-            assert_eq!(raised.unwrap_err().code, "PG_REJECTED");
+        // An exception a trigger or function raises, and a value the client
+        // cannot convert, are refused, not retried.
+        let raised = pg.store.with_client(|c| {
+            c.batch_execute("DO $$ BEGIN RAISE EXCEPTION 'no'; END $$")
+                .map_err(pylon_storage::pg_tx_store::pg_err_to_data)
         });
+        assert_eq!(raised.unwrap_err().code, "PG_REJECTED");
+        let wrong_type = pg.store.with_client(|c| {
+            c.query("SELECT $1::int", &[&"not a number"])
+                .map(|_| ())
+                .map_err(pylon_storage::pg_tx_store::pg_err_to_data)
+        });
+        assert_eq!(wrong_type.unwrap_err().code, "PG_REJECTED");
         // Rolled back: no result.
         in_tx(false, &|s| s.record_fn_call(&f, "k2", &call(3)).unwrap());
         assert_eq!(committed_result(&rt, &f, "k2").unwrap(), None);

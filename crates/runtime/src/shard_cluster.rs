@@ -257,9 +257,9 @@ impl PgShardDirectory {
              -> Result<bool, postgres::Error> {
                 Ok(tx
                     .query_one(
-                        "SELECT EXISTS (SELECT 1 FROM information_schema.columns
-                                        WHERE table_schema = current_schema()
-                                          AND table_name = $1 AND column_name = $2)",
+                        "SELECT EXISTS (SELECT 1 FROM pg_attribute
+                                        WHERE attrelid = to_regclass($1)
+                                          AND attname = $2 AND NOT attisdropped)",
                         &[&table, &col],
                     )?
                     .get(0))

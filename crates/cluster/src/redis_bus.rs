@@ -63,7 +63,18 @@ fn connect_with_timeouts(
         if let Some(user) = &info.redis.username {
             auth.arg(user);
         }
-        auth.arg(password).query::<()>(&mut conn)?;
+        match auth.arg(password).query::<()>(&mut conn) {
+            Ok(()) => {}
+            // Redis before 6 takes no user name (the old `redis://h:pass@`
+            // URLs): the password alone, as redis-rs does.
+            Err(e)
+                if info.redis.username.is_some()
+                    && e.to_string().contains("wrong number of arguments") =>
+            {
+                redis::cmd("AUTH").arg(password).query::<()>(&mut conn)?;
+            }
+            Err(e) => return Err(e),
+        }
     }
     if info.redis.db != 0 {
         redis::cmd("SELECT")
@@ -429,5 +440,57 @@ mod tests {
         // No password and no database: nothing waits for an answer.
         let client = Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
         assert!(connect_with_timeouts(&client, Duration::from_millis(200)).is_ok());
+    }
+
+    /// A Redis before 6 refuses AUTH with a user name; the connect sends
+    /// the password alone, then SELECT.
+    #[test]
+    fn auth_falls_back_to_the_password_alone() {
+        use std::io::{BufRead, BufReader, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+        {
+            let seen = Arc::clone(&seen);
+            thread::spawn(move || {
+                let (conn, _) = server.accept().unwrap();
+                let mut out = conn.try_clone().unwrap();
+                let mut reader = BufReader::new(conn);
+                // Read one RESP array of bulk strings.
+                let mut read_cmd = || -> Option<Vec<String>> {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).ok()?;
+                    let n: usize = line.trim().strip_prefix('*')?.parse().ok()?;
+                    let mut args = Vec::new();
+                    for _ in 0..n {
+                        line.clear();
+                        reader.read_line(&mut line).ok()?;
+                        line.clear();
+                        reader.read_line(&mut line).ok()?;
+                        args.push(line.trim_end().to_string());
+                    }
+                    Some(args)
+                };
+                while let Some(cmd) = read_cmd() {
+                    let reply: &[u8] = if cmd.len() == 3 && cmd[0] == "AUTH" {
+                        b"-ERR wrong number of arguments for 'auth' command\r\n"
+                    } else {
+                        b"+OK\r\n"
+                    };
+                    seen.lock().unwrap().push(cmd);
+                    out.write_all(reply).unwrap();
+                }
+            });
+        }
+        let client = Client::open(format!("redis://h:secret@127.0.0.1:{port}/2")).unwrap();
+        connect_with_timeouts(&client, Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                vec!["AUTH", "h", "secret"],
+                vec!["AUTH", "secret"],
+                vec!["SELECT", "2"],
+            ]
+        );
     }
 }

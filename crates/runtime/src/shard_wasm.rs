@@ -1608,6 +1608,9 @@ pub struct WasmShardHost {
     dirty: Mutex<data::Dirty>,
     /// One flush of `dirty` at a time.
     flush_lock: Mutex<()>,
+    /// Shards the sweep ended whose last writes and placement release are
+    /// in progress: no shard starts under these ids meanwhile.
+    ending: Mutex<std::collections::HashSet<String>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1739,6 +1742,7 @@ impl WasmShardHost {
             calls_in_flight: Mutex::new(HashMap::new()),
             dirty: Mutex::new(HashMap::new()),
             flush_lock: Mutex::new(()),
+            ending: Mutex::new(std::collections::HashSet::new()),
             kinds: kinds
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
@@ -1950,6 +1954,11 @@ impl WasmShardHost {
             if existing.is_running() {
                 return Err(CreateError::Exists(id.to_string()));
             }
+        }
+        // Its previous run is still writing its last fields and releasing
+        // its placement.
+        if self.ending.lock().unwrap().contains(id) {
+            return Err(CreateError::Exists(id.to_string()));
         }
         // In a cluster the directory counts every machine's shards (see
         // `create_claimed`); here, count only running shards, so a stopped
@@ -2581,7 +2590,10 @@ impl WasmShardHost {
             if let Some(epoch) = c.current_epoch() {
                 for p in &placed {
                     let held = c.owned.lock().unwrap().contains_key(&p.shard_id);
-                    if p.epoch != epoch || held || p.failed.is_some() {
+                    // An ended shard whose placement the sweep is about to
+                    // release is not started again.
+                    let ending = self.ending.lock().unwrap().contains(&p.shard_id);
+                    if p.epoch != epoch || held || ending || p.failed.is_some() {
                         continue;
                     }
                     if self
@@ -3031,20 +3043,38 @@ impl WasmShardHost {
                 }
             }
         }
-        drop((kind_of, idle));
+        // No shard starts under these ids until their placements are
+        // released: a new run (same machine, same lease) cannot lose its
+        // placement to the release below. The writes go out without the
+        // create lock.
+        self.ending
+            .lock()
+            .unwrap()
+            .extend(ended.iter().map(|(id, _)| id.clone()));
+        drop((kind_of, idle, _guard));
         let Some(c) = self.cluster.get() else {
             return;
         };
-        // Still under the create lock: a shard created under the same id
-        // (same machine, same lease) cannot lose its placement to this
-        // release.
         for (id, epoch) in ended {
             // Its last writes, while the placement still says it is ours
-            // (the flush's fence reads the placement).
-            self.flush_writes(data::Flush::Shard(&id));
+            // (the flush's fence reads the placement), tried a few times.
+            for attempt in 0..data::FINAL_WRITE_ATTEMPTS {
+                if self.flush_writes(data::Flush::Shard(&id)) == 0 {
+                    break;
+                }
+                if attempt + 1 == data::FINAL_WRITE_ATTEMPTS {
+                    tracing::error!(
+                        "[shard {id}] its last entity writes failed; they are lost with its placement"
+                    );
+                } else {
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            let _guard = self.create_lock.lock().unwrap();
             if let Err(e) = c.dir.release(&id, &c.me.id, epoch) {
                 tracing::warn!("[shard {id}] could not release its placement: {e}");
             }
+            self.ending.lock().unwrap().remove(&id);
         }
     }
 }
