@@ -943,3 +943,93 @@ fn the_host_registry_names_kinds_reports_numbers_and_stops_through_the_host() {
     assert!(!registry.stop("m1"));
     host.create("arena", "m1", &json!({})).unwrap();
 }
+
+#[test]
+fn a_saved_shard_starts_again_where_it_was() {
+    let k = kind(SnapshotFormat::Json, WasmLimits::default());
+    assert!(k.saves_state());
+    let params = json!({ "label": "north" });
+    let s = Shard::new(
+        "a1",
+        k.instantiate("a1", &params).unwrap(),
+        k.config().clone(),
+    );
+    let _q = join(&s, "u1");
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "move": { "dx": 3, "dy": 4 } } }),
+    )
+    .unwrap();
+    s.run_tick();
+    let saved = s
+        .with_state(|sim| sim.save())
+        .unwrap()
+        .expect("the arena saves");
+
+    // Another instance, on another machine, from the saved bytes.
+    let t = Shard::new(
+        "a1",
+        k.restore("a1", &params, &saved).unwrap(),
+        k.config().clone(),
+    );
+    let q = join(&t, "u2");
+    t.run_tick();
+    let (snap, _, _) = drain(&q, SnapshotFormat::Json);
+    assert_eq!(snap["label"], "north");
+    assert_eq!(snap["players"], json!([{ "id": "u1", "x": 3, "y": 4 }]));
+
+    // Bad bytes are the module's refusal, not a crash.
+    let err = k.restore("a1", &params, b"not json").err().unwrap();
+    assert!(err.contains("pylon_restore refused"), "{err}");
+}
+
+#[test]
+fn a_module_without_saved_state_saves_nothing_and_refuses_restore() {
+    let k = WasmShardKind::compile(
+        "field",
+        &guest_wasm("field"),
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap();
+    // The SDK exports the pair; the field guest keeps the default (none).
+    assert!(k.saves_state());
+    let sim = k.instantiate("f1", &json!({ "units": 3 })).unwrap();
+    assert_eq!(sim.save().unwrap(), None);
+
+    // A module that exports only half of the pair is refused.
+    let half = full_module(
+        1,
+        "i32.const 0",
+        r#"(func (export "pylon_save") (result i32) i32.const 3)"#,
+    );
+    let err = WasmShardKind::compile(
+        "half",
+        &half,
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(
+        err.contains("pylon_save") && err.contains("pylon_restore"),
+        "{err}"
+    );
+
+    // A module without the pair (built before saved state) saves nothing
+    // and cannot restore.
+    let old = WasmShardKind::compile(
+        "old",
+        &full_module(1, "i32.const 0", ""),
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap();
+    assert!(!old.saves_state());
+    assert_eq!(
+        old.instantiate("o1", &json!({})).unwrap().save().unwrap(),
+        None
+    );
+    assert!(old.restore("o1", &json!({}), b"{}").is_err());
+}

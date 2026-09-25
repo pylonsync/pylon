@@ -36,7 +36,7 @@ fn default_label() -> String {
     "arena".into()
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Player {
     id: String,
     x: i64,
@@ -78,10 +78,33 @@ struct Arena {
     hoard: Vec<Vec<u8>>,
 }
 
+/// What `save` keeps: the players and the time played.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    elapsed_ms: u64,
+    players: Vec<Player>,
+}
+
 impl Shard for Arena {
     type Params = Params;
     type Input = Input;
     type Snapshot = Snapshot;
+
+    fn save(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(&Saved {
+            elapsed_ms: self.elapsed.as_millis() as u64,
+            players: self.players.clone(),
+        })
+        .ok()
+    }
+
+    fn restore(shard_id: &str, params: Params, state: &[u8]) -> Result<Self, String> {
+        let saved: Saved = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+        let mut arena = Self::init(shard_id, params)?;
+        arena.elapsed = Duration::from_millis(saved.elapsed_ms);
+        arena.players = saved.players;
+        Ok(arena)
+    }
 
     fn init(shard_id: &str, params: Params) -> Result<Self, String> {
         if params.label.is_empty() {

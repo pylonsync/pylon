@@ -55,6 +55,8 @@ const MAX_LOG_LINE: usize = 2048;
 const STATUS_OK: i32 = 0;
 const STATUS_ERR: i32 = 1;
 const STATUS_SAME_AS_BROADCAST: i32 = 2;
+/// `pylon_save`: the shard keeps no saved state.
+const STATUS_NONE: i32 = 3;
 
 /// The process-wide engine, and the thread that advances its epoch.
 fn engine() -> &'static Engine {
@@ -148,6 +150,9 @@ const REQUIRED_EXPORTS: &[&str] = &[
     "pylon_authorize_input",
 ];
 
+/// Saved-state exports: both or neither (see pylon-shard-guest).
+const SAVE_EXPORTS: &[&str] = &["pylon_save", "pylon_restore"];
+
 /// Interest management exports: all or none (see pylon-shard-guest).
 const INTEREST_EXPORTS: &[&str] = &[
     "pylon_interest",
@@ -192,17 +197,19 @@ impl WasmShardKind {
                 missing.join(", ")
             ));
         }
-        let interest_present: Vec<&str> = INTEREST_EXPORTS
-            .iter()
-            .copied()
-            .filter(|n| exported.contains(n))
-            .collect();
-        if !interest_present.is_empty() && interest_present.len() != INTEREST_EXPORTS.len() {
-            return Err(format!(
-                "shard \"{name}\": the module exports {} but not all of {}",
-                interest_present.join(", "),
-                INTEREST_EXPORTS.join(", ")
-            ));
+        for group in [INTEREST_EXPORTS, SAVE_EXPORTS] {
+            let present: Vec<&str> = group
+                .iter()
+                .copied()
+                .filter(|n| exported.contains(n))
+                .collect();
+            if !present.is_empty() && present.len() != group.len() {
+                return Err(format!(
+                    "shard \"{name}\": the module exports {} but not all of {}",
+                    present.join(", "),
+                    group.join(", ")
+                ));
+            }
         }
         let mut linker = Linker::new(engine);
         linker
@@ -229,11 +236,42 @@ impl WasmShardKind {
         &self.limits
     }
 
+    /// True when the module can save and restore its state.
+    pub fn saves_state(&self) -> bool {
+        self.module.exports().any(|e| e.name() == "pylon_save")
+    }
+
     /// Instantiate the module and run `pylon_init` with `params`.
     pub fn instantiate(
         &self,
         shard_id: &str,
         params: &serde_json::Value,
+    ) -> Result<WasmSim, String> {
+        self.start(shard_id, params, None)
+    }
+
+    /// Instantiate the module and rebuild the shard from `state`, bytes an
+    /// earlier instance's [`WasmSim::save`] returned.
+    pub fn restore(
+        &self,
+        shard_id: &str,
+        params: &serde_json::Value,
+        state: &[u8],
+    ) -> Result<WasmSim, String> {
+        if !self.saves_state() {
+            return Err(format!(
+                "shard kind \"{}\" does not save state (its module has no pylon_restore)",
+                self.name
+            ));
+        }
+        self.start(shard_id, params, Some(state))
+    }
+
+    fn start(
+        &self,
+        shard_id: &str,
+        params: &serde_json::Value,
+        state: Option<&[u8]>,
     ) -> Result<WasmSim, String> {
         let codec = codec_id(self.config.snapshot_format)?;
         let limits = StoreLimitsBuilder::new()
@@ -302,6 +340,14 @@ impl WasmShardKind {
             } else {
                 None
             },
+            save: if instance.get_export(&mut store, "pylon_save").is_some() {
+                Some(SaveExports {
+                    save: func!("pylon_save"),
+                    restore: func!("pylon_restore"),
+                })
+            } else {
+                None
+            },
             interest: if instance.get_export(&mut store, "pylon_interest").is_some() {
                 Some(InterestExports {
                     config: func!("pylon_interest"),
@@ -335,12 +381,26 @@ impl WasmShardKind {
         }
         let init = serde_json::to_vec(&serde_json::json!({ "shard": shard_id, "params": params }))
             .map_err(|e| e.to_string())?;
-        let init_fn = inner.exports.init.clone();
-        let (ptr, len) = inner.write_args(&[&init])?[0];
-        match inner.call(&init_fn, (codec, ptr, len))? {
+        let (status, export) = match (state, inner.exports.save.clone()) {
+            (None, _) => {
+                let init_fn = inner.exports.init.clone();
+                let (ptr, len) = inner.write_args(&[&init])?[0];
+                (inner.call(&init_fn, (codec, ptr, len))?, "pylon_init")
+            }
+            (Some(state), Some(save)) => {
+                let args = inner.write_args(&[&init, state])?;
+                let ((ip, il), (sp, sl)) = (args[0], args[1]);
+                (
+                    inner.call(&save.restore, (codec, ip, il, sp, sl))?,
+                    "pylon_restore",
+                )
+            }
+            (Some(_), None) => return Err("the module has no pylon_restore".into()),
+        };
+        match status {
             STATUS_OK => {}
-            STATUS_ERR => return Err(format!("init refused: {}", inner.output_text()?)),
-            other => return Err(format!("pylon_init returned status {other}")),
+            STATUS_ERR => return Err(format!("{export} refused: {}", inner.output_text()?)),
+            other => return Err(format!("{export} returned status {other}")),
         }
         Ok(WasmSim {
             inner: RefCell::new(inner),
@@ -472,6 +532,13 @@ struct Exports {
     authorize_input: TypedFunc<(i32, i32, i32, i32, i32, i32), i32>,
     interest: Option<InterestExports>,
     replication: Option<TypedFunc<(), i32>>,
+    save: Option<SaveExports>,
+}
+
+#[derive(Clone)]
+struct SaveExports {
+    save: TypedFunc<(), i32>,
+    restore: TypedFunc<(i32, i32, i32, i32, i32), i32>,
 }
 
 #[derive(Clone)]
@@ -667,6 +734,24 @@ impl WasmSim {
     /// Why the module stopped, if it did.
     pub fn failure(&self) -> Option<String> {
         self.inner.borrow().failed.clone()
+    }
+
+    /// The state to start the shard again from ([`WasmShardKind::restore`]),
+    /// or `None` when the module keeps none. Call it between ticks (the
+    /// shard's state lock held): it has its own time budget. An error means
+    /// the module trapped or broke the ABI, and the shard has stopped.
+    pub fn save(&self) -> Result<Option<Vec<u8>>, String> {
+        let mut inner = self.inner.borrow_mut();
+        let Some(save) = inner.exports.save.clone() else {
+            return Ok(None);
+        };
+        inner.begin_op();
+        match inner.call(&save.save, ())? {
+            STATUS_OK => inner.output().map(Some),
+            STATUS_NONE => Ok(None),
+            STATUS_ERR => Err(format!("pylon_save refused: {}", inner.output_text()?)),
+            other => Err(inner.fail(&format!("pylon_save returned status {other}"))),
+        }
     }
 }
 

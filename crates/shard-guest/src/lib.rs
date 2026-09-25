@@ -86,6 +86,13 @@
 //! | --- | --- |
 //! | `pylon_replication() -> i32` | `0` off. `1` on, output: precision (f32), byte budget (u32), flags (u8: bit 0 x/z plane, bit 1 full dump), then a `pylon_replication` change log. The first call sends a full dump; later calls send the changes since the previous call. |
 //!
+//! Optional exports for saved state. A module exports both or neither.
+//!
+//! | Export | Meaning |
+//! | --- | --- |
+//! | `pylon_save() -> status` | The state to start again from, to the output. Status `3` means the shard keeps no saved state. |
+//! | `pylon_restore(codec, init_ptr, init_len, state_ptr, state_len) -> status` | Create the state from saved bytes instead of `pylon_init`. The init bytes are as for `pylon_init`. |
+//!
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
 //! message in the output. A trap stops the shard.
 //!
@@ -237,6 +244,26 @@ pub trait Shard: Sized + 'static {
     /// Settings for the replication frames.
     fn replication_config(&self) -> ReplicationConfig {
         ReplicationConfig::default()
+    }
+
+    // -- Saved state (optional) -------------------------------------------
+    //
+    // A shard that implements both can start again from where it was: on
+    // another machine after one fails, or after a deploy. The host saves it
+    // between ticks every `persistEverySecs` (see `shard({...})` in app.ts).
+    // A `Replicated` store saves with `full_changes` and loads with
+    // `apply_changes` on a new store.
+
+    /// The state to start again from. Default: none (a restart runs
+    /// `init` again and the state is lost).
+    fn save(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Rebuild the shard from bytes `save` returned. `params` are the ones
+    /// the shard was created with.
+    fn restore(_shard_id: &str, _params: Self::Params, _state: &[u8]) -> Result<Self, String> {
+        Err("this shard does not restore saved state".into())
     }
 }
 
@@ -463,6 +490,14 @@ macro_rules! export_shard {
             pub extern "C" fn pylon_replication() -> i32 {
                 RUNTIME.replication()
             }
+            #[no_mangle]
+            pub extern "C" fn pylon_save() -> i32 {
+                RUNTIME.save()
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_restore(codec: i32, ip: i32, il: i32, sp: i32, sl: i32) -> i32 {
+                RUNTIME.restore(codec, ip, il, sp, sl)
+            }
         };
     };
 }
@@ -475,6 +510,8 @@ pub mod __rt {
     pub const OK: i32 = 0;
     pub const ERR: i32 = 1;
     pub const SAME_AS_BROADCAST: i32 = 2;
+    /// `pylon_save`: the shard keeps no saved state.
+    pub const NONE: i32 = 3;
 
     struct State<T> {
         shard: Option<T>,
@@ -540,6 +577,29 @@ pub mod __rt {
         }
 
         pub fn init(&self, codec: i32, ptr: i32, len: i32) -> i32 {
+            self.start(codec, ptr, len, None)
+        }
+
+        pub fn restore(&self, codec: i32, ip: i32, il: i32, sp: i32, sl: i32) -> i32 {
+            // SAFETY: the host wrote `sl` bytes at `sp` inside the scratch buffer.
+            let state = unsafe { arg(sp, sl) };
+            self.start(codec, ip, il, Some(state))
+        }
+
+        pub fn save(&self) -> i32 {
+            let s = self.state();
+            match shard(&mut s.shard).save() {
+                Some(bytes) => {
+                    s.output.clear();
+                    s.output.extend_from_slice(&bytes);
+                    OK
+                }
+                None => NONE,
+            }
+        }
+
+        /// `init`, or `restore` from `state`.
+        fn start(&self, codec: i32, ptr: i32, len: i32, state: Option<&[u8]>) -> i32 {
             install_panic_hook();
             let s = self.state();
             let Some(codec) = Codec::from_i32(codec) else {
@@ -557,7 +617,11 @@ pub mod __rt {
                 Ok(v) => v,
                 Err(e) => return fail(&mut s.output, format!("invalid params: {e}")),
             };
-            match T::init(&init.shard, init.params) {
+            let made = match state {
+                Some(state) => T::restore(&init.shard, init.params, state),
+                None => T::init(&init.shard, init.params),
+            };
+            match made {
                 Ok(shard) => {
                     s.shard = Some(shard);
                     OK
