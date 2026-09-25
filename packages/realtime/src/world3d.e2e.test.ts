@@ -1,7 +1,8 @@
 // End-to-end: examples/world3d's island shard on a real `pylon start`, with
-// two players on connectShardGame: joins, moves drawn by the other player,
-// a move the shard clamps and prediction follows, hits, a refused respawn,
-// and a leave.
+// two players on connectShardGame: joins at the shard's spawn points, moves
+// drawn by the other player, a move the shard clamps and prediction
+// follows, hits and the damage limit, a refused respawn, a leave, and a
+// connection without a ticket refused.
 //
 // Runs only when PYLON_WORLD3D_E2E holds the server's host:port or its
 // origin (tools/smoke-wasm-shard.sh sets it up).
@@ -16,10 +17,10 @@ const origin = target.includes("://") ? target.replace(/\/$/, "") : `http://${ta
 const host = target ? new URL(origin).host : "";
 
 type Input =
-  | { join: { x: number; y: number; z: number } }
+  | "join"
   | { move: { dx: number; dy: number; dz: number; heading: number; pitch: number } }
   | { hit: { target: number; damage: number } }
-  | { spawn: { x: number; y: number; z: number } }
+  | "spawn"
   | "leave";
 
 const AVATAR = 1;
@@ -38,6 +39,8 @@ async function call<T>(token: string, fn: string, args: unknown): Promise<T> {
 
 interface Player {
   avatarId: string;
+  token: string;
+  userId: string;
   game: ShardGame<Input>;
   rejections: ShardInputRejection[];
   errors: Error[];
@@ -55,7 +58,7 @@ async function player(): Promise<Player> {
     tickRate: 20,
     ticket: async () => (await call<{ ticket: string }>(token, "joinIsland", {})).ticket,
   });
-  const p: Player = { avatarId: id, game, rejections: [], errors: [], x: 0 };
+  const p: Player = { avatarId: id, token, userId: user_id, game, rejections: [], errors: [], x: 0 };
   game.onInputRejected((r) => p.rejections.push(r));
   game.onError((e) => p.errors.push(e));
   return p;
@@ -92,59 +95,88 @@ const move = (dx: number): Input => ({ move: { dx, dy: 0, dz: 0, heading: 0.5, p
 test.skipIf(!host)("two players on the island shard with connectShardGame", async () => {
   const [a, b] = await Promise.all([player(), player()]);
   await waitFor("both connected", () => (a.game.connected && b.game.connected ? true : undefined));
-  expect(a.game.send({ join: { x: 0, y: 5, z: 0 } })).toBeGreaterThan(0);
-  b.game.send({ join: { x: 20, y: 5, z: 0 } });
+  expect(a.game.send("join")).toBeGreaterThan(0);
+  b.game.send("join");
 
   const aEntity = await waitFor("B sees A", () => entityOf(b, a.avatarId));
   const bEntity = await waitFor("A sees B", () => entityOf(a, b.avatarId));
   expect(entityOf(a, a.avatarId)).toBe(aEntity);
+  // The shard picked the spawn point (shards/island/spawns.json).
+  const start = a.game.latest.get(aEntity)!.x;
+  expect(Number.isFinite(start)).toBe(true);
 
-  // A walks 10 m at 5 m/s; B draws A in between, then at 10.
+  // Prediction: on every frame, the predicted x is the shard's x plus the
+  // moves it has not processed.
   const me = a.game.predict<number>((x, input) =>
     typeof input === "object" && "move" in input ? x + input.move.dx : x,
   );
+  const sent = new Map<number, number>();
   let predicted = 0;
+  let checked = 0;
   a.game.onReplication((table, _s, _t, ack) => {
     const mine = table.get(aEntity);
-    if (mine) predicted = me.reconcile(mine.x, ack);
+    if (!mine) return;
+    predicted = me.reconcile(mine.x, ack);
+    let pending = 0;
+    for (const [seq, dx] of sent) if (seq > ack) pending += dx;
+    expect(predicted).toBeCloseTo(mine.x + pending, 6);
+    checked++;
   });
+  const send = (dx: number) => {
+    const seq = a.game.send(move(dx));
+    sent.set(seq, dx);
+    return seq;
+  };
+
+  // A walks 10 m at 5 m/s; B draws A in between, then at start + 10.
   const drawn: number[] = [];
   for (let i = 0; i < 40; i++) {
-    a.game.send(move(0.25));
+    send(0.25);
     b.game.frame();
     const e = b.game.entities.get(aEntity);
     if (e) drawn.push(e.x);
     await sleep(50);
   }
-  const arrived = await waitFor("B draws A at x=10", () => {
+  const arrived = await waitFor("B draws A 10 m on", () => {
     b.game.frame();
     const x = b.game.entities.get(aEntity)?.x;
-    return x !== undefined && Math.abs(x - 10) < 0.02 ? x : undefined;
+    return x !== undefined && Math.abs(x - (start + 10)) < 0.02 ? x : undefined;
   });
-  expect(arrived).toBeCloseTo(10, 1);
+  expect(arrived).toBeCloseTo(start + 10, 1);
   // Drawn between frames: many distinct positions, never backwards.
   expect(new Set(drawn.map((x) => x.toFixed(3))).size).toBeGreaterThan(20);
   for (let i = 1; i < drawn.length; i++) expect(drawn[i]).toBeGreaterThanOrEqual(drawn[i - 1] - 1e-6);
   expect(b.game.clock.tickMs).toBe(50);
   expect(a.game.rttMs).not.toBeNull();
 
-  // A teleport attempt: the shard allows one second of movement (18 m).
-  const clampedSeq = a.game.send(move(500));
-  await waitFor("the clamped move acknowledged", () => (a.game.ack >= clampedSeq ? true : undefined));
-  await waitFor("prediction on the shard's position", () =>
-    Math.abs(predicted - (a.game.latest.get(aEntity)?.x ?? NaN)) < 1e-9 ? true : undefined,
-  );
-  expect(predicted).toBeLessThan(10 + 18.01);
-  expect(predicted).toBeGreaterThan(10);
+  // A teleport attempt: the shard allows its saved budget (18 m), and the
+  // prediction follows the shard.
+  const clampedSeq = send(500);
+  send(0.5);
+  await waitFor("the clamped move acknowledged", () => (a.game.ack >= clampedSeq + 1 ? true : undefined));
+  const x = a.game.latest.get(aEntity)!.x;
+  expect(x - start).toBeGreaterThan(10);
+  expect(x - start).toBeLessThan(10 + 18.6);
+  expect(predicted).toBeCloseTo(x, 6);
+  expect(checked).toBeGreaterThan(20);
 
-  // A shoots B twice (damage is capped at 60): B is down, and says so.
-  a.game.send({ hit: { target: bEntity, damage: 255 } });
-  a.game.send({ hit: { target: bEntity, damage: 60 } });
+  // A shoots B twice and C twice at once. Damage is capped at 60 a hit and
+  // 200 a second: B goes down, and the last hit on C is refused.
+  const c = await player();
+  await waitFor("C connected", () => (c.game.connected ? true : undefined));
+  c.game.send("join");
+  const cEntity = await waitFor("A sees C", () => entityOf(a, c.avatarId));
+  const hits = [bEntity, bEntity, cEntity, cEntity].map((target) =>
+    a.game.send({ hit: { target, damage: 255 } }),
+  );
   await waitFor("B dead in B's own table", () =>
     b.game.latest.get(bEntity)?.components.get(HEALTH)?.[0] === 0 ? true : undefined,
   );
+  await waitFor("the fourth hit refused", () =>
+    a.rejections.find((r) => r.clientSeq === hits[3] && r.message.includes("faster")),
+  );
   // Too soon to respawn: refused, with the shard's reason.
-  const spawnSeq = b.game.send({ spawn: { x: 50, y: 5, z: 50 } });
+  const spawnSeq = b.game.send("spawn");
   const refused = await waitFor("the respawn refused", () =>
     b.rejections.find((r) => r.clientSeq === spawnSeq),
   );
@@ -161,4 +193,23 @@ test.skipIf(!host)("two players on the island shard with connectShardGame", asyn
   expect(b.errors).toEqual([]);
   a.game.close();
   b.game.close();
+  c.game.close();
+});
+
+test.skipIf(!host)("a connection without a joinIsland ticket is refused", async () => {
+  // A guest session names itself as the subscriber, with no ticket.
+  const guest = await fetch(`${origin}/api/auth/guest`, { method: "POST" });
+  const { token, user_id } = (await guest.json()) as { token: string; user_id: string };
+  const game = connectShardGame<Input>("island-main", {
+    subscriberId: user_id,
+    baseUrl: host,
+    token,
+    autoReconnect: false,
+  });
+  let closed = false;
+  game.onClose(() => (closed = true));
+  game.onError(() => {});
+  await waitFor("the refused connection to close", () => (closed ? true : undefined));
+  expect(game.latest.size).toBe(0);
+  game.close();
 });

@@ -38,6 +38,13 @@
             "userId"
           ],
           "unique": true
+        },
+        {
+          "name": "by_last_seen",
+          "fields": [
+            "lastSeenAt"
+          ],
+          "unique": false
         }
       ]
     },

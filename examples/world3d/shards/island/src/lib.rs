@@ -2,13 +2,20 @@
 //!
 //! Each player is a replicated entity. Clients move their own player
 //! (they run the physics against the terrain, which only they have) by
-//! sending the distance moved since the last input; the shard applies it
-//! within a speed budget and the island bounds, so a client cannot
-//! teleport or outrun the others. Hits are range-checked and damage is
-//! capped here, and health lives here.
+//! sending the distance moved since the last input. The shard applies it
+//! within speed budgets and the island bounds: a client cannot teleport,
+//! outrun the others, or climb faster than a rocket jump. The shard has no
+//! terrain, so it cannot tell a player hovering in the air from one
+//! standing on a roof; the height cap bounds that.
+//!
+//! The shard picks every spawn point (spawns.json, the points the client's
+//! worldgen finds for the fixed seed), keeps health, range-checks hits,
+//! and limits the damage a shooter deals per second. A player who leaves
+//! and joins again within a minute comes back where they were, with the
+//! health they had.
 //!
 //! Subscribers are Avatar row ids: `joinIsland` mints the ticket with the
-//! caller's avatar id as the subscriber id.
+//! caller's avatar id as the subscriber id, and only ticket holders join.
 //!
 //! Runs inside the Pylon server as a WebAssembly module (see app.ts).
 //! `pylon dev` rebuilds it when this file changes.
@@ -20,7 +27,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use pylon_shard_guest::{export_shard, Replicated, ReplicationConfig, Shard};
+use pylon_shard_guest::{export_shard, Auth, Replicated, ReplicationConfig, Shard};
 use serde::Deserialize;
 
 /// Component: the Avatar row id (UTF-8), for the name and color.
@@ -32,23 +39,37 @@ const HEALTH: u8 = 3;
 
 /// Ground speed the budget allows, in m/s: sprinting (11.5) with slack for
 /// frame timing.
-const GROUND_SPEED: f32 = 18.0;
-/// Vertical speed the budget allows, in m/s (a long fall).
-const VERTICAL_SPEED: f32 = 45.0;
-/// The budget saves up at most this many seconds of movement, so inputs
-/// that arrive together after a network stall still apply.
-const BUDGET_SECS: f32 = 1.0;
+const GROUND_SPEED: f64 = 18.0;
+const GROUND_SAVED: f64 = GROUND_SPEED;
+/// Sustained climbing speed (a steep hill at a sprint), and the most saved
+/// up for one climb: a rocket jump (jump plus a grenade's lift) rises
+/// about 13 m.
+const UP_SPEED: f64 = 6.0;
+const UP_SAVED: f64 = 14.0;
+/// Falling: gravity is 22 m/s^2 and the tallest drop is about 90 m.
+const DOWN_SPEED: f64 = 45.0;
+const DOWN_SAVED: f64 = DOWN_SPEED;
 /// The island is 512 m across, centered on the origin.
 const HALF_WORLD: f32 = 250.0;
 const MIN_Y: f32 = -10.0;
-const MAX_Y: f32 = 200.0;
+/// The terrain peaks near 60 m; add rooftops and a rocket jump.
+const MAX_Y: f32 = 90.0;
 /// Weapon range (220 m) plus slack for grenade throws and pose lag.
-const HIT_RANGE: f32 = 280.0;
+const HIT_RANGE: f64 = 280.0;
 const MAX_DAMAGE: u8 = 60;
+/// Damage one shooter may deal per second, and at once: the rifle (18 per
+/// 105 ms) is about 170 per second, and a grenade can hit several players
+/// for up to 55 each.
+const DAMAGE_PER_SEC: f64 = 200.0;
+const DAMAGE_SAVED: f64 = 200.0;
 /// A dead player may spawn again after this long.
 const RESPAWN_DELAY: Duration = Duration::from_millis(2500);
 /// A player who sends nothing for this long leaves.
 const IDLE_LIMIT: Duration = Duration::from_secs(15);
+/// A player who left may join again after this long...
+const REJOIN_DELAY: Duration = Duration::from_secs(5);
+/// ...and comes back where they were, with their health, within this long.
+const REMEMBER_LEFT: Duration = Duration::from_secs(60);
 
 #[derive(Deserialize)]
 struct Params {}
@@ -56,9 +77,8 @@ struct Params {}
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum Input {
-    /// Enter the island at a spawn point the client picked on the terrain.
-    /// Ignored when already in.
-    Join { x: f32, y: f32, z: f32 },
+    /// Enter the island. Ignored when already in.
+    Join,
     /// Moved this far since the last move, now looking this way. A move
     /// with no distance keeps the player in.
     Move {
@@ -70,8 +90,8 @@ enum Input {
     },
     /// Shot entity `target` for `damage`.
     Hit { target: u64, damage: u8 },
-    /// Come back after dying, at a spawn point the client picked.
-    Spawn { x: f32, y: f32, z: f32 },
+    /// Come back after dying, at a spawn point the shard picks.
+    Spawn,
     /// Leave the island.
     Leave,
 }
@@ -80,16 +100,29 @@ struct Player {
     entity: u64,
     pos: [f32; 3],
     health: u8,
-    /// Meters of movement the player may still use, ground and vertical.
-    budget: [f32; 2],
+    /// Meters the player may still move: ground, up, down.
+    moves: [f64; 3],
+    /// Damage the player may still deal.
+    damage: f64,
     idle: Duration,
     /// Time since health reached 0.
     dead_for: Duration,
 }
 
+/// What the shard keeps of a player who left.
+struct Departed {
+    pos: [f32; 3],
+    health: u8,
+    dead_for: Duration,
+    gone_for: Duration,
+}
+
 struct Island {
     store: Replicated,
     players: HashMap<String, Player>,
+    departed: HashMap<String, Departed>,
+    spawns: Vec<[f32; 3]>,
+    next_spawn: usize,
     next_entity: u64,
 }
 
@@ -125,35 +158,71 @@ fn encode_look(heading: f32, pitch: f32) -> [u8; 4] {
     [h[0], h[1], p[0], p[1]]
 }
 
+/// The share of `wanted` meters that `left` meters of budget allows, in
+/// [0, 1].
+fn allowed(wanted: f64, left: f64) -> f64 {
+    if wanted > left {
+        left / wanted
+    } else {
+        1.0
+    }
+}
+
 impl Island {
-    fn join(&mut self, subscriber: &str, pos: [f32; 3]) {
+    fn spawn_point(&mut self) -> [f32; 3] {
+        let p = self.spawns[self.next_spawn % self.spawns.len()];
+        self.next_spawn = self.next_spawn.wrapping_add(1);
+        p
+    }
+
+    fn join(&mut self, subscriber: &str) -> Result<(), String> {
         if self.players.contains_key(subscriber) {
-            return;
+            return Ok(());
         }
+        let (pos, health, dead_for) = match self.departed.remove(subscriber) {
+            Some(d) if d.gone_for < REJOIN_DELAY => {
+                let wait = REJOIN_DELAY - d.gone_for;
+                self.departed.insert(subscriber.to_string(), d);
+                return Err(format!("wait {} ms to join again", wait.as_millis()));
+            }
+            Some(d) => (d.pos, d.health, d.dead_for),
+            None => (self.spawn_point(), 100, Duration::ZERO),
+        };
         let entity = self.next_entity;
         self.next_entity += 1;
-        let pos = clamp_pos(pos);
         self.store.spawn(entity, pos);
         self.store
             .set_component(entity, AVATAR, subscriber.as_bytes());
-        self.store.set_component(entity, LOOK, &encode_look(0.0, 0.0));
-        self.store.set_component(entity, HEALTH, &[100]);
+        self.store
+            .set_component(entity, LOOK, &encode_look(0.0, 0.0));
+        self.store.set_component(entity, HEALTH, &[health]);
         self.players.insert(
             subscriber.to_string(),
             Player {
                 entity,
                 pos,
-                health: 100,
-                budget: [GROUND_SPEED * BUDGET_SECS, VERTICAL_SPEED * BUDGET_SECS],
+                health,
+                moves: [GROUND_SAVED, UP_SAVED, DOWN_SAVED],
+                damage: DAMAGE_SAVED,
                 idle: Duration::ZERO,
-                dead_for: Duration::ZERO,
+                dead_for,
             },
         );
+        Ok(())
     }
 
     fn leave(&mut self, subscriber: &str) {
         if let Some(p) = self.players.remove(subscriber) {
             self.store.despawn(p.entity);
+            self.departed.insert(
+                subscriber.to_string(),
+                Departed {
+                    pos: p.pos,
+                    health: p.health,
+                    dead_for: p.dead_for,
+                    gone_for: Duration::ZERO,
+                },
+            );
         }
     }
 
@@ -170,11 +239,29 @@ impl Shard for Island {
     type Snapshot = ();
 
     fn init(_shard_id: &str, _params: Params) -> Result<Self, String> {
+        let spawns: Vec<[f32; 3]> = serde_json::from_str(include_str!("../spawns.json"))
+            .map_err(|e| format!("spawns.json: {e}"))?;
+        if spawns.is_empty() {
+            return Err("spawns.json lists no spawn points".into());
+        }
         Ok(Island {
             store: Replicated::new(),
             players: HashMap::new(),
+            departed: HashMap::new(),
+            spawns: spawns.into_iter().map(clamp_pos).collect(),
+            next_spawn: 0,
             next_entity: 1,
         })
+    }
+
+    /// Only a ticket from joinIsland admits a player: its subscriber id is
+    /// the caller's Avatar row id.
+    fn authorize_subscribe(&self, _subscriber: &str, auth: &Auth) -> Result<(), String> {
+        if auth.ticket.is_some() {
+            Ok(())
+        } else {
+            Err("join through joinIsland".into())
+        }
     }
 
     fn apply_input(&mut self, subscriber: &str, input: Input) -> Result<(), String> {
@@ -182,10 +269,7 @@ impl Shard for Island {
             p.idle = Duration::ZERO;
         }
         match input {
-            Input::Join { x, y, z } => {
-                finite(&[x, y, z])?;
-                self.join(subscriber, [x, y, z]);
-            }
+            Input::Join => self.join(subscriber)?,
             Input::Move {
                 dx,
                 dy,
@@ -199,21 +283,20 @@ impl Shard for Island {
                     // The dead do not move; the client stops sending moves.
                     return Ok(());
                 }
-                // Spend the budget; a move past it goes as far as it allows.
-                let ground = (dx * dx + dz * dz).sqrt();
-                let g = if ground > p.budget[0] {
-                    p.budget[0] / ground
-                } else {
-                    1.0
-                };
-                let v = if dy.abs() > p.budget[1] {
-                    p.budget[1] / dy.abs()
-                } else {
-                    1.0
-                };
-                p.budget[0] -= ground * g;
-                p.budget[1] -= dy.abs() * v;
-                p.pos = clamp_pos([p.pos[0] + dx * g, p.pos[1] + dy * v, p.pos[2] + dz * g]);
+                // In f64: no finite f32 overflows when squared.
+                let (dx, dy, dz) = (dx as f64, dy as f64, dz as f64);
+                let ground = dx.hypot(dz);
+                let g = allowed(ground, p.moves[0]);
+                let vertical = if dy >= 0.0 { 1 } else { 2 };
+                let v = allowed(dy.abs(), p.moves[vertical]);
+                p.moves[0] -= ground * g;
+                p.moves[vertical] -= dy.abs() * v;
+                debug_assert!(p.moves.iter().all(|m| m.is_finite() && *m >= -1e-9));
+                p.pos = clamp_pos([
+                    (p.pos[0] as f64 + dx * g) as f32,
+                    (p.pos[1] as f64 + dy * v) as f32,
+                    (p.pos[2] as f64 + dz * g) as f32,
+                ]);
                 let (entity, pos) = (p.entity, p.pos);
                 self.store.set_pos(entity, pos);
                 self.store
@@ -224,31 +307,36 @@ impl Shard for Island {
                 if shooter.health == 0 {
                     return Err("the dead cannot shoot".into());
                 }
+                let damage = damage.clamp(1, MAX_DAMAGE);
+                if (damage as f64) > shooter.damage {
+                    return Err("firing faster than the weapons allow".into());
+                }
                 let (from, own) = (shooter.pos, shooter.entity);
                 if target == own {
                     return Ok(());
                 }
-                let Some(victim) = self.players.values_mut().find(|p| p.entity == target) else {
+                let Some(victim) = self.players.values().find(|p| p.entity == target) else {
                     return Err(format!("no player {target}"));
                 };
-                let d = [
-                    victim.pos[0] - from[0],
-                    victim.pos[1] - from[1],
-                    victim.pos[2] - from[2],
-                ];
+                let d = [0, 1, 2].map(|i| victim.pos[i] as f64 - from[i] as f64);
                 if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() > HIT_RANGE {
                     return Err("target out of weapon range".into());
                 }
                 if victim.health == 0 {
                     return Ok(());
                 }
-                victim.health = victim.health.saturating_sub(damage.clamp(1, MAX_DAMAGE));
+                self.player_mut(subscriber)?.damage -= damage as f64;
+                let victim = self
+                    .players
+                    .values_mut()
+                    .find(|p| p.entity == target)
+                    .expect("found above");
+                victim.health = victim.health.saturating_sub(damage);
                 victim.dead_for = Duration::ZERO;
                 let (entity, health) = (victim.entity, victim.health);
                 self.store.set_component(entity, HEALTH, &[health]);
             }
-            Input::Spawn { x, y, z } => {
-                finite(&[x, y, z])?;
+            Input::Spawn => {
                 let p = self.player_mut(subscriber)?;
                 if p.health > 0 {
                     return Err("only the dead respawn".into());
@@ -256,10 +344,12 @@ impl Shard for Island {
                 if p.dead_for < RESPAWN_DELAY {
                     return Err("too soon to respawn".into());
                 }
+                let pos = self.spawn_point();
+                let p = self.player_mut(subscriber)?;
                 p.health = 100;
-                p.pos = clamp_pos([x, y, z]);
-                p.budget = [GROUND_SPEED * BUDGET_SECS, VERTICAL_SPEED * BUDGET_SECS];
-                let (entity, pos) = (p.entity, p.pos);
+                p.pos = pos;
+                p.moves = [GROUND_SAVED, UP_SAVED, DOWN_SAVED];
+                let entity = p.entity;
                 self.store.set_pos(entity, pos);
                 self.store.set_component(entity, HEALTH, &[100]);
             }
@@ -269,11 +359,14 @@ impl Shard for Island {
     }
 
     fn tick(&mut self, dt: Duration) {
-        let secs = dt.as_secs_f32();
+        let secs = dt.as_secs_f64();
         let mut gone = Vec::new();
         for (id, p) in &mut self.players {
-            p.budget[0] = (p.budget[0] + GROUND_SPEED * secs).min(GROUND_SPEED * BUDGET_SECS);
-            p.budget[1] = (p.budget[1] + VERTICAL_SPEED * secs).min(VERTICAL_SPEED * BUDGET_SECS);
+            let earn = |left: f64, rate: f64, cap: f64| (left + rate * secs).min(cap);
+            p.moves[0] = earn(p.moves[0], GROUND_SPEED, GROUND_SAVED);
+            p.moves[1] = earn(p.moves[1], UP_SPEED, UP_SAVED);
+            p.moves[2] = earn(p.moves[2], DOWN_SPEED, DOWN_SAVED);
+            p.damage = earn(p.damage, DAMAGE_PER_SEC, DAMAGE_SAVED);
             p.idle += dt;
             if p.health == 0 {
                 p.dead_for += dt;
@@ -285,6 +378,13 @@ impl Shard for Island {
         for id in gone {
             self.leave(&id);
         }
+        self.departed.retain(|_, d| {
+            d.gone_for += dt;
+            if d.health == 0 {
+                d.dead_for += dt;
+            }
+            d.gone_for < REMEMBER_LEFT
+        });
     }
 
     fn snapshot(&self) {}
@@ -314,10 +414,10 @@ mod tests {
         Island::init("island", Params {}).unwrap()
     }
 
-    fn mv(dx: f32, dz: f32) -> Input {
+    fn mv(dx: f32, dy: f32, dz: f32) -> Input {
         Input::Move {
             dx,
-            dy: 0.0,
+            dy,
             dz,
             heading: 0.0,
             pitch: 0.0,
@@ -328,118 +428,289 @@ mod tests {
         s.store.get(s.players[sub].entity).unwrap().pos
     }
 
+    fn ticks(s: &mut Island, n: u32) {
+        for _ in 0..n {
+            s.tick(TICK);
+        }
+    }
+
+    /// Joins `sub` and puts them at `at`.
+    fn place(s: &mut Island, sub: &str, at: [f32; 3]) {
+        s.apply_input(sub, Input::Join).unwrap();
+        s.players.get_mut(sub).unwrap().pos = at;
+    }
+
     #[test]
-    fn a_player_joins_moves_and_leaves() {
+    fn players_join_at_the_shards_spawn_points_and_leave() {
         let mut s = island();
-        s.apply_input("a", Input::Join { x: 1.0, y: 2.0, z: 3.0 })
-            .unwrap();
-        s.apply_input("a", mv(1.0, -1.0)).unwrap();
-        assert_eq!(pos(&s, "a"), [2.0, 2.0, 2.0]);
+        s.apply_input("a", Input::Join).unwrap();
+        s.apply_input("b", Input::Join).unwrap();
+        assert_eq!(pos(&s, "a"), s.spawns[0]);
+        assert_eq!(pos(&s, "b"), s.spawns[1]);
         let e = s.players["a"].entity;
         assert_eq!(s.store.get(e).unwrap().component(AVATAR), Some(&b"a"[..]));
         assert_eq!(s.store.get(e).unwrap().component(HEALTH), Some(&[100][..]));
         s.apply_input("a", Input::Leave).unwrap();
-        assert!(s.store.is_empty());
-        assert!(s.apply_input("a", mv(1.0, 0.0)).is_err());
+        assert_eq!(s.store.len(), 1);
+        assert!(s.apply_input("a", mv(1.0, 0.0, 0.0)).is_err());
+    }
+
+    #[test]
+    fn only_ticket_holders_subscribe() {
+        let s = island();
+        let signed_in = Auth {
+            user_id: Some("a".into()),
+            ..Default::default()
+        };
+        assert!(s.authorize_subscribe("a", &signed_in).is_err());
+        let with_ticket = Auth {
+            ticket: Some(pylon_shard_guest::Ticket {
+                shard: "island-main".into(),
+                sid: "a".into(),
+                user_id: Some("u".into()),
+                exp: u64::MAX,
+                claims: serde_json::Value::Null,
+            }),
+            ..Default::default()
+        };
+        assert!(s.authorize_subscribe("a", &with_ticket).is_ok());
     }
 
     #[test]
     fn movement_is_held_to_the_speed_budget() {
         let mut s = island();
-        s.apply_input("a", Input::Join { x: 0.0, y: 0.0, z: 0.0 })
-            .unwrap();
-        // A 100 m jump goes only as far as one second of budget.
-        s.apply_input("a", mv(100.0, 0.0)).unwrap();
-        assert_eq!(pos(&s, "a")[0], GROUND_SPEED * BUDGET_SECS);
+        place(&mut s, "a", [0.0, 0.0, 0.0]);
+        // A 100 m jump goes only as far as the saved budget.
+        s.apply_input("a", mv(100.0, 0.0, 0.0)).unwrap();
+        assert_eq!(pos(&s, "a")[0], GROUND_SAVED as f32);
         // The budget is spent; one tick earns one tick of movement.
         s.tick(TICK);
-        s.apply_input("a", mv(5.0, 0.0)).unwrap();
+        s.apply_input("a", mv(5.0, 0.0, 0.0)).unwrap();
         let x = pos(&s, "a")[0];
-        assert!((x - (GROUND_SPEED + GROUND_SPEED * 0.05)).abs() < 1e-3, "{x}");
+        assert!(
+            (x - (GROUND_SAVED + GROUND_SPEED * 0.05) as f32).abs() < 1e-3,
+            "{x}"
+        );
         // Sprinting at 20 inputs a second stays within it.
         for _ in 0..100 {
             s.tick(TICK);
-            s.apply_input("a", mv(11.5 / 20.0, 0.0)).unwrap();
+            s.apply_input("a", mv(11.5 / 20.0, 0.0, 0.0)).unwrap();
         }
         let x2 = pos(&s, "a")[0];
         assert!((x2 - x - 57.5).abs() < 1e-2, "{x2}");
     }
 
     #[test]
+    fn a_huge_move_neither_overflows_nor_frees_the_next_one() {
+        let mut s = island();
+        place(&mut s, "a", [0.0, 0.0, 0.0]);
+        s.apply_input("a", mv(1e20, 1e20, 1e20)).unwrap();
+        s.apply_input("a", mv(f32::MAX, -f32::MAX, f32::MAX))
+            .unwrap();
+        // The budgets are spent, not NaN: the next move goes nowhere.
+        assert!(s.players["a"].moves.iter().all(|m| m.is_finite()));
+        let before = pos(&s, "a");
+        s.apply_input("a", mv(240.0, 0.0, 0.0)).unwrap();
+        assert_eq!(pos(&s, "a"), before);
+        let p = pos(&s, "a");
+        assert!(p[0].hypot(p[2]) <= (GROUND_SAVED + 1e-3) as f32, "{p:?}");
+        assert!(p[1] <= UP_SAVED as f32 + 1e-3, "{p:?}");
+    }
+
+    #[test]
+    fn climbing_is_slow_and_the_height_is_capped() {
+        let mut s = island();
+        place(&mut s, "a", [0.0, 0.0, 0.0]);
+        // Straight up for 10 s at 45 m/s: at most the saved climb plus
+        // 6 m/s.
+        for _ in 0..200 {
+            s.apply_input("a", mv(0.0, 45.0 / 20.0, 0.0)).unwrap();
+            s.tick(TICK);
+        }
+        let y = pos(&s, "a")[1];
+        assert!(y <= (UP_SAVED + UP_SPEED * 10.0) as f32 + 0.5, "{y}");
+        for _ in 0..600 {
+            s.apply_input("a", mv(0.0, 45.0 / 20.0, 0.0)).unwrap();
+            s.tick(TICK);
+        }
+        assert_eq!(pos(&s, "a")[1], MAX_Y);
+        // Falling is fast.
+        s.apply_input("a", mv(0.0, -40.0, 0.0)).unwrap();
+        assert_eq!(pos(&s, "a")[1], MAX_Y - 40.0);
+    }
+
+    #[test]
     fn positions_stay_on_the_island_and_numbers_must_be_finite() {
         let mut s = island();
-        s.apply_input("a", Input::Join { x: 9999.0, y: -50.0, z: 0.0 })
-            .unwrap();
-        assert_eq!(pos(&s, "a"), [HALF_WORLD, MIN_Y, 0.0]);
-        assert!(s.apply_input("a", mv(f32::NAN, 0.0)).is_err());
-        assert!(s
-            .apply_input("b", Input::Join { x: f32::INFINITY, y: 0.0, z: 0.0 })
-            .is_err());
+        place(&mut s, "a", [HALF_WORLD - 1.0, 0.0, 0.0]);
+        s.apply_input("a", mv(10.0, 0.0, 0.0)).unwrap();
+        assert_eq!(pos(&s, "a")[0], HALF_WORLD);
+        assert!(s.apply_input("a", mv(f32::NAN, 0.0, 0.0)).is_err());
+        assert!(s.apply_input("a", mv(0.0, f32::INFINITY, 0.0)).is_err());
     }
 
     #[test]
     fn hits_are_range_checked_capped_and_kill() {
         let mut s = island();
-        s.apply_input("a", Input::Join { x: 0.0, y: 0.0, z: 0.0 })
-            .unwrap();
-        s.apply_input("b", Input::Join { x: 10.0, y: 0.0, z: 0.0 })
-            .unwrap();
-        s.apply_input("far", Input::Join { x: 0.0, y: 0.0, z: 0.0 })
-            .unwrap();
+        place(&mut s, "a", [0.0, 0.0, 0.0]);
+        place(&mut s, "b", [10.0, 0.0, 0.0]);
+        place(&mut s, "far", [0.0, 0.0, 300.0]);
         let (b, far) = (s.players["b"].entity, s.players["far"].entity);
-        s.players.get_mut("far").unwrap().pos = [0.0, 0.0, 300.0];
-        assert!(s.apply_input("a", Input::Hit { target: far, damage: 10 }).is_err());
-        s.apply_input("a", Input::Hit { target: b, damage: 255 })
-            .unwrap();
+        assert!(s
+            .apply_input(
+                "a",
+                Input::Hit {
+                    target: far,
+                    damage: 10
+                }
+            )
+            .is_err());
+        s.apply_input(
+            "a",
+            Input::Hit {
+                target: b,
+                damage: 255,
+            },
+        )
+        .unwrap();
         assert_eq!(s.players["b"].health, 100 - MAX_DAMAGE);
-        s.apply_input("a", Input::Hit { target: b, damage: 60 })
-            .unwrap();
+        ticks(&mut s, 10);
+        s.apply_input(
+            "a",
+            Input::Hit {
+                target: b,
+                damage: 60,
+            },
+        )
+        .unwrap();
         assert_eq!(s.players["b"].health, 0);
         assert_eq!(s.store.get(b).unwrap().component(HEALTH), Some(&[0][..]));
         // The dead neither shoot nor move.
         let a = s.players["a"].entity;
-        assert!(s.apply_input("b", Input::Hit { target: a, damage: 10 }).is_err());
+        assert!(s
+            .apply_input(
+                "b",
+                Input::Hit {
+                    target: a,
+                    damage: 10
+                }
+            )
+            .is_err());
         let before = pos(&s, "b");
-        s.apply_input("b", mv(1.0, 0.0)).unwrap();
+        s.apply_input("b", mv(1.0, 0.0, 0.0)).unwrap();
         assert_eq!(pos(&s, "b"), before);
     }
 
     #[test]
-    fn only_the_dead_respawn_and_only_after_the_delay() {
+    fn a_shooter_cannot_deal_more_than_the_weapons_allow() {
         let mut s = island();
-        s.apply_input("a", Input::Join { x: 0.0, y: 0.0, z: 0.0 })
-            .unwrap();
-        s.apply_input("b", Input::Join { x: 1.0, y: 0.0, z: 0.0 })
-            .unwrap();
-        let spawn = Input::Spawn { x: 50.0, y: 5.0, z: 50.0 };
-        assert!(s.apply_input("b", spawn.clone()).is_err());
-        let b = s.players["b"].entity;
-        s.apply_input("a", Input::Hit { target: b, damage: 60 })
-            .unwrap();
-        s.apply_input("a", Input::Hit { target: b, damage: 60 })
-            .unwrap();
-        assert!(s.apply_input("b", spawn.clone()).is_err());
-        for _ in 0..50 {
-            s.tick(TICK);
+        place(&mut s, "a", [0.0, 0.0, 0.0]);
+        let targets: Vec<u64> = (0..16)
+            .map(|i| {
+                let id = format!("t{i}");
+                place(&mut s, &id, [i as f32, 0.0, 5.0]);
+                s.players[&id].entity
+            })
+            .collect();
+        // Everything at once, in one tick: the saved 200 damage, no more.
+        let mut dealt = 0;
+        for &t in &targets {
+            for _ in 0..2 {
+                if s.apply_input(
+                    "a",
+                    Input::Hit {
+                        target: t,
+                        damage: 60,
+                    },
+                )
+                .is_ok()
+                {
+                    dealt += 60;
+                }
+            }
         }
-        s.apply_input("b", spawn).unwrap();
-        assert_eq!(pos(&s, "b"), [50.0, 5.0, 50.0]);
+        assert_eq!(dealt, 180);
+        let dead = s.players.values().filter(|p| p.health == 0).count();
+        assert_eq!(dead, 1);
+        // A second of rifle fire (about 10 shots of 18) goes through.
+        ticks(&mut s, 20);
+        let t = targets[5];
+        let mut hits = 0;
+        for _ in 0..10 {
+            if s.apply_input(
+                "a",
+                Input::Hit {
+                    target: t,
+                    damage: 18,
+                },
+            )
+            .is_ok()
+            {
+                hits += 1;
+            }
+            ticks(&mut s, 2);
+        }
+        assert_eq!(hits, 10);
+        assert_eq!(s.players["t5"].health, 0);
+    }
+
+    #[test]
+    fn only_the_dead_respawn_only_after_the_delay_at_a_spawn_point() {
+        let mut s = island();
+        place(&mut s, "a", [0.0, 0.0, 0.0]);
+        place(&mut s, "b", [1.0, 0.0, 0.0]);
+        assert!(s.apply_input("b", Input::Spawn).is_err());
+        s.players.get_mut("b").unwrap().health = 0;
+        assert!(s.apply_input("b", Input::Spawn).is_err());
+        ticks(&mut s, 50);
+        s.apply_input("b", Input::Spawn).unwrap();
+        assert!(s.spawns.contains(&pos(&s, "b")));
+        assert_eq!(s.players["b"].health, 100);
+    }
+
+    #[test]
+    fn leaving_and_joining_again_neither_heals_nor_moves_a_player() {
+        let mut s = island();
+        place(&mut s, "b", [-240.0, 5.0, 240.0]);
+        s.players.get_mut("b").unwrap().health = 0;
+        s.apply_input("b", Input::Leave).unwrap();
+        // Right away: refused.
+        assert!(s.apply_input("b", Input::Join).is_err());
+        ticks(&mut s, 120);
+        // Within a minute: back where they were, still dead.
+        s.apply_input("b", Input::Join).unwrap();
+        assert_eq!(pos(&s, "b"), [-240.0, 5.0, 240.0]);
+        assert_eq!(s.players["b"].health, 0);
+        // The idle kick counts as leaving too.
+        s.players.get_mut("b").unwrap().health = 70;
+        ticks(&mut s, (IDLE_LIMIT.as_millis() / TICK.as_millis()) as u32);
+        assert!(!s.players.contains_key("b"));
+        ticks(&mut s, 120);
+        s.apply_input("b", Input::Join).unwrap();
+        assert_eq!(s.players["b"].health, 70);
+        // After a minute away the record is gone: a fresh spawn.
+        s.apply_input("b", Input::Leave).unwrap();
+        ticks(
+            &mut s,
+            (REMEMBER_LEFT.as_millis() / TICK.as_millis()) as u32 + 1,
+        );
+        assert!(s.departed.is_empty());
+        s.apply_input("b", Input::Join).unwrap();
+        assert!(s.spawns.contains(&pos(&s, "b")));
         assert_eq!(s.players["b"].health, 100);
     }
 
     #[test]
     fn a_quiet_player_leaves() {
         let mut s = island();
-        s.apply_input("a", Input::Join { x: 0.0, y: 0.0, z: 0.0 })
-            .unwrap();
-        for _ in 0..(IDLE_LIMIT.as_millis() / TICK.as_millis() - 1) {
-            s.tick(TICK);
-        }
+        s.apply_input("a", Input::Join).unwrap();
+        ticks(
+            &mut s,
+            (IDLE_LIMIT.as_millis() / TICK.as_millis() - 1) as u32,
+        );
         assert_eq!(s.store.len(), 1);
-        s.apply_input("a", mv(0.0, 0.0)).unwrap();
-        for _ in 0..(IDLE_LIMIT.as_millis() / TICK.as_millis()) {
-            s.tick(TICK);
-        }
+        s.apply_input("a", mv(0.0, 0.0, 0.0)).unwrap();
+        ticks(&mut s, (IDLE_LIMIT.as_millis() / TICK.as_millis()) as u32);
         assert!(s.store.is_empty());
     }
 

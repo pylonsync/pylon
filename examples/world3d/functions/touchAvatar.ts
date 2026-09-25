@@ -1,12 +1,12 @@
 import { mutation } from "@pylonsync/functions";
 
 /**
- * The caller's avatar id, with its lastSeenAt set to now (spawnAvatar
- * prunes avatars nobody has used for a day). Internal: joinIsland calls
- * it with the caller's auth.
+ * The caller's avatar id, with its lastSeenAt set to now. spawnAvatar
+ * prunes avatars unused for 30 minutes; joinIsland calls this on every
+ * connection, and the client every 5 minutes while playing.
  */
 export default mutation({
-  internal: true,
+  auth: "guest",
   args: {},
   async handler(ctx) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");

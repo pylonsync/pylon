@@ -39,6 +39,8 @@ interface RemoteEntry {
   /** Small per-corpse sideways roll so bodies don't fall identically. */
   deathRoll: number;
   disposables: Array<{ dispose(): void }>;
+  /** Built before its Avatar row arrived, with a placeholder name. */
+  placeholder: boolean;
 }
 
 /** Hit info from a ray-vs-player capsule test. */
@@ -196,7 +198,7 @@ export class RemotePlayers implements GameSystem {
     return Array.from(this.entries.values(), (e) => ({ x: e.cur.x, z: e.cur.z }));
   }
 
-  private addEntry(row: AvatarRow, pose: RemotePose): RemoteEntry {
+  private addEntry(row: AvatarRow, pose: RemotePose, placeholder: boolean): RemoteEntry {
     const character = buildCharacter(row.color);
     const disposables: Array<{ dispose(): void }> = [character];
 
@@ -229,6 +231,7 @@ export class RemotePlayers implements GameSystem {
       // near each other don't look cloned.
       deathRoll: ((hashId(row.id) % 1000) / 1000 - 0.5) * 0.6,
       disposables,
+      placeholder,
     };
     this.entries.set(row.id, entry);
     return entry;
@@ -310,11 +313,22 @@ export class RemotePlayers implements GameSystem {
   update(ctx: FrameCtx) {
     const seen = new Set<string>();
     for (const pose of this.poses()) {
-      // The name and color arrive with the Avatar live query.
+      // The name and color arrive with the Avatar live query. A player is
+      // drawn (and can be shot) before then, under a placeholder.
       const row = this.rows.get(pose.avatarId);
-      if (!row) continue;
       seen.add(pose.avatarId);
-      const entry = this.entries.get(pose.avatarId) ?? this.addEntry(row, pose);
+      let entry = this.entries.get(pose.avatarId);
+      if (entry?.placeholder && row) {
+        this.removeEntry(pose.avatarId);
+        entry = undefined;
+      }
+      entry ??= row
+        ? this.addEntry(row, pose, false)
+        : this.addEntry(
+            { id: pose.avatarId, userId: "", name: "player", color: "#9ca3af", lastSeenAt: "" },
+            pose,
+            true,
+          );
       const c = entry.cur;
       const prevX = c.x;
       const prevZ = c.z;

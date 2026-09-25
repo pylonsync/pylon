@@ -26,10 +26,10 @@ import type { Player } from "./player";
 
 /** Inputs the island shard takes (`Input` in shards/island/src/lib.rs). */
 export type IslandInput =
-  | { join: { x: number; y: number; z: number } }
+  | "join"
   | { move: { dx: number; dy: number; dz: number; heading: number; pitch: number } }
   | { hit: { target: number; damage: number } }
-  | { spawn: { x: number; y: number; z: number } }
+  | "spawn"
   | "leave";
 
 /** Component ids (shards/island/src/lib.rs). */
@@ -46,6 +46,11 @@ const HEARTBEAT_S = 1;
 const REJOIN_S = 3;
 /** A difference from the shard's position smaller than this is rounding. */
 const CORRECT_M = 0.3;
+/** A larger one is a spawn or a rejoin: teleport instead of shifting. */
+const TELEPORT_M = 5;
+/** How often to mark the Avatar row as in use (spawnAvatar prunes rows
+ *  unused for 30 minutes). */
+const TOUCH_S = 5 * 60;
 
 interface Vec3 {
   x: number;
@@ -65,12 +70,13 @@ export interface RemotePose {
   health: number;
 }
 
+/** A move shifts the player. The shard picks spawn points, so a join or
+ *  spawn has no effect to predict: the correction after it moves the
+ *  player there. */
 function step(s: Vec3, input: IslandInput): Vec3 {
-  if (typeof input === "string") return s;
-  if ("move" in input) {
+  if (typeof input === "object" && "move" in input) {
     return { x: s.x + input.move.dx, y: s.y + input.move.dy, z: s.z + input.move.dz };
   }
-  if ("spawn" in input) return { ...input.spawn };
   return s;
 }
 
@@ -112,6 +118,7 @@ export class Net implements GameSystem {
   private lastLook = { heading: Infinity, pitch: Infinity };
   private lastJoinAt = -Infinity;
   private lastSeenSelfAt = 0;
+  private lastTouchAt = 0;
   private dead = false;
   private readonly decoder = new TextDecoder();
   /** Avatar id per entity, decoded once per entity. */
@@ -142,12 +149,9 @@ export class Net implements GameSystem {
         hit: { target, damage: Math.max(1, Math.min(255, Math.round(damage))) },
       });
     });
-    // Death sequence finished locally: come back where the player now is.
+    // Death sequence finished locally: the shard picks the spawn point.
     events.on("respawnRequested", () => {
-      const p = this.player.position;
-      if (this.shard?.send({ spawn: { x: p.x, y: p.y, z: p.z } })) {
-        this.lastSent.copy(p);
-      }
+      this.shard?.send("spawn");
     });
   }
 
@@ -198,24 +202,24 @@ export class Net implements GameSystem {
   }
 
   private join() {
-    const p = this.player.position;
-    if (this.shard?.send({ join: { x: p.x, y: p.y, z: p.z } })) {
-      this.lastSent.copy(p);
+    if (this.shard?.send("join")) {
+      this.lastSent.copy(this.player.position);
       this.lastJoinAt = performance.now() / 1000;
     }
   }
 
-  /** Our entity id, found by its AVATAR component. */
+  /** Our entity id, found by its AVATAR component: the newest one, when a
+   *  leave and a rejoin briefly leave two. */
   private findSelf(): number | null {
     const table = this.shard?.latest;
     if (!table || !this.avatarId) return null;
-    if (this.selfEntity !== null && this.avatarIdOf(this.selfEntity, table.get(this.selfEntity)?.components) === this.avatarId) {
-      return this.selfEntity;
-    }
+    let found: number | null = null;
     for (const e of table.entities.values()) {
-      if (this.avatarIdOf(e.id, e.components) === this.avatarId) return e.id;
+      if (this.avatarIdOf(e.id, e.components) === this.avatarId && (found === null || e.id > found)) {
+        found = e.id;
+      }
     }
-    return null;
+    return found;
   }
 
   private avatarIdOf(entity: number, components: ReadonlyMap<number, Uint8Array> | undefined): string | null {
@@ -250,7 +254,12 @@ export class Net implements GameSystem {
     const dx = predicted.x - this.lastSent.x;
     const dy = predicted.y - this.lastSent.y;
     const dz = predicted.z - this.lastSent.z;
-    if (Math.hypot(dx, dy, dz) > CORRECT_M) {
+    const off = Math.hypot(dx, dy, dz);
+    if (off > TELEPORT_M) {
+      // Where the shard put us (a spawn point, or a rejoin): go there.
+      this.player.teleport(new THREE.Vector3(predicted.x, predicted.y, predicted.z));
+      this.lastSent.copy(this.player.position);
+    } else if (off > CORRECT_M) {
       this.player.position.x += dx;
       this.player.position.y += dy;
       this.player.position.z += dz;
@@ -260,6 +269,12 @@ export class Net implements GameSystem {
 
   update(ctx: FrameCtx) {
     const shard = this.shard;
+    if (shard && ctx.time - this.lastTouchAt >= TOUCH_S) {
+      this.lastTouchAt = ctx.time;
+      callFn("touchAvatar", {}).catch(() => {
+        // Next interval retries; joinIsland touches the row too.
+      });
+    }
     if (shard) {
       shard.frame();
       for (const id of shard.left) this.avatarOf.delete(id);
@@ -315,12 +330,19 @@ export class Net implements GameSystem {
   private collectRemotes(shard: ShardGame<IslandInput>) {
     this.remotes.length = 0;
     this.entityOf.clear();
-    let i = 0;
+    // A leave and a join close together leave two entities for one avatar
+    // for the interpolation delay: draw the newer (ids only grow).
+    const newest = new Map<string, InterpolatedEntity>();
     for (const e of shard.entities.values()) {
       const avatarId = this.avatarIdOf(e.id, e.components);
       if (!avatarId) continue;
+      const seen = newest.get(avatarId);
+      if (!seen || e.id > seen.id) newest.set(avatarId, e);
+    }
+    let i = 0;
+    for (const [avatarId, e] of newest) {
       this.entityOf.set(avatarId, e.id);
-      if (e.id === this.selfEntity) continue;
+      if (avatarId === this.avatarId) continue;
       const pose = this.pool[i] ?? (this.pool[i] = {} as RemotePose);
       i++;
       this.fill(pose, avatarId, e);

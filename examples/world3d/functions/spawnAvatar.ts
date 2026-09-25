@@ -37,19 +37,16 @@ export default mutation({
       throw ctx.error("FORBIDDEN", "can only spawn your own avatar");
     }
 
-    // Prune avatars nobody has joined with for a day (closed tabs, old
-    // guest sessions) so the table doesn't accumulate ghosts. joinIsland
-    // sets lastSeenAt on every join.
-    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-    const all = await ctx.db.query("Avatar", {});
-    for (const row of all) {
-      const seen = Date.parse((row.lastSeenAt as string) ?? "");
-      if (Number.isNaN(seen) || seen < cutoff) {
-        // unsafe: pruning OTHER players' stale rows — the Avatar
-        // delete policy is owner-only, and this is the sanctioned
-        // janitor sweep.
-        await ctx.db.unsafe.delete("Avatar", row.id as string);
-      }
+    // Prune avatars nobody has used for 30 minutes (closed tabs, old
+    // guest sessions) so the table doesn't accumulate ghosts. Players
+    // touch their row every 5 minutes (touchAvatar).
+    const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const stale = await ctx.db.query("Avatar", { lastSeenAt: { $lt: cutoff } });
+    for (const row of stale) {
+      // unsafe: pruning OTHER players' stale rows — the Avatar
+      // delete policy is owner-only, and this is the sanctioned
+      // janitor sweep.
+      await ctx.db.unsafe.delete("Avatar", row.id as string);
     }
 
     // Make sure the building-rebuild chain is alive (see
@@ -71,7 +68,12 @@ export default mutation({
     }
 
     const existing = await ctx.db.query("Avatar", { userId: ctx.auth.userId });
-    if (existing.length > 0) return { id: existing[0].id as string };
+    if (existing.length > 0) {
+      await ctx.db.update("Avatar", existing[0].id as string, {
+        lastSeenAt: new Date().toISOString(),
+      });
+      return { id: existing[0].id as string };
+    }
 
     const color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
     const name = (args.name as string | undefined) ?? randomName();

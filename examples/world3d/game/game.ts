@@ -38,6 +38,7 @@ import {
 import { Vegetation } from "./vegetation";
 import { Water } from "./water";
 import { Weapon } from "./weapon";
+import SPAWNS from "../shards/island/spawns.json";
 
 /** Procedural texture bundle shared by the world systems. */
 export interface WorldTextures {
@@ -121,7 +122,9 @@ export class Game {
    *  ground on death; snapped back to 0 on respawn (teleport). */
   private selfDeathT = 0;
   private damageFlash = 0;
-  private readonly spawnPool: THREE.Vector3[] = [];
+  /** Spawn points worldgen finds for SEED. The island shard spawns
+   *  players at the copy in shards/island/spawns.json. */
+  readonly spawnPool: THREE.Vector3[] = [];
   private readonly aimTarget = new THREE.Vector3();
   private readonly camDir = new THREE.Vector3();
   private readonly muzzleWorld = new THREE.Vector3();
@@ -208,7 +211,9 @@ export class Game {
     this.scene.add(this.buildings.mesh);
 
     // --- Gameplay systems ---
-    this.spawnPoint = this.pickSpawn(vegetation);
+    this.pickSpawns(vegetation);
+    // Until the shard places us (it picks the spawn point).
+    this.spawnPoint = new THREE.Vector3(...(SPAWNS[0] as [number, number, number]));
     this.player = this.engine.add(
       new Player(this.terrain, this.camera, this.renderer.domElement, this.spawnPoint),
     );
@@ -386,9 +391,10 @@ export class Game {
   }
 
   /** Dry, flattish, TREE-FREE spots — the third-person boom needs
-   *  ~4 m of clear air behind the player. Collects a respawn pool;
-   *  returns the first as the initial spawn. */
-  private pickSpawn(vegetation: Vegetation): THREE.Vector3 {
+   *  ~4 m of clear air behind the player. The island shard spawns players
+   *  at a copy of these (shards/island/spawns.json); a worldgen change
+   *  that moves them needs the copy updated from `__world3d.game.spawnPool`. */
+  private pickSpawns(vegetation: Vegetation) {
     const rng = makeRng(SEED ^ 0x5fa3);
     for (let i = 0; i < 600 && this.spawnPool.length < 8; i++) {
       const x = rng.range(-120, 120);
@@ -403,7 +409,14 @@ export class Game {
         this.spawnPool.push(new THREE.Vector3(x, h + 1.7, z));
       }
     }
-    return this.spawnPool[0] ?? new THREE.Vector3(0, this.terrain.heightAt(0, 0) + 1.7, 0);
+    const same =
+      this.spawnPool.length === SPAWNS.length &&
+      this.spawnPool.every((p, i) => p.distanceTo(new THREE.Vector3(...(SPAWNS[i] as [number, number, number]))) < 0.05);
+    if (!same) {
+      console.warn(
+        "[world3d] shards/island/spawns.json no longer matches worldgen; update it from __world3d.game.spawnPool",
+      );
+    }
   }
 
   private spawnDestructionFx(removed: Array<{ key: string; center: THREE.Vector3 }>) {
@@ -450,16 +463,15 @@ export class Game {
   private syncHealth(now: number) {
     const health = this.net.selfHealth;
     if (health === null) return;
-    if (this.respawnSentAt !== null) {
-      // Until the shard applies the respawn it still says 0.
-      if (health <= 0) {
-        if (now - this.respawnSentAt > 1500) {
-          this.respawnSentAt = now;
-          this.engine.events.emit("respawnRequested", {});
-        }
-        return;
+    if (this.dead) {
+      // Dead until the shard says otherwise; it picks the spawn point, and
+      // Net moves us there.
+      if (health > 0) {
+        this.finishRespawn(health);
+      } else if (this.respawnSentAt !== null && now - this.respawnSentAt > 1500) {
+        this.requestRespawn(now);
       }
-      this.respawnSentAt = null;
+      return;
     }
     if (health < this.selfHealth) {
       this.damageFlash++;
@@ -475,7 +487,7 @@ export class Game {
       });
     }
     this.selfHealth = health;
-    if (health <= 0 && !this.dead) this.startDeath();
+    if (health <= 0) this.startDeath();
   }
 
   private startDeath() {
@@ -484,22 +496,25 @@ export class Game {
     this.player.controlsEnabled = false;
     this.weapon.enabled = false;
     this.engine.events.emit("shake", { strength: 0.5 });
-    // Respawn handled in the frame loop 3 s from now.
+    // The respawn request goes out from the frame loop 3 s from now.
     this.respawnAt = performance.now() + 3000;
+    this.respawnSentAt = null;
   }
 
-  private finishRespawn() {
+  /** Ask the shard to respawn us; asked again until it does. */
+  private requestRespawn(now: number) {
+    this.respawnSentAt = now;
+    this.engine.events.emit("respawnRequested", {});
+  }
+
+  private finishRespawn(health: number) {
     this.dead = false;
     this.net.setDead(false);
     this.selfDeathT = 0;
-    const spot =
-      this.spawnPool[Math.floor(Math.random() * this.spawnPool.length)] ?? this.spawnPoint;
-    this.player.teleport(spot);
     this.player.controlsEnabled = true;
     this.weapon.enabled = true;
-    this.selfHealth = 100; // optimistic; the shard confirms
-    this.respawnSentAt = performance.now();
-    this.engine.events.emit("respawnRequested", {});
+    this.selfHealth = health;
+    this.respawnSentAt = null;
   }
 
   /** Register the outbound fire-event broadcaster (rooms WS relay). */
@@ -616,7 +631,9 @@ export class Game {
 
       this.syncHealth(now);
       // Death → respawn timer.
-      if (this.dead && now >= this.respawnAt) this.finishRespawn();
+      if (this.dead && now >= this.respawnAt && this.respawnSentAt === null) {
+        this.requestRespawn(now);
+      }
 
       // Third-person body follows the controller (origin at eye level,
       // same convention as remote characters). Hidden in first person.

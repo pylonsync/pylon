@@ -26,7 +26,11 @@ const Avatar = entity(
     lastSeenAt: field.datetime(),
   },
   {
-    indexes: [{ name: "by_user", fields: ["userId"], unique: true }],
+    indexes: [
+      { name: "by_user", fields: ["userId"], unique: true },
+      // spawnAvatar's prune of rows unused for 30 minutes.
+      { name: "by_last_seen", fields: ["lastSeenAt"], unique: false },
+    ],
   },
 );
 
