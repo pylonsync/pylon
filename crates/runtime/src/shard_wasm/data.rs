@@ -538,9 +538,14 @@ impl WasmShardHost {
             }
             let row = dirty.entry(key).or_default();
             for (field, value) in w.set {
-                // A newer value keeps the field's failure count: the store
-                // error is the row's, not the value's.
-                let failures = row.fields.get(&field).map_or(0, |f| f.failures);
+                // A newer value from the same run keeps the field's failure
+                // count (the store error is the row's, not the value's); a
+                // value from another shard or run starts its own.
+                let failures = row
+                    .fields
+                    .get(&field)
+                    .filter(|f| f.shard == shard && f.epoch == epoch)
+                    .map_or(0, |f| f.failures);
                 row.fields.insert(
                     field,
                     FieldWrite {
@@ -698,17 +703,39 @@ impl WasmShardHost {
             }
             kept += 1;
             let row = dirty.entry(key).or_default();
-            // Values buffered since the flush took these are newer.
+            // Values buffered since the flush took these are newer; one from
+            // the same run takes this failure.
             for (field, value) in set {
-                row.fields.entry(field).or_insert_with(|| FieldWrite {
-                    value,
-                    shard: shard.clone(),
-                    epoch,
-                    failures,
-                });
+                match row.fields.entry(field) {
+                    std::collections::hash_map::Entry::Occupied(mut e) => {
+                        let f = e.get_mut();
+                        if f.shard == shard && f.epoch == epoch {
+                            f.failures = f.failures.max(failures);
+                        }
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(FieldWrite {
+                            value,
+                            shard: shard.clone(),
+                            epoch,
+                            failures,
+                        });
+                    }
+                }
             }
         }
         kept
+    }
+
+    /// The failure count of a buffered field, for tests.
+    #[cfg(test)]
+    pub(super) fn field_failures(&self, entity: &str, id: &str, field: &str) -> Option<u32> {
+        self.dirty
+            .lock()
+            .unwrap()
+            .get(&(entity.to_string(), id.to_string()))
+            .and_then(|row| row.fields.get(field))
+            .map(|f| f.failures)
     }
 
     /// Stop the periodic flush, for tests that flush by hand.
@@ -1781,7 +1808,28 @@ mod tests {
         );
         host.flush_failures
             .store(2, std::sync::atomic::Ordering::Release);
+        // Each flush notes whether the own lock was free and the id
+        // reserved.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (weak, seen, zone) = (Arc::downgrade(&host), Arc::clone(&seen), zone.clone());
+            *host.flush_hook.lock().unwrap() = Some(Box::new(move || {
+                if let Some(host) = weak.upgrade() {
+                    let c = host.cluster.get().unwrap();
+                    let free = c.own_lock.try_lock().is_ok();
+                    let reserved = host.ending.lock().unwrap().contains(&zone);
+                    seen.lock().unwrap().push((free, reserved));
+                }
+            }));
+        }
         assert!(host.stop(&zone));
+        *host.flush_hook.lock().unwrap() = None;
+        // stop_local's flush holds the lock; the two retries do not.
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![(false, false), (true, true), (true, true)]
+        );
+        assert!(host.ending.lock().unwrap().is_empty());
         assert_eq!(
             host.flush_failures
                 .load(std::sync::atomic::Ordering::Acquire),
@@ -2023,6 +2071,69 @@ mod tests {
         assert_eq!(
             (row["x"].clone(), row["nextGrant"].clone()),
             (0.into(), 9.into())
+        );
+    }
+
+    /// A field one shard failed to write does not pass its failure count
+    /// to another shard's value for it, and a value rewritten while a
+    /// flush writes the field takes that flush's failure.
+    #[test]
+    fn a_field_count_stays_with_its_run() {
+        let (rt, fns) = runtime();
+        let host = joined(&fns, &rt, "w1");
+        host.manual_flush();
+        host.create("zone", "w2", &serde_json::json!({})).unwrap();
+        let x = |n: i64| {
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(n))]),
+            }]
+        };
+        let fail = |n| {
+            host.flush_failures
+                .store(n, std::sync::atomic::Ordering::Release)
+        };
+        let count = || host.field_failures("Character", &fns.character, "x");
+        host.take_writes("w1", x(1));
+        fail(WRITE_ATTEMPTS - 1);
+        for _ in 1..WRITE_ATTEMPTS {
+            host.flush_writes(Flush::Held);
+        }
+        assert_eq!(count(), Some(WRITE_ATTEMPTS - 1));
+        // w1 again: the count stays. w2: its own count.
+        host.take_writes("w1", x(2));
+        assert_eq!(count(), Some(WRITE_ATTEMPTS - 1));
+        host.take_writes("w2", x(3));
+        assert_eq!(count(), Some(0));
+        fail(1);
+        assert_eq!(host.flush_writes(Flush::Held), 1);
+        assert_eq!(count(), Some(1));
+
+        // Rewritten by the same run while the flush writes it: the newer
+        // value takes the failure.
+        let weak = Arc::downgrade(&host);
+        let character = fns.character.clone();
+        *host.flush_hook.lock().unwrap() = Some(Box::new(move || {
+            if let Some(host) = weak.upgrade() {
+                host.take_writes(
+                    "w2",
+                    vec![Write {
+                        entity: "Character".into(),
+                        id: character.clone(),
+                        set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(4))]),
+                    }],
+                );
+            }
+        }));
+        fail(1);
+        host.flush_writes(Flush::Held);
+        *host.flush_hook.lock().unwrap() = None;
+        assert_eq!(count(), Some(2));
+        host.flush_writes(Flush::Held);
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            4
         );
     }
 

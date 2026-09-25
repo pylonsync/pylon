@@ -2154,11 +2154,17 @@ impl WasmShardHost {
             let held = c.owned.lock().unwrap().remove(id);
             if let Some(epoch) = held {
                 // stop_local tried once; out of `owned`, a periodic flush
-                // no longer takes what is left.
+                // no longer takes what is left. The retries run without the
+                // own lock (a database stall would hold up every placement
+                // change here), with the id reserved so no run of it starts.
+                self.ending.lock().unwrap().insert(id.to_string());
+                drop(own);
                 self.final_writes(id);
+                let _guard = self.create_lock.lock().unwrap();
                 if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
                     tracing::warn!("[shard {id}] could not release its placement: {e}");
                 }
+                self.ending.lock().unwrap().remove(id);
                 return stopped;
             }
             // A copy the fence stopped: its placement is from an earlier
