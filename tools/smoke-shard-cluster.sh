@@ -27,8 +27,10 @@
 #   4. restart: a is killed and started again under the same id; once the
 #      old process is silent for 10 s, it starts the shards placed on it
 #      from saved state.
-#   5. graceful leave: machine d stops (SIGTERM); its shard starts on a well
-#      before a dead machine's would.
+#   5. deploy: machine d gets SIGTERM with 10 bench bots in an arena on it
+#      and, in packages/realtime's shard-drain.e2e.test.ts, a player with
+#      state in a zone on it. d hands both shards to a before it exits; the
+#      clients follow with no drop and no error, and the state is the same.
 #   6. fencing: machine e reaches Postgres through a proxy; the proxy starts
 #      dropping every byte without closing a socket, so e's database calls
 #      hang. e's lease lapses and it stops its shard before a starts it.
@@ -236,18 +238,42 @@ PID_A=$PID
 up "$PORT_A"
 wait_log a-restarted.log "\[shard replay-check\] started (arena, from saved state)" 30
 
-echo "→ 5. graceful leave: d stops and its shard moves at once"
+echo "→ 5. deploy: d gets SIGTERM with players on it; its shards move with them"
 start d "$PORT_D" PYLON_REPLICA_ID=d
 PID_D=$PID
 up "$PORT_D"
 sleep 3
 join "$PORT_A" "$TOKEN" '{"arena":"leave-check","machine":"d"}' >/dev/null ||
 	fail "joinArena pinned to d failed"
-sleep 2
-LEFT_AT=$(date +%s)
-kill -TERM "$PID_D"
-wait_log a-restarted.log "\[shard leave-check\] machine d is dead; starting it here" 8
-(($(date +%s) - LEFT_AT < 8)) || fail "d's shard took the dead-machine delay to move"
+# 10 bots in the arena on d, through a, for the whole deploy.
+"$PYLON" bench shard --url "http://127.0.0.1:$PORT_A" --join joinArena \
+	--join-args '{"arena":"leave-check"}' --bots 10 --duration 16 --ramp 1 --rate 5 \
+	--input '"join"' --input '{"move_to":{"x":"$rand:0:800","y":"$rand:0:500"}}' \
+	--json >"$TMP/drain-bench.json" 2>"$TMP/drain-bench.log" &
+BENCH_PID=$!
+PIDS+=("$BENCH_PID")
+sleep 3
+# The e2e test puts a player with state in a zone on d, sends d SIGTERM,
+# and checks the player's client follows the zone with its state.
+(cd "$ROOT/packages/realtime" &&
+	PYLON_SHARD_DRAIN_E2E="127.0.0.1:$PORT_A,127.0.0.1:$PORT_D" \
+		PYLON_SHARD_DRAIN_PID="$PID_D" \
+		bun test src/shard-drain.e2e.test.ts) || fail "the drain e2e test failed"
+wait "$BENCH_PID" || {
+	cat "$TMP/drain-bench.log" "$TMP/drain-bench.json" >&2
+	fail "the bench during the deploy failed"
+}
+wait_log a-restarted.log "\[shard leave-check\] machine d is shutting down; starting it here" 5
+grep -q "\[shard leave-check\] handed over to machine" "$TMP/d.log" || fail "d did not hand over leave-check"
+node -e '
+const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const fail = (m) => { console.error("::error::" + m + "\n" + JSON.stringify(r, null, 2)); process.exit(1); };
+if (r.connected !== 10 || r.failed !== 0) fail(`${r.connected} of 10 bots connected`);
+if (r.dropped !== 0) fail(`${r.dropped} bots saw their connection drop during the deploy`);
+if (r.moves !== 10) fail(`${r.moves} of 10 bots followed the arena to its new machine`);
+if (r.decode_errors !== 0) fail(`${r.decode_errors} frames did not decode`);
+console.log(`  10 bots through the deploy: ${r.moves} moves, 0 drops, ack p99 ${r.ack_latency_ms.p99} ms`);
+' "$TMP/drain-bench.json"
 
 # The example's arena kind runs at most 4 shards: stop the ones done with.
 for done in replay-check leave-check; do

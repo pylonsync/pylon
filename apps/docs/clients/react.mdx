@@ -211,8 +211,11 @@ const { snapshot, send, connected } = useShard<GameState, Input>(
 
 When the server moves the player to another shard
 (`ctx.shards.transfer`), the hook reconnects there on its own; its
-`shardId` field is the shard it is connected to. See
-[Move a player to another shard](/concepts/shards#move-a-player-to-another-shard).
+`shardId` field is the shard it is connected to. When a deploy moves the
+shard itself to another machine, the hook reconnects the same way and its
+`shardId` stays. See
+[Move a player to another shard](/concepts/shards#move-a-player-to-another-shard)
+and [Deploys](/concepts/shards#deploys).
 
 See [Live queries → shards](/concepts/live-queries#shards).
 

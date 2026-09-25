@@ -460,6 +460,8 @@ pub struct Shard<S: SimState> {
     /// gets the notice when it comes back.
     moved: Mutex<HashMap<SubscriberId, Moved>>,
     running: AtomicBool,
+    /// Set by [`Shard::pause`]: no tick runs, and connections stay open.
+    paused: AtomicBool,
     /// Monotonically increasing tick number. Used for reconciliation and
     /// lockstep protocols.
     tick_no: Mutex<u64>,
@@ -526,6 +528,7 @@ impl<S: SimState> Shard<S> {
             call_results: Mutex::new(VecDeque::new()),
             moved: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
+            paused: AtomicBool::new(false),
             tick_no: Mutex::new(0),
             input_seq: Mutex::new(0),
             acks: Mutex::new(HashMap::new()),
@@ -614,6 +617,19 @@ impl<S: SimState> Shard<S> {
     /// [`Shard::stop`], then wait until a tick that was running has left the
     /// state. After this returns the state never changes again, so a save
     /// taken now is the last one.
+    /// Stop ticking and wait for a tick in progress, with every connection
+    /// left open: the state holds still (for a final save before the shard
+    /// moves to another machine), and inputs still queue. Ends only with a
+    /// stop.
+    pub fn pause(&self) {
+        self.paused.store(true, Ordering::Release);
+        drop(self.state.lock().unwrap());
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
     pub fn stop_and_wait(&self) {
         self.end();
         drop(self.state.lock().unwrap());
@@ -1381,7 +1397,7 @@ impl<S: SimState> Shard<S> {
     }
 
     pub fn run_tick(&self) {
-        if !self.is_running() {
+        if !self.is_running() || self.paused.load(Ordering::Acquire) {
             return;
         }
 
@@ -1412,8 +1428,9 @@ impl<S: SimState> Shard<S> {
         let mut phases = Phases::default();
         let (snapshots, shared, finished) = {
             let mut state = self.state.lock().unwrap();
-            // Stopped while this tick waited for the state: it never runs.
-            if !self.is_running() {
+            // Stopped or paused while this tick waited for the state: it
+            // never runs.
+            if !self.is_running() || self.paused.load(Ordering::Acquire) {
                 return;
             }
             let started = Instant::now();

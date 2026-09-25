@@ -278,7 +278,9 @@ try await shard.send(Input(action: "move", x: 10, y: 20))
 
 When the server moves the player to another shard (`ctx.shards.transfer`),
 the client reconnects there with the ticket the server sent, and
-`shard.shardId` changes. `transfers()` reports each move. Set
+`shard.shardId` changes. `transfers()` reports each move. When a deploy
+moves the shard itself to another machine, the client reconnects the same
+way, `shardId` stays, and `transfers()` reports nothing. Set
 `ticketProvider` to get a ticket per connection attempt, for the shard it
 connects to:
 

@@ -75,6 +75,8 @@ export interface ShardClient<TSnapshot = unknown, TInput = unknown> {
    * Called when the server moved this subscriber to another shard (a zone
    * line, a dungeon). The client reconnects there on its own, with the
    * ticket the server sent; `shardId` changes before the handlers run.
+   * When the shard itself moves to another machine (a deploy), the client
+   * reconnects the same way, and these handlers are not called.
    */
   onTransfer: (fn: (shardId: string, from: string) => void) => void;
   /** The shard the client is connected (or connecting) to. */
@@ -277,7 +279,8 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
           const from = currentShard;
           currentShard = notice.shard;
           transferTicket = notice.ticket;
-          // A new shard: its ticks, acks, and entities start over.
+          // A new shard, or this one started on another machine (a deploy):
+          // its ticks, acks, and entities start over.
           clock.reset();
           entities.clear();
           lastTick = -1;
@@ -285,7 +288,10 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
           sentAt.clear();
           codec = null;
           backoff = options.reconnectBackoffMs ?? 500;
-          for (const h of transferHandlers) h(currentShard, from);
+          // The same shard on another machine is not a move for the app.
+          if (currentShard !== from) {
+            for (const h of transferHandlers) h(currentShard, from);
+          }
           // The server closes this connection; reconnect at once.
           transferring = true;
           return;

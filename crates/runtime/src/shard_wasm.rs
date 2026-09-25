@@ -41,6 +41,7 @@ use crate::shard_cluster::{
 };
 
 mod data;
+mod drain;
 mod messages;
 mod transfer;
 pub use messages::{check_send, MessageError, Outbox, SendError, Target};
@@ -2304,6 +2305,9 @@ impl WasmShardHost {
                 })
                 .collect()
         };
+        // Each held shard goes to another machine with its clients, while
+        // the drain time lasts (see drain.rs).
+        let held = self.drain(c, held);
         for id in self.registry.ids() {
             if let Some(shard) = self.registry.get(&id) {
                 shard.stop();
@@ -2432,9 +2436,21 @@ impl WasmShardHost {
         if c.left.load(Ordering::Acquire) {
             return;
         }
-        let epoch = c.lease.lock().unwrap().epoch;
+        let (epoch, closed) = {
+            let lease = c.lease.lock().unwrap();
+            (lease.epoch, lease.closed)
+        };
+        // Shutting down: no room for new shards or hand-overs.
+        let me = if closed {
+            MachineConfig {
+                capacity: 0,
+                ..c.me.clone()
+            }
+        } else {
+            c.me.clone()
+        };
         let sent = Instant::now();
-        match c.dir.heartbeat(&c.me, epoch) {
+        match c.dir.heartbeat(&me, epoch) {
             Ok(true) => {
                 if c.id_conflict.swap(false, Ordering::Relaxed) {
                     tracing::info!("[shards] machine id {} is free; joining", c.me.id);
@@ -2797,6 +2813,12 @@ impl WasmShardHost {
                         code: e.code().into(),
                         message: e.to_string(),
                     },
+                }
+            }
+            RemoteOp::HandOver { id, from, epoch } => {
+                match self.accept_hand_over(&id, &from, epoch) {
+                    Ok(info) => RemoteReply::Ok(json(&info)),
+                    Err((code, message)) => RemoteReply::Err { code, message },
                 }
             }
             RemoteOp::Deliver {

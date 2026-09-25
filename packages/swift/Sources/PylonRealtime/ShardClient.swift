@@ -228,7 +228,9 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     }
 
     /// The shard the server moved this subscriber to, each time it does. The
-    /// client reconnects there on its own.
+    /// client reconnects there on its own. When the shard itself moves to
+    /// another machine (a deploy), the client reconnects the same way and
+    /// nothing is sent here.
     public func transfers() -> AsyncStream<String> {
         AsyncStream { cont in self.transferContinuation = cont }
     }
@@ -432,14 +434,19 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
             if let notice = try? ShardWire.decode(
                 ShardTransferNotice.self, codec: frame.codec, payload: frame.payload)
             {
-                // A new shard: its ticks, acks, entities, and codec start over.
+                // A new shard, or this one started on another machine (a
+                // deploy): its ticks, acks, entities, and codec start over.
+                let from = shardId
                 shardId = notice.shard
                 transferTicket = notice.ticket
                 entities.clear()
                 codec = nil
                 reconnectAttempts = 0
                 transferring = true
-                transferContinuation?.yield(notice.shard)
+                // The same shard on another machine is not a move for the app.
+                if notice.shard != from {
+                    transferContinuation?.yield(notice.shard)
+                }
             }
         case .replication, .none:
             break

@@ -534,6 +534,29 @@ impl PgShardDirectory {
         })
     }
 
+    /// Move shard `shard_id` from `from` (under `from_epoch`) to `to` under
+    /// `to_epoch`: `from` is shutting down and hands it over. False when
+    /// `from` no longer holds it under that epoch.
+    pub fn hand_over(
+        &self,
+        shard_id: &str,
+        from: &str,
+        from_epoch: i64,
+        to: &str,
+        to_epoch: i64,
+    ) -> Result<bool, String> {
+        self.pool.with_client_once(|c| {
+            let n = c.execute(
+                "UPDATE _pylon_shard_placements
+                 SET machine_id = $4, epoch = $5, failed = NULL,
+                     moved_at = (extract(epoch from clock_timestamp()) * 1000)::bigint
+                 WHERE shard_id = $1 AND machine_id = $2 AND epoch = $3",
+                &[&shard_id, &from, &from_epoch, &to, &to_epoch],
+            )?;
+            Ok(n == 1)
+        })
+    }
+
     /// Record why the machine could not start the shard it holds under
     /// `epoch`. Its state stays.
     pub fn mark_failed(
@@ -1060,6 +1083,14 @@ pub enum RemoteOp {
     /// receiver). The state is in the transfer row.
     TransferIn {
         id: String,
+    },
+    /// Take shard `id` from machine `from`, which is shutting down, holds it
+    /// under `epoch`, and saved its final state: move the placement to the
+    /// receiver and start it there.
+    HandOver {
+        id: String,
+        from: String,
+        epoch: i64,
     },
     /// Queue a server input (`ctx.shards.send`) for shard `id` on the
     /// receiver.

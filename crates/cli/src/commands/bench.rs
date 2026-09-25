@@ -69,6 +69,7 @@ Options:
                        are replaced per input.
   --join <function>    Join like a player: guest session, then this function,
                        which returns { shardId, subscriberId, ticket }
+  --join-args <json>   Arguments for the --join function (default {})
   --shard <id>         Join this running shard with locally minted tickets
   --sid-prefix <p>     Subscriber ids for --shard (default \"bot-\")
   --bot-offset <n>     First bot number, for runs on several machines
@@ -94,6 +95,8 @@ pub struct BenchConfig {
     pub rate: f64,
     pub inputs: Vec<serde_json::Value>,
     pub join: JoinMode,
+    /// Arguments for the `--join` function.
+    pub join_args: serde_json::Value,
     pub sid_prefix: String,
     pub bot_offset: usize,
     pub report: Option<String>,
@@ -108,6 +111,7 @@ impl BenchConfig {
         let mut rate = 10.0f64;
         let mut inputs = Vec::new();
         let mut join = None;
+        let mut join_args = serde_json::json!({});
         let mut sid_prefix = "bot-".to_string();
         let mut bot_offset = 0usize;
         let mut report = None;
@@ -139,6 +143,13 @@ impl BenchConfig {
                     );
                 }
                 "--join" => join = Some(JoinMode::Function(value(i, flag)?)),
+                "--join-args" => {
+                    let raw = value(i, flag)?;
+                    join_args = serde_json::from_str(&raw)
+                        .ok()
+                        .filter(serde_json::Value::is_object)
+                        .ok_or_else(|| format!("--join-args must be a JSON object, got {raw}"))?;
+                }
                 "--shard" => join = Some(JoinMode::Shard(value(i, flag)?)),
                 "--sid-prefix" => sid_prefix = value(i, flag)?,
                 "--bot-offset" => bot_offset = number(value(i, flag)?, flag)? as usize,
@@ -179,6 +190,7 @@ impl BenchConfig {
             rate,
             inputs,
             join,
+            join_args,
             sid_prefix,
             bot_offset,
             report,
@@ -385,8 +397,13 @@ pub struct Report {
     pub bots: u64,
     pub connected: u64,
     pub failed: u64,
-    /// Bots whose connection closed before the run ended.
+    /// Bots whose connection closed before the run ended (a transfer frame
+    /// followed by a reconnect is a move, not a drop).
     pub dropped: u64,
+    /// Transfer frames the bots followed: a player moved, or its shard
+    /// moved to another machine.
+    #[serde(default)]
+    pub moves: u64,
     /// Why joins or connections failed, with counts.
     pub errors: BTreeMap<String, u64>,
     pub frames: u64,
@@ -436,6 +453,7 @@ impl Report {
         add(&mut next.connected, other.connected, "connected")?;
         add(&mut next.failed, other.failed, "failed")?;
         add(&mut next.dropped, other.dropped, "dropped")?;
+        add(&mut next.moves, other.moves, "moves")?;
         for (k, v) in &other.errors {
             add(next.errors.entry(k.clone()).or_insert(0), *v, "errors")?;
         }
@@ -476,6 +494,7 @@ impl Report {
             "connected": self.connected,
             "failed": self.failed,
             "dropped": self.dropped,
+            "moves": self.moves,
             "errors": self.errors,
             "frames": self.frames,
             "inputs_sent": self.inputs_sent,
@@ -526,8 +545,8 @@ impl Report {
             );
         }
         println!(
-            "  connected          {} of {} ({} failed, {} dropped before the end)",
-            self.connected, self.bots, self.failed, self.dropped
+            "  connected          {} of {} ({} failed, {} dropped before the end, {} moves)",
+            self.connected, self.bots, self.failed, self.dropped, self.moves
         );
         for (why, n) in &self.errors {
             println!("    {n} x {why}");
@@ -649,6 +668,9 @@ async fn run_bots(config: Arc<BenchConfig>) -> Report {
                     r.connected += 1;
                     if stats.dropped {
                         r.dropped += 1;
+                        if let Some(why) = &stats.drop_reason {
+                            *r.errors.entry(format!("dropped: {why}")).or_insert(0) += 1;
+                        }
                     }
                     stats.add_to(&mut r);
                 }
@@ -695,7 +717,7 @@ fn join_with_function(config: &BenchConfig, function: &str) -> Result<Join, Stri
     let joined: serde_json::Value = agent
         .post(&format!("{}/api/fn/{function}", config.url))
         .set("Authorization", &format!("Bearer {token}"))
-        .send_json(serde_json::json!({}))
+        .send_json(config.join_args.clone())
         .map_err(|e| short_http_error(function, e))?
         .into_json()
         .map_err(|e| format!("{function}: bad JSON: {e}"))?;
@@ -740,6 +762,9 @@ struct BotStats {
     bytes: u64,
     connected_for: Duration,
     dropped: bool,
+    /// Why the connection dropped, when it did.
+    drop_reason: Option<String>,
+    moves: u64,
 }
 
 impl BotStats {
@@ -755,6 +780,7 @@ impl BotStats {
             *r.rejections.entry(k).or_insert(0) += v;
         }
         r.decode_errors += self.decode_errors;
+        r.moves += self.moves;
         // A bot's own counts cannot overflow the run's total.
         let _ = r.snapshot_interval_us.merge(&self.snapshot_interval_us);
         let _ = r.ack_latency_us.merge(&self.ack_latency_us);
@@ -803,168 +829,200 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
         }
     };
 
-    let url = format!(
-        "{}/shard?shard={}&sid={}&v=2",
-        config.ws_base(),
-        urlencode(&join.shard),
-        urlencode(&join.sid)
-    );
-    let mut request = url
-        .as_str()
-        .into_client_request()
-        .map_err(|e| format!("bad shard URL: {e}"))?;
-    let mut protocols = vec![format!("ticket.{}", urlencode(&join.ticket))];
-    if let Some(token) = &join.token {
-        protocols.push(format!("bearer.{}", urlencode(token)));
-    }
-    request.headers_mut().insert(
-        "Sec-WebSocket-Protocol",
-        // No space after the comma: tungstenite's client splits the header on
-        // "," without trimming and must find the server's echo in the list.
-        HeaderValue::from_str(&protocols.join(","))
-            .map_err(|e| format!("bad subprotocol header: {e}"))?,
-    );
-    let (ws, _) = tokio::time::timeout(
-        Duration::from_secs(15),
-        tokio_tungstenite::connect_async(request),
-    )
-    .await
-    .map_err(|_| "connect: timed out".to_string())?
-    .map_err(|e| format!("connect: {}", short_ws_error(&e)))?;
-    let (mut sink, mut stream) = ws.split();
-
+    let mut join = join;
     let started = Instant::now();
     let end = tokio::time::Instant::now() + config.duration;
     let mut stats = BotStats::default();
     let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(bot as u64);
-    // Sent inputs not yet acked: (client_seq, sent at).
-    let mut pending: VecDeque<(u64, Instant)> = VecDeque::new();
     let mut seq: u64 = 0;
-    let mut codec: Option<u8> = None;
-    let mut last_frame: Option<Instant> = None;
-    let mut last_tick: u64 = 0;
-    let mut replica = pylon_realtime::ReplicaTable::new();
     let mut input_timer = (config.rate > 0.0).then(|| {
         let mut t = tokio::time::interval(Duration::from_secs_f64(1.0 / config.rate));
         t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         t
     });
-
-    loop {
-        tokio::select! {
-            _ = tokio::time::sleep_until(end) => break,
-            _ = async {
-                match input_timer.as_mut() {
-                    Some(t) => { t.tick().await; }
-                    None => std::future::pending::<()>().await,
-                }
-            } => {
-                let template = &config.inputs[(seq as usize) % config.inputs.len()];
-                seq += 1;
-                let input = expand_template(template, bot, &join.sid, &mut rng);
-                let envelope = serde_json::json!({ "input": input, "client_seq": seq });
-                // Binary MessagePack once the shard's codec is known to be
-                // MessagePack; JSON text otherwise, which every shard takes.
-                let msg = if codec == Some(wire::codec::MESSAGE_PACK) {
-                    match rmp_serde::to_vec_named(&envelope) {
-                        Ok(b) => Message::Binary(b),
-                        Err(_) => Message::Text(envelope.to_string()),
-                    }
-                } else {
-                    Message::Text(envelope.to_string())
-                };
-                // Timestamp before the send: time spent sending into a slow
-                // connection is part of the latency.
-                let sent_at = Instant::now();
-                // A server that stops reading fills the socket; the send
-                // must not outlive the run.
-                match tokio::time::timeout_at(end, sink.send(msg)).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_)) => {
-                        stats.dropped = true;
-                        break;
-                    }
-                    Err(_) => break,
-                }
-                if pending.len() >= MAX_PENDING {
-                    pending.pop_front();
-                    stats.inputs_unacked_dropped += 1;
-                }
-                pending.push_back((seq, sent_at));
-                stats.inputs_sent += 1;
+    // One connection per pass; a transfer frame starts the next one, to the
+    // shard (and with the ticket) it names.
+    let mut first = true;
+    'connection: loop {
+        let url = format!(
+            "{}/shard?shard={}&sid={}&v=2",
+            config.ws_base(),
+            urlencode(&join.shard),
+            urlencode(&join.sid)
+        );
+        let mut request = url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| format!("bad shard URL: {e}"))?;
+        let mut protocols = vec![format!("ticket.{}", urlencode(&join.ticket))];
+        if let Some(token) = &join.token {
+            protocols.push(format!("bearer.{}", urlencode(token)));
+        }
+        request.headers_mut().insert(
+            "Sec-WebSocket-Protocol",
+            // No space after the comma: tungstenite's client splits the header on
+            // "," without trimming and must find the server's echo in the list.
+            HeaderValue::from_str(&protocols.join(","))
+                .map_err(|e| format!("bad subprotocol header: {e}"))?,
+        );
+        let connected = tokio::time::timeout(
+            Duration::from_secs(15),
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .map_err(|_| "connect: timed out".to_string())
+        .and_then(|r| r.map_err(|e| format!("connect: {}", short_ws_error(&e))));
+        let ws = match connected {
+            Ok((ws, _)) => ws,
+            Err(why) if first => return Err(why),
+            // A reconnect after a transfer that fails: the move lost the bot.
+            Err(why) => {
+                stats.dropped = true;
+                stats.drop_reason = Some(format!("after a transfer: {why}"));
+                break 'connection;
             }
-            next = stream.next() => {
-                let bytes = match next {
-                    Some(Ok(Message::Binary(b))) => b,
-                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
-                        stats.dropped = true;
-                        break;
-                    }
-                    Some(Ok(_)) => continue,
-                };
-                let now = Instant::now();
-                stats.bytes += bytes.len() as u64;
-                let Some(frame) = parse_frame(&bytes) else {
-                    stats.decode_errors += 1;
-                    continue;
-                };
-                // A replication frame's codec byte names the frame format,
-                // not the shard's input codec.
-                if frame.kind != wire::kind::REPLICATION {
-                    codec = Some(frame.codec);
+        };
+        first = false;
+        let (mut sink, mut stream) = ws.split();
+        // Each connection starts over: its codec, its acks, its baseline.
+        let mut pending: VecDeque<(u64, Instant)> = VecDeque::new();
+        let mut codec: Option<u8> = None;
+        let mut last_frame: Option<Instant> = None;
+        let mut last_tick: u64 = 0;
+        let mut replica = pylon_realtime::ReplicaTable::new();
+
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(end) => {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), sink.send(Message::Close(None))).await;
+                    break 'connection;
                 }
-                match frame.kind {
-                    wire::kind::SNAPSHOT | wire::kind::REPLICATION => {
-                        stats.frames += 1;
-                        let decoded = if frame.kind == wire::kind::REPLICATION {
-                            // Apply it like a client: a frame that does not
-                            // apply to this bot's table is a decode error.
-                            replica.apply(frame.payload).is_ok()
-                        } else {
-                            decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload).is_some()
-                        };
-                        if !decoded {
-                            stats.decode_errors += 1;
-                        }
-                        if let Some(prev) = last_frame {
-                            stats.snapshot_interval_us.record(now.duration_since(prev).as_micros() as u64);
-                        }
-                        last_frame = Some(now);
-                        if frame.tick > last_tick {
-                            stats.ticks_seen += 1;
-                            last_tick = frame.tick;
-                        }
+                _ = async {
+                    match input_timer.as_mut() {
+                        Some(t) => { t.tick().await; }
+                        None => std::future::pending::<()>().await,
                     }
-                    wire::kind::INPUT_REJECTED => {
-                        match decode_payload::<InputRejection>(frame.codec, frame.payload) {
-                            Some(r) => {
-                                // A refused input may never be acked (refused
-                                // before it was queued); stop waiting for it.
-                                if let Some(seq) = r.client_seq {
-                                    if let Some(i) = pending.iter().position(|(s, _)| *s == seq) {
-                                        pending.remove(i);
+                } => {
+                    let template = &config.inputs[(seq as usize) % config.inputs.len()];
+                    seq += 1;
+                    let input = expand_template(template, bot, &join.sid, &mut rng);
+                    let envelope = serde_json::json!({ "input": input, "client_seq": seq });
+                    // Binary MessagePack once the shard's codec is known to be
+                    // MessagePack; JSON text otherwise, which every shard takes.
+                    let msg = if codec == Some(wire::codec::MESSAGE_PACK) {
+                        match rmp_serde::to_vec_named(&envelope) {
+                            Ok(b) => Message::Binary(b),
+                            Err(_) => Message::Text(envelope.to_string()),
+                        }
+                    } else {
+                        Message::Text(envelope.to_string())
+                    };
+                    // Timestamp before the send: time spent sending into a slow
+                    // connection is part of the latency.
+                    let sent_at = Instant::now();
+                    // A server that stops reading fills the socket; the send
+                    // must not outlive the run.
+                    match tokio::time::timeout_at(end, sink.send(msg)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            stats.dropped = true;
+                            stats.drop_reason = Some(format!("send: {e}"));
+                            break 'connection;
+                        }
+                        Err(_) => break 'connection,
+                    }
+                    if pending.len() >= MAX_PENDING {
+                        pending.pop_front();
+                        stats.inputs_unacked_dropped += 1;
+                    }
+                    pending.push_back((seq, sent_at));
+                    stats.inputs_sent += 1;
+                }
+                next = stream.next() => {
+                    let bytes = match next {
+                        Some(Ok(Message::Binary(b))) => b,
+                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                            stats.dropped = true;
+                            stats.drop_reason = Some("the server closed the connection".into());
+                            break 'connection;
+                        }
+                        Some(Ok(_)) => continue,
+                    };
+                    let now = Instant::now();
+                    stats.bytes += bytes.len() as u64;
+                    let Some(frame) = parse_frame(&bytes) else {
+                        stats.decode_errors += 1;
+                        continue;
+                    };
+                    // A replication frame's codec byte names the frame format,
+                    // not the shard's input codec.
+                    if frame.kind != wire::kind::REPLICATION {
+                        codec = Some(frame.codec);
+                    }
+                    match frame.kind {
+                        wire::kind::SNAPSHOT | wire::kind::REPLICATION => {
+                            stats.frames += 1;
+                            let decoded = if frame.kind == wire::kind::REPLICATION {
+                                // Apply it like a client: a frame that does not
+                                // apply to this bot's table is a decode error.
+                                replica.apply(frame.payload).is_ok()
+                            } else {
+                                decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload).is_some()
+                            };
+                            if !decoded {
+                                stats.decode_errors += 1;
+                            }
+                            if let Some(prev) = last_frame {
+                                stats.snapshot_interval_us.record(now.duration_since(prev).as_micros() as u64);
+                            }
+                            last_frame = Some(now);
+                            if frame.tick > last_tick {
+                                stats.ticks_seen += 1;
+                                last_tick = frame.tick;
+                            }
+                        }
+                        wire::kind::INPUT_REJECTED => {
+                            match decode_payload::<InputRejection>(frame.codec, frame.payload) {
+                                Some(r) => {
+                                    // A refused input may never be acked (refused
+                                    // before it was queued); stop waiting for it.
+                                    if let Some(seq) = r.client_seq {
+                                        if let Some(i) = pending.iter().position(|(s, _)| *s == seq) {
+                                            pending.remove(i);
+                                        }
                                     }
+                                    *stats.rejections.entry(r.code).or_insert(0) += 1;
                                 }
-                                *stats.rejections.entry(r.code).or_insert(0) += 1;
+                                None => stats.decode_errors += 1,
+                            }
+                        }
+                        wire::kind::TRANSFER => match decode_payload::<wire::TransferNotice>(frame.codec, frame.payload) {
+                            Some(notice) => {
+                                // The last frame on this connection: follow it.
+                                // Inputs not acked yet may be lost in the move.
+                                stats.moves += 1;
+                                stats.inputs_unacked_dropped += pending.len() as u64;
+                                join.shard = notice.shard;
+                                join.ticket = notice.ticket;
+                                continue 'connection;
                             }
                             None => stats.decode_errors += 1,
+                        },
+                        _ => stats.decode_errors += 1,
+                    }
+                    while let Some(&(s, sent)) = pending.front() {
+                        if s > frame.ack {
+                            break;
                         }
+                        pending.pop_front();
+                        stats.inputs_acked += 1;
+                        stats.ack_latency_us.record(now.duration_since(sent).as_micros() as u64);
                     }
-                    _ => stats.decode_errors += 1,
-                }
-                while let Some(&(s, sent)) = pending.front() {
-                    if s > frame.ack {
-                        break;
-                    }
-                    pending.pop_front();
-                    stats.inputs_acked += 1;
-                    stats.ack_latency_us.record(now.duration_since(sent).as_micros() as u64);
                 }
             }
         }
     }
     stats.connected_for = started.elapsed();
-    let _ = tokio::time::timeout(Duration::from_secs(2), sink.send(Message::Close(None))).await;
     Ok(stats)
 }
 
@@ -1228,6 +1286,31 @@ mod tests {
         assert_eq!(v["move_to"]["y"], 5);
         assert_eq!(v["who"], serde_json::json!([7, "bot-7"]));
         assert_eq!(v["keep"], "text");
+    }
+
+    #[test]
+    fn join_args_are_a_json_object() {
+        let c = BenchConfig::parse(&[
+            "--join",
+            "j",
+            "--rate",
+            "0",
+            "--join-args",
+            r#"{"machine":"d"}"#,
+        ])
+        .unwrap();
+        assert_eq!(c.join_args, serde_json::json!({ "machine": "d" }));
+        assert_eq!(
+            BenchConfig::parse(&["--join", "j", "--rate", "0"])
+                .unwrap()
+                .join_args,
+            serde_json::json!({})
+        );
+        assert!(
+            BenchConfig::parse(&["--join", "j", "--rate", "0", "--join-args", "[1]"])
+                .unwrap_err()
+                .contains("--join-args")
+        );
     }
 
     #[test]

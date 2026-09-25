@@ -805,9 +805,12 @@ directory in the database, and shards spread across them:
   (below), or from `init` with its create params when it does not. Clients
   reconnect on their own (the client libraries retry, and a ticket function
   gets a new ticket).
-- **Restarts and deploys.** A machine that stops on SIGTERM stops ticking,
-  saves its shards, and leaves the directory, so they start on another
-  machine at once. A machine that comes back under the same id (a crash and
+- **Deploys.** A machine that gets SIGTERM hands each shard to another
+  live machine before it exits, and its players stay connected (see
+  [Deploys](#deploys)). A shard it cannot hand over is saved and starts on
+  another machine once this one leaves the directory; its clients
+  reconnect after the gap.
+- **Restarts.** A machine that comes back under the same id (a crash and
   restart, or a deploy on Fly, where the machine id stays) waits until the
   old process has left (a SIGTERM) or has been silent for 10 seconds, so
   two processes never hold one id. Then it gets a new lease, and the old
@@ -845,12 +848,41 @@ a failover loses at most that much. A `Replicated` store saves with
 | `PYLON_REPLICA_ID` | The machine's id. On Fly, `FLY_MACHINE_ID` is used. Without either, the host name and process id: a restart is a new machine. |
 | `PYLON_SHARD_ADVERTISE_URL` | The URL other machines reach this one at, for proxying and machine-to-machine calls. On Fly, `http://[FLY_PRIVATE_IP]:<port>`. |
 | `PYLON_SHARD_DIRECTORY=off` | Keep each shard on the machine that created it, with no directory. |
+| `PYLON_SHARD_DRAIN_SECS` | How long a machine that gets SIGTERM hands shards to other machines (default 20; 0 turns it off). |
 
 The machines sign their calls to each other, and shard tickets, with a key
 kept in the directory: there is no secret to share. A
 `PYLON_SHARD_TICKET_SECRET` you set still signs tickets.
 
 An app on SQLite runs on one machine, and the directory is off.
+
+### Deploys
+
+In a rolling deploy each machine gets SIGTERM in turn. For each shard it
+holds, a machine that gets SIGTERM:
+
+1. Stops ticking the shard. Connections stay open, and the shard's
+   buffered entity writes are written.
+2. Saves the shard's state.
+3. Asks another live machine to take the shard. That machine moves the
+   shard's place in the directory to itself and starts it from the saved
+   state.
+4. Sends each connection a transfer frame for the same shard, with a new
+   ticket, and closes it. The client libraries (JavaScript, React, Swift,
+   and `pylon bench shard`) reconnect at once. A same-shard transfer does
+   not call `onTransfer`.
+
+A hand-over takes milliseconds. Inputs a client sends between steps 1 and 4
+are lost; the shard's state is not. A machine that is shutting down reports
+no room in the directory, so no shard is placed or handed to it. The
+module's `save` and `restore` carry the state: a shard with no `save`
+starts from `init` on the other machine, and its clients reconnect to it.
+
+A shard the machine cannot hand over within `PYLON_SHARD_DRAIN_SECS` (no
+other live machine, or none takes it) is saved and starts on another machine
+once this one leaves. Give the platform time to wait: Fly kills a machine
+5 seconds after SIGTERM unless `kill_timeout` (fly.toml) or the machine's
+`stop_config` says otherwise. Stack0 Cloud sets 45 seconds.
 
 ## Limits and failures
 
@@ -873,3 +905,5 @@ An app on SQLite runs on one machine, and the directory is off.
 - An open shard connection keeps the app's machine running.
 - A machine with autostop on can stop when no client is connected. Its
   shards end, like on any restart.
+- A machine gets 45 seconds to stop, so a deploy saves its shards (and, on
+  an app with several machines, hands them over) before it exits.
