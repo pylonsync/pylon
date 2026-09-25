@@ -29,29 +29,41 @@ app/blog/[slug]/page.tsx       → /blog/:slug
 app/(marketing)/about/page.tsx → /about
 ```
 
-Page components receive:
+Page components receive `PageProps` from `@pylonsync/react`:
 
 ```tsx
-interface PageProps {
-  url: string;                         // full request path
-  params: Record<string, string>;      // dynamic segments
-  searchParams: Record<string, string>;
-  headers: Record<string, string>;     // lowercased
-  cookies: Record<string, string>;
+interface PageProps<TParams, TSearchParams> {
+  pathname: string;        // the request path, no query: "/blog/hello"
+  host: string;            // the request host when trusted, else ""
+  params: TParams;         // dynamic segments: { slug: "hello" }
+  searchParams: TSearchParams; // the parsed query: { page: "2" }
   auth: {
     user_id: string | null;
     is_admin: boolean;
     tenant_id: string | null;
     roles: string[];
   };
+  response: SsrResponse;   // status, headers, cookies, redirect, notFound
+  serverData: ServerData;  // read-only data for the render
 }
 
-export default function BlogPost({ params, auth }: PageProps) {
+export default function BlogPost({ params, auth }: PageProps<{ slug: string }>) {
   return <h1>{params.slug} — {auth.user_id ?? "anon"}</h1>;
 }
 ```
 
 `auth` is resolved from the session cookie. Anonymous requests get `user_id: null`. Your page needs no extra call to get the session. The SSR runtime provides it directly.
+
+Request headers and cookies are not props. They stay on the server, so a component that read them would render differently in the browser. Read request-derived data through `serverData` or a server function.
+
+`host` is the host the request was made to, lowercased, when the server trusts it:
+
+- the app's own URL (`PYLON_PUBLIC_URL`, `PYLON_CANONICAL_HOST`),
+- an entry in `PYLON_TRUSTED_HOSTS`,
+- a ready customer domain attached with `ctx.domains` (see [Customer domains](/ssr/customer-domains)),
+- a loopback host in dev, with its port.
+
+Any other `Host` header gives `""`, so a forged header cannot choose what a page renders. `host` is part of the SSR cache key, so a page that renders per host stays cacheable. The browser gets the same value in the hydration payload.
 
 ## Layouts
 

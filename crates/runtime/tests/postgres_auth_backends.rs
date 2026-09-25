@@ -60,6 +60,7 @@ fn oauth_state_backend_take_is_atomic_single_use() {
         callback_url: "https://app/dash".into(),
         error_callback_url: "https://app/login".into(),
         pkce_verifier: None,
+        handoff_binding: Some("abc".into()),
         expires_at: 9_999_999_999,
     };
     b.put("tok_pg_oauth", &s);
@@ -67,6 +68,7 @@ fn oauth_state_backend_take_is_atomic_single_use() {
     assert_eq!(got.provider, "google");
     assert_eq!(got.callback_url, "https://app/dash");
     assert_eq!(got.error_callback_url, "https://app/login");
+    assert_eq!(got.handoff_binding.as_deref(), Some("abc"));
     // Second take returns None — DELETE … RETURNING is atomic so
     // concurrent callbacks for the same token can't both succeed.
     assert!(b.take("tok_pg_oauth", 0).is_none());
@@ -284,4 +286,36 @@ fn auth_backends_share_one_pool_not_one_conn_each() {
         "tagged connection count {after} must not exceed the pool size {}",
         p.max_size()
     );
+}
+
+#[test]
+fn session_handoff_backend_is_single_use_and_keeps_the_binding() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_auth::session_handoff::{SessionHandoff, SessionHandoffBackend};
+    let b = pylon_runtime::session_handoff_backend::PostgresSessionHandoffBackend::with_pool(pool(
+        &url,
+    ))
+    .expect("with_pool");
+    let h = SessionHandoff {
+        user_id: "user_pg_handoff".into(),
+        target_host: "feedback.acme.com".into(),
+        redirect_url: "https://feedback.acme.com/p".into(),
+        binding: Some("bind_hash".into()),
+        expires_at: 9_999_999_999,
+    };
+    b.put("hash_pg_handoff", &h);
+    assert_eq!(b.take("hash_pg_handoff", 0), Some(h.clone()));
+    // DELETE … RETURNING: the second take finds nothing.
+    assert_eq!(b.take("hash_pg_handoff", 0), None);
+    // Expired rows are refused.
+    b.put(
+        "hash_pg_handoff_old",
+        &SessionHandoff {
+            expires_at: 10,
+            ..h
+        },
+    );
+    assert_eq!(b.take("hash_pg_handoff_old", 100), None);
 }

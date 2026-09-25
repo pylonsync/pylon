@@ -191,6 +191,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
     let session_store = pylon_auth::SessionStore::new();
     let magic_codes = pylon_auth::MagicCodeStore::new();
     let oauth_state = pylon_auth::OAuthStateStore::new();
+    let session_handoff = pylon_auth::session_handoff::SessionHandoffStore::new();
     let policy_engine = pylon_policy::PolicyEngine::from_manifest(&manifest);
     let change_log = pylon_sync::ChangeLog::new();
     let auth_ctx = session_store.resolve(auth_token.as_deref());
@@ -272,6 +273,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> WResult<Response> {
         session_store: &session_store,
         magic_codes: &magic_codes,
         oauth_state: &oauth_state,
+        // Per-request memory, like the OAuth state above: the bare Workers
+        // target has no platform domains, so no handoff is ever minted.
+        session_handoff: &session_handoff,
+        tenant_origin: |_| false,
         // Native-only stores not initialized on wasm32; matching
         // cfg-gates on the field declarations in router/src/lib.rs.
         // Stores that ARE pure (orgs, audit, verification, etc.)

@@ -323,6 +323,7 @@ impl ConnectionManager {
                 // reach it without re-parsing. Empty when not set.
                 error_callback_url: callback.clone(),
                 pkce_verifier: None,
+                handoff_binding: None,
                 expires_at,
             },
         );

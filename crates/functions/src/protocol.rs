@@ -116,6 +116,13 @@ pub struct RenderRouteMessage {
     pub layouts: Vec<String>,
     pub route_path: String,
     pub url: String,
+    /// The request's host when the server trusts it (its own URL, a
+    /// `PYLON_TRUSTED_HOSTS` entry, a ready platform/tenant domain, or
+    /// loopback in dev), else "". Exactly the host dimension of the SSR cache
+    /// key, so a page that renders from `props.host` never shares a cache
+    /// entry across hosts, and a forged `Host` header reads "".
+    #[serde(default)]
+    pub host: String,
     pub params: serde_json::Value,
     pub search_params: serde_json::Value,
     pub headers: std::collections::HashMap<String, String>,
@@ -151,6 +158,7 @@ impl RenderRouteMessage {
         layouts: Vec<String>,
         route_path: String,
         url: String,
+        host: String,
         params: serde_json::Value,
         search_params: serde_json::Value,
         headers: std::collections::HashMap<String, String>,
@@ -167,6 +175,7 @@ impl RenderRouteMessage {
             layouts,
             route_path,
             url,
+            host,
             params,
             search_params,
             headers,

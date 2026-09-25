@@ -112,6 +112,113 @@ fn create_session_with_device(ctx: &RouterContext, user_id: String) -> pylon_aut
     ctx.session_store.create_with_device(user_id, device)
 }
 
+// ---------------------------------------------------------------------------
+// Platform (tenant) domains: OAuth sign-in on a customer's own host.
+//
+// The provider returns to this app's one registered callback, on its own
+// host. When the sign-in started on a tenant host (`feedback.acme.com`), the
+// callback hands the new sign-in to that host with a one-time code instead of
+// setting a cookie the browser would keep for the wrong host. See
+// pylon_auth::session_handoff for the security properties.
+// ---------------------------------------------------------------------------
+
+/// The host of `target` when it is an https URL on a ready platform (tenant)
+/// domain of this app, lowercased without port. None for anything else,
+/// including a URL with credentials in it.
+fn tenant_redirect_host(ctx: &RouterContext, target: &str) -> Option<String> {
+    let rest = target.strip_prefix("https://")?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return None;
+    }
+    if !(ctx.tenant_origin)(&format!("https://{authority}")) {
+        return None;
+    }
+    Some(pylon_auth::session_handoff::normalize_host(authority))
+}
+
+/// This request's host, normalized the same way.
+fn request_host_normalized(ctx: &RouterContext) -> Option<String> {
+    ctx.request_host()
+        .map(pylon_auth::session_handoff::normalize_host)
+        .filter(|h| !h.is_empty())
+}
+
+/// A redirect target the sign-in routes may send the browser to: a trusted
+/// origin (or a relative path), or an https URL on a ready tenant domain.
+fn check_sign_in_redirect(ctx: &RouterContext, target: &str) -> Result<(), String> {
+    match pylon_auth::validate_trusted_redirect(target, ctx.trusted_origins) {
+        Ok(()) => Ok(()),
+        Err(_) if tenant_redirect_host(ctx, target).is_some() => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// A cookie from the request, by name.
+fn request_cookie(ctx: &RouterContext, name: &str) -> Option<String> {
+    ctx.request_headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("cookie"))
+        .find_map(|(_, v)| pylon_auth::extract_session_cookie(v, name))
+        .filter(|v| !v.is_empty())
+}
+
+/// Finish a browser OAuth sign-in. Normally: set the session cookie and
+/// redirect to the callback. When the callback is on a tenant host other than
+/// this one, revoke the session minted here and redirect to that host's
+/// `/api/auth/handoff` with a one-time code, bound to the browser that
+/// started the sign-in.
+fn finish_browser_sign_in(
+    ctx: &RouterContext,
+    user_id: &str,
+    session_token: &str,
+    state: &pylon_auth::OAuthState,
+) -> Result<(), crate::OAuthError> {
+    if let Some(host) = tenant_redirect_host(ctx, &state.callback_url) {
+        if request_host_normalized(ctx).as_deref() != Some(host.as_str()) {
+            ctx.session_store.revoke(session_token);
+            // The start endpoint sets the binding for every tenant callback.
+            // Without one the handoff could be redeemed by anyone holding the
+            // link, so refuse rather than hand off unbound.
+            let Some(binding) = state.handoff_binding.as_deref() else {
+                return Err(crate::OAuthError {
+                    status: 400,
+                    code: "HANDOFF_UNBOUND",
+                    message: "Start the sign-in from the site you want to be signed in to.".into(),
+                });
+            };
+            let code =
+                ctx.session_handoff
+                    .create(user_id, &host, &state.callback_url, Some(binding));
+            ctx.add_response_header(
+                "Location",
+                format!("https://{host}/api/auth/handoff?code={}", url_encode(&code)),
+            );
+            ctx.add_response_header("Cache-Control", "no-store".to_string());
+            ctx.add_response_header("Referrer-Policy", "no-referrer".to_string());
+            return Ok(());
+        }
+    }
+    ctx.set_browser_session_cookie(session_token);
+    ctx.add_response_header("Location", state.callback_url.clone());
+    Ok(())
+}
+
+/// The redirect for a failed browser sign-in: the error callback with the
+/// code and message appended.
+fn sign_in_error_location(error_callback_url: &str, code: &str, message: &str) -> String {
+    let sep = if error_callback_url.contains('?') {
+        '&'
+    } else {
+        '?'
+    };
+    format!(
+        "{error_callback_url}{sep}oauth_error={}&oauth_error_message={}",
+        url_encode(code),
+        url_encode(&truncate_chars(message, 500))
+    )
+}
+
 /// If the request arrived under a guest session whose user_id differs
 /// from `to_user_id`, transfer ownership of every `id(<user_entity>)`
 /// row from the guest to the authenticated user and revoke the guest
@@ -1966,8 +2073,7 @@ pub(crate) fn handle(
             // through one parameter that they couldn't through the
             // other.
             for (kind, target) in [("callback", &callback), ("error_callback", &error_callback)] {
-                if let Err(err) = pylon_auth::validate_trusted_redirect(target, ctx.trusted_origins)
-                {
+                if let Err(err) = check_sign_in_redirect(ctx, target) {
                     tracing::warn!(
                         "[oauth] rejected {kind}={target:?} for provider {provider}: {err}"
                     );
@@ -1997,11 +2103,41 @@ pub(crate) fn handle(
                     ));
                 }
             };
-            let state = ctx.oauth_state.create_with_pkce(
+            // A sign-in that returns to a tenant host must start ON that
+            // host, where a random host-only cookie now binds it to this
+            // browser. The handoff after the callback redeems only with it.
+            let handoff_binding = match tenant_redirect_host(ctx, &callback) {
+                Some(host) => {
+                    if request_host_normalized(ctx).as_deref() != Some(host.as_str()) {
+                        return Some((
+                            400,
+                            json_error(
+                                "HANDOFF_WRONG_START_HOST",
+                                &format!("Start a sign-in that returns to {host} from {host}."),
+                            ),
+                        ));
+                    }
+                    let (value, hash) = pylon_auth::session_handoff::new_binding();
+                    ctx.add_response_header(
+                        "Set-Cookie",
+                        ctx.response_cookie_config().set_value_for(
+                            &pylon_auth::session_handoff::binding_cookie_name(
+                                &ctx.cookie_config.name,
+                            ),
+                            &value,
+                            Some(pylon_auth::session_handoff::BINDING_COOKIE_MAX_AGE_SECS),
+                        ),
+                    );
+                    Some(hash)
+                }
+                None => None,
+            };
+            let state = ctx.oauth_state.create_with_binding(
                 provider,
                 &callback,
                 &error_callback,
                 pkce_verifier,
+                handoff_binding,
             );
             // auth_url_with_pkce was given an empty state placeholder
             // because we mint the random state token AFTER the URL.
@@ -2019,6 +2155,78 @@ pub(crate) fn handle(
                 200,
                 serde_json::json!({"redirect": auth_url, "state": state}).to_string(),
             ));
+        }
+    }
+
+    // GET /api/auth/handoff?code=… — the second half of an OAuth sign-in
+    // that returns to a platform (tenant) host. Runs ON the tenant host:
+    // redeems the one-time code the callback minted, sets the session cookie
+    // here, and redirects to the page the sign-in started from.
+    if let Some(rest) = url.strip_prefix("/api/auth/handoff") {
+        if method == HttpMethod::Get && (rest.is_empty() || rest.starts_with('?')) {
+            let params = parse_query(rest.trim_start_matches('?'));
+            let Some(code) = params.get("code").filter(|c| !c.is_empty()) else {
+                return Some((400, json_error("MISSING_CODE", "code is required")));
+            };
+            let Some(host) = ctx.request_host() else {
+                return Some((400, json_error("MISSING_HOST", "Host header is required")));
+            };
+            let binding_name =
+                pylon_auth::session_handoff::binding_cookie_name(&ctx.cookie_config.name);
+            let binding = request_cookie(ctx, &binding_name);
+            // The binding cookie is single-use like the code: clear it in
+            // every outcome. No caching, and no Referer carrying the code.
+            ctx.add_response_header(
+                "Set-Cookie",
+                ctx.response_cookie_config().clear_value_for(&binding_name),
+            );
+            ctx.add_response_header("Cache-Control", "no-store".to_string());
+            ctx.add_response_header("Referrer-Policy", "no-referrer".to_string());
+            use pylon_auth::session_handoff::HandoffError;
+            let record = match ctx.session_handoff.redeem(code, host, binding.as_deref()) {
+                Ok(r) => r,
+                Err(HandoffError::Invalid) => {
+                    return Some((
+                        400,
+                        json_error(
+                            "HANDOFF_INVALID",
+                            "This sign-in link expired or was already used. Sign in again.",
+                        ),
+                    ));
+                }
+                Err(HandoffError::WrongHost) => {
+                    return Some((
+                        400,
+                        json_error(
+                            "HANDOFF_WRONG_HOST",
+                            "This sign-in link is for a different site.",
+                        ),
+                    ));
+                }
+                Err(HandoffError::OtherBrowser) => {
+                    return Some((
+                        403,
+                        json_error(
+                            "HANDOFF_OTHER_BROWSER",
+                            "Finish signing in in the browser where you started.",
+                        ),
+                    ));
+                }
+            };
+            // The domain may have been detached since the callback.
+            if tenant_redirect_host(ctx, &record.redirect_url).is_none() {
+                return Some((
+                    403,
+                    json_error(
+                        "HANDOFF_HOST_NOT_TRUSTED",
+                        "This site no longer accepts sign-ins.",
+                    ),
+                ));
+            }
+            let session = create_session_with_device(ctx, record.user_id);
+            ctx.set_browser_session_cookie(&session.token);
+            ctx.add_response_header("Location", record.redirect_url);
+            return Some((302, String::new()));
         }
     }
 
@@ -2098,8 +2306,18 @@ pub(crate) fn handle(
                 return Some(match result {
                     Ok((user_id, session)) => {
                         audit_oauth_login(ctx, &user_id, provider);
-                        ctx.set_browser_session_cookie(&session.token);
-                        ctx.add_response_header("Location", state_record.callback_url);
+                        if let Err(err) =
+                            finish_browser_sign_in(ctx, &user_id, &session.token, &state_record)
+                        {
+                            ctx.add_response_header(
+                                "Location",
+                                sign_in_error_location(
+                                    &state_record.error_callback_url,
+                                    err.code,
+                                    &err.message,
+                                ),
+                            );
+                        }
                         (302, String::new())
                     }
                     Err(err) => {
@@ -2189,8 +2407,18 @@ pub(crate) fn handle(
             ) {
                 Ok((user_id, session)) => {
                     audit_oauth_login(ctx, &user_id, provider);
-                    ctx.set_browser_session_cookie(&session.token);
-                    ctx.add_response_header("Location", state_record.callback_url);
+                    if let Err(err) =
+                        finish_browser_sign_in(ctx, &user_id, &session.token, &state_record)
+                    {
+                        ctx.add_response_header(
+                            "Location",
+                            sign_in_error_location(
+                                &state_record.error_callback_url,
+                                err.code,
+                                &err.message,
+                            ),
+                        );
+                    }
                     return Some((302, String::new()));
                 }
                 Err(err) => {
@@ -2240,7 +2468,7 @@ pub(crate) fn handle(
         if let Some(token) = auth_token {
             ctx.session_store.revoke(token);
         }
-        ctx.add_response_header("Set-Cookie", ctx.cookie_config.clear_value());
+        ctx.add_response_header("Set-Cookie", ctx.response_cookie_config().clear_value());
         if let Some(uid) = user_id.as_deref() {
             ctx.notifier.notify_session_changed(uid, None);
         }
@@ -3566,7 +3794,7 @@ pub(crate) fn handle(
             // with sessions — operators don't have to configure two
             // sets of cookie attributes.
             if let Some(token) = &trust_minted {
-                let cookie_value = ctx.cookie_config.set_value_for(
+                let cookie_value = ctx.response_cookie_config().set_value_for(
                     pylon_auth::trusted_device::TRUST_COOKIE_NAME,
                     token,
                     Some(pylon_auth::trusted_device::DEFAULT_TRUST_LIFETIME_SECS),
@@ -6931,7 +7159,7 @@ pub(crate) fn handle(
             Ok(_) => {}
             Err(e) => return Some((400, json_error(&e.code, &e.message))),
         }
-        ctx.add_response_header("Set-Cookie", ctx.cookie_config.clear_value());
+        ctx.add_response_header("Set-Cookie", ctx.response_cookie_config().clear_value());
         ctx.audit.log(
             audit(ctx, pylon_auth::audit::AuditAction::AccountDelete)
                 .user(user_id.clone())

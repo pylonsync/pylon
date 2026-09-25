@@ -56,6 +56,7 @@ impl SqliteOAuthBackend {
                 callback_url TEXT NOT NULL DEFAULT '',
                 error_callback_url TEXT NOT NULL DEFAULT '',
                 pkce_verifier TEXT,
+                handoff_binding TEXT,
                 expires_at INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS {TABLE}_exp_idx ON {TABLE}(expires_at);"
@@ -73,6 +74,11 @@ impl SqliteOAuthBackend {
         // installs need an idempotent ADD COLUMN.
         let _ = conn.execute(
             &format!("ALTER TABLE {TABLE} ADD COLUMN pkce_verifier TEXT"),
+            [],
+        );
+        // Tenant-host session handoff binding (see pylon_auth::session_handoff).
+        let _ = conn.execute(
+            &format!("ALTER TABLE {TABLE} ADD COLUMN handoff_binding TEXT"),
             [],
         );
         Ok(Self {
@@ -101,13 +107,14 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         };
         if let Err(e) = guard.execute(
             &format!(
-                "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                "INSERT INTO {TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(token) DO UPDATE SET
                    provider = excluded.provider,
                    callback_url = excluded.callback_url,
                    error_callback_url = excluded.error_callback_url,
                    pkce_verifier = excluded.pkce_verifier,
+                   handoff_binding = excluded.handoff_binding,
                    expires_at = excluded.expires_at"
             ),
             rusqlite::params![
@@ -116,6 +123,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
                 state.callback_url,
                 state.error_callback_url,
                 state.pkce_verifier,
+                state.handoff_binding,
                 state.expires_at as i64,
             ],
         ) {
@@ -132,14 +140,15 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         // Read first, then delete — must be a transaction so concurrent
         // callbacks can't both succeed with the same token.
         let tx = guard.unchecked_transaction().ok()?;
-        let row: Option<(String, String, String, Option<String>, i64)> = tx
+        #[allow(clippy::type_complexity)]
+        let row: Option<(String, String, String, Option<String>, Option<String>, i64)> = tx
             .query_row(
                 &format!(
-                    "SELECT provider, callback_url, error_callback_url, pkce_verifier, expires_at
+                    "SELECT provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at
                      FROM {TABLE} WHERE token = ?1"
                 ),
                 rusqlite::params![token],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
             )
             .ok();
         // Always delete what we read — single-use even if expired.
@@ -151,7 +160,14 @@ impl OAuthStateBackend for SqliteOAuthBackend {
         }
         let _ = tx.commit();
 
-        let (provider, callback_url, error_callback_url, pkce_verifier, expires_at) = row?;
+        let (
+            provider,
+            callback_url,
+            error_callback_url,
+            pkce_verifier,
+            handoff_binding,
+            expires_at,
+        ) = row?;
         if (expires_at as u64) <= now_unix_secs {
             return None;
         }
@@ -160,6 +176,7 @@ impl OAuthStateBackend for SqliteOAuthBackend {
             callback_url,
             error_callback_url,
             pkce_verifier,
+            handoff_binding,
             expires_at: expires_at as u64,
         })
     }
@@ -195,11 +212,13 @@ mod pg {
                         callback_url TEXT NOT NULL DEFAULT '',
                         error_callback_url TEXT NOT NULL DEFAULT '',
                         pkce_verifier TEXT,
+                        handoff_binding TEXT,
                         expires_at BIGINT NOT NULL
                     );
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS callback_url TEXT NOT NULL DEFAULT '';
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS error_callback_url TEXT NOT NULL DEFAULT '';
                     ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS pkce_verifier TEXT;
+                    ALTER TABLE {PG_TABLE} ADD COLUMN IF NOT EXISTS handoff_binding TEXT;
                     CREATE INDEX IF NOT EXISTS {PG_TABLE}_exp_idx ON {PG_TABLE}(expires_at);"
                 ))
             })
@@ -246,13 +265,14 @@ mod pg {
             if let Err(e) = self.conn.with_client(|c| {
                 c.execute(
                     &format!(
-                        "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, expires_at)
-                         VALUES ($1, $2, $3, $4, $5, $6)
+                        "INSERT INTO {PG_TABLE} (token, provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7)
                          ON CONFLICT (token) DO UPDATE SET
                            provider = EXCLUDED.provider,
                            callback_url = EXCLUDED.callback_url,
                            error_callback_url = EXCLUDED.error_callback_url,
                            pkce_verifier = EXCLUDED.pkce_verifier,
+                           handoff_binding = EXCLUDED.handoff_binding,
                            expires_at = EXCLUDED.expires_at"
                     ),
                     &[
@@ -261,6 +281,7 @@ mod pg {
                         &state.callback_url,
                         &state.error_callback_url,
                         &state.pkce_verifier,
+                        &state.handoff_binding,
                         &(state.expires_at as i64),
                     ],
                 )
@@ -283,7 +304,7 @@ mod pg {
                 c.query_opt(
                     &format!(
                         "DELETE FROM {PG_TABLE} WHERE token = $1
-                         RETURNING provider, callback_url, error_callback_url, pkce_verifier, expires_at"
+                         RETURNING provider, callback_url, error_callback_url, pkce_verifier, handoff_binding, expires_at"
                     ),
                     &[&token],
                 )
@@ -315,7 +336,8 @@ mod pg {
             let callback_url: String = row.get(1);
             let error_callback_url: String = row.get(2);
             let pkce_verifier: Option<String> = row.get(3);
-            let expires_at: i64 = row.get(4);
+            let handoff_binding: Option<String> = row.get(4);
+            let expires_at: i64 = row.get(5);
             if (expires_at as u64) <= now_unix_secs {
                 return None;
             }
@@ -324,6 +346,7 @@ mod pg {
                 callback_url,
                 error_callback_url,
                 pkce_verifier,
+                handoff_binding,
                 expires_at: expires_at as u64,
             })
         }
@@ -340,6 +363,7 @@ mod tests {
             callback_url: callback.to_string(),
             error_callback_url: callback.to_string(),
             pkce_verifier: None,
+            handoff_binding: Some("b1".into()),
             expires_at: 9_999_999_999,
         }
     }
@@ -353,6 +377,29 @@ mod tests {
         assert_eq!(got.provider, "google");
         assert_eq!(got.callback_url, "http://localhost:3000/dashboard");
         assert_eq!(got.error_callback_url, "http://localhost:3000/dashboard");
+        assert_eq!(got.handoff_binding.as_deref(), Some("b1"));
+    }
+
+    #[test]
+    fn a_table_from_before_the_binding_column_is_migrated() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE {TABLE} (
+                token TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                callback_url TEXT NOT NULL DEFAULT '',
+                error_callback_url TEXT NOT NULL DEFAULT '',
+                pkce_verifier TEXT,
+                expires_at INTEGER NOT NULL
+            );"
+        ))
+        .unwrap();
+        let b = SqliteOAuthBackend::from_connection(conn).unwrap();
+        b.put("tok", &fixture("github", "https://feedback.acme.com/p"));
+        assert_eq!(
+            b.take("tok", 100).unwrap().handoff_binding.as_deref(),
+            Some("b1")
+        );
     }
 
     #[test]

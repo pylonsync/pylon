@@ -125,6 +125,23 @@ impl CookieConfig {
         format!("{stem}_session")
     }
 
+    /// This config for a response to `request_host` (the request's `Host`,
+    /// optionally with a port). When `domain` is set but the host is outside
+    /// it, the cookie must be host-only: a browser drops a Set-Cookie whose
+    /// `Domain=` does not cover the host it came from. That is the case for a
+    /// platform (tenant) domain, where one app answers on `feedback.acme.com`
+    /// while its own cookies are scoped to `.stack0.app`. A host inside the
+    /// domain, or an unknown host, keeps the configured scope.
+    pub fn for_request_host(&self, request_host: Option<&str>) -> CookieConfig {
+        match (&self.domain, request_host) {
+            (Some(domain), Some(host)) if !host_within_domain(host, domain) => CookieConfig {
+                domain: None,
+                ..self.clone()
+            },
+            _ => self.clone(),
+        }
+    }
+
     /// Build the Set-Cookie header value carrying a session token.
     pub fn set_value(&self, token: &str) -> String {
         self.build(&self.name, token, self.max_age_secs)
@@ -192,6 +209,25 @@ impl CookieConfig {
     }
 }
 
+/// Whether `host` (a `Host` header value, port allowed) is covered by a cookie
+/// `Domain=` attribute: the domain itself or any subdomain of it. Compared
+/// case-insensitively, with the domain's leading dot ignored (RFC 6265 §5.2.3).
+fn host_within_domain(host: &str, domain: &str) -> bool {
+    let host = host.trim();
+    // Strip a port, keeping a bracketed IPv6 literal intact.
+    let host = match host.rfind(':') {
+        Some(i) if !host.ends_with(']') && !host[..i].contains(':') => &host[..i],
+        _ => host,
+    }
+    .trim_end_matches('.')
+    .to_ascii_lowercase();
+    let domain = domain.trim().trim_start_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || host.is_empty() {
+        return false;
+    }
+    host == domain || host.ends_with(&format!(".{domain}"))
+}
+
 /// Read a session token out of a `Cookie:` header value. Cookies are
 /// `name=value; name=value; ...`; we scan for the configured name.
 pub fn extract_token(cookie_header: &str, cookie_name: &str) -> Option<String> {
@@ -238,6 +274,62 @@ mod tests {
         assert!(v.contains("Secure"));
         assert!(v.contains("SameSite=Lax"));
         assert!(v.contains("Max-Age=3600"));
+    }
+
+    fn scoped() -> CookieConfig {
+        CookieConfig {
+            name: "app_session".into(),
+            domain: Some(".stack0.app".into()),
+            secure: true,
+            same_site: SameSite::Lax,
+            max_age_secs: 3600,
+            path: "/".into(),
+        }
+    }
+
+    #[test]
+    fn a_host_inside_the_cookie_domain_keeps_it() {
+        let cfg = scoped();
+        for host in [
+            "stack0.app",
+            "feedback.stack0.app",
+            "FEEDBACK.Stack0.App:443",
+        ] {
+            let c = cfg.for_request_host(Some(host));
+            assert_eq!(c.domain.as_deref(), Some(".stack0.app"), "{host}");
+            assert!(c.set_value("t").contains("Domain=.stack0.app"), "{host}");
+        }
+    }
+
+    #[test]
+    fn a_host_outside_the_cookie_domain_gets_a_host_only_cookie() {
+        let cfg = scoped();
+        for host in [
+            "feedback.acme.com",
+            "evilstack0.app",
+            "stack0.app.evil.com",
+            "[::1]:8080",
+        ] {
+            let c = cfg.for_request_host(Some(host));
+            assert_eq!(c.domain, None, "{host}");
+            let v = c.set_value("t");
+            assert!(!v.contains("Domain="), "{host}: {v}");
+            // Everything else is unchanged.
+            assert!(v.contains("HttpOnly") && v.contains("Secure") && v.contains("SameSite=Lax"));
+            // No host-only-clear pairing: the cookie IS host-only here.
+            assert!(c.host_only_clear_value().is_none());
+        }
+    }
+
+    #[test]
+    fn no_domain_or_no_host_leaves_the_config_alone() {
+        let mut cfg = scoped();
+        assert_eq!(
+            cfg.for_request_host(None).domain.as_deref(),
+            Some(".stack0.app")
+        );
+        cfg.domain = None;
+        assert_eq!(cfg.for_request_host(Some("feedback.acme.com")).domain, None);
     }
 
     #[test]

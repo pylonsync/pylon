@@ -207,6 +207,21 @@ export interface PageProps<
    * existing pages keep working; it will be removed in a later release.
    */
   url: string;
+  /**
+   * The host this request was made to, lowercased (e.g. `feedback.acme.com`),
+   * when the server trusts it: the app's own URL (`PYLON_PUBLIC_URL`,
+   * `PYLON_CANONICAL_HOST`), a `PYLON_TRUSTED_HOSTS` entry, a ready platform
+   * domain attached with `ctx.domains`, or loopback in dev (with its port).
+   * Any other `Host` header reads as `""`, so a forged header cannot pick
+   * what the page renders.
+   *
+   * It is the same value as the host part of the SSR cache key, so a page
+   * may render differently per host (one app serving each customer on their
+   * own domain) and stay cacheable: each host gets its own entry. It is also
+   * sent to the browser, so hydration and client navigation see the same
+   * value the server rendered with.
+   */
+  host: string;
   /** Dynamic-segment matches keyed by name (e.g. `{ slug: "hello-world" }`). */
   params: TParams;
   /** Parsed query string (e.g. `?start=10` → `{ start: "10" }`). */

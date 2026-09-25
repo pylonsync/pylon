@@ -2026,6 +2026,7 @@ fn start_server(
     let session_store = auth_stores.session_store;
     let magic_codes = auth_stores.magic_codes;
     let oauth_state = auth_stores.oauth_state;
+    let session_handoff = auth_stores.session_handoff;
     let account_store = auth_stores.account_store;
     let api_keys = auth_stores.api_keys;
     // OrgStore reads + writes through the manifest's entity layer
@@ -3350,6 +3351,7 @@ fn start_server(
         let room_mgr = Arc::clone(&room_mgr);
         let metrics = Arc::clone(&metrics);
         let oauth_state = Arc::clone(&oauth_state);
+        let session_handoff = Arc::clone(&session_handoff);
         let account_store = Arc::clone(&account_store);
         let api_keys = Arc::clone(&api_keys);
         let orgs = Arc::clone(&orgs);
@@ -3413,6 +3415,7 @@ fn start_server(
         let rm = Arc::clone(&room_mgr);
         let mt = Arc::clone(&metrics);
         let os = Arc::clone(&oauth_state);
+        let sho = Arc::clone(&session_handoff);
         let acc = Arc::clone(&account_store);
         let ak = Arc::clone(&api_keys);
         let og = Arc::clone(&orgs);
@@ -8273,6 +8276,8 @@ fn start_server(
                     session_store: &ss,
                     magic_codes: &mc,
                     oauth_state: &os,
+                    session_handoff: &sho,
+                    tenant_origin: crate::tenant_hosts::is_trusted_origin,
                     account_store: &acc,
                     api_keys: &ak,
                     orgs: &og,
@@ -9450,6 +9455,7 @@ struct AuthStores {
     session_store: Arc<SessionStore>,
     magic_codes: Arc<pylon_auth::MagicCodeStore>,
     oauth_state: Arc<pylon_auth::OAuthStateStore>,
+    session_handoff: Arc<pylon_auth::session_handoff::SessionHandoffStore>,
     account_store: Arc<pylon_auth::AccountStore>,
     api_keys: Arc<pylon_auth::api_key::ApiKeyStore>,
     siwe: Arc<pylon_auth::siwe::NonceStore>,
@@ -9603,6 +9609,7 @@ fn in_memory_auth_stores(session_lifetime: u64) -> AuthStores {
         session_store: Arc::new(SessionStore::new().with_lifetime(session_lifetime)),
         magic_codes: Arc::new(pylon_auth::MagicCodeStore::new()),
         oauth_state: Arc::new(pylon_auth::OAuthStateStore::new()),
+        session_handoff: Arc::new(pylon_auth::session_handoff::SessionHandoffStore::new()),
         account_store: Arc::new(pylon_auth::AccountStore::new()),
         api_keys: Arc::new(pylon_auth::api_key::ApiKeyStore::new()),
         siwe: pylon_auth::siwe::NonceStore::new(),
@@ -9639,6 +9646,10 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
         crate::oauth_backend::SqliteOAuthBackend::open(path)
             .map_err(|e| map_err("OAuth state", e))?,
     ));
+    let session_handoff = pylon_auth::session_handoff::SessionHandoffStore::with_backend(Box::new(
+        crate::session_handoff_backend::SqliteSessionHandoffBackend::open(path)
+            .map_err(|e| map_err("session handoff", e))?,
+    ));
     let account_store = pylon_auth::AccountStore::with_backend(Box::new(
         crate::account_backend::SqliteAccountBackend::open(path)
             .map_err(|e| map_err("account-link", e))?,
@@ -9669,6 +9680,7 @@ fn build_sqlite_auth_stores(path: &str, session_lifetime: u64) -> Result<AuthSto
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
+        session_handoff: Arc::new(session_handoff),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
         siwe: pylon_auth::siwe::NonceStore::new(),
@@ -9726,6 +9738,10 @@ fn build_pg_auth_stores(
         crate::oauth_backend::PostgresOAuthBackend::with_pool(pool.clone())
             .map_err(|e| map_err("OAuth state", e))?,
     ));
+    let session_handoff = pylon_auth::session_handoff::SessionHandoffStore::with_backend(Box::new(
+        crate::session_handoff_backend::PostgresSessionHandoffBackend::with_pool(pool.clone())
+            .map_err(|e| map_err("session handoff", e))?,
+    ));
     let account_store = pylon_auth::AccountStore::with_backend(Box::new(
         crate::account_backend::PostgresAccountBackend::with_pool(pool.clone())
             .map_err(|e| map_err("account-link", e))?,
@@ -9758,6 +9774,7 @@ fn build_pg_auth_stores(
         session_store: Arc::new(session_store),
         magic_codes: Arc::new(magic_codes),
         oauth_state: Arc::new(oauth_state),
+        session_handoff: Arc::new(session_handoff),
         account_store: Arc::new(account_store),
         api_keys: Arc::new(api_keys),
         siwe: pylon_auth::siwe::NonceStore::new(),

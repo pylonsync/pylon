@@ -66,6 +66,13 @@ export interface RenderRouteMessage {
    * this) and `url` (deprecated); the query is `search_params`.
    */
   url: string;
+  /**
+   * The request's host when the server trusts it (its own URL,
+   * `PYLON_TRUSTED_HOSTS`, a ready platform/tenant domain, or loopback in
+   * dev), else "". The same value as the SSR cache key's host dimension.
+   * Absent from older hosts.
+   */
+  host?: string;
   /** Dynamic-segment matches keyed by name (e.g. `{slug: "hello-world"}`). */
   params: Record<string, string>;
   /** Parsed query string. */
@@ -2195,6 +2202,8 @@ export function buildHydrationTail(args: {
       // undefined, which is the same trap in a new place.
       pathname: restProps.pathname ?? restProps.url,
       url: restProps.url,
+      // The cache key's host dimension, so uniform across a bucket entry.
+      host: restProps.host ?? "",
       params: restProps.params,
       searchParams: restProps.searchParams,
       auth: { signedIn: args.bucketAuth.signedIn },
@@ -3395,6 +3404,9 @@ export async function handleRenderRoute(
       // finds nothing forever instead of failing.
       pathname: msg.url,
       url: msg.url,
+      // Keyed in the cache (the host bucket), so reading it is not a
+      // per-request read and does not veto caching.
+      host: msg.host ?? "",
       params: msg.params,
       searchParams: msg.search_params,
       headers: touchProxy(msg.headers as Record<string, unknown> | undefined),
@@ -3421,6 +3433,7 @@ export async function handleRenderRoute(
       ? {
           pathname: msg.url,
           url: msg.url,
+          host: msg.host ?? "",
           params: jsonClone(msg.params),
           searchParams: jsonClone(msg.search_params),
         }

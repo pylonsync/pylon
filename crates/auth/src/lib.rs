@@ -17,6 +17,7 @@ pub mod org;
 pub mod rate_limit;
 pub mod relay_blob;
 pub mod scim;
+pub mod session_handoff;
 pub mod trusted_device;
 pub mod trusted_mint;
 pub mod verification;
@@ -1880,6 +1881,12 @@ pub struct OAuthState {
     /// [`OAuthConfig::auth_url_with_pkce`]; replayed on token exchange
     /// in the callback. `None` for non-PKCE providers.
     pub pkce_verifier: Option<String>,
+    /// SHA-256 (hex) of a random value the start endpoint also set as a
+    /// host-only cookie on a platform (tenant) host, when the callback is on
+    /// that host. The session handoff that follows the callback only
+    /// redeems in the browser holding that cookie. `None` for ordinary
+    /// sign-ins. See pylon_auth::session_handoff.
+    pub handoff_binding: Option<String>,
     pub expires_at: u64,
 }
 
@@ -1981,6 +1988,25 @@ impl OAuthStateStore {
         error_callback_url: &str,
         pkce_verifier: Option<String>,
     ) -> String {
+        self.create_with_binding(
+            provider,
+            callback_url,
+            error_callback_url,
+            pkce_verifier,
+            None,
+        )
+    }
+
+    /// [`Self::create_with_pkce`] plus the browser binding for a sign-in
+    /// that returns to a platform (tenant) host.
+    pub fn create_with_binding(
+        &self,
+        provider: &str,
+        callback_url: &str,
+        error_callback_url: &str,
+        pkce_verifier: Option<String>,
+        handoff_binding: Option<String>,
+    ) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
         let token = generate_token();
         let now = SystemTime::now()
@@ -1992,6 +2018,7 @@ impl OAuthStateStore {
             callback_url: callback_url.to_string(),
             error_callback_url: error_callback_url.to_string(),
             pkce_verifier,
+            handoff_binding,
             expires_at: now + 600,
         };
         self.backend.put(&token, &state);

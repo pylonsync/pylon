@@ -2431,6 +2431,11 @@ fn serve_via_ssr_rpc(
         nav,
         md.is_some(),
     );
+    // `props.host`: the SAME value as the cache key's host dimension, so a
+    // page that renders per host (a platform app serving each customer's
+    // custom domain) can never share a cache entry across hosts, and an
+    // untrusted or forged `Host` reads as "".
+    let page_host = ssr_cache_host_bucket(headers_map.get("host").map(String::as_str));
 
     let params_json =
         serde_json::to_value(&matched.params).unwrap_or_else(|_| serde_json::json!({}));
@@ -2606,6 +2611,7 @@ fn serve_via_ssr_rpc(
                 layouts,
                 &route_path_owned,
                 &path_only_owned,
+                &page_host,
                 params_json,
                 search_params_json,
                 headers_map,

@@ -1,0 +1,132 @@
+---
+title: Customer domains
+description: "Serve each of your customers on their own domain from one app: attach the domain with ctx.domains, pick the tenant from props.host, and let users sign in on that domain."
+---
+
+A platform app serves many customers. Each customer can have their own domain,
+such as `feedback.acme.com`, that points at your app. Pylon Cloud issues the
+certificate, and your app decides what to render from the host of the request.
+
+This page covers three parts:
+
+1. Attach the domain with `ctx.domains`.
+2. Pick the customer from `props.host` in a page.
+3. Sign users in on the customer's domain.
+
+`ctx.domains` works on Pylon Cloud only. On a self-hosted server every method
+throws `DOMAINS_NOT_CONFIGURED`.
+
+## Attach a domain
+
+Call `ctx.domains.add` from an action when your customer enters their domain.
+The result has the DNS records the customer must add.
+
+```ts
+import { action, v } from "@pylonsync/functions";
+
+export default action({
+  args: { hostname: v.string() },
+  async handler(ctx, args) {
+    const d = await ctx.domains.add(args.hostname);
+    // Show the customer:
+    //   CNAME  d.hostname  →  d.cnameTarget
+    //   plus the TXT records in d.ownership and d.dcv
+    return d;
+  },
+});
+```
+
+Then poll `ctx.domains.status(hostname)`. When `status` is `"ready"`, the
+certificate is active and your app accepts requests for the host. Pylon
+refreshes the list of ready hosts every 30 seconds, so there is no deploy per
+domain. `ctx.domains.remove(hostname)` detaches a domain.
+
+Keep your own record of which customer owns which hostname. The control plane
+only knows that the hostname belongs to your app.
+
+## Pick the customer from the host
+
+Every page gets `props.host`. It is the request's host, lowercased, when the
+server trusts it, and `""` otherwise. A ready customer domain is trusted.
+
+```tsx
+import { use } from "react";
+import type { PageProps } from "@pylonsync/react";
+
+export default function Home({ host, serverData }: PageProps) {
+  // Your own lookup: which customer owns this hostname, if any.
+  const tenant = use(serverData.fn<Tenant | null>("tenantForHost", { host }));
+  if (!tenant) return <MarketingHome />;
+  return <TenantHome tenant={tenant} />;
+}
+```
+
+Rules that hold for `props.host`:
+
+- A forged `Host` header gives `""`. A page cannot be made to render another
+  customer's content by a header the server does not trust.
+- `host` is part of the SSR cache key. Each host gets its own cache entry, so
+  a page with `export const revalidate` stays cacheable.
+- The browser receives the same value in the hydration payload.
+
+Links inside a customer's site must stay on that host. Use root-relative paths
+(`/roadmap`), not paths with your app's own prefix.
+
+## Sign users in on the customer's domain
+
+A session cookie belongs to one host. Pylon sets it on the host that asked for
+it:
+
+- **Email and password, magic codes, passkeys.** These run on the customer's
+  domain directly. The session cookie is host-only on that domain, also when
+  `PYLON_COOKIE_DOMAIN` is set for your own domain, because a browser drops a
+  cookie whose `Domain=` does not cover the host.
+- **OAuth (Google, GitHub, and others).** The provider only knows your app's
+  one registered callback URL, on your own host. Pylon moves the sign-in to
+  the customer's domain with a one-time code.
+
+To start an OAuth sign-in on a customer's domain, request the login URL from
+that domain, with an absolute callback on the same domain:
+
+```ts
+const callback = `https://${location.host}/`;
+const res = await fetch(
+  `/api/auth/login/google?callback=${encodeURIComponent(callback)}`,
+);
+const { redirect } = await res.json();
+location.href = redirect;
+```
+
+What happens next:
+
+1. The start request sets a short-lived, host-only cookie on the customer's
+   domain. It binds the sign-in to this browser.
+2. The provider returns the browser to your app's callback. The callback does
+   not set a session cookie on your host. It redirects to
+   `https://<customer domain>/api/auth/handoff?code=…`.
+3. The handoff request, on the customer's domain, checks the code and the
+   binding cookie, creates the session, sets the cookie, and redirects to the
+   callback URL.
+
+The handoff code:
+
+- is 32 random bytes, and only its SHA-256 is stored,
+- works once, for 120 seconds,
+- works only on the domain it was made for,
+- works only in the browser that started the sign-in, so a code sent to
+  another person cannot sign them in to the sender's account.
+
+A sign-in that returns to a customer's domain must start on that domain. A
+start request on another host gets `400 HANDOFF_WRONG_START_HOST`.
+
+The handoff errors are:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 400 | `HANDOFF_INVALID` | The code expired or was used. Sign in again. |
+| 400 | `HANDOFF_WRONG_HOST` | The code was made for a different domain. |
+| 403 | `HANDOFF_OTHER_BROWSER` | The browser does not have the binding cookie. |
+| 403 | `HANDOFF_HOST_NOT_TRUSTED` | The domain was detached after the sign-in started. |
+
+The handoff codes are stored with the other auth state (SQLite or Postgres), so
+a sign-in that starts on one machine can finish on another.

@@ -574,6 +574,7 @@ pub trait FnOps: Send + Sync {
         _layouts: Vec<String>,
         _route_path: &str,
         _url: &str,
+        _host: &str,
         _params: serde_json::Value,
         _search_params: serde_json::Value,
         _headers: std::collections::HashMap<String, String>,
@@ -684,6 +685,13 @@ pub struct RouterContext<'a> {
     pub session_store: &'a SessionStore,
     pub magic_codes: &'a MagicCodeStore,
     pub oauth_state: &'a OAuthStateStore,
+    /// One-time codes that carry an OAuth sign-in to a platform (tenant)
+    /// host. See pylon_auth::session_handoff.
+    pub session_handoff: &'a pylon_auth::session_handoff::SessionHandoffStore,
+    /// Whether an origin/URL is a ready platform (tenant) domain of this app
+    /// — the runtime's trusted-host set, refreshed from the control plane.
+    /// Tests and runtimes without platform domains pass `|_| false`.
+    pub tenant_origin: fn(&str) -> bool,
     /// Persistent OAuth account links — better-auth's `account` table
     /// equivalent. Used by the OAuth callback to look up + upsert the
     /// `(provider, provider_account_id) → user_id` mapping plus the
@@ -809,6 +817,22 @@ impl<'a> RouterContext<'a> {
             .map(|(_, v)| v.as_str())
     }
 
+    /// The request's `Host` header, if any.
+    pub fn request_host(&self) -> Option<&str> {
+        self.request_headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("host"))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// The cookie config for THIS response. Host-only when the request came
+    /// to a host outside `PYLON_COOKIE_DOMAIN` (a platform/tenant domain),
+    /// because a browser drops a cookie whose `Domain=` does not cover the
+    /// host. Every session-cookie write in the router goes through this.
+    pub fn response_cookie_config(&self) -> CookieConfig {
+        self.cookie_config.for_request_host(self.request_host())
+    }
+
     /// Emit a session cookie when the request looks like it came from a
     /// browser (i.e. carries Origin). Non-browser callers still receive
     /// the JSON token in the body and ignore the missing cookie.
@@ -827,8 +851,9 @@ impl<'a> RouterContext<'a> {
     /// again," which is unworkable for a real product.
     pub fn maybe_set_session_cookie(&self, token: &str) {
         if self.request_origin().is_some() {
-            self.add_response_header("Set-Cookie", self.cookie_config.set_value(token));
-            if let Some(clear) = self.cookie_config.host_only_clear_value() {
+            let cookie = self.response_cookie_config();
+            self.add_response_header("Set-Cookie", cookie.set_value(token));
+            if let Some(clear) = cookie.host_only_clear_value() {
                 self.add_response_header("Set-Cookie", clear);
             }
         }
@@ -847,8 +872,9 @@ impl<'a> RouterContext<'a> {
     /// iOS Chrome OAuth: the post-callback /dashboard load read the
     /// stale host-only token, found no session, bounced back to /login.
     pub fn set_browser_session_cookie(&self, token: &str) {
-        self.add_response_header("Set-Cookie", self.cookie_config.set_value(token));
-        if let Some(clear) = self.cookie_config.host_only_clear_value() {
+        let cookie = self.response_cookie_config();
+        self.add_response_header("Set-Cookie", cookie.set_value(token));
+        if let Some(clear) = cookie.host_only_clear_value() {
             self.add_response_header("Set-Cookie", clear);
         }
     }
@@ -3518,6 +3544,8 @@ mod auth_gate_tests {
             session_store: &session_store,
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
+            session_handoff: &pylon_auth::session_handoff::SessionHandoffStore::new(),
+            tenant_origin: |_| false,
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
@@ -4206,6 +4234,8 @@ mod auth_gate_tests {
             session_store: &session_store,
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
+            session_handoff: &pylon_auth::session_handoff::SessionHandoffStore::new(),
+            tenant_origin: |_| false,
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
@@ -4932,6 +4962,8 @@ mod auth_gate_tests {
                 session_store: &session_store,
                 magic_codes: &magic_codes,
                 oauth_state: &oauth_state,
+                session_handoff: &pylon_auth::session_handoff::SessionHandoffStore::new(),
+                tenant_origin: |_| false,
                 account_store: &account_store,
                 api_keys: &api_keys,
                 orgs: &orgs,
@@ -5310,6 +5342,8 @@ mod auth_gate_tests {
             session_store: &session_store,
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
+            session_handoff: &pylon_auth::session_handoff::SessionHandoffStore::new(),
+            tenant_origin: |_| false,
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
@@ -5527,6 +5561,8 @@ mod auth_gate_tests {
             session_store: &session_store,
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
+            session_handoff: &pylon_auth::session_handoff::SessionHandoffStore::new(),
+            tenant_origin: |_| false,
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,
@@ -5839,6 +5875,8 @@ mod auth_gate_tests {
             session_store: &session_store,
             magic_codes: &magic_codes,
             oauth_state: &oauth_state,
+            session_handoff: &pylon_auth::session_handoff::SessionHandoffStore::new(),
+            tenant_origin: |_| false,
             account_store: &account_store,
             api_keys: &api_keys,
             orgs: &orgs,

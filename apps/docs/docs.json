@@ -60,7 +60,8 @@
               "ssr/link",
               "ssr/image",
               "ssr/styling",
-              "ssr/agents"
+              "ssr/agents",
+              "ssr/customer-domains"
             ]
           },
           {

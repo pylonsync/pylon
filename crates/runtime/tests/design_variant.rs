@@ -30,6 +30,7 @@ struct RenderCall {
     component: String,
     layouts: Vec<String>,
     url: String,
+    host: String,
     auth: AuthInfo,
     design: bool,
 }
@@ -69,6 +70,7 @@ impl pylon_router::FnOps for StubFnOps {
         layouts: Vec<String>,
         _route_path: &str,
         url: &str,
+        host: &str,
         _params: serde_json::Value,
         _search_params: serde_json::Value,
         _headers: HashMap<String, String>,
@@ -84,6 +86,7 @@ impl pylon_router::FnOps for StubFnOps {
             component: component.to_string(),
             layouts,
             url: url.to_string(),
+            host: host.to_string(),
             auth,
             design,
         });
