@@ -93,6 +93,15 @@
 //! | `pylon_save() -> status` | The state to start again from, to the output. Status `3` means the shard keeps no saved state. |
 //! | `pylon_restore(codec, init_ptr, init_len, state_ptr, state_len) -> status` | Create the state from saved bytes instead of `pylon_init`. The init bytes are as for `pylon_init`. |
 //!
+//! Optional exports for moving players between shards. A module exports all
+//! three or none.
+//!
+//! | Export | Meaning |
+//! | --- | --- |
+//! | `pylon_transfer_out(sid_ptr, sid_len) -> status` | Remove the subscriber's entity; its state to the output. Status `3` means the subscriber has no entity here. |
+//! | `pylon_transfer_in(sid_ptr, sid_len, state_ptr, state_len) -> status` | Add the subscriber's entity from state `pylon_transfer_out` produced, here or in another shard. Status `1` refuses. |
+//! | `pylon_transfer_requests() -> status` | Players the shard wants moved, as JSON `[[sid, target shard], ...]`, to the output. Status `3` means none. The host calls it after each tick. |
+//!
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
 //! message in the output. A trap stops the shard.
 //!
@@ -264,6 +273,36 @@ pub trait Shard: Sized + 'static {
     /// the shard was created with.
     fn restore(_shard_id: &str, _params: Self::Params, _state: &[u8]) -> Result<Self, String> {
         Err("this shard does not restore saved state".into())
+    }
+
+    // -- Moving players between shards (optional) --------------------------
+    //
+    // A player crosses a zone line, enters a dungeon, or joins a match on
+    // another shard, possibly on another machine, and keeps its state. The
+    // host takes the entity out of this shard with `transfer_out` and gives
+    // it to the target's `transfer_in`. When the target refuses, the host
+    // gives it back to this shard's `transfer_in`. The client reconnects to
+    // the target on its own.
+
+    /// Remove `subscriber`'s entity and return its state, in any encoding
+    /// the target's `transfer_in` reads. `Ok(None)`: the subscriber has no
+    /// entity here. `Err` refuses the transfer. Default: refuses.
+    fn transfer_out(&mut self, _subscriber: &str) -> Result<Option<Vec<u8>>, String> {
+        Err("this shard does not transfer players".into())
+    }
+
+    /// Add `subscriber`'s entity from `state` that a `transfer_out` returned
+    /// (another shard's, or this shard's own when a transfer comes back).
+    /// `Err` refuses. Default: refuses.
+    fn transfer_in(&mut self, _subscriber: &str, _state: &[u8]) -> Result<(), String> {
+        Err("this shard does not accept players".into())
+    }
+
+    /// Players to move, as (subscriber, target shard id): for example the
+    /// ones that crossed a zone line this tick. The host takes them after
+    /// each tick and moves each one. Default: none.
+    fn transfer_requests(&mut self) -> Vec<(String, String)> {
+        Vec::new()
     }
 }
 
@@ -498,6 +537,18 @@ macro_rules! export_shard {
             pub extern "C" fn pylon_restore(codec: i32, ip: i32, il: i32, sp: i32, sl: i32) -> i32 {
                 RUNTIME.restore(codec, ip, il, sp, sl)
             }
+            #[no_mangle]
+            pub extern "C" fn pylon_transfer_out(sp: i32, sl: i32) -> i32 {
+                RUNTIME.transfer_out(sp, sl)
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_transfer_in(sp: i32, sl: i32, tp: i32, tl: i32) -> i32 {
+                RUNTIME.transfer_in(sp, sl, tp, tl)
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_transfer_requests() -> i32 {
+                RUNTIME.transfer_requests()
+            }
         };
     };
 }
@@ -595,6 +646,44 @@ pub mod __rt {
                     OK
                 }
                 None => NONE,
+            }
+        }
+
+        pub fn transfer_out(&self, sp: i32, sl: i32) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written arguments in the scratch buffer.
+            let sid = unsafe { arg_str(sp, sl) };
+            match shard(&mut s.shard).transfer_out(sid) {
+                Ok(Some(bytes)) => {
+                    s.output.clear();
+                    s.output.extend_from_slice(&bytes);
+                    OK
+                }
+                Ok(None) => NONE,
+                Err(e) => fail(&mut s.output, e),
+            }
+        }
+
+        pub fn transfer_in(&self, sp: i32, sl: i32, tp: i32, tl: i32) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written arguments in the scratch buffer.
+            let (sid, state) = unsafe { (arg_str(sp, sl), arg(tp, tl)) };
+            match shard(&mut s.shard).transfer_in(sid, state) {
+                Ok(()) => OK,
+                Err(e) => fail(&mut s.output, e),
+            }
+        }
+
+        pub fn transfer_requests(&self) -> i32 {
+            let s = self.state();
+            let requests = shard(&mut s.shard).transfer_requests();
+            if requests.is_empty() {
+                return NONE;
+            }
+            s.output.clear();
+            match serde_json::to_writer(&mut s.output, &requests) {
+                Ok(()) => OK,
+                Err(e) => fail(&mut s.output, format!("transfer requests: {e}")),
             }
         }
 

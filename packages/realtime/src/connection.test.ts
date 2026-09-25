@@ -78,3 +78,83 @@ test("send returns 0 and sends nothing while the socket is not open", () => {
   expect(errors[0]).toContain("not open");
   client.close();
 });
+
+/** A version 2 frame with a JSON payload. */
+function jsonFrame(kind: number, tick: number, body: unknown): ArrayBuffer {
+  const payload = new TextEncoder().encode(JSON.stringify(body));
+  const out = new Uint8Array(18 + payload.length);
+  const view = new DataView(out.buffer);
+  view.setUint8(0, kind);
+  view.setUint8(1, 0);
+  view.setUint32(6, tick);
+  out.set(payload, 18);
+  return out.buffer;
+}
+
+test("a transfer frame moves the client to the new shard with the ticket it carries", async () => {
+  const asked: string[] = [];
+  const client = connectShard<{ zone: string }>("west", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: (shard) => {
+      asked.push(shard);
+      return `own-${shard}`;
+    },
+  });
+  const moves: Array<[string, string]> = [];
+  const snaps: string[] = [];
+  client.onTransfer((to, from) => moves.push([to, from]));
+  client.onSnapshot((s) => snaps.push(s.zone));
+  await settle();
+  const first = sockets[sockets.length - 1];
+  expect(first.url).toContain("shard=west");
+  expect(first.protocols).toEqual(["ticket.own-west"]);
+  first.readyState = 1;
+  first.onopen?.();
+  first.onmessage?.({ data: jsonFrame(1, 500, { zone: "west" }) });
+  expect(client.tick).toBe(500);
+
+  // The server moves the player, then closes.
+  first.onmessage?.({ data: jsonFrame(4, 501, { shard: "east", ticket: "from-server" }) });
+  expect(client.shardId).toBe("east");
+  expect(moves).toEqual([["east", "west"]]);
+  expect(client.tick).toBe(-1);
+  first.close();
+  await settle();
+
+  // At once, to the new shard, with the ticket from the frame.
+  const second = sockets[sockets.length - 1];
+  expect(second).not.toBe(first);
+  expect(second.url).toContain("shard=east");
+  expect(second.protocols).toEqual(["ticket.from-server"]);
+  expect(delays[delays.length - 1]).toBe(0);
+  second.readyState = 1;
+  second.onopen?.();
+  // The new shard's ticks start low; the client takes them.
+  second.onmessage?.({ data: jsonFrame(1, 3, { zone: "east" }) });
+  expect(client.tick).toBe(3);
+  expect(snaps).toEqual(["west", "east"]);
+
+  // A later reconnect asks the ticket function for the new shard.
+  second.close();
+  await settle();
+  expect(asked).toEqual(["west", "east"]);
+  expect(sockets[sockets.length - 1].protocols).toEqual(["ticket.own-east"]);
+  client.close();
+});
+
+test("an explicit wsUrl follows a transfer", async () => {
+  const client = connectShard("west", {
+    subscriberId: "p1",
+    wsUrl: "ws://h/shard?shard=west&sid=p1&v=2",
+  });
+  await settle();
+  const first = sockets[sockets.length - 1];
+  first.readyState = 1;
+  first.onopen?.();
+  first.onmessage?.({ data: jsonFrame(4, 9, { shard: "east", ticket: "t" }) });
+  first.close();
+  await settle();
+  expect(sockets[sockets.length - 1].url).toBe("ws://h/shard?shard=east&sid=p1&v=2");
+  client.close();
+});

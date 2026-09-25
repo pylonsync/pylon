@@ -276,6 +276,23 @@ for await snap in await shard.snapshots() {
 try await shard.send(Input(action: "move", x: 10, y: 20))
 ```
 
+When the server moves the player to another shard (`ctx.shards.transfer`),
+the client reconnects there with the ticket the server sent, and
+`shard.shardId` changes. `transfers()` reports each move. Set
+`ticketProvider` to get a ticket per connection attempt, for the shard it
+connects to:
+
+```swift
+let cfg = ShardClientConfig(
+    baseURL: URL(string: "https://your-app.com")!,
+    subscriberId: userId,
+    ticketProvider: { shardId in try await api.zoneTicket(shardId) }
+)
+for await zone in await shard.transfers() {
+    print("now in \(zone)")
+}
+```
+
 ## Loro CRDTs
 
 For collaborative text/lists/maps/trees, the SDK bridges to [`loro-swift`](https://github.com/loro-dev/loro-swift) (the official Swift binding for Loro):

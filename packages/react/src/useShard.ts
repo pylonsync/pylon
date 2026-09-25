@@ -55,6 +55,11 @@ export interface UseShardReturn<TSnapshot = unknown, TInput = unknown> {
   ack: number;
   /** The most recent input the shard refused, if any. */
   lastRejection: ShardInputRejection | null;
+  /**
+   * The shard the hook is connected to. It differs from the `shardId`
+   * argument after the server moved the player to another shard.
+   */
+  shardId: string;
   connected: boolean;
   error: Error | null;
   /** Send an input to the shard. Returns a client sequence number, or 0
@@ -94,6 +99,7 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
   const [connected, setConnected] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
   const [entitiesVersion, setEntitiesVersion] = useState<number>(0);
+  const [currentShard, setCurrentShard] = useState<string>(shardId);
 
   const clientRef = useRef<ShardClient<TSnapshot, TInput> | null>(null);
 
@@ -118,13 +124,14 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
       ...options,
       ticket:
         typeof options.ticket === "function"
-          ? () => {
+          ? (shard: string) => {
               const current = ticketRef.current;
-              return typeof current === "function" ? current() : (current ?? "");
+              return typeof current === "function" ? current(shard) : (current ?? "");
             }
           : options.ticket,
     });
     clientRef.current = client;
+    setCurrentShard(shardId);
 
     client.onSnapshot((snap, t, a) => {
       setSnapshot(snap);
@@ -132,6 +139,10 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
       setAck(a);
     });
     client.onInputRejected((r) => setLastRejection(r));
+    client.onTransfer((to) => {
+      setCurrentShard(to);
+      setSnapshot(null);
+    });
     client.onReplication((_table, _summary, t, a) => {
       setTick(t);
       setAck(a);
@@ -162,6 +173,7 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
     tick,
     ack,
     lastRejection,
+    shardId: currentShard,
     connected,
     error,
     send,

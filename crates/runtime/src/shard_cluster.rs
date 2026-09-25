@@ -158,6 +158,26 @@ pub struct Placement {
     pub epoch: i64,
 }
 
+/// A player in flight between shards (see [`PgShardDirectory::begin_transfer`]).
+///
+/// The row decides who holds the player: `out` (the row: the source removed
+/// it and nothing has taken it yet), `in` (the target), or `back` (the
+/// source again). The target and the source each take the row from `out`
+/// with a compare-and-set, so exactly one of them does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transfer {
+    pub id: String,
+    pub subscriber: String,
+    pub from_shard: String,
+    pub to_shard: String,
+    /// The entity state the source's `transfer_out` produced.
+    pub state: Vec<u8>,
+    /// The user and ticket claims the target's ticket carries:
+    /// `{"user_id": ..., "claims": ...}`.
+    pub auth: serde_json::Value,
+    pub status: String,
+}
+
 /// What [`PgShardDirectory::claim`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Claim {
@@ -291,6 +311,22 @@ impl PgShardDirectory {
                         state BYTEA NOT NULL,
                         saved_at BIGINT NOT NULL
                     )",
+                )?;
+            }
+            if !exists(&mut tx, "_pylon_shard_transfers")? {
+                tx.batch_execute(
+                    "CREATE TABLE _pylon_shard_transfers (
+                        transfer_id TEXT PRIMARY KEY,
+                        subscriber TEXT NOT NULL,
+                        from_shard TEXT NOT NULL,
+                        to_shard TEXT NOT NULL,
+                        state BYTEA NOT NULL,
+                        auth JSONB NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at BIGINT NOT NULL
+                    );
+                    CREATE INDEX _pylon_shard_transfers_out_idx
+                        ON _pylon_shard_transfers (from_shard) WHERE status = 'out';",
                 )?;
             }
             if !exists(&mut tx, "_pylon_shard_cluster")? {
@@ -534,22 +570,9 @@ impl PgShardDirectory {
     ) -> Result<bool, String> {
         self.pool.with_client(|c| {
             let mut tx = c.transaction()?;
-            let owned = tx
-                .query_opt(
-                    "SELECT 1 FROM _pylon_shard_placements
-                     WHERE shard_id = $1 AND machine_id = $2 AND epoch = $3
-                     FOR SHARE",
-                    &[&shard_id, &machine_id, &epoch],
-                )?
-                .is_some();
+            let owned = holds(&mut tx, shard_id, machine_id, epoch)?;
             if owned {
-                tx.execute(
-                    "INSERT INTO _pylon_shard_state (shard_id, state, saved_at)
-                     VALUES ($1, $2, (extract(epoch from clock_timestamp()) * 1000)::bigint)
-                     ON CONFLICT (shard_id) DO UPDATE SET
-                        state = EXCLUDED.state, saved_at = EXCLUDED.saved_at",
-                    &[&shard_id, &state],
-                )?;
+                put_state(&mut tx, shard_id, state)?;
             }
             tx.commit()?;
             Ok(owned)
@@ -573,6 +596,149 @@ impl PgShardDirectory {
                 &[&shard_id, &machine_id, &epoch],
             )?;
             Ok(row.map(|r| r.get(0)))
+        })
+    }
+
+    /// Record that the source removed a player: the row, in status `out`, and
+    /// the source's state without the player (`source_state`, when the shard
+    /// saves state), in one transaction, while `machine`/`epoch` holds the
+    /// source. False when it does not.
+    pub fn begin_transfer(
+        &self,
+        t: &Transfer,
+        machine: &str,
+        epoch: i64,
+        source_state: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        self.pool.with_client(|c| {
+            let mut tx = c.transaction()?;
+            if !holds(&mut tx, &t.from_shard, machine, epoch)? {
+                return Ok(false);
+            }
+            if let Some(state) = source_state {
+                put_state(&mut tx, &t.from_shard, state)?;
+            }
+            tx.execute(
+                "INSERT INTO _pylon_shard_transfers
+                    (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'out',
+                         (extract(epoch from clock_timestamp()) * 1000)::bigint)",
+                &[
+                    &t.id,
+                    &t.subscriber,
+                    &t.from_shard,
+                    &t.to_shard,
+                    &t.state,
+                    &t.auth,
+                ],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    /// The target took the player: `out` becomes `in`, with the target's
+    /// state (now holding the player) saved in the same transaction, while
+    /// `machine`/`epoch` holds the target. False when the row is no longer
+    /// `out` (the source took it back) or the target is not held.
+    pub fn accept_transfer(
+        &self,
+        id: &str,
+        to_shard: &str,
+        machine: &str,
+        epoch: i64,
+        target_state: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        self.settle(id, "in", to_shard, machine, epoch, target_state)
+    }
+
+    /// The source took the player back: `out` becomes `back`, with the
+    /// source's state saved in the same transaction. False when the row is
+    /// no longer `out` (the target took it) or the source is not held.
+    pub fn return_transfer(
+        &self,
+        id: &str,
+        from_shard: &str,
+        machine: &str,
+        epoch: i64,
+        source_state: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        self.settle(id, "back", from_shard, machine, epoch, source_state)
+    }
+
+    fn settle(
+        &self,
+        id: &str,
+        status: &str,
+        shard: &str,
+        machine: &str,
+        epoch: i64,
+        state: Option<&[u8]>,
+    ) -> Result<bool, String> {
+        self.pool.with_client(|c| {
+            let mut tx = c.transaction()?;
+            if !holds(&mut tx, shard, machine, epoch)? {
+                return Ok(false);
+            }
+            let n = tx.execute(
+                "UPDATE _pylon_shard_transfers SET status = $2
+                 WHERE transfer_id = $1 AND status = 'out'",
+                &[&id, &status],
+            )?;
+            if n != 1 {
+                return Ok(false);
+            }
+            if let Some(state) = state {
+                put_state(&mut tx, shard, state)?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    pub fn transfer(&self, id: &str) -> Result<Option<Transfer>, String> {
+        self.pool.with_client(|c| {
+            let row = c.query_opt(
+                "SELECT transfer_id, subscriber, from_shard, to_shard, state, auth, status
+                 FROM _pylon_shard_transfers WHERE transfer_id = $1",
+                &[&id],
+            )?;
+            Ok(row.map(|r| transfer_of(&r)))
+        })
+    }
+
+    /// Transfers still `out` for longer than `older_than_ms` whose source
+    /// `machine` holds under `epoch`: the source must finish them.
+    pub fn stale_transfers(
+        &self,
+        machine: &str,
+        epoch: i64,
+        older_than_ms: i64,
+    ) -> Result<Vec<Transfer>, String> {
+        self.pool.with_client(|c| {
+            let rows = c.query(
+                "SELECT t.transfer_id, t.subscriber, t.from_shard, t.to_shard, t.state, t.auth, t.status
+                 FROM _pylon_shard_transfers t
+                 JOIN _pylon_shard_placements p ON p.shard_id = t.from_shard
+                 WHERE t.status = 'out' AND p.machine_id = $1 AND p.epoch = $2
+                   AND t.created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - $3
+                 ORDER BY t.created_at",
+                &[&machine, &epoch, &older_than_ms],
+            )?;
+            Ok(rows.iter().map(transfer_of).collect())
+        })
+    }
+
+    /// Drop settled transfers older than an hour.
+    pub fn prune_transfers(&self) -> Result<(), String> {
+        self.pool.with_client(|c| {
+            c.execute(
+                "DELETE FROM _pylon_shard_transfers
+                 WHERE status <> 'out'
+                   AND created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 3600000",
+                &[],
+            )?;
+            Ok(())
         })
     }
 
@@ -614,6 +780,51 @@ fn placement_of(r: &postgres::Row) -> Placement {
     }
 }
 
+fn transfer_of(r: &postgres::Row) -> Transfer {
+    Transfer {
+        id: r.get(0),
+        subscriber: r.get(1),
+        from_shard: r.get(2),
+        to_shard: r.get(3),
+        state: r.get(4),
+        auth: r.get(5),
+        status: r.get(6),
+    }
+}
+
+/// True when `machine` holds `shard` under `epoch`. The placement row stays
+/// share-locked until the transaction ends, as in `save_state`.
+fn holds(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &str,
+    machine: &str,
+    epoch: i64,
+) -> Result<bool, postgres::Error> {
+    Ok(tx
+        .query_opt(
+            "SELECT 1 FROM _pylon_shard_placements
+             WHERE shard_id = $1 AND machine_id = $2 AND epoch = $3
+             FOR SHARE",
+            &[&shard, &machine, &epoch],
+        )?
+        .is_some())
+}
+
+fn put_state(
+    tx: &mut postgres::Transaction<'_>,
+    shard: &str,
+    state: &[u8],
+) -> Result<(), postgres::Error> {
+    tx.execute(
+        "INSERT INTO _pylon_shard_state (shard_id, state, saved_at)
+         VALUES ($1, $2, (extract(epoch from clock_timestamp()) * 1000)::bigint)
+         ON CONFLICT (shard_id) DO UPDATE SET
+            state = EXCLUDED.state, saved_at = EXCLUDED.saved_at",
+        &[&shard, &state],
+    )?;
+    Ok(())
+}
+
 /// SQL that is true when machine `machine` is live under `epoch`, with the
 /// liveness window in milliseconds at parameter `window`.
 fn owner_live_sql(machine: &str, epoch: &str, window: &str) -> String {
@@ -650,6 +861,17 @@ pub enum RemoteOp {
         id: String,
     },
     List,
+    /// Move `subscriber` from shard `from` (on the receiver) to shard `to`.
+    Transfer {
+        from: String,
+        subscriber: String,
+        to: String,
+    },
+    /// Take the player in transfer `id` into its target shard (on the
+    /// receiver). The state is in the transfer row.
+    TransferIn {
+        id: String,
+    },
 }
 
 /// The answer to a [`RemoteOp`]: a JSON value, or an error code and message.

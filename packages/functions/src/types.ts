@@ -892,6 +892,30 @@ export interface Shards {
 
   /** Every running shard. */
   list(): Promise<ShardInfo[]>;
+
+  /**
+   * Move a player from shard `from` to shard `to` (a zone line, a dungeon,
+   * a match), possibly on another machine. The source module's
+   * `transfer_out` removes the player's entity and the target's
+   * `transfer_in` adds it, with its state. The player's connections get a
+   * transfer frame with a ticket for `to`, and the client libraries
+   * reconnect there. Actions only.
+   *
+   * On an error the player stays in `from`. Throws
+   * `SHARD_TRANSFER_REFUSED` when a module refuses,
+   * `SHARD_TRANSFER_NO_PLAYER` when `from` has no entity for the
+   * subscriber, `SHARD_TRANSFER_BUSY` while it is already moving,
+   * `SHARD_TRANSFER_UNSUPPORTED`, or `SHARD_NOT_FOUND`.
+   */
+  transfer(from: string, subscriberId: string, to: string): Promise<ShardTransfer>;
+}
+
+/** A finished `ctx.shards.transfer`. */
+export interface ShardTransfer {
+  /** The shard the player is in now. */
+  shard: string;
+  /** A ticket for it, which the transfer frame also carried. */
+  ticket: string;
 }
 
 /** `ctx.shards` in a query or mutation: tickets and reads, no start or stop. */

@@ -52,6 +52,9 @@ pub enum FrameKind {
     /// Dropped like a snapshot when the queue is full; the shard then sends
     /// the next one as a full baseline.
     Replication,
+    /// A [`crate::wire::TransferNotice`]: the subscriber moved to another
+    /// shard. The last frame on a queue; never dropped.
+    Transfer,
 }
 
 /// One frame for the transport to write.
@@ -229,6 +232,31 @@ impl OutboundQueue {
         })
     }
 
+    /// Queue a transfer frame as the last frame, then close. Snapshots and
+    /// replication frames still waiting are dropped: the client leaves this
+    /// shard and gets a baseline from the next one.
+    pub fn push_transfer_and_close(&self, tick: u64, ack: u64, bytes: Arc<[u8]>) -> PushOutcome {
+        let outcome = {
+            let mut st = self.state.lock().unwrap();
+            if self.is_closed() {
+                return PushOutcome::Closed;
+            }
+            let before = st.frames.len();
+            st.frames
+                .retain(|f| !matches!(f.kind, FrameKind::Snapshot | FrameKind::Replication));
+            st.dropped_snapshots += (before - st.frames.len()) as u64;
+            st.frames.push_back(Frame {
+                tick,
+                kind: FrameKind::Transfer,
+                ack,
+                bytes,
+            });
+            PushOutcome::Queued
+        };
+        self.close();
+        outcome
+    }
+
     fn push(&self, frame: Frame) -> PushOutcome {
         let st = self.state.lock().unwrap();
         self.push_locked(st, frame)
@@ -257,7 +285,8 @@ impl OutboundQueue {
             if st.frames.len() >= self.config.max_frames {
                 st.full_since.get_or_insert(now);
                 let before = st.frames.len();
-                st.frames.retain(|f| f.kind == FrameKind::InputRejected);
+                st.frames
+                    .retain(|f| matches!(f.kind, FrameKind::InputRejected | FrameKind::Transfer));
                 st.dropped_snapshots += (before - st.frames.len()) as u64;
                 if st.frames.len() >= self.config.max_frames {
                     // Full of frames that cannot be dropped: the client is

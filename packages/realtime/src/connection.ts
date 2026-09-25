@@ -16,6 +16,7 @@ import {
   parseShardFrame,
   type ShardInputRejection,
   type ShardPayloadDecoder,
+  type ShardTransferNotice,
 } from "./wire";
 
 export interface ShardConnectOptions {
@@ -34,9 +35,10 @@ export interface ShardConnectOptions {
    * authorization hooks.
    *
    * Tickets expire. Pass a function to get a new one for each connection
-   * attempt, so a reconnect after the expiry still gets in.
+   * attempt, so a reconnect after the expiry still gets in. It receives the
+   * shard the client is connecting to, which changes after a transfer.
    */
-  ticket?: string | (() => string | Promise<string>);
+  ticket?: string | ((shardId: string) => string | Promise<string>);
   /** Host (and port) of the Pylon server. Defaults to `window.location.host`. */
   baseUrl?: string;
   /**
@@ -44,7 +46,10 @@ export interface ShardConnectOptions {
    * port (the dedicated port is the HTTP port + 3, e.g. 4324).
    */
   wsPort?: number;
-  /** Explicit WebSocket URL. Overrides baseUrl/wsPort. */
+  /**
+   * Explicit WebSocket URL. Overrides baseUrl/wsPort. After a transfer its
+   * `shard` query parameter is replaced with the new shard.
+   */
   wsUrl?: string;
   /** Reconnect on unexpected close (default: true). */
   autoReconnect?: boolean;
@@ -66,6 +71,14 @@ export interface ShardClient<TSnapshot = unknown, TInput = unknown> {
   onSnapshot: (fn: (snapshot: TSnapshot, tick: number, ack: number) => void) => void;
   /** Called when the shard refuses an input (see `ShardInputRejection.code`). */
   onInputRejected: (fn: (rejection: ShardInputRejection) => void) => void;
+  /**
+   * Called when the server moved this subscriber to another shard (a zone
+   * line, a dungeon). The client reconnects there on its own, with the
+   * ticket the server sent; `shardId` changes before the handlers run.
+   */
+  onTransfer: (fn: (shardId: string, from: string) => void) => void;
+  /** The shard the client is connected (or connecting) to. */
+  readonly shardId: string;
   /**
    * For a shard that replicates entities: called after each frame is
    * applied to `entities`, with what it changed.
@@ -115,11 +128,15 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   options: ShardConnectOptions,
 ): ShardClient<TSnapshot, TInput> {
   const now = options.now ?? (() => performance.now());
+  let currentShard = shardId;
+  // The ticket a transfer frame carried, for the next connection only.
+  let transferTicket: string | null = null;
   let ws: WebSocket | null = null;
   let clientSeq = 0;
   let closed = false;
   let connected = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let transferring = false;
   let backoff = options.reconnectBackoffMs ?? 500;
   // The shard's codec, learned from the first frame. Until then inputs go
   // as JSON text, which every shard accepts.
@@ -133,6 +150,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
   const snapshotHandlers: Array<(s: TSnapshot, t: number, ack: number) => void> = [];
   const rejectionHandlers: Array<(r: ShardInputRejection) => void> = [];
+  const transferHandlers: Array<(shard: string, from: string) => void> = [];
   const replicationHandlers: Array<
     (entities: EntityTable, summary: ReplicationSummary, tick: number, ack: number) => void
   > = [];
@@ -146,13 +164,18 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   };
 
   const buildWsUrl = (): string => {
-    if (options.wsUrl) return options.wsUrl;
+    if (options.wsUrl) {
+      if (currentShard === shardId) return options.wsUrl;
+      const url = new URL(options.wsUrl);
+      url.searchParams.set("shard", currentShard);
+      return url.toString();
+    }
     const proto =
       typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
     // Only shard id + subscriber id land in the URL: routing metadata, not
     // credentials.
     const params = new URLSearchParams({
-      shard: shardId,
+      shard: currentShard,
       sid: options.subscriberId,
       v: String(SHARD_PROTOCOL_VERSION),
     });
@@ -187,6 +210,12 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
   const connect = () => {
     if (closed) return;
+    if (transferTicket !== null) {
+      const ticket = transferTicket;
+      transferTicket = null;
+      open(ticket);
+      return;
+    }
     const source = options.ticket;
     if (typeof source !== "function") {
       open(source);
@@ -194,7 +223,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     }
     let ticket: string | Promise<string>;
     try {
-      ticket = source();
+      ticket = source(currentShard);
     } catch (e) {
       dispatchError(e instanceof Error ? e : new Error(String(e)));
       scheduleReconnect();
@@ -243,6 +272,24 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       const at = now();
       try {
         const frame = parseShardFrame(event.data);
+        if (frame.kind === ShardFrameKind.Transfer) {
+          const notice = decodeShardPayload(frame.codec, frame.payload) as ShardTransferNotice;
+          const from = currentShard;
+          currentShard = notice.shard;
+          transferTicket = notice.ticket;
+          // A new shard: its ticks, acks, and entities start over.
+          clock.reset();
+          entities.clear();
+          lastTick = -1;
+          lastAck = 0;
+          sentAt.clear();
+          codec = null;
+          backoff = options.reconnectBackoffMs ?? 500;
+          for (const h of transferHandlers) h(currentShard, from);
+          // The server closes this connection; reconnect at once.
+          transferring = true;
+          return;
+        }
         if (frame.kind === ShardFrameKind.Replication || frame.kind === ShardFrameKind.Snapshot) {
           // Only the per-tick frames: a rejection can go out before its
           // tick's frame is built, and would make the clock run early.
@@ -287,12 +334,17 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     };
 
     ws.onerror = () => {
-      dispatchError(new Error(`WebSocket error connecting to shard ${shardId}`));
+      dispatchError(new Error(`WebSocket error connecting to shard ${currentShard}`));
     };
 
     ws.onclose = () => {
       connected = false;
       for (const h of closeHandlers) h();
+      if (transferring && !closed) {
+        transferring = false;
+        reconnectTimer = setTimeout(connect, 0);
+        return;
+      }
       scheduleReconnect();
     };
   };
@@ -302,6 +354,9 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   return {
     get connected() {
       return connected;
+    },
+    get shardId() {
+      return currentShard;
     },
     get entities() {
       return entities;
@@ -323,6 +378,9 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     },
     onInputRejected(fn) {
       rejectionHandlers.push(fn);
+    },
+    onTransfer(fn) {
+      transferHandlers.push(fn);
     },
     onReplication(fn) {
       replicationHandlers.push(fn);

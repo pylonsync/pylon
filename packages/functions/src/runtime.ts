@@ -24,6 +24,7 @@ import type {
   Files,
   Shards,
   ShardInfo,
+  ShardTransfer,
   Stream,
   Scheduler,
   Llm,
@@ -554,6 +555,15 @@ function buildShards(callId: string): Shards {
     },
     async list() {
       return rpc(callId, { type: "shard_op", op: "list" }) as Promise<ShardInfo[]>;
+    },
+    async transfer(from, subscriberId, to) {
+      return rpc(callId, {
+        type: "shard_op",
+        op: "transfer",
+        id: from,
+        subscriber: subscriberId,
+        to,
+      }) as Promise<ShardTransfer>;
     },
   };
 }

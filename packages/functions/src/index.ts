@@ -76,6 +76,7 @@ export type {
   Shards,
   ShardsReader,
   ShardInfo,
+  ShardTransfer,
   MemberRow,
   Workflows,
   VectorSearchQuery,

@@ -24,3 +24,7 @@ crate-type = ["cdylib"]
 [[example]]
 name = "field"
 crate-type = ["cdylib"]
+
+[[example]]
+name = "zone"
+crate-type = ["cdylib"]

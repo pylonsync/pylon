@@ -30,6 +30,15 @@ const manifest = buildManifest({
       // The lobby stays up with nobody in it.
       idleShutdownSecs: 0,
     }),
+    // Zones that players move between with their state (functions/moveZone.ts).
+    shard({
+      name: "zone",
+      wasm: "shards/zone.wasm",
+      crate: "shards/zone",
+      tickRate: 20,
+      maxInstances: 16,
+      idleShutdownSecs: 0,
+    }),
   ],
 });
 

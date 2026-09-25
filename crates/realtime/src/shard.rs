@@ -312,6 +312,8 @@ pub enum ShardError {
     Stopped,
     SubscriberNotFound,
     Unauthorized(String),
+    /// The subscriber is moving to another shard; its inputs go there.
+    Transferring,
     Other(String),
 }
 
@@ -324,6 +326,7 @@ impl std::fmt::Display for ShardError {
             Self::Stopped => write!(f, "shard is stopped"),
             Self::SubscriberNotFound => write!(f, "subscriber not found"),
             Self::Unauthorized(reason) => write!(f, "unauthorized: {reason}"),
+            Self::Transferring => write!(f, "the subscriber is moving to another shard"),
             Self::Other(s) => write!(f, "{s}"),
         }
     }
@@ -387,6 +390,11 @@ pub struct Shard<S: SimState> {
     state: Mutex<S>,
     inputs: Mutex<InputQueue<S::Input>>,
     subscribers: Mutex<Vec<Arc<Subscriber<S::Snapshot>>>>,
+    /// Each connected subscriber's auth at its latest subscribe: a transfer
+    /// gives the next shard's ticket the same user and claims.
+    auths: Mutex<HashMap<SubscriberId, ShardAuth>>,
+    /// Subscribers being moved to another shard: their inputs are refused.
+    transferring: Mutex<std::collections::HashSet<SubscriberId>>,
     running: AtomicBool,
     /// Monotonically increasing tick number. Used for reconciliation and
     /// lockstep protocols.
@@ -448,6 +456,8 @@ impl<S: SimState> Shard<S> {
                 per_subscriber: HashMap::new(),
             }),
             subscribers: Mutex::new(Vec::new()),
+            auths: Mutex::new(HashMap::new()),
+            transferring: Mutex::new(std::collections::HashSet::new()),
             running: AtomicBool::new(true),
             tick_no: Mutex::new(0),
             input_seq: Mutex::new(0),
@@ -700,7 +710,66 @@ impl<S: SimState> Shard<S> {
                 return Err(ShardError::Unauthorized(reason));
             }
         }
-        self.add_subscriber(sub)
+        let id = sub.id().clone();
+        self.add_subscriber(sub)?;
+        self.auths.lock().unwrap().insert(id, auth.clone());
+        Ok(())
+    }
+
+    /// The auth subscriber `id` connected with most recently, while it is
+    /// connected.
+    pub fn subscriber_auth(&self, id: &SubscriberId) -> Option<ShardAuth> {
+        self.auths.lock().unwrap().get(id).cloned()
+    }
+
+    /// Start moving subscriber `id` to another shard: its queued inputs are
+    /// dropped and new ones refused until [`Shard::hand_off`] or
+    /// [`Shard::cancel_hand_off`].
+    pub fn begin_hand_off(&self, id: &SubscriberId) {
+        self.transferring.lock().unwrap().insert(id.clone());
+        let mut inputs = self.inputs.lock().unwrap();
+        inputs.queue.retain(|p| &p.subscriber_id != id);
+        if let Some(entry) = inputs.per_subscriber.get_mut(id) {
+            entry.queued = 0;
+        }
+    }
+
+    /// The move did not happen: subscriber `id`'s inputs are accepted again.
+    pub fn cancel_hand_off(&self, id: &SubscriberId) {
+        self.transferring.lock().unwrap().remove(id);
+    }
+
+    /// Subscriber `id` moved to another shard: send each of its connections
+    /// `notice` as their last frame, then remove it. True when it was
+    /// connected.
+    pub fn hand_off(&self, id: &SubscriberId, notice: &crate::wire::TransferNotice) -> bool {
+        let bytes: Arc<[u8]> = Arc::from(serde_json::to_vec(notice).unwrap_or_default());
+        let tick = self.tick_number();
+        let ack = self.acks.lock().unwrap().get(id).copied().unwrap_or(0);
+        let (removed, queues) = {
+            let mut inputs = self.inputs.lock().unwrap();
+            let mut subs = self.subscribers.lock().unwrap();
+            let mut queues = Vec::new();
+            let before = subs.len();
+            subs.retain(|s| {
+                if s.id() == id {
+                    queues.extend(s.queue().cloned());
+                    false
+                } else {
+                    true
+                }
+            });
+            let removed = before != subs.len();
+            if removed {
+                self.forget_locked(&mut inputs, id);
+            }
+            (removed, queues)
+        };
+        for q in queues {
+            q.push_transfer_and_close(tick, ack, Arc::clone(&bytes));
+        }
+        self.transferring.lock().unwrap().remove(id);
+        removed
     }
 
     /// Add a subscriber that receives frames through a new outbound queue,
@@ -776,6 +845,7 @@ impl<S: SimState> Shard<S> {
     /// Drop per-id state once no connection uses the id. The caller holds
     /// the inputs and subscribers locks.
     fn forget_locked(&self, inputs: &mut InputQueue<S::Input>, id: &SubscriberId) {
+        self.auths.lock().unwrap().remove(id);
         self.generations.lock().unwrap().remove(id);
         self.acks.lock().unwrap().remove(id);
         // Keep the entry while inputs from this subscriber are still
@@ -806,6 +876,9 @@ impl<S: SimState> Shard<S> {
     ) -> Result<u64, ShardError> {
         if !self.is_running() {
             return Err(ShardError::Stopped);
+        }
+        if self.transferring.lock().unwrap().contains(&subscriber_id) {
+            return Err(ShardError::Transferring);
         }
 
         let now = Instant::now();

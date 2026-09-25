@@ -1765,12 +1765,12 @@ impl FnRunner {
                     // the database: a query re-runs whenever its reads
                     // change, and a mutation's rollback cannot undo it.
                     let reply = if !matches!(fn_type, crate::protocol::FnType::Action)
-                        && matches!(req.op.as_str(), "create" | "stop")
+                        && matches!(req.op.as_str(), "create" | "stop" | "transfer")
                     {
                         DbResultMessage::err(
                             call_id.clone(),
                             "SHARD_OP_ACTIONS_ONLY",
-                            "ctx.shards.create and ctx.shards.stop are available in actions only (a mutation's rollback cannot undo them)",
+                            "ctx.shards.create, stop, and transfer are available in actions only (a mutation's rollback cannot undo them)",
                         )
                     } else {
                         let hook = self

@@ -602,8 +602,10 @@ async fn run_connection(
     let mut writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.tick().await; // the first tick fires at once
+        let mut transferred = false;
         loop {
             while let Some(frame) = writer_queue.pop() {
+                transferred |= frame.kind == FrameKind::Transfer;
                 let payload = match (version, frame.kind) {
                     (2, FrameKind::Snapshot) => wire::frame_v2(
                         wire::kind::SNAPSHOT,
@@ -626,6 +628,16 @@ async fn run_connection(
                         frame.ack,
                         &frame.bytes,
                     ),
+                    (2, FrameKind::Transfer) => wire::frame_v2(
+                        wire::kind::TRANSFER,
+                        wire::codec::JSON,
+                        frame.tick,
+                        frame.ack,
+                        &frame.bytes,
+                    ),
+                    // Version 1 has no transfer frame: the close below says
+                    // why the connection ends.
+                    (_, FrameKind::Transfer) => continue,
                     (_, FrameKind::Snapshot) => wire::frame_v1(frame.tick, &frame.bytes),
                     // Version 1 has no rejection frame.
                     (_, FrameKind::InputRejected) => continue,
@@ -642,7 +654,9 @@ async fn run_connection(
                 }
             }
             if writer_queue.is_closed() {
-                let (code, reason) = if writer_shard.is_running() {
+                let (code, reason) = if transferred {
+                    (CloseCode::Normal, "moved to another shard")
+                } else if writer_shard.is_running() {
                     (CloseCode::Again, "client too slow")
                 } else {
                     (CloseCode::Normal, "shard stopped")

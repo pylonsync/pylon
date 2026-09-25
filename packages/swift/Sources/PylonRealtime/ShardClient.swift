@@ -19,7 +19,7 @@ public struct ShardSnapshot<State: Decodable & Sendable>: Sendable {
 public struct ShardInputRejection: Sendable, Equatable, Decodable {
     public let clientSeq: UInt64?
     /// `unauthorized`, `rate_limited`, `queue_full`, `invalid`, `stopped`,
-    /// or `apply_failed`.
+    /// `transferring`, or `apply_failed`.
     public let code: String
     public let message: String
 
@@ -28,6 +28,12 @@ public struct ShardInputRejection: Sendable, Equatable, Decodable {
         case code
         case message
     }
+}
+
+/// Where the subscriber went: connect to `shard` with `ticket`.
+public struct ShardTransferNotice: Sendable, Equatable, Decodable {
+    public let shard: String
+    public let ticket: String
 }
 
 /// The shard wire protocol, version 2 (`pylon_realtime::wire`). Each server
@@ -41,6 +47,9 @@ public enum ShardWire {
         case inputRejected = 2
         /// An entity replication frame: apply it to an `EntityTable`.
         case replication = 3
+        /// The subscriber moved to another shard (`ShardTransferNotice`,
+        /// JSON). The last frame on the connection.
+        case transfer = 4
     }
 
     public enum Codec: UInt8, Sendable {
@@ -114,6 +123,10 @@ public struct ShardClientConfig: Sendable {
     /// Shard ticket from a server function (`ctx.shards.ticket(...)`), sent
     /// as the `X-Pylon-Shard-Ticket` header.
     public var ticket: String?
+    /// Gets a new ticket for each connection attempt, for the shard the
+    /// client connects to (it changes after a transfer). Used instead of
+    /// `ticket` when set.
+    public var ticketProvider: (@Sendable (String) async throws -> String)?
     public var autoReconnect: Bool
     public var reconnectBaseDelay: TimeInterval
 
@@ -125,8 +138,10 @@ public struct ShardClientConfig: Sendable {
         wsPort: Int? = nil,
         wsURL: URL? = nil,
         autoReconnect: Bool = true,
-        reconnectBaseDelay: TimeInterval = 0.5
+        reconnectBaseDelay: TimeInterval = 0.5,
+        ticketProvider: (@Sendable (String) async throws -> String)? = nil
     ) {
+        self.ticketProvider = ticketProvider
         self.baseURL = baseURL
         self.subscriberId = subscriberId
         self.token = token
@@ -148,7 +163,14 @@ public struct ShardClientConfig: Sendable {
 /// Refused inputs: `for await r in client.rejections() { ... }`.
 public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendable> {
     public let config: ShardClientConfig
-    public let shardId: String
+    /// The shard the client is connected (or connecting) to. It changes when
+    /// the server moves the subscriber to another shard.
+    public private(set) var shardId: String
+    /// The ticket a transfer frame carried, for the next connection only.
+    private(set) var transferTicket: String?
+    /// A transfer frame arrived: reconnect at once when the socket closes.
+    private var transferring = false
+    private var transferContinuation: AsyncStream<String>.Continuation?
 
     private var task: URLSessionWebSocketTask?
     private var session: URLSession
@@ -203,6 +225,12 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         AsyncStream { cont in self.replicationContinuation = cont }
     }
 
+    /// The shard the server moved this subscriber to, each time it does. The
+    /// client reconnects there on its own.
+    public func transfers() -> AsyncStream<String> {
+        AsyncStream { cont in self.transferContinuation = cont }
+    }
+
     public func connectionStates() -> AsyncStream<ConnectionState> {
         AsyncStream { cont in self.stateContinuation = cont }
     }
@@ -222,6 +250,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         snapshotContinuation?.finish()
         rejectionContinuation?.finish()
         replicationContinuation?.finish()
+        transferContinuation?.finish()
         stateContinuation?.finish()
     }
 
@@ -261,7 +290,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         if !protocols.isEmpty {
             req.setValue(protocols.joined(separator: ", "), forHTTPHeaderField: "Sec-WebSocket-Protocol")
         }
-        if let ticket = config.ticket, !ticket.isEmpty {
+        if let ticket = await nextTicket(), !ticket.isEmpty {
             req.setValue(ticket, forHTTPHeaderField: "X-Pylon-Shard-Ticket")
         }
         let task = session.webSocketTask(with: req)
@@ -285,6 +314,13 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
                     break
                 }
             } catch {
+                if transferring, running {
+                    // The server closed after a transfer frame: go to the
+                    // new shard at once.
+                    transferring = false
+                    await openSocket()
+                    return
+                }
                 stateContinuation?.yield(.failed("\(error)"))
                 if config.autoReconnect, running {
                     await scheduleReconnect()
@@ -305,8 +341,36 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         reconnectAttempts += 1
     }
 
-    private func deriveURL() -> URL {
-        if let override = config.wsURL { return override }
+    /// The ticket for the next connection: a transfer's, once; else the
+    /// provider's; else the configured one.
+    func nextTicket() async -> String? {
+        if let ticket = transferTicket {
+            transferTicket = nil
+            return ticket
+        }
+        if let provider = config.ticketProvider {
+            do {
+                return try await provider(shardId)
+            } catch {
+                stateContinuation?.yield(.failed("ticket: \(error)"))
+                return nil
+            }
+        }
+        return config.ticket
+    }
+
+    func deriveURL() -> URL {
+        if let override = config.wsURL {
+            // After a transfer, the same URL with the new shard.
+            guard var c = URLComponents(url: override, resolvingAgainstBaseURL: false) else {
+                return override
+            }
+            var items = c.queryItems ?? []
+            items.removeAll { $0.name == "shard" }
+            items.insert(URLQueryItem(name: "shard", value: shardId), at: 0)
+            c.queryItems = items
+            return c.url ?? override
+        }
         var components = URLComponents(url: config.baseURL, resolvingAgainstBaseURL: false)!
         let isHttps = components.scheme == "https"
         components.scheme = isHttps ? "wss" : "ws"
@@ -358,6 +422,19 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
                 ShardInputRejection.self, codec: frame.codec, payload: frame.payload)
             {
                 rejectionContinuation?.yield(rejection)
+            }
+        case .transfer:
+            if let notice = try? ShardWire.decode(
+                ShardTransferNotice.self, codec: frame.codec, payload: frame.payload)
+            {
+                // A new shard: its ticks, acks, entities, and codec start over.
+                shardId = notice.shard
+                transferTicket = notice.ticket
+                entities.clear()
+                codec = nil
+                reconnectAttempts = 0
+                transferring = true
+                transferContinuation?.yield(notice.shard)
             }
         case .replication, .none:
             break

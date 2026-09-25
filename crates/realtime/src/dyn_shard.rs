@@ -202,6 +202,7 @@ pub fn rejection_for(client_seq: Option<u64>, err: &ShardError) -> InputRejectio
         ShardError::InputRateLimited => "rate_limited",
         ShardError::InputQueueFull => "queue_full",
         ShardError::Stopped => "stopped",
+        ShardError::Transferring => "transferring",
         ShardError::Full | ShardError::SubscriberNotFound | ShardError::Other(_) => "invalid",
     };
     InputRejection {

@@ -80,6 +80,8 @@ export interface ShardGame<TInput = unknown> {
     fn: (entities: EntityTable, summary: ReplicationSummary, tick: number, ack: number) => void,
   ): void;
   onInputRejected(fn: (rejection: ShardInputRejection) => void): void;
+  /** The server moved this player to another shard; see `ShardClient.onTransfer`. */
+  onTransfer(fn: (shardId: string, from: string) => void): void;
   onOpen(fn: () => void): void;
   onClose(fn: () => void): void;
   onError(fn: (err: Error) => void): void;
@@ -104,6 +106,8 @@ export function connectShardGame<TInput = unknown>(
   connection.onOpen(() => {
     for (const p of predictors) p.reset();
   });
+  // Another shard: its entities and ticks start over.
+  connection.onTransfer(() => interpolator.clear());
 
   return {
     connection,
@@ -153,6 +157,7 @@ export function connectShardGame<TInput = unknown>(
     },
     onReplication: (fn) => connection.onReplication(fn),
     onInputRejected: (fn) => connection.onInputRejected(fn),
+    onTransfer: (fn) => connection.onTransfer(fn),
     onOpen: (fn) => connection.onOpen(fn),
     onClose: (fn) => connection.onClose(fn),
     onError: (fn) => connection.onError(fn),

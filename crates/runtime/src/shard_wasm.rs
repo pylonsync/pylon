@@ -39,6 +39,9 @@ use crate::shard_cluster::{
     self, choose, home, Claim, Machine, MachineConfig, PgShardDirectory, Placement, RemoteOp,
     RemoteReply,
 };
+
+mod transfer;
+pub use transfer::{TransferError, Transferred};
 use wasmtime::{
     Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
     TypedFunc, UpdateDeadline,
@@ -197,6 +200,12 @@ const REQUIRED_EXPORTS: &[&str] = &[
 
 /// Saved-state exports: both or neither (see pylon-shard-guest).
 const SAVE_EXPORTS: &[&str] = &["pylon_save", "pylon_restore"];
+/// Optional: moving players between shards. All or none.
+const TRANSFER_EXPORTS: &[&str] = &[
+    "pylon_transfer_out",
+    "pylon_transfer_in",
+    "pylon_transfer_requests",
+];
 
 /// Interest management exports: all or none (see pylon-shard-guest).
 const INTEREST_EXPORTS: &[&str] = &[
@@ -242,7 +251,7 @@ impl WasmShardKind {
                 missing.join(", ")
             ));
         }
-        for group in [INTEREST_EXPORTS, SAVE_EXPORTS] {
+        for group in [INTEREST_EXPORTS, SAVE_EXPORTS, TRANSFER_EXPORTS] {
             let present: Vec<&str> = group
                 .iter()
                 .copied()
@@ -292,6 +301,13 @@ impl WasmShardKind {
     /// True when the module can save and restore its state.
     pub fn saves_state(&self) -> bool {
         self.module.exports().any(|e| e.name() == "pylon_save")
+    }
+
+    /// True when the module can move players to and from other shards.
+    pub fn transfers(&self) -> bool {
+        self.module
+            .exports()
+            .any(|e| e.name() == "pylon_transfer_out")
     }
 
     /// Instantiate the module and run `pylon_init` with `params`.
@@ -408,6 +424,18 @@ impl WasmShardKind {
                 Some(SaveExports {
                     save: func!("pylon_save"),
                     restore: func!("pylon_restore"),
+                })
+            } else {
+                None
+            },
+            transfer: if instance
+                .get_export(&mut store, "pylon_transfer_out")
+                .is_some()
+            {
+                Some(TransferExports {
+                    out: func!("pylon_transfer_out"),
+                    accept: func!("pylon_transfer_in"),
+                    requests: func!("pylon_transfer_requests"),
                 })
             } else {
                 None
@@ -607,6 +635,14 @@ struct Exports {
     interest: Option<InterestExports>,
     replication: Option<TypedFunc<(), i32>>,
     save: Option<SaveExports>,
+    transfer: Option<TransferExports>,
+}
+
+#[derive(Clone)]
+struct TransferExports {
+    out: TypedFunc<(i32, i32), i32>,
+    accept: TypedFunc<(i32, i32, i32, i32), i32>,
+    requests: TypedFunc<(), i32>,
 }
 
 #[derive(Clone)]
@@ -834,6 +870,78 @@ impl WasmSim {
             STATUS_NONE => Ok(None),
             STATUS_ERR => Err(format!("pylon_save refused: {}", inner.output_text()?)),
             other => Err(inner.fail(&format!("pylon_save returned status {other}"))),
+        }
+    }
+
+    fn transfer_exports(inner: &Inner) -> Result<TransferExports, String> {
+        inner
+            .exports
+            .transfer
+            .clone()
+            .ok_or_else(|| "this shard's module does not transfer players".to_string())
+    }
+
+    /// Take `subscriber`'s entity out of the shard (see the guest SDK's
+    /// `Shard::transfer_out`). `Ok(None)`: the subscriber has no entity.
+    /// Call it with the state lock held, outside a tick.
+    pub fn transfer_out(&self, subscriber: &str) -> Result<Option<Vec<u8>>, String> {
+        let mut inner = self.inner.borrow_mut();
+        let t = Self::transfer_exports(&inner)?;
+        inner.begin_op();
+        let args = inner.write_args(&[subscriber.as_bytes()])?;
+        let (sp, sl) = args[0];
+        match inner.call(&t.out, (sp, sl))? {
+            STATUS_OK => inner.output().map(Some),
+            STATUS_NONE => Ok(None),
+            STATUS_ERR => Err(format!(
+                "pylon_transfer_out refused: {}",
+                inner.output_text()?
+            )),
+            other => Err(inner.fail(&format!("pylon_transfer_out returned status {other}"))),
+        }
+    }
+
+    /// Give `subscriber`'s entity to the shard from `state` a
+    /// `transfer_out` returned. `Err` is a refusal (or a stopped module).
+    /// Call it with the state lock held, outside a tick.
+    pub fn transfer_in(&self, subscriber: &str, state: &[u8]) -> Result<(), String> {
+        let mut inner = self.inner.borrow_mut();
+        let t = Self::transfer_exports(&inner)?;
+        inner.begin_op();
+        let args = inner.write_args(&[subscriber.as_bytes(), state])?;
+        let ((sp, sl), (tp, tl)) = (args[0], args[1]);
+        match inner.call(&t.accept, (sp, sl, tp, tl))? {
+            STATUS_OK => Ok(()),
+            STATUS_ERR => Err(format!(
+                "pylon_transfer_in refused: {}",
+                inner.output_text()?
+            )),
+            other => Err(inner.fail(&format!("pylon_transfer_in returned status {other}"))),
+        }
+    }
+
+    /// The players the module wants moved, as (subscriber, target shard).
+    /// Called from the tick hook, inside the tick's time budget.
+    pub fn transfer_requests(&self) -> Result<Vec<(String, String)>, String> {
+        let mut inner = self.inner.borrow_mut();
+        let Some(t) = inner.exports.transfer.clone() else {
+            return Ok(Vec::new());
+        };
+        if !inner.in_tick {
+            inner.begin_op();
+        }
+        match inner.call(&t.requests, ())? {
+            STATUS_OK => {
+                let bytes = inner.output()?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| inner.fail(&format!("pylon_transfer_requests sent bad JSON: {e}")))
+            }
+            STATUS_NONE => Ok(Vec::new()),
+            STATUS_ERR => Err(format!(
+                "pylon_transfer_requests refused: {}",
+                inner.output_text()?
+            )),
+            other => Err(inner.fail(&format!("pylon_transfer_requests returned status {other}"))),
         }
     }
 }
@@ -1251,6 +1359,10 @@ pub struct ShardInfo {
 /// The app's shard kinds and the shards created from them.
 pub struct WasmShardHost {
     kinds: HashMap<String, Arc<WasmShardKind>>,
+    /// Transfers in progress here, by (source shard, subscriber).
+    transferring: Mutex<std::collections::HashSet<(String, String)>>,
+    /// Transfers modules asked for after a tick: (source, subscriber, target).
+    transfer_requests: std::sync::mpsc::Sender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
     kind_of: RwLock<HashMap<String, String>>,
     /// When each shard last lost its last subscriber.
@@ -1371,11 +1483,14 @@ fn lease_error() -> CreateError {
 impl WasmShardHost {
     /// A host for `kinds`. Starts a thread that removes stopped shards.
     pub fn new(kinds: Vec<WasmShardKind>) -> Arc<Self> {
+        let (transfer_requests, requested) = std::sync::mpsc::channel();
         let host = Arc::new(Self {
             kinds: kinds
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
                 .collect(),
+            transferring: Mutex::new(std::collections::HashSet::new()),
+            transfer_requests,
             registry: ShardRegistry::new(),
             kind_of: RwLock::new(HashMap::new()),
             idle_since: Mutex::new(HashMap::new()),
@@ -1383,6 +1498,10 @@ impl WasmShardHost {
             stopped: AtomicBool::new(false),
             cluster: std::sync::OnceLock::new(),
         });
+        let transfers: Weak<Self> = Arc::downgrade(&host);
+        let _ = std::thread::Builder::new()
+            .name("pylon-shard-transfers".into())
+            .spawn(move || Self::run_requested_transfers(transfers, requested));
         let weak: Weak<Self> = Arc::downgrade(&host);
         let _ = std::thread::Builder::new()
             .name("pylon-shard-sweep".into())
@@ -1598,6 +1717,21 @@ impl WasmShardHost {
             }
         })?;
         let shard = Shard::new(id, sim, spec.config.clone());
+        if spec.transfers() {
+            // After each tick, the players the module wants moved go to the
+            // transfer thread (a transfer takes the state lock this hook runs
+            // under).
+            let requests = self.transfer_requests.clone();
+            let source = id.to_string();
+            shard.set_on_tick(move |sim, _| match sim.transfer_requests() {
+                Ok(list) => {
+                    for (sid, to) in list {
+                        let _ = requests.send((source.clone(), sid, to));
+                    }
+                }
+                Err(e) => tracing::warn!("[shard {source}] transfer requests: {e}"),
+            });
+        }
         let info = ShardInfo {
             id: id.to_string(),
             kind: kind.to_string(),
@@ -2102,6 +2236,10 @@ impl WasmShardHost {
                 self.save_one(c, &id, epoch);
             }
         }
+        // Transfers whose source runs here and that nothing finished.
+        if let Some(epoch) = c.current_epoch() {
+            self.settle_stale_transfers(epoch);
+        }
         // Failover: each orphan has one new home; this machine takes the
         // ones whose home it is.
         let round_started = Instant::now();
@@ -2285,6 +2423,57 @@ impl WasmShardHost {
             ),
             RemoteOp::List => {
                 RemoteReply::Ok(serde_json::to_value(self.list_local()).unwrap_or_default())
+            }
+            // Only for a source that runs here: never passed on again.
+            RemoteOp::Transfer {
+                from,
+                subscriber,
+                to,
+            } => {
+                if !self.registry.get(&from).is_some_and(|s| s.is_running()) {
+                    let e = TransferError::NotFound(from);
+                    return RemoteReply::Err {
+                        code: e.code().into(),
+                        message: e.to_string(),
+                    };
+                }
+                match self.transfer(&from, &subscriber, &to) {
+                    Ok(done) => RemoteReply::Ok(serde_json::to_value(done).unwrap_or_default()),
+                    Err(e) => RemoteReply::Err {
+                        code: e.code().into(),
+                        message: e.to_string(),
+                    },
+                }
+            }
+            RemoteOp::TransferIn { id } => {
+                let t = match c.dir.transfer(&id) {
+                    Ok(Some(t)) if t.status == "out" => t,
+                    Ok(Some(t)) => {
+                        return RemoteReply::Err {
+                            code: "SHARD_TRANSFER_REFUSED".into(),
+                            message: format!("transfer {id} is already {}", t.status),
+                        }
+                    }
+                    Ok(None) => {
+                        return RemoteReply::Err {
+                            code: "SHARD_TRANSFER_REFUSED".into(),
+                            message: format!("no transfer {id}"),
+                        }
+                    }
+                    Err(e) => {
+                        return RemoteReply::Err {
+                            code: "SHARD_CLUSTER_ERROR".into(),
+                            message: e,
+                        }
+                    }
+                };
+                match self.accept(&t) {
+                    Ok(()) => RemoteReply::Ok(serde_json::Value::Bool(true)),
+                    Err(e) => RemoteReply::Err {
+                        code: e.code().into(),
+                        message: e.to_string(),
+                    },
+                }
             }
         }
     }
@@ -2572,6 +2761,20 @@ pub fn handle_shard_op(
             .map(|info| to_json(&info))
             .unwrap_or(serde_json::Value::Null)),
         "list" => Ok(serde_json::to_value(host.list()).unwrap_or_default()),
+        "transfer" => {
+            let missing = |what: &str| ("INVALID_SHARD".to_string(), format!("{what} is required"));
+            let subscriber = req
+                .subscriber
+                .as_deref()
+                .ok_or_else(|| missing("subscriber"))?;
+            let to = req
+                .to
+                .as_deref()
+                .ok_or_else(|| missing("the target shard"))?;
+            host.transfer(id()?, subscriber, to)
+                .map(|done| serde_json::to_value(done).unwrap_or_default())
+                .map_err(|e| (e.code().to_string(), e.to_string()))
+        }
         other => Err((
             "INVALID_SHARD_OP".into(),
             format!("unknown shard op \"{other}\""),

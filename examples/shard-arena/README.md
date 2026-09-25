@@ -8,6 +8,11 @@ the module; there is no custom server build.
 - `app.ts` declares the `arena` shard kind.
 - `functions/joinArena.ts` starts the shard and mints a ticket.
 - `app/ArenaIsland.tsx` joins with `useShard` and draws the snapshot.
+- `shards/zone/src/lib.rs` is a second kind, `zone`: players with hit
+  points, buffs, and cooldowns. `functions/joinZone.ts` starts a zone and
+  `functions/moveZone.ts` moves the caller to another zone with its state
+  (`ctx.shards.transfer`). `tools/smoke-shard-cluster.sh` moves a player
+  between zones on two machines.
 
 ## Run
 
@@ -20,7 +25,7 @@ pylon dev
 Open http://localhost:4321 in two windows. `pylon dev` builds
 `shards/arena.wasm` at start and again when the Rust changes.
 
-`shards/arena.wasm` is committed, so `pylon deploy` and a GitHub deploy ship
+`shards/arena.wasm` and `shards/zone.wasm` are committed, so `pylon deploy` and a GitHub deploy ship
 it without a Rust toolchain on the builder. Run `pylon shards build` after a
 Rust change you want to deploy.
 

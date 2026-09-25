@@ -48,3 +48,55 @@ final class ShardBackoffTests: XCTestCase {
         XCTAssertEqual(attempts, 0)
     }
 }
+
+/// A transfer frame moves the client to the new shard with the ticket it
+/// carries, once; later connections ask the provider for the new shard.
+final class ShardTransferTests: XCTestCase {
+    struct Nothing: Codable, Sendable {}
+
+    actor Asked {
+        var shards: [String] = []
+        func add(_ s: String) { shards.append(s) }
+    }
+
+    func testATransferFrameSwitchesTheShardAndUsesItsTicketOnce() async throws {
+        let asked = Asked()
+        let client = ShardClient<Nothing, Nothing>(
+            shardId: "west",
+            config: ShardClientConfig(
+                baseURL: URL(string: "http://h")!,
+                subscriberId: "p1",
+                ticketProvider: { shard in
+                    await asked.add(shard)
+                    return "own-\(shard)"
+                }))
+        var url = await client.deriveURL()
+        XCTAssertTrue(url.absoluteString.contains("shard=west"), url.absoluteString)
+
+        let notice = Array(#"{"shard":"east","ticket":"from-server"}"#.utf8)
+        await client.handleFrame(ShardBackoffTests.frame(kind: 4, codec: 0, payload: notice))
+        let shard = await client.shardId
+        XCTAssertEqual(shard, "east")
+        url = await client.deriveURL()
+        XCTAssertTrue(url.absoluteString.contains("shard=east"), url.absoluteString)
+        var ticket = await client.nextTicket()
+        XCTAssertEqual(ticket, "from-server")
+        ticket = await client.nextTicket()
+        XCTAssertEqual(ticket, "own-east")
+        let shards = await asked.shards
+        XCTAssertEqual(shards, ["east"])
+    }
+
+    func testAnExplicitURLFollowsATransfer() async {
+        let client = ShardClient<Nothing, Nothing>(
+            shardId: "west",
+            config: ShardClientConfig(
+                baseURL: URL(string: "http://h")!,
+                subscriberId: "p1",
+                wsURL: URL(string: "ws://h/shard?shard=west&sid=p1&v=2")!))
+        let notice = Array(#"{"shard":"east","ticket":"t"}"#.utf8)
+        await client.handleFrame(ShardBackoffTests.frame(kind: 4, codec: 0, payload: notice))
+        let url = await client.deriveURL()
+        XCTAssertEqual(url.absoluteString, "ws://h/shard?shard=east&sid=p1&v=2")
+    }
+}

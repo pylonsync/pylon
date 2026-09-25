@@ -375,6 +375,7 @@ export default action({
 | `get(id)` | `{ id, kind, tick, subscribers, running, error? }`, or `null`. |
 | `list()` | Every running shard. |
 | `ticket(id, opts)` | A signed ticket. See [shard tickets](/concepts/functions#shard-tickets). |
+| `transfer(from, subscriberId, to)` | Moves a player to another shard with its state. See [Move a player to another shard](#move-a-player-to-another-shard). Actions only. |
 
 A shard id is 1 to 128 letters, digits, `-`, `_`, `.`, or `:`.
 
@@ -394,6 +395,79 @@ send({ move_to: { x: 120, y: 80 } });
 The client connects to `/shard` on the app's own origin, so it needs no
 extra port or proxy rule. See [React client](/clients/react#multiplayer-shards)
 for acks, rejections, and custom decoders.
+
+## Move a player to another shard
+
+A player crosses a zone line, enters a dungeon, or joins a match that runs
+on another shard, possibly on another machine. Its entity moves with its
+state (hit points, buffs, cooldowns, position), and the client reconnects
+to the new shard on its own.
+
+The module takes the entity out and puts it in:
+
+```rust
+fn transfer_out(&mut self, subscriber: &str) -> Result<Option<Vec<u8>>, String> {
+    match self.players.remove(subscriber) {
+        Some(p) => serde_json::to_vec(&p).map(Some).map_err(|e| e.to_string()),
+        None => Ok(None), // no entity here
+    }
+}
+
+fn transfer_in(&mut self, subscriber: &str, state: &[u8]) -> Result<(), String> {
+    if self.full() {
+        return Err("the zone is full".into()); // refuse: the player stays
+    }
+    let p: Player = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+    self.players.insert(subscriber.to_string(), p);
+    Ok(())
+}
+```
+
+A server function moves a player:
+
+```ts functions/moveZone.ts
+export default action({
+  args: { from: v.string(), to: v.string() },
+  async handler(ctx, args) {
+    return ctx.shards.transfer(args.from, ctx.auth.userId!, args.to);
+  },
+});
+```
+
+Or the module asks for the move itself, after a tick, from
+`transfer_requests`:
+
+```rust
+fn transfer_requests(&mut self) -> Vec<(String, String)> {
+    // (subscriber, target shard) for each player past the zone line
+    std::mem::take(&mut self.leaving)
+}
+```
+
+What happens:
+
+1. The source's `transfer_out` removes the entity. The source refuses the
+   player's inputs until the move ends.
+2. The target's `transfer_in` adds it. When the target refuses (or is not
+   running), the source's `transfer_in` gets the state back, and
+   `ctx.shards.transfer` throws `SHARD_TRANSFER_REFUSED` (or
+   `SHARD_NOT_FOUND`). The player stays in the source, still connected.
+3. Each of the player's connections to the source gets a transfer frame:
+   the target shard and a ticket for it, with the same user and claims.
+   `connectShard`, `connectShardGame`, `useShard`, and the Swift
+   `ShardClient` reconnect to the target at once, and `onTransfer` (or
+   `transfers()` in Swift) reports it. The target sends a baseline.
+
+A ticket function (`ticket: (shardId) => ...`) gets the current shard, so a
+later reconnect asks for a ticket to the right one.
+
+On several machines a row in the directory holds the player while it is in
+flight. The source saves its state without the player and writes the row
+in one transaction; the target saves its state with the player and marks
+the row taken in one transaction; a refusal gives the row back to the
+source the same way. One of the two takes the row, so the player is never
+in two shards and never lost. When a machine dies halfway, the machine that
+runs the source afterwards finishes the move within 15 seconds.
 
 ## Load test
 
@@ -555,7 +629,9 @@ An app on SQLite runs on one machine, and the directory is off.
   the stopped shard (within a few seconds).
 - A module may import only `pylon.log`. The server refuses a module built for
   WASI or with any other import, and the boot fails.
-- Shard state is in memory. A restart or a deploy ends every shard.
+- A shard's state is in memory. A module that implements `save` and
+  `restore`, on an app with the directory (Postgres), starts again from its
+  last save after a restart or a deploy. Otherwise a restart ends the shard.
 
 ## Hosted on Stack0 Cloud
 

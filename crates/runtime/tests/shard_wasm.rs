@@ -14,7 +14,7 @@ use pylon_realtime::{
     SnapshotFormat, SubscriberId,
 };
 use pylon_runtime::shard_wasm::{
-    CreateError, LeaseClock, WasmLimits, WasmShardHost, WasmShardKind, WasmSim,
+    CreateError, LeaseClock, TransferError, WasmLimits, WasmShardHost, WasmShardKind, WasmSim,
 };
 use serde_json::{json, Value};
 
@@ -117,6 +117,7 @@ fn drain(q: &pylon_realtime::OutboundQueue, format: SnapshotFormat) -> (Value, V
             }
             FrameKind::InputRejected => rejections.push(decode(&f.bytes)),
             FrameKind::Replication => panic!("the arena guest sends snapshots"),
+            FrameKind::Transfer => panic!("no transfer in this test"),
         }
     }
     (snap, rejections, ack)
@@ -1143,4 +1144,341 @@ fn a_module_without_saved_state_saves_nothing_and_refuses_restore() {
         None
     );
     assert!(old.restore("o1", &json!({}), b"{}").is_err());
+}
+
+// -- Moving players between shards ------------------------------------------
+
+fn zone_host() -> Arc<WasmShardHost> {
+    let kind = WasmShardKind::compile(
+        "zone",
+        &guest_wasm("zone"),
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap();
+    WasmShardHost::new(vec![kind])
+}
+
+fn dyn_shard(host: &Arc<WasmShardHost>, id: &str) -> Arc<dyn DynShard> {
+    pylon_realtime::DynShardRegistry::get(host.as_ref(), id).expect("shard is running")
+}
+
+fn subscribe(
+    host: &Arc<WasmShardHost>,
+    shard: &str,
+    sid: &str,
+) -> Arc<pylon_realtime::OutboundQueue> {
+    dyn_shard(host, shard)
+        .add_queued_subscriber(SubscriberId::new(sid), &user(sid))
+        .unwrap()
+}
+
+fn input(
+    host: &Arc<WasmShardHost>,
+    shard: &str,
+    sid: &str,
+    body: Value,
+) -> Result<u64, InputRejection> {
+    dyn_shard(host, shard).push_input_envelope(
+        SubscriberId::new(sid),
+        SnapshotFormat::Json,
+        json!({ "input": body }).to_string().as_bytes(),
+        &user(sid),
+    )
+}
+
+/// The next snapshot on `q` that `ok` accepts, within 5 s. Transfer frames
+/// are returned as `{"transfer": notice}`.
+fn wait_frame(q: &pylon_realtime::OutboundQueue, ok: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "no matching frame within 5 s");
+        let Some(f) = q.pop_blocking(Duration::from_millis(200)) else {
+            continue;
+        };
+        let body: Value = serde_json::from_slice(&f.bytes).unwrap();
+        let v = match f.kind {
+            FrameKind::Transfer => json!({ "transfer": body }),
+            FrameKind::Snapshot => body,
+            _ => continue,
+        };
+        if ok(&v) {
+            return v;
+        }
+    }
+}
+
+fn player(snap: &Value, sid: &str) -> Value {
+    snap["players"][sid].clone()
+}
+
+#[test]
+fn a_player_moves_between_zones_with_its_buffs_and_cooldowns() {
+    let host = zone_host();
+    host.create("zone", "z1", &json!({})).unwrap();
+    host.create("zone", "z2", &json!({})).unwrap();
+    let q = subscribe(&host, "z1", "p1");
+    input(&host, "z1", "p1", json!("join")).unwrap();
+    input(&host, "z1", "p1", json!({ "move": { "dx": 3 } })).unwrap();
+    input(
+        &host,
+        "z1",
+        "p1",
+        json!({ "buff": { "name": "haste", "ms": 60000 } }),
+    )
+    .unwrap();
+    input(
+        &host,
+        "z1",
+        "p1",
+        json!({ "cast": { "ability": "fireball", "cooldown_ms": 30000 } }),
+    )
+    .unwrap();
+    input(&host, "z1", "p1", json!({ "hit": { "damage": 25 } })).unwrap();
+    let before = player(&wait_frame(&q, |s| s["players"]["p1"]["hp"] == 75), "p1");
+
+    let done = host.transfer("z1", "p1", "z2").unwrap();
+    assert_eq!(done.shard, "z2");
+    let ticket = pylon_runtime::shard_tickets::verify(&done.ticket).unwrap();
+    assert_eq!((ticket.shard.as_str(), ticket.sid.as_str()), ("z2", "p1"));
+    assert_eq!(ticket.user_id.as_deref(), Some("p1"));
+
+    // The source's connection gets the transfer frame, last.
+    let notice = wait_frame(&q, |v| v.get("transfer").is_some());
+    assert_eq!(notice["transfer"]["shard"], "z2");
+    assert_eq!(notice["transfer"]["ticket"], done.ticket.as_str());
+    assert!(q.is_closed());
+
+    // The player is in z2 with its state, and gone from z1.
+    let q2 = subscribe(&host, "z2", "p1");
+    let after = player(&wait_frame(&q2, |s| !s["players"]["p1"].is_null()), "p1");
+    assert_eq!(after["hp"], 75);
+    assert_eq!(after["x"], 3);
+    assert_eq!(after["buffs"][0]["name"], "haste");
+    for path in [
+        &["buffs", "0", "remaining_ms"][..],
+        &["cooldowns", "fireball"][..],
+    ] {
+        let path: Vec<&str> = path.to_vec();
+        let get = |p: &Value| {
+            let mut v = p.clone();
+            for k in &path {
+                v = match k.parse::<usize>() {
+                    Ok(i) => v[i].clone(),
+                    Err(_) => v[*k].clone(),
+                };
+            }
+            v.as_i64().unwrap()
+        };
+        let (b, a) = (get(&before), get(&after));
+        assert!(a <= b && a >= b - 3000, "{path:?}: {b} before, {a} after");
+    }
+    let o = subscribe(&host, "z1", "observer");
+    let z1 = wait_frame(&o, |_| true);
+    assert!(player(&z1, "p1").is_null(), "{z1}");
+
+    // The cooldown came along: casting again is refused in z2.
+    input(
+        &host,
+        "z2",
+        "p1",
+        json!({ "cast": { "ability": "fireball", "cooldown_ms": 1 } }),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "no rejection");
+        if let Some(f) = q2.pop_blocking(Duration::from_millis(200)) {
+            if f.kind == FrameKind::InputRejected {
+                let r: Value = serde_json::from_slice(&f.bytes).unwrap();
+                assert!(
+                    r["message"].as_str().unwrap().contains("cooling down"),
+                    "{r}"
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[test]
+fn a_refused_transfer_leaves_the_player_in_the_source() {
+    let host = zone_host();
+    host.create("zone", "open", &json!({})).unwrap();
+    host.create("zone", "shut", &json!({ "closed": true }))
+        .unwrap();
+    let q = subscribe(&host, "open", "p1");
+    input(&host, "open", "p1", json!("join")).unwrap();
+    input(
+        &host,
+        "open",
+        "p1",
+        json!({ "buff": { "name": "shield", "ms": 60000 } }),
+    )
+    .unwrap();
+    input(&host, "open", "p1", json!({ "hit": { "damage": 10 } })).unwrap();
+    wait_frame(&q, |s| s["players"]["p1"]["hp"] == 90);
+
+    let err = host.transfer("open", "p1", "shut").unwrap_err();
+    assert!(matches!(err, TransferError::Refused(_)), "{err:?}");
+    assert_eq!(err.code(), "SHARD_TRANSFER_REFUSED");
+    assert!(err.to_string().contains("closed"), "{err}");
+
+    // Still in the source with its state, still connected, inputs accepted.
+    let snap = wait_frame(&q, |s| !s["players"]["p1"].is_null());
+    assert_eq!(snap["players"]["p1"]["hp"], 90);
+    assert_eq!(snap["players"]["p1"]["buffs"][0]["name"], "shield");
+    assert!(!q.is_closed());
+    input(&host, "open", "p1", json!({ "hit": { "damage": 1 } })).unwrap();
+    wait_frame(&q, |s| s["players"]["p1"]["hp"] == 89);
+    // Nothing arrived in the target.
+    let o = subscribe(&host, "shut", "observer");
+    assert!(player(&wait_frame(&o, |_| true), "p1").is_null());
+}
+
+#[test]
+fn a_zone_line_moves_the_player_on_its_own() {
+    let host = zone_host();
+    host.create("zone", "west", &json!({ "edge": 5, "next": "east" }))
+        .unwrap();
+    host.create("zone", "east", &json!({})).unwrap();
+    let q = subscribe(&host, "west", "p2");
+    input(&host, "west", "p2", json!("join")).unwrap();
+    input(&host, "west", "p2", json!({ "move": { "dx": 6 } })).unwrap();
+    let notice = wait_frame(&q, |v| v.get("transfer").is_some());
+    assert_eq!(notice["transfer"]["shard"], "east");
+    let o = subscribe(&host, "east", "observer");
+    assert_eq!(
+        player(&wait_frame(&o, |s| !s["players"]["p2"].is_null()), "p2")["x"],
+        6
+    );
+}
+
+#[test]
+fn a_transfer_needs_a_player_and_a_target() {
+    let host = zone_host();
+    host.create("zone", "a", &json!({})).unwrap();
+    host.create("zone", "b", &json!({})).unwrap();
+    let err = host.transfer("a", "nobody", "b").unwrap_err();
+    assert_eq!(err.code(), "SHARD_TRANSFER_NO_PLAYER");
+    let _q = subscribe(&host, "a", "p1");
+    input(&host, "a", "p1", json!("join")).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        host.transfer("a", "p1", "gone").unwrap_err().code(),
+        "SHARD_NOT_FOUND"
+    );
+    assert_eq!(
+        host.transfer("gone", "p1", "b").unwrap_err().code(),
+        "SHARD_NOT_FOUND"
+    );
+    assert_eq!(
+        host.transfer("a", "p1", "a").unwrap_err().code(),
+        "SHARD_TRANSFER_REFUSED"
+    );
+}
+
+/// The transfer protocol against the directory in Postgres, on one machine:
+/// each step saves the shards' states with the transfer row, and a row left
+/// `out` (the source crashed after step 1) is finished by the source's
+/// machine.
+#[test]
+fn transfers_on_a_cluster_save_both_shards_and_finish_after_a_crash() {
+    use pylon_runtime::shard_cluster::{MachineConfig, PgShardDirectory, Transfer};
+    let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+        eprintln!("skipping: PYLON_TEST_PG_URL not set");
+        return;
+    };
+    let pool = pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5))
+        .expect("test Postgres pool");
+    let check = PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+    let host = zone_host();
+    let run = format!("{:x}", rand::random::<u32>());
+    let machine = format!("tm-{run}");
+    host.attach_cluster(
+        PgShardDirectory::open(pool).unwrap(),
+        MachineConfig {
+            id: machine.clone(),
+            address: None,
+            capacity: 10,
+            fly_instance: None,
+        },
+    );
+    let (z1, z2, z3) = (
+        format!("z1-{run}"),
+        format!("z2-{run}"),
+        format!("z3-{run}"),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while host
+        .create_on("zone", &z1, &json!({}), Some(&machine))
+        .is_err()
+    {
+        assert!(Instant::now() < deadline, "no lease");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    host.create_on("zone", &z2, &json!({}), Some(&machine))
+        .unwrap();
+    host.create_on("zone", &z3, &json!({ "closed": true }), Some(&machine))
+        .unwrap();
+    let saved = |shard: &str| -> Value {
+        let p = check.placement(shard).unwrap().unwrap();
+        let bytes = check
+            .load_owned_state(shard, &p.machine_id, p.epoch)
+            .unwrap()
+            .flatten()
+            .unwrap_or_else(|| b"{}".to_vec());
+        serde_json::from_slice(&bytes).unwrap()
+    };
+
+    let q = subscribe(&host, &z1, "p1");
+    input(&host, &z1, "p1", json!("join")).unwrap();
+    input(&host, &z1, "p1", json!({ "hit": { "damage": 5 } })).unwrap();
+    wait_frame(&q, |s| s["players"]["p1"]["hp"] == 95);
+
+    // Moved: the source's saved state lost the player, the target's has it.
+    host.transfer(&z1, "p1", &z2).unwrap();
+    assert!(saved(&z1)["p1"].is_null());
+    assert_eq!(saved(&z2)["p1"]["hp"], 95);
+
+    // Refused: the player stays, in the source's saved state too.
+    assert_eq!(
+        host.transfer(&z2, "p1", &z3).unwrap_err().code(),
+        "SHARD_TRANSFER_REFUSED"
+    );
+    assert_eq!(saved(&z2)["p1"]["hp"], 95);
+    assert!(saved(&z3)["p1"].is_null());
+
+    // The source crashed right after step 1: the row holds the player.
+    let p = check.placement(&z1).unwrap().unwrap();
+    let orphaned = Transfer {
+        id: format!("t-{run}"),
+        subscriber: "p9".into(),
+        from_shard: z1.clone(),
+        to_shard: z2.clone(),
+        state: serde_json::to_vec(
+            &json!({ "x": 4, "hp": 40, "buffs": [], "cooldowns": { "dash": 90000 } }),
+        )
+        .unwrap(),
+        auth: json!({}),
+        status: "out".into(),
+    };
+    assert!(check
+        .begin_transfer(&orphaned, &machine, p.epoch, None)
+        .unwrap());
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while saved(&z2)["p9"].is_null() {
+        assert!(
+            Instant::now() < deadline,
+            "the unfinished transfer was not finished"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert_eq!(saved(&z2)["p9"]["hp"], 40);
+    assert_eq!(check.transfer(&orphaned.id).unwrap().unwrap().status, "in");
+
+    for id in [&z1, &z2, &z3] {
+        host.stop(id);
+    }
+    host.stop_all();
 }

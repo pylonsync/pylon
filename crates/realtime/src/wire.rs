@@ -56,6 +56,8 @@ pub mod kind {
     /// An entity replication frame (`pylon_replication::frame`). Its codec
     /// byte is [`super::codec::REPLICATION`].
     pub const REPLICATION: u8 = 3;
+    /// A [`super::TransferNotice`], JSON. The last frame on the connection.
+    pub const TRANSFER: u8 = 4;
 }
 
 /// Codec bytes in the version 2 header.
@@ -95,6 +97,14 @@ pub fn frame_v1(tick: u64, payload: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&tick.to_be_bytes());
     out.extend_from_slice(payload);
     out
+}
+
+/// The subscriber moved to another shard: connect to `shard` with `ticket`.
+/// Sent as a transfer frame, the last frame on the connection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferNotice {
+    pub shard: String,
+    pub ticket: String,
 }
 
 /// Why an input did not take effect. Sent as an input-rejected frame.
