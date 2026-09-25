@@ -204,10 +204,11 @@ mod tests {
         handle.join();
 
         let state = shard.state_for_test();
-        // 24 at the target rate; catch-up ticks keep it close despite the
-        // slow ticks. The bound leaves room for a loaded CI runner.
+        // The property is the constant dt below. The count only shows the
+        // loop ran: on a loaded runner the 80 ms sleeps run long, so a count
+        // near the target rate (24) fails for reasons outside the tick loop.
         assert!(
-            state.dts.len() >= 15,
+            state.dts.len() >= 6,
             "ran {} ticks in 1.2 s",
             state.dts.len()
         );
@@ -216,6 +217,33 @@ mod tests {
             "dts: {:?}",
             state.dts
         );
+    }
+
+    #[test]
+    fn catch_up_runs_overdue_ticks_up_to_the_cap_and_counts_the_rest() {
+        let config = ShardConfig {
+            tick_rate_hz: 20,
+            max_catch_up_ticks: 5,
+            idle_ticks_before_shutdown: 0,
+            ..Default::default()
+        };
+        let interval = Duration::from_millis(50);
+
+        // Two ticks overdue, plus the one due now: all three run.
+        let shard = Shard::new("a", Noop, config.clone());
+        let mut next = Instant::now() - interval * 2;
+        catch_up(&shard, &mut next, interval);
+        assert_eq!(shard.tick_number(), 3);
+        assert_eq!(shard.overrun_ticks(), 0);
+        assert!(next > Instant::now());
+
+        // Ten overdue: five run, the rest are skipped and counted.
+        let shard = Shard::new("b", Noop, config);
+        let mut next = Instant::now() - interval * 10;
+        catch_up(&shard, &mut next, interval);
+        assert_eq!(shard.tick_number(), 5);
+        assert!(shard.overrun_ticks() >= 5, "{}", shard.overrun_ticks());
+        assert!(next > Instant::now());
     }
 
     /// Position integrates velocity over dt; inputs set the velocity.
