@@ -52,6 +52,13 @@ pub(super) const STALE_TRANSFER_MS: i64 = 15_000;
 /// How long the ticket for the target is valid, and how long the source
 /// repeats the transfer notice to a connection that comes back.
 const TICKET_TTL_SECS: u64 = 600;
+/// A row whose source was stopped and whose target refuses the player is
+/// offered again this often, and abandoned (status `dropped`, state kept)
+/// after [`ABANDON_AFTER_MS`].
+const OWNERLESS_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
+const ABANDON_AFTER_MS: i64 = 30 * 60 * 1000;
+/// How often a machine deletes settled rows.
+const PRUNE_EVERY: std::time::Duration = std::time::Duration::from_secs(300);
 /// A move a module asked for that failed is not tried again for this long.
 const REQUEST_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many module-requested moves wait for the transfer thread.
@@ -349,6 +356,11 @@ impl WasmShardHost {
         let saves = self.saves_state(&t.from_shard);
         let auth = back_auth(t);
         source.with_state(|sim| {
+            // The run can end (the module finished) while this waited for
+            // its state.
+            if !self.is_current(&t.from_shard, at) {
+                return Err(TransferError::NotFound(t.from_shard.clone()));
+            }
             let state = match sim.transfer_out(sid.as_str()) {
                 Ok(Some(state)) => state,
                 Ok(None) => return Err(TransferError::NoPlayer(t.subscriber.clone())),
@@ -569,6 +581,9 @@ impl WasmShardHost {
         let saves = self.saves_state(&t.to_shard);
         // (outcome, whether the target keeps a copy the row may not count)
         let (outcome, unknown) = target.with_state(|sim| {
+            if !self.is_current(&t.to_shard, at) {
+                return (Err(not_found()), false);
+            }
             if !has_copy {
                 if let Err(e) = sim.transfer_in(&t.subscriber, &t.state, &auth, false) {
                     return (Err(TransferError::Refused(e)), false);
@@ -697,6 +712,10 @@ impl WasmShardHost {
         }
         let saves = self.saves_state(&t.from_shard);
         let (outcome, unknown) = source.with_state(|sim| {
+            if !self.is_current(&t.from_shard, at) {
+                let why = format!("shard \"{}\" ended during the move", t.from_shard);
+                return (Err(TransferError::Cluster(why)), false);
+            }
             if !has_copy {
                 if let Err(e) = sim.transfer_in(sid.as_str(), &t.state, &auth, true) {
                     // The row keeps the player; a later round offers it
@@ -859,14 +878,23 @@ impl WasmShardHost {
             }
             self.live.lock().unwrap().remove(&t.id);
         }
-        // Rows whose source was stopped: the target takes the player.
+        // Rows whose source was stopped: the target takes the player. One
+        // it refuses is offered again each minute, and abandoned after 30.
         match c
             .dir
             .ownerless_transfers(&c.me.id, epoch, STALE_TRANSFER_MS)
         {
             Ok(rows) => {
-                for t in rows {
-                    if self.live.lock().unwrap().contains(&t.id) || self.is_unsettled(&t.id) {
+                let now = std::time::Instant::now();
+                self.ownerless_retry
+                    .lock()
+                    .unwrap()
+                    .retain(|_, next| *next > now);
+                for (t, age_ms) in rows {
+                    if self.live.lock().unwrap().contains(&t.id)
+                        || self.is_unsettled(&t.id)
+                        || self.ownerless_retry.lock().unwrap().contains_key(&t.id)
+                    {
                         continue;
                     }
                     match self.accept(&t) {
@@ -876,18 +904,47 @@ impl WasmShardHost {
                             t.subscriber,
                             t.from_shard
                         ),
-                        Err(e) => tracing::warn!(
-                            "[shard {}] transfer {} from stopped shard {}: {e}",
-                            t.to_shard,
-                            t.id,
-                            t.from_shard
-                        ),
+                        Err(e @ (TransferError::Refused(_) | TransferError::Unsupported(_)))
+                            if age_ms > ABANDON_AFTER_MS =>
+                        {
+                            if c.dir.abandon_transfer(&t.id).unwrap_or(false) {
+                                tracing::error!(
+                                    "[shard {}] refused subscriber {} from stopped shard {} for 30 minutes ({e}); transfer {} abandoned, its state kept in the row for a week",
+                                    t.to_shard,
+                                    t.subscriber,
+                                    t.from_shard,
+                                    t.id
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "[shard {}] transfer {} from stopped shard {}: {e}; trying again in a minute",
+                                t.to_shard,
+                                t.id,
+                                t.from_shard
+                            );
+                            self.ownerless_retry
+                                .lock()
+                                .unwrap()
+                                .insert(t.id.clone(), now + OWNERLESS_RETRY);
+                        }
                     }
                 }
             }
             Err(e) => tracing::warn!("[shards] reading transfers from stopped shards failed: {e}"),
         }
-        let _ = c.dir.prune_transfers();
+        let due = {
+            let mut last = self.last_prune.lock().unwrap();
+            let due = last.is_none_or(|at| at.elapsed() >= PRUNE_EVERY);
+            if due {
+                *last = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if due {
+            let _ = c.dir.prune_transfers();
+        }
     }
 
     /// What a source must do when it starts from saved state: its moves
@@ -1031,6 +1088,18 @@ impl WasmShardHost {
                 at,
             },
         );
+    }
+
+    /// True when a step on shard `id` (as source or target) is unsettled.
+    pub(super) fn unsettled_on(&self, id: &str) -> bool {
+        self.unsettled
+            .lock()
+            .unwrap()
+            .values()
+            .any(|u| match u.step.role() {
+                Role::Source => u.t.from_shard == id,
+                Role::Target => u.t.to_shard == id,
+            })
     }
 
     fn is_unsettled(&self, id: &str) -> bool {
@@ -1427,6 +1496,14 @@ mod tests {
             .with_state(|sim| sim.transfer_in("p4", &state(77), &arrival_auth(&t4), false))
             .unwrap();
         host.unsettle(Step::Accept, &t4, at_b);
+        // While the step is unknown, the target is not saved: its saved
+        // state still matches the row.
+        host.save_one(c, &b, epoch);
+        let saved_b = c.dir.load_owned_state(&b, &me, epoch).unwrap().flatten();
+        let saved_b: serde_json::Value = saved_b
+            .map(|bytes| serde_json::from_slice(&bytes).unwrap())
+            .unwrap_or_default();
+        assert!(saved_b["p4"].is_null(), "saved during an unknown step");
         host.resolve_unsettled();
         assert_eq!(c.dir.transfer(&t4.id).unwrap().unwrap().status, "in");
         assert_eq!(hp(&host, &b, "p4"), 77);
@@ -1688,8 +1765,10 @@ mod tests {
         assert_eq!(dir.transfer(&unused).unwrap(), None);
     }
 
-    /// A source with a move out is not stopped as idle; once stopped, a
-    /// row it left `out` is finished by the target's machine.
+    /// A source with a move out is not stopped as idle. A source that ends
+    /// with a move still open is released, and the target's machine takes
+    /// the player; a player the target keeps refusing is abandoned after 30
+    /// minutes, its state kept.
     #[test]
     fn a_move_out_keeps_its_source_and_a_stopped_source_s_row_is_finished() {
         let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
@@ -1702,7 +1781,7 @@ mod tests {
         let Setup {
             host,
             run,
-            me: _,
+            me,
             a,
             b,
         } = setup(&url);
@@ -1710,6 +1789,14 @@ mod tests {
         let at_a = host.instance(&a).unwrap();
         let epoch = at_a.epoch;
         let long_ago = Instant::now() - Duration::from_secs(3600);
+        let shut = format!("shut-{run}");
+        host.create_on(
+            "zone",
+            &shut,
+            &serde_json::json!({ "closed": true }),
+            Some(&me),
+        )
+        .unwrap();
 
         // Idle for an hour, but a player is moving out: it stays up.
         host.transferring
@@ -1719,36 +1806,46 @@ mod tests {
         host.idle_since.lock().unwrap().insert(a.clone(), long_ago);
         host.sweep();
         assert!(host.instance(&a).is_some(), "stopped with a move out");
-
-        // The move is gone: it stops as idle, and with no row open its
-        // placement goes.
         host.transferring.lock().unwrap().clear();
-        host.idle_since.lock().unwrap().insert(a.clone(), long_ago);
-        host.sweep();
+
+        // Rows out of `a`, 20 s old and 31 minutes old.
+        let row = |id: &str, sid: &str, to: &str, age_ms: i64, hp: i64| {
+            c.dir
+                .pool_for_tests()
+                .with_client_once(|cl| {
+                    cl.execute(
+                        "INSERT INTO _pylon_shard_transfers
+                            (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
+                         VALUES ($1, $2, $3, $4, $5, '{}'::jsonb, 'out',
+                                 (extract(epoch from clock_timestamp()) * 1000)::bigint - $6)",
+                        &[&id, &sid, &a, &to, &state(hp), &age_ms],
+                    )
+                })
+                .unwrap();
+        };
+        let (fresh, stuck) = (format!("fresh-{run}"), format!("stuck-{run}"));
+        row(&fresh, "p2", &b, 20_000, 21);
+        row(&stuck, "p3", &shut, 31 * 60 * 1000, 5);
+
+        // The module ends (finished): the source is released, open rows or
+        // not.
+        host.registry.get(&a).unwrap().stop();
         host.sweep();
         assert!(host.registry.get(&a).is_none());
         assert!(c.dir.placement(&a).unwrap().is_none());
+        assert!(host.instances.lock().unwrap().get(&a).is_none());
 
-        // A row that stopped source left `out` (written before it stopped):
-        // the target's machine takes the player.
-        let id = format!("gone-{run}");
-        c.dir
-            .pool_for_tests()
-            .with_client_once(|cl| {
-                cl.execute(
-                    "INSERT INTO _pylon_shard_transfers
-                        (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
-                     VALUES ($1, 'p2', $2, $3, $4, '{}'::jsonb, 'out',
-                             (extract(epoch from clock_timestamp()) * 1000)::bigint - 20000)",
-                    &[&id, &a, &b, &state(21)],
-                )
-            })
-            .unwrap();
+        // The target's machine takes p2; the closed zone refuses p3, which
+        // is abandoned with its state.
         host.settle_transfers(epoch);
-        assert_eq!(c.dir.transfer(&id).unwrap().unwrap().status, "in");
+        assert_eq!(c.dir.transfer(&fresh).unwrap().unwrap().status, "in");
         assert_eq!(hp(&host, &b, "p2"), 21);
+        let dropped = c.dir.transfer(&stuck).unwrap().unwrap();
+        assert_eq!(dropped.status, "dropped");
+        assert_eq!(dropped.state, state(5));
 
         host.stop(&b);
+        host.stop(&shut);
         host.stop_all();
     }
 }

@@ -341,6 +341,12 @@ impl PgShardDirectory {
                         ON _pylon_shard_transfers (from_shard) WHERE status = 'out';",
                 )?;
             }
+            if !exists(&mut tx, "_pylon_shard_transfers_age_idx")? {
+                tx.batch_execute(
+                    "CREATE INDEX _pylon_shard_transfers_age_idx
+                        ON _pylon_shard_transfers (status, created_at)",
+                )?;
+            }
             if !exists(&mut tx, "_pylon_shard_cluster")? {
                 tx.batch_execute(
                     "CREATE TABLE _pylon_shard_cluster (
@@ -774,7 +780,7 @@ impl PgShardDirectory {
         self.pool.with_client_once(|c| {
             let mut tx = c.transaction()?;
             tx.batch_execute(
-                "SET LOCAL lock_timeout = '20s';
+                "SET LOCAL lock_timeout = '5s';
                  SET LOCAL idle_in_transaction_session_timeout = '15s'",
             )?;
             // Blocks behind an uncommitted insert of the same id.
@@ -806,10 +812,11 @@ impl PgShardDirectory {
         machine: &str,
         epoch: i64,
         older_than_ms: i64,
-    ) -> Result<Vec<Transfer>, String> {
+    ) -> Result<Vec<(Transfer, i64)>, String> {
         self.pool.with_client(|c| {
             let rows = c.query(
-                "SELECT t.transfer_id, t.subscriber, t.from_shard, t.to_shard, t.state, t.auth, t.status
+                "SELECT t.transfer_id, t.subscriber, t.from_shard, t.to_shard, t.state, t.auth, t.status,
+                        (extract(epoch from clock_timestamp()) * 1000)::bigint - t.created_at
                  FROM _pylon_shard_transfers t
                  JOIN _pylon_shard_placements p ON p.shard_id = t.to_shard
                  WHERE t.status = 'out' AND p.machine_id = $1 AND p.epoch = $2
@@ -819,7 +826,7 @@ impl PgShardDirectory {
                  ORDER BY t.created_at",
                 &[&machine, &epoch, &older_than_ms],
             )?;
-            Ok(rows.iter().map(transfer_of).collect())
+            Ok(rows.iter().map(|r| (transfer_of(r), r.get(7))).collect())
         })
     }
 
@@ -856,16 +863,33 @@ impl PgShardDirectory {
         })
     }
 
-    /// Drop settled transfers older than an hour.
+    /// Drop settled transfers older than an hour, and abandoned ones older
+    /// than a week (kept that long for an operator to recover by hand).
     pub fn prune_transfers(&self) -> Result<(), String> {
         self.pool.with_client(|c| {
             c.execute(
                 "DELETE FROM _pylon_shard_transfers
-                 WHERE status <> 'out'
-                   AND created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 3600000",
+                 WHERE (status IN ('in', 'back', 'void')
+                        AND created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 3600000)
+                    OR (status = 'dropped'
+                        AND created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - 604800000)",
                 &[],
             )?;
             Ok(())
+        })
+    }
+
+    /// Give up on transfer `id`: its source was stopped and its target
+    /// keeps refusing the player. `out` becomes `dropped`; the row keeps the
+    /// player's state. False when it was no longer `out`.
+    pub fn abandon_transfer(&self, id: &str) -> Result<bool, String> {
+        self.pool.with_client_once(|c| {
+            let n = c.execute(
+                "UPDATE _pylon_shard_transfers SET status = 'dropped'
+                 WHERE transfer_id = $1 AND status = 'out'",
+                &[&id],
+            )?;
+            Ok(n == 1)
         })
     }
 

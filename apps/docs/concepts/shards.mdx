@@ -493,7 +493,10 @@ source the same way. One of the two takes the row, so the player is never
 in two shards and never lost. A step whose commit the database did not
 confirm is settled from the row in the next round. When a machine dies
 halfway, the machine that starts the source from saved state finishes the
-move at once, and the player cannot act in the source until then.
+move at once, and the player cannot act in the source until then. When the
+source ended (it finished, or an operator stopped it), the target's machine
+takes the player; a target that refuses it for 30 minutes gives up, the row
+marked `dropped` with the player's state for a week.
 
 ## Load test
 

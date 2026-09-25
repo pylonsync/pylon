@@ -1382,6 +1382,11 @@ pub struct WasmShardHost {
     live: Mutex<std::collections::HashSet<String>>,
     /// Each running shard's run number (see `transfer::Instance`).
     instances: Mutex<HashMap<String, u64>>,
+    /// Rows from stopped sources a target refused, by id: when to offer
+    /// them again.
+    ownerless_retry: Mutex<HashMap<String, Instant>>,
+    /// When this machine last deleted settled transfer rows.
+    last_prune: Mutex<Option<Instant>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1516,6 +1521,8 @@ impl WasmShardHost {
             waiting: Mutex::new(HashMap::new()),
             live: Mutex::new(std::collections::HashSet::new()),
             instances: Mutex::new(HashMap::new()),
+            ownerless_retry: Mutex::new(HashMap::new()),
+            last_prune: Mutex::new(None),
             transfer_requests,
             registry: ShardRegistry::new(),
             kind_of: RwLock::new(HashMap::new()),
@@ -1883,10 +1890,10 @@ impl WasmShardHost {
 
     /// Stop and remove a shard running in this process.
     fn stop_local(&self, id: &str) -> bool {
-        self.instances.lock().unwrap().remove(id);
         // Serialized with create and the sweep, so a stop never removes the
         // bookkeeping of a shard created under the same id meanwhile.
         let _guard = self.create_lock.lock().unwrap();
+        self.instances.lock().unwrap().remove(id);
         let removed = self.registry.remove(id);
         self.kind_of.write().unwrap().remove(id);
         self.idle_since.lock().unwrap().remove(id);
@@ -2371,6 +2378,11 @@ impl WasmShardHost {
     /// save lock, so saves land in the order they were captured.
     fn save_shard(&self, c: &ClusterState, id: &str, epoch: i64, shard: &Shard<WasmSim>) {
         let _save = c.save_lock.lock().unwrap();
+        // A transfer step on it whose commit is unknown: its last save is
+        // the one that matches the row, so none until the step settles.
+        if self.unsettled_on(id) {
+            return;
+        }
         c.saved_at
             .lock()
             .unwrap()
@@ -2393,6 +2405,9 @@ impl WasmShardHost {
     /// directory read leaves it for a later round.
     fn adopt(&self, p: &Placement, epoch: i64) -> Result<ShardInfo, String> {
         let c = self.cluster.get().expect("adopt runs in a cluster");
+        // A transfer step holds the save lock through its commit: the state
+        // and moves read here are ones no step is halfway through.
+        let _save = c.save_lock.lock().unwrap();
         let Some(state) = c.dir.load_owned_state(&p.shard_id, &c.me.id, epoch)? else {
             return Err("no longer placed here".into());
         };
@@ -2562,6 +2577,7 @@ impl WasmShardHost {
             .iter()
             .map(|(id, k)| (id.clone(), k.clone()))
             .collect();
+        let mut due: Vec<(String, Duration)> = Vec::new();
         {
             let mut idle = self.idle_since.lock().unwrap();
             for (id, kind) in &kinds {
@@ -2576,9 +2592,27 @@ impl WasmShardHost {
                 }
                 let since = *idle.entry(id.clone()).or_insert(now);
                 if now.duration_since(since) >= limit {
-                    tracing::info!("[shard {id}] stopping: no subscribers for {limit:?}");
-                    shard.stop();
+                    due.push((id.clone(), limit));
                 }
+            }
+        }
+        // Stopped under the save lock, checked again: a transfer step holds
+        // it, so a shard never stops between a step's check and its commit
+        // (an arrival resets its idle time).
+        for (id, limit) in due {
+            let _save = self.cluster.get().map(|c| c.save_lock.lock().unwrap());
+            let Some(shard) = self.registry.get(&id) else {
+                continue;
+            };
+            let still_idle = self
+                .idle_since
+                .lock()
+                .unwrap()
+                .get(&id)
+                .is_some_and(|since| since.elapsed() >= limit);
+            if still_idle && shard.subscriber_count() == 0 && !self.moving_out(&id) {
+                tracing::info!("[shard {id}] stopping: no subscribers for {limit:?}");
+                shard.stop();
             }
         }
         // Under the create lock, so a shard created under a stopped id is
@@ -2601,6 +2635,7 @@ impl WasmShardHost {
         {
             kind_of.remove(id);
             idle.remove(id);
+            self.instances.lock().unwrap().remove(id);
             tracing::info!("[shard {id}] removed after it stopped");
             // It ended (finished, idle, or failed): forget its placement,
             // unless another machine runs it now.
@@ -2622,13 +2657,10 @@ impl WasmShardHost {
                     let held = c.owned.lock().unwrap().remove(id);
                     held.filter(|&epoch| in_force && !lapsed && epoch == lease.epoch)
                 };
-                // A move out of it still open keeps the placement: the shard
-                // starts again here and finishes the move.
-                let moving = self.moving_out(id)
-                    || c.dir
-                        .open_transfers_from(id)
-                        .map_or(true, |open| !open.is_empty());
-                if let Some(epoch) = held.filter(|_| !moving) {
+                // It ended (finished, failed, or idle with no move out): a
+                // move out of it still open is finished by its target's
+                // machine once the placement is gone.
+                if let Some(epoch) = held {
                     if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
                         tracing::warn!("[shard {id}] could not release its placement: {e}");
                     }
