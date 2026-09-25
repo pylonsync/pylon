@@ -2153,11 +2153,8 @@ impl WasmShardHost {
             return self.registry.get(id).is_some() && self.stop_local(id);
         };
         let own = c.own_lock.lock().unwrap();
-        // Ending here: the stop, sweep or shutdown writing its last fields
-        // releases the placement after them.
-        if self.ending.lock().unwrap().contains(id) {
-            return false;
-        }
+        // An id ending here has no run here (none starts until its
+        // release), so this takes the placement path below.
         if self.registry.get(id).is_some() {
             let stopped = self.stop_local(id);
             c.saved_at.lock().unwrap().remove(id);
@@ -2188,6 +2185,12 @@ impl WasmShardHost {
                 return false;
             }
         };
+        // Ending here: the stop, sweep or shutdown writing its last fields
+        // releases this machine's placement after them. One another machine
+        // took over meanwhile is stopped as any other.
+        if placement.machine_id == c.me.id && self.ending.lock().unwrap().contains(id) {
+            return false;
+        }
         let owner = (placement.machine_id != c.me.id)
             .then(|| c.live(&placement.machine_id))
             .flatten()

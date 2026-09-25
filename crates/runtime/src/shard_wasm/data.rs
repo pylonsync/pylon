@@ -1956,6 +1956,10 @@ mod tests {
             let placed = dir.placement(id).unwrap().unwrap();
             assert_eq!(placed.machine_id, other, "{id} moved here while ending");
         }
+        // A stop of an ending id placed on another machine (dead here)
+        // removes that placement, as it would any other.
+        assert!(host.stop(&orphan));
+        assert_eq!(dir.placement(&orphan).unwrap(), None);
         host.ending.lock().unwrap().clear();
         assert!(host.may_take_orphan(c, &orphan, &alone));
         host.stop_all();
