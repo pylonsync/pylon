@@ -980,18 +980,15 @@ impl SimState for WasmSim {
             // every subscriber's baseline.
             mirror.clear();
         }
-        if let Err(e) = mirror.apply_changes(&out[9..]) {
-            inner.fail(&format!("pylon_replication sent a bad change log: {e}"));
-        } else if mirror.len() > self.limits.max_replicated_entities
-            || mirror.component_bytes() > self.limits.memory_bytes
-        {
-            // The copy lives in host memory, outside the module's cap.
+        // The copy lives in host memory, outside the module's cap: apply
+        // under limits, stopping at the change that passes one.
+        if let Err(e) = mirror.apply_changes_limited(
+            &out[9..],
+            self.limits.max_replicated_entities,
+            self.limits.memory_bytes,
+        ) {
             inner.fail(&format!(
-                "the replicated store passed its limit ({} entities, {} component bytes; at most {} and {})",
-                mirror.len(),
-                mirror.component_bytes(),
-                self.limits.max_replicated_entities,
-                self.limits.memory_bytes
+                "pylon_replication sent a change log the host refused: {e}"
             ));
             mirror.clear();
         }

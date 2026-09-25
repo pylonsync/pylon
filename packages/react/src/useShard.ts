@@ -216,7 +216,6 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
     ws.onopen = () => {
       connected = true;
-      backoff = options.reconnectBackoffMs ?? 500;
       for (const h of openHandlers) h();
     };
 
@@ -235,6 +234,10 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
             ws?.close();
             return;
           }
+          // A frame applied: the connection works, so the next reconnect
+          // starts from the short delay again. (Resetting on open would
+          // retry a frame that always fails every 500 ms forever.)
+          backoff = options.reconnectBackoffMs ?? 500;
           for (const h of replicationHandlers) h(entities, summary, frame.tick, frame.ack);
           return;
         }
@@ -247,6 +250,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
             frame.payload,
             options.decode,
           ) as TSnapshot;
+          backoff = options.reconnectBackoffMs ?? 500;
           dispatchSnapshot(snapshot, frame.tick, frame.ack);
         } else if (frame.kind === ShardFrameKind.InputRejected) {
           const rejection = decodeShardRejection(frame.codec, frame.payload, options.decode);

@@ -66,14 +66,20 @@ pub struct Component {
     pub seq: u64,
 }
 
+/// Memory an entity costs beyond its components, for limits.
+const ENTITY_COST: usize = 64;
+/// Memory a component entry (present or removed) costs beyond its bytes.
+const COMPONENT_COST: usize = 48;
+
 /// The replicated state of a simulation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 pub struct Replicated {
     entities: BTreeMap<EntityId, Entity>,
     seq: u64,
     log: Option<Vec<u8>>,
-    /// Bytes held in components.
-    component_bytes: usize,
+    /// Approximate memory held: a fixed cost per entity and per component
+    /// entry (removed ones too) plus component bytes.
+    cost: usize,
     /// Unique per store made in this process, so a WebAssembly module can
     /// tell when the game swapped in a new store.
     store_id: u64,
@@ -86,9 +92,31 @@ impl Default for Replicated {
             entities: BTreeMap::new(),
             seq: 0,
             log: None,
-            component_bytes: 0,
+            cost: 0,
             store_id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }
+    }
+}
+
+/// A clone is a different store: it gets its own id and no change log, so
+/// a WebAssembly module that swaps one in (a round reset from a template, a
+/// rollback) sends the host a full dump of it.
+impl Clone for Replicated {
+    fn clone(&self) -> Self {
+        Self {
+            entities: self.entities.clone(),
+            seq: self.seq,
+            cost: self.cost,
+            ..Self::default()
+        }
+    }
+}
+
+/// Stores are equal when they hold the same entities; the id and the log
+/// are bookkeeping.
+impl PartialEq for Replicated {
+    fn eq(&self, other: &Self) -> bool {
+        self.entities == other.entities && self.seq == other.seq
     }
 }
 
@@ -130,9 +158,10 @@ impl Replicated {
         self.entities.is_empty()
     }
 
-    /// Bytes held in components, for limits.
-    pub fn component_bytes(&self) -> usize {
-        self.component_bytes
+    /// Approximate memory the store holds, for limits: a fixed cost per
+    /// entity and per component entry (removed ones too) plus the bytes.
+    pub fn cost(&self) -> usize {
+        self.cost
     }
 
     /// This store's process-unique id.
@@ -145,7 +174,7 @@ impl Replicated {
     /// reads as a new entity.
     pub fn clear(&mut self) {
         self.entities.clear();
-        self.component_bytes = 0;
+        self.cost = 0;
         self.bump();
     }
 
@@ -173,6 +202,7 @@ impl Replicated {
         if self.entities.contains_key(&id) {
             return false;
         }
+        self.cost += ENTITY_COST;
         let seq = self.bump();
         self.entities.insert(
             id,
@@ -197,11 +227,11 @@ impl Replicated {
         let Some(e) = self.entities.remove(&id) else {
             return false;
         };
-        self.component_bytes -= e
-            .components
-            .values()
-            .map(|c| c.bytes.as_ref().map_or(0, Vec::len))
-            .sum::<usize>();
+        self.cost -= ENTITY_COST
+            + e.components
+                .values()
+                .map(|c| COMPONENT_COST + c.bytes.as_ref().map_or(0, Vec::len))
+                .sum::<usize>();
         self.bump();
         if let Some(log) = &mut self.log {
             log.push(op::DESPAWN);
@@ -249,8 +279,11 @@ impl Replicated {
             },
         );
         e.seq = seq;
-        self.component_bytes += bytes.len();
-        self.component_bytes -= old.and_then(|c| c.bytes).map_or(0, |b| b.len());
+        self.cost += bytes.len();
+        match old {
+            Some(c) => self.cost -= c.bytes.map_or(0, |b| b.len()),
+            None => self.cost += COMPONENT_COST,
+        }
         if let Some(log) = &mut self.log {
             log.push(op::SET);
             varint::write_u64(log, id);
@@ -277,7 +310,8 @@ impl Replicated {
             .components
             .insert(component, Component { bytes: None, seq });
         e.seq = seq;
-        self.component_bytes -= old.and_then(|c| c.bytes).map_or(0, |b| b.len());
+        // The entry stays as a tombstone: only its bytes are freed.
+        self.cost -= old.and_then(|c| c.bytes).map_or(0, |b| b.len());
         if let Some(log) = &mut self.log {
             log.push(op::REMOVE);
             varint::write_u64(log, id);
@@ -324,9 +358,28 @@ impl Replicated {
 
     /// Apply changes another store recorded. Stops at the first malformed
     /// or inconsistent change; the changes before it stay applied.
-    pub fn apply_changes(&mut self, mut bytes: &[u8]) -> Result<(), ChangeError> {
+    pub fn apply_changes(&mut self, bytes: &[u8]) -> Result<(), ChangeError> {
+        self.apply_changes_limited(bytes, usize::MAX, usize::MAX)
+    }
+
+    /// `apply_changes` for a log from an untrusted source: stops with an
+    /// error at the first change that takes the store past `max_entities`
+    /// or `max_cost` (see [`Replicated::cost`]), before the rest applies.
+    pub fn apply_changes_limited(
+        &mut self,
+        mut bytes: &[u8],
+        max_entities: usize,
+        max_cost: usize,
+    ) -> Result<(), ChangeError> {
         let err = |m: &str| ChangeError(m.to_string());
         while let Some((&tag, rest)) = bytes.split_first() {
+            if self.entities.len() > max_entities || self.cost > max_cost {
+                return Err(ChangeError(format!(
+                    "the store passed its limit ({} entities, {} bytes; at most {max_entities} and {max_cost})",
+                    self.entities.len(),
+                    self.cost
+                )));
+            }
             bytes = rest;
             let id = varint::read_u64(&mut bytes).ok_or_else(|| err("truncated entity id"))?;
             match tag {
@@ -371,6 +424,13 @@ impl Replicated {
                 }
                 other => return Err(ChangeError(format!("unknown change tag {other}"))),
             }
+        }
+        if self.entities.len() > max_entities || self.cost > max_cost {
+            return Err(ChangeError(format!(
+                "the store passed its limit ({} entities, {} bytes; at most {max_entities} and {max_cost})",
+                self.entities.len(),
+                self.cost
+            )));
         }
         Ok(())
     }
@@ -458,18 +518,55 @@ mod tests {
     }
 
     #[test]
-    fn component_bytes_track_sets_removals_and_despawns() {
+    fn cost_counts_entities_entries_tombstones_and_bytes() {
         let mut r = Replicated::new();
         r.spawn(1, [0.0; 3]);
+        assert_eq!(r.cost(), ENTITY_COST);
         r.set_component(1, 1, &[0; 10]);
         r.set_component(1, 2, &[0; 5]);
-        assert_eq!(r.component_bytes(), 15);
+        assert_eq!(r.cost(), ENTITY_COST + 2 * COMPONENT_COST + 15);
         r.set_component(1, 1, &[0; 3]);
-        assert_eq!(r.component_bytes(), 8);
+        assert_eq!(r.cost(), ENTITY_COST + 2 * COMPONENT_COST + 8);
+        // A removed component is a tombstone: its entry still costs.
         r.remove_component(1, 2);
-        assert_eq!(r.component_bytes(), 3);
+        assert_eq!(r.cost(), ENTITY_COST + 2 * COMPONENT_COST + 3);
+        // Empty components cost too.
+        r.set_component(1, 9, &[]);
+        assert_eq!(r.cost(), ENTITY_COST + 3 * COMPONENT_COST + 3);
         r.despawn(1);
-        assert_eq!(r.component_bytes(), 0);
+        assert_eq!(r.cost(), 0);
+    }
+
+    #[test]
+    fn a_limited_apply_stops_at_the_change_that_passes_the_limit() {
+        let mut source = Replicated::new();
+        source.record_changes(true);
+        for id in 0..1000 {
+            source.spawn(id, [0.0; 3]);
+        }
+        let log = source.take_changes();
+        let mut host = Replicated::new();
+        assert!(host.apply_changes_limited(&log, 10, usize::MAX).is_err());
+        // It stopped right past the limit, not after the whole log.
+        assert_eq!(host.len(), 11);
+        let mut host = Replicated::new();
+        assert!(host
+            .apply_changes_limited(&log, usize::MAX, 20 * ENTITY_COST)
+            .is_err());
+        assert_eq!(host.len(), 21);
+    }
+
+    #[test]
+    fn a_clone_is_a_new_store_without_a_log() {
+        let mut a = Replicated::new();
+        a.record_changes(true);
+        a.spawn(1, [0.0; 3]);
+        let b = a.clone();
+        assert_ne!(a.store_id(), b.store_id());
+        let mut b = b;
+        assert!(b.take_changes().is_empty());
+        assert_eq!(a, b);
+        assert_eq!(a.cost(), b.cost());
     }
 
     #[test]

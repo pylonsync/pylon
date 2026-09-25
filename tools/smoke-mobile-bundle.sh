@@ -117,6 +117,9 @@ vendor_local() {
 }
 
 echo "→ overlay local @pylonsync packages"
+# Bun's store for workspace packages sits under the root node_modules, and
+# resolution from there does not reach apps/*/node_modules: copy it to both.
+vendor_local "$APP/node_modules" realtime "$ROOT/packages/realtime"
 for app in apps/expo apps/api; do
 	vendor_local "$APP/$app/node_modules" realtime "$ROOT/packages/realtime"
 	overlay "$app" realtime "$ROOT/packages/realtime"

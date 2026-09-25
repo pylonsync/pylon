@@ -267,7 +267,6 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         self.task = task
         task.resume()
         stateContinuation?.yield(.connected)
-        reconnectAttempts = 0
         await receiveLoop(task: task)
     }
 
@@ -327,6 +326,10 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         if frame.kind == ShardWire.Kind.replication.rawValue {
             do {
                 let summary = try entities.apply(frame.payload)
+                // A frame applied: the connection works. Resetting on open
+                // instead would retry a frame that always fails at the
+                // shortest delay forever.
+                reconnectAttempts = 0
                 replicationContinuation?.yield(
                     ShardReplicationUpdate(tick: frame.tick, ack: frame.ack, summary: summary, entities: entities))
             } catch {
@@ -342,6 +345,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         switch ShardWire.Kind(rawValue: frame.kind) {
         case .snapshot:
             if let state = try? ShardWire.decode(State.self, codec: frame.codec, payload: frame.payload) {
+                reconnectAttempts = 0
                 snapshotContinuation?.yield(ShardSnapshot(tick: frame.tick, ack: frame.ack, state: state))
             }
         case .inputRejected:
