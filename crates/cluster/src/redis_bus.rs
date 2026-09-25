@@ -29,6 +29,13 @@ use tracing::{debug, error, info, warn};
 /// cross-talk and ship each other's mutations.
 pub const DEFAULT_CHANNEL: &str = "pylon:cluster:bus";
 
+/// How long the subscriber waits for a message before it PINGs Redis (and
+/// then for the answer before it reconnects).
+#[cfg(not(test))]
+const SUBSCRIBER_IDLE: Duration = Duration::from_secs(15);
+#[cfg(test)]
+const SUBSCRIBER_IDLE: Duration = Duration::from_millis(200);
+
 /// How long a publish connection waits for Redis before it fails.
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// The same for at-most-once envelopes, which are dropped on a failure.
@@ -266,16 +273,29 @@ fn run_one_subscription(
     self_instance_id: &str,
     handlers: &Arc<Mutex<Vec<SubscriberHandler>>>,
 ) -> Result<(), RedisError> {
-    // The conn stays in SUBSCRIBE mode for its lifetime once
-    // `as_pubsub` is called. Returning out of `get_message` only
-    // happens on connection error; the outer loop reconnects.
-    let mut pubsub = conn.as_pubsub();
-    pubsub.subscribe(channel)?;
-    // Subscribed: it waits for messages for as long as it takes.
-    pubsub.set_read_timeout(None)?;
+    // In SUBSCRIBE mode for the connection's lifetime. A read that waits
+    // SUBSCRIBER_IDLE sends a PING; a PING with no answer by the next
+    // wait means the connection is gone (a failover, a NAT drop), and the
+    // outer loop reconnects.
+    conn.send_packed_command(&redis::cmd("SUBSCRIBE").arg(channel).get_packed_command())?;
+    conn.set_read_timeout(Some(SUBSCRIBER_IDLE))?;
     info!("[cluster] redis subscriber listening on channel \"{channel}\"");
+    let mut pinged = false;
     loop {
-        let msg = pubsub.get_message()?;
+        let value = match conn.recv_response() {
+            Ok(value) => value,
+            Err(e) if e.is_timeout() && !pinged => {
+                conn.send_packed_command(&redis::cmd("PING").get_packed_command())?;
+                pinged = true;
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        pinged = false;
+        // Subscribe confirmations and PING answers are not messages.
+        let Some(msg) = redis::Msg::from_owned_value(value) else {
+            continue;
+        };
         let payload: String = match msg.get_payload() {
             Ok(s) => s,
             Err(e) => {
@@ -492,5 +512,76 @@ mod tests {
                 vec!["SELECT", "2"],
             ]
         );
+    }
+
+    /// The subscriber PINGs an idle connection, takes messages after the
+    /// answer, and ends (to reconnect) when a PING goes unanswered.
+    #[test]
+    fn an_idle_subscriber_pings_and_a_silent_one_ends() {
+        use std::io::{BufRead, BufReader, Write};
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = server.local_addr().unwrap().port();
+        let envelope = serde_json::to_string(&Envelope {
+            instance_id: "other".into(),
+            kind: "change".into(),
+            payload: serde_json::json!({ "n": 1 }),
+        })
+        .unwrap();
+        thread::spawn(move || {
+            let (conn, _) = server.accept().unwrap();
+            let mut out = conn.try_clone().unwrap();
+            let mut reader = BufReader::new(conn);
+            let mut read_cmd = || -> Option<Vec<String>> {
+                let mut line = String::new();
+                reader.read_line(&mut line).ok()?;
+                let n: usize = line.trim().strip_prefix('*')?.parse().ok()?;
+                let mut args = Vec::new();
+                for _ in 0..n {
+                    line.clear();
+                    reader.read_line(&mut line).ok()?;
+                    line.clear();
+                    reader.read_line(&mut line).ok()?;
+                    args.push(line.trim_end().to_string());
+                }
+                Some(args)
+            };
+            let bulk = |s: &str| format!("${}\r\n{s}\r\n", s.len());
+            assert_eq!(read_cmd().unwrap()[0], "SUBSCRIBE");
+            write!(out, "*3\r\n{}{}:1\r\n", bulk("subscribe"), bulk("ch")).unwrap();
+            // Idle: the client PINGs; answer, then send a message.
+            assert_eq!(read_cmd().unwrap()[0], "PING");
+            write!(out, "*2\r\n{}{}", bulk("pong"), bulk("")).unwrap();
+            write!(
+                out,
+                "*3\r\n{}{}{}",
+                bulk("message"),
+                bulk("ch"),
+                bulk(&envelope)
+            )
+            .unwrap();
+            // Then silent: the next PING gets no answer.
+            let _ = read_cmd();
+            thread::sleep(Duration::from_secs(5));
+        });
+        let client = Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let conn = connect_with_timeouts(&client, Duration::from_secs(2)).unwrap();
+        let got: Arc<Mutex<Vec<Envelope>>> = Arc::default();
+        let handlers: Arc<Mutex<Vec<SubscriberHandler>>> = Arc::default();
+        {
+            let got = Arc::clone(&got);
+            handlers
+                .lock()
+                .unwrap()
+                .push(Arc::new(move |e: Envelope| got.lock().unwrap().push(e)));
+        }
+        let started = std::time::Instant::now();
+        let ended = run_one_subscription(conn, "ch", "me", &handlers);
+        assert!(ended.is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(got.lock().unwrap().len(), 1);
     }
 }

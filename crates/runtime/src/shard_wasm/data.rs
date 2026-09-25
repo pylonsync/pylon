@@ -1433,7 +1433,20 @@ mod tests {
         // Still buffered: no periodic flush wrote it yet.
         assert_eq!(host.dirty_rows(&zone), 1);
         host.registry.get(&zone).unwrap().stop();
+        // An adoption while the id is reserved fails without marking the
+        // placement failed (a lease lapse can send one there).
+        {
+            let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+            let placed = dir.placement(&zone).unwrap().unwrap();
+            host.ending.lock().unwrap().insert(zone.clone());
+            assert!(host.adopt(&placed, placed.epoch).is_err());
+            host.ending.lock().unwrap().remove(&zone);
+            assert_eq!(dir.placement(&zone).unwrap().unwrap().failed, None);
+        }
         host.sweep();
+        // The sweep reserved the id while it wrote and released, and let
+        // it go after.
+        assert!(host.ending.lock().unwrap().is_empty());
         assert!(host.registry.get(&zone).is_none());
         let dir = crate::shard_cluster::PgShardDirectory::open(pool).unwrap();
         assert!(dir.placement(&zone).unwrap().is_none(), "not released");
@@ -1446,7 +1459,7 @@ mod tests {
         host.ending.lock().unwrap().insert(zone.clone());
         assert!(matches!(
             host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me)),
-            Err(crate::shard_wasm::CreateError::Exists(_))
+            Err(crate::shard_wasm::CreateError::Cluster(_))
         ));
         host.ending.lock().unwrap().remove(&zone);
         host.stop_all();

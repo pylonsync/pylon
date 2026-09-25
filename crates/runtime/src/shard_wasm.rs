@@ -1956,9 +1956,12 @@ impl WasmShardHost {
             }
         }
         // Its previous run is still writing its last fields and releasing
-        // its placement.
+        // its placement: try again shortly (a Cluster error, so an adoption
+        // does not mark the placement failed).
         if self.ending.lock().unwrap().contains(id) {
-            return Err(CreateError::Exists(id.to_string()));
+            return Err(CreateError::Cluster(format!(
+                "shard {id} is ending on this machine; try again shortly"
+            )));
         }
         // In a cluster the directory counts every machine's shards (see
         // `create_claimed`); here, count only running shards, so a stopped
@@ -2359,6 +2362,14 @@ impl WasmShardHost {
         for id in self.registry.ids() {
             self.stop_local(&id);
         }
+        // The sweep's last writes and placement releases for shards that
+        // ended: done before this machine leaves, or another machine would
+        // start them again.
+        let waited = Instant::now();
+        while !self.ending.lock().unwrap().is_empty() && waited.elapsed() < Duration::from_secs(10)
+        {
+            std::thread::sleep(Duration::from_millis(20));
+        }
         self.flush_writes(data::Flush::All);
         let _beat = c.beat_lock.lock().unwrap();
         c.left.store(true, Ordering::Release);
@@ -2656,6 +2667,13 @@ impl WasmShardHost {
                 break;
             }
             if home(&orphan.shard_id, &live).map(|m| m.id.as_str()) != Some(c.me.id.as_str()) {
+                continue;
+            }
+            // Ended here and about to be released by the sweep: not
+            // started again.
+            if orphan.machine_id == c.me.id
+                && self.ending.lock().unwrap().contains(&orphan.shard_id)
+            {
                 continue;
             }
             let _own = c.own_lock.lock().unwrap();
@@ -3066,6 +3084,8 @@ impl WasmShardHost {
                     tracing::error!(
                         "[shard {id}] its last entity writes failed; they are lost with its placement"
                     );
+                    // Gone: a later run of the id must not write them.
+                    self.discard_writes(&id);
                 } else {
                     std::thread::sleep(Duration::from_millis(200));
                 }

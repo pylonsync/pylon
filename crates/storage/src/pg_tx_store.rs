@@ -222,7 +222,16 @@ pub fn pg_error_code(e: &postgres::Error) -> &'static str {
             source = s.source();
             Some(s)
         })
-        .any(|s| s.is::<std::io::Error>());
+        // An I/O error, but not one about the statement itself (a NUL
+        // byte in the query, a value too large to send).
+        .any(|s| {
+            s.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                !matches!(
+                    io.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
+                )
+            })
+        });
         return if e.is_closed() || io {
             "PG_TX_QUERY_FAILED"
         } else {
