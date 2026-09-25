@@ -1921,6 +1921,9 @@ mod tests {
         let zone = format!("gap-{run}");
         host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
             .unwrap();
+        let (steps_tx, steps) = std::sync::mpsc::channel();
+        *host.stop_steps.lock().unwrap() = Some(steps_tx);
+        let next_step = || steps.recv_timeout(Duration::from_secs(5)).unwrap();
         let stopper = {
             let guard = host.create_lock.lock().unwrap();
             host.registry.remove(&zone);
@@ -1928,7 +1931,8 @@ mod tests {
                 let (host, zone) = (Arc::clone(&host), zone.clone());
                 std::thread::spawn(move || host.stop(&zone))
             };
-            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(next_step(), "entered");
+            assert_eq!(next_step(), "create lock held");
             host.ending.lock().unwrap().insert(zone.clone());
             drop(guard);
             stopper
@@ -1949,12 +1953,35 @@ mod tests {
             };
             dir.claim(&p, 100).unwrap();
         };
-        // A request from another machine: another machine's placement is
-        // not touched. A local stop removes it (its machine is dead).
+        // A request from another machine for a placement here that moves
+        // to a third machine before the stop acts: the third machine's
+        // placement is not touched. A local stop removes it (that machine
+        // is dead).
         let elsewhere = format!("elsewhere-{run}");
-        place(&elsewhere, &format!("gone-{run}"), 3);
-        assert!(!host.stop_where(&elsewhere, false));
-        assert!(placed(&elsewhere).is_some());
+        let epoch = host.cluster.get().unwrap().current_epoch().unwrap();
+        let third = format!("gone-{run}");
+        let request = {
+            // Held from before the placement exists, so the cluster round
+            // does not start it here meanwhile.
+            let own = host.cluster.get().unwrap().own_lock.lock().unwrap();
+            place(&elsewhere, &me, epoch);
+            let request = {
+                let (host, id) = (Arc::clone(&host), elsewhere.clone());
+                std::thread::spawn(move || {
+                    host.run_remote(crate::shard_cluster::RemoteOp::Stop { id })
+                })
+            };
+            assert_eq!(next_step(), "entered");
+            assert!(dir.hand_over(&elsewhere, &me, epoch, &third, 3).unwrap());
+            drop(own);
+            request
+        };
+        match request.join().unwrap() {
+            crate::shard_cluster::RemoteReply::Ok(v) => assert_eq!(v, serde_json::json!(false)),
+            _ => panic!("the stop request failed"),
+        }
+        assert_eq!(placed(&elsewhere), Some(third.clone()));
+        *host.stop_steps.lock().unwrap() = None;
         assert!(host.stop(&elsewhere));
         assert_eq!(placed(&elsewhere), None);
 

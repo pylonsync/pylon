@@ -1626,6 +1626,10 @@ pub struct WasmShardHost {
     /// groups taken), before it writes them.
     #[cfg(test)]
     flush_hook: Mutex<Option<FlushHook>>,
+    /// Told when a stop starts ("entered", before the own lock) and when
+    /// it finds the create lock held ("create lock held"), for tests.
+    #[cfg(test)]
+    stop_steps: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1771,6 +1775,8 @@ impl WasmShardHost {
             periodic_flush_off: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             flush_hook: Mutex::new(None),
+            #[cfg(test)]
+            stop_steps: Mutex::new(None),
             kinds: kinds
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
@@ -2161,11 +2167,26 @@ impl WasmShardHost {
         let Some(c) = self.cluster.get() else {
             return self.registry.get(id).is_some() && self.stop_local(id);
         };
+        #[cfg(test)]
+        let step = |name: &'static str| {
+            if let Some(tx) = self.stop_steps.lock().unwrap().as_ref() {
+                let _ = tx.send(name);
+            }
+        };
+        #[cfg(test)]
+        step("entered");
         let own = c.own_lock.lock().unwrap();
         // Read under the create lock, which the sweep holds from removing a
         // stopped shard until it reserves its id: an id with its last
         // writes pending is either registered or ending here.
         let running = {
+            #[cfg(test)]
+            if matches!(
+                self.create_lock.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ) {
+                step("create lock held");
+            }
             let _guard = self.create_lock.lock().unwrap();
             self.registry.get(id).is_some()
         };
