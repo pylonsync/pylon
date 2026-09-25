@@ -531,7 +531,9 @@ jobs:
       - name: Directory tests against Postgres
         env:
           PYLON_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
-        run: cargo test -p pylon-runtime --lib shard_cluster
+        run: |
+          cargo test -p pylon-runtime --lib shard_cluster
+          cargo test -p pylon-runtime --lib shard_wasm::lease_tests
       - name: Two machines
         env:
           PYLON_SMOKE_PG_URL: postgres://postgres:postgres@localhost:5432/postgres
