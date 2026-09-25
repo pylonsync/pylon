@@ -153,6 +153,10 @@ pub struct Replicator {
     baselines: HashMap<u64, Baseline>,
     all_ids: Vec<EntityId>,
     candidates: Vec<Candidate>,
+    /// The store the baselines describe. The game can swap in another
+    /// (a clone for a rollback, a new one for a round); its sequence
+    /// numbers mean nothing against these baselines.
+    store_id: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -176,6 +180,11 @@ impl Replicator {
 
     /// Call once per tick before `frame`.
     pub fn begin_tick(&mut self, store: &Replicated) {
+        if self.store_id != Some(store.store_id()) {
+            // Every subscription gets a full frame of the new store.
+            self.baselines.clear();
+            self.store_id = Some(store.store_id());
+        }
         self.all_ids.clear();
         self.all_ids.extend(store.iter().map(|(id, _)| id));
     }
@@ -554,6 +563,42 @@ mod tests {
         assert_eq!((s.despawned, s.spawned), (vec![7], vec![7]));
         assert!(table.entities[&7].components.is_empty());
         assert_eq!(table.pos(7), Some([5.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_swapped_store_is_sent_in_full() {
+        let config = ReplicationConfig::default();
+        let mut store = Replicated::new();
+        store.spawn(1, [0.0; 3]);
+        store.set_component(1, 1, b"template");
+        let template = store.clone();
+        let mut rep = Replicator::new();
+        let mut table = ReplicaTable::new();
+        for tick in 1..=5u64 {
+            store.set_pos(1, [tick as f32, 0.0, 0.0]);
+            store.set_component(1, 1, &[tick as u8]);
+            rep.begin_tick(&store);
+            table
+                .apply(&rep.frame(&store, &config, tick, input(1, None)).bytes)
+                .unwrap();
+        }
+        // A rollback to the template: same ids, older sequence numbers.
+        store = template.clone();
+        rep.begin_tick(&store);
+        let s = table
+            .apply(&rep.frame(&store, &config, 6, input(1, None)).bytes)
+            .unwrap();
+        assert!(s.full);
+        assert_matches(&table, &store, &[1], config.precision);
+        // A new round in a new store: its counter starts again at zero.
+        store = Replicated::new();
+        store.spawn(1, [9.0, 0.0, 0.0]);
+        rep.begin_tick(&store);
+        let s = table
+            .apply(&rep.frame(&store, &config, 7, input(1, None)).bytes)
+            .unwrap();
+        assert!(s.full);
+        assert_matches(&table, &store, &[1], config.precision);
     }
 
     #[test]

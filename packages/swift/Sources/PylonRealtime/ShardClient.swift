@@ -162,7 +162,8 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     private var codec: UInt8?
     private var stateContinuation: AsyncStream<ConnectionState>.Continuation?
     private var clientSeq: UInt64 = 0
-    private var reconnectAttempts = 0
+    /// Reconnects since the last frame that applied; sets the next delay.
+    private(set) var reconnectAttempts = 0
     private var running = false
 
     public enum ConnectionState: Sendable {
@@ -294,10 +295,14 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     }
 
     private func scheduleReconnect() async {
-        reconnectAttempts += 1
+        noteReconnect()
         let delay = exponentialBackoff(attempts: reconnectAttempts, baseDelay: config.reconnectBaseDelay, maxDelay: 10.0)
         try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         await openSocket()
+    }
+
+    func noteReconnect() {
+        reconnectAttempts += 1
     }
 
     private func deriveURL() -> URL {
@@ -321,7 +326,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         return components.url ?? config.baseURL
     }
 
-    private func handleFrame(_ data: Data) {
+    func handleFrame(_ data: Data) {
         guard let frame = try? ShardWire.parse(data) else { return }
         if frame.kind == ShardWire.Kind.replication.rawValue {
             do {

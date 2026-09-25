@@ -66,10 +66,18 @@ pub struct Component {
     pub seq: u64,
 }
 
-/// Memory an entity costs beyond its components, for limits.
-const ENTITY_COST: usize = 64;
-/// Memory a component entry (present or removed) costs beyond its bytes.
-const COMPONENT_COST: usize = 48;
+// Heap an entity and its component entries take beyond the component
+// bytes, for limits. Measured on 64-bit targets (see the heap test in
+// tests/cost.rs): an entry in the store's map, the first leaf of an
+// entity's component map, one entry in that map, and the allocation of a
+// component's bytes.
+/// An entity's entry in the store's map.
+const ENTITY_COST: usize = 160;
+/// The first node of an entity's component map, allocated with its first
+/// component.
+const COMPONENT_MAP_COST: usize = 400;
+/// A component entry (present or removed), with its bytes' allocation.
+const COMPONENT_COST: usize = 64;
 
 /// The replicated state of a simulation.
 #[derive(Debug)]
@@ -227,11 +235,7 @@ impl Replicated {
         let Some(e) = self.entities.remove(&id) else {
             return false;
         };
-        self.cost -= ENTITY_COST
-            + e.components
-                .values()
-                .map(|c| COMPONENT_COST + c.bytes.as_ref().map_or(0, Vec::len))
-                .sum::<usize>();
+        self.cost -= entity_cost(&e);
         self.bump();
         if let Some(log) = &mut self.log {
             log.push(op::DESPAWN);
@@ -271,6 +275,9 @@ impl Replicated {
         }
         let seq = self.bump();
         let e = self.entities.get_mut(&id).expect("checked above");
+        if e.components.is_empty() {
+            self.cost += COMPONENT_MAP_COST;
+        }
         let old = e.components.insert(
             component,
             Component {
@@ -363,8 +370,9 @@ impl Replicated {
     }
 
     /// `apply_changes` for a log from an untrusted source: stops with an
-    /// error at the first change that takes the store past `max_entities`
-    /// or `max_cost` (see [`Replicated::cost`]), before the rest applies.
+    /// error at the first change that would take the store past
+    /// `max_entities` or `max_cost` (see [`Replicated::cost`]). That change
+    /// and the rest do not apply.
     pub fn apply_changes_limited(
         &mut self,
         mut bytes: &[u8],
@@ -372,19 +380,23 @@ impl Replicated {
         max_cost: usize,
     ) -> Result<(), ChangeError> {
         let err = |m: &str| ChangeError(m.to_string());
+        let over = |entities: usize, cost: usize| {
+            ChangeError(format!(
+                "the change takes the store past its limit ({entities} entities, {cost} bytes; at most {max_entities} and {max_cost})"
+            ))
+        };
         while let Some((&tag, rest)) = bytes.split_first() {
-            if self.entities.len() > max_entities || self.cost > max_cost {
-                return Err(ChangeError(format!(
-                    "the store passed its limit ({} entities, {} bytes; at most {max_entities} and {max_cost})",
-                    self.entities.len(),
-                    self.cost
-                )));
-            }
             bytes = rest;
             let id = varint::read_u64(&mut bytes).ok_or_else(|| err("truncated entity id"))?;
             match tag {
                 op::SPAWN => {
                     let pos = read_pos(&mut bytes).ok_or_else(|| err("truncated position"))?;
+                    let (entities, cost) = (self.entities.len() + 1, self.cost + ENTITY_COST);
+                    if !self.entities.contains_key(&id)
+                        && (entities > max_entities || cost > max_cost)
+                    {
+                        return Err(over(entities, cost));
+                    }
                     if !self.spawn(id, pos) {
                         return Err(ChangeError(format!("spawn of existing entity {id}")));
                     }
@@ -411,9 +423,21 @@ impl Replicated {
                     }
                     let (value, rest) = bytes.split_at(len);
                     bytes = rest;
-                    if !self.set_component(id, cid, value) {
+                    let Some(e) = self.entities.get(&id) else {
                         return Err(ChangeError(format!("component on missing entity {id}")));
+                    };
+                    let added = match e.components.get(&cid) {
+                        Some(c) => len.saturating_sub(c.bytes.as_ref().map_or(0, Vec::len)),
+                        None if e.components.is_empty() => {
+                            COMPONENT_MAP_COST + COMPONENT_COST + len
+                        }
+                        None => COMPONENT_COST + len,
+                    };
+                    let cost = self.cost.saturating_add(added);
+                    if cost > max_cost {
+                        return Err(over(self.entities.len(), cost));
                     }
+                    self.set_component(id, cid, value);
                 }
                 op::REMOVE => {
                     let (&cid, rest) = bytes
@@ -425,15 +449,23 @@ impl Replicated {
                 other => return Err(ChangeError(format!("unknown change tag {other}"))),
             }
         }
-        if self.entities.len() > max_entities || self.cost > max_cost {
-            return Err(ChangeError(format!(
-                "the store passed its limit ({} entities, {} bytes; at most {max_entities} and {max_cost})",
-                self.entities.len(),
-                self.cost
-            )));
-        }
         Ok(())
     }
+}
+
+/// What an entity adds to [`Replicated::cost`].
+fn entity_cost(e: &Entity) -> usize {
+    let map = if e.components.is_empty() {
+        0
+    } else {
+        COMPONENT_MAP_COST
+    };
+    ENTITY_COST
+        + map
+        + e.components
+            .values()
+            .map(|c| COMPONENT_COST + c.bytes.as_ref().map_or(0, Vec::len))
+            .sum::<usize>()
 }
 
 fn write_pos(out: &mut Vec<u8>, pos: [f32; 3]) {
@@ -522,17 +554,18 @@ mod tests {
         let mut r = Replicated::new();
         r.spawn(1, [0.0; 3]);
         assert_eq!(r.cost(), ENTITY_COST);
+        let base = ENTITY_COST + COMPONENT_MAP_COST;
         r.set_component(1, 1, &[0; 10]);
         r.set_component(1, 2, &[0; 5]);
-        assert_eq!(r.cost(), ENTITY_COST + 2 * COMPONENT_COST + 15);
+        assert_eq!(r.cost(), base + 2 * COMPONENT_COST + 15);
         r.set_component(1, 1, &[0; 3]);
-        assert_eq!(r.cost(), ENTITY_COST + 2 * COMPONENT_COST + 8);
+        assert_eq!(r.cost(), base + 2 * COMPONENT_COST + 8);
         // A removed component is a tombstone: its entry still costs.
         r.remove_component(1, 2);
-        assert_eq!(r.cost(), ENTITY_COST + 2 * COMPONENT_COST + 3);
+        assert_eq!(r.cost(), base + 2 * COMPONENT_COST + 3);
         // Empty components cost too.
         r.set_component(1, 9, &[]);
-        assert_eq!(r.cost(), ENTITY_COST + 3 * COMPONENT_COST + 3);
+        assert_eq!(r.cost(), base + 3 * COMPONENT_COST + 3);
         r.despawn(1);
         assert_eq!(r.cost(), 0);
     }
@@ -547,13 +580,33 @@ mod tests {
         let log = source.take_changes();
         let mut host = Replicated::new();
         assert!(host.apply_changes_limited(&log, 10, usize::MAX).is_err());
-        // It stopped right past the limit, not after the whole log.
-        assert_eq!(host.len(), 11);
+        // It stopped at the limit, not after the whole log.
+        assert_eq!(host.len(), 10);
         let mut host = Replicated::new();
         assert!(host
             .apply_changes_limited(&log, usize::MAX, 20 * ENTITY_COST)
             .is_err());
-        assert_eq!(host.len(), 21);
+        assert_eq!(host.len(), 20);
+        assert!(host.cost() <= 20 * ENTITY_COST);
+    }
+
+    #[test]
+    fn a_limited_apply_refuses_one_large_component_before_it_applies() {
+        let mut source = Replicated::new();
+        source.record_changes(true);
+        source.spawn(1, [0.0; 3]);
+        source.set_component(1, 1, &[7; 100]);
+        source.set_component(1, 1, &vec![7; 1 << 20]);
+        let log = source.take_changes();
+        let limit = ENTITY_COST + COMPONENT_MAP_COST + COMPONENT_COST + 1000;
+        let mut host = Replicated::new();
+        assert!(host.apply_changes_limited(&log, usize::MAX, limit).is_err());
+        // The megabyte never landed; the store holds the 100 bytes.
+        assert_eq!(
+            host.get(1).unwrap().component(1).map(<[u8]>::len),
+            Some(100)
+        );
+        assert!(host.cost() <= limit);
     }
 
     #[test]

@@ -981,11 +981,13 @@ impl SimState for WasmSim {
             mirror.clear();
         }
         // The copy lives in host memory, outside the module's cap: apply
-        // under limits, stopping at the change that passes one.
+        // under limits, refusing the change that would pass one. A store
+        // that fits in the module's 32-bit memory takes up to about twice
+        // that on a 64-bit host (pointers and map nodes double).
         if let Err(e) = mirror.apply_changes_limited(
             &out[9..],
             self.limits.max_replicated_entities,
-            self.limits.memory_bytes,
+            self.limits.memory_bytes.saturating_mul(2),
         ) {
             inner.fail(&format!(
                 "pylon_replication sent a change log the host refused: {e}"

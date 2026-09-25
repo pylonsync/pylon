@@ -25,14 +25,18 @@ class FakeWebSocket {
   send() {}
 }
 
-function badReplicationFrame(): ArrayBuffer {
-  const buf = new ArrayBuffer(SHARD_HEADER_LEN + 6);
+function replicationFrame(version: number): ArrayBuffer {
+  const buf = new ArrayBuffer(SHARD_HEADER_LEN + 9);
   const view = new DataView(buf);
   view.setUint8(0, ShardFrameKind.Replication);
   view.setUint8(1, ShardCodec.Replication);
-  new Uint8Array(buf, SHARD_HEADER_LEN).set([2, 0, 0, 0, 0x80, 0x3f]); // version 2
+  // FULL, precision 0.01, no despawns, spawns, or updates.
+  new Uint8Array(buf, SHARD_HEADER_LEN).set([version, 1, 0x0a, 0xd7, 0x23, 0x3c, 0, 0, 0]);
   return buf;
 }
+
+/** Version 2: the client can never apply it. */
+const badReplicationFrame = () => replicationFrame(2);
 
 const realWebSocket = globalThis.WebSocket;
 const realSetTimeout = globalThis.setTimeout;
@@ -65,4 +69,25 @@ test("a frame that always fails backs off instead of reconnecting at the shortes
   client.close();
   expect(delays.slice(0, 5)).toEqual([500, 1000, 2000, 4000, 8000]);
   expect(errors.some((e) => e.message.includes("version 2"))).toBe(true);
+});
+
+test("a frame that applies resets the backoff", async () => {
+  sockets.length = 0;
+  delays.length = 0;
+  const client = connectShard("zone", { subscriberId: "p1", baseUrl: "h" });
+  for (let i = 0; i < 3; i++) {
+    const ws = sockets[i];
+    ws.readyState = 1;
+    ws.onopen?.();
+    ws.onmessage?.({ data: badReplicationFrame() });
+    await new Promise((r) => realSetTimeout(r, 0));
+  }
+  const ws = sockets[3];
+  ws.readyState = 1;
+  ws.onopen?.();
+  ws.onmessage?.({ data: replicationFrame(1) });
+  ws.close();
+  await new Promise((r) => realSetTimeout(r, 0));
+  client.close();
+  expect(delays).toEqual([500, 1000, 2000, 500]);
 });

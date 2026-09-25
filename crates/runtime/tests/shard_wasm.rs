@@ -922,5 +922,5 @@ fn a_replicated_store_past_its_limit_stops_the_shard() {
     s.run_tick();
     assert!(!s.is_running());
     let failure = s.with_state(|sim| sim.failure()).unwrap();
-    assert!(failure.contains("passed its limit"), "{failure}");
+    assert!(failure.contains("past its limit"), "{failure}");
 }
