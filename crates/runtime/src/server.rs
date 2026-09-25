@@ -8731,8 +8731,19 @@ fn start_server(
     // design and would always hit the drain_timeout. If they outlive
     // the cap, they get killed alongside the process; that's
     // acceptable for a graceful-shutdown signal vs. SIGKILL.
+    // Jobs in the shared Postgres queue outlive this process (another
+    // machine, or this one after the restart, runs them), and a job
+    // scheduled for later is pending for good: only the in-memory queue's
+    // jobs are waited for.
+    let pending_here = || {
+        if job_queue.is_distributed() {
+            0
+        } else {
+            job_queue.stats().pending
+        }
+    };
     while start.elapsed() < drain_timeout {
-        let pending_jobs = job_queue.stats().pending;
+        let pending_jobs = pending_here();
         let in_flight_http = dispatch_limiter.in_flight();
         if pending_jobs == 0 && in_flight_http == 0 {
             break;
@@ -8742,7 +8753,7 @@ fn start_server(
 
     let elapsed = start.elapsed();
     let final_in_flight = dispatch_limiter.in_flight();
-    let final_pending = job_queue.stats().pending;
+    let final_pending = pending_here();
     let final_streams = stream_limiter
         .in_flight
         .load(std::sync::atomic::Ordering::Acquire);

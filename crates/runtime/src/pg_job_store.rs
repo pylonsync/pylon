@@ -419,13 +419,23 @@ fn now_secs_i64() -> i64 {
 }
 
 fn count_to_usize(value: i64) -> usize {
-    value.max(0).min(usize::MAX as i64) as usize
+    usize::try_from(value.max(0)).unwrap_or(usize::MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use pylon_http::DataError;
+
+    /// `usize::MAX as i64` is -1: a clamp against it turned every count
+    /// into usize::MAX.
+    #[test]
+    fn counts_convert_as_counts() {
+        assert_eq!(count_to_usize(0), 0);
+        assert_eq!(count_to_usize(3), 3);
+        assert_eq!(count_to_usize(-1), 0);
+        assert_eq!(count_to_usize(i64::MAX), i64::MAX as usize);
+    }
     use pylon_kernel::AppManifest;
     use pylon_storage::pg_datastore::PostgresDataStore;
     use std::time::Duration;
