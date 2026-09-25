@@ -490,11 +490,17 @@ impl<S: SimState> Shard<S> {
     }
 
     fn end(&self) {
-        self.running.store(false, Ordering::Release);
-        for sub in self.subscribers.lock().unwrap().iter() {
-            if let Some(q) = sub.queue() {
-                q.close();
-            }
+        // Flip `running` under the subscriber lock: `add_subscriber` checks
+        // it under the same lock, so no subscription is added after the
+        // queues below are collected. Close them after releasing the lock
+        // (a queue's notifier wakes a transport).
+        let queues: Vec<Arc<OutboundQueue>> = {
+            let subs = self.subscribers.lock().unwrap();
+            self.running.store(false, Ordering::Release);
+            subs.iter().filter_map(|s| s.queue().cloned()).collect()
+        };
+        for q in queues {
+            q.close();
         }
     }
 
@@ -555,10 +561,11 @@ impl<S: SimState> Shard<S> {
     /// by accident, this becomes an auth bypass on shard state.
     #[doc(hidden)]
     pub fn add_subscriber(&self, sub: Subscriber<S::Snapshot>) -> Result<(), ShardError> {
+        let mut subs = self.subscribers.lock().unwrap();
+        // Under the lock `end` flips `running` in; see there.
         if !self.is_running() {
             return Err(ShardError::Stopped);
         }
-        let mut subs = self.subscribers.lock().unwrap();
         if self.config.max_subscribers > 0 && subs.len() >= self.config.max_subscribers {
             return Err(ShardError::Full);
         }
@@ -628,59 +635,65 @@ impl<S: SimState> Shard<S> {
     /// removing its own connection). Other connections with the same
     /// subscriber id stay.
     pub fn remove_queued_subscriber(&self, queue: &Arc<OutboundQueue>) -> bool {
-        let removed_id = {
+        // Lock order: inputs, then subscribers (as `drain_inputs`), then
+        // acks. Holding both while checking for other connections and
+        // forgetting the id keeps a join with the same id from landing in
+        // between and losing its ack and rate-limit state.
+        let removed = {
+            let mut inputs = self.inputs.lock().unwrap();
             let mut subs = self.subscribers.lock().unwrap();
             let idx = subs
                 .iter()
                 .position(|s| s.queue().is_some_and(|q| Arc::ptr_eq(q, queue)));
-            idx.map(|i| subs.remove(i).id().clone())
+            match idx {
+                Some(i) => {
+                    let id = subs.remove(i).id().clone();
+                    if !subs.iter().any(|s| s.id() == &id) {
+                        self.forget_locked(&mut inputs, &id);
+                    }
+                    true
+                }
+                None => false,
+            }
         };
         queue.close();
-        let Some(id) = removed_id else {
-            return false;
-        };
-        let still_connected = self
-            .subscribers
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|s| s.id() == &id);
-        if !still_connected {
-            self.forget_subscriber(&id);
-        }
-        true
+        removed
     }
 
     /// Remove every subscription with this subscriber id.
     pub fn remove_subscriber(&self, id: &SubscriberId) -> bool {
-        let removed = {
+        let (removed, queues) = {
+            let mut inputs = self.inputs.lock().unwrap();
             let mut subs = self.subscribers.lock().unwrap();
+            let mut queues = Vec::new();
             let before = subs.len();
             subs.retain(|s| {
                 if s.id() == id {
-                    // Wake the transport's writer so it ends too.
-                    if let Some(q) = s.queue() {
-                        q.close();
-                    }
+                    queues.extend(s.queue().cloned());
                     false
                 } else {
                     true
                 }
             });
-            before != subs.len()
+            let removed = before != subs.len();
+            if removed {
+                self.forget_locked(&mut inputs, id);
+            }
+            (removed, queues)
         };
-        if removed {
-            self.forget_subscriber(id);
+        // Wake the transports' writers so they end too.
+        for q in queues {
+            q.close();
         }
         removed
     }
 
-    /// Drop per-id state once no connection uses the id.
-    fn forget_subscriber(&self, id: &SubscriberId) {
+    /// Drop per-id state once no connection uses the id. The caller holds
+    /// the inputs and subscribers locks.
+    fn forget_locked(&self, inputs: &mut InputQueue<S::Input>, id: &SubscriberId) {
         self.acks.lock().unwrap().remove(id);
         // Keep the entry while inputs from this subscriber are still
         // queued; the tick removes it once they drain.
-        let mut inputs = self.inputs.lock().unwrap();
         if inputs.per_subscriber.get(id).is_some_and(|e| e.queued == 0) {
             inputs.per_subscriber.remove(id);
         }

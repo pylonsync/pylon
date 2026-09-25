@@ -91,6 +91,13 @@ impl SpatialGrid {
         }
     }
 
+    /// The cell index of a coordinate. Insertion and lookup both use this
+    /// (f64, so they agree for any cell size). `as i32` saturates, so
+    /// coordinates far outside the grid clamp.
+    fn cell_of(&self, v: f64) -> i32 {
+        (v / self.cell_size as f64).floor() as i32
+    }
+
     /// Replace the grid's contents with `entities`. Entities with a
     /// non-finite position are left out, and of two with one id the first
     /// is kept. The grid holds them sorted by id, so a scan in index order
@@ -108,10 +115,7 @@ impl SpatialGrid {
         self.entities.sort_by_key(|e| e.id);
         self.entities.dedup_by_key(|e| e.id);
         for (idx, e) in self.entities.iter().enumerate() {
-            let cell = (
-                (e.x / self.cell_size).floor() as i32,
-                (e.y / self.cell_size).floor() as i32,
-            );
+            let cell = (self.cell_of(e.x as f64), self.cell_of(e.y as f64));
             self.cells.entry(cell).or_default().push(idx as u32);
         }
         // Drop cells that stayed empty, and trim cells whose buffer is far
@@ -147,11 +151,8 @@ impl SpatialGrid {
         if !(x.is_finite() && y.is_finite() && r.is_finite()) || r < 0.0 {
             return;
         }
-        // `as i32` saturates, so bounds far outside the grid clamp.
-        let cell = self.cell_size as f64;
-        let c = |v: f64| (v / cell).floor() as i32;
-        let (x0, y0) = (c(x - r), c(y - r));
-        let (x1, y1) = (c(x + r), c(y + r));
+        let (x0, y0) = (self.cell_of(x - r), self.cell_of(y - r));
+        let (x1, y1) = (self.cell_of(x + r), self.cell_of(y + r));
         // A radius far larger than the world would walk millions of empty
         // cells; scan the entities directly instead.
         let span = (x1 as i128 - x0 as i128 + 1) * (y1 as i128 - y0 as i128 + 1);
@@ -482,6 +483,19 @@ mod tests {
             g.rebuild(&crowd);
         }
         assert_eq!(g.cells.len(), 1);
+    }
+
+    #[test]
+    fn an_entity_is_visible_at_its_own_position_with_a_fractional_cell() {
+        // 1.0 / 0.1f32 is 9.99999 in f32 and 10.000000149 in f64: insertion
+        // and lookup must use the same arithmetic.
+        let mut m: InterestManager<String> = InterestManager::new(InterestConfig {
+            cell_size: 0.1,
+            margin: 0.0,
+        });
+        m.rebuild(&[e(1, 1.0, 0.0), e(2, 0.3, 0.7)]);
+        assert_eq!(m.update(&sid("a"), area(1.0, 0.0, 0.0), |_| {}).visible, vec![1]);
+        assert_eq!(m.update(&sid("b"), area(0.3, 0.7, 0.0), |_| {}).visible, vec![2]);
     }
 
     #[test]

@@ -324,17 +324,29 @@ impl Histogram {
         self.min = Some(self.min.map_or(v, |m| m.min(v)));
     }
 
-    pub fn merge(&mut self, other: &Histogram) {
+    /// Add `other`'s values. Fails, leaving `self` unchanged, when the
+    /// total count would overflow.
+    pub fn merge(&mut self, other: &Histogram) -> Result<(), String> {
+        let count = self
+            .count
+            .checked_add(other.count)
+            .ok_or("merged histogram holds more than 2^64 values")?;
         for (b, c) in &other.buckets {
             let slot = self.buckets.entry(*b).or_insert(0);
-            *slot = slot.saturating_add(*c);
+            // Each bucket is at most the total, which did not overflow.
+            *slot += c;
         }
-        self.count = self.count.saturating_add(other.count);
-        self.max = self.max.max(other.max);
-        self.min = match (self.min, other.min) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+        // An empty side is neutral. A non-empty side without a minimum (a
+        // report from before minimums were stored) makes it unknown.
+        self.min = match (self.count, self.min, other.count, other.min) {
+            (0, _, _, m) => m,
+            (_, m, 0, _) => m,
+            (_, Some(a), _, Some(b)) => Some(a.min(b)),
+            _ => None,
         };
+        self.count = count;
+        self.max = self.max.max(other.max);
+        Ok(())
     }
 
     /// The value at quantile `q` (0..=1), within the bucket precision.
@@ -409,7 +421,7 @@ pub struct RunInfo {
 }
 
 impl Report {
-    pub fn merge(&mut self, other: &Report) {
+    pub fn merge(&mut self, other: &Report) -> Result<(), String> {
         self.runs.extend(other.runs.iter().cloned());
         self.bots += other.bots;
         self.connected += other.connected;
@@ -427,10 +439,11 @@ impl Report {
             *self.rejections.entry(k.clone()).or_insert(0) += v;
         }
         self.decode_errors += other.decode_errors;
-        self.snapshot_interval_us.merge(&other.snapshot_interval_us);
-        self.ack_latency_us.merge(&other.ack_latency_us);
-        self.tick_rate_mhz.merge(&other.tick_rate_mhz);
-        self.bytes_per_sec.merge(&other.bytes_per_sec);
+        self.snapshot_interval_us.merge(&other.snapshot_interval_us)?;
+        self.ack_latency_us.merge(&other.ack_latency_us)?;
+        self.tick_rate_mhz.merge(&other.tick_rate_mhz)?;
+        self.bytes_per_sec.merge(&other.bytes_per_sec)?;
+        Ok(())
     }
 
     pub fn summary(&self) -> serde_json::Value {
@@ -719,8 +732,9 @@ impl BotStats {
             *r.rejections.entry(k).or_insert(0) += v;
         }
         r.decode_errors += self.decode_errors;
-        r.snapshot_interval_us.merge(&self.snapshot_interval_us);
-        r.ack_latency_us.merge(&self.ack_latency_us);
+        // A bot's own counts cannot overflow the run's total.
+        let _ = r.snapshot_interval_us.merge(&self.snapshot_interval_us);
+        let _ = r.ack_latency_us.merge(&self.ack_latency_us);
         let secs = self.connected_for.as_secs_f64();
         if secs > 0.0 {
             r.tick_rate_mhz
@@ -999,7 +1013,10 @@ fn run_merge(files: &[&str], json_mode: bool) -> ExitCode {
                         return ExitCode::Error;
                     }
                 }
-                total.merge(&r)
+                if let Err(e) = total.merge(&r) {
+                    output::print_error(&format!("{f}: {e}"));
+                    return ExitCode::Error;
+                }
             }
             Err(e) => {
                 output::print_error(&format!("{f}: {e}"));
@@ -1062,7 +1079,7 @@ mod tests {
             b.record(v * 13 + 1);
             both.record(v * 13 + 1);
         }
-        a.merge(&b);
+        a.merge(&b).unwrap();
         assert_eq!(a, both);
     }
 
@@ -1077,6 +1094,41 @@ mod tests {
         assert_eq!(big.quantile(0.5), Some(u64::MAX));
         assert!(Histogram::mid_of(Histogram::max_bucket()) > u64::MAX / 2);
         assert!(big.validate().is_ok());
+    }
+
+    #[test]
+    fn merging_an_old_report_without_a_minimum_keeps_the_minimum_unknown() {
+        let old = Histogram {
+            buckets: [(Histogram::bucket_of(1), 1)].into_iter().collect(),
+            count: 1,
+            max: 1,
+            min: None,
+        };
+        let mut new = Histogram::default();
+        new.record(10);
+        new.merge(&old).unwrap();
+        assert_eq!(new.min, None);
+        assert_eq!(new.quantile(0.0), Some(1));
+        // An empty histogram is neutral.
+        let mut empty = Histogram::default();
+        empty.merge(&Histogram::default()).unwrap();
+        let mut one = Histogram::default();
+        one.record(5);
+        empty.merge(&one).unwrap();
+        assert_eq!(empty.min, Some(5));
+    }
+
+    #[test]
+    fn a_merge_that_would_overflow_the_count_is_refused() {
+        let big = |bucket: u32| Histogram {
+            buckets: [(bucket, 10_000_000_000_000_000_000)].into_iter().collect(),
+            count: 10_000_000_000_000_000_000,
+            max: 2,
+            min: Some(1),
+        };
+        let mut a = big(1);
+        assert!(a.merge(&big(2)).is_err());
+        assert_eq!(a, big(1));
     }
 
     #[test]
