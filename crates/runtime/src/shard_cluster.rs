@@ -322,20 +322,28 @@ impl PgShardDirectory {
 
     /// Renew this machine's row under lease `epoch`. Times come from the
     /// database clock, so machines with skewed clocks agree on who is alive.
-    pub fn heartbeat(&self, me: &MachineConfig, epoch: i64) -> Result<(), String> {
+    ///
+    /// False when another process holds the id under another epoch and is
+    /// still live: a second process with the same id waits until the first
+    /// leaves or goes silent for [`DEAD_AFTER`], so it never takes shards
+    /// the first is still running.
+    pub fn heartbeat(&self, me: &MachineConfig, epoch: i64) -> Result<bool, String> {
         let capacity = me.capacity as i32;
+        let window = DEAD_AFTER.as_millis() as i64;
         self.pool.with_client(|c| {
-            c.execute(
-                "INSERT INTO _pylon_shard_machines
+            let n = c.execute(
+                "INSERT INTO _pylon_shard_machines AS m
                     (machine_id, address, fly_instance, capacity, heartbeat_at, epoch)
                  VALUES ($1, $2, $3, $4, (extract(epoch from clock_timestamp()) * 1000)::bigint, $5)
                  ON CONFLICT (machine_id) DO UPDATE SET
                     address = EXCLUDED.address, fly_instance = EXCLUDED.fly_instance,
                     capacity = EXCLUDED.capacity, heartbeat_at = EXCLUDED.heartbeat_at,
-                    epoch = EXCLUDED.epoch",
-                &[&me.id, &me.address, &me.fly_instance, &capacity, &epoch],
+                    epoch = EXCLUDED.epoch
+                 WHERE m.epoch = EXCLUDED.epoch
+                    OR m.heartbeat_at <= (extract(epoch from clock_timestamp()) * 1000)::bigint - $6",
+                &[&me.id, &me.address, &me.fly_instance, &capacity, &epoch, &window],
             )?;
-            Ok(())
+            Ok(n == 1)
         })
     }
 
@@ -568,13 +576,14 @@ impl PgShardDirectory {
         })
     }
 
-    /// Remove this machine's row: it is shutting down, and its shards should
-    /// move now rather than after [`DEAD_AFTER`].
-    pub fn leave(&self, machine_id: &str) -> Result<(), String> {
+    /// Remove this machine's row under `epoch`: it is shutting down, and
+    /// its shards should move now rather than after [`DEAD_AFTER`]. A row a
+    /// newer process wrote under the same id stays.
+    pub fn leave(&self, machine_id: &str, epoch: i64) -> Result<(), String> {
         self.pool.with_client(|c| {
             c.execute(
-                "DELETE FROM _pylon_shard_machines WHERE machine_id = $1",
-                &[&machine_id],
+                "DELETE FROM _pylon_shard_machines WHERE machine_id = $1 AND epoch = $2",
+                &[&machine_id, &epoch],
             )?;
             Ok(())
         })
@@ -999,8 +1008,8 @@ mod tests {
         let run = pylon_cluster::new_instance_id();
         let (a, b) = (format!("a-{run}"), format!("b-{run}"));
         let shard = format!("s-{run}");
-        dir.heartbeat(&me(&a), 7).unwrap();
-        dir.heartbeat(&me(&b), 1).unwrap();
+        assert!(dir.heartbeat(&me(&a), 7).unwrap());
+        assert!(dir.heartbeat(&me(&b), 1).unwrap());
         let orphan = |dir: &PgShardDirectory| {
             dir.orphans()
                 .unwrap()
@@ -1037,9 +1046,18 @@ mod tests {
         assert_eq!(orphan(&dir), None);
         assert!(!dir.take_over(&p, &a, 7).unwrap());
 
-        // B restarts under the same id (a new epoch): its placement is an
-        // orphan at once, without waiting for B to go silent.
-        dir.heartbeat(&me(&b), 2).unwrap();
+        // A second process with B's id cannot take the id while B is live.
+        assert!(!dir.heartbeat(&me(&b), 2).unwrap());
+        assert_eq!(orphan(&dir), None);
+        // B left (or went silent): the new process takes the id under its
+        // own epoch, and B's placement is an orphan.
+        dir.leave(&b, 2).unwrap();
+        assert!(
+            dir.live_machines().unwrap().iter().any(|m| m.id == b),
+            "a leave under another epoch removes nothing"
+        );
+        dir.leave(&b, 1).unwrap();
+        assert!(dir.heartbeat(&me(&b), 2).unwrap());
         let o = orphan(&dir).expect("an orphan after the epoch changed");
         assert_eq!((o.machine_id.as_str(), o.epoch), (b.as_str(), 1));
         assert!(dir.take_over(&o, &a, 7).unwrap());
@@ -1069,8 +1087,8 @@ mod tests {
         assert_eq!(dir.placement(&shard).unwrap(), None);
         assert_eq!(dir.load_owned_state(&shard, &a, 7).unwrap(), None);
 
-        dir.leave(&a).unwrap();
-        dir.leave(&b).unwrap();
+        dir.leave(&a, 7).unwrap();
+        dir.leave(&b, 2).unwrap();
         assert!(!dir.live_machines().unwrap().iter().any(|m| m.id == a));
     }
 
@@ -1081,7 +1099,7 @@ mod tests {
         let run = pylon_cluster::new_instance_id();
         let (a, b) = (format!("a-{run}"), format!("b-{run}"));
         let shard = format!("s-{run}");
-        dir.heartbeat(&me(&a), 1).unwrap();
+        assert!(dir.heartbeat(&me(&a), 1).unwrap());
         let p = placement(&shard, "arena", &b);
         assert_eq!(dir.claim(&p, 10).unwrap(), Claim::Claimed);
         // B never heartbeat: its placement is an orphan.
@@ -1130,7 +1148,7 @@ mod tests {
         );
         assert!(!dir.save_state(&shard, &b, 1, b"late").unwrap());
         assert!(dir.release(&shard, &a, 1).unwrap());
-        dir.leave(&a).unwrap();
+        dir.leave(&a, 1).unwrap();
     }
 
     #[test]

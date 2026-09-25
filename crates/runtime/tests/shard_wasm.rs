@@ -13,7 +13,9 @@ use pylon_realtime::{
     DynShard, FrameKind, InputRejection, Shard, ShardAuth, ShardConfig, ShardError, ShardTicket,
     SnapshotFormat, SubscriberId,
 };
-use pylon_runtime::shard_wasm::{CreateError, WasmLimits, WasmShardHost, WasmShardKind, WasmSim};
+use pylon_runtime::shard_wasm::{
+    CreateError, LeaseClock, WasmLimits, WasmShardHost, WasmShardKind, WasmSim,
+};
 use serde_json::{json, Value};
 
 /// Build the guest examples once per test binary.
@@ -982,6 +984,56 @@ fn a_saved_shard_starts_again_where_it_was() {
     // Bad bytes are the module's refusal, not a crash.
     let err = k.restore("a1", &params, b"not json").err().unwrap();
     assert!(err.contains("pylon_restore refused"), "{err}");
+}
+
+#[test]
+fn a_lapsed_lease_refuses_every_call_and_interrupts_a_running_one() {
+    // A budget far longer than the test, so only the lease can stop a call.
+    let k = kind(
+        SnapshotFormat::Json,
+        WasmLimits {
+            budget: Duration::from_secs(60),
+            ..WasmLimits::default()
+        },
+    );
+    let clock = Arc::new(LeaseClock::default());
+    clock.set(Some(Instant::now() + Duration::from_secs(60)));
+    k.set_lease_clock(Arc::clone(&clock));
+
+    // A call running when the lease ends is interrupted.
+    let s = Shard::new(
+        "l1",
+        k.instantiate("l1", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    let _q = join(&s, "u1");
+    send(
+        &s,
+        "u1",
+        json!({ "input": { "burn": { "iters": u64::MAX } } }),
+    )
+    .unwrap();
+    let lapse = {
+        let clock = Arc::clone(&clock);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            clock.set(None);
+        })
+    };
+    let started = Instant::now();
+    s.run_tick();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    lapse.join().unwrap();
+    let why = s.with_state(|sim| sim.failure()).unwrap();
+    assert!(why.contains("lease"), "{why}");
+
+    // A new instance cannot even start while the lease has lapsed.
+    let err = k.instantiate("l2", &json!({})).err().unwrap();
+    assert!(err.contains("lease"), "{err}");
 }
 
 #[test]

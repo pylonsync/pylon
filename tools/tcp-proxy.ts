@@ -30,7 +30,7 @@ Bun.listen<Pair>({
           open(upstream) {
             upstream.data = { upstream: client, pending: [] };
             client.data.upstream = upstream;
-            for (const chunk of client.data.pending) upstream.write(chunk);
+            if (!dropping) for (const chunk of client.data.pending) upstream.write(chunk);
             client.data.pending = [];
           },
           data(upstream, chunk) {

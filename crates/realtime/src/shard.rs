@@ -528,9 +528,18 @@ impl<S: SimState> Shard<S> {
     }
 
     /// Stop the shard: no more ticks, and every subscriber's queue closes so
-    /// its transport disconnects and drops the shard.
+    /// its transport disconnects and drops the shard. A tick already running
+    /// finishes; see [`Shard::stop_and_wait`].
     pub fn stop(&self) {
         self.end();
+    }
+
+    /// [`Shard::stop`], then wait until a tick that was running has left the
+    /// state. After this returns the state never changes again, so a save
+    /// taken now is the last one.
+    pub fn stop_and_wait(&self) {
+        self.end();
+        drop(self.state.lock().unwrap());
     }
 
     fn end(&self) {
@@ -1145,6 +1154,10 @@ impl<S: SimState> Shard<S> {
         let mut phases = Phases::default();
         let (snapshots, shared, finished) = {
             let mut state = self.state.lock().unwrap();
+            // Stopped while this tick waited for the state: it never runs.
+            if !self.is_running() {
+                return;
+            }
             let started = Instant::now();
             let generations = self.generations.lock().unwrap();
             let mut acks = self.acks.lock().unwrap();
@@ -1389,6 +1402,65 @@ mod tests {
         fn is_finished(&self) -> bool {
             self.finished
         }
+    }
+
+    /// Counts ticks; each tick takes `tick_for`.
+    struct Slow {
+        ticks: Arc<AtomicU64>,
+        tick_for: Duration,
+    }
+
+    impl SimState for Slow {
+        type Input = i64;
+        type Snapshot = u64;
+        type Error = String;
+
+        fn apply_input(&mut self, _: &SubscriberId, _: i64, _: Instant) -> Result<(), String> {
+            Ok(())
+        }
+        fn tick(&mut self, _dt: Duration) {
+            std::thread::sleep(self.tick_for);
+            self.ticks.fetch_add(1, Ordering::SeqCst);
+        }
+        fn snapshot(&self) -> u64 {
+            self.ticks.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn stop_and_wait_returns_after_the_running_tick_and_no_tick_follows() {
+        let ticks = Arc::new(AtomicU64::new(0));
+        let shard = Shard::new(
+            "slow",
+            Slow {
+                ticks: Arc::clone(&ticks),
+                tick_for: Duration::from_millis(300),
+            },
+            ShardConfig::default(),
+        );
+        // One tick holds the state; a second waits for it.
+        let first = {
+            let shard = Arc::clone(&shard);
+            std::thread::spawn(move || shard.run_tick())
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        let second = {
+            let shard = Arc::clone(&shard);
+            std::thread::spawn(move || shard.run_tick())
+        };
+        std::thread::sleep(Duration::from_millis(50));
+
+        let started = Instant::now();
+        shard.stop_and_wait();
+        // It waited for the running tick...
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+        first.join().unwrap();
+        second.join().unwrap();
+        // ...and the waiting tick never ran.
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+        shard.run_tick();
+        assert_eq!(ticks.load(Ordering::SeqCst), 1);
     }
 
     #[test]

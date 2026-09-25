@@ -13,8 +13,9 @@
 #      moves a player; kills b; and finds the arena started on a from b's
 #      saved state, with the player where it was, after the client
 #      reconnects.
-#   4. restart: a is killed and started again under the same id; it starts
-#      the shards placed on it from saved state.
+#   4. restart: a is killed and started again under the same id; once the
+#      old process is silent for 10 s, it starts the shards placed on it
+#      from saved state.
 #   5. graceful leave: machine d stops (SIGTERM); its shard starts on a well
 #      before a dead machine's would.
 #   6. fencing: machine e reaches Postgres through a proxy; the proxy starts
@@ -47,6 +48,7 @@ PG_PROXY_PORT=55432
 TMP="$(mktemp -d -t pylon-shard-cluster.XXXXXX)"
 PIDS=()
 DB_NAME="pylon_shard_cluster_smoke"
+ADMIN_TOKEN="shard-cluster-smoke-admin-0123456789"
 
 cleanup() {
 	for pid in "${PIDS[@]}"; do
@@ -96,6 +98,7 @@ start() {
 		PYLON_SHARD_SAVE_SECS=1 \
 		PYLON_SHARD_WS_MAX_PER_IP=0 \
 		PYLON_CORS_ORIGIN="http://localhost:$port" \
+		PYLON_ADMIN_TOKEN="$ADMIN_TOKEN" \
 		"$@" \
 		"$PYLON" start app.ts --port "$port") >"$TMP/$log.log" 2>&1 &
 	PID=$!
@@ -184,7 +187,7 @@ wait "$PID_A" 2>/dev/null || true
 start a-restarted "$PORT_A" PYLON_REPLICA_ID=a FLY_MACHINE_ID=a
 PID_A=$PID
 up "$PORT_A"
-wait_log a-restarted.log "\[shard replay-check\] started (arena, from saved state)" 20
+wait_log a-restarted.log "\[shard replay-check\] started (arena, from saved state)" 30
 
 echo "→ 5. graceful leave: d stops and its shard moves at once"
 start d "$PORT_D" PYLON_REPLICA_ID=d
@@ -215,12 +218,22 @@ join "$PORT_A" "$TOKEN" '{"arena":"fence-check","machine":"e"}' >/dev/null ||
 sleep 2
 kill -USR1 "$PROXY_PID"
 wait_log e.log "\[shard fence-check\] stopped: this machine's lease on the shard directory lapsed" 15
-wait_log a-restarted.log "\[shard fence-check\] machine e is dead; starting it here" 25
-# e stopped its copy (the log line follows the stop) before a started one.
+wait_log a-restarted.log "\[shard fence-check\] took over from machine e" 25
+# e stopped its copy (the line follows the end of its last tick) before a
+# started one.
 stamp() { grep -- "$2" "$TMP/$1" | head -1 | sed -E 's/\x1b\[[0-9;]*m//g' | awk '{print $1}'; }
 FENCED=$(stamp e.log "\[shard fence-check\] stopped")
-ADOPTED=$(stamp a-restarted.log "\[shard fence-check\] machine e is dead")
+ADOPTED=$(stamp a-restarted.log "\[shard fence-check\] started")
 [[ "$FENCED" < "$ADOPTED" ]] || fail "e stopped its copy at $FENCED, after a started one at $ADOPTED"
+# a's copy runs: its tick count goes up.
+tick() {
+	curl -sf "http://127.0.0.1:$PORT_A/api/shards/fence-check" -H "Authorization: Bearer $ADMIN_TOKEN" |
+		sed -E 's/.*"tick":([0-9]+).*/\1/'
+}
+T1=$(tick) || fail "a does not report fence-check"
+sleep 1
+T2=$(tick) || fail "a does not report fence-check"
+((T2 > T1)) || fail "fence-check on a is not ticking ($T1, then $T2)"
 
 echo
 echo "✓ shards across machines: placement, routing, restarts, leaving, fencing, failover"

@@ -24,7 +24,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -137,6 +137,40 @@ pub struct WasmShardKind {
     linker: Linker<HostState>,
     config: ShardConfig,
     limits: WasmLimits,
+    /// The machine's lease, when the host runs in a cluster: set once, and
+    /// shared by every instance started afterwards.
+    lease: OnceLock<Arc<LeaseClock>>,
+}
+
+/// When this machine's lease on the shard directory ends, shared by the
+/// stores of the shards it runs. A guest call is refused once it has
+/// passed, and a call running at that moment is interrupted, so a shard
+/// never runs past the lease even if the fence thread is late.
+#[derive(Default)]
+pub struct LeaseClock {
+    /// Milliseconds after [`LeaseClock::base`]; 0 means no lease.
+    until_ms: AtomicU64,
+}
+
+impl LeaseClock {
+    fn base() -> Instant {
+        static BASE: OnceLock<Instant> = OnceLock::new();
+        *BASE.get_or_init(Instant::now)
+    }
+
+    fn millis(at: Instant) -> u64 {
+        at.saturating_duration_since(Self::base()).as_millis() as u64
+    }
+
+    /// The lease now ends at `until`, or has ended when None.
+    pub fn set(&self, until: Option<Instant>) {
+        let ms = until.map_or(0, |u| Self::millis(u).max(1));
+        self.until_ms.store(ms, Ordering::Release);
+    }
+
+    pub fn expired(&self) -> bool {
+        Self::millis(Instant::now()) >= self.until_ms.load(Ordering::Acquire)
+    }
 }
 
 const REQUIRED_EXPORTS: &[&str] = &[
@@ -226,11 +260,19 @@ impl WasmShardKind {
             linker,
             config,
             limits,
+            lease: OnceLock::new(),
         })
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Bind instances started from now on to a machine's lease. Set once
+    /// (the cluster host does it when it joins the directory); later calls
+    /// do nothing.
+    pub fn set_lease_clock(&self, clock: Arc<LeaseClock>) {
+        let _ = self.lease.set(clock);
     }
 
     pub fn config(&self) -> &ShardConfig {
@@ -295,6 +337,7 @@ impl WasmShardKind {
                 log_budget: LogBudget::new(self.limits.log_lines_per_sec),
                 last_error_line: None,
                 deadline: Instant::now() + self.limits.budget,
+                lease: self.lease.get().cloned(),
             },
         );
         store.limiter(|s| &mut s.limits);
@@ -302,11 +345,13 @@ impl WasmShardKind {
         // time: on a loaded machine the thread's 2 ms sleeps run long, and a
         // budget counted in epoch ticks would stretch with them.
         store.epoch_deadline_callback(|ctx| {
-            Ok(if Instant::now() >= ctx.data().deadline {
-                UpdateDeadline::Interrupt
-            } else {
-                UpdateDeadline::Continue(1)
-            })
+            Ok(
+                if Instant::now() >= ctx.data().deadline || ctx.data().lease_lapsed() {
+                    UpdateDeadline::Interrupt
+                } else {
+                    UpdateDeadline::Continue(1)
+                },
+            )
         });
         store.set_epoch_deadline(1);
 
@@ -439,6 +484,14 @@ struct HostState {
     last_error_line: Option<String>,
     /// When the current operation's time budget ends.
     deadline: Instant,
+    /// The machine's lease in a cluster.
+    lease: Option<Arc<LeaseClock>>,
+}
+
+impl HostState {
+    fn lease_lapsed(&self) -> bool {
+        self.lease.as_ref().is_some_and(|l| l.expired())
+    }
 }
 
 struct LogBudget {
@@ -502,6 +555,8 @@ fn guest_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32) 
         _ => tracing::error!("[shard {shard}] {line}"),
     }
 }
+
+const LEASE_LAPSED: &str = "this machine's lease on the shard directory lapsed";
 
 fn describe_error(store: &Store<HostState>, err: &wasmtime::Error, budget: Duration) -> String {
     let base = match err.downcast_ref::<Trap>() {
@@ -586,8 +641,17 @@ impl Inner {
         if let Some(why) = &self.failed {
             return Err(format!("shard stopped: {why}"));
         }
+        if self.store.data().lease_lapsed() {
+            let why = LEASE_LAPSED.to_string();
+            self.failed = Some(why.clone());
+            return Err(why);
+        }
         f.call(&mut self.store, params).map_err(|e| {
-            let why = describe_error(&self.store, &e, self.budget);
+            let why = if self.store.data().lease_lapsed() {
+                LEASE_LAPSED.to_string()
+            } else {
+                describe_error(&self.store, &e, self.budget)
+            };
             tracing::error!("[shard {}] stopped: {why}", self.store.data().shard_id);
             self.failed = Some(why.clone());
             why
@@ -1190,6 +1254,13 @@ struct ClusterState {
     save_every: Duration,
     /// This machine's lease on the directory.
     lease: Mutex<Lease>,
+    /// The lease's end, as the shards' stores see it.
+    clock: Arc<LeaseClock>,
+    /// One save at a time: a state captured earlier is never written after
+    /// one captured later (the final save at shutdown).
+    save_lock: Mutex<()>,
+    /// Set once when another live process holds this machine's id.
+    id_conflict: AtomicBool,
     /// Shards running here, each with the epoch it was placed under. Only
     /// these are saved and released: the fence and shutdown empty it, so a
     /// shard either of them stopped keeps its placement for another machine.
@@ -1209,6 +1280,8 @@ struct Lease {
     /// Until when shards may run here. None until a heartbeat of this epoch
     /// reaches the directory.
     until: Option<Instant>,
+    /// Shutting down: no shard starts here again.
+    closed: bool,
 }
 
 /// A shard starts only when the lease has at least this long left.
@@ -1239,10 +1312,17 @@ impl ClusterState {
     /// The lease epoch, when the lease has at least [`LEASE_MARGIN`] left.
     fn current_epoch(&self) -> Option<i64> {
         let lease = self.lease.lock().unwrap();
-        lease
-            .until
-            .filter(|&until| until > Instant::now() + LEASE_MARGIN)
-            .map(|_| lease.epoch)
+        lease.startable().then_some(lease.epoch)
+    }
+}
+
+impl Lease {
+    /// True when a shard may start here now.
+    fn startable(&self) -> bool {
+        !self.closed
+            && self
+                .until
+                .is_some_and(|until| until > Instant::now() + LEASE_MARGIN)
     }
 }
 
@@ -1376,6 +1456,9 @@ impl WasmShardHost {
             .get()
             .expect("create_claimed runs in a cluster");
         let _own = cluster.own_lock.lock().unwrap();
+        if self.stopped.load(Ordering::Acquire) {
+            return Err(lease_error());
+        }
         let epoch = cluster.current_epoch().ok_or_else(lease_error)?;
         let spec = &self.kinds[kind];
         let placement = Placement {
@@ -1480,9 +1563,7 @@ impl WasmShardHost {
         let _lease = match self.cluster.get() {
             Some(c) => {
                 let lease = c.lease.lock().unwrap();
-                let current = lease
-                    .until
-                    .is_some_and(|until| until > Instant::now() + LEASE_MARGIN);
+                let current = lease.startable();
                 let Some(epoch) = epoch.filter(|&e| current && e == lease.epoch) else {
                     return Err(lease_error());
                 };
@@ -1685,21 +1766,39 @@ impl WasmShardHost {
             }
             return;
         };
-        // Take the held shards first: the sweep releases only held shards,
-        // so none of these loses its placement.
-        let held: Vec<(String, i64)> = c.owned.lock().unwrap().drain().collect();
+        // No create, adoption, or stop runs from here on, and no shard
+        // starts here again.
+        let _own = c.own_lock.lock().unwrap();
+        c.lease.lock().unwrap().closed = true;
+        // Take the held shards with their handles, under the create lock the
+        // sweep releases under: the sweep releases only held shards, so none
+        // of these loses its placement, and the handles outlive the sweep
+        // removing them from the registry.
+        let held: Vec<(String, i64, Arc<Shard<WasmSim>>)> = {
+            let _create = self.create_lock.lock().unwrap();
+            let owned: Vec<(String, i64)> = c.owned.lock().unwrap().drain().collect();
+            owned
+                .into_iter()
+                .filter_map(|(id, epoch)| self.registry.get(&id).map(|s| (id, epoch, s)))
+                .collect()
+        };
         for id in self.registry.ids() {
             if let Some(shard) = self.registry.get(&id) {
                 shard.stop();
             }
         }
-        for (id, epoch) in &held {
-            self.save_one(c, id, *epoch);
+        // The final saves run under the lease: renew it once, since the
+        // heartbeat thread stops with the host.
+        self.heartbeat();
+        for (id, epoch, shard) in &held {
+            shard.stop_and_wait();
+            self.save_shard(c, id, *epoch, shard);
         }
         for id in self.registry.ids() {
             self.stop_local(&id);
         }
-        if let Err(e) = c.dir.leave(&c.me.id) {
+        let epoch = c.lease.lock().unwrap().epoch;
+        if let Err(e) = c.dir.leave(&c.me.id, epoch) {
             tracing::warn!("[shards] could not leave the directory: {e}");
         }
     }
@@ -1725,6 +1824,10 @@ impl WasmShardHost {
             me.address.as_deref().unwrap_or("none"),
             me.capacity
         );
+        let clock = Arc::new(LeaseClock::default());
+        for kind in self.kinds.values() {
+            kind.set_lease_clock(Arc::clone(&clock));
+        }
         if self
             .cluster
             .set(ClusterState {
@@ -1734,7 +1837,11 @@ impl WasmShardHost {
                 lease: Mutex::new(Lease {
                     epoch: shard_cluster::new_epoch(),
                     until: None,
+                    closed: false,
                 }),
+                clock: Arc::clone(&clock),
+                save_lock: Mutex::new(()),
+                id_conflict: AtomicBool::new(false),
                 owned: Mutex::new(HashMap::new()),
                 own_lock: Mutex::new(()),
                 saved_at: Mutex::new(HashMap::new()),
@@ -1788,13 +1895,28 @@ impl WasmShardHost {
         let epoch = c.lease.lock().unwrap().epoch;
         let sent = Instant::now();
         match c.dir.heartbeat(&c.me, epoch) {
-            Ok(()) => {
+            Ok(true) => {
+                if c.id_conflict.swap(false, Ordering::Relaxed) {
+                    tracing::info!("[shards] machine id {} is free; joining", c.me.id);
+                }
                 let until = sent + shard_cluster::FENCE_AFTER;
                 let mut lease = c.lease.lock().unwrap();
                 // A reply for a lapsed epoch, or one that arrived after its
                 // own lease ended, authorizes nothing.
                 if lease.epoch == epoch && until > Instant::now() {
-                    lease.until = Some(lease.until.map_or(until, |u| u.max(until)));
+                    let until = lease.until.map_or(until, |u| u.max(until));
+                    lease.until = Some(until);
+                    c.clock.set(Some(until));
+                }
+            }
+            Ok(false) => {
+                if !c.id_conflict.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(
+                        "[shards] machine id {} is held by another live process; waiting until it \
+                         leaves or is silent for {:?}",
+                        c.me.id,
+                        shard_cluster::DEAD_AFTER
+                    );
                 }
             }
             Err(e) => tracing::warn!("[shards] heartbeat failed: {e}"),
@@ -1803,25 +1925,34 @@ impl WasmShardHost {
 
     /// Stop every shard when the lease has lapsed, and take a new epoch.
     /// Other machines may start these shards once the directory counts this
-    /// machine dead; by then they are stopped here.
+    /// machine dead; by then they are stopped here, with no tick running.
     fn fence(&self) {
         let Some(c) = self.cluster.get() else { return };
-        let mut lease = c.lease.lock().unwrap();
-        if lease.until.is_none_or(|until| Instant::now() < until) {
-            return;
-        }
-        lease.until = None;
-        lease.epoch = shard_cluster::new_epoch();
-        c.owned.lock().unwrap().clear();
-        for id in self.registry.ids() {
-            if let Some(shard) = self.registry.get(&id) {
-                if shard.is_running() {
-                    shard.stop();
-                    tracing::warn!(
-                        "[shard {id}] stopped: this machine's lease on the shard directory lapsed"
-                    );
-                }
+        let stopping: Vec<(String, Arc<Shard<WasmSim>>)> = {
+            let mut lease = c.lease.lock().unwrap();
+            if lease.until.is_none_or(|until| Instant::now() < until) {
+                return;
             }
+            lease.until = None;
+            lease.epoch = shard_cluster::new_epoch();
+            // A guest call from here on is refused, and one running now is
+            // interrupted.
+            c.clock.set(None);
+            // Every held shard, running or not: one whose guest call was
+            // just refused has stopped on its own already.
+            let held: Vec<String> = c.owned.lock().unwrap().drain().map(|(id, _)| id).collect();
+            held.into_iter()
+                .filter_map(|id| self.registry.get(&id).map(|s| (id, s)))
+                .collect()
+        };
+        for (_, shard) in &stopping {
+            shard.stop();
+        }
+        for (id, shard) in &stopping {
+            shard.stop_and_wait();
+            tracing::warn!(
+                "[shard {id}] stopped: this machine's lease on the shard directory lapsed"
+            );
         }
     }
 
@@ -1858,6 +1989,31 @@ impl WasmShardHost {
                     tracing::warn!("[shard {id}] no longer placed here; stopping this copy");
                     c.owned.lock().unwrap().remove(&id);
                     self.stop_local(&id);
+                }
+            }
+            // Placed here under the current lease with nothing running: an
+            // adoption that failed after its takeover (a directory error, or
+            // the lease briefly too short to start). Start it again.
+            if let Some(epoch) = c.current_epoch() {
+                for p in &placed {
+                    let held = c.owned.lock().unwrap().contains_key(&p.shard_id);
+                    if p.epoch != epoch || held || p.failed.is_some() {
+                        continue;
+                    }
+                    if self
+                        .registry
+                        .get(&p.shard_id)
+                        .is_some_and(|s| s.is_running())
+                    {
+                        continue;
+                    }
+                    tracing::info!(
+                        "[shard {}] placed here and not running; starting it",
+                        p.shard_id
+                    );
+                    if let Err(e) = self.adopt(p, epoch) {
+                        tracing::error!("[shard {}] could not start: {e}", p.shard_id);
+                    }
                 }
             }
         }
@@ -1921,8 +2077,15 @@ impl WasmShardHost {
                         );
                     }
                     if orphan.failed.is_none() {
-                        if let Err(e) = self.adopt(&orphan, epoch) {
-                            tracing::error!("[shard {}] could not start: {e}", orphan.shard_id);
+                        match self.adopt(&orphan, epoch) {
+                            Ok(_) => tracing::info!(
+                                "[shard {}] took over from machine {}",
+                                orphan.shard_id,
+                                orphan.machine_id
+                            ),
+                            Err(e) => {
+                                tracing::error!("[shard {}] could not start: {e}", orphan.shard_id)
+                            }
                         }
                     }
                 }
@@ -1933,13 +2096,18 @@ impl WasmShardHost {
         let _ = c.dir.prune_machines();
     }
 
-    /// Save one local shard's state to the directory, when its module keeps
-    /// state and this machine still holds it under `epoch`. The shard may be
-    /// stopped (shutdown saves after the last tick).
+    /// Save one local shard's state to the directory (see
+    /// [`WasmShardHost::save_shard`]).
     fn save_one(&self, c: &ClusterState, id: &str, epoch: i64) {
-        let Some(shard) = self.registry.get(id) else {
-            return;
-        };
+        if let Some(shard) = self.registry.get(id) {
+            self.save_shard(c, id, epoch, &shard);
+        }
+    }
+
+    /// Save `shard`'s state, when its module keeps state and this machine
+    /// still holds it under `epoch`. The capture and the write run under the
+    /// save lock, so saves land in the order they were captured.
+    fn save_shard(&self, c: &ClusterState, id: &str, epoch: i64, shard: &Shard<WasmSim>) {
         let saves = self
             .kind_of
             .read()
@@ -1949,6 +2117,7 @@ impl WasmShardHost {
         if !saves {
             return;
         }
+        let _save = c.save_lock.lock().unwrap();
         c.saved_at
             .lock()
             .unwrap()
@@ -2126,7 +2295,15 @@ impl WasmShardHost {
             // its placement.
             if let Some(c) = self.cluster.get() {
                 c.saved_at.lock().unwrap().remove(id);
-                let held = c.owned.lock().unwrap().remove(id);
+                // A shard stops on its own when its lease lapses (its guest
+                // calls are refused) before the fence runs: that is not an
+                // ending, and it keeps its placement.
+                let held = {
+                    let lease = c.lease.lock().unwrap();
+                    let in_force = lease.until.is_some_and(|until| Instant::now() < until);
+                    let held = c.owned.lock().unwrap().remove(id);
+                    held.filter(|&epoch| in_force && epoch == lease.epoch)
+                };
                 if let Some(epoch) = held {
                     if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
                         tracing::warn!("[shard {id}] could not release its placement: {e}");
