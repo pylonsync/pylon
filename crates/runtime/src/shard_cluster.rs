@@ -341,6 +341,9 @@ impl PgShardDirectory {
                         ON _pylon_shard_transfers (from_shard) WHERE status = 'out';",
                 )?;
             }
+            if !column(&mut tx, "_pylon_shard_transfers", "refused_at")? {
+                tx.batch_execute("ALTER TABLE _pylon_shard_transfers ADD COLUMN refused_at BIGINT")?;
+            }
             if !exists(&mut tx, "_pylon_shard_transfers_age_idx")? {
                 tx.batch_execute(
                     "CREATE INDEX _pylon_shard_transfers_age_idx
@@ -876,6 +879,39 @@ impl PgShardDirectory {
                 &[],
             )?;
             Ok(())
+        })
+    }
+
+    /// Record that the target refused transfer `id` (its source stopped),
+    /// and return how long it has refused, in ms, since the first time.
+    pub fn note_refusal(&self, id: &str) -> Result<i64, String> {
+        self.pool.with_client(|c| {
+            let row = c.query_opt(
+                "UPDATE _pylon_shard_transfers
+                 SET refused_at = COALESCE(refused_at, (extract(epoch from clock_timestamp()) * 1000)::bigint)
+                 WHERE transfer_id = $1
+                 RETURNING (extract(epoch from clock_timestamp()) * 1000)::bigint - refused_at",
+                &[&id],
+            )?;
+            Ok(row.map(|r| r.get(0)).unwrap_or(0))
+        })
+    }
+
+    /// Mark `dropped` the transfers `out` for longer than `older_than_ms`
+    /// whose source and target both have no placement: nothing will take
+    /// them. The rows keep the players' states. Returns them.
+    pub fn drop_stranded_rows(&self, older_than_ms: i64) -> Result<Vec<Transfer>, String> {
+        self.pool.with_client(|c| {
+            let rows = c.query(
+                "UPDATE _pylon_shard_transfers t SET status = 'dropped'
+                 WHERE t.status = 'out'
+                   AND t.created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - $1
+                   AND NOT EXISTS (SELECT 1 FROM _pylon_shard_placements p
+                                   WHERE p.shard_id IN (t.from_shard, t.to_shard))
+                 RETURNING t.transfer_id, t.subscriber, t.from_shard, t.to_shard, t.state, t.auth, t.status",
+                &[&older_than_ms],
+            )?;
+            Ok(rows.iter().map(transfer_of).collect())
         })
     }
 

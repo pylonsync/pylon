@@ -1384,7 +1384,9 @@ pub struct WasmShardHost {
     instances: Mutex<HashMap<String, u64>>,
     /// Rows from stopped sources a target refused, by id: when to offer
     /// them again.
-    ownerless_retry: Mutex<HashMap<String, Instant>>,
+    ownerless_retry: Mutex<HashMap<String, (Instant, String)>>,
+    /// Waiting moves that failed, by id: when to try again, and the delay.
+    waiting_retry: Mutex<HashMap<String, (Instant, Duration)>>,
     /// When this machine last deleted settled transfer rows.
     last_prune: Mutex<Option<Instant>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
@@ -1522,6 +1524,7 @@ impl WasmShardHost {
             live: Mutex::new(std::collections::HashSet::new()),
             instances: Mutex::new(HashMap::new()),
             ownerless_retry: Mutex::new(HashMap::new()),
+            waiting_retry: Mutex::new(HashMap::new()),
             last_prune: Mutex::new(None),
             transfer_requests,
             registry: ShardRegistry::new(),
@@ -2350,7 +2353,6 @@ impl WasmShardHost {
                 Err(e) => tracing::warn!("[shard {}] take over failed: {e}", orphan.shard_id),
             }
         }
-        let _ = c.dir.prune_machines();
     }
 
     /// Save one local shard's state to the directory (see
@@ -2586,7 +2588,11 @@ impl WasmShardHost {
                 };
                 let limit = self.kinds[kind].limits.idle_shutdown;
                 // A player moving out keeps it up until the move ends.
-                if shard.subscriber_count() > 0 || limit.is_zero() || self.moving_out(id) {
+                if shard.subscriber_count() > 0
+                    || limit.is_zero()
+                    || self.moving_out(id)
+                    || self.moving_in(id)
+                {
                     idle.remove(id);
                     continue;
                 }
@@ -2610,7 +2616,11 @@ impl WasmShardHost {
                 .unwrap()
                 .get(&id)
                 .is_some_and(|since| since.elapsed() >= limit);
-            if still_idle && shard.subscriber_count() == 0 && !self.moving_out(&id) {
+            if still_idle
+                && shard.subscriber_count() == 0
+                && !self.moving_out(&id)
+                && !self.moving_in(&id)
+            {
                 tracing::info!("[shard {id}] stopping: no subscribers for {limit:?}");
                 shard.stop();
             }
