@@ -208,11 +208,7 @@ pub fn pg_err_to_data(e: postgres::Error) -> DataError {
 /// `PG_TX_QUERY_FAILED` when the statement can pass if tried again, else
 /// `PG_REJECTED` (see [`classify_pg_error`]).
 pub fn pg_error_code(e: &postgres::Error) -> &'static str {
-    classify_pg_error(
-        e.code().map(|c| c.code()),
-        e.is_closed(),
-        &e.to_string(),
-    )
+    classify_pg_error(e.code().map(|c| c.code()), e.is_closed(), &e.to_string())
 }
 
 /// The rule behind [`pg_error_code`], from an error's SQLSTATE, whether its
@@ -1062,7 +1058,8 @@ mod pg_error_tests {
     /// src/error/mod.rs); a version that changes them fails here.
     #[test]
     fn pg_errors_classify_by_state_and_kind() {
-        let t = |state: Option<&str>, closed: bool, text: &str| classify_pg_error(state, closed, text);
+        let t =
+            |state: Option<&str>, closed: bool, text: &str| classify_pg_error(state, closed, text);
         assert_eq!(t(Some("23505"), false, "db error"), "PG_REJECTED");
         assert_eq!(t(Some("P0001"), false, "db error"), "PG_REJECTED");
         assert_eq!(t(Some("40001"), false, "db error"), "PG_TX_QUERY_FAILED");

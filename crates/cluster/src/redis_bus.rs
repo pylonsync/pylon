@@ -548,6 +548,13 @@ mod tests {
                 };
                 let bulk = |s: &str| format!("${}\r\n{s}\r\n", s.len());
                 while let Some(cmd) = read_cmd() {
+                    // redis-rs unsubscribes when its PubSub is dropped, and
+                    // waits for the answer.
+                    if cmd[0] == "UNSUBSCRIBE" || cmd[0] == "PUNSUBSCRIBE" {
+                        let kind = cmd[0].to_ascii_lowercase();
+                        write!(out, "*3\r\n{}$-1\r\n:0\r\n", bulk(&kind)).unwrap();
+                        continue;
+                    }
                     assert_eq!(cmd[0], "SUBSCRIBE");
                     if refuse {
                         write!(
