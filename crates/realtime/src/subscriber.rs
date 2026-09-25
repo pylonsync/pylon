@@ -76,6 +76,10 @@ pub struct Subscriber<T> {
     /// previous to current snapshot.
     last_snapshot: Mutex<Option<Vec<u8>>>,
     delta_mode: bool,
+    /// Frame bytes queued (or given to a sink) since `take_tick_counts`.
+    sent_bytes: std::sync::atomic::AtomicU64,
+    /// The queue's dropped-frame count at the last `take_tick_counts`.
+    seen_dropped: std::sync::atomic::AtomicU64,
     /// The subscriber never holds a `T`, only encodes one passed to `send`,
     /// so it stays Send + Sync whatever the snapshot type is.
     _phantom: std::marker::PhantomData<fn(&T)>,
@@ -101,6 +105,8 @@ impl<T: EncodeSnapshot> Subscriber<T> {
             delivery,
             last_snapshot: Mutex::new(None),
             delta_mode: false,
+            sent_bytes: std::sync::atomic::AtomicU64::new(0),
+            seen_dropped: std::sync::atomic::AtomicU64::new(0),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -136,11 +142,37 @@ impl<T: EncodeSnapshot> Subscriber<T> {
         self.queue().is_some_and(|q| q.is_closed())
     }
 
+    /// Frame bytes sent and frames the queue dropped since the last call.
+    /// The shard calls it once per tick, for its numbers.
+    pub fn take_tick_counts(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let bytes = self.sent_bytes.swap(0, Relaxed);
+        let dropped = self.queue().map_or(0, |q| {
+            let now = q.dropped_snapshots();
+            now.saturating_sub(self.seen_dropped.swap(now, Relaxed))
+        });
+        (bytes, dropped)
+    }
+
+    /// Count a frame the transport took. Frames a closed queue discarded,
+    /// and replication deltas it refused, were not sent.
+    fn count_pushed(&self, len: usize, outcome: PushOutcome) {
+        if matches!(outcome, PushOutcome::Queued | PushOutcome::Coalesced) {
+            self.sent_bytes
+                .fetch_add(len as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn deliver(&self, tick: u64, ack: u64, frame: Arc<[u8]>) {
         match &self.delivery {
-            Delivery::Sink(sink) => sink(tick, &frame),
+            Delivery::Sink(sink) => {
+                self.count_pushed(frame.len(), PushOutcome::Queued);
+                sink(tick, &frame)
+            }
             Delivery::Queue(q) => {
-                q.push_snapshot(tick, ack, frame);
+                let len = frame.len();
+                let outcome = q.push_snapshot(tick, ack, frame);
+                self.count_pushed(len, outcome);
             }
         }
     }
@@ -161,10 +193,16 @@ impl<T: EncodeSnapshot> Subscriber<T> {
     ) -> PushOutcome {
         match &self.delivery {
             Delivery::Sink(sink) => {
+                self.count_pushed(frame.len(), PushOutcome::Queued);
                 sink(tick, &frame);
                 PushOutcome::Queued
             }
-            Delivery::Queue(q) => q.push_replication(tick, ack, frame, delta_of),
+            Delivery::Queue(q) => {
+                let len = frame.len();
+                let outcome = q.push_replication(tick, ack, frame, delta_of);
+                self.count_pushed(len, outcome);
+                outcome
+            }
         }
     }
 
@@ -184,7 +222,9 @@ impl<T: EncodeSnapshot> Subscriber<T> {
         let Some(q) = self.queue() else { return };
         match encode_snapshot(rejection, format) {
             Ok(bytes) => {
-                q.push_rejection(tick, ack, Arc::from(bytes));
+                let len = bytes.len();
+                let outcome = q.push_rejection(tick, ack, Arc::from(bytes));
+                self.count_pushed(len, outcome);
             }
             Err(e) => tracing::warn!("[realtime] rejection encode failed for {}: {}", self.id, e),
         }

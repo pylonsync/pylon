@@ -1254,6 +1254,18 @@ impl pylon_realtime::DynShardRegistry for WasmShardHost {
     fn len(&self) -> usize {
         self.registry.len()
     }
+
+    fn kind(&self, id: &str) -> Option<String> {
+        self.kind_of.read().unwrap().get(id).cloned()
+    }
+
+    fn failure(&self, id: &str) -> Option<String> {
+        self.registry.get(id)?.with_state(|s| s.failure())
+    }
+
+    fn stop(&self, id: &str) -> bool {
+        WasmShardHost::stop(self, id)
+    }
 }
 
 /// Shard ids go in URLs and logs: 1 to 128 characters of letters, digits,

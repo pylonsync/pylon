@@ -924,3 +924,22 @@ fn a_replicated_store_past_its_limit_stops_the_shard() {
     let failure = s.with_state(|sim| sim.failure()).unwrap();
     assert!(failure.contains("past its limit"), "{failure}");
 }
+
+#[test]
+fn the_host_registry_names_kinds_reports_numbers_and_stops_through_the_host() {
+    use pylon_realtime::DynShardRegistry;
+    let host = WasmShardHost::new(vec![kind(SnapshotFormat::Json, WasmLimits::default())]);
+    host.create("arena", "m1", &json!({})).unwrap();
+    let registry: &dyn DynShardRegistry = host.as_ref();
+    assert_eq!(registry.kind("m1").as_deref(), Some("arena"));
+    assert_eq!(registry.kind("nope"), None);
+    assert_eq!(registry.failure("m1"), None);
+    assert!(registry.get("m1").unwrap().is_running());
+    // Stopping through the registry removes the host's bookkeeping too: the
+    // kind's slot frees and the id can be created again.
+    assert!(registry.stop("m1"));
+    assert!(host.info("m1").is_none());
+    assert!(registry.get("m1").is_none());
+    assert!(!registry.stop("m1"));
+    host.create("arena", "m1", &json!({})).unwrap();
+}

@@ -66,6 +66,7 @@ pub mod scheduler;
 pub mod seq_allocator;
 pub mod server;
 pub mod session_backend;
+pub mod shard_metrics;
 pub mod shard_tickets;
 pub mod shard_wasm;
 pub mod shard_ws;

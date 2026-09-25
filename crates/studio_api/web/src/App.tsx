@@ -9,6 +9,7 @@ import { api, MANIFEST } from "@/lib/pylon";
 import { EntitiesPage } from "@/pages/Entities";
 import { FunctionsPage } from "@/pages/Functions";
 import { HealthPage } from "@/pages/Health";
+import { ShardsPage } from "@/pages/Shards";
 import { ManifestPage } from "@/pages/Manifest";
 import { PoliciesPage } from "@/pages/Policies";
 import { RoutesPage } from "@/pages/Routes";
@@ -111,6 +112,8 @@ function RouteContent({
 			return <SyncPage />;
 		case "health":
 			return <HealthPage />;
+		case "shards":
+			return <ShardsPage />;
 		case "settings":
 			return <SettingsPage />;
 		case "entities":

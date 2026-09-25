@@ -390,6 +390,28 @@ pub trait ShardOps: Send + Sync {
     /// Number of active shards.
     fn shard_count(&self) -> usize;
 
+    /// The kind of shard `id`, when known (WebAssembly shards).
+    fn shard_kind(&self, _id: &str) -> Option<String> {
+        None
+    }
+
+    /// Why shard `id` stopped on its own, if it did.
+    fn shard_failure(&self, _id: &str) -> Option<String> {
+        None
+    }
+
+    /// Stop shard `id` and close its subscribers' connections. False when
+    /// there is no such shard.
+    fn stop_shard(&self, id: &str) -> bool {
+        match self.get_shard(id) {
+            Some(shard) => {
+                shard.stop();
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Verify a shard ticket's signature and expiry with the host's ticket
     /// secret. See `pylon_realtime::ticket`.
     fn verify_ticket(

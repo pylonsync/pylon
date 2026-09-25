@@ -13,6 +13,7 @@ use crate::replication::{
     entity_positions, FrameInput, ReplicatedRef, ReplicationConfig, Replicator,
 };
 use crate::snapshot::EncodeSnapshot;
+use crate::stats::{Phases, ShardStats, StatsRecorder, TickSample};
 use crate::subscriber::{Subscriber, SubscriberId};
 use crate::ticket::ShardTicket;
 use crate::wire::{InputRejection, ShardInput};
@@ -419,6 +420,9 @@ pub struct Shard<S: SimState> {
     /// Lock order: inputs, subscribers, generations, acks.
     generations: Mutex<HashMap<SubscriberId, u64>>,
     next_generation: std::sync::atomic::AtomicU64,
+    /// Per-tick numbers for operators. A leaf lock: nothing else is taken
+    /// while it is held.
+    stats: Mutex<StatsRecorder>,
 }
 
 /// One subscriber's snapshot this tick: its own, or one shared with every
@@ -460,6 +464,7 @@ impl<S: SimState> Shard<S> {
             replicator: Mutex::new(Replicator::new()),
             generations: Mutex::new(HashMap::new()),
             next_generation: std::sync::atomic::AtomicU64::new(1),
+            stats: Mutex::new(StatsRecorder::new()),
         })
     }
 
@@ -583,6 +588,28 @@ impl<S: SimState> Shard<S> {
 
     pub fn input_queue_len(&self) -> usize {
         self.inputs.lock().unwrap().queue.len()
+    }
+
+    /// Tick timings, bytes sent, and drops (see [`crate::stats`]).
+    pub fn stats(&self) -> ShardStats {
+        // Copy under the lock; sort outside it, off the tick's path.
+        let recorder = self.stats.lock().unwrap().clone();
+        let mut stats = recorder.snapshot();
+        stats.overruns = self.overrun_ticks();
+        stats.subscribers = self.subscriber_count();
+        stats.input_queue = self.input_queue_len();
+        stats
+    }
+
+    /// Each subscriber id with its number of live connections, sorted.
+    pub fn subscriber_ids(&self) -> Vec<(SubscriberId, usize)> {
+        let mut counts: HashMap<SubscriberId, usize> = HashMap::new();
+        for sub in self.subscribers.lock().unwrap().iter() {
+            *counts.entry(sub.id().clone()).or_default() += 1;
+        }
+        let mut out: Vec<(SubscriberId, usize)> = counts.into_iter().collect();
+        out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        out
     }
 
     // -----------------------------------------------------------------------
@@ -817,10 +844,12 @@ impl<S: SimState> Shard<S> {
                     entry.dropped_since_log = 0;
                     entry.last_log = Some(now);
                 }
+                self.stats.lock().unwrap().input_rate_limited();
                 return Err(ShardError::InputRateLimited);
             }
 
             if cfg.max_input_queue > 0 && q.queue.len() >= cfg.max_input_queue {
+                self.stats.lock().unwrap().input_queue_full();
                 return Err(ShardError::InputQueueFull);
             }
             q.per_subscriber
@@ -1090,6 +1119,7 @@ impl<S: SimState> Shard<S> {
         }
 
         let now = Instant::now();
+        let tick_started = now;
         let measured = self
             .last_tick_at
             .lock()
@@ -1112,8 +1142,10 @@ impl<S: SimState> Shard<S> {
         let sub_count = subs.len();
 
         let mut failed: Vec<(SubscriberId, InputRejection)> = Vec::new();
+        let mut phases = Phases::default();
         let (snapshots, shared, finished) = {
             let mut state = self.state.lock().unwrap();
+            let started = Instant::now();
             let generations = self.generations.lock().unwrap();
             let mut acks = self.acks.lock().unwrap();
             let recorder = self.input_recorder.lock().unwrap();
@@ -1145,16 +1177,22 @@ impl<S: SimState> Shard<S> {
             drop(acks);
             drop(generations);
             drop(recorder);
+            let applied = Instant::now();
+            phases.inputs = applied - started;
 
             state.tick(dt);
 
             if let Some(cb) = &*self.on_tick.lock().unwrap() {
                 cb(&state, tick_number);
             }
+            let ticked = Instant::now();
+            phases.tick = ticked - applied;
 
             let (snapshots, shared) = self.take_snapshots(&state, &subs, tick_number);
+            phases.interest = ticked.elapsed();
             (snapshots, shared, state.is_finished())
         };
+        let delivering = Instant::now();
 
         // Encode and deliver outside the state lock. Rejections go first so
         // the client learns about a failed input before the snapshot that
@@ -1211,6 +1249,18 @@ impl<S: SimState> Shard<S> {
             }
             closed |= sub.is_closed();
         }
+        phases.encode = delivering.elapsed();
+        let mut sample = TickSample {
+            whole: Duration::ZERO,
+            phases,
+            subscriber_bytes: Vec::with_capacity(subs.len()),
+            dropped_frames: 0,
+        };
+        for sub in &subs {
+            let (bytes, dropped) = sub.take_tick_counts();
+            sample.subscriber_bytes.push(bytes);
+            sample.dropped_frames += dropped;
+        }
         if closed {
             // The same cleanup as an explicit removal, in the same lock order.
             let mut inputs = self.inputs.lock().unwrap();
@@ -1235,6 +1285,8 @@ impl<S: SimState> Shard<S> {
                 }
             }
         }
+        sample.whole = tick_started.elapsed();
+        self.stats.lock().unwrap().record(sample);
 
         if finished {
             self.end();
@@ -1337,6 +1389,54 @@ mod tests {
         fn is_finished(&self) -> bool {
             self.finished
         }
+    }
+
+    #[test]
+    fn stats_count_ticks_bytes_drops_and_refused_inputs() {
+        let shard = Shard::new(
+            "stats",
+            Counter {
+                value: 0,
+                finished: false,
+            },
+            ShardConfig {
+                max_input_queue: 2,
+                outbound_queue_frames: 2,
+                ..ShardConfig::default()
+            },
+        );
+        let reader = shard
+            .add_queued_subscriber_authorized(SubscriberId::new("reader"), &ShardAuth::admin())
+            .unwrap();
+        let _stalled = shard
+            .add_queued_subscriber_authorized(SubscriberId::new("stalled"), &ShardAuth::admin())
+            .unwrap();
+        for i in 0..4 {
+            let _ = shard.push_input(SubscriberId::new("reader"), i, None);
+        }
+        for _ in 0..5 {
+            shard.run_tick();
+            while reader.pop().is_some() {}
+        }
+        let s = shard.stats();
+        assert_eq!(s.ticks, 5);
+        assert_eq!(s.subscribers, 2);
+        assert_eq!(s.dropped_inputs_total.queue_full, 2);
+        // The stalled queue holds 2 frames. Ticks 3 and 5 find it full and
+        // drop the 2 it holds.
+        assert_eq!(s.dropped_frames_total, 4);
+        // Two subscribers, five ticks, one small JSON snapshot each.
+        assert!(s.bytes_total >= 10, "{}", s.bytes_total);
+        assert!(s.bytes_per_subscriber.p50 >= 1.0);
+        assert_eq!(s.bytes_per_tick.p50, 2.0 * s.bytes_per_subscriber.p50);
+        assert!(s.tick_ms.max >= s.encode_ms.max);
+        assert_eq!(
+            shard.subscriber_ids(),
+            vec![
+                (SubscriberId::new("reader"), 1),
+                (SubscriberId::new("stalled"), 1)
+            ]
+        );
     }
 
     #[test]

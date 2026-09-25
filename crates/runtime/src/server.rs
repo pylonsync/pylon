@@ -3882,6 +3882,7 @@ fn start_server(
                 if let Some(m) = &memory {
                     text.push_str(&m.prometheus());
                 }
+                text.push_str(&crate::shard_metrics::prometheus_opt(&shards_ref));
                 (text, "text/plain; version=0.0.4")
             } else {
                 // Augment the bare HTTP snapshot with live operational
@@ -3946,6 +3947,12 @@ fn start_server(
                     );
                     if let Some(m) = &memory {
                         obj.insert("memory".to_string(), m.to_json());
+                    }
+                    if let Some(reg) = &shards_ref {
+                        obj.insert(
+                            "shards".to_string(),
+                            crate::shard_metrics::json(reg.as_ref()),
+                        );
                     }
                 }
                 (snap.to_string(), "application/json")

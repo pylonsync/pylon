@@ -2322,6 +2322,18 @@ impl pylon_router::ShardOps for ShardOpsAdapter {
         self.registry.len()
     }
 
+    fn shard_kind(&self, id: &str) -> Option<String> {
+        self.registry.kind(id)
+    }
+
+    fn shard_failure(&self, id: &str) -> Option<String> {
+        self.registry.failure(id)
+    }
+
+    fn stop_shard(&self, id: &str) -> bool {
+        self.registry.stop(id)
+    }
+
     fn verify_ticket(
         &self,
         token: &str,

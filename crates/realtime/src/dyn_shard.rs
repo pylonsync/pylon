@@ -90,6 +90,12 @@ pub trait DynShard: Send + Sync {
 
     /// Stop the shard (no further ticks; tick loop will exit).
     fn stop(&self);
+
+    /// Tick timings, bytes sent, and drops (see [`crate::stats`]).
+    fn stats(&self) -> crate::stats::ShardStats;
+
+    /// Each subscriber id with its number of live connections, sorted.
+    fn subscriber_ids(&self) -> Vec<(SubscriberId, usize)>;
 }
 
 impl<S: SimState> DynShard for Shard<S> {
@@ -179,6 +185,14 @@ impl<S: SimState> DynShard for Shard<S> {
     fn stop(&self) {
         Shard::stop(self);
     }
+
+    fn stats(&self) -> crate::stats::ShardStats {
+        Shard::stats(self)
+    }
+
+    fn subscriber_ids(&self) -> Vec<(SubscriberId, usize)> {
+        Shard::subscriber_ids(self)
+    }
 }
 
 /// The rejection sent to a client for a push error.
@@ -205,6 +219,25 @@ pub trait DynShardRegistry: Send + Sync {
     fn get(&self, id: &str) -> Option<Arc<dyn DynShard>>;
     fn ids(&self) -> Vec<String>;
     fn len(&self) -> usize;
+    /// The kind (shard type name) of shard `id`, when the registry knows it.
+    fn kind(&self, _id: &str) -> Option<String> {
+        None
+    }
+    /// Why shard `id` stopped on its own (its module trapped), if it did.
+    fn failure(&self, _id: &str) -> Option<String> {
+        None
+    }
+    /// Stop shard `id` and close its subscribers' connections. False when
+    /// there is no such shard.
+    fn stop(&self, id: &str) -> bool {
+        match self.get(id) {
+            Some(shard) => {
+                shard.stop();
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 impl<S: SimState> DynShardRegistry for crate::registry::ShardRegistry<S> {

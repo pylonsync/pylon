@@ -1,9 +1,41 @@
 //! Real-time simulation shards (games, MMO zones, live docs, etc.).
-//! `/api/shards` (admin list), `POST /api/shards/<id>/input`,
-//! `GET /api/shards/<id>` (per-shard info).
+//!
+//! - `GET /api/shards`: every shard with its numbers (admin).
+//! - `GET /api/shards/<id>`: one shard's numbers and subscribers (admin).
+//! - `POST /api/shards/<id>/stop`: stop a shard (admin).
+//! - `POST /api/shards/<id>/kick` `{ "subscriber": id }`: close a
+//!   subscriber's connections (admin).
+//! - `POST /api/shards/<id>/input`: send an input.
 
-use crate::{json_error, parse_json, query_param, require_admin, RouterContext};
+use crate::{
+    json_error, parse_json, query_decode, query_param, require_admin, RouterContext, ShardOps,
+};
 use pylon_http::HttpMethod;
+
+/// One shard as the admin routes report it.
+fn describe(shards: &dyn ShardOps, sh: &dyn pylon_realtime::DynShard) -> serde_json::Value {
+    let id = sh.id();
+    serde_json::json!({
+        "id": id,
+        "kind": shards.shard_kind(id),
+        "running": sh.is_running(),
+        "error": shards.shard_failure(id),
+        "tick": sh.tick_number(),
+        "subscribers": sh.subscriber_count(),
+        "input_queue": sh.input_queue_len(),
+        "stats": sh.stats(),
+    })
+}
+
+fn not_found(shard_id: &str) -> (u16, String) {
+    (
+        404,
+        json_error(
+            "SHARD_NOT_FOUND",
+            &format!("Shard \"{shard_id}\" not found"),
+        ),
+    )
+}
 
 pub(crate) fn handle(
     ctx: &RouterContext,
@@ -19,22 +51,12 @@ pub(crate) fn handle(
         }
         return Some(match ctx.shards {
             Some(s) => {
-                let ids = s.list_shards();
+                let mut ids = s.list_shards();
+                ids.sort();
                 let out: Vec<serde_json::Value> = ids
                     .iter()
-                    .map(|id| {
-                        s.get_shard(id)
-                            .map(|sh| {
-                                serde_json::json!({
-                                    "id": sh.id(),
-                                    "running": sh.is_running(),
-                                    "tick": sh.tick_number(),
-                                    "subscribers": sh.subscriber_count(),
-                                    "input_queue": sh.input_queue_len(),
-                                })
-                            })
-                            .unwrap_or(serde_json::json!({"id": id}))
-                    })
+                    .filter_map(|id| s.get_shard(id))
+                    .map(|sh| describe(s, sh.as_ref()))
                     .collect();
                 (
                     200,
@@ -45,11 +67,68 @@ pub(crate) fn handle(
         });
     }
 
+    // POST /api/shards/:id/stop and /kick (admin)
+    if method == HttpMethod::Post {
+        if let Some(rest) = url.strip_prefix("/api/shards/") {
+            let rest = rest.split('?').next().unwrap_or(rest);
+            let action = rest
+                .strip_suffix("/stop")
+                .map(|id| (id, "stop"))
+                .or_else(|| rest.strip_suffix("/kick").map(|id| (id, "kick")));
+            if let Some((shard_id, action)) = action {
+                // Shard ids may hold `:`, which a client encodes.
+                let shard_id = query_decode(shard_id);
+                let shard_id = shard_id.as_str();
+                if let Some(err) = require_admin(ctx) {
+                    return Some(err);
+                }
+                let Some(shards) = ctx.shards else {
+                    return Some(not_found(shard_id));
+                };
+                if action == "stop" {
+                    return Some(if shards.stop_shard(shard_id) {
+                        (200, serde_json::json!({ "stopped": true }).to_string())
+                    } else {
+                        not_found(shard_id)
+                    });
+                }
+                let Some(shard) = shards.get_shard(shard_id) else {
+                    return Some(not_found(shard_id));
+                };
+                let body: serde_json::Value = match parse_json(body) {
+                    Ok(v) => v,
+                    Err((s, b)) => return Some((s, b)),
+                };
+                let Some(subscriber) = body.get("subscriber").and_then(|v| v.as_str()) else {
+                    return Some((
+                        400,
+                        json_error("MISSING_SUBSCRIBER", "body needs { \"subscriber\": id }"),
+                    ));
+                };
+                let removed =
+                    shard.remove_subscriber(&pylon_realtime::SubscriberId::new(subscriber));
+                return Some(if removed {
+                    (200, serde_json::json!({ "kicked": true }).to_string())
+                } else {
+                    (
+                        404,
+                        json_error(
+                            "SUBSCRIBER_NOT_FOUND",
+                            &format!("No subscriber \"{subscriber}\" in shard \"{shard_id}\""),
+                        ),
+                    )
+                });
+            }
+        }
+    }
+
     // POST /api/shards/:id/input
     if method == HttpMethod::Post {
         if let Some(rest) = url.strip_prefix("/api/shards/") {
             let rest = rest.split('?').next().unwrap_or(rest);
             if let Some(shard_id) = rest.strip_suffix("/input") {
+                let shard_id = query_decode(shard_id);
+                let shard_id = shard_id.as_str();
                 let shards = match ctx.shards {
                     Some(s) => s,
                     None => {
@@ -137,33 +216,31 @@ pub(crate) fn handle(
         }
     }
 
-    // GET /api/shards/:id (per-shard info)
+    // GET /api/shards/:id (admin): numbers and subscribers
     if method == HttpMethod::Get {
         if let Some(shard_id) = url.strip_prefix("/api/shards/") {
             let shard_id = shard_id.split('?').next().unwrap_or(shard_id);
             if !shard_id.is_empty() && !shard_id.contains('/') {
-                if let Some(shards) = ctx.shards {
-                    if let Some(sh) = shards.get_shard(shard_id) {
-                        return Some((
-                            200,
-                            serde_json::json!({
-                                "id": sh.id(),
-                                "running": sh.is_running(),
-                                "tick": sh.tick_number(),
-                                "subscribers": sh.subscriber_count(),
-                                "input_queue": sh.input_queue_len(),
-                            })
-                            .to_string(),
-                        ));
-                    }
-                    return Some((
-                        404,
-                        json_error(
-                            "SHARD_NOT_FOUND",
-                            &format!("Shard \"{shard_id}\" not found"),
-                        ),
-                    ));
+                if let Some(err) = require_admin(ctx) {
+                    return Some(err);
                 }
+                let shard_id = query_decode(shard_id);
+                let shard_id = shard_id.as_str();
+                let Some(shards) = ctx.shards else {
+                    return Some(not_found(shard_id));
+                };
+                let Some(sh) = shards.get_shard(shard_id) else {
+                    return Some(not_found(shard_id));
+                };
+                let mut out = describe(shards, sh.as_ref());
+                out["subscriber_ids"] = sh
+                    .subscriber_ids()
+                    .into_iter()
+                    .map(|(id, connections)| {
+                        serde_json::json!({ "id": id.as_str(), "connections": connections })
+                    })
+                    .collect();
+                return Some((200, out.to_string()));
             }
         }
     }

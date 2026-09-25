@@ -34,6 +34,7 @@ export const BUILT_IN_PAGES = new Set([
 	"routes",
 	"sync",
 	"health",
+	"shards",
 	"settings",
 	"roles",
 ]);
@@ -170,6 +171,13 @@ function defaultSidebar(
 				id: "health",
 				label: "Health",
 				icon: "activity",
+				requiresAdmin: true,
+			},
+			{
+				kind: "page",
+				id: "shards",
+				label: "Shards",
+				icon: "boxes",
 				requiresAdmin: true,
 			},
 		],

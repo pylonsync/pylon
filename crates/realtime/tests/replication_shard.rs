@@ -259,3 +259,26 @@ fn a_full_queue_never_ends_up_with_a_delta_after_a_dropped_baseline() {
     }
     assert_table(&table, &expected(&s, "u1"), false);
 }
+
+#[test]
+fn stats_count_the_full_frame_sent_for_a_refused_delta_and_not_the_delta() {
+    // A queue of one frame that is never read: tick 1 queues the full
+    // baseline; tick 2's delta finds the queue full, is refused, and a full
+    // frame replaces the baseline.
+    let s = shard_with(20, false, 1);
+    let q = join(&s, "u1");
+    s.run_tick();
+    let first = s.stats().bytes_total;
+    assert!(first > 0);
+    s.run_tick();
+    let second = s.stats().bytes_total - first;
+    let queued = q.pop().expect("the full frame");
+    assert_eq!(queued.kind, FrameKind::Replication);
+    assert!(q.pop().is_none());
+    assert_eq!(second, queued.bytes.len() as u64);
+    assert_eq!(s.stats().dropped_frames_total, 1);
+    // A closed queue takes nothing, and nothing is counted.
+    q.close();
+    s.run_tick();
+    assert_eq!(s.stats().bytes_total, first + second);
+}

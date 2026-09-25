@@ -440,6 +440,41 @@ pylon bench shard ... --bots 300 --bot-offset 300 --report b.json   # machine 2
 pylon bench merge a.json b.json
 ```
 
+## Metrics and operations
+
+`/metrics` reports every shard (Prometheus text with
+`Accept: text/plain`, JSON otherwise), with `shard` and `kind` labels.
+Percentiles cover the last 1200 ticks (a minute at 20 Hz); bytes per
+subscriber sample four subscribers a tick, in turn, over those ticks.
+Counters run from the shard's start.
+
+A shard per match makes new series for every match. Set
+`PYLON_SHARD_METRICS_LABELS=kind` to report one series per kind instead:
+counters and gauges are summed, and each percentile is the highest any shard
+of the kind has. The JSON (and Studio) stays per shard.
+
+| Metric | Meaning |
+| --- | --- |
+| `pylon_shard_tick_duration_seconds` | Tick duration, p50 and p99 (a summary). |
+| `pylon_shard_tick_overruns_total` | Ticks skipped because the loop fell behind. |
+| `pylon_shard_phase_seconds_total{phase}` | Time in `inputs` (`apply_input`), `tick`, `interest` (interest management and building snapshots or replication frames), and `encode` (encoding and queueing frames). |
+| `pylon_shard_phase_duration_seconds{phase,quantile}` | The same phases, p50 and p99. |
+| `pylon_shard_subscribers`, `pylon_shard_input_queue` | Live connections, and inputs waiting for the next tick. |
+| `pylon_shard_frame_bytes_total` | Bytes of frames queued for subscribers, including frames a full queue drops later. |
+| `pylon_shard_tick_bytes`, `pylon_shard_subscriber_tick_bytes` | Bytes per tick for all subscribers, and per subscriber per tick, p50 and p99. |
+| `pylon_shard_dropped_frames_total` | Frames dropped from full subscriber queues. |
+| `pylon_shard_dropped_inputs_total{reason}` | Inputs refused before queueing: `queue_full` or `rate_limited`. |
+
+Studio's **Shards** page (admins) lists the running shards with these
+numbers. Open one to see its phase timings and subscribers, kick a
+subscriber, or stop the shard. The same actions are HTTP routes, admin-only:
+
+- `GET /api/shards` and `GET /api/shards/<id>` (the detail adds
+  `subscriber_ids`),
+- `POST /api/shards/<id>/kick` with `{ "subscriber": "<id>" }` closes that
+  subscriber's connections,
+- `POST /api/shards/<id>/stop` stops the shard and closes every connection.
+
 ## Limits and failures
 
 - A tick that runs past `tickBudgetMs` stops the shard.
