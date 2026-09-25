@@ -142,6 +142,15 @@
       "idleShutdownSecs": 0
     },
     {
+      "name": "frontier",
+      "wasm": "shards/frontier.wasm",
+      "crate": "shards/frontier",
+      "tickRate": 20,
+      "maxInstances": 4,
+      "maxSubscribers": 1000,
+      "idleShutdownSecs": 0
+    },
+    {
       "name": "zone",
       "wasm": "shards/zone.wasm",
       "crate": "shards/zone",

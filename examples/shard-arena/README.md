@@ -31,7 +31,20 @@ Rust change you want to deploy.
 
 ## Load test
 
-With `pylon dev` running, put 300 bots in the arena:
+`frontier` is the kind for load tests at MMO scale: a 2000 × 2000 zone with
+interest management (view radius 250), entity replication, and a 900 B/tick
+byte budget. `size` in `--join-args` makes a small zone, where every player
+is in view of the others:
+
+```bash
+pylon bench shard --join joinFrontier --bots 300 \
+  --input '"join"' --input '{"move_to":{"x":"$rand:0:2000","y":"$rand:0:2000"}}' --input '"hit"'
+pylon bench shard --join joinFrontier --join-args '{"frontier":"crowd","size":400}' --bots 300 \
+  --input '"join"' --input '{"move_to":{"x":"$rand:0:400","y":"$rand:0:400"}}' --input '"hit"'
+```
+
+`arena` sends every player the full snapshot. With `pylon dev` running, put
+300 bots in the arena:
 
 ```bash
 pylon bench shard --join joinArena --bots 300 --input '"join"' \
