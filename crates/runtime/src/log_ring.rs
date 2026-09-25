@@ -42,6 +42,9 @@ pub struct RingEntry {
     pub path: String,
     pub status: u16,
     pub cpu_ms: u32,
+    /// Why the request or connection failed. Omitted when it did not fail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// ~10 minutes at 100 rps. Tuned for the dashboard tail use case:
@@ -137,6 +140,7 @@ mod tests {
             path: "/x".into(),
             status,
             cpu_ms: 1,
+            error: None,
         }
     }
 

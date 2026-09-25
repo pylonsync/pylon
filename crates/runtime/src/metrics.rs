@@ -13,6 +13,13 @@ use crate::tinybird_logger::{iso_now_ms, TinybirdLogger};
 /// concern.
 const ROLLUP_MINUTES: usize = 60;
 
+/// A response counts as an error when its status is 4xx or 5xx. A
+/// `101 Switching Protocols` (every WebSocket upgrade, including `/shard`)
+/// is a success. A status below 100 is not valid HTTP, so it counts as an error.
+fn is_error_status(status: u16) -> bool {
+    !(100..400).contains(&status)
+}
+
 struct RequestBuckets {
     /// Wall-clock minute (epoch seconds / 60) the head bucket
     /// represents. We rotate when the current minute moves past this.
@@ -57,7 +64,7 @@ impl RequestBuckets {
             self.head_minute = now;
         }
         self.requests[0] = self.requests[0].saturating_add(1);
-        if !(200..400).contains(&status) {
+        if is_error_status(status) {
             self.errors[0] = self.errors[0].saturating_add(1);
         }
     }
@@ -219,10 +226,10 @@ impl Metrics {
     /// in-flight request without cross-talk.
     pub fn record_request(&self, method: &str, status: u16) {
         self.requests_total.fetch_add(1, Ordering::Relaxed);
-        if (200..400).contains(&status) {
-            self.requests_ok.fetch_add(1, Ordering::Relaxed);
-        } else {
+        if is_error_status(status) {
             self.requests_err.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.requests_ok.fetch_add(1, Ordering::Relaxed);
         }
         self.requests_by_method.increment(method);
         // Rolling sparkline buckets. Lock for the rotation + bump;
@@ -243,36 +250,17 @@ impl Metrics {
             Some(c) => {
                 let dur_ms = c.started.elapsed().as_millis();
                 tracing::info!("← {} {} {} in {}ms", method, c.url, status, dur_ms);
-                // Tinybird shipper: best-effort fire-and-forget into
-                // the background channel. `record()` returns immediately
-                // even on backpressure (drops the event), so the cost
-                // on the request hot path is one channel try_send.
                 let path = c.url.split('?').next().unwrap_or(&c.url);
                 let cpu_ms = u32::try_from(dur_ms).unwrap_or(u32::MAX);
-                if let Some(logger) = tinybird_logger() {
-                    logger.record(
-                        method,
-                        path,
-                        status,
-                        cpu_ms,
-                        c.request_bytes,
-                        c.response_bytes,
-                        "",
-                    );
-                }
-                // In-process ring buffer for the /admin/logs/tail
-                // endpoint. Tinybird is the long-term store; this is
-                // what the dashboard tail polls so we don't burn the
-                // Tinybird quota on every 2s refresh.
-                if let Some(ring) = log_ring() {
-                    ring.push(RingEntry {
-                        timestamp: iso_now_ms(),
-                        method: method.to_string(),
-                        path: path.to_string(),
-                        status,
-                        cpu_ms,
-                    });
-                }
+                record_log_row(
+                    method,
+                    path,
+                    status,
+                    cpu_ms,
+                    c.request_bytes,
+                    c.response_bytes,
+                    None,
+                );
             }
             None => {
                 tracing::debug!("← {} {} (no per-request ctx)", method, status);
@@ -334,7 +322,7 @@ impl Metrics {
              # HELP pylon_http_requests_total HTTP requests total.\n\
              # TYPE pylon_http_requests_total counter\n\
              pylon_http_requests_total {total}\n\
-             # HELP pylon_http_requests_ok_total HTTP requests with 2xx/3xx status.\n\
+             # HELP pylon_http_requests_ok_total HTTP requests with 1xx/2xx/3xx status.\n\
              # TYPE pylon_http_requests_ok_total counter\n\
              pylon_http_requests_ok_total {ok}\n\
              # HELP pylon_http_requests_errors_total HTTP requests with 4xx/5xx status.\n\
@@ -354,6 +342,50 @@ impl Metrics {
 impl Default for Metrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Write one row to the request log: the Tinybird (or Pylon Cloud) shipper
+/// and the in-process ring that `pylon logs` tails. It does not change the
+/// request counters, so a caller can log an event that is not a new request,
+/// such as the end of a WebSocket connection.
+///
+/// `cpu_ms` is the wall time of the request or connection. `error` is why it
+/// failed; `None` when it did not.
+pub fn record_log_row(
+    method: &str,
+    path: &str,
+    status: u16,
+    cpu_ms: u32,
+    bytes_in: u32,
+    bytes_out: u32,
+    error: Option<&str>,
+) {
+    // Fire-and-forget into the shipper's background channel. `record()`
+    // returns at once even on backpressure (it drops the event), so the cost
+    // on the hot path is one channel try_send.
+    if let Some(logger) = tinybird_logger() {
+        logger.record(
+            method,
+            path,
+            status,
+            cpu_ms,
+            bytes_in,
+            bytes_out,
+            error.unwrap_or(""),
+        );
+    }
+    // The ring is what the dashboard and `pylon logs` tail poll, so they do
+    // not spend the Tinybird quota on every refresh.
+    if let Some(ring) = log_ring() {
+        ring.push(RingEntry {
+            timestamp: iso_now_ms(),
+            method: method.to_string(),
+            path: path.to_string(),
+            status,
+            cpu_ms,
+            error: error.map(str::to_string),
+        });
     }
 }
 
@@ -387,6 +419,16 @@ mod tests {
         assert_eq!(m.requests_ok.load(Ordering::Relaxed), 0);
         assert_eq!(m.requests_err.load(Ordering::Relaxed), 1);
         assert_eq!(m.requests_by_method.post.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn websocket_upgrade_is_not_an_error() {
+        let m = Metrics::new();
+        m.record_request("GET", 101);
+        assert_eq!(m.requests_ok.load(Ordering::Relaxed), 1);
+        assert_eq!(m.requests_err.load(Ordering::Relaxed), 0);
+        let snap = m.snapshot();
+        assert_eq!(snap["requests"]["errors_per_minute"][0], 0);
     }
 
     #[test]

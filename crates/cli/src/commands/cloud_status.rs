@@ -43,6 +43,19 @@ struct Realtime {
     sse: u64,
 }
 
+/// One entry of the `shards` list in `/metrics`. Only the subscriber count
+/// is read here; `pylon status` shows totals, Studio shows the detail.
+#[derive(Deserialize)]
+struct Shard {
+    stats: ShardStats,
+}
+
+#[derive(Deserialize)]
+struct ShardStats {
+    #[serde(default)]
+    subscribers: u64,
+}
+
 #[derive(Deserialize)]
 struct Metrics {
     #[serde(default)]
@@ -50,6 +63,8 @@ struct Metrics {
     requests: Requests,
     jobs: Option<Jobs>,
     realtime: Option<Realtime>,
+    /// Absent when the app runs no shards.
+    shards: Option<Vec<Shard>>,
 }
 
 #[derive(Deserialize)]
@@ -136,6 +151,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             "requests": {"total": m.requests.total, "ok": m.requests.ok, "error": m.requests.error},
             "jobs": m.jobs.as_ref().map(|j| serde_json::json!({"running": j.running, "pending": j.pending, "failed": j.failed})),
             "realtime": m.realtime.as_ref().map(|r| serde_json::json!({"ws": r.ws, "sse": r.sse})),
+            "shards": m.shards.as_ref().map(|s| serde_json::json!({
+                "count": s.len(),
+                "subscribers": shard_subscribers(s),
+            })),
         });
         println!("{}", serde_json::to_string(&out).unwrap_or_default());
         return ExitCode::Ok;
@@ -156,7 +175,18 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     if let Some(r) = &m.realtime {
         println!("  Realtime: {} WS · {} SSE", r.ws, r.sse);
     }
+    if let Some(s) = &m.shards {
+        println!(
+            "  Shards:   {} running · {} subscribers",
+            s.len(),
+            shard_subscribers(s)
+        );
+    }
     ExitCode::Ok
+}
+
+fn shard_subscribers(shards: &[Shard]) -> u64 {
+    shards.iter().map(|s| s.stats.subscribers).sum()
 }
 
 fn fmt_secs(s: u64) -> String {
