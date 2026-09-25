@@ -8,13 +8,27 @@ runs:
   using: composite
   steps:
     # Building openssl + libxml2 + xmlsec from source is the slow part, so the
-    # binary cache is keyed on the port set. A miss costs ~20 minutes and still
+    # binary cache is keyed on the port set. A miss costs ~13 minutes and still
     # succeeds; a hit is seconds.
+    #
+    # vcpkg only restores an archive whose ABI hash matches, and the hash
+    # changes when the runner image updates vcpkg (port versions) or MSVC. A
+    # cache key that does not change with them restores stale archives on
+    # every run ("Restored 0 package(s)") and is never saved again, because a
+    # key that exists is not overwritten. So the key carries the vcpkg commit
+    # and the runner image version.
+    - name: Compute vcpkg cache key
+      id: vcpkg-key
+      shell: bash
+      run: |
+        set -euo pipefail
+        vcpkg_rev="$(git -C "$VCPKG_INSTALLATION_ROOT" rev-parse --short=12 HEAD)"
+        echo "key=vcpkg-x64-windows-static-md-xmlsec-${vcpkg_rev}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
     - name: Cache vcpkg binaries
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/vcpkg-archives
-        key: vcpkg-x64-windows-static-md-xmlsec-v1
+        key: ${{ steps.vcpkg-key.outputs.key }}
     - name: Install xmlsec1 via vcpkg
       shell: bash
       env:
