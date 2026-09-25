@@ -16,10 +16,10 @@ use pylon_realtime::{
 use pylon_runtime::shard_wasm::{CreateError, WasmLimits, WasmShardHost, WasmShardKind, WasmSim};
 use serde_json::{json, Value};
 
-/// Build the arena guest once per test binary.
-fn arena_wasm() -> &'static [u8] {
-    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
-    WASM.get_or_init(|| {
+/// Build the guest examples once per test binary.
+fn build_guests() -> &'static std::path::Path {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         // A target dir of its own, so this build never waits on the lock the
         // outer `cargo test` holds.
@@ -30,8 +30,7 @@ fn arena_wasm() -> &'static [u8] {
                 "build",
                 "-p",
                 "pylon-shard-guest",
-                "--example",
-                "arena",
+                "--examples",
                 "--release",
                 "--target",
                 "wasm32-unknown-unknown",
@@ -42,11 +41,19 @@ fn arena_wasm() -> &'static [u8] {
             .expect("run cargo");
         assert!(
             status.success(),
-            "building the arena guest failed; is wasm32-unknown-unknown installed?"
+            "building the guest examples failed; is wasm32-unknown-unknown installed?"
         );
-        std::fs::read(target_dir.join("wasm32-unknown-unknown/release/examples/arena.wasm"))
-            .expect("read arena.wasm")
+        target_dir.join("wasm32-unknown-unknown/release/examples")
     })
+}
+
+fn guest_wasm(name: &str) -> Vec<u8> {
+    std::fs::read(build_guests().join(format!("{name}.wasm"))).expect("read the guest module")
+}
+
+fn arena_wasm() -> &'static [u8] {
+    static WASM: OnceLock<Vec<u8>> = OnceLock::new();
+    WASM.get_or_init(|| guest_wasm("arena"))
 }
 
 fn config(format: SnapshotFormat) -> ShardConfig {
@@ -779,4 +786,88 @@ fn deep_recursion_on_a_small_stack_stops_the_shard_not_the_process() {
     assert!(!s.is_running());
     let failure = s.with_state(|sim| sim.failure()).unwrap();
     assert!(failure.contains("call stack exhausted"), "{failure}");
+}
+
+// ---------------------------------------------------------------------------
+// Entity replication in a WebAssembly shard (the `field` guest)
+// ---------------------------------------------------------------------------
+
+fn field(params: Value) -> Arc<Shard<WasmSim>> {
+    let k = WasmShardKind::compile(
+        "field",
+        &guest_wasm("field"),
+        config(SnapshotFormat::Json),
+        WasmLimits::default(),
+    )
+    .unwrap();
+    let sim = k.instantiate("f1", &params).unwrap();
+    Shard::new("f1", sim, k.config().clone())
+}
+
+fn apply_all(q: &pylon_realtime::OutboundQueue, table: &mut pylon_realtime::ReplicaTable) -> bool {
+    let mut full = false;
+    while let Some(f) = q.pop() {
+        if f.kind == FrameKind::Replication {
+            full |= table.apply(&f.bytes).unwrap().full;
+        }
+    }
+    full
+}
+
+#[test]
+fn a_wasm_shard_replicates_its_store_with_interest_and_stealth() {
+    let s = field(json!({ "units": 40, "radius": 12.0 }));
+    assert!(DynShard::replicates(s.as_ref()));
+    let plain = join(&s, "u5");
+    let seer = DynShard::add_queued_subscriber(
+        s.as_ref(),
+        SubscriberId::new("seer1"),
+        &ShardAuth::admin(),
+    )
+    .unwrap();
+    let (mut tp, mut ts) = (
+        pylon_realtime::ReplicaTable::new(),
+        pylon_realtime::ReplicaTable::new(),
+    );
+    let mut seer_saw_zero = false;
+    for tick in 0..40 {
+        if tick == 10 {
+            send(&s, "u5", json!({ "input": { "hp": [6, 42] } })).unwrap();
+        }
+        if tick == 20 {
+            send(&s, "u5", json!({ "input": { "despawn": 7 } })).unwrap();
+        }
+        s.run_tick();
+        assert!(!apply_all(&plain, &mut tp) || tick == 0);
+        apply_all(&seer, &mut ts);
+        // The stealthed unit never reaches the plain subscriber.
+        assert!(!tp.entities.contains_key(&0));
+        seer_saw_zero |= ts.entities.contains_key(&0);
+        // Far units are out of the plain subscriber's view.
+        assert!(!tp.entities.contains_key(&39));
+    }
+    assert!(seer_saw_zero);
+    // The component change and the despawn arrived; positions track the
+    // module's (unit 5 is at the center of its own view).
+    assert_eq!(tp.entities[&6].components[&1], vec![42]);
+    assert!(!tp.entities.contains_key(&7));
+    assert!(tp.pos(5).is_some());
+}
+
+#[test]
+fn a_wasm_replicating_shard_refuses_sse_and_sends_a_baseline_to_a_reconnect() {
+    let s = field(json!({ "units": 5 }));
+    let q = join(&s, "u1");
+    let mut t = pylon_realtime::ReplicaTable::new();
+    s.run_tick();
+    assert!(apply_all(&q, &mut t));
+    assert_eq!(t.entities.len(), 4); // unit 0 is stealthed
+    s.run_tick();
+    assert!(!apply_all(&q, &mut t));
+    assert!(s.remove_queued_subscriber(&q));
+    let again = join(&s, "u1");
+    let mut fresh = pylon_realtime::ReplicaTable::new();
+    s.run_tick();
+    assert!(apply_all(&again, &mut fresh));
+    assert_eq!(fresh.entities.len(), 4);
 }

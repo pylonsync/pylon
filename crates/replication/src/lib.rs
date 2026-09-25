@@ -42,6 +42,10 @@ pub struct Entity {
     pub components: BTreeMap<ComponentId, Component>,
     /// Change counter value of the last change of any kind.
     pub seq: u64,
+    /// Change counter value of this entity's spawn. An id despawned and
+    /// spawned again gets a new value, so readers can tell a new entity
+    /// from the old one.
+    pub spawn_seq: u64,
 }
 
 impl Entity {
@@ -140,6 +144,7 @@ impl Replicated {
                 pos_seq: seq,
                 components: BTreeMap::new(),
                 seq,
+                spawn_seq: seq,
             },
         );
         if let Some(log) = &mut self.log {
@@ -248,6 +253,27 @@ impl Replicated {
             Some(log) => std::mem::take(log),
             None => Vec::new(),
         }
+    }
+
+    /// Every entity and component as a change log that rebuilds this
+    /// store from empty (spawns, then component sets).
+    pub fn full_changes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (id, e) in &self.entities {
+            out.push(op::SPAWN);
+            varint::write_u64(&mut out, *id);
+            write_pos(&mut out, e.pos);
+            for (cid, c) in &e.components {
+                if let Some(bytes) = &c.bytes {
+                    out.push(op::SET);
+                    varint::write_u64(&mut out, *id);
+                    out.push(*cid);
+                    varint::write_u64(&mut out, bytes.len() as u64);
+                    out.extend_from_slice(bytes);
+                }
+            }
+        }
+        out
     }
 
     /// Apply changes another store recorded. Stops at the first malformed
@@ -365,6 +391,24 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(summary(&host), summary(&guest));
+    }
+
+    #[test]
+    fn a_full_dump_rebuilds_the_store() {
+        let mut a = Replicated::new();
+        a.spawn(1, [1.0, 2.0, 3.0]);
+        a.spawn(4, [0.0; 3]);
+        a.set_component(1, 2, b"x");
+        a.set_component(4, 2, b"y");
+        a.remove_component(4, 2);
+        let mut b = Replicated::new();
+        b.apply_changes(&a.full_changes()).unwrap();
+        let view = |r: &Replicated| {
+            r.iter()
+                .map(|(id, e)| (id, e.pos, e.component(2).map(<[u8]>::to_vec)))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(view(&a), view(&b));
     }
 
     #[test]

@@ -79,6 +79,13 @@
 //! | `pylon_filter_visible(sid_ptr, sid_len, ids_ptr, ids_len) -> status` | Output: the ids the subscriber may see, in order. |
 //! | `pylon_snapshot_visible(sid_ptr, sid_len, view_ptr, view_len) -> status` | The view is three u32 counts (visible, entered, left) and then the ids. Status `2` means "send `snapshot_for`". |
 //!
+//!
+//! Optional export for entity replication:
+//!
+//! | Export | Meaning |
+//! | --- | --- |
+//! | `pylon_replication() -> i32` | `0` off. `1` on, output: precision (f32), byte budget (u32), flags (u8: bit 0 x/z plane, bit 1 full dump), then a `pylon_replication` change log. The first call sends a full dump; later calls send the changes since the previous call. |
+//!
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
 //! message in the output. A trap stops the shard.
 //!
@@ -88,6 +95,7 @@
 use std::cell::UnsafeCell;
 use std::time::Duration;
 
+pub use pylon_replication::{ComponentId, Entity, EntityId, Replicated};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -212,6 +220,44 @@ pub trait Shard: Sized + 'static {
     /// `snapshot_for` gives.
     fn snapshot_visible(&self, _subscriber: &str, _view: &View<'_>) -> Option<Self::Snapshot> {
         None
+    }
+
+    // -- Entity replication (optional) ---------------------------------------
+    //
+    // Keep entities in a `Replicated` store and return it here: the host
+    // then sends each subscriber spawn, update, and despawn frames for the
+    // entities in its view (all of them, or the interest view), with only
+    // what changed. `snapshot*` is not used then.
+
+    /// The entity store to replicate. Default: none (send snapshots).
+    fn replicated(&mut self) -> Option<&mut Replicated> {
+        None
+    }
+
+    /// Settings for the replication frames.
+    fn replication_config(&self) -> ReplicationConfig {
+        ReplicationConfig::default()
+    }
+}
+
+/// Replication settings (see `Shard::replicated`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReplicationConfig {
+    /// Position precision in world units.
+    pub precision: f32,
+    /// Byte budget per subscriber per tick for updates. 0 = no limit.
+    pub max_bytes_per_tick: u32,
+    /// The ground plane interest management uses: false = x/y, true = x/z.
+    pub y_up: bool,
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            precision: 0.01,
+            max_bytes_per_tick: 0,
+            y_up: false,
+        }
     }
 }
 
@@ -413,6 +459,10 @@ macro_rules! export_shard {
             pub extern "C" fn pylon_snapshot_visible(sp: i32, sl: i32, vp: i32, vl: i32) -> i32 {
                 RUNTIME.snapshot_visible(sp, sl, vp, vl)
             }
+            #[no_mangle]
+            pub extern "C" fn pylon_replication() -> i32 {
+                RUNTIME.replication()
+            }
         };
     };
 }
@@ -431,6 +481,8 @@ pub mod __rt {
         codec: Codec,
         scratch: Vec<u8>,
         output: Vec<u8>,
+        /// The host has the full store; send only changes from now on.
+        replication_synced: bool,
     }
 
     /// The module's global state. A `wasm32-unknown-unknown` module runs on
@@ -457,6 +509,7 @@ pub mod __rt {
                     codec: Codec::Json,
                     scratch: Vec::new(),
                     output: Vec::new(),
+                    replication_synced: false,
                 }),
             }
         }
@@ -643,6 +696,32 @@ pub mod __rt {
                 }
             }
             OK
+        }
+
+        pub fn replication(&self) -> i32 {
+            let s = self.state();
+            let game = shard(&mut s.shard);
+            let config = game.replication_config();
+            let synced = s.replication_synced;
+            let Some(store) = game.replicated() else {
+                return 0;
+            };
+            let (full, log) = if synced {
+                (false, store.take_changes())
+            } else {
+                // Entities made before now (in init) predate recording:
+                // send them all once, then record from here on.
+                store.record_changes(true);
+                (true, store.full_changes())
+            };
+            s.replication_synced = true;
+            s.output.clear();
+            s.output.extend_from_slice(&config.precision.to_le_bytes());
+            s.output
+                .extend_from_slice(&config.max_bytes_per_tick.to_le_bytes());
+            s.output.push(config.y_up as u8 | (full as u8) << 1);
+            s.output.extend_from_slice(&log);
+            1
         }
 
         pub fn snapshot_visible(&self, sp: i32, sl: i32, vp: i32, vl: i32) -> i32 {

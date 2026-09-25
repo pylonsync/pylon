@@ -15,7 +15,12 @@ version.workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = "1.3"
+pylon-replication = { path = "../replication", version = "0.13.0" }  # x-release-please-version
 
 [[example]]
 name = "arena"
+crate-type = ["cdylib"]
+
+[[example]]
+name = "field"
 crate-type = ["cdylib"]

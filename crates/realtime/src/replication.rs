@@ -105,6 +105,9 @@ pub fn entity_positions(store: &Replicated, plane: Plane, out: &mut Vec<EntityPo
 
 #[derive(Debug, Clone, Copy)]
 struct Sent {
+    /// The entity's spawn counter when the subscriber got it; a different
+    /// value in the store means the id now names a new entity.
+    spawn_seq: u64,
     /// The quantized position the subscriber has.
     q: [i64; 3],
     /// The store's change counter when the subscriber was last updated.
@@ -116,6 +119,8 @@ struct Sent {
 #[derive(Debug, Default)]
 struct Baseline {
     entities: HashMap<EntityId, Sent>,
+    /// The precision the subscriber's positions are in.
+    precision: f32,
     /// The outbound queue's dropped-frame count when this baseline was
     /// last sent to; a higher count means frames were lost.
     dropped: u64,
@@ -134,6 +139,14 @@ pub struct FrameInput<'a> {
     pub queue_full: bool,
 }
 
+/// One subscription's frame, and how to queue it.
+pub struct FrameOutput {
+    pub bytes: Vec<u8>,
+    /// For a delta, the queue's dropped-frame count its baseline assumed
+    /// (see `OutboundQueue::push_replication`); None for a full frame.
+    pub delta_of: Option<u64>,
+}
+
 /// Per-subscription baselines for one shard.
 #[derive(Debug, Default)]
 pub struct Replicator {
@@ -150,9 +163,6 @@ struct Candidate {
     delta: [i64; 3],
     seq: u64,
 }
-
-/// Bytes an update's id costs, on average, for budget accounting.
-const ID_COST: usize = 2;
 
 impl Replicator {
     pub fn new() -> Self {
@@ -177,24 +187,37 @@ impl Replicator {
         config: &ReplicationConfig,
         tick: u64,
         input: FrameInput<'_>,
-    ) -> Vec<u8> {
+    ) -> FrameOutput {
         let precision = sanitize_precision(config.precision);
         let visible: &[EntityId] = input.visible.unwrap_or(&self.all_ids);
         let base = self.baselines.entry(input.key).or_default();
-        let full = !base.started || input.dropped > base.dropped || input.queue_full;
+        // A new precision rescales every position the client has.
+        let full = !base.started
+            || input.dropped != base.dropped
+            || input.queue_full
+            || base.precision != precision;
         base.started = true;
         base.dropped = input.dropped;
+        base.precision = precision;
         let mut frame = FrameBuilder::new(full, precision);
 
         if full {
             base.entities.clear();
         } else {
             // Despawn what the subscriber has and no longer sees.
+            // Despawn what the subscriber has and no longer sees, and ids
+            // that now name a new entity (it spawns again below, with its
+            // full state, so nothing of the old entity lingers).
             let gone: Vec<EntityId> = base
                 .entities
-                .keys()
-                .copied()
-                .filter(|id| visible.binary_search(id).is_err() || !store.contains(*id))
+                .iter()
+                .filter(|(id, sent)| {
+                    visible.binary_search(id).is_err()
+                        || store
+                            .get(**id)
+                            .is_none_or(|e| e.spawn_seq != sent.spawn_seq)
+                })
+                .map(|(id, _)| *id)
                 .collect();
             for id in gone {
                 base.entities.remove(&id);
@@ -222,6 +245,7 @@ impl Replicator {
                     base.entities.insert(
                         id,
                         Sent {
+                            spawn_seq: e.spawn_seq,
                             q,
                             seq: store.seq(),
                             tick,
@@ -230,7 +254,13 @@ impl Replicator {
                 }
                 Some(sent) if e.changed_since(sent.seq) => {
                     let q = quantize3(e.pos, precision);
-                    let delta = [q[0] - sent.q[0], q[1] - sent.q[1], q[2] - sent.q[2]];
+                    // Wrapping, like the decoder's add: any finite position
+                    // round-trips, even across the whole i64 range.
+                    let delta = [
+                        q[0].wrapping_sub(sent.q[0]),
+                        q[1].wrapping_sub(sent.q[1]),
+                        q[2].wrapping_sub(sent.q[2]),
+                    ];
                     let comps: Vec<ComponentChange<'_>> = e
                         .components
                         .iter()
@@ -273,9 +303,15 @@ impl Replicator {
                     .then(a.id.cmp(&b.id))
             });
             let mut used = 0usize;
+            let mut first = true;
             self.candidates.retain(|c| {
-                let cost = c.body.len() + ID_COST;
-                if used + cost <= budget {
+                // The id is delta-coded after sorting; its absolute length
+                // bounds that.
+                let cost = c.body.len() + pylon_replication::varint::len_u64(c.id);
+                // The top candidate always goes, even past the budget, so an
+                // update bigger than the budget still arrives.
+                if first || used + cost <= budget {
+                    first = false;
                     used += cost;
                     true
                 } else {
@@ -288,12 +324,15 @@ impl Replicator {
             frame.update(c.id, &c.body);
             let sent = base.entities.get_mut(&c.id).expect("present");
             for i in 0..3 {
-                sent.q[i] += c.delta[i];
+                sent.q[i] = sent.q[i].wrapping_add(c.delta[i]);
             }
             sent.seq = c.seq;
             sent.tick = tick;
         }
-        frame.finish()
+        FrameOutput {
+            bytes: frame.finish(),
+            delta_of: (!full).then_some(input.dropped),
+        }
     }
 }
 
@@ -374,7 +413,7 @@ mod tests {
                 }
             }
             rep.begin_tick(&store);
-            let f = rep.frame(&store, &config, tick, input(9, None));
+            let f = rep.frame(&store, &config, tick, input(9, None)).bytes;
             let s = table.apply(&f).unwrap();
             assert_eq!(s.full, tick == 1);
             let ids: Vec<EntityId> = store.iter().map(|(id, _)| id).collect();
@@ -392,14 +431,14 @@ mod tests {
         let mut table = ReplicaTable::new();
         rep.begin_tick(&store);
         table
-            .apply(&rep.frame(&store, &config, 1, input(1, Some(&[1, 2]))))
+            .apply(&rep.frame(&store, &config, 1, input(1, Some(&[1, 2]))).bytes)
             .unwrap();
         let s = table
-            .apply(&rep.frame(&store, &config, 2, input(1, Some(&[1]))))
+            .apply(&rep.frame(&store, &config, 2, input(1, Some(&[1]))).bytes)
             .unwrap();
         assert_eq!(s.despawned, vec![2]);
         let s = table
-            .apply(&rep.frame(&store, &config, 3, input(1, Some(&[1, 2]))))
+            .apply(&rep.frame(&store, &config, 3, input(1, Some(&[1, 2]))).bytes)
             .unwrap();
         assert_eq!(s.spawned, vec![2]);
         assert_eq!(table.entities.len(), 2);
@@ -414,12 +453,12 @@ mod tests {
         rep.begin_tick(&store);
         let mut t = ReplicaTable::new();
         assert!(
-            t.apply(&rep.frame(&store, &config, 1, input(1, None)))
+            t.apply(&rep.frame(&store, &config, 1, input(1, None)).bytes)
                 .unwrap()
                 .full
         );
         assert!(
-            !t.apply(&rep.frame(&store, &config, 2, input(1, None)))
+            !t.apply(&rep.frame(&store, &config, 2, input(1, None)).bytes)
                 .unwrap()
                 .full
         );
@@ -428,7 +467,7 @@ mod tests {
         store.set_pos(1, [4.0, 0.0, 0.0]);
         let mut fresh = ReplicaTable::new(); // a client that missed frames
         let s = fresh
-            .apply(&rep.frame(&store, &config, 3, dropped))
+            .apply(&rep.frame(&store, &config, 3, dropped).bytes)
             .unwrap();
         assert!(s.full);
         assert_eq!(fresh.pos(1), Some([4.0, 0.0, 0.0]));
@@ -437,7 +476,7 @@ mod tests {
         full_queue.queue_full = true;
         assert!(
             fresh
-                .apply(&rep.frame(&store, &config, 4, full_queue))
+                .apply(&rep.frame(&store, &config, 4, full_queue).bytes)
                 .unwrap()
                 .full
         );
@@ -464,14 +503,16 @@ mod tests {
         rep.begin_tick(&store);
         let mut first = input(1, None);
         first.area = area;
-        table.apply(&rep.frame(&store, &config, 1, first)).unwrap();
+        table
+            .apply(&rep.frame(&store, &config, 1, first).bytes)
+            .unwrap();
         for id in 0..40u64 {
             store.set_pos(id, [id as f32 * 10.0 + 1.0, 0.0, 0.0]);
         }
         rep.begin_tick(&store);
         let mut next = input(1, None);
         next.area = area;
-        let f = rep.frame(&store, &config, 2, next);
+        let f = rep.frame(&store, &config, 2, next).bytes;
         let s = table.apply(&f).unwrap();
         // The frame fits the budget (plus the fixed header and counts)...
         assert!(f.len() <= 30 + 12, "{} bytes", f.len());
@@ -484,10 +525,105 @@ mod tests {
             let mut i = input(1, None);
             i.area = area;
             rep.begin_tick(&store);
-            table.apply(&rep.frame(&store, &config, tick, i)).unwrap();
+            table
+                .apply(&rep.frame(&store, &config, tick, i).bytes)
+                .unwrap();
         }
         let ids: Vec<EntityId> = (0..40).collect();
         assert_matches(&table, &store, &ids, config.precision);
+    }
+
+    #[test]
+    fn a_reused_id_arrives_as_a_new_entity_without_the_old_components() {
+        let config = ReplicationConfig::default();
+        let mut store = Replicated::new();
+        store.spawn(7, [0.0; 3]);
+        store.set_component(7, 1, b"old");
+        let mut rep = Replicator::new();
+        let mut table = ReplicaTable::new();
+        rep.begin_tick(&store);
+        table
+            .apply(&rep.frame(&store, &config, 1, input(1, None)).bytes)
+            .unwrap();
+        store.despawn(7);
+        store.spawn(7, [5.0, 0.0, 0.0]);
+        rep.begin_tick(&store);
+        let s = table
+            .apply(&rep.frame(&store, &config, 2, input(1, None)).bytes)
+            .unwrap();
+        assert_eq!((s.despawned, s.spawned), (vec![7], vec![7]));
+        assert!(table.entities[&7].components.is_empty());
+        assert_eq!(table.pos(7), Some([5.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn a_precision_change_sends_a_full_frame() {
+        let mut store = Replicated::new();
+        store.spawn(1, [10.0, 0.0, 0.0]);
+        let mut rep = Replicator::new();
+        let mut table = ReplicaTable::new();
+        rep.begin_tick(&store);
+        let coarse = ReplicationConfig {
+            precision: 1.0,
+            ..Default::default()
+        };
+        table
+            .apply(&rep.frame(&store, &coarse, 1, input(1, None)).bytes)
+            .unwrap();
+        let fine = ReplicationConfig {
+            precision: 0.5,
+            ..Default::default()
+        };
+        let out = rep.frame(&store, &fine, 2, input(1, None));
+        assert!(out.delta_of.is_none());
+        assert!(table.apply(&out.bytes).unwrap().full);
+        assert_eq!(table.pos(1), Some([10.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn extreme_positions_round_trip_without_overflow() {
+        let config = ReplicationConfig {
+            precision: 1.0e-30,
+            ..Default::default()
+        };
+        let mut store = Replicated::new();
+        store.spawn(1, [-f32::MAX, 0.0, 0.0]);
+        let mut rep = Replicator::new();
+        let mut table = ReplicaTable::new();
+        rep.begin_tick(&store);
+        table
+            .apply(&rep.frame(&store, &config, 1, input(1, None)).bytes)
+            .unwrap();
+        store.set_pos(1, [f32::MAX, 0.0, 0.0]);
+        rep.begin_tick(&store);
+        table
+            .apply(&rep.frame(&store, &config, 2, input(1, None)).bytes)
+            .unwrap();
+        assert_eq!(table.entities[&1].q[0], i64::MAX);
+    }
+
+    #[test]
+    fn an_update_bigger_than_the_budget_still_arrives() {
+        let config = ReplicationConfig {
+            precision: 0.1,
+            max_bytes_per_tick: 10,
+            plane: Plane::XY,
+        };
+        let mut store = Replicated::new();
+        store.spawn(u64::MAX, [0.0; 3]);
+        let mut rep = Replicator::new();
+        let mut table = ReplicaTable::new();
+        rep.begin_tick(&store);
+        table
+            .apply(&rep.frame(&store, &config, 1, input(1, None)).bytes)
+            .unwrap();
+        store.set_component(u64::MAX, 3, &[9u8; 100]);
+        rep.begin_tick(&store);
+        let s = table
+            .apply(&rep.frame(&store, &config, 2, input(1, None)).bytes)
+            .unwrap();
+        assert_eq!(s.updated, vec![u64::MAX]);
+        assert_eq!(table.entities[&u64::MAX].components[&3], vec![9u8; 100]);
     }
 
     #[test]
@@ -502,7 +638,7 @@ mod tests {
         let mut table = ReplicaTable::new();
         rep.begin_tick(&store);
         table
-            .apply(&rep.frame(&store, &config, 1, input(1, None)))
+            .apply(&rep.frame(&store, &config, 1, input(1, None)).bytes)
             .unwrap();
         // 0.3 per tick: the quantized value only changes every few ticks,
         // and the client ends where the store is.
@@ -511,7 +647,7 @@ mod tests {
             store.set_pos(1, [x, 0.0, 0.0]);
             rep.begin_tick(&store);
             table
-                .apply(&rep.frame(&store, &config, tick, input(1, None)))
+                .apply(&rep.frame(&store, &config, tick, input(1, None)).bytes)
                 .unwrap();
         }
         assert_matches(&table, &store, &[1], 1.0);

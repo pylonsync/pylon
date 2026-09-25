@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use crate::outbound::OutboundQueue;
+use crate::outbound::{OutboundQueue, PushOutcome};
 use crate::snapshot::{encode_snapshot, EncodeSnapshot, SnapshotFormat};
 use crate::wire::InputRejection;
 
@@ -150,12 +150,21 @@ impl<T: EncodeSnapshot> Subscriber<T> {
     }
 
     /// Send an entity replication frame built for this subscription.
-    pub fn send_replication(&self, tick: u64, frame: Arc<[u8]>, ack: u64) {
+    /// `delta_of` as in `OutboundQueue::push_replication`. Returns the
+    /// queue's answer; `NeedsBaseline` means send a full frame instead.
+    pub fn send_replication(
+        &self,
+        tick: u64,
+        frame: Arc<[u8]>,
+        ack: u64,
+        delta_of: Option<u64>,
+    ) -> PushOutcome {
         match &self.delivery {
-            Delivery::Sink(sink) => sink(tick, &frame),
-            Delivery::Queue(q) => {
-                q.push_replication(tick, ack, frame);
+            Delivery::Sink(sink) => {
+                sink(tick, &frame);
+                PushOutcome::Queued
             }
+            Delivery::Queue(q) => q.push_replication(tick, ack, frame, delta_of),
         }
     }
 

@@ -29,8 +29,9 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use pylon_realtime::{
-    EntityId, EntityPos, InterestArea, InterestConfig, RawInput, RawSnapshot, Shard, ShardAuth,
-    ShardConfig, ShardRegistry, SimState, SnapshotFormat, SubscriberId, Visibility,
+    EntityId, EntityPos, InterestArea, InterestConfig, Plane, RawInput, RawSnapshot, Replicated,
+    ReplicatedRef, ReplicationConfig, Shard, ShardAuth, ShardConfig, ShardRegistry, SimState,
+    SnapshotFormat, SubscriberId, Visibility,
 };
 use serde::Serialize;
 use wasmtime::{
@@ -289,6 +290,14 @@ impl WasmShardKind {
             is_finished: func!("pylon_is_finished"),
             authorize_subscribe: func!("pylon_authorize_subscribe"),
             authorize_input: func!("pylon_authorize_input"),
+            replication: if instance
+                .get_export(&mut store, "pylon_replication")
+                .is_some()
+            {
+                Some(func!("pylon_replication"))
+            } else {
+                None
+            },
             interest: if instance.get_export(&mut store, "pylon_interest").is_some() {
                 Some(InterestExports {
                     config: func!("pylon_interest"),
@@ -331,6 +340,8 @@ impl WasmShardKind {
         }
         Ok(WasmSim {
             inner: RefCell::new(inner),
+            mirror: RefCell::new(Replicated::new()),
+            replication: std::cell::Cell::new(None),
         })
     }
 }
@@ -455,6 +466,7 @@ struct Exports {
     authorize_subscribe: TypedFunc<(i32, i32, i32, i32), i32>,
     authorize_input: TypedFunc<(i32, i32, i32, i32, i32, i32), i32>,
     interest: Option<InterestExports>,
+    replication: Option<TypedFunc<(), i32>>,
 }
 
 #[derive(Clone)]
@@ -636,6 +648,13 @@ pub struct WasmSim {
     // call needs `&mut Store`. The shard holds its state behind a mutex, so
     // one call runs at a time and the RefCell never sees a second borrow.
     inner: RefCell<Inner>,
+    /// The host's copy of the module's replicated store, rebuilt from the
+    /// change logs `pylon_replication` returns. Its own cell, so the shard
+    /// can hold a borrow of it while calling the module for interest.
+    mirror: RefCell<Replicated>,
+    /// The module's last replication settings; None when it does not
+    /// replicate.
+    replication: std::cell::Cell<Option<ReplicationConfig>>,
 }
 
 impl WasmSim {
@@ -910,6 +929,58 @@ impl SimState for WasmSim {
 
     fn shares_visible_snapshots(&self) -> bool {
         self.inner.borrow().interest_shared
+    }
+
+    fn replicated(&self) -> Option<ReplicatedRef<'_>> {
+        let mut inner = self.inner.borrow_mut();
+        let f = inner.exports.replication.clone()?;
+        if inner.failed.is_some() {
+            // No more changes; keep sending what the mirror holds.
+            drop(inner);
+            return self
+                .replication
+                .get()
+                .map(|_| ReplicatedRef::Cell(self.mirror.borrow()));
+        }
+        if !inner.in_tick {
+            inner.begin_op();
+        }
+        let status = inner.call(&f, ()).ok()?;
+        if status == 0 {
+            self.replication.set(None);
+            return None;
+        }
+        if status != 1 {
+            inner.fail(&format!("pylon_replication returned {status}"));
+            return None;
+        }
+        let out = inner.output().ok()?;
+        if out.len() < 9 {
+            inner.fail("pylon_replication output is shorter than its 9-byte header");
+            return None;
+        }
+        let precision = f32::from_le_bytes(out[0..4].try_into().unwrap());
+        let budget = u32::from_le_bytes(out[4..8].try_into().unwrap());
+        let flags = out[8];
+        self.replication.set(Some(ReplicationConfig {
+            precision,
+            max_bytes_per_tick: budget as usize,
+            plane: if flags & 1 != 0 { Plane::XZ } else { Plane::XY },
+        }));
+        let mut mirror = self.mirror.borrow_mut();
+        if flags & 2 != 0 {
+            *mirror = Replicated::new();
+        }
+        if let Err(e) = mirror.apply_changes(&out[9..]) {
+            inner.fail(&format!("pylon_replication sent a bad change log: {e}"));
+        }
+        drop(mirror);
+        drop(inner);
+        Some(ReplicatedRef::Cell(self.mirror.borrow()))
+    }
+
+    fn replication_config(&self) -> ReplicationConfig {
+        self.replication.get().unwrap_or_default()
     }
 }
 

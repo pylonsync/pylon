@@ -75,6 +75,10 @@ pub enum PushOutcome {
     Coalesced,
     /// The queue is closed; the frame was discarded.
     Closed,
+    /// A replication delta was refused: the queue is full, or dropped
+    /// frames since the delta's baseline was chosen. Nothing was queued or
+    /// dropped; send a full baseline instead.
+    NeedsBaseline,
 }
 
 struct State {
@@ -175,7 +179,37 @@ impl OutboundQueue {
     /// Queue a replication frame, dropping older snapshot and replication
     /// frames when full. The caller must make a frame pushed into a full
     /// queue a full baseline: the dropped deltas are gone.
-    pub fn push_replication(&self, tick: u64, ack: u64, bytes: Arc<[u8]>) -> PushOutcome {
+    ///
+    /// `delta_of`: `None` for a full baseline, which is always queued
+    /// (dropping older frames when full). For a delta, the dropped-frame
+    /// count its baseline assumed: the delta is queued only if no frame was
+    /// dropped since and the queue has room, checked under the queue lock
+    /// so a concurrent push cannot drop the baseline in between.
+    pub fn push_replication(
+        &self,
+        tick: u64,
+        ack: u64,
+        bytes: Arc<[u8]>,
+        delta_of: Option<u64>,
+    ) -> PushOutcome {
+        if let Some(expected_dropped) = delta_of {
+            let st = self.state.lock().unwrap();
+            if st.dropped_snapshots != expected_dropped || st.frames.len() >= self.config.max_frames
+            {
+                return PushOutcome::NeedsBaseline;
+            }
+            // Room, and nothing dropped: `push` will not coalesce. Keep the
+            // lock so no other push fills the queue first.
+            return self.push_locked(
+                st,
+                Frame {
+                    tick,
+                    kind: FrameKind::Replication,
+                    ack,
+                    bytes,
+                },
+            );
+        }
         self.push(Frame {
             tick,
             kind: FrameKind::Replication,
@@ -196,11 +230,16 @@ impl OutboundQueue {
     }
 
     fn push(&self, frame: Frame) -> PushOutcome {
+        let st = self.state.lock().unwrap();
+        self.push_locked(st, frame)
+    }
+
+    fn push_locked(&self, st: std::sync::MutexGuard<'_, State>, frame: Frame) -> PushOutcome {
         if self.is_closed() {
             return PushOutcome::Closed;
         }
         let outcome = {
-            let mut st = self.state.lock().unwrap();
+            let mut st = st;
             let mut outcome = PushOutcome::Queued;
             let now = Instant::now();
             // `full_since` is set when a push found the queue full, and only

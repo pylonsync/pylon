@@ -3265,6 +3265,7 @@ dependencies = [
 name = "pylon-shard-guest"
 version = "0.13.0"
 dependencies = [
+ "pylon-replication",
  "rmp-serde",
  "serde",
  "serde_json",

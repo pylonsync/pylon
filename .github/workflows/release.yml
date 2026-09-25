@@ -444,11 +444,13 @@ jobs:
           # otherwise pylon-studio-api never publishes.
           args: "--allow-dirty"
 
-  # pylon-shard-guest: the crate apps use to write WebAssembly shard logic.
-  # Published on its own because the workspace publish above is off: it
-  # depends only on serde crates, so the samael problem does not reach it.
+  # pylon-replication and pylon-shard-guest: the crates apps use to write
+  # WebAssembly shard logic. Published on their own because the workspace
+  # publish above is off: they depend only on serde crates, so the samael
+  # problem does not reach them. pylon-replication first: the guest crate
+  # depends on it.
   publish-shard-guest:
-    name: Publish pylon-shard-guest
+    name: Publish pylon-replication + pylon-shard-guest
     needs: verify
     runs-on: ubuntu-latest
     environment: Production
@@ -457,21 +459,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      - name: Check it builds for wasm32
-        run: cargo build -p pylon-shard-guest --example arena --release --target wasm32-unknown-unknown
+      - name: Check the guest builds for wasm32
+        run: cargo build -p pylon-shard-guest --examples --release --target wasm32-unknown-unknown
       - name: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "pylon-shard-guest") | .version')
-          # A re-run of a release must not fail on a version already up.
-          if curl -sf "https://crates.io/api/v1/crates/pylon-shard-guest/$version" \
-            -H "User-Agent: pylon-release (https://github.com/pylonsync/pylon)" >/dev/null; then
-            echo "pylon-shard-guest $version is already on crates.io"
-            exit 0
-          fi
-          cargo publish -p pylon-shard-guest
+          for crate in pylon-replication pylon-shard-guest; do
+            version=$(cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')
+            # A re-run of a release must not fail on a version already up.
+            if curl -sf "https://crates.io/api/v1/crates/$crate/$version" \
+              -H "User-Agent: pylon-release (https://github.com/pylonsync/pylon)" >/dev/null; then
+              echo "$crate $version is already on crates.io"
+              continue
+            fi
+            cargo publish -p "$crate"
+            # The next crate's verification build resolves this one from
+            # the registry; wait until the index serves it.
+            for _ in $(seq 1 30); do
+              if cargo search "$crate" --limit 1 | grep -q "\"$version\""; then break; fi
+              sleep 10
+            done
+          done
 
   binaries:
     name: binary (${{ matrix.target }})

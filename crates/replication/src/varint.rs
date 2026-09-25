@@ -13,6 +13,11 @@ pub fn write_u64(out: &mut Vec<u8>, mut v: u64) {
     }
 }
 
+/// Bytes `write_u64` uses for `v`.
+pub fn len_u64(v: u64) -> usize {
+    (64 - (v | 1).leading_zeros() as usize).div_ceil(7)
+}
+
 /// Read an unsigned LEB128 varint and advance `bytes` past it. None when
 /// it is truncated or longer than 10 bytes.
 pub fn read_u64(bytes: &mut &[u8]) -> Option<u64> {
@@ -63,6 +68,15 @@ mod tests {
         let mut b = Vec::new();
         write_i64(&mut b, -63);
         assert_eq!(b.len(), 1);
+    }
+
+    #[test]
+    fn len_matches_the_encoding() {
+        for v in [0u64, 1, 127, 128, 16383, 16384, u64::MAX] {
+            let mut b = Vec::new();
+            write_u64(&mut b, v);
+            assert_eq!(len_u64(v), b.len(), "{v}");
+        }
     }
 
     #[test]

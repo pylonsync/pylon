@@ -426,8 +426,9 @@ pub struct Shard<S: SimState> {
 enum TickSnapshot<T> {
     Own(T),
     Shared(usize),
-    /// An entity replication frame, built for this subscription.
-    Replication(Arc<[u8]>),
+    /// An entity replication frame, built for this subscription, and for a
+    /// delta the dropped-frame count its baseline assumed.
+    Replication(Arc<[u8]>, Option<u64>),
 }
 
 impl<S: SimState> Shard<S> {
@@ -976,9 +977,52 @@ impl<S: SimState> Shard<S> {
                     queue_full,
                 },
             );
-            out.push(TickSnapshot::Replication(Arc::from(frame)));
+            out.push(TickSnapshot::Replication(
+                Arc::from(frame.bytes),
+                frame.delta_of,
+            ));
         }
         out
+    }
+
+    /// A full replication frame for one subscription, rebuilt after the
+    /// queue refused a delta. Uses the view computed this tick.
+    fn full_replication_frame(&self, sub: &Subscriber<S::Snapshot>, tick: u64) -> Option<Vec<u8>> {
+        let state = self.state.lock().unwrap();
+        let store = state.replicated()?;
+        let config = state.replication_config();
+        let id = sub.id();
+        let area = state.interest_area(id);
+        let interest = self.interest.lock().unwrap();
+        let mut ids: Vec<EntityId> = match (state.interest_config(), interest.as_ref()) {
+            (Some(_), Some(m)) => m
+                .view(&sub.instance())
+                .map(|v| v.visible.clone())
+                .unwrap_or_default(),
+            _ => {
+                let mut all: Vec<EntityId> = store.iter().map(|(id, _)| id).collect();
+                state.filter_visible(id, &mut all);
+                all.sort_unstable();
+                all.dedup();
+                all
+            }
+        };
+        ids.retain(|e| store.contains(*e));
+        let dropped = sub.queue().map_or(0, |q| q.dropped_snapshots());
+        let mut replicator = self.replicator.lock().unwrap();
+        let out = replicator.frame(
+            &store,
+            &config,
+            tick,
+            FrameInput {
+                key: sub.instance(),
+                visible: Some(&ids),
+                area,
+                dropped,
+                queue_full: true,
+            },
+        );
+        Some(out.bytes)
     }
 
     /// Each subscriber's snapshot this tick, plus the snapshots shared by
@@ -1136,8 +1180,16 @@ impl<S: SimState> Shard<S> {
                 TickSnapshot::Own(snap) => {
                     sub.send(tick_number, snap, self.config.snapshot_format, ack)
                 }
-                TickSnapshot::Replication(bytes) => {
-                    sub.send_replication(tick_number, Arc::clone(bytes), ack)
+                TickSnapshot::Replication(bytes, delta_of) => {
+                    let outcome =
+                        sub.send_replication(tick_number, Arc::clone(bytes), ack, *delta_of);
+                    if outcome == crate::outbound::PushOutcome::NeedsBaseline {
+                        // The queue filled or dropped frames since this
+                        // delta's baseline was chosen: send a full frame.
+                        if let Some(full) = self.full_replication_frame(sub, tick_number) {
+                            sub.send_replication(tick_number, Arc::from(full), ack, None);
+                        }
+                    }
                 }
                 TickSnapshot::Shared(i) => {
                     let bytes = shared_bytes[*i].get_or_insert_with(|| {

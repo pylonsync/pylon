@@ -47,8 +47,11 @@ impl SimState for Field {
         (id, hp): Self::Input,
         _: Instant,
     ) -> Result<(), String> {
-        self.store.set_component(id, HP, &[hp]);
-        Ok(())
+        if self.store.set_component(id, HP, &[hp]) {
+            Ok(())
+        } else {
+            Err(format!("no unit {id}"))
+        }
     }
     fn tick(&mut self, dt: Duration) {
         self.t += dt.as_secs_f32();
@@ -96,12 +99,21 @@ impl SimState for Field {
 }
 
 fn shard(units: u64, interest: bool) -> Arc<Shard<Field>> {
+    shard_with(
+        units,
+        interest,
+        ShardConfig::default().outbound_queue_frames,
+    )
+}
+
+fn shard_with(units: u64, interest: bool, queue_frames: usize) -> Arc<Shard<Field>> {
     Shard::new(
         "f",
         Field::new(units, interest),
         ShardConfig {
             tick_rate_hz: 20,
             idle_ticks_before_shutdown: 0,
+            outbound_queue_frames: queue_frames,
             ..Default::default()
         },
     )
@@ -116,6 +128,9 @@ fn join(s: &Arc<Shard<Field>>, sid: &str) -> Arc<OutboundQueue> {
 fn drain(q: &OutboundQueue, table: &mut ReplicaTable) -> bool {
     let mut saw_full = false;
     while let Some(f) = q.pop() {
+        if f.kind == FrameKind::InputRejected {
+            continue;
+        }
         assert_eq!(f.kind, FrameKind::Replication);
         saw_full |= table.apply(&f.bytes).unwrap().full;
     }
@@ -220,4 +235,27 @@ fn a_reconnect_gets_a_full_baseline() {
         "the new connection's first frame is full"
     );
     assert_table(&fresh, &expected(&s, "u1"), false);
+}
+
+#[test]
+fn a_full_queue_never_ends_up_with_a_delta_after_a_dropped_baseline() {
+    // Two frames of room. The first (full) frame stays unread.
+    let s = shard_with(3, false, 2);
+    let q = join(&s, "u1");
+    s.run_tick();
+    // Next tick: an input fails (a rejection frame fills the queue) and
+    // every unit moves (a delta would follow and push the baseline out).
+    s.push_input(SubscriberId::new("u1"), (99, 1), Some(1))
+        .unwrap();
+    s.run_tick();
+    // Whatever survived applies cleanly and the table matches the store.
+    let mut table = ReplicaTable::new();
+    drain(&q, &mut table);
+    assert_table(&table, &expected(&s, "u1"), false);
+    // And later deltas keep applying.
+    for _ in 0..5 {
+        s.run_tick();
+        drain(&q, &mut table);
+    }
+    assert_table(&table, &expected(&s, "u1"), false);
 }
