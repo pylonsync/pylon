@@ -248,29 +248,51 @@ For 300 players in one area, all moving, at 20 Hz: about 23 KB/s per
 client with no budget, and 15 KB/s with a 900-byte budget, where a
 client's positions stay within 0.08 units of the server's at p99.
 
-On the client, read the table the frames build:
+### Client: a render loop
+
+`@pylonsync/realtime` is the client with no framework. `connectShardGame`
+connects, applies each frame, and places entities for a render frame
+without a React render:
 
 ```ts
-import { connectShard } from "@pylonsync/react";
+import { connectShardGame } from "@pylonsync/realtime";
 
-const client = connectShard(shardId, { subscriberId, ticket });
-client.onReplication((entities, summary) => {
-  for (const id of summary.spawned) addMesh(id);
-  for (const id of summary.despawned) removeMesh(id);
-});
+const game = connectShardGame<Input>(shardId, { subscriberId, ticket, tickRate: 20 });
 
-function frame() {
-  for (const e of client.entities.entities.values()) {
+function frame(now: number) {
+  game.frame(now);
+  for (const id of game.left) removeMesh(id);
+  for (const id of game.entered) addMesh(id);
+  for (const e of game.entities.values()) {
     moveMesh(e.id, e.x, e.y, e.z, e.components.get(HP));
   }
   requestAnimationFrame(frame);
 }
+requestAnimationFrame(frame);
 ```
 
-`useShard` returns the same table as `entities`. The table and its decoder
-also ship without React in `@pylonsync/realtime` (`EntityTable`). In Swift,
-`ShardClient<NoSnapshot, Input>` has `entities` and a `replication()`
-stream.
+- **Interpolation.** Entities are drawn `interpolationDelayMs` (default
+  100) behind the shard's current tick, between the two frames around that
+  time. Spawns, despawns, and component changes show at the tick they
+  happened. `e.from`, `e.to`, and `e.t` give the samples and the fraction,
+  to interpolate your own data in components (a heading). An id in both
+  `left` and `entered` is a new entity that reused the id.
+- **The clock.** `game.clock` estimates the shard's current tick from when
+  frames arrive, anchored on the least-delayed frame. Pass `tickRate` when
+  you know it; otherwise it is measured.
+- **Prediction.** `game.predict(step)` returns a `Predictor` that records
+  each input you `send`. After each frame, `reconcile(serverState, ack)`
+  starts from the shard's state for your entity and applies the inputs it
+  has not processed. Refused inputs drop out, and a reconnect clears it.
+- **Round trip.** `game.rttMs` is the smoothed time from an input to the
+  frame that acknowledges it.
+- **Reconnects** get a full frame. The entities it lacks leave.
+
+`game.latest` is the newest table, not interpolated. `connectShard` is the
+connection alone, with `onReplication` and `entities`. `useShard` in
+`@pylonsync/react` re-renders on every frame; use it for small,
+turn-based, or UI-only shards. In Swift, `ShardClient<NoSnapshot, Input>`
+has `entities` and a `replication()` stream.
 
 ## Declare the shard kind
 

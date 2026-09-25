@@ -151,6 +151,11 @@ export {
   encodeShardInput,
   EntityTable,
   ReplicationError,
+  // Render-loop client (no React): see `@pylonsync/realtime`.
+  connectShardGame,
+  ShardClock,
+  EntityInterpolator,
+  Predictor,
 } from "./shardWire";
 export type {
   ShardFrame,
@@ -158,6 +163,14 @@ export type {
   ShardPayloadDecoder,
   ReplicatedEntity,
   ReplicationSummary,
+  ShardConnectOptions,
+  ShardGame,
+  ShardGameOptions,
+  InterpolatedEntity,
+  InterpolationOptions,
+  EntitySample,
+  ShardClockOptions,
+  PredictorOptions,
 } from "./shardWire";
 
 // Session hook — server-resolved user + tenant identity
