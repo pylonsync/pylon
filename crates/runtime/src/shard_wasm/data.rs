@@ -613,8 +613,10 @@ impl WasmShardHost {
         // Taken out of the buffer, grouped by row and by the run that wrote
         // them: (entity, id, shard, epoch) -> fields.
         type Group = ((String, String), String, Option<i64>);
-        let mut groups: HashMap<Group, (serde_json::Map<String, serde_json::Value>, u32)> =
-            HashMap::new();
+        // Each field keeps its own failure count: one row update writes the
+        // group, and a failure counts against each field separately.
+        type Fields = HashMap<String, (serde_json::Value, u32)>;
+        let mut groups: HashMap<Group, Fields> = HashMap::new();
         {
             let mut dirty = self.dirty.lock().unwrap();
             // Shards discarded from here on: their fields are not put back.
@@ -628,21 +630,20 @@ impl WasmShardHost {
                     .collect();
                 for name in names {
                     let f = row.fields.remove(&name).expect("listed above");
-                    let group = groups
+                    groups
                         .entry((key.clone(), f.shard, f.epoch))
-                        .or_insert_with(|| (serde_json::Map::new(), 0));
-                    group.1 = group.1.max(f.failures);
-                    group.0.insert(name, f.value);
+                        .or_default()
+                        .insert(name, (f.value, f.failures));
                 }
             }
             dirty.retain(|_, row| !row.fields.is_empty());
         }
         #[cfg(test)]
         if let Some(hook) = self.flush_hook.lock().unwrap().as_ref() {
-            hook();
+            hook(groups.len());
         }
-        let mut failed: Vec<(Group, serde_json::Map<String, serde_json::Value>, u32)> = Vec::new();
-        for (((entity, id), shard, epoch), (set, failures)) in groups {
+        let mut failed: Vec<(Group, Fields)> = Vec::new();
+        for (((entity, id), shard, epoch), fields) in groups {
             let fence = match (epoch, machine.as_deref()) {
                 (Some(epoch), Some(machine)) => Some(crate::entity_writer::Fence {
                     shard: &shard,
@@ -651,7 +652,10 @@ impl WasmShardHost {
                 }),
                 _ => None,
             };
-            let fields = serde_json::Value::Object(set.clone());
+            let set: serde_json::Map<String, serde_json::Value> = fields
+                .iter()
+                .map(|(name, (value, _))| (name.clone(), value.clone()))
+                .collect();
             #[cfg(test)]
             let injected = self
                 .flush_failures
@@ -668,7 +672,7 @@ impl WasmShardHost {
                     "failed for a test".into(),
                 ))
             } else {
-                writer.update_fenced(&entity, &id, &fields, fence)
+                writer.update_fenced(&entity, &id, &serde_json::Value::Object(set), fence)
             };
             match result {
                 Ok(()) => {}
@@ -676,15 +680,22 @@ impl WasmShardHost {
                     tracing::warn!("[shard {shard}] write to {entity} {id} refused: {why}");
                 }
                 Err(crate::entity_writer::WriteError::Store(why)) => {
-                    if failures + 1 >= WRITE_ATTEMPTS && !matches!(scope, Flush::Shard(_)) {
-                        tracing::warn!(
-                            "[shard {shard}] write to {entity} {id} failed {WRITE_ATTEMPTS} times; dropped: {why}"
-                        );
-                    } else {
+                    let keep_all = matches!(scope, Flush::Shard(_));
+                    let mut kept = Fields::new();
+                    for (name, (value, failures)) in fields {
+                        if failures + 1 >= WRITE_ATTEMPTS && !keep_all {
+                            tracing::warn!(
+                                "[shard {shard}] write of {entity} {id} {name} failed {WRITE_ATTEMPTS} times; dropped: {why}"
+                            );
+                        } else {
+                            kept.insert(name, (value, failures + 1));
+                        }
+                    }
+                    if !kept.is_empty() {
                         tracing::warn!(
                             "[shard {shard}] write to {entity} {id} failed; kept: {why}"
                         );
-                        failed.push((((entity, id), shard, epoch), set, failures + 1));
+                        failed.push((((entity, id), shard, epoch), kept));
                     }
                 }
             }
@@ -697,7 +708,7 @@ impl WasmShardHost {
             .take()
             .unwrap_or_default();
         let mut kept = 0;
-        for ((key, shard, epoch), set, failures) in failed {
+        for ((key, shard, epoch), fields) in failed {
             if discarded.contains(&shard) {
                 continue;
             }
@@ -705,7 +716,7 @@ impl WasmShardHost {
             let row = dirty.entry(key).or_default();
             // Values buffered since the flush took these are newer; one from
             // the same run takes this failure.
-            for (field, value) in set {
+            for (field, (value, failures)) in fields {
                 match row.fields.entry(field) {
                     std::collections::hash_map::Entry::Occupied(mut e) => {
                         let f = e.get_mut();
@@ -1609,10 +1620,29 @@ mod tests {
         );
         // It ends (as an idle stop does); shutdown comes before the sweep.
         host.registry.get(&zone).unwrap().stop();
-        // The first two tries fail; the last writes still go out.
+        // The first two tries fail; the last writes still go out, all while
+        // the placement is ours (the in-memory store does not check the
+        // fence, so the test does): each flush that takes the field notes
+        // whether the placement was there.
         host.flush_failures
             .store(2, std::sync::atomic::Ordering::Release);
+        let takes = Arc::new(Mutex::new(Vec::new()));
+        {
+            let (weak, takes, zone) = (Arc::downgrade(&host), Arc::clone(&takes), zone.clone());
+            *host.flush_hook.lock().unwrap() = Some(Box::new(move |groups| {
+                if groups == 0 {
+                    return;
+                }
+                if let Some(host) = weak.upgrade() {
+                    let c = host.cluster.get().unwrap();
+                    let placed = c.dir.placement(&zone).unwrap().is_some();
+                    takes.lock().unwrap().push(placed);
+                }
+            }));
+        }
         host.stop_all();
+        *host.flush_hook.lock().unwrap() = None;
+        assert_eq!(*takes.lock().unwrap(), vec![true, true, true]);
         // Both failures went to the final writes (a periodic flush that
         // wrote the field first would leave them unused).
         assert_eq!(
@@ -1810,15 +1840,29 @@ mod tests {
             .store(2, std::sync::atomic::Ordering::Release);
         // Each flush notes whether the own lock was free and the id
         // reserved.
+        // A second stop during the retries leaves the placement to the
+        // first: (its result, the placement still there).
         let seen = Arc::new(Mutex::new(Vec::new()));
+        let second = Arc::new(Mutex::new(None));
         {
-            let (weak, seen, zone) = (Arc::downgrade(&host), Arc::clone(&seen), zone.clone());
-            *host.flush_hook.lock().unwrap() = Some(Box::new(move || {
+            let (weak, seen, second, zone) = (
+                Arc::downgrade(&host),
+                Arc::clone(&seen),
+                Arc::clone(&second),
+                zone.clone(),
+            );
+            *host.flush_hook.lock().unwrap() = Some(Box::new(move |_| {
                 if let Some(host) = weak.upgrade() {
                     let c = host.cluster.get().unwrap();
                     let free = c.own_lock.try_lock().is_ok();
                     let reserved = host.ending.lock().unwrap().contains(&zone);
                     seen.lock().unwrap().push((free, reserved));
+                    let mut second = second.lock().unwrap();
+                    if reserved && second.is_none() {
+                        let stopped = host.stop(&zone);
+                        let placed = c.dir.placement(&zone).unwrap().is_some();
+                        *second = Some((stopped, placed));
+                    }
                 }
             }));
         }
@@ -1829,6 +1873,7 @@ mod tests {
             *seen.lock().unwrap(),
             vec![(false, false), (true, true), (true, true)]
         );
+        assert_eq!(*second.lock().unwrap(), Some((false, true)));
         assert!(host.ending.lock().unwrap().is_empty());
         assert_eq!(
             host.flush_failures
@@ -2018,7 +2063,7 @@ mod tests {
             }],
         );
         let weak = Arc::downgrade(&host);
-        *host.flush_hook.lock().unwrap() = Some(Box::new(move || {
+        *host.flush_hook.lock().unwrap() = Some(Box::new(move |_| {
             if let Some(host) = weak.upgrade() {
                 host.discard_writes("w1");
             }
@@ -2114,7 +2159,7 @@ mod tests {
         // value takes the failure.
         let weak = Arc::downgrade(&host);
         let character = fns.character.clone();
-        *host.flush_hook.lock().unwrap() = Some(Box::new(move || {
+        *host.flush_hook.lock().unwrap() = Some(Box::new(move |_| {
             if let Some(host) = weak.upgrade() {
                 host.take_writes(
                     "w2",
@@ -2134,6 +2179,47 @@ mod tests {
         assert_eq!(
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             4
+        );
+    }
+
+    /// Fields of one run in one row keep their own counts: a field with
+    /// earlier failures does not take a newer field down with it.
+    #[test]
+    fn fields_of_a_run_keep_their_own_counts() {
+        let (rt, fns) = runtime();
+        let host = joined(&fns, &rt, "w1");
+        host.manual_flush();
+        let set = |field: &str, n: i64| {
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([(field.to_string(), serde_json::json!(n))]),
+            }]
+        };
+        let fail = |n| {
+            host.flush_failures
+                .store(n, std::sync::atomic::Ordering::Release)
+        };
+        let count = |field| host.field_failures("Character", &fns.character, field);
+        host.take_writes("w1", set("x", 1));
+        fail(WRITE_ATTEMPTS - 1);
+        for _ in 1..WRITE_ATTEMPTS {
+            host.flush_writes(Flush::Held);
+        }
+        host.take_writes("w1", set("nextGrant", 9));
+        assert_eq!(
+            (count("x"), count("nextGrant")),
+            (Some(WRITE_ATTEMPTS - 1), Some(0))
+        );
+        // One more failure: x reaches the limit, nextGrant has one.
+        fail(1);
+        assert_eq!(host.flush_writes(Flush::Held), 1);
+        assert_eq!((count("x"), count("nextGrant")), (None, Some(1)));
+        host.flush_writes(Flush::Held);
+        let row = rt.get_by_id("Character", &fns.character).unwrap().unwrap();
+        assert_eq!(
+            (row["x"].clone(), row["nextGrant"].clone()),
+            (0.into(), 9.into())
         );
     }
 

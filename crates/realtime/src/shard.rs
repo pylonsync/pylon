@@ -635,6 +635,11 @@ impl<S: SimState> Shard<S> {
         self.paused.load(Ordering::Acquire)
     }
 
+    /// Wait for a tick in progress, with its `on_tick` hook, to finish.
+    pub fn wait_for_tick(&self) {
+        drop(self.state.lock().unwrap());
+    }
+
     pub fn stop_and_wait(&self) {
         self.end();
         drop(self.state.lock().unwrap());

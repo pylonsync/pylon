@@ -102,23 +102,32 @@ impl<S: SimState> ShardRegistry<S> {
         self.len() == 0
     }
 
-    /// Sweep: remove shards that are no longer running (finished or idle-shutdown).
-    /// Call periodically from a scheduler.
+    /// Sweep: remove shards that are no longer running (finished or
+    /// idle-shutdown). Call periodically from a scheduler. Each goes after a
+    /// tick it had in progress, with its `on_tick` hook, finished: a hook
+    /// that looks the shard up (to buffer its last writes) still finds it.
+    /// A tick that takes the state lock after the shard stopped does
+    /// nothing.
     pub fn sweep_finished(&self) -> usize {
-        let mut map = self.shards.write().unwrap();
-        let dead: Vec<String> = map
+        let stopped: Vec<(String, Arc<Shard<S>>)> = self
+            .shards
+            .read()
+            .unwrap()
             .iter()
-            .filter_map(|(id, e)| {
-                if e.shard.is_running() {
-                    None
-                } else {
-                    Some(id.clone())
-                }
-            })
+            .filter(|(_, e)| !e.shard.is_running())
+            .map(|(id, e)| (id.clone(), Arc::clone(&e.shard)))
             .collect();
-        let count = dead.len();
-        for id in dead {
-            map.remove(&id);
+        for (_, shard) in &stopped {
+            shard.wait_for_tick();
+        }
+        let mut map = self.shards.write().unwrap();
+        let mut count = 0;
+        for (id, shard) in stopped {
+            // The same shard: one inserted under the id meanwhile stays.
+            if map.get(&id).is_some_and(|e| Arc::ptr_eq(&e.shard, &shard)) {
+                map.remove(&id);
+                count += 1;
+            }
         }
         count
     }
@@ -198,5 +207,51 @@ mod tests {
         assert!(shard.is_running());
         reg.remove("x");
         assert!(!shard.is_running());
+    }
+
+    /// A shard stopped while its tick's hook runs stays registered until
+    /// the hook returns.
+    #[test]
+    fn a_sweep_waits_for_the_last_tick_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Mutex};
+        let reg: Arc<ShardRegistry<Counter>> = Arc::new(ShardRegistry::new());
+        let shard = Shard::new(
+            "x",
+            Counter { value: 0 },
+            ShardConfig {
+                tick_rate_hz: 50,
+                ..Default::default()
+            },
+        );
+        let (entered_tx, entered) = mpsc::channel::<()>();
+        let (release, released) = mpsc::channel::<()>();
+        let released = Mutex::new(Some(released));
+        let found = Arc::new(AtomicBool::new(false));
+        {
+            let (reg, found) = (Arc::clone(&reg), Arc::clone(&found));
+            shard.set_on_tick(move |_, _| {
+                // Only the first tick waits.
+                let Some(released) = released.lock().unwrap().take() else {
+                    return;
+                };
+                let _ = entered_tx.send(());
+                let _ = released.recv();
+                found.store(reg.get("x").is_some(), Ordering::SeqCst);
+            });
+        }
+        reg.insert(Arc::clone(&shard));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        shard.stop();
+        let sweeper = {
+            let reg = Arc::clone(&reg);
+            std::thread::spawn(move || reg.sweep_finished())
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!sweeper.is_finished(), "swept during the hook");
+        release.send(()).unwrap();
+        assert_eq!(sweeper.join().unwrap(), 1);
+        assert!(found.load(Ordering::SeqCst), "the hook did not find it");
+        assert!(reg.get("x").is_none());
     }
 }

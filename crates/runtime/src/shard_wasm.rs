@@ -1622,9 +1622,10 @@ pub struct WasmShardHost {
     /// Stops the periodic flush, for tests that flush by hand.
     #[cfg(test)]
     periodic_flush_off: std::sync::atomic::AtomicBool,
-    /// Runs in a flush after it takes its fields, before it writes them.
+    /// Runs in a flush after it takes its fields (with the number of row
+    /// groups taken), before it writes them.
     #[cfg(test)]
-    flush_hook: Mutex<Option<Box<dyn Fn() + Send>>>,
+    flush_hook: Mutex<Option<FlushHook>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1638,6 +1639,10 @@ pub struct WasmShardHost {
 }
 
 /// This machine's place in the shard directory.
+/// A test hook run inside a flush (see `WasmShardHost::flush_hook`).
+#[cfg(test)]
+type FlushHook = Box<dyn Fn(usize) + Send>;
+
 struct ClusterState {
     dir: PgShardDirectory,
     me: MachineConfig,
@@ -2148,6 +2153,11 @@ impl WasmShardHost {
             return self.registry.get(id).is_some() && self.stop_local(id);
         };
         let own = c.own_lock.lock().unwrap();
+        // Ending here: the stop, sweep or shutdown writing its last fields
+        // releases the placement after them.
+        if self.ending.lock().unwrap().contains(id) {
+            return false;
+        }
         if self.registry.get(id).is_some() {
             let stopped = self.stop_local(id);
             c.saved_at.lock().unwrap().remove(id);
