@@ -83,6 +83,16 @@ impl std::error::Error for DataError {}
 // DataStore — platform-agnostic data access trait
 // ---------------------------------------------------------------------------
 
+/// An idempotent function call's stored outcome (see
+/// [`DataStore::record_fn_call`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredCall {
+    pub result: serde_json::Value,
+    /// A hash of the call's arguments: a later call with the same key and
+    /// other arguments is refused, not answered with this result.
+    pub args_hash: String,
+}
+
 /// Platform-agnostic data store trait.
 ///
 /// Implemented by `Runtime` (SQLite, self-hosted) and `D1DataStore` (Workers).
@@ -251,19 +261,15 @@ pub trait DataStore: Send + Sync {
     /// The stored result of the idempotent call of `fn_name` with `key`,
     /// inside the current mutation transaction (see
     /// [`DataStore::record_fn_call`]). `None` when no such call committed.
-    fn fn_call_result(
-        &self,
-        _fn_name: &str,
-        _key: &str,
-    ) -> Result<Option<serde_json::Value>, DataError> {
+    fn fn_call_result(&self, _fn_name: &str, _key: &str) -> Result<Option<StoredCall>, DataError> {
         Err(DataError {
             code: "NOT_SUPPORTED".into(),
             message: "idempotent calls require a mutation transaction".into(),
         })
     }
 
-    /// Record that the idempotent call of `fn_name` with `key` returned
-    /// `result`, in the current mutation transaction: it commits or rolls
+    /// Record that the idempotent call of `fn_name` with `key` (and the
+    /// arguments `call.args_hash` names) returned `call.result`, in the current mutation transaction: it commits or rolls
     /// back with the mutation's own writes. A second record of the same
     /// function and key fails (the pair is unique), so two concurrent calls
     /// cannot both commit.
@@ -271,7 +277,7 @@ pub trait DataStore: Send + Sync {
         &self,
         _fn_name: &str,
         _key: &str,
-        _result: &serde_json::Value,
+        _call: &StoredCall,
     ) -> Result<(), DataError> {
         Err(DataError {
             code: "NOT_SUPPORTED".into(),

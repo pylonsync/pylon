@@ -369,8 +369,9 @@ pub struct CallResult {
     pub data: Arc<[u8]>,
 }
 
-/// Call results a shard holds for its next ticks. A shard sends at most
-/// this many calls at once (the host enforces it), so none is dropped.
+/// Call results a shard holds for its next ticks. Past this, a result is
+/// dropped, and the shard sends its call again (a mutation's key returns
+/// the same result).
 pub const MAX_QUEUED_CALL_RESULTS: usize = 1024;
 
 /// Messages a shard holds for its next ticks. Past this, new ones are

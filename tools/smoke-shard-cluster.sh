@@ -249,6 +249,12 @@ kill -TERM "$PID_D"
 wait_log a-restarted.log "\[shard leave-check\] machine d is dead; starting it here" 8
 (($(date +%s) - LEFT_AT < 8)) || fail "d's shard took the dead-machine delay to move"
 
+# The example's arena kind runs at most 4 shards: stop the ones done with.
+for done in replay-check leave-check; do
+	curl -sf -X POST "http://127.0.0.1:$PORT_A/api/shards/$done/stop" \
+		-H "Authorization: Bearer $ADMIN_TOKEN" >/dev/null || fail "could not stop $done"
+done
+
 echo "→ 6. fencing: e's database calls hang; e stops its shard, then a starts it"
 url_part() { bun -e 'const u = new URL(process.argv[1]); console.log(process.argv[2] === "host" ? u.hostname : (u.port || "5432"))' "$DB_URL" "$1"; }
 PROXY_URL=$(bun -e 'const u = new URL(process.argv[1]); u.hostname = "127.0.0.1"; u.port = process.argv[2]; console.log(u.toString())' "$DB_URL" "$PG_PROXY_PORT")

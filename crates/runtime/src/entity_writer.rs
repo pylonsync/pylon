@@ -47,6 +47,10 @@ impl EntityWriter {
         }
     }
 
+    pub fn runtime(&self) -> &Runtime {
+        &self.runtime
+    }
+
     /// Set `fields` (a JSON object) on row `id` of `entity`.
     pub fn update(
         &self,

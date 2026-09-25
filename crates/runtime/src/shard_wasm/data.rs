@@ -4,19 +4,23 @@
 //! gets each result at the start of a later tick (`pylon_call_result`). A
 //! mutation runs once per key (see `crate::fn_calls`): a grant sent again
 //! after a crash returns the first run's result and changes nothing. Worker
-//! threads make the calls, so a slow function never delays a tick.
+//! threads make the calls, one shard's calls in turn with the others', so a
+//! slow function never delays a tick and one busy shard does not hold up the
+//! rest. A call that fails in the database or the functions runtime (see
+//! [`retryable`]) is made again with the same key after a delay; the module
+//! gets only a function's answer or its own error.
 //!
 //! A module also writes entity fields after each tick (`pylon_writes`). The
-//! host keeps the latest value of each field, per shard, and writes them
+//! host keeps the latest value of each field of each row and writes them
 //! every [`WRITE_EVERY`] and when the shard stops, through the same path as
 //! `PATCH /api/entities/<entity>/<id>` (plugins, change log, sync), with
 //! admin rights. Writes since the last flush are lost when the process
-//! crashes.
+//! crashes. A copy of a shard that lost its place (its machine's lease
+//! lapsed, or another machine runs it now) writes nothing more.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::mpsc::{Receiver, SyncSender};
-use std::sync::{Arc, Mutex, Weak};
-use std::time::Duration;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use pylon_realtime::CallResult;
 use serde::Deserialize;
@@ -30,16 +34,24 @@ pub(super) const CALL_QUEUE: usize = 4096;
 pub(super) const MAX_CALLS_IN_FLIGHT: usize = 256;
 const MAX_KEY: usize = 256;
 const MAX_FN_NAME: usize = 128;
-/// Rows one shard holds to write. Past this, new rows are dropped.
-pub(super) const MAX_DIRTY_ROWS: usize = 10_000;
-/// Flushes a row that fails with a store error is kept for.
+/// Rows waiting to be written, on all shards. Past this, new rows are
+/// dropped.
+pub(super) const MAX_DIRTY_ROWS: usize = 100_000;
+/// Flushes a row that fails with a store error is tried in.
 const WRITE_ATTEMPTS: u32 = 5;
-/// Worker threads that make calls, unless `PYLON_SHARD_CALL_WORKERS` sets it.
-const CALL_WORKERS: usize = 4;
-
+/// The most call workers (see [`default_workers`]).
+const MAX_CALL_WORKERS: usize = 4;
 /// How often buffered writes are flushed, unless
-/// `PYLON_SHARD_WRITE_EVERY_MS` sets it.
+/// `PYLON_SHARD_WRITE_EVERY_MS` sets it (at least [`MIN_WRITE_EVERY`]).
 pub(super) const WRITE_EVERY: Duration = Duration::from_secs(2);
+const MIN_WRITE_EVERY: Duration = Duration::from_millis(100);
+/// The delay before a call that failed in the infrastructure is made
+/// again; it doubles up to [`RETRY_MAX`].
+const RETRY_FIRST: Duration = Duration::from_millis(250);
+const RETRY_MAX: Duration = Duration::from_secs(30);
+/// A call waiting to be made again that the module stopped sending for this
+/// long is forgotten.
+const FORGET_AFTER: Duration = Duration::from_secs(60);
 
 /// A function call a module asked for.
 #[derive(Debug, Clone, Deserialize)]
@@ -59,30 +71,107 @@ pub(crate) struct Write {
     pub set: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A call waiting for a worker.
+/// A call a worker took.
 pub(super) struct QueuedCall {
     shard: String,
     call: Call,
 }
+
+/// Calls waiting for a worker: a queue per shard, served in turn.
+#[derive(Default)]
+pub(super) struct CallQueue {
+    state: Mutex<QueueState>,
+    ready: Condvar,
+}
+
+#[derive(Default)]
+struct QueueState {
+    by_shard: HashMap<String, VecDeque<Call>>,
+    /// Shards with calls waiting, in the order they are served.
+    turn: VecDeque<String>,
+    len: usize,
+}
+
+impl CallQueue {
+    /// False when [`CALL_QUEUE`] calls wait already.
+    fn push(&self, shard: &str, call: Call) -> bool {
+        let mut s = self.state.lock().unwrap();
+        if s.len >= CALL_QUEUE {
+            return false;
+        }
+        let queue = s.by_shard.entry(shard.to_string()).or_default();
+        let first = queue.is_empty();
+        queue.push_back(call);
+        if first {
+            s.turn.push_back(shard.to_string());
+        }
+        s.len += 1;
+        self.ready.notify_one();
+        true
+    }
+
+    /// The next call, from the next shard in turn; `None` after `wait`
+    /// with nothing waiting.
+    fn pop(&self, wait: Duration) -> Option<QueuedCall> {
+        let mut s = self.state.lock().unwrap();
+        if s.len == 0 {
+            s = self.ready.wait_timeout(s, wait).unwrap().0;
+        }
+        let shard = s.turn.pop_front()?;
+        let queue = s.by_shard.get_mut(&shard)?;
+        let call = queue.pop_front()?;
+        if queue.is_empty() {
+            s.by_shard.remove(&shard);
+        } else {
+            s.turn.push_back(shard.clone());
+        }
+        s.len -= 1;
+        Some(QueuedCall { shard, call })
+    }
+}
+
+/// Where one call of a shard is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Flight {
+    /// A worker has it or will. `attempt` counts earlier tries that failed
+    /// in the infrastructure.
+    Running { attempt: u32 },
+    /// Its result reached the shard's queue by tick `tick`; the module has
+    /// it once a later tick starts.
+    Answered { tick: u64 },
+    /// It failed in the infrastructure; the module's next send after
+    /// `until` makes it again.
+    Waiting { until: Instant, attempt: u32 },
+}
+
+/// The calls of each shard that are in flight, by shard id, then by
+/// function and key.
+pub(super) type InFlight = HashMap<String, HashMap<String, Flight>>;
 
 /// Fields waiting to be written to one row.
 #[derive(Debug, Default)]
 pub(super) struct DirtyRow {
     set: serde_json::Map<String, serde_json::Value>,
     failures: u32,
+    /// The shard that wrote it last.
+    shard: String,
 }
 
-/// Buffered writes, by shard, then by (entity, id).
-pub(super) type Dirty = HashMap<String, HashMap<(String, String), DirtyRow>>;
+/// Buffered writes, by (entity, id).
+pub(super) type Dirty = HashMap<(String, String), DirtyRow>;
 
-/// The call queue: the sender for the tick hook, the receiver for the
-/// workers (taken when functions are attached).
-pub(super) fn call_queue() -> (SyncSender<QueuedCall>, Mutex<Option<Receiver<QueuedCall>>>) {
-    let (tx, rx) = std::sync::mpsc::sync_channel(CALL_QUEUE);
-    (tx, Mutex::new(Some(rx)))
+/// Which buffered rows a flush writes.
+pub(super) enum Flush<'a> {
+    /// The rows shard `id` wrote last (it is stopping here, in order).
+    Shard(&'a str),
+    /// The rows of shards this machine holds under a live lease (every row
+    /// with no directory).
+    Held,
+    /// Every row (the machine is leaving, after its final saves).
+    All,
 }
 
-fn in_flight_key(call: &Call) -> String {
+fn flight_key(call: &Call) -> String {
     format!("{}\u{0}{}", call.function, call.key)
 }
 
@@ -92,6 +181,30 @@ fn error_result(key: &str, code: &str, message: &str) -> CallResult {
         ok: false,
         data: Arc::from(format!("{code}: {message}").into_bytes()),
     }
+}
+
+/// True for an error of the database or the functions runtime, not of the
+/// function: the call is made again, with the same key, after a delay. A
+/// mutation runs once per key, so this never runs it twice.
+pub(crate) fn retryable(code: &str) -> bool {
+    ["PG_", "SQLITE_", "TX_", "RUNNER_"]
+        .iter()
+        .any(|p| code.starts_with(p))
+        || matches!(
+            code,
+            "FN_TIMEOUT"
+                | "IO_ERROR"
+                | "HANDLER_CRASH"
+                | "CALL_CANCELLED"
+                | "LOCK_FAILED"
+                | "ROLLBACK_FAILED"
+        )
+}
+
+fn retry_delay(attempt: u32) -> Duration {
+    RETRY_FIRST
+        .saturating_mul(1 << attempt.min(16))
+        .min(RETRY_MAX)
 }
 
 /// The identity a shard's calls run with: the server's own, as a scheduled
@@ -114,6 +227,16 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// Call workers when `PYLON_SHARD_CALL_WORKERS` is unset: a quarter of the
+/// Postgres pool (each call holds a connection for its whole run), 1 to
+/// [`MAX_CALL_WORKERS`]; 1 on SQLite, which writes on one connection.
+fn default_workers(runtime: &crate::Runtime) -> usize {
+    match runtime.pg_backend() {
+        Some(pg) => (pg.store.shared_pool().max_size() / 4).clamp(1, MAX_CALL_WORKERS),
+        None => 1,
+    }
+}
+
 impl WasmShardHost {
     /// Make shards' function calls with `functions` (`None` when the app
     /// has none: calls then fail with `NO_FUNCTIONS`), and write their
@@ -128,50 +251,57 @@ impl WasmShardHost {
         if self.functions.set(functions).is_err() {
             return;
         }
+        let workers = env_or(
+            "PYLON_SHARD_CALL_WORKERS",
+            default_workers(writer.runtime()),
+        );
         let _ = self.writer.set(writer);
-        let Some(rx) = self.call_rx.lock().unwrap().take() else {
-            return;
-        };
-        let rx = Arc::new(Mutex::new(rx));
-        for n in 0..env_or("PYLON_SHARD_CALL_WORKERS", CALL_WORKERS).max(1) {
-            let rx = Arc::clone(&rx);
+        for n in 0..workers.max(1) {
             let host = Arc::downgrade(self);
+            let queue = Arc::clone(&self.calls);
             let _ = std::thread::Builder::new()
                 .name(format!("pylon-shard-calls-{n}"))
-                .spawn(move || Self::run_calls(host, rx));
+                .spawn(move || Self::run_calls(host, queue));
         }
         let host = Arc::downgrade(self);
         let every = Duration::from_millis(env_or(
             "PYLON_SHARD_WRITE_EVERY_MS",
             WRITE_EVERY.as_millis() as u64,
-        ));
+        ))
+        .max(MIN_WRITE_EVERY);
         let _ = std::thread::Builder::new()
             .name("pylon-shard-writes".into())
             .spawn(move || loop {
                 std::thread::sleep(every);
                 let Some(host) = host.upgrade() else { return };
-                host.flush_writes(None);
+                host.flush_writes(Flush::Held);
             });
     }
 
-    /// Queue the calls a module asked for after a tick. A call whose key is
-    /// in flight for this shard is skipped; so are calls past
-    /// [`MAX_CALLS_IN_FLIGHT`] or a full queue (the module sends them again).
+    /// Queue the calls a module asked for after a tick (it sends each until
+    /// its result arrives). A call in flight for this shard is skipped, as
+    /// is one waiting to be made again, one past [`MAX_CALLS_IN_FLIGHT`],
+    /// and one that finds the queue full: the module sends them again.
     pub(super) fn take_calls(&self, shard: &str, calls: Vec<Call>) {
         let Some(target) = self.registry.get(shard) else {
             return;
         };
-        if matches!(self.functions.get(), Some(None)) {
-            for call in calls {
-                target.push_call_result(error_result(
-                    &call.key,
-                    "NO_FUNCTIONS",
-                    "the app runs no functions",
-                ));
-            }
-            return;
-        }
+        let tick = target.tick_number();
+        let now = Instant::now();
         let mut in_flight = self.calls_in_flight.lock().unwrap();
+        let mut flights = in_flight.remove(shard).unwrap_or_default();
+        // A result queued before this tick started reached the module at
+        // its start; a call the module stopped sending is forgotten.
+        flights.retain(|_, f| match *f {
+            Flight::Running { .. } => true,
+            Flight::Answered { tick: t } => t >= tick,
+            Flight::Waiting { until, .. } => now < until + FORGET_AFTER,
+        });
+        let no_functions = matches!(self.functions.get(), Some(None));
+        let mut running = flights
+            .values()
+            .filter(|f| matches!(f, Flight::Running { .. }))
+            .count();
         for call in calls {
             if call.key.is_empty() || call.key.len() > MAX_KEY {
                 target.push_call_result(error_result(
@@ -189,89 +319,166 @@ impl WasmShardHost {
                 ));
                 continue;
             }
-            let keys = in_flight.entry(shard.to_string()).or_default();
-            let key = in_flight_key(&call);
-            if keys.contains(&key) || keys.len() >= MAX_CALLS_IN_FLIGHT {
+            if no_functions {
+                target.push_call_result(error_result(
+                    &call.key,
+                    "NO_FUNCTIONS",
+                    "the app runs no functions",
+                ));
                 continue;
             }
-            match self.calls.try_send(QueuedCall {
-                shard: shard.to_string(),
-                call,
-            }) {
-                Ok(()) => {
-                    keys.insert(key);
-                }
-                Err(_) => {
+            let key = flight_key(&call);
+            let attempt = match flights.get(&key) {
+                Some(Flight::Running { .. }) | Some(Flight::Answered { .. }) => continue,
+                Some(Flight::Waiting { until, .. }) if now < *until => continue,
+                Some(Flight::Waiting { attempt, .. }) => *attempt,
+                None => 0,
+            };
+            if running >= MAX_CALLS_IN_FLIGHT {
+                continue;
+            }
+            if !self.calls.push(shard, call) {
+                tracing::warn!(
+                    "[shard {shard}] the call queue is full; the module sends the call again"
+                );
+                break;
+            }
+            flights.insert(key, Flight::Running { attempt });
+            running += 1;
+        }
+        if !flights.is_empty() {
+            in_flight.insert(shard.to_string(), flights);
+        } else {
+            in_flight.remove(shard);
+        }
+    }
+
+    fn run_calls(host: Weak<Self>, queue: Arc<CallQueue>) {
+        loop {
+            let next = queue.pop(Duration::from_secs(1));
+            let Some(host) = host.upgrade() else { return };
+            if let Some(QueuedCall { shard, call }) = next {
+                host.make_call(&shard, call);
+            }
+        }
+    }
+
+    /// Make one call and settle it: deliver its result, or, after an
+    /// infrastructure failure, leave it waiting to be made again.
+    fn make_call(&self, shard: &str, call: Call) {
+        let flight = flight_key(&call);
+        let key = call.key.clone();
+        let function = call.function.clone();
+        let outcome = match self
+            .functions
+            .get()
+            .cloned()
+            .flatten()
+            .and_then(|w| w.upgrade())
+        {
+            Some(functions) => std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                functions.call_once(&call.function, call.args, shard_auth(), &call.key)
+            }))
+            .unwrap_or_else(|_| {
+                Err(pylon_functions::runner::FnCallError {
+                    code: "CALL_PANICKED".into(),
+                    message: format!("calling {function} panicked in the server"),
+                })
+            }),
+            None => Err(pylon_functions::runner::FnCallError {
+                code: "NO_FUNCTIONS".into(),
+                message: "the app runs no functions".into(),
+            }),
+        };
+        let result = match outcome {
+            Ok(value) => CallResult {
+                key,
+                ok: true,
+                data: Arc::from(value.to_string().into_bytes()),
+            },
+            Err(e) if retryable(&e.code) => {
+                let mut in_flight = self.calls_in_flight.lock().unwrap();
+                if let Some(f) = in_flight.get_mut(shard).and_then(|m| m.get_mut(&flight)) {
+                    let attempt = match *f {
+                        Flight::Running { attempt } => attempt,
+                        _ => 0,
+                    };
+                    let delay = retry_delay(attempt);
                     tracing::warn!(
-                        "[shard {shard}] the call queue is full; the module sends the call again"
+                        "[shard {shard}] call {function} {key} failed ({}: {}); trying again in {delay:?}",
+                        e.code,
+                        e.message
                     );
-                    break;
+                    *f = Flight::Waiting {
+                        until: Instant::now() + delay,
+                        attempt: attempt + 1,
+                    };
+                }
+                return;
+            }
+            Err(e) => error_result(&key, &e.code, &e.message),
+        };
+        // The result is in the shard's queue before the call counts as
+        // answered, and the answer is kept until a later tick starts: the
+        // module never sends a call again while its result is on the way.
+        let target = self.registry.get(shard);
+        let pushed = target.as_ref().is_some_and(|t| t.push_call_result(result));
+        let mut in_flight = self.calls_in_flight.lock().unwrap();
+        let Some(flights) = in_flight.get_mut(shard) else {
+            return;
+        };
+        match (pushed, target) {
+            (true, Some(t)) => {
+                flights.insert(
+                    flight,
+                    Flight::Answered {
+                        tick: t.tick_number(),
+                    },
+                );
+            }
+            // Stopped, or its queue is full: it sends the call again (here
+            // or where it runs next) and gets the same result.
+            _ => {
+                flights.remove(&flight);
+                if flights.is_empty() {
+                    in_flight.remove(shard);
                 }
             }
         }
     }
 
-    fn run_calls(host: Weak<Self>, rx: Arc<Mutex<Receiver<QueuedCall>>>) {
-        loop {
-            let next = rx.lock().unwrap().recv();
-            let Ok(QueuedCall { shard, call }) = next else {
-                return;
-            };
-            let Some(host) = host.upgrade() else { return };
-            let flight = in_flight_key(&call);
-            let result = match host
-                .functions
-                .get()
-                .cloned()
-                .flatten()
-                .and_then(|w| w.upgrade())
-            {
-                Some(functions) => {
-                    match functions.call_once(&call.function, call.args, shard_auth(), &call.key) {
-                        Ok(value) => CallResult {
-                            key: call.key,
-                            ok: true,
-                            data: Arc::from(value.to_string().into_bytes()),
-                        },
-                        Err(e) => error_result(&call.key, &e.code, &e.message),
-                    }
-                }
-                None => error_result(&call.key, "NO_FUNCTIONS", "the app runs no functions"),
-            };
-            // The result reaches the shard before its key leaves the
-            // in-flight set, so the module never sends a call again while
-            // its result is on the way. A shard that stopped meanwhile
-            // sends the call again where it runs next, and gets the same
-            // result.
-            if let Some(target) = host.registry.get(&shard) {
-                target.push_call_result(result);
-            }
-            let mut in_flight = host.calls_in_flight.lock().unwrap();
-            if let Some(keys) = in_flight.get_mut(&shard) {
-                keys.remove(&flight);
-                if keys.is_empty() {
-                    in_flight.remove(&shard);
-                }
+    /// Forget a stopped shard's calls, except the ones a worker has.
+    pub(super) fn forget_calls(&self, shard: &str) {
+        let mut in_flight = self.calls_in_flight.lock().unwrap();
+        if let Some(flights) = in_flight.get_mut(shard) {
+            flights.retain(|_, f| matches!(f, Flight::Running { .. }));
+            if flights.is_empty() {
+                in_flight.remove(shard);
             }
         }
     }
 
     /// Buffer the writes a module asked for after a tick: each field keeps
-    /// its latest value.
+    /// its latest value, whichever shard wrote it.
     pub(super) fn take_writes(&self, shard: &str, writes: Vec<Write>) {
+        // A tick of a copy removed meanwhile: its writes are not current.
+        if self.registry.get(shard).is_none() {
+            return;
+        }
         let mut dirty = self.dirty.lock().unwrap();
-        let rows = dirty.entry(shard.to_string()).or_default();
         let mut dropped = 0usize;
         for w in writes {
             if w.entity.is_empty() || w.id.is_empty() || w.set.is_empty() {
                 continue;
             }
             let key = (w.entity, w.id);
-            if !rows.contains_key(&key) && rows.len() >= MAX_DIRTY_ROWS {
+            if !dirty.contains_key(&key) && dirty.len() >= MAX_DIRTY_ROWS {
                 dropped += 1;
                 continue;
             }
-            rows.entry(key).or_default().set.extend(w.set);
+            let row = dirty.entry(key).or_default();
+            row.shard = shard.to_string();
+            row.set.extend(w.set);
         }
         if dropped > 0 {
             tracing::warn!(
@@ -280,81 +487,100 @@ impl WasmShardHost {
         }
     }
 
-    /// Write the buffered fields of `shard`, or of every shard. One flush at
-    /// a time, so a later value is never overwritten by an earlier one. A
-    /// row that fails with a store error is kept (under newer values) for
+    /// Drop the rows shard `id` wrote last: a copy that lost its place.
+    pub(super) fn discard_writes(&self, id: &str) {
+        self.dirty.lock().unwrap().retain(|_, row| row.shard != id);
+    }
+
+    /// Write the buffered rows `scope` names. One flush at a time, so a
+    /// later value is never overwritten by an earlier one. A row that fails
+    /// with a store error is kept (under newer values) for
     /// [`WRITE_ATTEMPTS`] flushes; one refused (missing row, plugin,
     /// validation) is dropped with a log line.
-    pub(super) fn flush_writes(&self, shard: Option<&str>) {
+    pub(super) fn flush_writes(&self, scope: Flush<'_>) {
         let Some(writer) = self.writer.get() else {
             return;
         };
         let _one = self.flush_lock.lock().unwrap();
-        let taken: Dirty = {
-            let mut dirty = self.dirty.lock().unwrap();
-            match shard {
-                Some(id) => dirty
-                    .remove(id)
-                    .map(|rows| (id.to_string(), rows))
-                    .into_iter()
-                    .collect(),
-                None => std::mem::take(&mut *dirty),
+        let held: Option<std::collections::HashSet<String>> = match (&scope, self.cluster.get()) {
+            (Flush::Held, Some(c)) => {
+                if c.current_epoch().is_none() {
+                    return;
+                }
+                Some(c.owned.lock().unwrap().keys().cloned().collect())
             }
+            _ => None,
         };
-        for (shard, rows) in taken {
-            let mut failed: Vec<((String, String), DirtyRow)> = Vec::new();
-            for ((entity, id), row) in rows {
-                let fields = serde_json::Value::Object(row.set.clone());
-                match writer.update(&entity, &id, &fields) {
-                    Ok(()) => {}
-                    Err(crate::entity_writer::WriteError::Refused(why)) => {
-                        tracing::warn!("[shard {shard}] write to {entity} {id} refused: {why}");
-                    }
-                    Err(crate::entity_writer::WriteError::Store(why)) => {
-                        if row.failures + 1 >= WRITE_ATTEMPTS {
-                            tracing::warn!(
-                                "[shard {shard}] write to {entity} {id} failed {WRITE_ATTEMPTS} times; dropped: {why}"
-                            );
-                        } else {
-                            tracing::warn!(
-                                "[shard {shard}] write to {entity} {id} failed; kept: {why}"
-                            );
-                            failed.push((
-                                (entity, id),
-                                DirtyRow {
-                                    set: row.set,
-                                    failures: row.failures + 1,
-                                },
-                            ));
-                        }
-                    }
-                }
-            }
-            if failed.is_empty() {
-                continue;
-            }
+        let taken: Vec<((String, String), DirtyRow)> = {
             let mut dirty = self.dirty.lock().unwrap();
-            let rows = dirty.entry(shard).or_default();
-            for (key, old) in failed {
-                let row = rows.entry(key).or_default();
-                // Values buffered since the flush took this row are newer.
-                for (field, value) in old.set {
-                    row.set.entry(field).or_insert(value);
+            let keys: Vec<(String, String)> = dirty
+                .iter()
+                .filter(|(_, row)| match &scope {
+                    Flush::Shard(id) => row.shard == *id,
+                    Flush::Held => held.as_ref().is_none_or(|h| h.contains(&row.shard)),
+                    Flush::All => true,
+                })
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.into_iter()
+                .filter_map(|k| dirty.remove(&k).map(|row| (k, row)))
+                .collect()
+        };
+        let mut failed: Vec<((String, String), DirtyRow)> = Vec::new();
+        for ((entity, id), row) in taken {
+            let fields = serde_json::Value::Object(row.set.clone());
+            let shard = &row.shard;
+            match writer.update(&entity, &id, &fields) {
+                Ok(()) => {}
+                Err(crate::entity_writer::WriteError::Refused(why)) => {
+                    tracing::warn!("[shard {shard}] write to {entity} {id} refused: {why}");
                 }
-                row.failures = row.failures.max(old.failures);
+                Err(crate::entity_writer::WriteError::Store(why)) => {
+                    if row.failures + 1 >= WRITE_ATTEMPTS {
+                        tracing::warn!(
+                            "[shard {shard}] write to {entity} {id} failed {WRITE_ATTEMPTS} times; dropped: {why}"
+                        );
+                    } else {
+                        tracing::warn!(
+                            "[shard {shard}] write to {entity} {id} failed; kept: {why}"
+                        );
+                        let failures = row.failures + 1;
+                        failed.push(((entity, id), DirtyRow { failures, ..row }));
+                    }
+                }
+            }
+        }
+        if failed.is_empty() {
+            return;
+        }
+        let mut dirty = self.dirty.lock().unwrap();
+        for (key, old) in failed {
+            match dirty.get_mut(&key) {
+                // Values buffered since the flush took this row are newer.
+                Some(row) => {
+                    for (field, value) in old.set {
+                        row.set.entry(field).or_insert(value);
+                    }
+                    row.failures = row.failures.max(old.failures);
+                }
+                None => {
+                    dirty.insert(key, old);
+                }
             }
         }
     }
 
-    /// Rows with writes waiting, for tests.
+    /// Rows with writes waiting that shard `shard` wrote last, for tests.
     #[cfg(test)]
     pub(super) fn dirty_rows(&self, shard: &str) -> usize {
-        self.dirty.lock().unwrap().get(shard).map_or(0, |r| r.len())
+        self.dirty
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|r| r.shard == shard)
+            .count()
     }
 }
-
-/// The calls in flight per shard, by shard id.
-pub(super) type InFlight = HashMap<String, HashSet<String>>;
 
 #[cfg(test)]
 mod tests {
@@ -374,6 +600,10 @@ mod tests {
         character: String,
         stored: Mutex<HashMap<(String, String), serde_json::Value>>,
         runs: Mutex<HashMap<String, usize>>,
+        /// grantItem fails this many more times in the database.
+        db_failures: Mutex<u32>,
+        /// Keys grantItem answers KEY_REUSED for.
+        reused: Mutex<Vec<String>>,
         hold: Mutex<bool>,
         released: Condvar,
     }
@@ -447,6 +677,33 @@ mod tests {
                     }))
                 }
                 "grantItem" => {
+                    match args["item"].as_str() {
+                        Some("panic") => panic!("a bug in the server"),
+                        Some("cursed") => {
+                            return Err(FnCallError {
+                                code: "REFUSED".into(),
+                                message: "cursed items cannot be granted".into(),
+                            })
+                        }
+                        _ => {}
+                    }
+                    if self.reused.lock().unwrap().iter().any(|k| k == key) {
+                        return Err(FnCallError {
+                            code: "KEY_REUSED".into(),
+                            message: "other arguments".into(),
+                        });
+                    }
+                    {
+                        let mut failures = self.db_failures.lock().unwrap();
+                        if *failures > 0 {
+                            *failures -= 1;
+                            *self.runs.lock().unwrap().entry(fn_name.into()).or_default() += 1;
+                            return Err(FnCallError {
+                                code: "PG_TX_QUERY_FAILED".into(),
+                                message: "connection reset".into(),
+                            });
+                        }
+                    }
                     let id = (fn_name.to_string(), key.to_string());
                     if let Some(v) = self.stored.lock().unwrap().get(&id) {
                         return Ok(v.clone());
@@ -583,7 +840,9 @@ mod tests {
             saved(&host, "z1")["players"]["p1"]["items"] == both
         });
         assert_eq!(saved(&host, "z1")["grants"], serde_json::json!({}));
-        assert!(host.calls_in_flight.lock().unwrap().is_empty());
+        wait_for("the calls in flight to clear", || {
+            host.calls_in_flight.lock().unwrap().is_empty()
+        });
 
         // The zone crashed before it saved the result: restored from the
         // earlier state, it loads the character again, sends the grant
@@ -683,7 +942,9 @@ mod tests {
         input(&host, "z4", "p1", "\"join\"");
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(saved(&host, "z4")["players"]["p1"]["loaded"], false);
-        assert!(host.calls_in_flight.lock().unwrap().is_empty());
+        wait_for("the calls in flight to clear", || {
+            host.calls_in_flight.lock().unwrap().is_empty()
+        });
         host.stop_all();
     }
 
@@ -723,6 +984,174 @@ mod tests {
             host.send_input("z5", &serde_json::json!("x".repeat(70 * 1024))),
             Err(SendError::Invalid(_))
         ));
+        host.stop_all();
+    }
+
+    /// Join p1 in a new zone and wait for the character.
+    fn joined(fns: &Arc<Fns>, rt: &Arc<crate::Runtime>, zone: &str) -> Arc<WasmShardHost> {
+        let host = host();
+        let weak: Weak<dyn pylon_router::FnOps> =
+            Arc::downgrade(&(Arc::clone(fns) as Arc<dyn pylon_router::FnOps>));
+        host.attach_data(Some(weak), writer(rt));
+        host.create("zone", zone, &serde_json::json!({})).unwrap();
+        input(&host, zone, "p1", "\"join\"");
+        wait_for("the character to load", || {
+            saved(&host, zone)["players"]["p1"]["loaded"] == true
+        });
+        host
+    }
+
+    fn items(host: &WasmShardHost, zone: &str) -> Vec<String> {
+        saved(host, zone)["players"]["p1"]["items"]
+            .as_object()
+            .unwrap()
+            .values()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A call that fails in the database is made again with the same key;
+    /// the module never sees the failure. A function's own error, and a
+    /// panic in the server, reach the module; the worker lives on.
+    #[test]
+    fn infrastructure_failures_are_retried_and_answers_are_delivered() {
+        let (rt, fns) = runtime();
+        *fns.db_failures.lock().unwrap() = 2;
+        let host = joined(&fns, &rt, "r1");
+        input(&host, "r1", "p1", r#"{"loot":{"item":"shield"}}"#);
+        wait_for("the shield", || {
+            items(&host, "r1").contains(&"shield".to_string())
+        });
+        assert_eq!(fns.runs("grantItem"), 3);
+
+        input(&host, "r1", "p1", r#"{"loot":{"item":"cursed"}}"#);
+        input(&host, "r1", "p1", r#"{"loot":{"item":"panic"}}"#);
+        wait_for("both answers", || {
+            saved(&host, "r1")["grants"] == serde_json::json!({})
+        });
+        assert_eq!(items(&host, "r1"), ["old", "shield"]);
+
+        // The workers still answer.
+        input(&host, "r1", "p1", r#"{"loot":{"item":"bow"}}"#);
+        wait_for("the bow", || {
+            items(&host, "r1").contains(&"bow".to_string())
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let in_flight = host.calls_in_flight.lock().unwrap();
+        assert!(in_flight
+            .values()
+            .flat_map(|m| m.values())
+            .all(|f| !matches!(f, Flight::Running { .. } | Flight::Waiting { .. })));
+        drop(in_flight);
+        host.stop_all();
+    }
+
+    /// A grant whose key another grant used is sent again under the next
+    /// key.
+    #[test]
+    fn a_reused_key_moves_the_grant_to_the_next_key() {
+        let (rt, fns) = runtime();
+        fns.reused
+            .lock()
+            .unwrap()
+            .push(format!("loot:{}:3", fns.character));
+        let host = joined(&fns, &rt, "k1");
+        input(&host, "k1", "p1", r#"{"loot":{"item":"ring"}}"#);
+        wait_for("the ring", || {
+            items(&host, "k1").contains(&"ring".to_string())
+        });
+        let key = format!("loot:{}:4", fns.character);
+        assert!(fns
+            .stored
+            .lock()
+            .unwrap()
+            .contains_key(&("grantItem".to_string(), key)));
+        assert_eq!(saved(&host, "k1")["players"]["p1"]["next_grant"], 5);
+        host.stop_all();
+    }
+
+    #[test]
+    fn retryable_codes_are_the_infrastructure_ones() {
+        for code in [
+            "PG_TX_QUERY_FAILED",
+            "PG_POOL_TIMEOUT",
+            "SQLITE_BUSY",
+            "RUNNER_EXITED",
+            "FN_TIMEOUT",
+        ] {
+            assert!(retryable(code), "{code}");
+        }
+        for code in [
+            "NOT_FOUND",
+            "FORBIDDEN",
+            "KEY_REUSED",
+            "FN_NOT_FOUND",
+            "CALL_PANICKED",
+        ] {
+            assert!(!retryable(code), "{code}");
+        }
+        assert_eq!(retry_delay(0), RETRY_FIRST);
+        assert_eq!(retry_delay(40), RETRY_MAX);
+    }
+
+    /// Workers take one call of each shard in turn.
+    #[test]
+    fn the_call_queue_serves_shards_in_turn() {
+        let q = CallQueue::default();
+        let call = |k: &str| Call {
+            key: k.into(),
+            function: "f".into(),
+            args: serde_json::Value::Null,
+        };
+        for k in ["a1", "a2", "a3"] {
+            assert!(q.push("a", call(k)));
+        }
+        assert!(q.push("b", call("b1")));
+        let order: Vec<String> = std::iter::from_fn(|| q.pop(Duration::ZERO))
+            .map(|c| c.call.key)
+            .collect();
+        assert_eq!(order, ["a1", "b1", "a2", "a3"]);
+    }
+
+    /// A row keeps the latest value whichever shard wrote it, belongs to
+    /// the shard that wrote it last, and a discarded shard's rows are not
+    /// written.
+    #[test]
+    fn writes_keep_the_latest_value_across_shards_and_discarded_rows_are_dropped() {
+        let (rt, fns) = runtime();
+        let host = joined(&fns, &rt, "w1");
+        host.create("zone", "w2", &serde_json::json!({})).unwrap();
+        let x = |n: i64| {
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(n))]),
+            }]
+        };
+        host.take_writes("w1", x(5));
+        host.take_writes("w2", x(9));
+        assert_eq!((host.dirty_rows("w1"), host.dirty_rows("w2")), (0, 1));
+        host.flush_writes(Flush::Shard("w1"));
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            0
+        );
+        host.flush_writes(Flush::Held);
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            9
+        );
+
+        host.take_writes("w2", x(11));
+        host.discard_writes("w2");
+        host.stop("w2");
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            9
+        );
+        // A stopped copy's late writes are not taken.
+        host.take_writes("w2", x(12));
+        assert_eq!(host.dirty_rows("w2"), 0);
         host.stop_all();
     }
 }

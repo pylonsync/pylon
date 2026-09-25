@@ -297,7 +297,9 @@ impl WasmShardHost {
         if let Some(pushed) = self.push_input_here(id, &text) {
             return pushed;
         }
-        if self.cluster.get().is_none() {
+        // Where it runs, read at most every 2 s: a shard that runs nowhere
+        // is refused here, as on one machine.
+        if self.cluster.get().is_none() || self.located(id).is_none() {
             return Err(SendError::NotFound);
         }
         if self

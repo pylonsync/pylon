@@ -1583,9 +1583,7 @@ pub struct WasmShardHost {
     /// Writes shards' entity fields (see `data`).
     writer: OnceLock<Arc<crate::entity_writer::EntityWriter>>,
     /// Calls for the call workers.
-    calls: std::sync::mpsc::SyncSender<data::QueuedCall>,
-    /// The workers' end of `calls`, until they start.
-    call_rx: Mutex<Option<std::sync::mpsc::Receiver<data::QueuedCall>>>,
+    calls: Arc<data::CallQueue>,
     /// Each shard's calls in flight, as function and key.
     calls_in_flight: Mutex<data::InFlight>,
     /// Entity fields waiting to be written.
@@ -1716,12 +1714,10 @@ impl WasmShardHost {
     pub fn new(kinds: Vec<WasmShardKind>) -> Arc<Self> {
         let (transfer_requests, requested) = std::sync::mpsc::sync_channel(transfer::REQUEST_QUEUE);
         let (outgoing, to_route) = std::sync::mpsc::sync_channel(messages::ROUTE_QUEUE);
-        let (calls, call_rx) = data::call_queue();
         let host = Arc::new(Self {
             functions: OnceLock::new(),
             writer: OnceLock::new(),
-            calls,
-            call_rx,
+            calls: Arc::new(data::CallQueue::default()),
             calls_in_flight: Mutex::new(HashMap::new()),
             dirty: Mutex::new(HashMap::new()),
             flush_lock: Mutex::new(()),
@@ -1990,13 +1986,14 @@ impl WasmShardHost {
             shard.set_on_tick(move |sim, _| {
                 let host_now = || host.as_ref().and_then(|w| w.upgrade());
                 if calls {
+                    // Every tick, with no calls too: answered calls are
+                    // cleared once the module has their results.
                     match sim.calls() {
-                        Ok(list) if !list.is_empty() => {
+                        Ok(list) => {
                             if let Some(host) = host_now() {
                                 host.take_calls(&source, list);
                             }
                         }
-                        Ok(_) => {}
                         Err(e) => tracing::warn!("[shard {source}] calls: {e}"),
                     }
                 }
@@ -2161,16 +2158,21 @@ impl WasmShardHost {
         // Serialized with create and the sweep, so a stop never removes the
         // bookkeeping of a shard created under the same id meanwhile.
         let _guard = self.create_lock.lock().unwrap();
+        // Its last tick ends first (a tick hook never takes the create
+        // lock), so the flush below has its last writes.
+        if let Some(shard) = self.registry.get(id) {
+            shard.stop_and_wait();
+        }
         self.instances.lock().unwrap().remove(id);
         self.forget_groups(id);
         let removed = self.registry.remove(id);
         self.kind_of.write().unwrap().remove(id);
         self.idle_since.lock().unwrap().remove(id);
         drop(_guard);
+        self.forget_calls(id);
         // Its last writes, before another machine may start it and read
-        // them. A tick running during the stop can buffer more; the next
-        // flush writes those.
-        self.flush_writes(Some(id));
+        // them.
+        self.flush_writes(data::Flush::Shard(id));
         removed
     }
 
@@ -2279,7 +2281,7 @@ impl WasmShardHost {
                 }
                 self.stop(&id);
             }
-            self.flush_writes(None);
+            self.flush_writes(data::Flush::All);
             return;
         };
         // No create, adoption, or stop runs from here on, and no shard
@@ -2318,7 +2320,7 @@ impl WasmShardHost {
         for id in self.registry.ids() {
             self.stop_local(&id);
         }
-        self.flush_writes(None);
+        self.flush_writes(data::Flush::All);
         let _beat = c.beat_lock.lock().unwrap();
         c.left.store(true, Ordering::Release);
         let epoch = c.lease.lock().unwrap().epoch;
@@ -2483,6 +2485,8 @@ impl WasmShardHost {
         }
         for (id, shard) in &stopping {
             shard.stop_and_wait();
+            // Another machine may start it: its writes are not ours to make.
+            self.discard_writes(id);
             tracing::warn!(
                 "[shard {id}] stopped: this machine's lease on the shard directory lapsed"
             );
@@ -2521,6 +2525,11 @@ impl WasmShardHost {
                 if !valid.contains(&(id.as_str(), epoch)) {
                     tracing::warn!("[shard {id}] no longer placed here; stopping this copy");
                     c.owned.lock().unwrap().remove(&id);
+                    if let Some(shard) = self.registry.get(&id) {
+                        shard.stop_and_wait();
+                    }
+                    // The copy that runs now writes the rows.
+                    self.discard_writes(&id);
                     self.stop_local(&id);
                 }
             }

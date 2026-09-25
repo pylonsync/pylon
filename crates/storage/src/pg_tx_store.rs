@@ -821,19 +821,23 @@ impl<'a> DataStore for PgTxStore<'a> {
         &self,
         fn_name: &str,
         key: &str,
-    ) -> Result<Option<serde_json::Value>, DataError> {
+    ) -> Result<Option<pylon_http::StoredCall>, DataError> {
         self.with_tx(|tx| {
             let row = tx
                 .query_opt(
-                    "SELECT result FROM _pylon_fn_calls WHERE fn = $1 AND key = $2",
+                    "SELECT result, args_hash FROM _pylon_fn_calls WHERE fn = $1 AND key = $2",
                     &[&fn_name, &key],
                 )
                 .map_err(pg_err_to_data)?;
             row.map(|r| {
                 let text: String = r.get(0);
-                serde_json::from_str(&text).map_err(|e| DataError {
+                let result = serde_json::from_str(&text).map_err(|e| DataError {
                     code: "FN_CALL_RESULT_CORRUPT".into(),
-                    message: format!("stored result of call {key}: {e}"),
+                    message: format!("stored result of {fn_name} call {key}: {e}"),
+                })?;
+                Ok(pylon_http::StoredCall {
+                    result,
+                    args_hash: r.get(1),
                 })
             })
             .transpose()
@@ -844,14 +848,14 @@ impl<'a> DataStore for PgTxStore<'a> {
         &self,
         fn_name: &str,
         key: &str,
-        result: &serde_json::Value,
+        call: &pylon_http::StoredCall,
     ) -> Result<(), DataError> {
-        let text = result.to_string();
+        let text = call.result.to_string();
         self.with_tx(|tx| {
             tx.execute(
-                "INSERT INTO _pylon_fn_calls (fn, key, result, created_at)
-                 VALUES ($1, $2, $3, (extract(epoch from clock_timestamp()) * 1000)::bigint)",
-                &[&fn_name, &key, &text],
+                "INSERT INTO _pylon_fn_calls (fn, key, args_hash, result, created_at)
+                 VALUES ($1, $2, $3, $4, (extract(epoch from clock_timestamp()) * 1000)::bigint)",
+                &[&fn_name, &key, &call.args_hash, &text],
             )
             .map_err(pg_err_to_data)?;
             Ok(())

@@ -59,6 +59,9 @@ struct Player {
     /// The number of the character's next grant (its key), from the row.
     #[serde(default)]
     next_grant: u64,
+    /// Milliseconds until a failed load is tried again.
+    #[serde(default)]
+    load_retry_ms: u64,
 }
 
 /// A grant sent to `grantItem` and not answered yet. Saved, so a zone that
@@ -95,17 +98,38 @@ struct Snapshot {
 #[serde(rename_all = "snake_case")]
 enum Input {
     Join,
-    Move { dx: i64 },
-    Buff { name: String, ms: u64 },
-    Cast { ability: String, cooldown_ms: u64 },
-    Hit { damage: i64 },
+    Move {
+        dx: i64,
+    },
+    Buff {
+        name: String,
+        ms: u64,
+    },
+    Cast {
+        ability: String,
+        cooldown_ms: u64,
+    },
+    Hit {
+        damage: i64,
+    },
     /// Send `text` to other zones: `to` is "all" (default),
     /// "group:<name>", or "shard:<id>".
-    Shout { text: String, #[serde(default)] to: Option<String> },
+    Shout {
+        text: String,
+        #[serde(default)]
+        to: Option<String>,
+    },
     /// Grant `item` (through the `grantItem` mutation).
-    Loot { item: String, #[serde(default)] delay_ms: u64 },
+    Loot {
+        item: String,
+        #[serde(default)]
+        delay_ms: u64,
+    },
     /// From the server only (`ctx.shards.send`): heal `who` by `hp`.
-    Heal { who: String, hp: i64 },
+    Heal {
+        who: String,
+        hp: i64,
+    },
 }
 
 struct Zone {
@@ -154,16 +178,23 @@ impl Shard for Zone {
 
     fn apply_input(&mut self, subscriber: &str, input: Input) -> Result<(), String> {
         if let Input::Join = input {
-            self.players.entry(subscriber.to_string()).or_insert(Player {
-                x: 0,
-                hp: 100,
-                buffs: Vec::new(),
-                cooldowns: BTreeMap::new(),
-                loaded: false,
-                character: String::new(),
-                items: BTreeMap::new(),
-                next_grant: 0,
-            });
+            // The empty id is the server's (ctx.shards.send), not a player.
+            if subscriber.is_empty() {
+                return Err("the server cannot join".into());
+            }
+            self.players
+                .entry(subscriber.to_string())
+                .or_insert(Player {
+                    x: 0,
+                    hp: 100,
+                    buffs: Vec::new(),
+                    cooldowns: BTreeMap::new(),
+                    loaded: false,
+                    character: String::new(),
+                    items: BTreeMap::new(),
+                    next_grant: 0,
+                    load_retry_ms: 0,
+                });
             return Ok(());
         }
         if let Input::Heal { who, hp } = &input {
@@ -174,10 +205,7 @@ impl Shard for Zone {
             p.hp += hp;
             return Ok(());
         }
-        let p = self
-            .players
-            .get_mut(subscriber)
-            .ok_or("join first")?;
+        let p = self.players.get_mut(subscriber).ok_or("join first")?;
         match input {
             Input::Join | Input::Heal { .. } => {}
             Input::Move { dx } => {
@@ -206,7 +234,10 @@ impl Shard for Zone {
                     },
                 );
             }
-            Input::Buff { name, ms } => p.buffs.push(Buff { name, remaining_ms: ms }),
+            Input::Buff { name, ms } => p.buffs.push(Buff {
+                name,
+                remaining_ms: ms,
+            }),
             Input::Cast {
                 ability,
                 cooldown_ms,
@@ -245,6 +276,7 @@ impl Shard for Zone {
             for ms in p.cooldowns.values_mut() {
                 count_down(ms, dt);
             }
+            count_down(&mut p.load_retry_ms, dt);
             if let (Some(edge), Some(next)) = (self.params.edge, &self.params.next) {
                 if p.x < edge {
                     self.asked.remove(sid);
@@ -321,11 +353,15 @@ impl Shard for Zone {
     fn calls(&mut self) -> Vec<Call> {
         // Every call waiting, every tick: the host skips the ones in
         // flight, and one that a crash lost goes out again.
-        let loads = self.players.iter().filter(|(_, p)| !p.loaded).map(|(sid, _)| Call {
-            key: load_key(sid),
-            function: "loadCharacter".into(),
-            args: serde_json::json!({ "userId": sid }),
-        });
+        let loads = self
+            .players
+            .iter()
+            .filter(|(_, p)| !p.loaded && p.load_retry_ms == 0)
+            .map(|(sid, _)| Call {
+                key: load_key(sid),
+                function: "loadCharacter".into(),
+                args: serde_json::json!({ "userId": sid }),
+            });
         let grants = self.grants.iter().map(|(key, g)| Call {
             key: key.clone(),
             function: "grantItem".into(),
@@ -341,7 +377,9 @@ impl Shard for Zone {
 
     fn on_call_result(&mut self, key: &str, result: Result<serde_json::Value, String>) {
         if let Some(sid) = key.strip_prefix("load:") {
-            let Some(p) = self.players.get_mut(sid) else { return };
+            let Some(p) = self.players.get_mut(sid) else {
+                return;
+            };
             match result {
                 Ok(row) if !p.loaded => {
                     p.loaded = true;
@@ -353,13 +391,22 @@ impl Shard for Zone {
                     p.character = row["id"].as_str().unwrap_or_default().to_string();
                     p.next_grant = p.next_grant.max(row["nextGrant"].as_u64().unwrap_or(0));
                     for item in row["items"].as_array().into_iter().flatten() {
-                        if let (Some(id), Some(name)) = (item["id"].as_str(), item["name"].as_str()) {
+                        if let (Some(id), Some(name)) = (item["id"].as_str(), item["name"].as_str())
+                        {
                             p.items.insert(id.to_string(), name.to_string());
                         }
                     }
                 }
                 Ok(_) => {}
-                Err(e) => pylon_shard_guest::log(pylon_shard_guest::Level::Warn, &format!("loading {sid} failed: {e}")),
+                Err(e) => {
+                    // The host tries database failures again itself; this
+                    // is the function's answer (no character, say).
+                    p.load_retry_ms = 5_000;
+                    pylon_shard_guest::log(
+                        pylon_shard_guest::Level::Warn,
+                        &format!("loading {sid} failed: {e}"),
+                    );
+                }
             }
             return;
         }
@@ -376,8 +423,21 @@ impl Shard for Zone {
                     p.items.insert(id.to_string(), grant.item);
                 }
             }
-            // Refused: the mutation rolled back, so no item exists.
-            Err(e) => pylon_shard_guest::log(pylon_shard_guest::Level::Warn, &format!("grant {key} failed: {e}")),
+            // The key was used for another grant: a restored zone counted
+            // from an older row. Send this grant again under the next key.
+            Err(e) if e.starts_with("KEY_REUSED") => {
+                if let Some(p) = self.players.get_mut(&grant.player) {
+                    let key = format!("loot:{}:{}", p.character, p.next_grant);
+                    p.next_grant += 1;
+                    self.grants.insert(key, grant);
+                }
+            }
+            // The function refused (the host tries database failures
+            // again itself): the mutation rolled back, so no item exists.
+            Err(e) => pylon_shard_guest::log(
+                pylon_shard_guest::Level::Warn,
+                &format!("grant {key} failed: {e}"),
+            ),
         }
     }
 

@@ -2641,7 +2641,7 @@ impl<'a> DataStore for TxStore<'a> {
         &self,
         fn_name: &str,
         key: &str,
-    ) -> Result<Option<serde_json::Value>, DataError> {
+    ) -> Result<Option<pylon_http::StoredCall>, DataError> {
         crate::fn_calls::sqlite_result(self.conn, fn_name, key)
     }
 
@@ -2649,9 +2649,9 @@ impl<'a> DataStore for TxStore<'a> {
         &self,
         fn_name: &str,
         key: &str,
-        result: &serde_json::Value,
+        call: &pylon_http::StoredCall,
     ) -> Result<(), DataError> {
-        crate::fn_calls::sqlite_record(self.conn, fn_name, key, result)
+        crate::fn_calls::sqlite_record(self.conn, fn_name, key, call)
     }
 
     fn manifest(&self) -> &pylon_kernel::AppManifest {
@@ -4427,6 +4427,8 @@ impl FnOpsImpl {
         // try_spawn_functions capture that runner's Arc directly, so
         // pinning here propagates through automatically.
         let runner = self.pool.pick();
+        // For a keyed call: the arguments' hash, stored with the result.
+        let once = once.map(|key| (key, crate::fn_calls::args_hash(&args)));
 
         match def.fn_type {
             FnType::Mutation => {
@@ -4452,7 +4454,7 @@ impl FnOpsImpl {
                     let fn_type = def.fn_type;
                     let caller_internal = def.internal;
                     let fn_name_owned = fn_name.to_string();
-                    let once_owned = once.map(str::to_string);
+                    let once_owned = once.clone().map(|(k, h)| (k.to_string(), h));
 
                     // Push the schedule buffer onto the thread-local for
                     // the duration of the handler. Drain after COMMIT
@@ -4491,7 +4493,7 @@ impl FnOpsImpl {
                             HookEnforcingDataStore::new(&buffered, Arc::clone(&plugins), hook_auth);
                         // A call with this key committed already: its result,
                         // and nothing runs or is written.
-                        if let Some(key) = &once_owned {
+                        if let Some((key, hash)) = &once_owned {
                             let stored =
                                 inner_store
                                     .fn_call_result(&fn_name_owned, key)
@@ -4499,7 +4501,9 @@ impl FnOpsImpl {
                                         code: e.code,
                                         message: e.message,
                                     })?;
-                            if let Some(value) = stored {
+                            if let Some(stored) = stored {
+                                let value =
+                                    crate::fn_calls::answer(&fn_name_owned, key, hash, stored)?;
                                 let trace = pylon_functions::trace::TraceBuilder::new(
                                     format!("once:{key}"),
                                     fn_name_owned.clone(),
@@ -4522,9 +4526,13 @@ impl FnOpsImpl {
                             caller_internal,
                         )?;
                         // The key and the result commit with the writes.
-                        if let Some(key) = &once_owned {
+                        if let Some((key, hash)) = &once_owned {
+                            let call = pylon_http::StoredCall {
+                                result: value.clone(),
+                                args_hash: hash.clone(),
+                            };
                             inner_store
-                                .record_fn_call(&fn_name_owned, key, &value)
+                                .record_fn_call(&fn_name_owned, key, &call)
                                 .map_err(|e| FnCallError {
                                     code: e.code,
                                     message: e.message,
@@ -4624,13 +4632,15 @@ impl FnOpsImpl {
                     HookEnforcingDataStore::new(&tx_store, Arc::clone(&self.plugins), hook_auth);
                 // A call with this key committed already: its result, and
                 // nothing runs or is written.
-                let stored = match once {
-                    Some(key) => tx_store
-                        .fn_call_result(fn_name, key)
-                        .map_err(|e| FnCallError {
-                            code: e.code,
-                            message: e.message,
-                        }),
+                let stored = match &once {
+                    Some((key, _)) => {
+                        tx_store
+                            .fn_call_result(fn_name, key)
+                            .map_err(|e| FnCallError {
+                                code: e.code,
+                                message: e.message,
+                            })
+                    }
                     None => Ok(None),
                 };
                 let stored = match stored {
@@ -4640,13 +4650,14 @@ impl FnOpsImpl {
                         return Err(e);
                     }
                 };
-                if let (Some(key), Some(value)) = (once, stored) {
+                if let (Some((key, hash)), Some(stored)) = (&once, stored) {
                     if let Err(e) = conn_guard.execute("ROLLBACK", []) {
                         return Err(FnCallError {
                             code: "ROLLBACK_FAILED".into(),
                             message: format!("Failed to end transaction: {e}"),
                         });
                     }
+                    let value = crate::fn_calls::answer(fn_name, key, hash, stored)?;
                     let trace = pylon_functions::trace::TraceBuilder::new(
                         format!("once:{key}"),
                         fn_name.to_string(),
@@ -4670,8 +4681,12 @@ impl FnOpsImpl {
                     )
                     .and_then(|(value, trace)| {
                         // The key and the result commit with the writes.
-                        if let Some(key) = once {
-                            tx_store.record_fn_call(fn_name, key, &value).map_err(|e| {
+                        if let Some((key, hash)) = &once {
+                            let call = pylon_http::StoredCall {
+                                result: value.clone(),
+                                args_hash: hash.clone(),
+                            };
+                            tx_store.record_fn_call(fn_name, key, &call).map_err(|e| {
                                 FnCallError {
                                     code: e.code,
                                     message: e.message,
@@ -4897,13 +4912,16 @@ impl pylon_router::FnOps for FnOpsImpl {
                         message: "an idempotency key is 1 to 256 bytes".into(),
                     });
                 }
+                let hash = crate::fn_calls::args_hash(&args);
                 match self.call_keyed(fn_name, args, auth, None, None, None, Some(key)) {
                     Ok((value, _)) => Ok(value),
                     // A call with the same key committed first (this one
                     // lost on the unique key and rolled back): its result.
                     Err(e) => {
                         match crate::fn_calls::committed_result(&self.runtime, fn_name, key) {
-                            Ok(Some(value)) => Ok(value),
+                            Ok(Some(stored)) => {
+                                crate::fn_calls::answer(fn_name, key, &hash, stored)
+                            }
                             _ => Err(e),
                         }
                     }

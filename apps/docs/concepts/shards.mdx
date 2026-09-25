@@ -573,9 +573,9 @@ buffered writes. Each has a different promise.
 ### Call a function
 
 After each tick the host takes the module's `calls`. Worker threads run
-them, so a slow function never delays a tick. The result reaches
-`on_call_result` at the start of a later tick, before its messages and
-inputs:
+them, one shard's calls in turn with the others', so a slow function never
+delays a tick. The result reaches `on_call_result` at the start of a later
+tick, before its messages and inputs:
 
 ```rust
 fn calls(&mut self) -> Vec<Call> {
@@ -596,16 +596,25 @@ fn on_call_result(&mut self, key: &str, result: Result<serde_json::Value, String
     match result {
         // The mutation committed: show the item now.
         Ok(_) => self.give(&grant),
-        // It rolled back: no item exists. The text is "CODE: message".
+        // The function refused, and rolled back: no item exists. The text
+        // is "CODE: message".
         Err(e) => log(Level::Warn, &format!("grant {key} failed: {e}")),
     }
 }
 ```
 
-A mutation called with a key runs once per function and key. The key and
-the mutation's result are written in the mutation's own transaction. A
-later call with the same key returns the stored result and changes
-nothing. So a grant has these rules:
+A mutation called with a key runs once per function and key. The key, a
+hash of the arguments, and the mutation's result are written in the
+mutation's own transaction. A later call with the same key and arguments
+returns the stored result and changes nothing. A call with the same key and
+other arguments fails with `KEY_REUSED`.
+
+A call that fails in the database or the functions runtime (codes that
+start with `PG_`, `SQLITE_`, `TX_`, or `RUNNER_`, and `FN_TIMEOUT`,
+`IO_ERROR`, `HANDLER_CRASH`, `CALL_CANCELLED`, `LOCK_FAILED`,
+`ROLLBACK_FAILED`) is made again by the host with the same key, after 250
+ms and then twice as long each time, up to 30 s. The module gets only the
+function's answer or its own error. So a grant has these rules:
 
 - Save the calls in flight with the shard's state (`save`). A shard that
   restarts from its last save sends them again under the same keys.
@@ -615,27 +624,27 @@ nothing. So a grant has these rules:
   last save, and a zone restored from that save does not know it yet. Keep
   items by row id (the mutation returns it), so an item that both the
   reload and a late result bring shows once.
-- Make the key unique for good. A stored result is kept for 7 days, and a
-  key used again in that time returns the old result. The example keeps
-  the next grant number in the character row and uses
-  `loot:<character>:<n>`.
-
-An error result means the mutation did not commit. The one exception is a
-database failure during the commit itself: send the call again with the
-same key, and the stored result (or a fresh run) answers.
+- Make the key unique for good. A stored result is kept for 7 days. The
+  example keeps the next grant number in the character row and uses
+  `loot:<character>:<n>`. On `KEY_REUSED` (a restored zone counted from an
+  older row), it sends the grant again under the next number.
 
 A query runs each time it is called. An action is refused
 (`FN_NOT_TRANSACTIONAL`): it has no transaction to store the result in.
 Calls run with admin rights, like a scheduled job, so a function that
 shards call must check the caller (`ctx.auth.isAdmin`) if players can also
-reach it. A shard has at most 256 calls in flight. A result can arrive
-twice for one key; its value is the same.
+reach it. A shard has at most 256 calls in flight. Each call holds a
+database connection while it runs, so the workers are a quarter of the
+Postgres pool, 1 to 4 (1 on SQLite); `PYLON_SHARD_CALL_WORKERS` sets the
+number. A result can arrive twice for one key; its value is the same.
 
 ### Write entity fields
 
 After each tick the host takes the module's `writes`. It keeps the latest
-value of each field, per row, and writes them every 2 s
-(`PYLON_SHARD_WRITE_EVERY_MS`) and when the shard stops. A write goes
+value of each field of each row, whichever shard wrote it, and writes them
+every 2 s (`PYLON_SHARD_WRITE_EVERY_MS`, at least 100) and when the shard
+stops. A copy of a shard that lost its place (its machine's lease lapsed,
+or another machine runs it now) writes nothing more. A write goes
 through the same path as `PATCH /api/entities/<entity>/<id>` with admin
 rights: plugins run, and synced clients see the change.
 
@@ -654,7 +663,7 @@ fn writes(&mut self) -> Vec<Write> {
 
 A write to a row that does not exist, or that a plugin refuses, is
 dropped with a log line. A write that fails in the database is tried again
-on the next 4 flushes. A shard holds at most 10,000 rows to write.
+on the next 4 flushes. A machine holds at most 100,000 rows to write.
 
 ### Send an input from a function
 
@@ -684,9 +693,9 @@ export default mutation({
 
 In a mutation the input is sent after the commit, and not at all when the
 mutation rolls back. In an action it is sent at once, and a shard on this
-machine has it when the call returns. Delivery is at most once: a shard
-that stops, a full input queue, or a machine that cannot be reached loses
-it. An input is at most 64 KB as JSON. A query cannot send.
+machine has it when the call returns, and one that runs nowhere fails with
+`SHARD_NOT_FOUND`. Delivery is at most once: a shard that stops, a full
+input queue, or a machine that cannot be reached loses it. An input is at most 64 KB as JSON. A query cannot send.
 
 `examples/shard-arena` has all four: its zone loads a `Character` on join,
 grants `Item`s through `functions/grantItem.ts`, writes x back, and takes
