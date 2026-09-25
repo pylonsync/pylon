@@ -71,9 +71,12 @@ pub(crate) struct Write {
     pub set: serde_json::Map<String, serde_json::Value>,
 }
 
-/// A call a worker took.
+/// A call a worker took, for one run of a shard.
 pub(super) struct QueuedCall {
     shard: String,
+    /// The run (see `WasmShardHost::instances`) that sent it: its result
+    /// goes to that run only.
+    serial: u64,
     call: Call,
 }
 
@@ -86,7 +89,7 @@ pub(super) struct CallQueue {
 
 #[derive(Default)]
 struct QueueState {
-    by_shard: HashMap<String, VecDeque<Call>>,
+    by_shard: HashMap<String, VecDeque<(u64, Call)>>,
     /// Shards with calls waiting, in the order they are served.
     turn: VecDeque<String>,
     len: usize,
@@ -94,14 +97,14 @@ struct QueueState {
 
 impl CallQueue {
     /// False when [`CALL_QUEUE`] calls wait already.
-    fn push(&self, shard: &str, call: Call) -> bool {
+    fn push(&self, shard: &str, serial: u64, call: Call) -> bool {
         let mut s = self.state.lock().unwrap();
         if s.len >= CALL_QUEUE {
             return false;
         }
         let queue = s.by_shard.entry(shard.to_string()).or_default();
         let first = queue.is_empty();
-        queue.push_back(call);
+        queue.push_back((serial, call));
         if first {
             s.turn.push_back(shard.to_string());
         }
@@ -119,14 +122,18 @@ impl CallQueue {
         }
         let shard = s.turn.pop_front()?;
         let queue = s.by_shard.get_mut(&shard)?;
-        let call = queue.pop_front()?;
+        let (serial, call) = queue.pop_front()?;
         if queue.is_empty() {
             s.by_shard.remove(&shard);
         } else {
             s.turn.push_back(shard.clone());
         }
         s.len -= 1;
-        Some(QueuedCall { shard, call })
+        Some(QueuedCall {
+            shard,
+            serial,
+            call,
+        })
     }
 }
 
@@ -144,17 +151,27 @@ pub(super) enum Flight {
     Waiting { until: Instant, attempt: u32 },
 }
 
-/// The calls of each shard that are in flight, by shard id, then by
-/// function and key.
-pub(super) type InFlight = HashMap<String, HashMap<String, Flight>>;
+/// The calls of each shard that are in flight, by shard id: the run they
+/// belong to, and each call by function and key. A new run of the shard
+/// starts with none (it sends its own calls; a mutation's key still runs
+/// once).
+pub(super) type InFlight = HashMap<String, (u64, HashMap<String, Flight>)>;
+
+/// One buffered field value, with the run of the shard that wrote it.
+#[derive(Debug, Clone)]
+struct FieldWrite {
+    value: serde_json::Value,
+    shard: String,
+    /// The lease epoch the shard was held under here (None with no shard
+    /// directory): the write is made only while that still holds.
+    epoch: Option<i64>,
+}
 
 /// Fields waiting to be written to one row.
 #[derive(Debug, Default)]
 pub(super) struct DirtyRow {
-    set: serde_json::Map<String, serde_json::Value>,
+    fields: HashMap<String, FieldWrite>,
     failures: u32,
-    /// The shard that wrote it last.
-    shard: String,
 }
 
 /// Buffered writes, by (entity, id).
@@ -187,6 +204,10 @@ fn error_result(key: &str, code: &str, message: &str) -> CallResult {
 /// function: the call is made again, with the same key, after a delay. A
 /// mutation runs once per key, so this never runs it twice.
 pub(crate) fn retryable(code: &str) -> bool {
+    // Postgres refused the statement itself: the same call meets it again.
+    if matches!(code, "PG_REJECTED" | "PG_INVALID_DATA") {
+        return false;
+    }
     ["PG_", "SQLITE_", "TX_", "RUNNER_"]
         .iter()
         .any(|p| code.starts_with(p))
@@ -197,6 +218,8 @@ pub(crate) fn retryable(code: &str) -> bool {
                 | "HANDLER_CRASH"
                 | "CALL_CANCELLED"
                 | "LOCK_FAILED"
+                | "BEGIN_FAILED"
+                | "COMMIT_FAILED"
                 | "ROLLBACK_FAILED"
         )
 }
@@ -286,10 +309,17 @@ impl WasmShardHost {
         let Some(target) = self.registry.get(shard) else {
             return;
         };
+        let Some(serial) = self.instances.lock().unwrap().get(shard).copied() else {
+            return;
+        };
         let tick = target.tick_number();
         let now = Instant::now();
         let mut in_flight = self.calls_in_flight.lock().unwrap();
-        let mut flights = in_flight.remove(shard).unwrap_or_default();
+        let mut flights = match in_flight.remove(shard) {
+            Some((run, flights)) if run == serial => flights,
+            // Another run's calls: this run sends its own.
+            _ => HashMap::new(),
+        };
         // A result queued before this tick started reached the module at
         // its start; a call the module stopped sending is forgotten.
         flights.retain(|_, f| match *f {
@@ -337,7 +367,7 @@ impl WasmShardHost {
             if running >= MAX_CALLS_IN_FLIGHT {
                 continue;
             }
-            if !self.calls.push(shard, call) {
+            if !self.calls.push(shard, serial, call) {
                 tracing::warn!(
                     "[shard {shard}] the call queue is full; the module sends the call again"
                 );
@@ -347,9 +377,7 @@ impl WasmShardHost {
             running += 1;
         }
         if !flights.is_empty() {
-            in_flight.insert(shard.to_string(), flights);
-        } else {
-            in_flight.remove(shard);
+            in_flight.insert(shard.to_string(), (serial, flights));
         }
     }
 
@@ -357,15 +385,20 @@ impl WasmShardHost {
         loop {
             let next = queue.pop(Duration::from_secs(1));
             let Some(host) = host.upgrade() else { return };
-            if let Some(QueuedCall { shard, call }) = next {
-                host.make_call(&shard, call);
+            if let Some(QueuedCall {
+                shard,
+                serial,
+                call,
+            }) = next
+            {
+                host.make_call(&shard, serial, call);
             }
         }
     }
 
     /// Make one call and settle it: deliver its result, or, after an
     /// infrastructure failure, leave it waiting to be made again.
-    fn make_call(&self, shard: &str, call: Call) {
+    fn make_call(&self, shard: &str, serial: u64, call: Call) {
         let flight = flight_key(&call);
         let key = call.key.clone();
         let function = call.function.clone();
@@ -398,7 +431,11 @@ impl WasmShardHost {
             },
             Err(e) if retryable(&e.code) => {
                 let mut in_flight = self.calls_in_flight.lock().unwrap();
-                if let Some(f) = in_flight.get_mut(shard).and_then(|m| m.get_mut(&flight)) {
+                if let Some(f) = in_flight
+                    .get_mut(shard)
+                    .filter(|(run, _)| *run == serial)
+                    .and_then(|(_, m)| m.get_mut(&flight))
+                {
                     let attempt = match *f {
                         Flight::Running { attempt } => attempt,
                         _ => 0,
@@ -421,10 +458,18 @@ impl WasmShardHost {
         // The result is in the shard's queue before the call counts as
         // answered, and the answer is kept until a later tick starts: the
         // module never sends a call again while its result is on the way.
-        let target = self.registry.get(shard);
+        // It goes to the run that sent the call, never to a later one.
+        let target = self
+            .registry
+            .get(shard)
+            .filter(|_| self.instances.lock().unwrap().get(shard) == Some(&serial));
         let pushed = target.as_ref().is_some_and(|t| t.push_call_result(result));
         let mut in_flight = self.calls_in_flight.lock().unwrap();
-        let Some(flights) = in_flight.get_mut(shard) else {
+        let Some(flights) = in_flight
+            .get_mut(shard)
+            .filter(|(run, _)| *run == serial)
+            .map(|(_, f)| f)
+        else {
             return;
         };
         match (pushed, target) {
@@ -447,24 +492,27 @@ impl WasmShardHost {
         }
     }
 
-    /// Forget a stopped shard's calls, except the ones a worker has.
+    /// Forget a stopped shard's calls. A worker still making one delivers
+    /// nothing: its run is gone.
     pub(super) fn forget_calls(&self, shard: &str) {
-        let mut in_flight = self.calls_in_flight.lock().unwrap();
-        if let Some(flights) = in_flight.get_mut(shard) {
-            flights.retain(|_, f| matches!(f, Flight::Running { .. }));
-            if flights.is_empty() {
-                in_flight.remove(shard);
-            }
-        }
+        self.calls_in_flight.lock().unwrap().remove(shard);
     }
 
     /// Buffer the writes a module asked for after a tick: each field keeps
-    /// its latest value, whichever shard wrote it.
+    /// its latest value, whichever shard wrote it, with that shard's run.
     pub(super) fn take_writes(&self, shard: &str, writes: Vec<Write>) {
         // A tick of a copy removed meanwhile: its writes are not current.
         if self.registry.get(shard).is_none() {
             return;
         }
+        let epoch = match self.cluster.get() {
+            Some(c) => match c.owned.lock().unwrap().get(shard) {
+                Some(&epoch) => Some(epoch),
+                // Not held here (fenced, or placed elsewhere): not ours.
+                None => return,
+            },
+            None => None,
+        };
         let mut dirty = self.dirty.lock().unwrap();
         let mut dropped = 0usize;
         for w in writes {
@@ -477,8 +525,16 @@ impl WasmShardHost {
                 continue;
             }
             let row = dirty.entry(key).or_default();
-            row.shard = shard.to_string();
-            row.set.extend(w.set);
+            for (field, value) in w.set {
+                row.fields.insert(
+                    field,
+                    FieldWrite {
+                        value,
+                        shard: shard.to_string(),
+                        epoch,
+                    },
+                );
+            }
         }
         if dropped > 0 {
             tracing::warn!(
@@ -487,56 +543,86 @@ impl WasmShardHost {
         }
     }
 
-    /// Drop the rows shard `id` wrote last: a copy that lost its place.
+    /// Drop the fields shard `id` wrote: a copy that lost its place.
     pub(super) fn discard_writes(&self, id: &str) {
-        self.dirty.lock().unwrap().retain(|_, row| row.shard != id);
+        let mut dirty = self.dirty.lock().unwrap();
+        for row in dirty.values_mut() {
+            row.fields.retain(|_, f| f.shard != id);
+        }
+        dirty.retain(|_, row| !row.fields.is_empty());
     }
 
-    /// Write the buffered rows `scope` names. One flush at a time, so a
-    /// later value is never overwritten by an earlier one. A row that fails
-    /// with a store error is kept (under newer values) for
-    /// [`WRITE_ATTEMPTS`] flushes; one refused (missing row, plugin,
-    /// validation) is dropped with a log line.
+    /// Write the buffered fields `scope` names, each with the fence of the
+    /// shard run that wrote it (see [`crate::entity_writer::Fence`]). One
+    /// flush at a time, so a later value is never overwritten by an earlier
+    /// one. Fields that fail with a store error are kept (under newer
+    /// values) for [`WRITE_ATTEMPTS`] flushes; ones refused (missing row,
+    /// plugin, validation, a shard no longer held) are dropped with a log
+    /// line.
     pub(super) fn flush_writes(&self, scope: Flush<'_>) {
         let Some(writer) = self.writer.get() else {
             return;
         };
         let _one = self.flush_lock.lock().unwrap();
-        let held: Option<std::collections::HashSet<String>> = match (&scope, self.cluster.get()) {
+        let machine = self.cluster.get().map(|c| c.me.id.clone());
+        let held: Option<HashMap<String, i64>> = match (&scope, self.cluster.get()) {
             (Flush::Held, Some(c)) => {
                 if c.current_epoch().is_none() {
                     return;
                 }
-                Some(c.owned.lock().unwrap().keys().cloned().collect())
+                Some(c.owned.lock().unwrap().clone())
             }
             _ => None,
         };
-        let taken: Vec<((String, String), DirtyRow)> = {
-            let mut dirty = self.dirty.lock().unwrap();
-            let keys: Vec<(String, String)> = dirty
-                .iter()
-                .filter(|(_, row)| match &scope {
-                    Flush::Shard(id) => row.shard == *id,
-                    Flush::Held => held.as_ref().is_none_or(|h| h.contains(&row.shard)),
-                    Flush::All => true,
-                })
-                .map(|(k, _)| k.clone())
-                .collect();
-            keys.into_iter()
-                .filter_map(|k| dirty.remove(&k).map(|row| (k, row)))
-                .collect()
+        let wanted = |f: &FieldWrite| match &scope {
+            Flush::Shard(id) => f.shard == *id,
+            Flush::Held => held
+                .as_ref()
+                .is_none_or(|h| f.epoch.is_none() || h.get(&f.shard) == f.epoch.as_ref()),
+            Flush::All => true,
         };
-        let mut failed: Vec<((String, String), DirtyRow)> = Vec::new();
-        for ((entity, id), row) in taken {
-            let fields = serde_json::Value::Object(row.set.clone());
-            let shard = &row.shard;
-            match writer.update(&entity, &id, &fields) {
+        // Taken out of the buffer, grouped by row and by the run that wrote
+        // them: (entity, id, shard, epoch) -> fields.
+        type Group = ((String, String), String, Option<i64>);
+        let mut groups: HashMap<Group, (serde_json::Map<String, serde_json::Value>, u32)> =
+            HashMap::new();
+        {
+            let mut dirty = self.dirty.lock().unwrap();
+            for (key, row) in dirty.iter_mut() {
+                let names: Vec<String> = row
+                    .fields
+                    .iter()
+                    .filter(|(_, f)| wanted(f))
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                for name in names {
+                    let f = row.fields.remove(&name).expect("listed above");
+                    let group = groups
+                        .entry((key.clone(), f.shard, f.epoch))
+                        .or_insert_with(|| (serde_json::Map::new(), row.failures));
+                    group.0.insert(name, f.value);
+                }
+            }
+            dirty.retain(|_, row| !row.fields.is_empty());
+        }
+        let mut failed: Vec<(Group, serde_json::Map<String, serde_json::Value>, u32)> = Vec::new();
+        for (((entity, id), shard, epoch), (set, failures)) in groups {
+            let fence = match (epoch, machine.as_deref()) {
+                (Some(epoch), Some(machine)) => Some(crate::entity_writer::Fence {
+                    shard: &shard,
+                    machine,
+                    epoch,
+                }),
+                _ => None,
+            };
+            let fields = serde_json::Value::Object(set.clone());
+            match writer.update_fenced(&entity, &id, &fields, fence) {
                 Ok(()) => {}
                 Err(crate::entity_writer::WriteError::Refused(why)) => {
                     tracing::warn!("[shard {shard}] write to {entity} {id} refused: {why}");
                 }
                 Err(crate::entity_writer::WriteError::Store(why)) => {
-                    if row.failures + 1 >= WRITE_ATTEMPTS {
+                    if failures + 1 >= WRITE_ATTEMPTS {
                         tracing::warn!(
                             "[shard {shard}] write to {entity} {id} failed {WRITE_ATTEMPTS} times; dropped: {why}"
                         );
@@ -544,8 +630,7 @@ impl WasmShardHost {
                         tracing::warn!(
                             "[shard {shard}] write to {entity} {id} failed; kept: {why}"
                         );
-                        let failures = row.failures + 1;
-                        failed.push(((entity, id), DirtyRow { failures, ..row }));
+                        failed.push((((entity, id), shard, epoch), set, failures + 1));
                     }
                 }
             }
@@ -554,30 +639,28 @@ impl WasmShardHost {
             return;
         }
         let mut dirty = self.dirty.lock().unwrap();
-        for (key, old) in failed {
-            match dirty.get_mut(&key) {
-                // Values buffered since the flush took this row are newer.
-                Some(row) => {
-                    for (field, value) in old.set {
-                        row.set.entry(field).or_insert(value);
-                    }
-                    row.failures = row.failures.max(old.failures);
-                }
-                None => {
-                    dirty.insert(key, old);
-                }
+        for ((key, shard, epoch), set, failures) in failed {
+            let row = dirty.entry(key).or_default();
+            // Values buffered since the flush took these are newer.
+            for (field, value) in set {
+                row.fields.entry(field).or_insert_with(|| FieldWrite {
+                    value,
+                    shard: shard.clone(),
+                    epoch,
+                });
             }
+            row.failures = row.failures.max(failures);
         }
     }
 
-    /// Rows with writes waiting that shard `shard` wrote last, for tests.
+    /// Rows with a field shard `shard` wrote waiting, for tests.
     #[cfg(test)]
     pub(super) fn dirty_rows(&self, shard: &str) -> usize {
         self.dirty
             .lock()
             .unwrap()
             .values()
-            .filter(|r| r.shard == shard)
+            .filter(|r| r.fields.values().any(|f| f.shard == shard))
             .count()
     }
 }
@@ -604,6 +687,8 @@ mod tests {
         db_failures: Mutex<u32>,
         /// Keys grantItem answers KEY_REUSED for.
         reused: Mutex<Vec<String>>,
+        /// loadCharacter waits while this is set.
+        hold_loads: Mutex<bool>,
         hold: Mutex<bool>,
         released: Condvar,
     }
@@ -615,6 +700,11 @@ mod tests {
 
         fn set_hold(&self, hold: bool) {
             *self.hold.lock().unwrap() = hold;
+            self.released.notify_all();
+        }
+
+        fn hold_loads(&self, hold: bool) {
+            *self.hold_loads.lock().unwrap() = hold;
             self.released.notify_all();
         }
     }
@@ -669,10 +759,21 @@ mod tests {
             assert!(auth.is_admin, "shards call with the server's rights");
             match fn_name {
                 "loadCharacter" => {
-                    *self.runs.lock().unwrap().entry(fn_name.into()).or_default() += 1;
+                    // Each load reads a newer row: x is 7, then 8, ...
+                    let n = {
+                        let mut runs = self.runs.lock().unwrap();
+                        let n = runs.entry(fn_name.into()).or_default();
+                        *n += 1;
+                        *n
+                    };
+                    let mut hold = self.hold_loads.lock().unwrap();
+                    while *hold {
+                        hold = self.released.wait(hold).unwrap();
+                    }
+                    drop(hold);
                     assert_eq!(args["userId"], "p1");
                     Ok(serde_json::json!({
-                        "id": self.character, "x": 7, "nextGrant": 3,
+                        "id": self.character, "x": 6 + n as i64, "nextGrant": 3,
                         "items": [{ "id": "i-old", "name": "old" }]
                     }))
                 }
@@ -1040,7 +1141,7 @@ mod tests {
         let in_flight = host.calls_in_flight.lock().unwrap();
         assert!(in_flight
             .values()
-            .flat_map(|m| m.values())
+            .flat_map(|(_, m)| m.values())
             .all(|f| !matches!(f, Flight::Running { .. } | Flight::Waiting { .. })));
         drop(in_flight);
         host.stop_all();
@@ -1070,14 +1171,72 @@ mod tests {
         host.stop_all();
     }
 
+    /// A call of a run that stopped delivers nothing to the next run of the
+    /// shard, which sends its own: an old load (x 7) never overwrites the
+    /// new run's (x 8).
+    #[test]
+    fn a_result_goes_only_to_the_run_that_sent_the_call() {
+        let (rt, fns) = runtime();
+        let host = host();
+        let weak: Weak<dyn pylon_router::FnOps> =
+            Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
+        host.attach_data(Some(weak), writer(&rt));
+        fns.hold_loads(true);
+        host.create("zone", "s1", &serde_json::json!({})).unwrap();
+        input(&host, "s1", "p1", "\"join\"");
+        wait_for("the first load to start", || fns.runs("loadCharacter") == 1);
+        // A new run of s1 while the first run's load waits.
+        host.stop("s1");
+        host.create("zone", "s1", &serde_json::json!({})).unwrap();
+        input(&host, "s1", "p1", "\"join\"");
+        std::thread::sleep(Duration::from_millis(200));
+        fns.hold_loads(false);
+        wait_for("the new run's character", || {
+            saved(&host, "s1")["players"]["p1"]["loaded"] == true
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(fns.runs("loadCharacter"), 2);
+        assert_eq!(saved(&host, "s1")["players"]["p1"]["x"], 8);
+        host.stop_all();
+    }
+
+    /// Each field belongs to the shard that wrote it: discarding one
+    /// shard's fields keeps another shard's fields of the same row.
+    #[test]
+    fn discarding_a_shard_keeps_the_other_shards_fields_of_a_row() {
+        let (rt, fns) = runtime();
+        let host = joined(&fns, &rt, "f1");
+        host.create("zone", "f2", &serde_json::json!({})).unwrap();
+        let set = |field: &str, n: i64| {
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([(field.to_string(), serde_json::json!(n))]),
+            }]
+        };
+        host.take_writes("f1", set("x", 5));
+        host.take_writes("f2", set("nextGrant", 9));
+        host.discard_writes("f1");
+        host.flush_writes(Flush::All);
+        let row = rt.get_by_id("Character", &fns.character).unwrap().unwrap();
+        assert_eq!(
+            (row["x"].clone(), row["nextGrant"].clone()),
+            (serde_json::json!(0), serde_json::json!(9))
+        );
+        host.stop_all();
+    }
+
     #[test]
     fn retryable_codes_are_the_infrastructure_ones() {
         for code in [
             "PG_TX_QUERY_FAILED",
             "PG_POOL_TIMEOUT",
             "SQLITE_BUSY",
+            "SQLITE_IOERR",
             "RUNNER_EXITED",
             "FN_TIMEOUT",
+            "BEGIN_FAILED",
+            "COMMIT_FAILED",
         ] {
             assert!(retryable(code), "{code}");
         }
@@ -1087,6 +1246,8 @@ mod tests {
             "KEY_REUSED",
             "FN_NOT_FOUND",
             "CALL_PANICKED",
+            "PG_REJECTED",
+            "INSERT_FAILED",
         ] {
             assert!(!retryable(code), "{code}");
         }
@@ -1104,9 +1265,9 @@ mod tests {
             args: serde_json::Value::Null,
         };
         for k in ["a1", "a2", "a3"] {
-            assert!(q.push("a", call(k)));
+            assert!(q.push("a", 1, call(k)));
         }
-        assert!(q.push("b", call("b1")));
+        assert!(q.push("b", 2, call("b1")));
         let order: Vec<String> = std::iter::from_fn(|| q.pop(Duration::ZERO))
             .map(|c| c.call.key)
             .collect();

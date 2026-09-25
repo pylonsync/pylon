@@ -284,7 +284,10 @@ mod tests {
         assert_eq!(committed_result(&rt, "other", "k").unwrap(), None);
         in_tx(false, &|s| {
             assert_eq!(s.fn_call_result(&f, "k").unwrap(), Some(call(1)));
-            assert!(s.record_fn_call(&f, "k", &call(2)).is_err());
+            // A unique violation: refused for what it says, not retried.
+            let dup = s.record_fn_call(&f, "k", &call(2)).unwrap_err();
+            assert_eq!(dup.code, "PG_REJECTED");
+            assert!(!crate::shard_wasm::retryable_code(&dup.code));
         });
         // Rolled back: no result.
         in_tx(false, &|s| s.record_fn_call(&f, "k2", &call(3)).unwrap());

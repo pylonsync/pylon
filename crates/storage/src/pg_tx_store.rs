@@ -200,8 +200,20 @@ pub fn pg_err_to_data(e: postgres::Error) -> DataError {
         src = s.source();
     }
     DataError {
-        code: "PG_TX_QUERY_FAILED".into(),
+        code: pg_error_code(&e).into(),
         message: format!("Postgres query in transaction failed: {detail}"),
+    }
+}
+
+/// `PG_REJECTED` when Postgres refused the statement for what it says (a
+/// data exception, a constraint violation, a syntax or access error:
+/// SQLSTATE classes 22, 23, 42, and 44), which the same statement meets
+/// again; else `PG_TX_QUERY_FAILED` (a lost connection, a serialization
+/// failure, a deadlock), which can pass if tried again.
+pub fn pg_error_code(e: &postgres::Error) -> &'static str {
+    match e.code().map(|c| &c.code()[..2]) {
+        Some("22" | "23" | "42" | "44") => "PG_REJECTED",
+        _ => "PG_TX_QUERY_FAILED",
     }
 }
 
@@ -814,6 +826,19 @@ impl<'a> DataStore for PgTxStore<'a> {
             )
             .map_err(pg_err_to_data)?;
             Ok(())
+        })
+    }
+
+    fn check_shard_fence(&self, shard: &str, machine: &str, epoch: i64) -> Result<bool, DataError> {
+        self.with_tx(|tx| {
+            tx.query_opt(
+                "SELECT 1 FROM _pylon_shard_placements
+                 WHERE shard_id = $1 AND machine_id = $2 AND epoch = $3
+                 FOR SHARE",
+                &[&shard, &machine, &epoch],
+            )
+            .map(|row| row.is_some())
+            .map_err(pg_err_to_data)
         })
     }
 

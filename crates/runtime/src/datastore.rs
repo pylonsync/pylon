@@ -3431,13 +3431,13 @@ impl<'a> DataStore for HookEnforcingDataStore<'a> {
 /// `TxStore` provides directly. The underlying `inner` ref lives only
 /// for the duration of `PostgresDataStore::with_transaction`'s closure
 /// — the lifetime tracks through.
-struct PgBufferedTxStore<'a> {
+pub(crate) struct PgBufferedTxStore<'a> {
     inner: &'a dyn DataStore,
     pending: std::sync::Mutex<Vec<pylon_sync::ChangeEvent>>,
 }
 
 impl<'a> PgBufferedTxStore<'a> {
-    fn new(inner: &'a dyn DataStore) -> Self {
+    pub(crate) fn new(inner: &'a dyn DataStore) -> Self {
         Self {
             inner,
             pending: std::sync::Mutex::new(Vec::new()),
@@ -3478,7 +3478,7 @@ impl<'a> PgBufferedTxStore<'a> {
         }
     }
 
-    fn take_pending(self) -> Vec<pylon_sync::ChangeEvent> {
+    pub(crate) fn take_pending(self) -> Vec<pylon_sync::ChangeEvent> {
         self.pending.into_inner().unwrap_or_default()
     }
 

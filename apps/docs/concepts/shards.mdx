@@ -612,9 +612,12 @@ other arguments fails with `KEY_REUSED`.
 A call that fails in the database or the functions runtime (codes that
 start with `PG_`, `SQLITE_`, `TX_`, or `RUNNER_`, and `FN_TIMEOUT`,
 `IO_ERROR`, `HANDLER_CRASH`, `CALL_CANCELLED`, `LOCK_FAILED`,
-`ROLLBACK_FAILED`) is made again by the host with the same key, after 250
-ms and then twice as long each time, up to 30 s. The module gets only the
-function's answer or its own error. So a grant has these rules:
+`BEGIN_FAILED`, `COMMIT_FAILED`, `ROLLBACK_FAILED`) is made again by the
+host with the same key, after 250 ms and then twice as long each time, up
+to 30 s. A statement Postgres refuses for what it is (a constraint, a data
+error: `PG_REJECTED`) is not made again. The module gets only the
+function's answer or its own error. A result goes only to the run of the
+shard that sent the call: a shard that restarts sends its calls again. So a grant has these rules:
 
 - Save the calls in flight with the shard's state (`save`). A shard that
   restarts from its last save sends them again under the same keys.
@@ -643,8 +646,12 @@ number. A result can arrive twice for one key; its value is the same.
 After each tick the host takes the module's `writes`. It keeps the latest
 value of each field of each row, whichever shard wrote it, and writes them
 every 2 s (`PYLON_SHARD_WRITE_EVERY_MS`, at least 100) and when the shard
-stops. A copy of a shard that lost its place (its machine's lease lapsed,
-or another machine runs it now) writes nothing more. A write goes
+stops. Each field keeps the shard that wrote it and the lease that shard
+ran under. On Postgres a flush checks, in the write's own transaction and
+with the shard's place in the directory locked, that this machine still
+holds the shard under that lease: a copy that lost its place (its
+machine's lease lapsed, or another machine runs it now) writes nothing
+more, even a write already on its way. A write goes
 through the same path as `PATCH /api/entities/<entity>/<id>` with admin
 rights: plugins run, and synced clients see the change.
 

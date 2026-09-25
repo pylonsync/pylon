@@ -31,6 +31,10 @@ struct Params {
     /// A group for messages (`shout` with `to: "group:<name>"`).
     #[serde(default)]
     group: Option<String>,
+    /// Test hook: grant results wait for a `release` input, so every save
+    /// holds the grant as sent (tools/smoke-shard-cluster.sh).
+    #[serde(default)]
+    hold_results: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -74,6 +78,9 @@ struct Grant {
     /// Test hook: how long the mutation waits before it writes.
     #[serde(default)]
     delay_ms: u64,
+    /// Restored from a save: its result is a replay.
+    #[serde(default)]
+    restored: bool,
 }
 
 /// What a zone saves.
@@ -92,6 +99,8 @@ struct Snapshot {
     players: BTreeMap<String, Player>,
     /// The last shouts heard from other zones.
     heard: Vec<String>,
+    /// Grant results applied to grants restored from a save.
+    replayed: u64,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +139,8 @@ enum Input {
         who: String,
         hp: i64,
     },
+    /// Apply the grant results `hold_results` kept.
+    Release,
 }
 
 struct Zone {
@@ -146,6 +157,9 @@ struct Zone {
     grants: BTreeMap<String, Grant>,
     /// Players whose x changed since the last write.
     moved: BTreeSet<String>,
+    /// Grant results waiting for `release` (with `hold_results`), by key.
+    held: BTreeMap<String, Result<serde_json::Value, String>>,
+    replayed: u64,
 }
 
 /// The key of a character load: a query, so it is not stored.
@@ -155,6 +169,46 @@ fn load_key(player: &str) -> String {
 
 fn count_down(ms: &mut u64, dt: Duration) {
     *ms = ms.saturating_sub(dt.as_millis() as u64);
+}
+
+impl Zone {
+    /// Apply a grant's result: its item on `Ok`, the next key on
+    /// `KEY_REUSED`, a log line on a refusal.
+    fn apply_grant_result(&mut self, key: &str, result: Result<serde_json::Value, String>) {
+        let Some(grant) = self.grants.remove(key) else {
+            // Answered already (a result can arrive twice).
+            return;
+        };
+        let restored = grant.restored;
+        match result {
+            Ok(done) => {
+                // By row id: a reload may have shown it already.
+                if let (Some(p), Some(id)) =
+                    (self.players.get_mut(&grant.player), done["itemId"].as_str())
+                {
+                    p.items.insert(id.to_string(), grant.item);
+                }
+                if restored {
+                    self.replayed += 1;
+                }
+            }
+            // The key was used for another grant: a restored zone counted
+            // from an older row. Send this grant again under the next key.
+            Err(e) if e.starts_with("KEY_REUSED") => {
+                if let Some(p) = self.players.get_mut(&grant.player) {
+                    let key = format!("loot:{}:{}", p.character, p.next_grant);
+                    p.next_grant += 1;
+                    self.grants.insert(key, grant);
+                }
+            }
+            // The function refused (the host tries database failures
+            // again itself): the mutation rolled back, so no item exists.
+            Err(e) => pylon_shard_guest::log(
+                pylon_shard_guest::Level::Warn,
+                &format!("grant {key} failed: {e}"),
+            ),
+        }
+    }
 }
 
 impl Shard for Zone {
@@ -173,6 +227,8 @@ impl Shard for Zone {
             asked: Default::default(),
             grants: BTreeMap::new(),
             moved: BTreeSet::new(),
+            held: BTreeMap::new(),
+            replayed: 0,
         })
     }
 
@@ -197,6 +253,12 @@ impl Shard for Zone {
                 });
             return Ok(());
         }
+        if let Input::Release = input {
+            for (key, result) in std::mem::take(&mut self.held) {
+                self.apply_grant_result(&key, result);
+            }
+            return Ok(());
+        }
         if let Input::Heal { who, hp } = &input {
             if !subscriber.is_empty() {
                 return Err("heal comes from the server only".into());
@@ -207,7 +269,7 @@ impl Shard for Zone {
         }
         let p = self.players.get_mut(subscriber).ok_or("join first")?;
         match input {
-            Input::Join | Input::Heal { .. } => {}
+            Input::Join | Input::Heal { .. } | Input::Release => {}
             Input::Move { dx } => {
                 // x comes from the character row: no move before it loads.
                 if !p.loaded {
@@ -231,6 +293,7 @@ impl Shard for Zone {
                         character: p.character.clone(),
                         item,
                         delay_ms,
+                        restored: false,
                     },
                 );
             }
@@ -292,6 +355,7 @@ impl Shard for Zone {
             zone: self.id.clone(),
             players: self.players.clone(),
             heard: self.heard.iter().cloned().collect(),
+            replayed: self.replayed,
         }
     }
 
@@ -362,16 +426,21 @@ impl Shard for Zone {
                 function: "loadCharacter".into(),
                 args: serde_json::json!({ "userId": sid }),
             });
-        let grants = self.grants.iter().map(|(key, g)| Call {
-            key: key.clone(),
-            function: "grantItem".into(),
-            args: serde_json::json!({
-                "characterId": g.character,
-                "item": g.item,
-                "key": key,
-                "delayMs": g.delay_ms,
-            }),
-        });
+        // A grant whose result waits for `release` is answered already.
+        let grants = self
+            .grants
+            .iter()
+            .filter(|(key, _)| !self.held.contains_key(*key))
+            .map(|(key, g)| Call {
+                key: key.clone(),
+                function: "grantItem".into(),
+                args: serde_json::json!({
+                    "characterId": g.character,
+                    "item": g.item,
+                    "key": key,
+                    "delayMs": g.delay_ms,
+                }),
+            });
         loads.chain(grants).collect()
     }
 
@@ -410,35 +479,11 @@ impl Shard for Zone {
             }
             return;
         }
-        let Some(grant) = self.grants.remove(key) else {
-            // Answered already (a result can arrive twice).
+        if self.params.hold_results {
+            self.held.insert(key.to_string(), result);
             return;
-        };
-        match result {
-            Ok(done) => {
-                // By row id: a reload may have shown it already.
-                if let (Some(p), Some(id)) =
-                    (self.players.get_mut(&grant.player), done["itemId"].as_str())
-                {
-                    p.items.insert(id.to_string(), grant.item);
-                }
-            }
-            // The key was used for another grant: a restored zone counted
-            // from an older row. Send this grant again under the next key.
-            Err(e) if e.starts_with("KEY_REUSED") => {
-                if let Some(p) = self.players.get_mut(&grant.player) {
-                    let key = format!("loot:{}:{}", p.character, p.next_grant);
-                    p.next_grant += 1;
-                    self.grants.insert(key, grant);
-                }
-            }
-            // The function refused (the host tries database failures
-            // again itself): the mutation rolled back, so no item exists.
-            Err(e) => pylon_shard_guest::log(
-                pylon_shard_guest::Level::Warn,
-                &format!("grant {key} failed: {e}"),
-            ),
         }
+        self.apply_grant_result(key, result);
     }
 
     fn writes(&mut self) -> Vec<Write> {
@@ -475,6 +520,9 @@ impl Shard for Zone {
             p.loaded = false;
         }
         zone.grants = saved.grants;
+        for g in zone.grants.values_mut() {
+            g.restored = true;
+        }
         Ok(zone)
     }
 }

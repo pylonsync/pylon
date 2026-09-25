@@ -536,6 +536,7 @@ jobs:
           cargo test -p pylon-runtime --lib shard_wasm::lease_tests
           cargo test -p pylon-runtime --lib shard_wasm::transfer::tests
           cargo test -p pylon-runtime --lib fn_calls
+          cargo test -p pylon-runtime --lib entity_writer
           cargo test -p pylon-runtime --test shard_wasm -- transfers_on_a_cluster a_move_left_open a_dead_machine
       - name: Two machines
         env:

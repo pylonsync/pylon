@@ -42,6 +42,8 @@ interface Player {
 interface Zone {
   zone: string;
   players: Record<string, Player>;
+  /** Grant results applied to grants restored from a save. */
+  replayed: number;
 }
 
 type Joined = { subscriberId: string; ticket: string; machine?: string };
@@ -111,9 +113,9 @@ async function waitFor<T>(
 }
 
 /** Join zone `zone` through `host` as a new guest and wait for the character. */
-async function joinPlayer(host: string, zone: string, machine?: string) {
+async function joinPlayer(host: string, zone: string, machine?: string, params?: object) {
   const token = await guest(host);
-  const joined = await call<Joined>(host, token, "joinZone", { zone, machine });
+  const joined = await call<Joined>(host, token, "joinZone", { zone, machine, params });
   let snapshot: Zone | undefined;
   const client = connectShard<Zone, unknown>(zone, {
     subscriberId: joined.subscriberId,
@@ -230,20 +232,21 @@ test.skipIf(!killable)(
     expect(await itemsOf(cf)).toEqual([]);
     process.kill(pidF, "SIGKILL");
 
-    // After: the grant commits, and G dies at once, most likely before the
-    // zone saved the result (it saves every 1 s; the first save, with the
-    // loaded player, comes before the loot).
+    // After: the grant commits, and G dies after a save that still holds
+    // the grant as sent (the zone keeps grant results until `release`), so
+    // the zone that starts elsewhere must replay the stored result.
     const after = `grant-after-${run}`;
-    const pg = await joinPlayer(hostG, after, "g");
+    const pg = await joinPlayer(hostG, after, "g", { hold_results: true });
     expect(pg.machine).toBe("g");
     const cg = pg.me()!.character;
-    await sleep(1500);
     pg.client.send({ loot: { item: "crown" } });
     await waitFor(
       "the crown's row",
       async () => ((await itemsOf(cg)).length > 0 ? true : undefined),
       10_000,
     );
+    // Saves every 1 s: at least one after the commit, with the grant.
+    await sleep(2500);
     process.kill(pidG, "SIGKILL");
 
     const watcherToken = await guest(hostA);
@@ -271,19 +274,20 @@ test.skipIf(!killable)(
     pf.client.close();
     pg.client.close();
 
-    // The restarted zones show each item once, after the grant's result.
-    for (const [zone, sid, item] of [
-      [during, pf.sid, "relic"],
-      [after, pg.sid, "crown"],
-    ]) {
-      await expectShown(zone, sid, item);
-    }
+    // The restarted zones show each item once, after the grant's result;
+    // the second one replayed the stored result of its committed grant.
+    await expectShown(during, pf.sid, "relic", false);
+    await expectShown(after, pg.sid, "crown", true);
   },
   180_000,
 );
 
-/** Watch `zone` as a new guest until player `sid` shows `item`, once. */
-async function expectShown(zone: string, sid: string, item: string) {
+/**
+ * Watch `zone` as a new guest until player `sid` shows `item`, once. With
+ * `replay`, release the zone's held grant results until one restored from
+ * its save was applied.
+ */
+async function expectShown(zone: string, sid: string, item: string, replay: boolean) {
   const token = await guest(hostA);
   const t = await call<Joined>(hostA, token, "joinZone", { zone });
   let snapshot: Zone | undefined;
@@ -299,6 +303,17 @@ async function expectShown(zone: string, sid: string, item: string) {
     () => (Object.values(snapshot?.players[sid]?.items ?? {}).includes(item) ? true : undefined),
     20_000,
   );
+  if (replay) {
+    await waitFor(
+      `the replayed grant in ${zone}`,
+      () => {
+        if (snapshot?.replayed === 1) return true;
+        watcher.send("release");
+        return undefined;
+      },
+      20_000,
+    );
+  }
   expect(Object.values(snapshot!.players[sid].items)).toEqual([item]);
   watcher.close();
 }

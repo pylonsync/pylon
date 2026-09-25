@@ -258,6 +258,23 @@ pub trait DataStore: Send + Sync {
         })
     }
 
+    /// True when machine `machine` holds shard `shard` under `epoch`, read in
+    /// the current transaction with the placement row share-locked, so no
+    /// other machine takes the shard over until the transaction ends (see
+    /// the runtime's shard directory). A shard's buffered entity writes
+    /// check it first.
+    fn check_shard_fence(
+        &self,
+        _shard: &str,
+        _machine: &str,
+        _epoch: i64,
+    ) -> Result<bool, DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "a shard fence needs a Postgres transaction".into(),
+        })
+    }
+
     /// The stored result of the idempotent call of `fn_name` with `key`,
     /// inside the current mutation transaction (see
     /// [`DataStore::record_fn_call`]). `None` when no such call committed.

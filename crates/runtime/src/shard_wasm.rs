@@ -45,6 +45,12 @@ mod drain;
 mod messages;
 mod transfer;
 pub use messages::{check_send, MessageError, Outbox, SendError, Target};
+
+/// True when a shard call that failed with `code` is made again (see
+/// `data::retryable`).
+pub fn retryable_code(code: &str) -> bool {
+    data::retryable(code)
+}
 pub use transfer::{TransferError, Transferred};
 use wasmtime::{
     Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,

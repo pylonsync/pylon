@@ -505,6 +505,58 @@ impl From<pylon_http::DataError> for RuntimeError {
 // SQL safety helpers
 // ---------------------------------------------------------------------------
 
+/// The code of a failed SQLite write: `SQLITE_BUSY` when the database was
+/// busy or locked and `SQLITE_IOERR` on an I/O error (both pass if tried
+/// again), else `default`.
+pub(crate) fn sqlite_write_code(e: &rusqlite::Error, default: &'static str) -> &'static str {
+    match e.sqlite_error_code() {
+        Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+            "SQLITE_BUSY"
+        }
+        Some(rusqlite::ErrorCode::SystemIoFailure) => "SQLITE_IOERR",
+        _ => default,
+    }
+}
+
+#[cfg(test)]
+mod sqlite_write_code_tests {
+    use super::sqlite_write_code;
+
+    fn failure(code: rusqlite::ffi::ErrorCode, extended: i32) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: extended,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn busy_and_io_failures_are_marked() {
+        use rusqlite::ffi::ErrorCode;
+        assert_eq!(
+            sqlite_write_code(&failure(ErrorCode::DatabaseBusy, 5), "INSERT_FAILED"),
+            "SQLITE_BUSY"
+        );
+        assert_eq!(
+            sqlite_write_code(&failure(ErrorCode::DatabaseLocked, 6), "UPDATE_FAILED"),
+            "SQLITE_BUSY"
+        );
+        assert_eq!(
+            sqlite_write_code(&failure(ErrorCode::SystemIoFailure, 10), "DELETE_FAILED"),
+            "SQLITE_IOERR"
+        );
+        assert_eq!(
+            sqlite_write_code(
+                &failure(ErrorCode::ConstraintViolation, 2067),
+                "INSERT_FAILED"
+            ),
+            "INSERT_FAILED"
+        );
+    }
+}
+
 /// Quote a SQL identifier with double quotes to prevent injection.
 /// Any embedded double quotes are escaped by doubling them (SQL standard).
 fn quote_ident(name: &str) -> String {
@@ -2370,7 +2422,7 @@ impl Runtime {
                 let code = if msg.contains(&format!("UNIQUE constraint failed: {entity}.id")) {
                     "OPTIMISTIC_ID_CONFLICT"
                 } else {
-                    "INSERT_FAILED"
+                    sqlite_write_code(&e, "INSERT_FAILED")
                 };
                 RuntimeError {
                     code: code.into(),
@@ -2760,7 +2812,7 @@ impl Runtime {
             let affected = conn
                 .execute(&sql, params.as_slice())
                 .map_err(|e| RuntimeError {
-                    code: "UPDATE_FAILED".into(),
+                    code: sqlite_write_code(&e, "UPDATE_FAILED").into(),
                     message: format!("Update {entity}/{id} failed: {e}"),
                 })? as i64;
 
@@ -2840,7 +2892,7 @@ impl Runtime {
         let affected = conn
             .execute(&sql, rusqlite::params![id])
             .map_err(|e| RuntimeError {
-                code: "DELETE_FAILED".into(),
+                code: sqlite_write_code(&e, "DELETE_FAILED").into(),
                 message: format!("Delete {entity}/{id} failed: {e}"),
             })?;
         if ent.crdt {
@@ -3484,7 +3536,7 @@ impl Runtime {
             let code = if msg.contains("UNIQUE constraint failed") {
                 "OPTIMISTIC_ID_CONFLICT"
             } else {
-                "INSERT_FAILED"
+                sqlite_write_code(&e, "INSERT_FAILED")
             };
             RuntimeError {
                 code: code.into(),
@@ -3568,7 +3620,7 @@ impl Runtime {
         let affected = conn
             .execute(&sql, params.as_slice())
             .map_err(|e| RuntimeError {
-                code: "UPDATE_FAILED".into(),
+                code: sqlite_write_code(&e, "UPDATE_FAILED").into(),
                 message: format!("Update {entity}/{id} failed: {e}"),
             })?;
 
@@ -3614,7 +3666,7 @@ impl Runtime {
         let affected = conn
             .execute(&sql, rusqlite::params![id])
             .map_err(|e| RuntimeError {
-                code: "DELETE_FAILED".into(),
+                code: sqlite_write_code(&e, "DELETE_FAILED").into(),
                 message: format!("Delete {entity}/{id} failed: {e}"),
             })?;
         if ent.crdt {
