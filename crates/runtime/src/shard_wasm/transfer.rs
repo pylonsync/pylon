@@ -28,7 +28,7 @@ use std::sync::Arc;
 use pylon_realtime::{Shard, SubscriberId};
 
 use super::{validate_shard_id, WasmShardHost, WasmSim};
-use crate::shard_cluster::{self, RemoteOp, RemoteReply, Transfer};
+use crate::shard_cluster::{self, RemoteOp, RemoteReply, Settle, Transfer};
 
 /// A `out` row this old is finished by the source's machine.
 pub(super) const STALE_TRANSFER_MS: i64 = 15_000;
@@ -245,12 +245,8 @@ impl WasmShardHost {
                     });
                 if !matches!(recorded, Ok(true)) {
                     // Nothing recorded: the player goes straight back.
-                    if let Err(e) = sim.transfer_in(sid.as_str(), &state) {
-                        tracing::error!(
-                            "[shard {}] could not take subscriber {} back after a failed transfer: {e}",
-                            t.from_shard,
-                            t.subscriber
-                        );
+                    if let Err(e) = sim.transfer_in(sid.as_str(), &state, true) {
+                        self.strand(t, state.clone(), &e);
                     }
                     return Err(match recorded {
                         Err(e) => e,
@@ -357,7 +353,7 @@ impl WasmShardHost {
         };
         let saves = self.saves_state(&t.to_shard);
         target.with_state(|sim| {
-            sim.transfer_in(&t.subscriber, &t.state)
+            sim.transfer_in(&t.subscriber, &t.state, false)
                 .map_err(TransferError::Refused)?;
             let (Some(c), Some(epoch)) = (cluster, epoch) else {
                 return Ok(());
@@ -368,35 +364,43 @@ impl WasmShardHost {
                 .map(|s| s.filter(|_| saves))
                 .and_then(|target_state| {
                     c.dir
-                        .accept_transfer(&t.id, &t.to_shard, &c.me.id, epoch, target_state.as_deref())
+                        .accept_transfer(
+                            &t.id,
+                            &t.to_shard,
+                            &c.me.id,
+                            epoch,
+                            target_state.as_deref(),
+                        )
                         .map_err(TransferError::Cluster)
                 });
-            match settled {
-                Ok(true) => Ok(()),
-                other => {
-                    // Not ours: the source took the player back, or nothing
-                    // was recorded. Remove the copy just added.
-                    if let Err(e) = sim.transfer_out(&t.subscriber) {
-                        tracing::error!(
-                            "[shard {}] could not remove subscriber {} after losing its transfer: {e}",
-                            t.to_shard,
-                            t.subscriber
-                        );
-                    }
-                    Err(match other {
-                        Err(e) => e,
-                        _ => TransferError::Refused(format!(
-                            "transfer {} was settled elsewhere",
-                            t.id
-                        )),
-                    })
-                }
+            if matches!(settled, Ok(Settle::Done)) {
+                return Ok(());
             }
+            // Not ours: remove the copy just added.
+            if let Err(e) = sim.transfer_out(&t.subscriber) {
+                tracing::error!(
+                    "[shard {}] could not remove subscriber {} after losing its transfer: {e}",
+                    t.to_shard,
+                    t.subscriber
+                );
+            }
+            Err(match settled {
+                Err(e) => e,
+                Ok(Settle::Taken) => {
+                    TransferError::Refused(format!("transfer {} was settled by the source", t.id))
+                }
+                // The row stays `out`; the source takes the player back.
+                _ => TransferError::Cluster(format!(
+                    "this machine no longer holds shard \"{}\"",
+                    t.to_shard
+                )),
+            })
         })
     }
 
     /// Step 3: give the player back to the source. Ok(true): the source has
-    /// it. Ok(false): the target took it first.
+    /// it. Ok(false): the target took it first. An error leaves the row
+    /// `out` for whichever machine holds the source to finish.
     fn take_back(
         &self,
         source: &Arc<Shard<WasmSim>>,
@@ -408,14 +412,19 @@ impl WasmShardHost {
         let epoch = cluster.and_then(|c| c.owned.lock().unwrap().get(&t.from_shard).copied());
         let saves = self.saves_state(&t.from_shard);
         source.with_state(|sim| {
-            if let Err(e) = sim.transfer_in(sid.as_str(), &t.state) {
-                // The row keeps the player; a later round tries again.
-                tracing::error!(
-                    "[shard {}] refused subscriber {} back from transfer {}: {e}",
-                    t.from_shard,
-                    t.subscriber,
-                    t.id
-                );
+            if let Err(e) = sim.transfer_in(sid.as_str(), &t.state, true) {
+                // On several machines the row keeps the player and a later
+                // round offers it again; on one, the host keeps it.
+                if cluster.is_none() {
+                    self.strand(t, t.state.clone(), &e);
+                } else {
+                    tracing::error!(
+                        "[shard {}] refused subscriber {} back from transfer {}: {e}",
+                        t.from_shard,
+                        t.subscriber,
+                        t.id
+                    );
+                }
                 return Err(TransferError::Cluster(format!(
                     "the source refused the player back: {e}"
                 )));
@@ -441,12 +450,22 @@ impl WasmShardHost {
                     }),
                 None => Err(TransferError::NotFound(t.from_shard.clone())),
             };
-            if !matches!(settled, Ok(true)) {
+            if !matches!(settled, Ok(Settle::Done)) {
                 // Not ours: remove the copy just added.
                 let _ = sim.transfer_out(sid.as_str());
             }
-            // Ok(false): the row is no longer `out`, so the target has it.
-            settled
+            match settled? {
+                Settle::Done => Ok(true),
+                // Only the target moves a row this machine's source holds
+                // away from `out`: the target has the player.
+                Settle::Taken => Ok(false),
+                // The source moved (a lapsed lease): its new holder
+                // finishes the transfer from the row.
+                Settle::NotHeld => Err(TransferError::Cluster(format!(
+                    "this machine no longer holds shard \"{}\"; it finishes the transfer",
+                    t.from_shard
+                ))),
+            }
         })
     }
 
@@ -526,6 +545,44 @@ impl WasmShardHost {
                 auth.claims,
                 Some(TICKET_TTL_SECS),
             ),
+        }
+    }
+
+    /// Keep a player no shard would take back, and no directory row holds,
+    /// so the sweep offers it to the source again.
+    fn strand(&self, t: &Transfer, state: Vec<u8>, why: &str) {
+        tracing::error!(
+            "[shard {}] refused subscriber {} back ({why}); the host keeps it and offers it again",
+            t.from_shard,
+            t.subscriber
+        );
+        let mut kept = t.clone();
+        kept.state = state;
+        self.stranded.lock().unwrap().push(kept);
+    }
+
+    /// Offer kept players back to their source shards (from the sweep). One
+    /// whose source is gone is dropped, with an error log: nothing is left
+    /// to return it to.
+    pub(super) fn retry_stranded(&self) {
+        let kept = std::mem::take(&mut *self.stranded.lock().unwrap());
+        for t in kept {
+            let Some(source) = self.registry.get(&t.from_shard).filter(|s| s.is_running()) else {
+                tracing::error!(
+                    "[shard {}] stopped with subscriber {} still waiting to come back; dropped",
+                    t.from_shard,
+                    t.subscriber
+                );
+                continue;
+            };
+            match source.with_state(|sim| sim.transfer_in(&t.subscriber, &t.state, true)) {
+                Ok(()) => tracing::info!(
+                    "[shard {}] took subscriber {} back",
+                    t.from_shard,
+                    t.subscriber
+                ),
+                Err(_) => self.stranded.lock().unwrap().push(t),
+            }
         }
     }
 

@@ -1482,3 +1482,23 @@ fn transfers_on_a_cluster_save_both_shards_and_finish_after_a_crash() {
     }
     host.stop_all();
 }
+
+#[test]
+fn a_closed_zone_takes_its_own_player_back() {
+    // Both zones keep newcomers out. A move between them is refused, and the
+    // source must still take its own player back (`returning`).
+    let host = zone_host();
+    host.create("zone", "keep", &json!({ "closed": true }))
+        .unwrap();
+    host.create("zone", "vault", &json!({ "closed": true }))
+        .unwrap();
+    let q = subscribe(&host, "keep", "p1");
+    input(&host, "keep", "p1", json!("join")).unwrap();
+    input(&host, "keep", "p1", json!({ "hit": { "damage": 7 } })).unwrap();
+    wait_frame(&q, |s| s["players"]["p1"]["hp"] == 93);
+
+    let err = host.transfer("keep", "p1", "vault").unwrap_err();
+    assert_eq!(err.code(), "SHARD_TRANSFER_REFUSED", "{err}");
+    let snap = wait_frame(&q, |s| !s["players"]["p1"].is_null());
+    assert_eq!(snap["players"]["p1"]["hp"], 93);
+}

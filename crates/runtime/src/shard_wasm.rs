@@ -641,7 +641,7 @@ struct Exports {
 #[derive(Clone)]
 struct TransferExports {
     out: TypedFunc<(i32, i32), i32>,
-    accept: TypedFunc<(i32, i32, i32, i32), i32>,
+    accept: TypedFunc<(i32, i32, i32, i32, i32), i32>,
     requests: TypedFunc<(), i32>,
 }
 
@@ -902,15 +902,21 @@ impl WasmSim {
     }
 
     /// Give `subscriber`'s entity to the shard from `state` a
-    /// `transfer_out` returned. `Err` is a refusal (or a stopped module).
-    /// Call it with the state lock held, outside a tick.
-    pub fn transfer_in(&self, subscriber: &str, state: &[u8]) -> Result<(), String> {
+    /// `transfer_out` returned; `returning` when it is the shard's own player
+    /// coming back from a failed move. `Err` is a refusal (or a stopped
+    /// module). Call it with the state lock held, outside a tick.
+    pub fn transfer_in(
+        &self,
+        subscriber: &str,
+        state: &[u8],
+        returning: bool,
+    ) -> Result<(), String> {
         let mut inner = self.inner.borrow_mut();
         let t = Self::transfer_exports(&inner)?;
         inner.begin_op();
         let args = inner.write_args(&[subscriber.as_bytes(), state])?;
         let ((sp, sl), (tp, tl)) = (args[0], args[1]);
-        match inner.call(&t.accept, (sp, sl, tp, tl))? {
+        match inner.call(&t.accept, (sp, sl, tp, tl, i32::from(returning)))? {
             STATUS_OK => Ok(()),
             STATUS_ERR => Err(format!(
                 "pylon_transfer_in refused: {}",
@@ -1361,6 +1367,9 @@ pub struct WasmShardHost {
     kinds: HashMap<String, Arc<WasmShardKind>>,
     /// Transfers in progress here, by (source shard, subscriber).
     transferring: Mutex<std::collections::HashSet<(String, String)>>,
+    /// Players whose source refused them back and that no directory row
+    /// holds; the sweep offers them again (see `transfer::retry_stranded`).
+    stranded: Mutex<Vec<crate::shard_cluster::Transfer>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::Sender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1490,6 +1499,7 @@ impl WasmShardHost {
                 .map(|k| (k.name.clone(), Arc::new(k)))
                 .collect(),
             transferring: Mutex::new(std::collections::HashSet::new()),
+            stranded: Mutex::new(Vec::new()),
             transfer_requests,
             registry: ShardRegistry::new(),
             kind_of: RwLock::new(HashMap::new()),
@@ -2506,6 +2516,7 @@ impl WasmShardHost {
 
     /// Stop shards idle past their kind's limit, then remove stopped ones.
     fn sweep(&self) {
+        self.retry_stranded();
         let now = Instant::now();
         let kinds: Vec<(String, String)> = self
             .kind_of

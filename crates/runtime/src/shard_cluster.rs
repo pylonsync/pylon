@@ -178,6 +178,18 @@ pub struct Transfer {
     pub status: String,
 }
 
+/// What settling a transfer row found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settle {
+    /// The row was `out` and is now this side's, with the state saved.
+    Done,
+    /// The row is no longer `out`: the other side settled it first.
+    Taken,
+    /// This machine no longer holds the shard (its lease lapsed, or it
+    /// moved). The row is unchanged; the shard's holder finishes it.
+    NotHeld,
+}
+
 /// What [`PgShardDirectory::claim`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Claim {
@@ -648,7 +660,7 @@ impl PgShardDirectory {
         machine: &str,
         epoch: i64,
         target_state: Option<&[u8]>,
-    ) -> Result<bool, String> {
+    ) -> Result<Settle, String> {
         self.settle(id, "in", to_shard, machine, epoch, target_state)
     }
 
@@ -662,7 +674,7 @@ impl PgShardDirectory {
         machine: &str,
         epoch: i64,
         source_state: Option<&[u8]>,
-    ) -> Result<bool, String> {
+    ) -> Result<Settle, String> {
         self.settle(id, "back", from_shard, machine, epoch, source_state)
     }
 
@@ -674,11 +686,11 @@ impl PgShardDirectory {
         machine: &str,
         epoch: i64,
         state: Option<&[u8]>,
-    ) -> Result<bool, String> {
+    ) -> Result<Settle, String> {
         self.pool.with_client(|c| {
             let mut tx = c.transaction()?;
             if !holds(&mut tx, shard, machine, epoch)? {
-                return Ok(false);
+                return Ok(Settle::NotHeld);
             }
             let n = tx.execute(
                 "UPDATE _pylon_shard_transfers SET status = $2
@@ -686,13 +698,13 @@ impl PgShardDirectory {
                 &[&id, &status],
             )?;
             if n != 1 {
-                return Ok(false);
+                return Ok(Settle::Taken);
             }
             if let Some(state) = state {
                 put_state(&mut tx, shard, state)?;
             }
             tx.commit()?;
-            Ok(true)
+            Ok(Settle::Done)
         })
     }
 

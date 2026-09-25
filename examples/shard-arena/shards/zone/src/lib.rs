@@ -143,8 +143,9 @@ impl Shard for Zone {
         }
     }
 
-    fn transfer_in(&mut self, subscriber: &str, state: &[u8]) -> Result<(), String> {
-        if self.params.closed {
+    fn transfer_in(&mut self, subscriber: &str, state: &[u8], returning: bool) -> Result<(), String> {
+        // A closed zone keeps newcomers out, not its own players coming back.
+        if self.params.closed && !returning {
             return Err(format!("zone {} is closed", self.id));
         }
         let p: Player = serde_json::from_slice(state).map_err(|e| e.to_string())?;
