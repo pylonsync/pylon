@@ -8,9 +8,10 @@ import type { AvatarRow } from "../game/remote";
  *
  * The page SSRs as a lightweight shell (instant first paint), then a
  * client-only effect dynamic-imports the game engine — three.js never
- * loads during SSR and ships as its own async chunk. Pylon live
- * queries (<SyncBridge/>) feed avatar poses and destruction state
- * into the engine through a narrow setter API.
+ * loads during SSR and ships as its own async chunk. Player poses and
+ * health come from the island shard (game/net.ts); Pylon live queries
+ * (<SyncBridge/>) feed avatar names and destruction state into the
+ * engine through a narrow setter API.
  */
 
 interface DestructionRow {
@@ -136,13 +137,7 @@ export default function IslandPage() {
           const uid = await ensureGuestSession();
           if (disposed) return;
           setUserId(uid);
-          const spawn = g.spawnPoint;
-          const r = await callFn<{ id: string }>("spawnAvatar", {
-            userId: uid,
-            x: spawn.x,
-            y: spawn.y,
-            z: spawn.z,
-          });
+          const r = await callFn<{ id: string }>("spawnAvatar", { userId: uid });
           if (!disposed) {
             g.setAvatarId(r.id);
             setBootError(null);
@@ -207,6 +202,7 @@ export default function IslandPage() {
             <HudRow label="draws" value={`${stats.drawCalls}`} />
             <HudRow label="tris" value={`${(stats.triangles / 1e6).toFixed(2)}M`} />
             <HudRow label="players" value={`${stats.players}`} />
+            <HudRow label="shard" value={stats.rtt === null ? "connecting" : `rtt ${stats.rtt}ms`} />
             <HudRow label="sync" value={`${stats.mutPerSec}/s · p95 ${stats.p95}ms`} />
             <HudRow
               label="ruins"

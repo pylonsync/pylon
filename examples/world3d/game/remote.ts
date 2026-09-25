@@ -1,18 +1,20 @@
 /**
- * Remote players. One animated character per Avatar row (see
- * character.ts — same model as the local third-person body), with the
- * synced pitch aiming the rifle and a canvas-sprite name tag.
+ * Remote players. One animated character per player in the island shard
+ * (see character.ts — same model as the local third-person body), named
+ * and colored from its Avatar row, with the synced pitch aiming the rifle
+ * and a canvas-sprite name tag.
  *
- * Server pose arrives at ~10 Hz; exponential smoothing interpolates
- * to 60 fps, and the interpolated velocity drives the walk cycle.
- * The synced y is the player's eye height — meshes ground themselves
- * against the terrain when close to it (so walkers don't float) but
- * keep the synced y while swimming or falling.
+ * Poses come from Net, already interpolated between shard frames; the
+ * pose's velocity drives the walk cycle. The synced y is the player's eye
+ * height — meshes ground themselves against the terrain when close to it
+ * (so walkers don't float) but keep the synced y while swimming or
+ * falling.
  */
 import * as THREE from "three";
 import type { EventBus, FrameCtx, GameSystem } from "./engine";
 import { PLAYER } from "./config";
 import { buildCharacter, type Character } from "./character";
+import type { RemotePose } from "./net";
 import type { Terrain } from "./terrain";
 
 export interface AvatarRow {
@@ -20,12 +22,6 @@ export interface AvatarRow {
   userId: string;
   name: string;
   color: string;
-  x: number;
-  y: number;
-  z: number;
-  heading: number;
-  pitch: number;
-  health?: number | null;
   lastSeenAt: string;
 }
 
@@ -35,7 +31,6 @@ interface RemoteEntry {
    *  death while the name tag + health bar sprites stay upright. */
   root: THREE.Group;
   cur: { x: number; y: number; z: number; heading: number; pitch: number };
-  target: { x: number; y: number; z: number; heading: number; pitch: number };
   healthBar: HealthBar;
   /** Last synced health — a drop between frames triggers blood VFX. */
   lastHealth: number;
@@ -146,72 +141,62 @@ export class RemotePlayers implements GameSystem {
   readonly name = "remote-players";
   readonly group = new THREE.Group();
 
+  /** Keyed by Avatar row id (the shard's subscriber id). */
   private readonly entries = new Map<string, RemoteEntry>();
-  private latest: AvatarRow[] = [];
-  private selfUserId: string | null = null;
+  private readonly rows = new Map<string, AvatarRow>();
 
   constructor(
     private readonly terrain: Terrain,
     private readonly events: EventBus,
+    /** Other players this frame, from Net. */
+    private readonly poses: () => readonly RemotePose[],
   ) {
     this.group.name = "remote-players";
   }
 
+  /** The Avatar row id of the user's avatar, if known. */
+  private avatarOfUser(userId: string): string | null {
+    for (const row of this.rows.values()) if (row.userId === userId) return row.id;
+    return null;
+  }
+
   /** World position of a remote player's gun muzzle (tracer anchor). */
   muzzleWorldOf(userId: string): THREE.Vector3 | null {
-    for (const row of this.latest) {
-      if (row.userId !== userId) continue;
-      const entry = this.entries.get(row.id);
-      if (!entry) return null;
-      return entry.character.muzzle.getWorldPosition(new THREE.Vector3());
-    }
-    return null;
+    const id = this.avatarOfUser(userId);
+    const entry = id ? this.entries.get(id) : undefined;
+    return entry ? entry.character.muzzle.getWorldPosition(new THREE.Vector3()) : null;
   }
 
   /** Kick a remote player's weapon (their shot just arrived). */
   fireCharacter(userId: string) {
-    for (const row of this.latest) {
-      if (row.userId !== userId) continue;
-      this.entries.get(row.id)?.character.fire();
-      return;
-    }
+    const id = this.avatarOfUser(userId);
+    if (id) this.entries.get(id)?.character.fire();
   }
 
-  /** Latest known pose for a user — anchors remote-fire VFX. */
+  /** Latest drawn position for a user — anchors remote-fire VFX. */
   poseOf(userId: string): { x: number; y: number; z: number } | null {
-    for (const row of this.latest) {
-      if (row.userId !== userId) continue;
-      const entry = this.entries.get(row.id);
-      return entry ? { x: entry.cur.x, y: entry.cur.y, z: entry.cur.z } : { x: row.x, y: row.y, z: row.z };
-    }
-    return null;
+    const id = this.avatarOfUser(userId);
+    const entry = id ? this.entries.get(id) : undefined;
+    return entry ? { x: entry.cur.x, y: entry.cur.y, z: entry.cur.z } : null;
   }
 
-  /** Called from React whenever the Avatar live query updates. */
-  setAvatars(rows: AvatarRow[], selfUserId: string | null) {
-    this.latest = rows;
-    this.selfUserId = selfUserId;
+  /** Called from React whenever the Avatar live query updates: names and
+   *  colors. */
+  setAvatars(rows: AvatarRow[]) {
+    this.rows.clear();
+    for (const row of rows) this.rows.set(row.id, row);
   }
 
   get count(): number {
     return this.entries.size;
   }
 
-  /** Current interpolated positions for the minimap. */
+  /** Current drawn positions for the minimap. */
   minimapDots(): Array<{ x: number; z: number }> {
-    const dots: Array<{ x: number; z: number }> = [];
-    for (const row of this.latest) {
-      if (this.selfUserId && row.userId === this.selfUserId) continue;
-      const entry = this.entries.get(row.id);
-      dots.push({
-        x: entry ? entry.cur.x : row.x,
-        z: entry ? entry.cur.z : row.z,
-      });
-    }
-    return dots;
+    return Array.from(this.entries.values(), (e) => ({ x: e.cur.x, z: e.cur.z }));
   }
 
-  private addEntry(row: AvatarRow): RemoteEntry {
+  private addEntry(row: AvatarRow, pose: RemotePose): RemoteEntry {
     const character = buildCharacter(row.color);
     const disposables: Array<{ dispose(): void }> = [character];
 
@@ -228,19 +213,18 @@ export class RemotePlayers implements GameSystem {
     root.add(healthBar.sprite);
     disposables.push(healthBar);
 
-    root.position.set(row.x, row.y, row.z);
+    root.position.set(pose.x, pose.y, pose.z);
     this.group.add(root);
 
     const entry: RemoteEntry = {
       character,
       root,
-      cur: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
-      target: { x: row.x, y: row.y, z: row.z, heading: row.heading, pitch: row.pitch },
+      cur: { x: pose.x, y: pose.y, z: pose.z, heading: pose.heading, pitch: pose.pitch },
       healthBar,
-      // Seed from the row so a player FIRST SEEN at low health doesn't
+      // Seed from the pose so a player FIRST SEEN at low health doesn't
       // splatter on arrival.
-      lastHealth: row.health ?? 100,
-      deathT: (row.health ?? 100) <= 0 ? 1 : 0,
+      lastHealth: pose.health,
+      deathT: pose.health <= 0 ? 1 : 0,
       // Deterministic ±0.3 rad roll from the id so two corpses lying
       // near each other don't look cloned.
       deathRoll: ((hashId(row.id) % 1000) / 1000 - 0.5) * 0.6,
@@ -289,10 +273,9 @@ export class RemotePlayers implements GameSystem {
       const hitY = origin.y + dir.y * t;
       if (hitY < yLo || hitY > yHi + RADIUS) continue;
       if (!best || t < best.dist) {
-        const row = this.latest.find((r) => r.id === id);
         best = {
           avatarId: id,
-          userId: row?.userId ?? "",
+          userId: this.rows.get(id)?.userId ?? "",
           point: new THREE.Vector3(origin.x + dir.x * t, hitY, origin.z + dir.z * t),
           dist: t,
         };
@@ -326,74 +309,55 @@ export class RemotePlayers implements GameSystem {
 
   update(ctx: FrameCtx) {
     const seen = new Set<string>();
-    for (const row of this.latest) {
-      if (this.selfUserId && row.userId === this.selfUserId) continue;
-      seen.add(row.id);
-      let entry = this.entries.get(row.id);
-      if (!entry) entry = this.addEntry(row);
-      // Coerce defensively: rows written by older schema versions may
-      // miss fields, and one NaN would poison the whole matrix.
-      entry.target.x = Number.isFinite(row.x) ? row.x : 0;
-      entry.target.y = Number.isFinite(row.y) ? row.y : 0;
-      entry.target.z = Number.isFinite(row.z) ? row.z : 0;
-      entry.target.heading = Number.isFinite(row.heading) ? row.heading : 0;
-      entry.target.pitch = Number.isFinite(row.pitch) ? row.pitch : 0;
-    }
-    for (const id of Array.from(this.entries.keys())) {
-      if (!seen.has(id)) this.removeEntry(id);
-    }
-
-    // Interpolate toward targets.
-    const lerp = 1 - Math.exp(-ctx.dt * 10);
-    for (const [id, entry] of this.entries) {
+    for (const pose of this.poses()) {
+      // The name and color arrive with the Avatar live query.
+      const row = this.rows.get(pose.avatarId);
+      if (!row) continue;
+      seen.add(pose.avatarId);
+      const entry = this.entries.get(pose.avatarId) ?? this.addEntry(row, pose);
       const c = entry.cur;
-      const t = entry.target;
       const prevX = c.x;
       const prevZ = c.z;
-      c.x += (t.x - c.x) * lerp;
-      c.z += (t.z - c.z) * lerp;
+      // Already interpolated between shard frames.
+      c.x = pose.x;
+      c.z = pose.z;
+      c.heading = pose.heading;
+      c.pitch = pose.pitch;
 
-      // Ground the mesh when the synced eye-y is near the local
-      // terrain (walking); trust the synced y otherwise (swim/fall).
+      // Ground the mesh when the synced eye-y is near the local terrain
+      // (walking); trust the synced y otherwise (swim/fall). Eased, so
+      // the switch between the two does not pop.
       const groundEye = this.terrain.heightAt(c.x, c.z) + PLAYER.eyeHeight;
-      const targetY = Math.abs(t.y - groundEye) < 1.2 ? groundEye : t.y;
-      c.y += (targetY - c.y) * lerp;
-
-      let dh = t.heading - c.heading;
-      while (dh > Math.PI) dh -= Math.PI * 2;
-      while (dh < -Math.PI) dh += Math.PI * 2;
-      c.heading += dh * lerp;
-      c.pitch += (t.pitch - c.pitch) * lerp;
+      const targetY = Math.abs(pose.y - groundEye) < 1.2 ? groundEye : pose.y;
+      c.y += (targetY - c.y) * (1 - Math.exp(-ctx.dt * 20));
 
       entry.root.position.set(c.x, c.y, c.z);
       entry.root.rotation.y = c.heading;
       entry.character.aimPivot.rotation.x = c.pitch;
-      // Interpolated velocity drives the walk cycle.
+      // Drawn velocity drives the walk cycle.
       const speed = ctx.dt > 0 ? Math.hypot(c.x - prevX, c.z - prevZ) / ctx.dt : 0;
       entry.character.animate(ctx.time, speed);
-      // Health bar follows the synced row; a drop means this player
-      // just took a hit — splatter at chest height so EVERY client
-      // sees the gore, not just the shooter.
-      const row = this.latest.find((r) => r.id === id);
-      if (row) {
-        const health = row.health ?? 100;
-        if (health < entry.lastHealth) {
-          this.events.emit("blood", {
-            point: new THREE.Vector3(c.x, c.y - 0.55, c.z),
-          });
-        }
-        entry.lastHealth = health;
-        entry.healthBar.set(health);
+      // A drop in health means this player just took a hit — splatter at
+      // chest height so EVERY client sees the gore, not just the shooter.
+      if (pose.health < entry.lastHealth) {
+        this.events.emit("blood", {
+          point: new THREE.Vector3(c.x, c.y - 0.55, c.z),
+        });
       }
-      // Death pose: collapse flat onto the ground at 0 HP, snap
-      // upright on respawn (the row teleports anyway). The tip happens
-      // INSIDE root so the name tag + health bar stay overhead.
+      entry.lastHealth = pose.health;
+      entry.healthBar.set(pose.health);
+      // Death pose: collapse flat onto the ground at 0 HP, snap upright on
+      // respawn. The tip happens INSIDE root so the name tag + health bar
+      // stay overhead.
       if (entry.lastHealth <= 0) {
         entry.deathT += (1 - entry.deathT) * Math.min(1, ctx.dt * 6);
       } else {
         entry.deathT = 0;
       }
       poseDeath(entry.character.group, entry.deathT, entry.deathRoll);
+    }
+    for (const id of Array.from(this.entries.keys())) {
+      if (!seen.has(id)) this.removeEntry(id);
     }
   }
 

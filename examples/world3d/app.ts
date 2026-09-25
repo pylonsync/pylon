@@ -5,14 +5,17 @@
  * palms, grass, rocks) with destructible block buildings, rendered
  * in three.js and served by Pylon's native SSR — one binary, one port.
  *
- * Multiplayer rides on two entities:
- *   - Avatar       — one row per player, pose updated at ~10 Hz
+ * Multiplayer:
+ *   - the `island` shard (Rust compiled to WebAssembly, in
+ *     shards/island) holds player poses and health. Clients send their
+ *     moves at 20 Hz and draw each other from its replication frames.
+ *   - Avatar       — one row per player: name and color.
  *   - Destruction  — one row per destroyed building block. The world
  *                    is deterministic from a fixed seed, so syncing
  *                    just the destroyed block keys reproduces the
  *                    exact same ruins on every client.
  */
-import { buildManifest, discoverAppRoutes, entity, field, policy } from "@pylonsync/sdk";
+import { buildManifest, discoverAppRoutes, entity, field, policy, shard } from "@pylonsync/sdk";
 
 const Avatar = entity(
   "Avatar",
@@ -20,14 +23,6 @@ const Avatar = entity(
     userId: field.string(),
     name: field.string(),
     color: field.string(),
-    x: field.float(),
-    y: field.float(),
-    z: field.float(),
-    heading: field.float(), // radians, y-axis rotation
-    pitch: field.float(),   // radians, look up/down (drives remote aim pose)
-    // Optional so pre-combat rows don't break — clients treat null as
-    // full health. Written ONLY by server functions (damage/respawn).
-    health: field.float().optional(),
     lastSeenAt: field.datetime(),
   },
   {
@@ -103,6 +98,19 @@ const manifest = buildManifest({
   actions: [],
   policies: [avatarPolicy, destructionPolicy, worldPolicy],
   routes: await discoverAppRoutes(),
+  shards: [
+    shard({
+      name: "island",
+      wasm: "shards/island.wasm",
+      crate: "shards/island",
+      codec: "json",
+      tickRate: 20,
+      maxInstances: 1,
+      maxSubscribers: 200,
+      // The island stays up with nobody on it.
+      idleShutdownSecs: 0,
+    }),
+  ],
 });
 
 // Emit canonical manifest JSON to stdout for pylon codegen.

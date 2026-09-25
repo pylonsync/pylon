@@ -25,42 +25,6 @@
           "unique": false
         },
         {
-          "name": "x",
-          "type": "float",
-          "optional": false,
-          "unique": false
-        },
-        {
-          "name": "y",
-          "type": "float",
-          "optional": false,
-          "unique": false
-        },
-        {
-          "name": "z",
-          "type": "float",
-          "optional": false,
-          "unique": false
-        },
-        {
-          "name": "heading",
-          "type": "float",
-          "optional": false,
-          "unique": false
-        },
-        {
-          "name": "pitch",
-          "type": "float",
-          "optional": false,
-          "unique": false
-        },
-        {
-          "name": "health",
-          "type": "float",
-          "optional": true,
-          "unique": false
-        },
-        {
           "name": "lastSeenAt",
           "type": "datetime",
           "optional": false,
@@ -197,6 +161,19 @@
       "invite_entity": "OrgInvite",
       "disabled": false
     },
+    "org_roles": [],
     "trusted_origins": []
-  }
+  },
+  "shards": [
+    {
+      "name": "island",
+      "wasm": "shards/island.wasm",
+      "crate": "shards/island",
+      "codec": "json",
+      "tickRate": 20,
+      "maxInstances": 1,
+      "maxSubscribers": 200,
+      "idleShutdownSecs": 0
+    }
+  ]
 }

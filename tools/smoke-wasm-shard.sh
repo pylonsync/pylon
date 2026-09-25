@@ -12,6 +12,9 @@
 #    must connect all of them and see their inputs acked.
 # 4. `pylon build` writes an artifact with the module in it; `pylon start
 #    <dir>` boots it and the same test runs again.
+# 5. examples/world3d: its island shard is built and booted, and
+#    packages/realtime's world3d.e2e.test.ts plays two players on
+#    connectShardGame (moves, interpolation, prediction, hits, a leave).
 #
 # Needs Rust with the wasm32-unknown-unknown target, and `bun install` at the
 # repo root. PYLON_SMOKE_KEEP=1 keeps the temp directory.
@@ -27,13 +30,15 @@ PYLON="${1:-$ROOT/target/debug/pylon}"
 }
 PYLON="$(cd "$(dirname "$PYLON")" && pwd)/$(basename "$PYLON")"
 APP="$ROOT/examples/shard-arena"
+WORLD="$ROOT/examples/world3d"
 PORT="${PYLON_SMOKE_PORT:-4793}"
 TMP="$(mktemp -d -t pylon-wasm-shard.XXXXXX)"
 SERVER_PID=""
 cleanup() {
 	[[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
-	# Keep the committed module: a local toolchain's build differs byte for byte.
+	# Keep the committed modules: a local toolchain's build differs byte for byte.
 	[[ -f "$TMP/arena.wasm.committed" ]] && cp "$TMP/arena.wasm.committed" "$APP/shards/arena.wasm"
+	[[ -f "$TMP/island.wasm.committed" ]] && cp "$TMP/island.wasm.committed" "$WORLD/shards/island.wasm"
 	if [[ -n "${PYLON_SMOKE_KEEP:-}" ]]; then
 		echo "kept $TMP"
 	else
@@ -122,5 +127,12 @@ serve "$TMP" "$TMP/dist" artifact
 e2e
 stop
 
+echo "→ world3d: pylon shards build, pylon start app.ts"
+cp "$WORLD/shards/island.wasm" "$TMP/island.wasm.committed"
+(cd "$WORLD" && "$PYLON" shards build)
+serve "$WORLD" app.ts world3d
+(cd "$ROOT/packages/realtime" && PYLON_WORLD3D_E2E="localhost:$PORT" bun test src/world3d.e2e.test.ts)
+stop
+
 echo
-echo "✓ a WebAssembly shard runs from source and from a pylon build artifact"
+echo "✓ WebAssembly shards run from source and from a pylon build artifact"

@@ -5,12 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "pylon dev",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "shards": "pylon shards build"
   },
   "dependencies": {
     "@dgreenheck/ez-tree": "^1.1.0",
     "@pylonsync/functions": "workspace:*",
     "@pylonsync/react": "workspace:*",
+    "@pylonsync/realtime": "workspace:*",
     "@pylonsync/sdk": "workspace:*",
     "@tailwindcss/cli": "^4.3.0",
     "react": "^19.0.0",

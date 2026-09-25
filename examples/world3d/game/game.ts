@@ -3,7 +3,8 @@
  * GameSystem with the engine in update order, runs the render loop,
  * and exposes the narrow API the React page talks to:
  *
- *   setAvatars(rows)            ← Avatar live query
+ *   setAvatars(rows)            ← Avatar live query (names, colors)
+ *   setAvatarId(id)             → joins the island shard as that avatar
  *   syncDestruction(keys)       ← Destruction live query
  *   onStats(cb)                 → HUD numbers at 4 Hz
  *   requestPointerLock()        → click-to-play overlay
@@ -65,6 +66,8 @@ export interface GameStats {
   p50: number;
   p95: number;
   mutPerSec: number;
+  /** Input round trip to the island shard (ms), once measured. */
+  rtt: number | null;
   /** Player pose + remote dots for the minimap (world coords). */
   pose: { x: number; z: number; heading: number };
   /** Hostiles — everyone but you. Rendered as red dots on the minimap. */
@@ -112,6 +115,8 @@ export class Game {
   private selfHealth = 100;
   private dead = false;
   private respawnAt = 0;
+  /** When the respawn input went out, until the shard reports health. */
+  private respawnSentAt: number | null = null;
   /** 0 = standing, 1 = prone — eases the third-person body to the
    *  ground on death; snapped back to 0 on respawn (teleport). */
   private selfDeathT = 0;
@@ -214,7 +219,12 @@ export class Game {
     this.player.occluderTest = (origin, dir, far) =>
       this.buildings.raycastDistance(origin, dir, far);
 
-    this.remote = this.engine.add(new RemotePlayers(this.terrain, this.engine.events));
+    // Net runs before RemotePlayers: it places the shard's entities for
+    // this frame, and RemotePlayers draws them.
+    this.net = this.engine.add(new Net(this.player, this.engine.events));
+    this.remote = this.engine.add(
+      new RemotePlayers(this.terrain, this.engine.events, () => this.net.remotes),
+    );
     this.scene.add(this.remote.group);
 
     // PvP wiring: the weapon resolves shots and grenade splash against
@@ -230,8 +240,6 @@ export class Game {
 
     this.particles = this.engine.add(new Particles(this.engine.events));
     this.scene.add(this.particles.points, this.particles.tracerGroup);
-
-    this.net = this.engine.add(new Net(this.player, this.engine.events));
 
     // --- Local third-person body (visible when the camera is back) ---
     this.selfRig = buildCharacter("#cdd3da");
@@ -425,19 +433,34 @@ export class Game {
   // -----------------------------------------------------------------------
 
   setAvatars(rows: AvatarRow[], selfUserId: string | null) {
-    this.remote.setAvatars(rows, selfUserId);
-    if (!selfUserId) return;
+    this.remote.setAvatars(rows);
+    if (!selfUserId || this.selfColorSet) return;
     const mine = rows.find((r) => r.userId === selfUserId);
-    if (!mine) return;
     // Tint the local body with our server-assigned color once known.
-    if (!this.selfColorSet) {
+    if (mine) {
       this.selfRig.bodyMat.color.set(mine.color);
       this.selfColorSet = true;
     }
-    // Health is server-authoritative: damage lands on our row via
-    // other players' damageAvatar calls and arrives through the live
-    // query like any other change.
-    const health = mine.health ?? 100;
+  }
+
+  /**
+   * Health is the shard's: damage lands through other players' hit
+   * inputs and arrives with the replication frames.
+   */
+  private syncHealth(now: number) {
+    const health = this.net.selfHealth;
+    if (health === null) return;
+    if (this.respawnSentAt !== null) {
+      // Until the shard applies the respawn it still says 0.
+      if (health <= 0) {
+        if (now - this.respawnSentAt > 1500) {
+          this.respawnSentAt = now;
+          this.engine.events.emit("respawnRequested", {});
+        }
+        return;
+      }
+      this.respawnSentAt = null;
+    }
     if (health < this.selfHealth) {
       this.damageFlash++;
       this.engine.events.emit("shake", { strength: 0.22 });
@@ -457,6 +480,7 @@ export class Game {
 
   private startDeath() {
     this.dead = true;
+    this.net.setDead(true);
     this.player.controlsEnabled = false;
     this.weapon.enabled = false;
     this.engine.events.emit("shake", { strength: 0.5 });
@@ -466,13 +490,15 @@ export class Game {
 
   private finishRespawn() {
     this.dead = false;
+    this.net.setDead(false);
     this.selfDeathT = 0;
     const spot =
       this.spawnPool[Math.floor(Math.random() * this.spawnPool.length)] ?? this.spawnPoint;
     this.player.teleport(spot);
     this.player.controlsEnabled = true;
     this.weapon.enabled = true;
-    this.selfHealth = 100; // optimistic; the server row confirms via sync
+    this.selfHealth = 100; // optimistic; the shard confirms
+    this.respawnSentAt = performance.now();
     this.engine.events.emit("respawnRequested", {});
   }
 
@@ -556,8 +582,9 @@ export class Game {
     });
   }
 
+  /** Join the island shard as avatar `id`. */
   setAvatarId(id: string) {
-    this.net.setAvatarId(id);
+    this.net.connect(id);
   }
 
   /** Reconcile building state with the Destruction live query. */
@@ -587,6 +614,7 @@ export class Game {
 
       const ctx = this.engine.tick(dt, this.camera, this.player.position);
 
+      this.syncHealth(now);
       // Death → respawn timer.
       if (this.dead && now >= this.respawnAt) this.finishRespawn();
 

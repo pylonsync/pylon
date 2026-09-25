@@ -438,9 +438,6 @@
       "version": "0.2.0",
       "dependencies": {
         "@dgreenheck/ez-tree": "^1.1.0",
-        "@pylonsync/functions": "workspace:*",
-        "@pylonsync/react": "workspace:*",
-        "@pylonsync/sdk": "workspace:*",
         "@tailwindcss/cli": "^4.3.0",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",

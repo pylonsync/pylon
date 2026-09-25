@@ -20,10 +20,9 @@ const SWEEP_MS = 10 * 60 * 1000;
 const MARKER_KEY = "buildingSweep";
 
 /**
- * Idempotent per-user avatar creation. The client computes the actual
- * spawn position (it knows the terrain heights); the server only
- * validates bounds. Existing rows are reused so refreshing the page
- * keeps your identity.
+ * Idempotent per-user avatar creation: the name and color other players
+ * see. Poses and health live in the island shard (see joinIsland).
+ * Existing rows are reused so refreshing the page keeps your identity.
  */
 export default mutation({
   // Players are anonymous guest sessions — no signup screen in a demo.
@@ -31,17 +30,17 @@ export default mutation({
   args: {
     userId: v.string(),
     name: v.optional(v.string()),
-    x: v.optional(v.number()),
-    y: v.optional(v.number()),
-    z: v.optional(v.number()),
   },
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "log in first");
+    if (args.userId !== ctx.auth.userId) {
+      throw ctx.error("FORBIDDEN", "can only spawn your own avatar");
+    }
 
-    // Prune avatars that haven't moved in 10 minutes (closed tabs,
-    // stale rows from older schema versions) so the island doesn't
-    // accumulate ghosts.
-    const cutoff = Date.now() - 10 * 60 * 1000;
+    // Prune avatars nobody has joined with for a day (closed tabs, old
+    // guest sessions) so the table doesn't accumulate ghosts. joinIsland
+    // sets lastSeenAt on every join.
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
     const all = await ctx.db.query("Avatar", {});
     for (const row of all) {
       const seen = Date.parse((row.lastSeenAt as string) ?? "");
@@ -71,22 +70,15 @@ export default mutation({
       await ctx.scheduler.runAfter(SWEEP_MS, "rebuildBuildings", {});
     }
 
-    const existing = await ctx.db.query("Avatar", { userId: args.userId });
+    const existing = await ctx.db.query("Avatar", { userId: ctx.auth.userId });
     if (existing.length > 0) return { id: existing[0].id as string };
 
-    const clamp = (n: number) => Math.max(-250, Math.min(250, n));
     const color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
     const name = (args.name as string | undefined) ?? randomName();
     const id = await ctx.db.insert("Avatar", {
-      userId: args.userId,
+      userId: ctx.auth.userId,
       name,
       color,
-      x: clamp((args.x as number | undefined) ?? 0),
-      y: (args.y as number | undefined) ?? 0,
-      z: clamp((args.z as number | undefined) ?? 0),
-      heading: Math.random() * Math.PI * 2,
-      pitch: 0,
-      health: 100,
       lastSeenAt: new Date().toISOString(),
     });
     return { id };

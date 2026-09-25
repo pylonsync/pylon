@@ -1,0 +1,20 @@
+[package]
+name = "island-shard"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Outside this repo: pylon-shard-guest = "0.13"
+pylon-shard-guest = { path = "../../../../crates/shard-guest" }
+serde = { version = "1", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+
+# Its own workspace, not a member of the Pylon repo's.
+[workspace]

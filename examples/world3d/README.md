@@ -9,10 +9,19 @@ player; buildings you demolish crumble for everyone in realtime.
 - **Pylon SSR as a game shell.** `app/page.tsx` server-renders an
   instant HUD shell, then dynamic-imports the engine — three.js ships
   as its own async chunk and never loads during SSR.
-- **3D realtime sync with standard data primitives.** Player poses live
-  in an `Avatar` table updated at ~10 Hz through `callFn("moveAvatar")`;
-  `db.useQuery("Avatar")` powers every other player you see. No game
-  server, no netcode layer.
+- **A realtime shard for movement and combat.** The `island` shard
+  (`shards/island`, Rust compiled to WebAssembly and run by the Pylon
+  server) holds every player's pose and health. `game/net.ts` uses
+  `connectShardGame` from `@pylonsync/realtime`:
+  - your moves go up at 20 Hz as the distance moved since the last one;
+    the shard applies them within a speed budget and the island bounds,
+    and prediction puts you back where the shard has you when it clamps
+    one;
+  - other players are drawn 100 ms behind the shard, interpolated between
+    its frames, with no React render per frame;
+  - hits are range-checked and damage is capped in the shard, which also
+    owns respawns.
+  Names and colors stay in the `Avatar` table (`db.useQuery("Avatar")`).
 - **Deterministic worldgen as a sync strategy.** The entire island —
   terrain, water, sky, vegetation, buildings — generates from one
   seed, so multiplayer only syncs *destroyed block keys* (a
@@ -26,7 +35,8 @@ player; buildings you demolish crumble for everyone in realtime.
 ```bash
 cd examples/world3d
 bun install
-bun run dev          # pylon dev — everything on :4321
+rustup target add wasm32-unknown-unknown   # once, for the shard
+bun run dev          # pylon dev — everything on :4321; builds the shard
 ```
 
 Open <http://localhost:4321>, click to deploy, and open more tabs for
@@ -70,9 +80,13 @@ every demolished building (deletes all Destruction rows).
 
 ## Files
 
-- `app.ts`: entities (`Avatar`, `Destruction`), policies, SSR routes
+- `app.ts`: entities (`Avatar`, `Destruction`), policies, SSR routes,
+  the `island` shard kind
+- `shards/island`: the shard: joins, moves, hits, respawns (`cargo test`
+  there runs its tests)
 - `functions/`: `spawnAvatar` (idempotent, prunes stale rows),
-  `moveAvatar`, `destroyBlocks` (idempotent batch), `resetIsland`
+  `joinIsland` (starts the shard, mints a ticket for your avatar),
+  `destroyBlocks` (idempotent batch), `resetIsland`
 - `app/page.tsx`: SSR shell, HUD, minimap, `<SyncBridge/>` feeding
   live queries into the engine
 - `game/`: the engine: one system per file, composed in `game.ts`

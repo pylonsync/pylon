@@ -1,16 +1,91 @@
 /**
  * Network glue between the game loop and Pylon.
  *
- * Outbound only — inbound state (other avatars, destruction rows)
- * flows through React live queries in page.tsx and is pushed into the
- * game via setters. This module throttles pose uploads to ~10 Hz
- * (and skips them entirely while stationary), batches destruction
- * keys, and tracks round-trip latency for the HUD.
+ * Poses and combat go through the `island` shard (shards/island) with
+ * `@pylonsync/realtime`:
+ *   - the local player's moves go up at 20 Hz as the distance moved since
+ *     the last one. The shard applies them within a speed budget; when it
+ *     clamps one, prediction (the shard's position plus the moves it has
+ *     not processed yet) puts the player back where the shard has them.
+ *   - other players are drawn 100 ms behind the shard, between the frames
+ *     around that time, from the interpolated entities.
+ *   - hits and respawns are shard inputs; health lives in the shard.
+ *
+ * Destroyed blocks still go to the database (destroyBlocks), batched.
  */
 import { callFn } from "@pylonsync/react";
-import { PLAYER } from "./config";
+import {
+  connectShardGame,
+  type InterpolatedEntity,
+  type Predictor,
+  type ShardGame,
+} from "@pylonsync/realtime";
+import * as THREE from "three";
 import type { EventBus, FrameCtx, GameSystem } from "./engine";
 import type { Player } from "./player";
+
+/** Inputs the island shard takes (`Input` in shards/island/src/lib.rs). */
+export type IslandInput =
+  | { join: { x: number; y: number; z: number } }
+  | { move: { dx: number; dy: number; dz: number; heading: number; pitch: number } }
+  | { hit: { target: number; damage: number } }
+  | { spawn: { x: number; y: number; z: number } }
+  | "leave";
+
+/** Component ids (shards/island/src/lib.rs). */
+const AVATAR = 1;
+const LOOK = 2;
+const HEALTH = 3;
+
+const SHARD_ID = "island-main";
+/** Move inputs per second while moving. */
+const SEND_HZ = 20;
+/** A standing player still sends a move this often, to stay on the island. */
+const HEARTBEAT_S = 1;
+/** Rejoin when the shard has not shown our entity for this long. */
+const REJOIN_S = 3;
+/** A difference from the shard's position smaller than this is rounding. */
+const CORRECT_M = 0.3;
+
+interface Vec3 {
+  x: number;
+  y: number;
+  z: number;
+}
+
+/** Another player as drawn this frame. */
+export interface RemotePose {
+  avatarId: string;
+  entity: number;
+  x: number;
+  y: number;
+  z: number;
+  heading: number;
+  pitch: number;
+  health: number;
+}
+
+function step(s: Vec3, input: IslandInput): Vec3 {
+  if (typeof input === "string") return s;
+  if ("move" in input) {
+    return { x: s.x + input.move.dx, y: s.y + input.move.dy, z: s.z + input.move.dz };
+  }
+  if ("spawn" in input) return { ...input.spawn };
+  return s;
+}
+
+function readLook(bytes: Uint8Array | undefined): { heading: number; pitch: number } {
+  if (!bytes || bytes.length < 4) return { heading: 0, pitch: 0 };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, 4);
+  return { heading: view.getInt16(0, true) / 10_000, pitch: view.getInt16(2, true) / 10_000 };
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  let d = b - a;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
 
 function percentile(values: number[], p: number): number {
   if (values.length === 0) return 0;
@@ -22,19 +97,28 @@ function percentile(values: number[], p: number): number {
 export class Net implements GameSystem {
   readonly name = "net";
 
+  /** Other players this frame, interpolated. */
+  readonly remotes: RemotePose[] = [];
+  /** Our health as the shard has it, or null before we are in. */
+  selfHealth: number | null = null;
+
+  private shard: ShardGame<IslandInput> | null = null;
+  private me: Predictor<Vec3, IslandInput> | null = null;
   private avatarId: string | null = null;
-  private lastSentAt = 0;
-  // Seeded to Infinity, not NaN: the moved-gate compares |current -
-  // lastSent| and every NaN comparison is false, so Infinity makes the
-  // first comparison true (the opening pose always sends) and real
-  // deltas take over from there.
-  private lastSent = {
-    x: Infinity,
-    y: Infinity,
-    z: Infinity,
-    heading: Infinity,
-    pitch: Infinity,
-  };
+  private selfEntity: number | null = null;
+  /** Where the local player was when it sent its last move. */
+  private readonly lastSent = new THREE.Vector3();
+  private lastSentAt = -Infinity;
+  private lastLook = { heading: Infinity, pitch: Infinity };
+  private lastJoinAt = -Infinity;
+  private lastSeenSelfAt = 0;
+  private dead = false;
+  private readonly decoder = new TextDecoder();
+  /** Avatar id per entity, decoded once per entity. */
+  private readonly avatarOf = new Map<number, { bytes: Uint8Array; id: string }>();
+  private readonly entityOf = new Map<string, number>();
+  private readonly pool: RemotePose[] = [];
+
   private readonly latencies: number[] = [];
   private mutationsInWindow: number[] = [];
   private pendingKeys: string[] = [];
@@ -49,32 +133,57 @@ export class Net implements GameSystem {
     events.on("blocksDestroyed", ({ keys }) => {
       this.pendingKeys.push(...keys);
     });
-    // Combat: the shooter reports hits; the server clamps damage and
-    // range-checks before touching the victim's row.
+    // Combat: the shooter reports hits; the shard range-checks them and
+    // caps the damage.
     events.on("playerHit", ({ avatarId, damage }) => {
-      this.track(callFn("damageAvatar", { targetId: avatarId, amount: damage })).catch(() => {
-        // Out-of-range / target gone — the world view self-corrects.
+      const target = this.entityOf.get(avatarId);
+      if (target === undefined) return;
+      this.shard?.send({
+        hit: { target, damage: Math.max(1, Math.min(255, Math.round(damage))) },
       });
     });
-    // Death sequence finished locally → heal the row server-side.
+    // Death sequence finished locally: come back where the player now is.
     events.on("respawnRequested", () => {
-      if (!this.avatarId) return;
-      this.track(callFn("respawnAvatar", { avatarId: this.avatarId })).catch(() => {});
+      const p = this.player.position;
+      if (this.shard?.send({ spawn: { x: p.x, y: p.y, z: p.z } })) {
+        this.lastSent.copy(p);
+      }
     });
   }
 
-  setAvatarId(id: string) {
-    this.avatarId = id;
+  /** Join the island as avatar `avatarId`. */
+  connect(avatarId: string) {
+    if (this.shard) return;
+    this.avatarId = avatarId;
+    const shard = connectShardGame<IslandInput>(SHARD_ID, {
+      subscriberId: avatarId,
+      // A new ticket for every connection attempt: they expire.
+      ticket: async () => (await callFn<{ ticket: string }>("joinIsland", {})).ticket,
+      tickRate: 20,
+      // A respawn moves a player across the island: jump, do not slide.
+      interpolation: { snapDistance: 12 },
+    });
+    this.shard = shard;
+    this.me = shard.predict<Vec3>(step);
+    shard.onOpen(() => this.join());
+    shard.onReplication((table, _summary, _tick, ack) => this.reconcile(ack));
   }
 
-  get hudStats(): { p50: number; p95: number; mutPerSec: number } {
+  /** The player is dead (no moves) or alive. */
+  setDead(dead: boolean) {
+    this.dead = dead;
+  }
+
+  get hudStats(): { p50: number; p95: number; mutPerSec: number; rtt: number | null } {
     const now = Date.now();
     this.mutationsInWindow = this.mutationsInWindow.filter((t) => now - t < 1000);
     const recent = this.latencies.slice(-100);
+    const rtt = this.shard?.rttMs;
     return {
       p50: Math.round(percentile(recent, 0.5)),
       p95: Math.round(percentile(recent, 0.95)),
       mutPerSec: this.mutationsInWindow.length,
+      rtt: rtt === null || rtt === undefined ? null : Math.round(rtt),
     };
   }
 
@@ -88,41 +197,74 @@ export class Net implements GameSystem {
     });
   }
 
-  update(ctx: FrameCtx) {
-    if (!this.avatarId) return;
+  private join() {
+    const p = this.player.position;
+    if (this.shard?.send({ join: { x: p.x, y: p.y, z: p.z } })) {
+      this.lastSent.copy(p);
+      this.lastJoinAt = performance.now() / 1000;
+    }
+  }
 
-    // Pose upload — throttled, and only when the pose moved.
-    const interval = 1 / PLAYER.netHz;
-    if (ctx.time - this.lastSentAt >= interval) {
-      const p = this.player.position;
-      const moved =
-        Math.abs(p.x - this.lastSent.x) > 0.01 ||
-        Math.abs(p.y - this.lastSent.y) > 0.01 ||
-        Math.abs(p.z - this.lastSent.z) > 0.01 ||
-        Math.abs(this.player.yaw - this.lastSent.heading) > 0.01 ||
-        Math.abs(this.player.pitch - this.lastSent.pitch) > 0.02;
-      if (moved) {
-        this.lastSentAt = ctx.time;
-        this.lastSent = {
-          x: p.x,
-          y: p.y,
-          z: p.z,
-          heading: this.player.yaw,
-          pitch: this.player.pitch,
-        };
-        this.track(
-          callFn("moveAvatar", {
-            avatarId: this.avatarId,
-            x: p.x,
-            y: p.y,
-            z: p.z,
-            heading: this.player.yaw,
-            pitch: this.player.pitch,
-          }),
-        ).catch(() => {
-          // Transient network failure — next tick retries naturally.
-        });
-      }
+  /** Our entity id, found by its AVATAR component. */
+  private findSelf(): number | null {
+    const table = this.shard?.latest;
+    if (!table || !this.avatarId) return null;
+    if (this.selfEntity !== null && this.avatarIdOf(this.selfEntity, table.get(this.selfEntity)?.components) === this.avatarId) {
+      return this.selfEntity;
+    }
+    for (const e of table.entities.values()) {
+      if (this.avatarIdOf(e.id, e.components) === this.avatarId) return e.id;
+    }
+    return null;
+  }
+
+  private avatarIdOf(entity: number, components: ReadonlyMap<number, Uint8Array> | undefined): string | null {
+    const bytes = components?.get(AVATAR);
+    if (!bytes) return null;
+    const cached = this.avatarOf.get(entity);
+    if (cached && cached.bytes === bytes) return cached.id;
+    const id = this.decoder.decode(bytes);
+    this.avatarOf.set(entity, { bytes, id });
+    return id;
+  }
+
+  /**
+   * After each frame: the shard's position for us plus the moves it has
+   * not processed is where we should be. If the local player is somewhere
+   * else, the shard clamped a move: follow it.
+   */
+  private reconcile(ack: number) {
+    const shard = this.shard;
+    const me = this.me;
+    if (!shard || !me) return;
+    this.selfEntity = this.findSelf();
+    const mine = this.selfEntity === null ? undefined : shard.latest.get(this.selfEntity);
+    if (!mine) {
+      this.selfHealth = null;
+      return;
+    }
+    this.lastSeenSelfAt = performance.now() / 1000;
+    this.selfHealth = mine.components.get(HEALTH)?.[0] ?? 100;
+    const predicted = me.reconcile({ x: mine.x, y: mine.y, z: mine.z }, ack);
+    if (this.dead) return;
+    const dx = predicted.x - this.lastSent.x;
+    const dy = predicted.y - this.lastSent.y;
+    const dz = predicted.z - this.lastSent.z;
+    if (Math.hypot(dx, dy, dz) > CORRECT_M) {
+      this.player.position.x += dx;
+      this.player.position.y += dy;
+      this.player.position.z += dz;
+      this.lastSent.set(predicted.x, predicted.y, predicted.z);
+    }
+  }
+
+  update(ctx: FrameCtx) {
+    const shard = this.shard;
+    if (shard) {
+      shard.frame();
+      for (const id of shard.left) this.avatarOf.delete(id);
+      this.sendMove(shard, ctx.time);
+      this.collectRemotes(shard);
     }
 
     // Destruction sync — batch keys, one in-flight call at a time.
@@ -140,7 +282,69 @@ export class Net implements GameSystem {
     }
   }
 
+  private sendMove(shard: ShardGame<IslandInput>, time: number) {
+    if (!shard.connected) return;
+    const now = performance.now() / 1000;
+    // The shard dropped us (idle, or restarted): join again.
+    if (
+      this.selfEntity === null ||
+      (now - this.lastSeenSelfAt > REJOIN_S && now - this.lastJoinAt > REJOIN_S)
+    ) {
+      if (now - this.lastJoinAt > REJOIN_S) this.join();
+      if (this.selfEntity === null) return;
+    }
+    if (time - this.lastSentAt < 1 / SEND_HZ) return;
+    const p = this.player.position;
+    const heading = this.player.yaw;
+    const pitch = this.player.pitch;
+    const moved =
+      !this.dead &&
+      (p.distanceToSquared(this.lastSent) > 1e-4 ||
+        Math.abs(heading - this.lastLook.heading) > 0.01 ||
+        Math.abs(pitch - this.lastLook.pitch) > 0.02);
+    if (!moved && time - this.lastSentAt < HEARTBEAT_S) return;
+    // The dead do not move; their moves only keep them on the island.
+    const d = this.dead ? { x: 0, y: 0, z: 0 } : p.clone().sub(this.lastSent);
+    const seq = shard.send({ move: { dx: d.x, dy: d.y, dz: d.z, heading, pitch } });
+    if (seq === 0) return;
+    this.lastSentAt = time;
+    this.lastLook = { heading, pitch };
+    if (!this.dead) this.lastSent.copy(p);
+  }
+
+  private collectRemotes(shard: ShardGame<IslandInput>) {
+    this.remotes.length = 0;
+    this.entityOf.clear();
+    let i = 0;
+    for (const e of shard.entities.values()) {
+      const avatarId = this.avatarIdOf(e.id, e.components);
+      if (!avatarId) continue;
+      this.entityOf.set(avatarId, e.id);
+      if (e.id === this.selfEntity) continue;
+      const pose = this.pool[i] ?? (this.pool[i] = {} as RemotePose);
+      i++;
+      this.fill(pose, avatarId, e);
+      this.remotes.push(pose);
+    }
+  }
+
+  private fill(pose: RemotePose, avatarId: string, e: InterpolatedEntity) {
+    const from = readLook(e.from.components.get(LOOK));
+    const to = readLook(e.to.components.get(LOOK));
+    pose.avatarId = avatarId;
+    pose.entity = e.id;
+    pose.x = e.x;
+    pose.y = e.y;
+    pose.z = e.z;
+    pose.heading = lerpAngle(from.heading, to.heading, e.t);
+    pose.pitch = from.pitch + (to.pitch - from.pitch) * e.t;
+    pose.health = e.components.get(HEALTH)?.[0] ?? 100;
+  }
+
   dispose() {
     this.pendingKeys = [];
+    this.shard?.send("leave");
+    this.shard?.close();
+    this.shard = null;
   }
 }
