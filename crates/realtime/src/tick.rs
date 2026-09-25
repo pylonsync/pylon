@@ -80,9 +80,10 @@ fn run_loop<S: SimState>(weak: Weak<Shard<S>>, interval: Duration, event_driven:
         }
 
         if event_driven {
-            // Only tick if there are inputs OR subscribers need a fresh snapshot.
-            // For now, we tick when there are pending inputs; otherwise sleep.
-            if shard.input_queue_len() > 0 {
+            // Tick only when there is something to apply: inputs, messages
+            // from other shards, or call results. A tick applies at most 64
+            // messages; the rest keep the shard ticking.
+            if shard.has_pending_work() {
                 shard.run_tick();
             }
             next_tick += interval;
@@ -327,5 +328,67 @@ mod tests {
 
         shard.stop();
         loop_handle.join();
+    }
+
+    /// Counts the messages and call results it gets.
+    #[derive(Default)]
+    struct Mailbox {
+        messages: u64,
+        results: u64,
+    }
+    impl SimState for Mailbox {
+        type Input = ();
+        type Snapshot = u64;
+        type Error = String;
+        fn apply_input(&mut self, _: &SubscriberId, _: (), _: Instant) -> Result<(), String> {
+            Ok(())
+        }
+        fn tick(&mut self, _dt: Duration) {}
+        fn snapshot(&self) -> u64 {
+            self.messages
+        }
+        fn on_message(&mut self, _message: &crate::shard::ShardMessage) {
+            self.messages += 1;
+        }
+        fn on_call_result(&mut self, _result: &crate::shard::CallResult) {
+            self.results += 1;
+        }
+    }
+
+    /// An event-driven shard with no inputs still ticks for messages (more
+    /// than one tick's worth) and call results.
+    #[test]
+    fn an_event_driven_shard_wakes_for_messages_and_call_results() {
+        let shard = Arc::new(Shard::new(
+            "turns",
+            Mailbox::default(),
+            ShardConfig {
+                tick_rate_hz: 0,
+                ..Default::default()
+            },
+        ));
+        for n in 0..70u8 {
+            assert!(shard.push_message(crate::shard::ShardMessage {
+                from: String::new(),
+                topic: "t".into(),
+                data: Arc::from(vec![n]),
+            }));
+        }
+        assert!(shard.push_call_result(crate::shard::CallResult {
+            key: "k".into(),
+            ok: true,
+            data: Arc::from(b"1".to_vec()),
+        }));
+        let _loop = TickLoop::spawn(Arc::clone(&shard));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while shard.with_state(|m| (m.messages, m.results)) != (70, 1) {
+            assert!(
+                Instant::now() < deadline,
+                "{:?}",
+                shard.with_state(|m| (m.messages, m.results))
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        shard.stop();
     }
 }

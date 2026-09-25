@@ -264,6 +264,9 @@ pub fn new_instance_id() -> String {
 // RedisBus — feature-gated cross-machine transport via Redis PUB/SUB.
 // ---------------------------------------------------------------------------
 
+#[cfg(any(feature = "redis-bus", feature = "relay-bus"))]
+mod best_effort;
+
 #[cfg(feature = "redis-bus")]
 pub mod redis_bus;
 

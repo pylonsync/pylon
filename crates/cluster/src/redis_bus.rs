@@ -15,6 +15,7 @@
 //! every pylon machine in the cluster goes deaf to cross-machine
 //! events until manually restarted.
 
+use crate::best_effort::BestEffort;
 use crate::{new_instance_id, ClusterBus, Envelope, SubscriberHandler};
 use redis::{Client, Commands, RedisError};
 use std::sync::{Arc, Mutex};
@@ -28,6 +29,23 @@ use tracing::{debug, error, info, warn};
 /// cross-talk and ship each other's mutations.
 pub const DEFAULT_CHANNEL: &str = "pylon:cluster:bus";
 
+/// How long a publish connection waits for Redis before it fails.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+/// The same for at-most-once envelopes, which are dropped on a failure.
+const BEST_EFFORT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A connection whose reads and writes fail after `timeout`, so a Redis
+/// that accepts the connection and stops answering cannot hang a publisher.
+fn connect_with_timeouts(
+    client: &Client,
+    timeout: Duration,
+) -> Result<redis::Connection, RedisError> {
+    let conn = client.get_connection_with_timeout(timeout)?;
+    conn.set_read_timeout(Some(timeout))?;
+    conn.set_write_timeout(Some(timeout))?;
+    Ok(conn)
+}
+
 pub struct RedisBus {
     client: Client,
     channel: String,
@@ -37,6 +55,9 @@ pub struct RedisBus {
     /// is bounded by publish rate; pylon emits ≤O(mutations/sec) which
     /// is two orders of magnitude below the mutex's ceiling.
     publish_conn: Mutex<redis::Connection>,
+    /// At-most-once envelopes (messages between shards), on a connection
+    /// of their own, apart from committed changes.
+    best_effort: BestEffort,
     /// Handlers registered via [`subscribe`]. The subscriber thread
     /// reads from this Vec on every inbound message and invokes each
     /// handler in turn. Wrapped in Arc<Mutex> so callers can register
@@ -61,9 +82,29 @@ impl RedisBus {
             .map(|n| format!("{n}:cluster:bus"))
             .unwrap_or_else(|| DEFAULT_CHANNEL.to_string());
         let client = Client::open(url).map_err(|e| format!("redis Client::open: {e}"))?;
-        let publish_conn = client
-            .get_connection()
+        let publish_conn = connect_with_timeouts(&client, PUBLISH_TIMEOUT)
             .map_err(|e| format!("redis publish connect: {e}"))?;
+        let best_effort = {
+            let client = client.clone();
+            let channel = channel.clone();
+            let mut conn: Option<redis::Connection> = None;
+            BestEffort::spawn("pylon-cluster-redis-best-effort", move |envelope| {
+                let body = serde_json::to_string(envelope).map_err(|e| e.to_string())?;
+                if conn.is_none() {
+                    conn = Some(
+                        connect_with_timeouts(&client, BEST_EFFORT_TIMEOUT)
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
+                let c = conn.as_mut().expect("connected above");
+                // Once: a PUBLISH whose reply was lost may have been
+                // delivered, and a retry would deliver it twice.
+                c.publish::<_, _, ()>(&channel, body).map_err(|e| {
+                    conn = None;
+                    e.to_string()
+                })
+            })?
+        };
         let instance_id = new_instance_id();
         let handlers: Arc<Mutex<Vec<SubscriberHandler>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -89,6 +130,7 @@ impl RedisBus {
             channel,
             instance_id,
             publish_conn: Mutex::new(publish_conn),
+            best_effort,
             handlers,
         })
     }
@@ -107,7 +149,7 @@ impl RedisBus {
             "[cluster] redis publish failed ({}); reconnecting + retrying",
             first.as_ref().unwrap_err()
         );
-        match self.client.get_connection() {
+        match connect_with_timeouts(&self.client, PUBLISH_TIMEOUT) {
             Ok(fresh) => {
                 *guard = fresh;
                 guard.publish(&self.channel, payload)
@@ -118,6 +160,10 @@ impl RedisBus {
 }
 
 impl ClusterBus for RedisBus {
+    fn try_publish(&self, envelope: &Envelope) -> bool {
+        self.best_effort.try_send(envelope)
+    }
+
     fn publish(&self, envelope: &Envelope) {
         let body = match serde_json::to_string(envelope) {
             Ok(s) => s,

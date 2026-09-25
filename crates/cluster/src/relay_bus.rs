@@ -5,6 +5,7 @@
 //! sequence and keeps a bounded ring, so a transient socket reconnect can
 //! replay missed frames. Postgres remains the data and change-log truth.
 
+use crate::best_effort::BestEffort;
 use crate::{new_instance_id, ClusterBus, Envelope, RelayFrame, SubscriberHandler};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -30,6 +31,8 @@ struct RelayConfig {
 pub struct RelayBus {
     instance_id: String,
     sender: SyncSender<Envelope>,
+    /// At-most-once envelopes, apart from committed changes.
+    best_effort: BestEffort,
     handlers: Arc<Mutex<Vec<SubscriberHandler>>>,
     last_relay_seq: Arc<AtomicU64>,
 }
@@ -60,6 +63,13 @@ impl RelayBus {
                 .spawn(move || run_publisher(receiver, cfg))
                 .map_err(|e| format!("spawn relay publisher: {e}"))?;
         }
+        let best_effort = {
+            let cfg = cfg.clone();
+            let agent = publish_agent();
+            BestEffort::spawn("pylon-cluster-relay-best-effort", move |envelope| {
+                post_once(&agent, &cfg, envelope)
+            })?
+        };
         {
             let cfg = cfg.clone();
             let handlers = Arc::clone(&handlers);
@@ -80,6 +90,7 @@ impl RelayBus {
         Ok(Self {
             instance_id,
             sender,
+            best_effort,
             handlers,
             last_relay_seq,
         })
@@ -92,7 +103,7 @@ impl RelayBus {
 
 impl ClusterBus for RelayBus {
     fn try_publish(&self, envelope: &Envelope) -> bool {
-        self.sender.try_send(envelope.clone()).is_ok()
+        self.best_effort.try_send(envelope)
     }
 
     fn publish(&self, envelope: &Envelope) {
@@ -117,41 +128,57 @@ impl ClusterBus for RelayBus {
 
 type RelaySocket = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 
-fn run_publisher(receiver: Receiver<Envelope>, cfg: RelayConfig) {
-    let agent = ureq::AgentBuilder::new()
+fn publish_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(10))
-        .build();
+        .build()
+}
+
+/// The signed push request's body for `envelope`, under a new message id.
+fn push_body(cfg: &RelayConfig, envelope: &Envelope) -> String {
+    serde_json::json!({
+        "app": cfg.app,
+        "message_id": uuid::Uuid::new_v4().to_string(),
+        "envelope": envelope,
+    })
+    .to_string()
+}
+
+/// POST `body` to the relay once.
+fn push(agent: &ureq::Agent, cfg: &RelayConfig, body: &str) -> Result<(), String> {
+    let timestamp = now_secs();
+    let signature = pylon_auth::trusted_mint::sign(&cfg.secret, timestamp, body.as_bytes());
+    let url = format!(
+        "{}/sync/cluster/push?app={}",
+        cfg.base_url,
+        percent_encode(&cfg.app)
+    );
+    agent
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .set("X-Pylon-Relay-Timestamp", &timestamp.to_string())
+        .set("X-Pylon-Relay-Signature", &signature)
+        .send_string(body)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+/// Send an at-most-once envelope, once.
+fn post_once(agent: &ureq::Agent, cfg: &RelayConfig, envelope: &Envelope) -> Result<(), String> {
+    push(agent, cfg, &push_body(cfg, envelope))
+}
+
+fn run_publisher(receiver: Receiver<Envelope>, cfg: RelayConfig) {
+    let agent = publish_agent();
     while let Ok(envelope) = receiver.recv() {
-        let message_id = uuid::Uuid::new_v4().to_string();
-        let body = serde_json::json!({
-            "app": cfg.app,
-            "message_id": message_id,
-            "envelope": envelope,
-        })
-        .to_string();
+        // One message id for every retry, so the relay can tell them apart
+        // from new messages.
+        let body = push_body(&cfg, &envelope);
         let mut backoff = 1u64;
-        loop {
-            let timestamp = now_secs();
-            let signature = pylon_auth::trusted_mint::sign(&cfg.secret, timestamp, body.as_bytes());
-            let url = format!(
-                "{}/sync/cluster/push?app={}",
-                cfg.base_url,
-                percent_encode(&cfg.app)
-            );
-            match agent
-                .post(&url)
-                .set("Content-Type", "application/json")
-                .set("X-Pylon-Relay-Timestamp", &timestamp.to_string())
-                .set("X-Pylon-Relay-Signature", &signature)
-                .send_string(&body)
-            {
-                Ok(_) => break,
-                Err(e) => {
-                    warn!("[cluster] relay publish failed: {e}; retrying in {backoff}s");
-                    thread::sleep(Duration::from_secs(backoff));
-                    backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
-                }
-            }
+        while let Err(e) = push(&agent, &cfg, &body) {
+            warn!("[cluster] relay publish failed: {e}; retrying in {backoff}s");
+            thread::sleep(Duration::from_secs(backoff));
+            backoff = (backoff * 2).min(MAX_BACKOFF_SECS);
         }
     }
 }

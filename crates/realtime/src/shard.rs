@@ -688,6 +688,14 @@ impl<S: SimState> Shard<S> {
         self.acks.lock().unwrap().get(id).copied().unwrap_or(0)
     }
 
+    /// True when a tick has something to apply: inputs, messages, or call
+    /// results. An event-driven shard ticks only then.
+    pub fn has_pending_work(&self) -> bool {
+        self.input_queue_len() > 0
+            || !self.messages.lock().unwrap().is_empty()
+            || !self.call_results.lock().unwrap().is_empty()
+    }
+
     pub fn input_queue_len(&self) -> usize {
         self.inputs.lock().unwrap().queue.len()
     }
@@ -1417,7 +1425,7 @@ impl<S: SimState> Shard<S> {
         let tick_number = *tick_no_guard;
         drop(tick_no_guard);
 
-        let mut had_inputs = false;
+        let had_inputs: bool;
         // Clone the list so delivery below runs without the subscribers
         // lock: a transport can add or remove subscribers meanwhile.
         let subs: Vec<Arc<Subscriber<S::Snapshot>>> = self.subscribers.lock().unwrap().clone();

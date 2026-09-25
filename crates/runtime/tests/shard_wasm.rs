@@ -1881,6 +1881,39 @@ fn messages_cross_machines_on_the_cluster_bus() {
     wait_heard(&q, |h| h.iter().any(|m| m == "west> p1: direct"));
 }
 
+/// Read one HTTP request, check its cluster signature for machine `me`,
+/// answer, and return the body (None when the signature does not verify).
+fn read_signed_op(mut conn: std::net::TcpStream, me: &str) -> Option<String> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut reader = BufReader::new(conn.try_clone().ok()?);
+    let (mut length, mut auth) = (0usize, String::new());
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).ok()?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => length = value.trim().parse().ok()?,
+                "x-pylon-cluster-auth" => auth = value.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).ok()?;
+    let ok = pylon_runtime::shard_cluster::verify(me, &auth, &body).is_ok();
+    let reply = r#"{"ok":1}"#;
+    let _ = write!(
+        conn,
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{reply}",
+        reply.len()
+    );
+    ok.then(|| String::from_utf8_lossy(&body).into_owned())
+}
+
 /// On a cluster without a bus: a machine that cannot be reached does not
 /// hold up delivery on this one, and a message another machine sends
 /// (the signed Deliver call) reaches the shard it names.
@@ -1906,16 +1939,48 @@ fn a_dead_machine_does_not_hold_up_messages_and_deliver_reaches_a_shard() {
             fly_instance: None,
         },
     );
-    // A machine that looks live but answers nothing.
-    pool.with_client_once(|c| {
-        c.execute(
-            "INSERT INTO _pylon_shard_machines (machine_id, address, capacity, heartbeat_at, epoch)
-             VALUES ($1, 'http://10.255.255.1:9', 10,
-                     (extract(epoch from clock_timestamp()) * 1000)::bigint + 60000, 1)",
-            &[&format!("dead-{run}")],
-        )
-    })
-    .unwrap();
+    // Machines that look live: one that cannot be reached, one that takes
+    // the connection and never answers, and one that answers.
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stalled_addr = format!("http://{}", stalled.local_addr().unwrap());
+    let held: Arc<std::sync::Mutex<Vec<std::net::TcpStream>>> = Arc::default();
+    {
+        let held = Arc::clone(&held);
+        std::thread::spawn(move || {
+            for conn in stalled.incoming().flatten() {
+                held.lock().unwrap().push(conn);
+            }
+        });
+    }
+    let healthy_id = format!("ok-{run}");
+    let healthy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let healthy_addr = format!("http://{}", healthy.local_addr().unwrap());
+    let delivered: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    {
+        let (delivered, me) = (Arc::clone(&delivered), healthy_id.clone());
+        std::thread::spawn(move || {
+            for conn in healthy.incoming().flatten() {
+                if let Some(body) = read_signed_op(conn, &me) {
+                    delivered.lock().unwrap().push(body);
+                }
+            }
+        });
+    }
+    for (id, address) in [
+        (format!("dead-{run}"), "http://10.255.255.1:9".to_string()),
+        (format!("stalled-{run}"), stalled_addr),
+        (healthy_id.clone(), healthy_addr),
+    ] {
+        pool.with_client_once(|c| {
+            c.execute(
+                "INSERT INTO _pylon_shard_machines (machine_id, address, capacity, heartbeat_at, epoch)
+                 VALUES ($1, $2, 10,
+                         (extract(epoch from clock_timestamp()) * 1000)::bigint + 60000, 1)",
+                &[&id, &address],
+            )
+        })
+        .unwrap();
+    }
     let (a, b) = (format!("ma-{run}"), format!("mb-{run}"));
     let deadline = Instant::now() + Duration::from_secs(10);
     while host
@@ -1942,6 +2007,21 @@ fn a_dead_machine_does_not_hold_up_messages_and_deliver_reaches_a_shard() {
         started.elapsed()
     );
     wait_heard(&q, |h| h.iter().any(|m| m == r#"> "n199""#));
+    // The machine that answers gets them, signed, while the stalled one
+    // still holds its first request.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let last = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, r#""n199""#);
+    while !delivered.lock().unwrap().iter().any(|b| b.contains(&last)) {
+        assert!(
+            Instant::now() < deadline,
+            "the healthy machine got no messages"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !held.lock().unwrap().is_empty(),
+        "the stalled machine got no request"
+    );
 
     // Another machine's Deliver call.
     let reply = host.run_remote(RemoteOp::Deliver {

@@ -33,6 +33,19 @@ pub(super) const BUS_KIND: &str = "shard-message";
 pub(super) const ROUTE_QUEUE: usize = 4096;
 /// Messages waiting for one other machine.
 const PEER_QUEUE: usize = 1024;
+/// A worker for another machine that sent nothing for this long exits.
+#[cfg(not(test))]
+const PEER_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+#[cfg(test)]
+const PEER_IDLE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The worker that sends messages to one other machine.
+pub(super) struct Peer {
+    address: String,
+    /// Tells this worker from a later one for the same machine.
+    serial: u64,
+    sender: std::sync::mpsc::SyncSender<RemoteOp>,
+}
 /// How long the list of live machines, and where a shard runs, are reused.
 const PEER_CACHE: std::time::Duration = std::time::Duration::from_secs(2);
 /// Limits on what a module or a function sends.
@@ -41,6 +54,13 @@ const MAX_TOPIC: usize = 128;
 const MAX_GROUP: usize = 128;
 const MAX_GROUPS: usize = 64;
 const MAX_DATA: usize = 64 * 1024;
+/// Records (groups or messages) the host reads from one outbox. The SDK
+/// sends at most 64 messages and 64 groups; past this, the rest count as
+/// dropped unread, so a module cannot make the host parse without end.
+const MAX_RECORDS: usize = 256;
+/// The largest outbox the host copies out of a module (64 full messages and
+/// 64 groups are about 4.2 MB).
+pub(super) const MAX_OUTBOX_BYTES: usize = 8 * 1024 * 1024;
 
 /// Where a message goes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -184,6 +204,9 @@ impl Outbox {
             0 => None,
             1 => {
                 let n = u16_at(take(2)?);
+                if n > MAX_RECORDS {
+                    return Err(format!("{n} groups (at most {MAX_RECORDS})"));
+                }
                 let mut groups = Vec::new();
                 for _ in 0..n {
                     let len = u16_at(take(2)?);
@@ -205,7 +228,16 @@ impl Outbox {
         };
         let count = u32_at(take(4)?);
         let mut messages = Vec::new();
-        for _ in 0..count {
+        for read in 0..count {
+            if read == MAX_RECORDS {
+                // The rest are not read: dropped, unchecked.
+                dropped += count - read;
+                return Ok(Outbox {
+                    groups,
+                    messages,
+                    dropped,
+                });
+            }
             let len = u16_at(take(2)?);
             let target = take(len)?;
             let len = u16_at(take(2)?);
@@ -534,36 +566,82 @@ impl WasmShardHost {
         found
     }
 
-    /// Queue `op` for `machine`'s worker, starting one the first time. A
-    /// full queue drops the message: that machine is slow or gone.
+    /// Queue `op` for `machine`'s worker at `address`, starting one when
+    /// there is none for that address (a machine that restarted under the
+    /// same id at a new address gets a new one). A full queue drops the
+    /// message: that machine is slow or gone. A worker idle for
+    /// [`PEER_IDLE`] exits and leaves the map.
     fn to_peer(&self, machine: &str, address: &str, op: RemoteOp) {
-        let mut peers = self.peers.lock().unwrap();
-        let tx = peers
-            .entry(machine.to_string())
-            .or_insert_with(|| {
-                let (tx, rx) = std::sync::mpsc::sync_channel::<RemoteOp>(PEER_QUEUE);
-                let (machine, address) = (machine.to_string(), address.to_string());
-                let _ = std::thread::Builder::new()
-                    .name(format!("pylon-shard-peer-{machine}"))
-                    .spawn(move || {
-                        let agent = shard_cluster::call_agent();
-                        while let Ok(op) = rx.recv() {
-                            if let Err(e) =
-                                shard_cluster::call_with(&agent, &machine, &address, &op)
-                            {
-                                tracing::debug!(
-                                    "[shards] message to machine {machine} dropped: {e}"
-                                );
-                            }
-                        }
-                    });
-                tx
-            })
-            .clone();
-        drop(peers);
+        let tx = {
+            let mut peers = self.peers.lock().unwrap();
+            match peers.get(machine) {
+                Some(p) if p.address == address => p.sender.clone(),
+                _ => {
+                    // A replaced worker ends when its sender drops.
+                    peers.remove(machine);
+                    let Some(peer) = self.spawn_peer(machine, address) else {
+                        return;
+                    };
+                    let tx = peer.sender.clone();
+                    peers.insert(machine.to_string(), peer);
+                    tx
+                }
+            }
+        };
         if tx.try_send(op).is_err() {
             tracing::debug!("[shards] message to machine {machine} dropped: it is behind");
         }
+    }
+
+    fn spawn_peer(&self, machine: &str, address: &str) -> Option<Peer> {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<RemoteOp>(PEER_QUEUE);
+        let host = self.weak_self.get().cloned();
+        let (m, a) = (machine.to_string(), address.to_string());
+        let spawned = std::thread::Builder::new()
+            .name(format!("pylon-shard-peer-{machine}"))
+            .spawn(move || {
+                let agent = shard_cluster::call_agent();
+                loop {
+                    match rx.recv_timeout(PEER_IDLE) {
+                        Ok(op) => {
+                            if let Err(e) = shard_cluster::call_with(&agent, &m, &a, &op) {
+                                tracing::debug!("[shards] message to machine {m} dropped: {e}");
+                            }
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            // Idle: leave the map, unless a newer worker
+                            // took the slot already.
+                            if let Some(host) = host.as_ref().and_then(|w| w.upgrade()) {
+                                let mut peers = host.peers.lock().unwrap();
+                                if peers.get(&m).is_some_and(|p| p.serial == serial) {
+                                    peers.remove(&m);
+                                }
+                            }
+                            return;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+            });
+        match spawned {
+            Ok(_) => Some(Peer {
+                address: address.to_string(),
+                serial,
+                sender: tx,
+            }),
+            Err(e) => {
+                tracing::warn!("[shards] no worker for machine {machine}: {e}");
+                None
+            }
+        }
+    }
+
+    /// Other machines with a message worker, for tests.
+    #[cfg(test)]
+    pub(super) fn peer_count(&self) -> usize {
+        self.peers.lock().unwrap().len()
     }
 
     /// A message another machine sent (a signed call or the bus): deliver
@@ -730,5 +808,58 @@ mod tests {
         assert!(Target::parse("north").is_err());
         assert!(Target::parse("group:").is_err());
         assert!(Target::parse("shard:has space").is_err());
+    }
+
+    fn host() -> std::sync::Arc<WasmShardHost> {
+        let zone = crate::shard_wasm::WasmShardKind::compile(
+            "zone",
+            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
+            pylon_realtime::ShardConfig::default(),
+            crate::shard_wasm::WasmLimits::default(),
+        )
+        .unwrap();
+        WasmShardHost::new(vec![zone])
+    }
+
+    /// A module that returns a huge count of records is read up to
+    /// MAX_RECORDS; the rest count as dropped, unread.
+    #[test]
+    fn an_outbox_is_read_up_to_its_record_limit() {
+        let mut out = vec![0u8]; // no groups
+        let count: u32 = 100_000;
+        out.extend_from_slice(&count.to_le_bytes());
+        for _ in 0..count {
+            // An empty target, an empty topic, no data: refused.
+            out.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0]);
+        }
+        let parsed = Outbox::parse(&out).unwrap();
+        assert!(parsed.messages.is_empty());
+        assert_eq!(parsed.dropped, count as usize);
+
+        let mut groups = vec![1u8];
+        groups.extend_from_slice(&((MAX_RECORDS + 1) as u16).to_le_bytes());
+        assert!(Outbox::parse(&groups).unwrap_err().contains("groups"));
+    }
+
+    /// A machine that came back at a new address gets a new worker; an
+    /// idle worker leaves the map.
+    #[test]
+    fn peer_workers_follow_the_address_and_retire_when_idle() {
+        let host = host();
+        host.to_peer("m", "http://127.0.0.1:1", RemoteOp::List);
+        assert_eq!(host.peer_count(), 1);
+        host.to_peer("m", "http://127.0.0.1:2", RemoteOp::List);
+        assert_eq!(host.peer_count(), 1);
+        assert_eq!(
+            host.peers.lock().unwrap()["m"].address,
+            "http://127.0.0.1:2"
+        );
+        host.to_peer("n", "http://127.0.0.1:3", RemoteOp::List);
+        assert_eq!(host.peer_count(), 2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while host.peer_count() > 0 {
+            assert!(std::time::Instant::now() < deadline, "idle workers stayed");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 }

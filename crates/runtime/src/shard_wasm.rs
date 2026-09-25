@@ -202,6 +202,9 @@ const REQUIRED_EXPORTS: &[&str] = &[
     "pylon_authorize_input",
 ];
 
+/// The largest `pylon_calls` or `pylon_writes` output the host reads.
+const MAX_DATA_OUTPUT: usize = 8 * 1024 * 1024;
+
 /// Saved-state exports: both or neither (see pylon-shard-guest).
 const SAVE_EXPORTS: &[&str] = &["pylon_save", "pylon_restore"];
 /// Optional: messages between shards. Both or neither.
@@ -807,6 +810,11 @@ impl Inner {
     }
 
     fn output(&mut self) -> Result<Vec<u8>, String> {
+        self.output_at_most(usize::MAX)
+    }
+
+    /// The output buffer, when it holds at most `max` bytes.
+    fn output_at_most(&mut self, max: usize) -> Result<Vec<u8>, String> {
         let (ptr_fn, len_fn) = (
             self.exports.output_ptr.clone(),
             self.exports.output_len.clone(),
@@ -814,6 +822,9 @@ impl Inner {
         let ptr = self.call(&ptr_fn, ())? as u32 as usize;
         let len = self.call(&len_fn, ())?;
         let len = usize::try_from(len).map_err(|_| self.fail("pylon_output_len is negative"))?;
+        if len > max {
+            return Err(self.fail(&format!("the output is {len} bytes (at most {max})")));
+        }
         // Bounds-check against the module's memory before copying, so a bad
         // length cannot make the host allocate past the memory cap.
         let bytes = ptr
@@ -1005,7 +1016,7 @@ impl WasmSim {
         }
         match inner.call(&m.outbox, ())? {
             STATUS_OK => {
-                let bytes = inner.output()?;
+                let bytes = inner.output_at_most(messages::MAX_OUTBOX_BYTES)?;
                 messages::Outbox::parse(&bytes)
                     .map(Some)
                     .map_err(|e| inner.fail(&format!("pylon_outbox sent a bad outbox: {e}")))
@@ -1028,7 +1039,7 @@ impl WasmSim {
         }
         match inner.call(&c.calls, ())? {
             STATUS_OK => {
-                let bytes = inner.output()?;
+                let bytes = inner.output_at_most(MAX_DATA_OUTPUT)?;
                 serde_json::from_slice(&bytes)
                     .map_err(|e| inner.fail(&format!("pylon_calls sent bad JSON: {e}")))
             }
@@ -1050,7 +1061,7 @@ impl WasmSim {
         }
         match inner.call(&f, ())? {
             STATUS_OK => {
-                let bytes = inner.output()?;
+                let bytes = inner.output_at_most(MAX_DATA_OUTPUT)?;
                 serde_json::from_slice(&bytes)
                     .map_err(|e| inner.fail(&format!("pylon_writes sent bad JSON: {e}")))
             }
@@ -1576,7 +1587,7 @@ pub struct WasmShardHost {
     /// The cluster bus, when the app has one: messages travel on it.
     bus: OnceLock<Arc<dyn pylon_cluster::ClusterBus>>,
     /// A worker per other machine that messages go to, by machine id.
-    peers: Mutex<HashMap<String, std::sync::mpsc::SyncSender<RemoteOp>>>,
+    peers: Mutex<HashMap<String, messages::Peer>>,
     /// Live machines and shard locations for messages, read every 2 s.
     peer_cache: Mutex<messages::PeerCache>,
     /// The app's functions, for shards' calls (see `data`).
