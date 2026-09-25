@@ -1031,9 +1031,35 @@ fn a_lapsed_lease_refuses_every_call_and_interrupts_a_running_one() {
     let why = s.with_state(|sim| sim.failure()).unwrap();
     assert!(why.contains("lease"), "{why}");
 
-    // A new instance cannot even start while the lease has lapsed.
+    // A new instance cannot even start while the lease has lapsed, and the
+    // error is the bare lease message (a module's own errors are prefixed),
+    // which the host retries instead of marking the shard failed.
     let err = k.instantiate("l2", &json!({})).err().unwrap();
-    assert!(err.contains("lease"), "{err}");
+    assert_eq!(err, "this machine's lease on the shard directory lapsed");
+
+    // A start function interrupted by the lease ending reports the lease,
+    // not a time budget.
+    let spinning = WasmShardKind::compile(
+        "spin",
+        &full_module(
+            1,
+            "i32.const 0",
+            "(func $spin (loop $l (br $l))) (start $spin)",
+        ),
+        config(SnapshotFormat::Json),
+        WasmLimits {
+            budget: Duration::from_secs(60),
+            ..WasmLimits::default()
+        },
+    )
+    .unwrap();
+    let clock = Arc::new(LeaseClock::default());
+    clock.set(Some(Instant::now() + Duration::from_millis(200)));
+    spinning.set_lease_clock(Arc::clone(&clock));
+    let started = Instant::now();
+    let err = spinning.instantiate("s1", &json!({})).err().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(err, "this machine's lease on the shard directory lapsed");
 }
 
 #[test]

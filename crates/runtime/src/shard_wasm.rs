@@ -364,7 +364,15 @@ impl WasmShardKind {
         let instance = self
             .linker
             .instantiate(&mut store, &self.module)
-            .map_err(|e| describe_error(&store, &e, self.limits.budget))?;
+            .map_err(|e| {
+                // A start function interrupted because the lease ended is
+                // not the module's failure.
+                if store.data().lease_lapsed() {
+                    LEASE_LAPSED.to_string()
+                } else {
+                    describe_error(&store, &e, self.limits.budget)
+                }
+            })?;
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or("the module's `memory` export is not a memory")?;
