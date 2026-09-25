@@ -90,18 +90,37 @@ pub fn create_table_sql(entity_name: &str, fields: &[FieldSpec]) -> String {
 ///
 /// Mirrors the Postgres handler at crates/storage/src/postgres.rs —
 /// see the longer commentary there.
+/// The column itself. A `unique` field gets its constraint from
+/// [`add_column_unique_index_sql`] instead: SQLite refuses
+/// `ALTER TABLE … ADD COLUMN … UNIQUE` ("Cannot add a UNIQUE column"), so
+/// putting it here failed the whole schema apply and left the column out
+/// of every table that existed before the field was declared.
 pub fn add_column_sql(entity_name: &str, field: &FieldSpec) -> String {
     let col_type = sqlite_column_type(&field.field_type);
-    let unique = if field.unique { " UNIQUE" } else { "" };
     let null_default = sqlite_add_column_null_default(field);
     format!(
-        "ALTER TABLE {} ADD COLUMN {} {}{}{}",
+        "ALTER TABLE {} ADD COLUMN {} {}{}",
         quote_ident(entity_name),
         quote_ident(&field.name),
         col_type,
         null_default,
-        unique,
     )
+}
+
+/// The unique index that enforces a `unique` field added to an existing
+/// table. NULLs stay distinct in a SQLite unique index, so optional unique
+/// fields keep working on rows that have no value yet. `None` for a field
+/// that is not unique.
+pub fn add_column_unique_index_sql(entity_name: &str, field: &FieldSpec) -> Option<String> {
+    if !field.unique {
+        return None;
+    }
+    Some(format!(
+        "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {} ({})",
+        quote_ident(&format!("{}_{}_unique", entity_name, field.name)),
+        quote_ident(entity_name),
+        quote_ident(&field.name),
+    ))
 }
 
 /// SQLite parity with the Postgres equivalent at
@@ -583,6 +602,17 @@ impl SqliteAdapter {
                         code: "SQLITE_EXEC_FAILED".into(),
                         message: format!("Failed to add column {}.{}: {e}", entity, field.name),
                     })?;
+                    if let Some(index_sql) = add_column_unique_index_sql(entity, field) {
+                        self.conn
+                            .execute(&index_sql, [])
+                            .map_err(|e| StorageError {
+                                code: "SQLITE_EXEC_FAILED".into(),
+                                message: format!(
+                                    "Failed to make {}.{} unique: {e}",
+                                    entity, field.name
+                                ),
+                            })?;
+                    }
                 }
                 SchemaOperation::AlterField {
                     entity,
@@ -1388,6 +1418,74 @@ mod tests {
             .unwrap()
             .any(|r| r.unwrap() == "bio");
         assert!(has_bio);
+    }
+
+    #[test]
+    fn sqlite_adapter_adds_unique_field_to_existing_table() {
+        // Found in production: an app declared `externalId:
+        // field.string().optional().unique()` on an Org table that already
+        // had rows. SQLite refused `ADD COLUMN … UNIQUE`, the column never
+        // arrived, and every federated sign-in failed its insert.
+        let adapter = SqliteAdapter::in_memory().unwrap();
+        let plan = adapter.plan_schema(&test_manifest()).unwrap();
+        adapter.apply_schema(&plan).unwrap();
+        adapter
+            .conn
+            .execute(
+                "INSERT INTO \"User\" (id, email, displayName) VALUES ('u1', 'a@x.co', 'A'), ('u2', 'b@x.co', 'B')",
+                [],
+            )
+            .unwrap();
+
+        let add_plan = SchemaPlan {
+            operations: vec![SchemaOperation::AddField {
+                entity: "User".into(),
+                field: FieldSpec {
+                    name: "externalId".into(),
+                    field_type: "string".into(),
+                    optional: true,
+                    unique: true,
+                },
+            }],
+        };
+        adapter.apply_schema(&add_plan).unwrap();
+
+        // Existing rows keep NULL, and two NULLs do not collide.
+        adapter
+            .conn
+            .execute(
+                "UPDATE \"User\" SET externalId = 'org_1' WHERE id = 'u1'",
+                [],
+            )
+            .unwrap();
+        let dup = adapter.conn.execute(
+            "UPDATE \"User\" SET externalId = 'org_1' WHERE id = 'u2'",
+            [],
+        );
+        assert!(dup.is_err(), "the unique index must refuse a second org_1");
+    }
+
+    #[test]
+    fn add_column_unique_is_an_index_not_a_column_constraint() {
+        let field = FieldSpec {
+            name: "externalId".into(),
+            field_type: "string".into(),
+            optional: true,
+            unique: true,
+        };
+        assert_eq!(
+            add_column_sql("Org", &field),
+            "ALTER TABLE \"Org\" ADD COLUMN \"externalId\" TEXT"
+        );
+        assert_eq!(
+            add_column_unique_index_sql("Org", &field).as_deref(),
+            Some("CREATE UNIQUE INDEX IF NOT EXISTS \"Org_externalId_unique\" ON \"Org\" (\"externalId\")")
+        );
+        let plain = FieldSpec {
+            unique: false,
+            ..field
+        };
+        assert_eq!(add_column_unique_index_sql("Org", &plain), None);
     }
 
     #[test]
