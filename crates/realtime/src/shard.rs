@@ -353,9 +353,12 @@ pub struct ShardMessage {
     pub data: Arc<[u8]>,
 }
 
-/// Messages a shard holds for its next tick. Past this, new ones are
+/// Messages a shard holds for its next ticks. Past this, new ones are
 /// dropped (delivery is at most once).
 pub const MAX_QUEUED_MESSAGES: usize = 1024;
+/// Messages applied in one tick; the rest wait for the next ones, so a
+/// flood of messages cannot push a tick past its time budget.
+pub const MAX_MESSAGES_PER_TICK: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Pending input — bundles the input with its originator
@@ -1357,7 +1360,11 @@ impl<S: SimState> Shard<S> {
             let started = Instant::now();
             // Messages first: they arrived before this tick's inputs were
             // applied.
-            let messages: Vec<ShardMessage> = self.messages.lock().unwrap().drain(..).collect();
+            let messages: Vec<ShardMessage> = {
+                let mut queue = self.messages.lock().unwrap();
+                let n = queue.len().min(MAX_MESSAGES_PER_TICK);
+                queue.drain(..n).collect()
+            };
             for message in &messages {
                 state.on_message(message);
             }
@@ -1742,6 +1749,20 @@ mod tests {
             *seen.lock().unwrap(),
             vec!["relic from west: taken".to_string(), "input 7".to_string()]
         );
+
+        // At most MAX_MESSAGES_PER_TICK a tick; the rest wait.
+        seen.lock().unwrap().clear();
+        for i in 0..MAX_MESSAGES_PER_TICK + 6 {
+            assert!(shard.push_message(ShardMessage {
+                from: String::new(),
+                topic: format!("m{i}"),
+                data: Arc::from(&b""[..]),
+            }));
+        }
+        shard.run_tick();
+        assert_eq!(seen.lock().unwrap().len(), MAX_MESSAGES_PER_TICK);
+        shard.run_tick();
+        assert_eq!(seen.lock().unwrap().len(), MAX_MESSAGES_PER_TICK + 6);
 
         // Bounded: past the limit, messages are dropped.
         for _ in 0..MAX_QUEUED_MESSAGES {

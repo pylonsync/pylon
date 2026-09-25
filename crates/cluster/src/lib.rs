@@ -189,6 +189,16 @@ pub type SubscriberHandler = Arc<dyn Fn(Envelope) + Send + Sync>;
 /// Cross-machine pubsub abstraction. See module docs for the contract.
 pub trait ClusterBus: Send + Sync {
     fn publish(&self, envelope: &Envelope);
+
+    /// Publish without waiting when the transport is backed up: false when
+    /// the envelope was dropped. For at-most-once traffic (messages between
+    /// shards) that must not hold up committed changes. The default
+    /// publishes.
+    fn try_publish(&self, envelope: &Envelope) -> bool {
+        self.publish(envelope);
+        true
+    }
+
     fn subscribe(&self, handler: SubscriberHandler);
     fn instance_id(&self) -> &str;
 

@@ -1474,6 +1474,10 @@ pub struct WasmShardHost {
     outgoing: std::sync::mpsc::SyncSender<messages::Routed>,
     /// The cluster bus, when the app has one: messages travel on it.
     bus: OnceLock<Arc<dyn pylon_cluster::ClusterBus>>,
+    /// A worker per other machine that messages go to, by machine id.
+    peers: Mutex<HashMap<String, std::sync::mpsc::SyncSender<RemoteOp>>>,
+    /// Live machines and shard locations for messages, read every 2 s.
+    peer_cache: Mutex<messages::PeerCache>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1617,6 +1621,8 @@ impl WasmShardHost {
             groups: Mutex::new(HashMap::new()),
             outgoing,
             bus: OnceLock::new(),
+            peers: Mutex::new(HashMap::new()),
+            peer_cache: Mutex::new(Default::default()),
             registry: ShardRegistry::new(),
             kind_of: RwLock::new(HashMap::new()),
             idle_since: Mutex::new(HashMap::new()),

@@ -3,13 +3,15 @@
 // Postgres, no cluster bus: the machines call each other).
 //
 // Runs only when PYLON_SHARD_MESSAGES_E2E is "<host:port of A>,<host:port of
-// B>" (tools/smoke-shard-cluster.sh sets it).
+// B>" and PYLON_SHARD_ADMIN_TOKEN is the machines' admin token
+// (tools/smoke-shard-cluster.sh sets both).
 
 import { expect, test } from "bun:test";
 
 import { connectShard } from "./connection";
 
 const [hostA, hostB] = (process.env.PYLON_SHARD_MESSAGES_E2E ?? "").split(",");
+const adminToken = process.env.PYLON_SHARD_ADMIN_TOKEN ?? "";
 
 interface Zone {
   zone: string;
@@ -49,7 +51,7 @@ function waitFor<T>(what: string, check: () => T | undefined, ms: number): Promi
   });
 }
 
-test.skipIf(!hostA || !hostB)(
+test.skipIf(!hostA || !hostB || !adminToken)(
   "a message from a shard on one machine reaches a shard on another",
   async () => {
     const run = Math.random().toString(36).slice(2, 8);
@@ -97,8 +99,11 @@ test.skipIf(!hostA || !hostB)(
       10_000,
     );
 
-    // A server function on A announces to all: east, on B, hears it.
-    await call(hostA, shouter, "announce", { text: "keep under attack" });
+    // A server function on A announces to all: east, on B, hears it. A
+    // player (here a guest) may not announce.
+    const refused = await call(hostA, shouter, "announce", { text: "fake" }).catch((e) => e);
+    expect(String(refused)).toMatch(/AUTH_REQUIRED|FORBIDDEN/);
+    await call(hostA, adminToken, "announce", { text: "keep under attack" });
     await waitFor(
       "east hears the announcement",
       () => (heard.includes(`> "keep under attack"`) ? true : undefined),

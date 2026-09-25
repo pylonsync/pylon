@@ -535,7 +535,7 @@ jobs:
           cargo test -p pylon-runtime --lib shard_cluster
           cargo test -p pylon-runtime --lib shard_wasm::lease_tests
           cargo test -p pylon-runtime --lib shard_wasm::transfer::tests
-          cargo test -p pylon-runtime --test shard_wasm -- transfers_on_a_cluster a_move_left_open
+          cargo test -p pylon-runtime --test shard_wasm -- transfers_on_a_cluster a_move_left_open a_dead_machine
       - name: Two machines
         env:
           PYLON_SMOKE_PG_URL: postgres://postgres:postgres@localhost:5432/postgres

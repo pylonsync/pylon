@@ -1092,9 +1092,17 @@ pub fn ticket_key() -> Option<Vec<u8>> {
 }
 
 /// Signatures seen within the window, so each is accepted once.
-fn seen() -> &'static Mutex<HashMap<String, i64>> {
-    static SEEN: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
-    SEEN.get_or_init(|| Mutex::new(HashMap::new()))
+/// Nonces of accepted signatures, oldest first, so expiry pops from the
+/// front instead of scanning every entry on each call.
+#[derive(Default)]
+struct Seen {
+    order: std::collections::VecDeque<(i64, String)>,
+    set: std::collections::HashSet<String>,
+}
+
+fn seen() -> &'static Mutex<Seen> {
+    static SEEN: OnceLock<Mutex<Seen>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(Seen::default()))
 }
 
 fn mac(key: &[u8], parts: &[&[u8]]) -> String {
@@ -1154,10 +1162,20 @@ pub fn verify(me: &str, header: &str, payload: &[u8]) -> Result<(), &'static str
     let (_, rest) = header.split_once('.').ok_or("malformed signature")?;
     let (nonce, _) = rest.split_once('.').ok_or("malformed signature")?;
     let mut seen = seen().lock().unwrap();
-    seen.retain(|_, at| now.abs_diff(*at) <= CALL_WINDOW_MS as u64 * 2);
-    if seen.insert(nonce.to_string(), now).is_some() {
+    // A signature is valid for CALL_WINDOW_MS either side of now; its nonce
+    // is kept twice that long.
+    while seen
+        .order
+        .front()
+        .is_some_and(|(at, _)| now.saturating_sub(*at) > CALL_WINDOW_MS * 2)
+    {
+        let (_, old) = seen.order.pop_front().expect("checked");
+        seen.set.remove(&old);
+    }
+    if !seen.set.insert(nonce.to_string()) {
         return Err("signature already used");
     }
+    seen.order.push_back((now, nonce.to_string()));
     Ok(())
 }
 
@@ -1193,15 +1211,30 @@ fn verify_with(
     }
 }
 
-/// Run `op` on machine `to` at `address`.
-pub fn call(to: &str, address: &str, op: &RemoteOp) -> Result<RemoteReply, String> {
-    let body = serde_json::to_vec(op).map_err(|e| e.to_string())?;
-    let signature = sign(to, &body).ok_or("this machine is not in the shard directory")?;
-    let agent = ureq::AgentBuilder::new()
+/// The HTTP agent machine-to-machine calls use: 3 s to connect, 15 s in
+/// all, no redirects. One agent keeps its connections for reuse.
+pub fn call_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(3))
         .timeout(Duration::from_secs(15))
         .redirects(0)
-        .build();
+        .build()
+}
+
+/// Run `op` on machine `to` at `address`.
+pub fn call(to: &str, address: &str, op: &RemoteOp) -> Result<RemoteReply, String> {
+    call_with(&call_agent(), to, address, op)
+}
+
+/// [`call`] with a given agent (see [`call_agent`]).
+pub fn call_with(
+    agent: &ureq::Agent,
+    to: &str,
+    address: &str,
+    op: &RemoteOp,
+) -> Result<RemoteReply, String> {
+    let body = serde_json::to_vec(op).map_err(|e| e.to_string())?;
+    let signature = sign(to, &body).ok_or("this machine is not in the shard directory")?;
     let url = format!("{address}/_pylon/shards/op");
     let response = agent
         .post(&url)

@@ -1857,6 +1857,10 @@ fn messages_cross_machines_on_the_cluster_bus() {
     input(&h1, "west", "p1", json!("join")).unwrap();
     input(&h1, "west", "p1", json!({ "shout": { "text": "to all" } })).unwrap();
     wait_heard(&q, |h| h.iter().any(|m| m == "west> p1: to all"));
+    // Exactly once: the bus does not echo it back or deliver it twice.
+    assert!(!heard_within(&q, 400, |h| {
+        h.iter().filter(|m| *m == "west> p1: to all").count() > 1
+    }));
     // Groups are per machine: the bus carries the message, and the machine
     // that runs a member delivers it.
     input(
@@ -1875,4 +1879,94 @@ fn messages_cross_machines_on_the_cluster_bus() {
     )
     .unwrap();
     wait_heard(&q, |h| h.iter().any(|m| m == "west> p1: direct"));
+}
+
+/// On a cluster without a bus: a machine that cannot be reached does not
+/// hold up delivery on this one, and a message another machine sends
+/// (the signed Deliver call) reaches the shard it names.
+#[test]
+fn a_dead_machine_does_not_hold_up_messages_and_deliver_reaches_a_shard() {
+    use pylon_runtime::shard_cluster::{MachineConfig, PgShardDirectory, RemoteOp, RemoteReply};
+    let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+    let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+        eprintln!("skipping: PYLON_TEST_PG_URL not set");
+        return;
+    };
+    let pool = pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5))
+        .expect("test Postgres pool");
+    let run = format!("{:x}", rand::random::<u32>());
+    let machine = format!("mm-{run}");
+    let host = zone_host();
+    host.attach_cluster(
+        PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+        MachineConfig {
+            id: machine.clone(),
+            address: None,
+            capacity: 10,
+            fly_instance: None,
+        },
+    );
+    // A machine that looks live but answers nothing.
+    pool.with_client_once(|c| {
+        c.execute(
+            "INSERT INTO _pylon_shard_machines (machine_id, address, capacity, heartbeat_at, epoch)
+             VALUES ($1, 'http://10.255.255.1:9', 10,
+                     (extract(epoch from clock_timestamp()) * 1000)::bigint + 60000, 1)",
+            &[&format!("dead-{run}")],
+        )
+    })
+    .unwrap();
+    let (a, b) = (format!("ma-{run}"), format!("mb-{run}"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while host
+        .create_on("zone", &a, &json!({}), Some(&machine))
+        .is_err()
+    {
+        assert!(Instant::now() < deadline, "no lease");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    host.create_on("zone", &b, &json!({}), Some(&machine))
+        .unwrap();
+    let q = subscribe(&host, &b, "watch");
+    wait_heard(&q, |_| true);
+
+    // 200 messages to all: every one is for the dead machine too.
+    let started = Instant::now();
+    for i in 0..200 {
+        host.publish("all", "shout", format!("\"n{i}\"").as_bytes())
+            .unwrap();
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "publishing waited on the dead machine: {:?}",
+        started.elapsed()
+    );
+    wait_heard(&q, |h| h.iter().any(|m| m == r#"> "n199""#));
+
+    // Another machine's Deliver call.
+    let reply = host.run_remote(RemoteOp::Deliver {
+        from: "elsewhere".into(),
+        to: format!("shard:{b}"),
+        topic: "shout".into(),
+        data_b64: base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            "hello from afar",
+        ),
+    });
+    assert!(
+        matches!(reply, RemoteReply::Ok(ref n) if n == &json!(1)),
+        "{reply:?}"
+    );
+    wait_heard(&q, |h| h.iter().any(|m| m == "elsewhere> hello from afar"));
+
+    host.stop(&a);
+    host.stop(&b);
+    host.stop_all();
+    pool.with_client_once(|c| {
+        c.execute(
+            "DELETE FROM _pylon_shard_machines WHERE machine_id = $1",
+            &[&format!("dead-{run}")],
+        )
+    })
+    .unwrap();
 }

@@ -796,7 +796,23 @@ pub mod __rt {
             let s = self.state();
             let shard = shard(&mut s.shard);
             let groups = shard.groups();
-            let messages = shard.outbox();
+            // The host's limits: past them a message is dropped here, with
+            // a log line, rather than sent.
+            let mut messages = shard.outbox();
+            let before = messages.len();
+            messages.retain(|m| {
+                !m.topic.is_empty() && m.topic.len() <= 128 && m.data.len() <= 64 * 1024
+            });
+            messages.truncate(64);
+            if messages.len() < before {
+                log(
+                    Level::Warn,
+                    &format!(
+                        "{} message(s) dropped: at most 64 a tick, topics of 1 to 128 bytes, data up to 64 KB",
+                        before - messages.len()
+                    ),
+                );
+            }
             let changed = s.groups_sent.as_ref() != Some(&groups);
             if !changed && messages.is_empty() {
                 return NONE;

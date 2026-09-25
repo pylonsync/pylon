@@ -91,6 +91,10 @@ impl RelayBus {
 }
 
 impl ClusterBus for RelayBus {
+    fn try_publish(&self, envelope: &Envelope) -> bool {
+        self.sender.try_send(envelope.clone()).is_ok()
+    }
+
     fn publish(&self, envelope: &Envelope) {
         // Apply backpressure when the relay is unavailable. Dropping a committed
         // change would leave peer machines stale until a client reconciles.

@@ -189,6 +189,7 @@ grep -q "moved to shard east-" "$TMP/a.log" || fail "a did not log the transfer"
 echo "→ 2d. messages: a zone on a shouts, a zone on b hears it"
 (cd "$ROOT/packages/realtime" &&
 	PYLON_SHARD_MESSAGES_E2E="127.0.0.1:$PORT_A,127.0.0.1:$PORT_B" \
+		PYLON_SHARD_ADMIN_TOKEN="$ADMIN_TOKEN" \
 		bun test src/shard-messages.e2e.test.ts) || fail "the messages e2e test failed"
 
 echo "→ 3. e2e: create on b through a, connect through a, kill b"

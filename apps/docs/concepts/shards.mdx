@@ -536,9 +536,12 @@ self.to_send.push(Outgoing {
 ```
 
 A server function sends with `ctx.shards.publish`; the data arrives as
-JSON bytes, with an empty sender:
+JSON bytes, with an empty sender. A module cannot tell who called the
+function, so check the caller there (an admin or GM role) before
+publishing a command:
 
 ```ts
+if (!ctx.auth.isAdmin) throw ctx.error("FORBIDDEN", "GMs only");
 await ctx.shards.publish("all", "gm", { command: "restart", inSecs: 300 });
 ```
 
@@ -547,9 +550,11 @@ one (`PYLON_CLUSTER_BUS`), else as a signed call to each live machine.
 
 Delivery is at most once. A message is dropped, with no notice, when its
 shard is stopped, when the shard already holds 1024 messages for
-its next tick, or when a machine cannot be reached. A sender never gets
-its own message. Limits: 64 messages per tick, topics of 1 to 128 bytes,
-data up to 64 KB, 64 groups per shard.
+its next ticks, or when a machine cannot be reached or is behind. A
+sender never gets its own message. A shard applies at most 64 messages a
+tick; more wait for the next ones. Limits: 64 messages sent per tick,
+topics of 1 to 128 bytes, data up to 64 KB, 64 groups per shard; a
+message over a limit is dropped with a log line.
 
 ## Load test
 

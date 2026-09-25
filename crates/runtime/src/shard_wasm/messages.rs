@@ -6,11 +6,13 @@
 //! each module's `groups`), or to every shard (`all`), on any machine. The
 //! receiving module's `on_message` runs at the start of its next tick.
 //!
-//! Between machines a message travels on the cluster bus when the app has
-//! one (`PYLON_CLUSTER_BUS`), else as a signed call to each live machine in
-//! the shard directory. Delivery is at most once: a message to a shard that
-//! is stopped, whose queue is full, or on a machine that cannot be reached,
-//! is dropped, and no one is told.
+//! Shards on this machine get a message at once. For other machines it
+//! goes on the cluster bus when the app has one (`PYLON_CLUSTER_BUS`), else
+//! as a signed call to each live machine in the shard directory, each
+//! machine through its own worker and queue, so a slow machine only delays
+//! its own messages. Delivery is at most once: a message to a shard that is
+//! stopped, whose queue is full, or on a machine that cannot be reached or
+//! is behind, is dropped, and no one is told.
 
 use std::sync::Arc;
 
@@ -24,6 +26,10 @@ use crate::shard_cluster::{self, RemoteOp};
 pub(super) const BUS_KIND: &str = "shard-message";
 /// Messages waiting for the routing thread.
 pub(super) const ROUTE_QUEUE: usize = 4096;
+/// Messages waiting for one other machine.
+const PEER_QUEUE: usize = 1024;
+/// How long the list of live machines, and where a shard runs, are reused.
+const PEER_CACHE: std::time::Duration = std::time::Duration::from_secs(2);
 /// Limits on what a module or a function sends.
 const MAX_MESSAGES_PER_TICK: usize = 64;
 const MAX_TOPIC: usize = 128;
@@ -88,7 +94,7 @@ impl std::fmt::Display for MessageError {
 
 impl std::error::Error for MessageError {}
 
-/// One message to route.
+/// One message for other machines.
 #[derive(Debug, Clone)]
 pub(super) struct Routed {
     pub(super) from: String,
@@ -104,10 +110,14 @@ pub struct Outbox {
     pub groups: Option<Vec<String>>,
     /// (target, topic, data)
     pub messages: Vec<(String, String, Vec<u8>)>,
+    /// Messages dropped for breaking a limit.
+    pub dropped: usize,
 }
 
 impl Outbox {
-    /// Parse the outbox format (see the guest SDK's ABI docs).
+    /// Parse the outbox format (see the guest SDK's ABI docs). Only a
+    /// malformed frame is an error; a message over a limit, or past the
+    /// first [`MAX_MESSAGES_PER_TICK`], is dropped and counted.
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         let mut at = 0usize;
         let mut take = |n: usize| -> Result<&[u8], String> {
@@ -119,53 +129,58 @@ impl Outbox {
         };
         let u16_at = |b: &[u8]| u16::from_le_bytes([b[0], b[1]]) as usize;
         let u32_at = |b: &[u8]| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize;
-        let text = |b: &[u8]| -> Result<String, String> {
-            String::from_utf8(b.to_vec()).map_err(|_| "a name is not UTF-8".to_string())
-        };
+        let mut dropped = 0usize;
         let groups = match take(1)?[0] {
             0 => None,
             1 => {
                 let n = u16_at(take(2)?);
-                if n > MAX_GROUPS {
-                    return Err(format!("more than {MAX_GROUPS} groups"));
-                }
-                let mut groups = Vec::with_capacity(n);
+                let mut groups = Vec::new();
                 for _ in 0..n {
                     let len = u16_at(take(2)?);
-                    if len == 0 || len > MAX_GROUP {
-                        return Err(format!("a group name is 1 to {MAX_GROUP} bytes"));
+                    let name = take(len)?;
+                    match std::str::from_utf8(name) {
+                        Ok(g)
+                            if !g.is_empty()
+                                && g.len() <= MAX_GROUP
+                                && groups.len() < MAX_GROUPS =>
+                        {
+                            groups.push(g.to_string())
+                        }
+                        _ => dropped += 1,
                     }
-                    groups.push(text(take(len)?)?);
                 }
                 Some(groups)
             }
             other => return Err(format!("groups flag {other}")),
         };
         let count = u32_at(take(4)?);
-        if count > MAX_MESSAGES_PER_TICK {
-            return Err(format!(
-                "{count} messages in one tick; at most {MAX_MESSAGES_PER_TICK}"
-            ));
-        }
-        let mut messages = Vec::with_capacity(count);
+        let mut messages = Vec::new();
         for _ in 0..count {
             let len = u16_at(take(2)?);
-            let target = text(take(len)?)?;
+            let target = take(len)?;
             let len = u16_at(take(2)?);
-            if len > MAX_TOPIC {
-                return Err(format!("a topic is at most {MAX_TOPIC} bytes"));
-            }
-            let topic = text(take(len)?)?;
+            let topic = take(len)?;
             let len = u32_at(take(4)?);
-            if len > MAX_DATA {
-                return Err(format!("a message is at most {MAX_DATA} bytes"));
+            let data = take(len)?;
+            let fits = messages.len() < MAX_MESSAGES_PER_TICK
+                && !topic.is_empty()
+                && topic.len() <= MAX_TOPIC
+                && data.len() <= MAX_DATA;
+            match (std::str::from_utf8(target), std::str::from_utf8(topic)) {
+                (Ok(target), Ok(topic)) if fits => {
+                    messages.push((target.to_string(), topic.to_string(), data.to_vec()))
+                }
+                _ => dropped += 1,
             }
-            messages.push((target, topic, take(len)?.to_vec()));
         }
         if at != bytes.len() {
             return Err("bytes after the last message".into());
         }
-        Ok(Outbox { groups, messages })
+        Ok(Outbox {
+            groups,
+            messages,
+            dropped,
+        })
     }
 }
 
@@ -181,13 +196,22 @@ fn check(topic: &str, data: &[u8]) -> Result<(), MessageError> {
     Ok(())
 }
 
+/// Other machines, as the routing thread last read them.
+#[derive(Default)]
+pub(super) struct PeerCache {
+    /// Live machines other than this one: (id, address), and when read.
+    machines: Option<(std::time::Instant, Vec<(String, String)>)>,
+    /// Where a shard runs: its machine and address, or none; and when read.
+    located: std::collections::HashMap<String, (std::time::Instant, Option<(String, String)>)>,
+}
+
 impl WasmShardHost {
     /// Send a message from a server function (`from` is empty) to `to`.
-    /// Returns once it is queued; delivery is at most once.
+    /// Shards here have it when this returns; delivery is at most once.
     pub fn publish(&self, to: &str, topic: &str, data: &[u8]) -> Result<(), MessageError> {
         let to = Target::parse(to)?;
         check(topic, data)?;
-        self.queue_message(Routed {
+        self.send_message(Routed {
             from: String::new(),
             to,
             topic: topic.to_string(),
@@ -197,15 +221,21 @@ impl WasmShardHost {
     }
 
     /// Take a module's outbox (from its tick hook): record its groups and
-    /// queue its messages. A message with a bad target is dropped with a
-    /// log line.
+    /// send its messages. A message with a bad target is dropped with a log
+    /// line.
     pub(super) fn take_outbox(&self, from: &str, outbox: Outbox) {
         if let Some(groups) = outbox.groups {
             self.groups.lock().unwrap().insert(from.to_string(), groups);
         }
+        if outbox.dropped > 0 {
+            tracing::warn!(
+                "[shard {from}] {} message(s) or group(s) over a limit dropped",
+                outbox.dropped
+            );
+        }
         for (to, topic, data) in outbox.messages {
-            match Target::parse(&to).and_then(|t| check(&topic, &data).map(|()| t)) {
-                Ok(to) => self.queue_message(Routed {
+            match Target::parse(&to) {
+                Ok(to) => self.send_message(Routed {
                     from: from.to_string(),
                     to,
                     topic,
@@ -216,17 +246,18 @@ impl WasmShardHost {
         }
     }
 
-    fn queue_message(&self, m: Routed) {
-        if self.outgoing.try_send(m).is_err() {
-            tracing::warn!("[shards] too many messages waiting; one dropped");
-        }
-    }
-
-    /// Deliver `m` to the shards here it is for, then pass it to the other
-    /// machines (from the routing thread).
-    pub(super) fn route(&self, m: &Routed) {
+    /// Deliver to the shards here now; queue the message for other machines
+    /// when it may be for one.
+    fn send_message(&self, m: Routed) {
         self.deliver_local(&m.from, &m.to, &m.topic, &m.data);
-        self.forward(m);
+        let local_shard = matches!(&m.to, Target::Shard(id) if self.registry.get(id).is_some());
+        let others = self.bus.get().is_some_and(|b| b.is_active()) || self.cluster.get().is_some();
+        if local_shard || !others {
+            return;
+        }
+        if self.outgoing.try_send(m).is_err() {
+            tracing::warn!("[shards] too many messages waiting for other machines; one dropped");
+        }
     }
 
     /// Queue `topic`/`data` for each shard here that `to` names, except the
@@ -272,13 +303,13 @@ impl WasmShardHost {
         delivered
     }
 
-    /// Pass `m` to the other machines: on the cluster bus when there is
-    /// one, else a signed call to each live machine that may run a shard it
-    /// names.
-    fn forward(&self, m: &Routed) {
+    /// Pass `m` to the other machines (from the routing thread): on the
+    /// cluster bus when there is one, else to each live machine that may
+    /// run a shard it names, through that machine's worker.
+    pub(super) fn forward(&self, m: &Routed) {
         let data_b64 = base64::engine::general_purpose::STANDARD.encode(&m.data);
         if let Some(bus) = self.bus.get().filter(|b| b.is_active()) {
-            bus.publish(&pylon_cluster::Envelope {
+            let sent = bus.try_publish(&pylon_cluster::Envelope {
                 instance_id: bus.instance_id().to_string(),
                 kind: BUS_KIND.to_string(),
                 payload: serde_json::json!({
@@ -288,39 +319,21 @@ impl WasmShardHost {
                     "data_b64": data_b64,
                 }),
             });
+            if !sent {
+                tracing::debug!(
+                    "[shards] message {} dropped: the cluster bus is behind",
+                    m.topic
+                );
+            }
             return;
         }
-        let Some(c) = self.cluster.get() else { return };
-        let machines: Vec<(String, String)> = match &m.to {
-            // The shard is here, or on one machine.
-            Target::Shard(id) => {
-                if self.registry.get(id).is_some() {
-                    return;
-                }
-                match self.locate(id) {
-                    pylon_realtime::ShardLocation::Remote {
-                        machine_id,
-                        address: Some(address),
-                        ..
-                    } => vec![(machine_id, address)],
-                    _ => return,
-                }
-            }
-            _ => match c.dir.live_machines() {
-                Ok(live) => live
-                    .into_iter()
-                    .filter(|m| m.id != c.me.id)
-                    .filter_map(|m| m.address.map(|a| (m.id, a)))
-                    .collect(),
-                Err(e) => {
-                    tracing::warn!(
-                        "[shards] message {} not sent to other machines: {e}",
-                        m.topic
-                    );
-                    return;
-                }
-            },
+        let machines = match &m.to {
+            Target::Shard(id) => self.located(id).into_iter().collect(),
+            _ => self.other_machines(),
         };
+        if machines.is_empty() {
+            return;
+        }
         let op = RemoteOp::Deliver {
             from: m.from.clone(),
             to: m.to.wire(),
@@ -328,12 +341,92 @@ impl WasmShardHost {
             data_b64,
         };
         for (machine, address) in machines {
-            if let Err(e) = shard_cluster::call(&machine, &address, &op) {
-                tracing::debug!(
-                    "[shards] message {} to machine {machine} dropped: {e}",
-                    m.topic
-                );
+            self.to_peer(&machine, &address, op.clone());
+        }
+    }
+
+    /// Live machines other than this one, read at most every 2 s.
+    fn other_machines(&self) -> Vec<(String, String)> {
+        let Some(c) = self.cluster.get() else {
+            return Vec::new();
+        };
+        let mut cache = self.peer_cache.lock().unwrap();
+        if let Some((at, machines)) = &cache.machines {
+            if at.elapsed() < PEER_CACHE {
+                return machines.clone();
             }
+        }
+        let machines: Vec<(String, String)> = match c.dir.live_machines() {
+            Ok(live) => live
+                .into_iter()
+                .filter(|m| m.id != c.me.id)
+                .filter_map(|m| m.address.map(|a| (m.id, a)))
+                .collect(),
+            Err(e) => {
+                tracing::warn!("[shards] reading live machines for messages failed: {e}");
+                Vec::new()
+            }
+        };
+        cache.machines = Some((std::time::Instant::now(), machines.clone()));
+        machines
+    }
+
+    /// The other machine that runs shard `id`, read at most every 2 s.
+    fn located(&self, id: &str) -> Option<(String, String)> {
+        {
+            let cache = self.peer_cache.lock().unwrap();
+            if let Some((at, found)) = cache.located.get(id) {
+                if at.elapsed() < PEER_CACHE {
+                    return found.clone();
+                }
+            }
+        }
+        let found = match self.locate(id) {
+            pylon_realtime::ShardLocation::Remote {
+                machine_id,
+                address: Some(address),
+                ..
+            } => Some((machine_id, address)),
+            _ => None,
+        };
+        let mut cache = self.peer_cache.lock().unwrap();
+        let now = std::time::Instant::now();
+        cache
+            .located
+            .retain(|_, (at, _)| now.duration_since(*at) < PEER_CACHE);
+        cache.located.insert(id.to_string(), (now, found.clone()));
+        found
+    }
+
+    /// Queue `op` for `machine`'s worker, starting one the first time. A
+    /// full queue drops the message: that machine is slow or gone.
+    fn to_peer(&self, machine: &str, address: &str, op: RemoteOp) {
+        let mut peers = self.peers.lock().unwrap();
+        let tx = peers
+            .entry(machine.to_string())
+            .or_insert_with(|| {
+                let (tx, rx) = std::sync::mpsc::sync_channel::<RemoteOp>(PEER_QUEUE);
+                let (machine, address) = (machine.to_string(), address.to_string());
+                let _ = std::thread::Builder::new()
+                    .name(format!("pylon-shard-peer-{machine}"))
+                    .spawn(move || {
+                        let agent = shard_cluster::call_agent();
+                        while let Ok(op) = rx.recv() {
+                            if let Err(e) =
+                                shard_cluster::call_with(&agent, &machine, &address, &op)
+                            {
+                                tracing::debug!(
+                                    "[shards] message to machine {machine} dropped: {e}"
+                                );
+                            }
+                        }
+                    });
+                tx
+            })
+            .clone();
+        drop(peers);
+        if tx.try_send(op).is_err() {
+            tracing::debug!("[shards] message to machine {machine} dropped: it is behind");
         }
     }
 
@@ -386,7 +479,7 @@ impl WasmShardHost {
         let _ = self.bus.set(bus);
     }
 
-    /// Route queued messages, one at a time, until the host goes away.
+    /// Pass queued messages to other machines until the host goes away.
     pub(super) fn run_routing(
         weak: std::sync::Weak<Self>,
         queue: std::sync::mpsc::Receiver<Routed>,
@@ -396,7 +489,7 @@ impl WasmShardHost {
             if host.stopped.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
-            host.route(&m);
+            host.forward(&m);
         }
     }
 
@@ -436,8 +529,9 @@ mod tests {
     }
 
     #[test]
-    fn an_outbox_parses_and_bad_ones_are_refused() {
+    fn an_outbox_parses_drops_messages_over_a_limit_and_refuses_bad_frames() {
         let ok = Outbox::parse(&outbox(Some(&["north"]), &[("all", "relic", b"taken")])).unwrap();
+        assert_eq!(ok.dropped, 0);
         assert_eq!(ok.groups, Some(vec!["north".to_string()]));
         assert_eq!(
             ok.messages,
@@ -451,12 +545,26 @@ mod tests {
         let mut extra = outbox(None, &[]);
         extra.push(0);
         assert!(Outbox::parse(&extra).is_err());
+        // Over a limit: that message is dropped and counted; the rest stay.
         let big = vec![0u8; MAX_DATA + 1];
-        assert!(Outbox::parse(&outbox(None, &[("all", "t", &big)])).is_err());
-        let many: Vec<(&str, &str, &[u8])> = (0..=MAX_MESSAGES_PER_TICK)
+        let over =
+            Outbox::parse(&outbox(None, &[("all", "t", &big), ("all", "ok", b"1")])).unwrap();
+        assert_eq!((over.messages.len(), over.dropped), (1, 1));
+        let long_topic = "t".repeat(MAX_TOPIC + 1);
+        let over = Outbox::parse(&outbox(
+            None,
+            &[("all", &long_topic, b""), ("all", "", b"")],
+        ))
+        .unwrap();
+        assert_eq!((over.messages.len(), over.dropped), (0, 2));
+        let many: Vec<(&str, &str, &[u8])> = (0..MAX_MESSAGES_PER_TICK + 3)
             .map(|_| ("all", "t", &b""[..]))
             .collect();
-        assert!(Outbox::parse(&outbox(None, &many)).is_err());
+        let capped = Outbox::parse(&outbox(None, &many)).unwrap();
+        assert_eq!(
+            (capped.messages.len(), capped.dropped),
+            (MAX_MESSAGES_PER_TICK, 3)
+        );
         // A length past the end, or a huge count, is an error, not a panic.
         assert!(Outbox::parse(&[0, 1, 0, 0, 0, 0xff, 0xff]).is_err());
         assert!(Outbox::parse(&[0, 0xff, 0xff, 0xff, 0xff]).is_err());
