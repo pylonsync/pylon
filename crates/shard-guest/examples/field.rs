@@ -35,12 +35,18 @@ struct Params {
 enum Input {
     Hp(u64, u8),
     Despawn(u64),
+    /// Start over with a new store: `n` units, shifted 1000 units right.
+    Reset(u64),
+    /// Spawn `n` more units.
+    Flood(u64),
 }
 
 struct Field {
     store: Replicated,
     t: f32,
     radius: Option<f32>,
+    /// Added to every unit's x (a reset moves the field).
+    shift: f32,
 }
 
 impl Shard for Field {
@@ -58,6 +64,7 @@ impl Shard for Field {
             store,
             t: 0.0,
             radius: params.radius,
+            shift: 0.0,
         })
     }
 
@@ -71,6 +78,21 @@ impl Shard for Field {
             Input::Despawn(id) => {
                 self.store.despawn(id);
             }
+            Input::Reset(n) => {
+                let mut store = Replicated::new();
+                for id in 0..n {
+                    store.spawn(id, [1000.0 + id as f32 * 3.0, 0.0, 0.0]);
+                    store.set_component(id, HP, &[50]);
+                }
+                self.store = store;
+                self.shift = 1000.0;
+            }
+            Input::Flood(n) => {
+                let start = self.store.iter().map(|(id, _)| id + 1).max().unwrap_or(0);
+                for id in start..start + n {
+                    self.store.spawn(id, [0.0; 3]);
+                }
+            }
         }
         Ok(())
     }
@@ -80,7 +102,7 @@ impl Shard for Field {
         let ids: Vec<u64> = self.store.iter().map(|(id, _)| id).collect();
         for id in ids {
             let a = self.t + id as f32;
-            let base = id as f32 * 3.0;
+            let base = self.shift + id as f32 * 3.0;
             self.store
                 .set_pos(id, [base + a.cos() * 2.0, a.sin() * 2.0, 0.0]);
         }

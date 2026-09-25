@@ -9,7 +9,7 @@ import {
   decodeShardRejection,
   encodeShardInput,
   parseShardFrame,
-} from "./shardWire";
+} from "./wire";
 
 function frame(kind: number, codec: number, tick: number, ack: number, payload: Uint8Array) {
   const buf = new ArrayBuffer(SHARD_HEADER_LEN + payload.length);

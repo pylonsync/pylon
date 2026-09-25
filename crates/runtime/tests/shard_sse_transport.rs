@@ -308,3 +308,69 @@ fn shard_websockets_are_served_on_the_main_port_at_slash_shard() {
     );
     drop(conns);
 }
+
+/// A shard that replicates entities: binary frames only.
+struct Field {
+    store: pylon_realtime::Replicated,
+}
+
+impl SimState for Field {
+    type Input = i64;
+    type Snapshot = ();
+    type Error = String;
+    fn apply_input(&mut self, _s: &SubscriberId, _i: i64, _now: Instant) -> Result<(), String> {
+        Ok(())
+    }
+    fn tick(&mut self, _dt: Duration) {}
+    fn snapshot(&self) {}
+    fn replicated(&self) -> Option<pylon_realtime::ReplicatedRef<'_>> {
+        Some((&self.store).into())
+    }
+}
+
+#[test]
+fn sse_refuses_a_shard_that_replicates_entities() {
+    unsafe {
+        std::env::set_var("PYLON_DEV_MODE", "1");
+    }
+    let mut store = pylon_realtime::Replicated::new();
+    store.spawn(1, [0.0; 3]);
+    let registry: Arc<ShardRegistry<Field>> = Arc::new(ShardRegistry::new());
+    registry.insert(Shard::new(
+        "field",
+        Field { store },
+        ShardConfig {
+            idle_ticks_before_shutdown: 0,
+            ..Default::default()
+        },
+    ));
+    let port = available_port();
+    let rt = Arc::new(
+        Runtime::in_memory(AppManifest {
+            manifest_version: 1,
+            name: "shards".into(),
+            version: "0".into(),
+            ..Default::default()
+        })
+        .unwrap(),
+    );
+    let dyn_registry: Arc<dyn DynShardRegistry> = registry;
+    std::thread::spawn(move || {
+        let _ = pylon_runtime::server::start_with_shards(rt, port, None, dyn_registry);
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline, "server never bound {port}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (token, id) = guest(port);
+    let (status, body) = http(
+        port,
+        "GET",
+        &format!("/api/shards/field/connect?sid={id}"),
+        Some(&token),
+        "",
+    );
+    assert_eq!(status, 406, "{body}");
+    assert!(body.contains("SHARD_CODEC_NOT_SSE"), "{body}");
+}

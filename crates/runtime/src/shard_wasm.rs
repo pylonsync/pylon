@@ -105,6 +105,9 @@ pub struct WasmLimits {
     /// Stop a shard that has had no subscribers for this long. Zero never
     /// stops it.
     pub idle_shutdown: Duration,
+    /// Entities the host's copy of a replicating module's store may hold.
+    /// The module's memory cap does not cover that copy.
+    pub max_replicated_entities: usize,
 }
 
 impl Default for WasmLimits {
@@ -115,6 +118,7 @@ impl Default for WasmLimits {
             max_instances: 64,
             log_lines_per_sec: 20.0,
             idle_shutdown: Duration::from_secs(90),
+            max_replicated_entities: 100_000,
         }
     }
 }
@@ -342,6 +346,7 @@ impl WasmShardKind {
             inner: RefCell::new(inner),
             mirror: RefCell::new(Replicated::new()),
             replication: std::cell::Cell::new(None),
+            limits: self.limits.clone(),
         })
     }
 }
@@ -655,6 +660,7 @@ pub struct WasmSim {
     /// The module's last replication settings; None when it does not
     /// replicate.
     replication: std::cell::Cell<Option<ReplicationConfig>>,
+    limits: WasmLimits,
 }
 
 impl WasmSim {
@@ -969,10 +975,25 @@ impl SimState for WasmSim {
         }));
         let mut mirror = self.mirror.borrow_mut();
         if flags & 2 != 0 {
-            *mirror = Replicated::new();
+            // A full dump replaces everything. `clear` keeps the change
+            // counter running, so entities it re-creates read as new to
+            // every subscriber's baseline.
+            mirror.clear();
         }
         if let Err(e) = mirror.apply_changes(&out[9..]) {
             inner.fail(&format!("pylon_replication sent a bad change log: {e}"));
+        } else if mirror.len() > self.limits.max_replicated_entities
+            || mirror.component_bytes() > self.limits.memory_bytes
+        {
+            // The copy lives in host memory, outside the module's cap.
+            inner.fail(&format!(
+                "the replicated store passed its limit ({} entities, {} component bytes; at most {} and {})",
+                mirror.len(),
+                mirror.component_bytes(),
+                self.limits.max_replicated_entities,
+                self.limits.memory_bytes
+            ));
+            mirror.clear();
         }
         drop(mirror);
         drop(inner);

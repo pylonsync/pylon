@@ -28,7 +28,7 @@ echo "→ build local package types"
 # Each package's `types` points at dist/, so the overlay below needs a
 # fresh build or the scaffold typechecks against src (which needs dev
 # types the app does not install).
-for pkg in sdk sync react functions; do
+for pkg in sdk sync realtime react functions; do
 	(cd "$ROOT/packages/$pkg" && bun run build >/dev/null)
 done
 
@@ -68,7 +68,7 @@ echo "→ bun install"
 for app in apps/expo apps/api; do
 	extra_deps="$(node "$ROOT/tools/missing-local-deps.mjs" "$APP/$app" \
 		"$ROOT/packages/react" "$ROOT/packages/react-native" "$ROOT/packages/sdk" \
-		"$ROOT/packages/sync" "$ROOT/packages/functions")"
+		"$ROOT/packages/sync" "$ROOT/packages/functions" "$ROOT/packages/realtime")"
 	if [[ -n "$extra_deps" ]]; then
 		echo "→ $app: add dependencies of the local packages: $(echo $extra_deps)"
 		# shellcheck disable=SC2086 # one argument per line of output
@@ -106,8 +106,20 @@ overlay() {
 	cp "$src/package.json" "$real/package.json"
 	link_extra_deps "$APP/$app/node_modules" "$real" "$src"
 }
+# A local @pylonsync package the overlaid packages depend on but npm does
+# not have yet (added since the last release): copy it into the app.
+vendor_local() {
+	local app_nm="$1" name="$2" src="$3"
+	[[ -e "$app_nm/@pylonsync/$name" ]] && return 0
+	mkdir -p "$app_nm/@pylonsync/$name"
+	cp -R "$src/src" "$src/package.json" "$app_nm/@pylonsync/$name/"
+	if [[ -d "$src/dist" ]]; then cp -R "$src/dist" "$app_nm/@pylonsync/$name/"; fi
+}
+
 echo "→ overlay local @pylonsync packages"
 for app in apps/expo apps/api; do
+	vendor_local "$APP/$app/node_modules" realtime "$ROOT/packages/realtime"
+	overlay "$app" realtime "$ROOT/packages/realtime"
 	overlay "$app" react "$ROOT/packages/react"
 	overlay "$app" react-native "$ROOT/packages/react-native"
 	overlay "$app" sdk "$ROOT/packages/sdk"

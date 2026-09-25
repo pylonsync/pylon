@@ -67,11 +67,29 @@ pub struct Component {
 }
 
 /// The replicated state of a simulation.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Replicated {
     entities: BTreeMap<EntityId, Entity>,
     seq: u64,
     log: Option<Vec<u8>>,
+    /// Bytes held in components.
+    component_bytes: usize,
+    /// Unique per store made in this process, so a WebAssembly module can
+    /// tell when the game swapped in a new store.
+    store_id: u64,
+}
+
+impl Default for Replicated {
+    fn default() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            entities: BTreeMap::new(),
+            seq: 0,
+            log: None,
+            component_bytes: 0,
+            store_id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 mod op {
@@ -110,6 +128,25 @@ impl Replicated {
 
     pub fn is_empty(&self) -> bool {
         self.entities.is_empty()
+    }
+
+    /// Bytes held in components, for limits.
+    pub fn component_bytes(&self) -> usize {
+        self.component_bytes
+    }
+
+    /// This store's process-unique id.
+    pub fn store_id(&self) -> u64 {
+        self.store_id
+    }
+
+    /// Remove every entity but keep the change counter running, so an id
+    /// spawned again afterwards gets a spawn counter no reader has seen and
+    /// reads as a new entity.
+    pub fn clear(&mut self) {
+        self.entities.clear();
+        self.component_bytes = 0;
+        self.bump();
     }
 
     pub fn get(&self, id: EntityId) -> Option<&Entity> {
@@ -157,9 +194,14 @@ impl Replicated {
 
     /// Remove an entity. Returns false when there was none.
     pub fn despawn(&mut self, id: EntityId) -> bool {
-        if self.entities.remove(&id).is_none() {
+        let Some(e) = self.entities.remove(&id) else {
             return false;
-        }
+        };
+        self.component_bytes -= e
+            .components
+            .values()
+            .map(|c| c.bytes.as_ref().map_or(0, Vec::len))
+            .sum::<usize>();
         self.bump();
         if let Some(log) = &mut self.log {
             log.push(op::DESPAWN);
@@ -199,7 +241,7 @@ impl Replicated {
         }
         let seq = self.bump();
         let e = self.entities.get_mut(&id).expect("checked above");
-        e.components.insert(
+        let old = e.components.insert(
             component,
             Component {
                 bytes: Some(bytes.to_vec()),
@@ -207,6 +249,8 @@ impl Replicated {
             },
         );
         e.seq = seq;
+        self.component_bytes += bytes.len();
+        self.component_bytes -= old.and_then(|c| c.bytes).map_or(0, |b| b.len());
         if let Some(log) = &mut self.log {
             log.push(op::SET);
             varint::write_u64(log, id);
@@ -229,9 +273,11 @@ impl Replicated {
         }
         let seq = self.bump();
         let e = self.entities.get_mut(&id).expect("checked above");
-        e.components
+        let old = e
+            .components
             .insert(component, Component { bytes: None, seq });
         e.seq = seq;
+        self.component_bytes -= old.and_then(|c| c.bytes).map_or(0, |b| b.len());
         if let Some(log) = &mut self.log {
             log.push(op::REMOVE);
             varint::write_u64(log, id);
@@ -409,6 +455,32 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(view(&a), view(&b));
+    }
+
+    #[test]
+    fn component_bytes_track_sets_removals_and_despawns() {
+        let mut r = Replicated::new();
+        r.spawn(1, [0.0; 3]);
+        r.set_component(1, 1, &[0; 10]);
+        r.set_component(1, 2, &[0; 5]);
+        assert_eq!(r.component_bytes(), 15);
+        r.set_component(1, 1, &[0; 3]);
+        assert_eq!(r.component_bytes(), 8);
+        r.remove_component(1, 2);
+        assert_eq!(r.component_bytes(), 3);
+        r.despawn(1);
+        assert_eq!(r.component_bytes(), 0);
+    }
+
+    #[test]
+    fn clear_keeps_the_counter_so_a_respawned_id_is_new() {
+        let mut r = Replicated::new();
+        r.spawn(7, [0.0; 3]);
+        let first = r.get(7).unwrap().spawn_seq;
+        r.clear();
+        r.spawn(7, [0.0; 3]);
+        assert!(r.get(7).unwrap().spawn_seq > first);
+        assert_ne!(Replicated::new().store_id(), Replicated::new().store_id());
     }
 
     #[test]

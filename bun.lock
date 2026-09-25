@@ -632,7 +632,7 @@
       "name": "@pylonsync/react",
       "version": "0.13.0",
       "dependencies": {
-        "@msgpack/msgpack": "^3.1.3",
+        "@pylonsync/realtime": "workspace:*",
         "@pylonsync/sdk": "workspace:*",
         "@pylonsync/sync": "workspace:*",
       },
@@ -663,6 +663,13 @@
         "@react-native-community/netinfo": ">=9.0",
         "react": ">=19",
         "react-native": ">=0.74",
+      },
+    },
+    "packages/realtime": {
+      "name": "@pylonsync/realtime",
+      "version": "0.13.0",
+      "dependencies": {
+        "@msgpack/msgpack": "^3.1.3",
       },
     },
     "packages/sdk": {
@@ -986,6 +993,8 @@
     "@pylonsync/react": ["@pylonsync/react@workspace:packages/react"],
 
     "@pylonsync/react-native": ["@pylonsync/react-native@workspace:packages/react-native"],
+
+    "@pylonsync/realtime": ["@pylonsync/realtime@workspace:packages/realtime"],
 
     "@pylonsync/revenuecat": ["@pylonsync/revenuecat@workspace:packages/plugins/revenuecat"],
 

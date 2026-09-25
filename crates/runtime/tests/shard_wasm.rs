@@ -855,7 +855,7 @@ fn a_wasm_shard_replicates_its_store_with_interest_and_stealth() {
 }
 
 #[test]
-fn a_wasm_replicating_shard_refuses_sse_and_sends_a_baseline_to_a_reconnect() {
+fn a_wasm_replicating_shard_sends_a_baseline_to_a_reconnect() {
     let s = field(json!({ "units": 5 }));
     let q = join(&s, "u1");
     let mut t = pylon_realtime::ReplicaTable::new();
@@ -870,4 +870,57 @@ fn a_wasm_replicating_shard_refuses_sse_and_sends_a_baseline_to_a_reconnect() {
     s.run_tick();
     assert!(apply_all(&again, &mut fresh));
     assert_eq!(fresh.entities.len(), 4);
+}
+
+#[test]
+fn a_guest_that_swaps_in_a_new_store_resends_everything() {
+    let s = field(json!({ "units": 5 }));
+    let q = join(&s, "u1");
+    let mut t = pylon_realtime::ReplicaTable::new();
+    s.run_tick();
+    apply_all(&q, &mut t);
+    assert_eq!(t.entities.len(), 4);
+    // Ids 0..3 come back in a new store, at new positions.
+    send(&s, "u1", json!({ "input": { "reset": 3 } })).unwrap();
+    s.run_tick();
+    s.run_tick();
+    apply_all(&q, &mut t);
+    let ids: Vec<u64> = t.entities.keys().copied().collect();
+    assert_eq!(ids, vec![1, 2]); // unit 0 stealthed; 3 and 4 gone
+    for id in [1u64, 2] {
+        let x = t.pos(id).unwrap()[0];
+        // Units walk a circle of radius 2 around their center.
+        assert!(
+            (x - (1000.0 + id as f32 * 3.0)).abs() <= 2.01,
+            "unit {id} at {x}"
+        );
+        assert_eq!(t.entities[&id].components[&1], vec![50]);
+    }
+}
+
+#[test]
+fn a_replicated_store_past_its_limit_stops_the_shard() {
+    let k = WasmShardKind::compile(
+        "field",
+        &guest_wasm("field"),
+        config(SnapshotFormat::Json),
+        WasmLimits {
+            max_replicated_entities: 20,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let s = Shard::new(
+        "f1",
+        k.instantiate("f1", &json!({ "units": 5 })).unwrap(),
+        k.config().clone(),
+    );
+    join(&s, "u1");
+    s.run_tick();
+    assert!(s.is_running());
+    send(&s, "u1", json!({ "input": { "flood": 50 } })).unwrap();
+    s.run_tick();
+    assert!(!s.is_running());
+    let failure = s.with_state(|sim| sim.failure()).unwrap();
+    assert!(failure.contains("passed its limit"), "{failure}");
 }

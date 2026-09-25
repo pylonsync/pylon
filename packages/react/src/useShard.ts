@@ -21,15 +21,17 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  EntityTable,
   SHARD_PROTOCOL_VERSION,
   ShardFrameKind,
   decodeShardPayload,
   decodeShardRejection,
   encodeShardInput,
   parseShardFrame,
+  type ReplicationSummary,
   type ShardInputRejection,
   type ShardPayloadDecoder,
-} from "./shardWire";
+} from "@pylonsync/realtime";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -95,6 +97,13 @@ export interface UseShardReturn<TSnapshot = unknown, TInput = unknown> {
   send: (input: TInput) => number;
   /** Close the connection early. */
   close: () => void;
+  /**
+   * For a shard that replicates entities: the entities this client has
+   * been sent, updated in place. The hook re-renders once per applied frame
+   * (`entitiesVersion` changes); a render loop can read it directly.
+   */
+  entities: EntityTable | null;
+  entitiesVersion: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +115,18 @@ export interface ShardClient<TSnapshot = unknown, TInput = unknown> {
   onSnapshot: (fn: (snapshot: TSnapshot, tick: number, ack: number) => void) => void;
   /** Called when the shard refuses an input (see `ShardInputRejection.code`). */
   onInputRejected: (fn: (rejection: ShardInputRejection) => void) => void;
+  /**
+   * For a shard that replicates entities: called after each frame is
+   * applied to `entities`, with what it changed.
+   */
+  onReplication: (
+    fn: (entities: EntityTable, summary: ReplicationSummary, tick: number, ack: number) => void,
+  ) => void;
+  /**
+   * The entities a replicating shard has sent this client. Read it each
+   * frame (a render loop); it changes in place as frames arrive.
+   */
+  readonly entities: EntityTable;
   onError: (fn: (err: Error) => void) => void;
   onOpen: (fn: () => void) => void;
   onClose: (fn: () => void) => void;
@@ -134,6 +155,10 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
   const snapshotHandlers: Array<(s: TSnapshot, t: number, ack: number) => void> = [];
   const rejectionHandlers: Array<(r: ShardInputRejection) => void> = [];
+  const replicationHandlers: Array<
+    (entities: EntityTable, summary: ReplicationSummary, tick: number, ack: number) => void
+  > = [];
+  const entities = new EntityTable();
   const errorHandlers: Array<(e: Error) => void> = [];
   const openHandlers: Array<() => void> = [];
   const closeHandlers: Array<() => void> = [];
@@ -199,6 +224,22 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       if (!(event.data instanceof ArrayBuffer)) return;
       try {
         const frame = parseShardFrame(event.data);
+        if (frame.kind === ShardFrameKind.Replication) {
+          let summary: ReplicationSummary;
+          try {
+            summary = entities.apply(frame.payload);
+          } catch (e) {
+            // Out of sync with the server. Reconnecting gets a full baseline.
+            dispatchError(e instanceof Error ? e : new Error(String(e)));
+            entities.clear();
+            ws?.close();
+            return;
+          }
+          for (const h of replicationHandlers) h(entities, summary, frame.tick, frame.ack);
+          return;
+        }
+        // The replication codec byte names the frame format, not the
+        // shard's input codec, so only other frames set it.
         codec = frame.codec;
         if (frame.kind === ShardFrameKind.Snapshot) {
           const snapshot = decodeShardPayload(
@@ -242,6 +283,12 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     },
     onInputRejected(fn) {
       rejectionHandlers.push(fn);
+    },
+    onReplication(fn) {
+      replicationHandlers.push(fn);
+    },
+    get entities() {
+      return entities;
     },
     onError(fn) {
       errorHandlers.push(fn);
@@ -293,6 +340,7 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
   const [lastRejection, setLastRejection] = useState<ShardInputRejection | null>(null);
   const [connected, setConnected] = useState<boolean>(false);
   const [error, setError] = useState<Error | null>(null);
+  const [entitiesVersion, setEntitiesVersion] = useState<number>(0);
 
   const clientRef = useRef<ShardClient<TSnapshot, TInput> | null>(null);
 
@@ -318,6 +366,11 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
       setAck(a);
     });
     client.onInputRejected((r) => setLastRejection(r));
+    client.onReplication((_table, _summary, t, a) => {
+      setTick(t);
+      setAck(a);
+      setEntitiesVersion((v) => v + 1);
+    });
     client.onOpen(() => setConnected(true));
     client.onClose(() => setConnected(false));
     client.onError((e) => setError(e));
@@ -338,5 +391,16 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
     if (clientRef.current) clientRef.current.close();
   };
 
-  return { snapshot, tick, ack, lastRejection, connected, error, send, close };
+  return {
+    snapshot,
+    tick,
+    ack,
+    lastRejection,
+    connected,
+    error,
+    send,
+    close,
+    entities: clientRef.current?.entities ?? null,
+    entitiesVersion,
+  };
 }

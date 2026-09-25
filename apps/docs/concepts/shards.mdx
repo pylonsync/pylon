@@ -186,7 +186,91 @@ impl Shard for Zone {
 
 A Rust shard compiled into a custom binary uses the same hooks on
 `SimState`: `interest_config`, `entities`, `interest_area`, `can_see` (or
-`filter_visible`), `snapshot_visible`, and `shares_visible_snapshots`.
+`filter_visible`), `snapshot_visible`, `shares_visible_snapshots`,
+`replicated`, and `replication_config`.
+
+### Replicate entities instead of sending snapshots
+
+A snapshot is the whole visible state every tick. For many moving entities,
+replicate them instead: keep them in a `Replicated` store, and each
+subscriber gets only what changed.
+
+```rust
+use pylon_shard_guest::{Replicated, ReplicationConfig};
+
+const HP: u8 = 1; // component ids are yours to choose
+
+impl Shard for Zone {
+    // ...
+    fn tick(&mut self, dt: Duration) {
+        for unit in &mut self.units {
+            unit.step(dt);
+            self.store.set_pos(unit.id, [unit.x, unit.y, 0.0]);
+        }
+    }
+
+    fn replicated(&mut self) -> Option<&mut Replicated> {
+        Some(&mut self.store)
+    }
+
+    fn replication_config(&self) -> ReplicationConfig {
+        ReplicationConfig { precision: 0.01, max_bytes_per_tick: 900, y_up: false }
+    }
+}
+```
+
+Use the store's methods for every change: `spawn(id, [x, y, z])`,
+`set_pos`, `set_component(id, component, bytes)`, `remove_component`, and
+`despawn`. A change to the same value is not sent.
+
+Each tick, each subscriber gets one frame with:
+
+- **despawn** for entities that left its view or the store,
+- **spawn** with the full state for entities that came into view,
+- **update** for entities in view that changed: only the axes whose
+  position moved (as a difference) and the components that changed or were
+  removed.
+
+The view is the interest view when `interest` returns a config, or every
+entity otherwise. `can_see` still hides entities. `snapshot*` is not used.
+
+| Setting | Meaning |
+| --- | --- |
+| `precision` | Position step in world units. Positions travel as `round(value / precision)`. |
+| `max_bytes_per_tick` | Update budget per subscriber per tick. Spawns and despawns always go; updates go in priority order (the longer since the entity was sent and the nearer it is, the higher). What does not fit is sent later. `0` = no limit. |
+| `y_up` | The ground plane interest management uses: `false` for x/y, `true` for x/z. |
+
+A new connection, and one whose outbound queue dropped frames, gets a full
+frame. Replication needs the shard WebSocket (`/shard`); SSE refuses a
+replicating shard.
+
+For 300 players in one area, all moving, at 20 Hz: about 23 KB/s per
+client with no budget, and 15 KB/s with a 900-byte budget, where a
+client's positions stay within 0.08 units of the server's at p99.
+
+On the client, read the table the frames build:
+
+```ts
+import { connectShard } from "@pylonsync/react";
+
+const client = connectShard(shardId, { subscriberId, ticket });
+client.onReplication((entities, summary) => {
+  for (const id of summary.spawned) addMesh(id);
+  for (const id of summary.despawned) removeMesh(id);
+});
+
+function frame() {
+  for (const e of client.entities.entities.values()) {
+    moveMesh(e.id, e.x, e.y, e.z, e.components.get(HP));
+  }
+  requestAnimationFrame(frame);
+}
+```
+
+`useShard` returns the same table as `entities`. The table and its decoder
+also ship without React in `@pylonsync/realtime` (`EntityTable`). In Swift,
+`ShardClient<NoSnapshot, Input>` has `entities` and a `replication()`
+stream.
 
 ## Declare the shard kind
 

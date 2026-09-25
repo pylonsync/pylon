@@ -173,6 +173,11 @@
         },
         {
           "type": "json",
+          "path": "packages/realtime/package.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
           "path": "packages/workflows/package.json",
           "jsonpath": "$.version"
         },

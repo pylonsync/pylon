@@ -481,8 +481,9 @@ pub mod __rt {
         codec: Codec,
         scratch: Vec<u8>,
         output: Vec<u8>,
-        /// The host has the full store; send only changes from now on.
-        replication_synced: bool,
+        /// The store the host holds a full copy of (by `store_id`); only
+        /// that store's changes can follow as a log.
+        replication_synced: Option<u64>,
     }
 
     /// The module's global state. A `wasm32-unknown-unknown` module runs on
@@ -509,7 +510,7 @@ pub mod __rt {
                     codec: Codec::Json,
                     scratch: Vec::new(),
                     output: Vec::new(),
-                    replication_synced: false,
+                    replication_synced: None,
                 }),
             }
         }
@@ -702,19 +703,20 @@ pub mod __rt {
             let s = self.state();
             let game = shard(&mut s.shard);
             let config = game.replication_config();
-            let synced = s.replication_synced;
             let Some(store) = game.replicated() else {
+                s.replication_synced = None;
                 return 0;
             };
-            let (full, log) = if synced {
+            let (full, log) = if s.replication_synced == Some(store.store_id()) {
                 (false, store.take_changes())
             } else {
-                // Entities made before now (in init) predate recording:
-                // send them all once, then record from here on.
+                // A store the host has not seen (the first, or one the game
+                // swapped in): its entities predate recording, so send them
+                // all once and record from here on.
                 store.record_changes(true);
                 (true, store.full_changes())
             };
-            s.replication_synced = true;
+            s.replication_synced = Some(store.store_id());
             s.output.clear();
             s.output.extend_from_slice(&config.precision.to_le_bytes());
             s.output

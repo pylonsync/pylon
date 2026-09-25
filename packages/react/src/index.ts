@@ -149,11 +149,15 @@ export {
   parseShardFrame,
   decodeShardPayload,
   encodeShardInput,
+  EntityTable,
+  ReplicationError,
 } from "./shardWire";
 export type {
   ShardFrame,
   ShardInputRejection,
   ShardPayloadDecoder,
+  ReplicatedEntity,
+  ReplicationSummary,
 } from "./shardWire";
 
 // Session hook — server-resolved user + tenant identity

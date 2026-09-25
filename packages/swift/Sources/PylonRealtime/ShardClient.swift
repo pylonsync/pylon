@@ -39,6 +39,8 @@ public enum ShardWire {
     public enum Kind: UInt8, Sendable {
         case snapshot = 1
         case inputRejected = 2
+        /// An entity replication frame: apply it to an `EntityTable`.
+        case replication = 3
     }
 
     public enum Codec: UInt8, Sendable {
@@ -46,6 +48,8 @@ public enum ShardWire {
         case messagePack = 1
         case bincode = 2
         case custom = 3
+        /// The replication frame format (frame kind 3).
+        case replication = 4
     }
 
     public struct Frame: Sendable {
@@ -85,6 +89,18 @@ public enum ShardWire {
         }
     }
 }
+
+/// One applied replication frame.
+public struct ShardReplicationUpdate: Sendable {
+    public let tick: UInt64
+    /// The highest `client_seq` the shard has processed for this subscriber.
+    public let ack: UInt64
+    public let summary: ReplicationSummary
+    public let entities: EntityTable
+}
+
+/// A `State` for a shard that replicates entities and sends no snapshots.
+public struct NoSnapshot: Decodable, Sendable {}
 
 public struct ShardClientConfig: Sendable {
     public var baseURL: URL
@@ -138,6 +154,9 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     private var session: URLSession
     private var snapshotContinuation: AsyncStream<ShardSnapshot<State>>.Continuation?
     private var rejectionContinuation: AsyncStream<ShardInputRejection>.Continuation?
+    private var replicationContinuation: AsyncStream<ShardReplicationUpdate>.Continuation?
+    /// The entities a replicating shard has sent this client.
+    public private(set) var entities = EntityTable()
     /// The shard's codec, learned from the first frame. Until then inputs go
     /// as JSON text, which every shard accepts.
     private var codec: UInt8?
@@ -177,6 +196,12 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         AsyncStream { cont in self.rejectionContinuation = cont }
     }
 
+    /// For a shard that replicates entities: one update per applied frame,
+    /// with the table as it stands after it.
+    public func replication() -> AsyncStream<ShardReplicationUpdate> {
+        AsyncStream { cont in self.replicationContinuation = cont }
+    }
+
     public func connectionStates() -> AsyncStream<ConnectionState> {
         AsyncStream { cont in self.stateContinuation = cont }
     }
@@ -195,6 +220,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         task = nil
         snapshotContinuation?.finish()
         rejectionContinuation?.finish()
+        replicationContinuation?.finish()
         stateContinuation?.finish()
     }
 
@@ -298,6 +324,20 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
 
     private func handleFrame(_ data: Data) {
         guard let frame = try? ShardWire.parse(data) else { return }
+        if frame.kind == ShardWire.Kind.replication.rawValue {
+            do {
+                let summary = try entities.apply(frame.payload)
+                replicationContinuation?.yield(
+                    ShardReplicationUpdate(tick: frame.tick, ack: frame.ack, summary: summary, entities: entities))
+            } catch {
+                // Out of sync with the server. Reconnecting gets a full baseline.
+                entities.clear()
+                task?.cancel(with: .protocolError, reason: nil)
+            }
+            return
+        }
+        // The replication codec byte names the frame format, not the
+        // shard's input codec, so only other frames set it.
         codec = frame.codec
         switch ShardWire.Kind(rawValue: frame.kind) {
         case .snapshot:
@@ -310,7 +350,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
             {
                 rejectionContinuation?.yield(rejection)
             }
-        case .none:
+        case .replication, .none:
             break
         }
     }

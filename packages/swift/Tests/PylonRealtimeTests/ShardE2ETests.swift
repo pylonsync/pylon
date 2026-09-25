@@ -77,4 +77,67 @@ final class ShardE2ETests: XCTestCase {
 
         await client.close()
     }
+
+    /// An `[id, hp]` input for the replication server.
+    struct Hp: Encodable, Sendable {
+        let id: UInt64
+        let hp: UInt8
+        func encode(to encoder: Encoder) throws {
+            var c = encoder.unkeyedContainer()
+            try c.encode(id)
+            try c.encode(hp)
+        }
+    }
+
+    func testTheEntityTableFollowsAReplicatingShard() async throws {
+        guard let raw = ProcessInfo.processInfo.environment["PYLON_SHARD_REPLICATION_E2E"] else {
+            throw XCTSkip("PYLON_SHARD_REPLICATION_E2E is not set")
+        }
+        let server = try JSONDecoder().decode(Server.self, from: Data(raw.utf8))
+        let client = ShardClient<NoSnapshot, Hp>(
+            shardId: server.shard,
+            config: ShardClientConfig(
+                baseURL: URL(string: "http://127.0.0.1")!,
+                subscriberId: "swift",
+                token: server.tokens["swift"],
+                wsPort: server.port,
+                autoReconnect: false
+            )
+        )
+        let updates = await client.replication()
+        Task { await client.connect() }
+        let watchdog = Task {
+            try await Task.sleep(nanoseconds: 10_000_000_000)
+            await client.close()
+        }
+        defer { watchdog.cancel() }
+
+        var it = updates.makeAsyncIterator()
+        let first = await it.next()
+        XCTAssertEqual(first?.summary.full, true)
+        // The server is shared with the TypeScript test, which may have
+        // despawned a unit already: count from this baseline. Unit 0 is
+        // stealthed and never arrives.
+        let baseline = first?.entities.count ?? 0
+        XCTAssertGreaterThan(baseline, 0)
+        XCTAssertNil(first?.entities[0])
+
+        try await client.send(Hp(id: 7, hp: 42))
+        var sawHp = false
+        while !sawHp, let u = await it.next() {
+            sawHp = u.entities[7]?.components[1] == Data([42])
+        }
+        XCTAssertTrue(sawHp)
+
+        try await client.send(Hp(id: 8, hp: 0))
+        var gone = false
+        while !gone, let u = await it.next() {
+            gone = u.entities[8] == nil
+        }
+        XCTAssertTrue(gone)
+        let count = await client.entities.count
+        XCTAssertEqual(count, baseline - 1)
+        await client.close()
+    }
 }
+
