@@ -29,6 +29,9 @@ use std::time::Duration;
 /// ≤30s trust-propagation delay is negligible — and a fixed interval avoids
 /// any unknown-Host-triggered refresh amplification.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+/// The wait after a failed refresh. A control plane that is down at boot
+/// would otherwise leave every tenant host untrusted for a full interval.
+const RETRY_INTERVAL: Duration = Duration::from_secs(2);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct TenantHosts {
@@ -71,8 +74,12 @@ pub fn init() {
             let _ = thread::Builder::new()
                 .name("pylon-tenant-hosts".into())
                 .spawn(move || loop {
-                    refresh(leaked);
-                    thread::sleep(REFRESH_INTERVAL);
+                    let wait = if refresh(leaked) {
+                        REFRESH_INTERVAL
+                    } else {
+                        RETRY_INTERVAL
+                    };
+                    thread::sleep(wait);
                 });
             Some(leaked)
         }
@@ -80,7 +87,8 @@ pub fn init() {
     });
 }
 
-fn refresh(th: &TenantHosts) {
+/// Pull the set once. False when the pull failed and the last-good set stays.
+fn refresh(th: &TenantHosts) -> bool {
     // listProjectTrustedHosts is a Pylon action (args: {}) → POST the empty
     // args object; auth is the Bearer domains token, not a cookie.
     let result = th
@@ -102,17 +110,20 @@ fn refresh(th: &TenantHosts) {
                     if let Ok(mut w) = th.hosts.write() {
                         *w = set;
                     }
+                    true
                 }
                 Err(e) => {
                     tracing::warn!(
                         "[tenant-hosts] malformed listProjectTrustedHosts response (keeping last-good): {e}"
                     );
+                    false
                 }
             }
         }
         Err(e) => {
             // Keep the last-known-good set — never fail open, never clear trust.
             tracing::warn!("[tenant-hosts] refresh failed (keeping last-good): {e}");
+            false
         }
     }
 }

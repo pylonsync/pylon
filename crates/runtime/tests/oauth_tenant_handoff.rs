@@ -88,16 +88,26 @@ fn free_port(lane: std::ops::Range<u16>) -> u16 {
 }
 
 /// The control plane's `listProjectTrustedHosts`, answering `tenant.test`
-/// to the right bearer token and 401 to anything else.
+/// to the right bearer token and 401 to anything else. The first call gets a
+/// 503, so the runtime must retry a failed refresh well inside the test's
+/// 15 s wait (the full refresh interval is 30 s).
 fn start_control_plane(port: u16) {
     let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
     std::thread::spawn(move || {
+        let mut first = true;
         for stream in listener.incoming().flatten() {
             let mut stream = stream;
             stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            // Read the whole head: one read can return part of it.
+            let mut head = Vec::new();
             let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => head.extend_from_slice(&buf[..n]),
+                }
+            }
+            let req = String::from_utf8_lossy(&head).to_ascii_lowercase();
             let body = if req.starts_with("post /api/fn/listprojecttrustedhosts")
                 && req.contains("authorization: bearer domains-token")
             {
@@ -105,10 +115,12 @@ fn start_control_plane(port: u16) {
             } else {
                 String::new()
             };
-            let status = if body.is_empty() {
-                "401 Unauthorized"
+            let (status, body) = if std::mem::take(&mut first) {
+                ("503 Service Unavailable", String::new())
+            } else if body.is_empty() {
+                ("401 Unauthorized", body)
             } else {
-                "200 OK"
+                ("200 OK", body)
             };
             let _ = stream.write_all(
                 format!(
