@@ -813,6 +813,10 @@ pub struct ShardOpMessage {
     /// Passed to the module's init (`create`).
     #[serde(default)]
     pub params: serde_json::Value,
+    /// The machine to create the shard on (`create`), when the app runs on
+    /// several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
 }
 
 /// Send a transactional email via the runtime's configured provider.

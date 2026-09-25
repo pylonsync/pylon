@@ -1,28 +1,44 @@
-import { action } from "@pylonsync/functions";
+import { action, v } from "@pylonsync/functions";
 
-/** The one shared arena. */
-const SHARD_ID = "arena-main";
+/** The shared arena, when the caller names none. */
+const DEFAULT_ARENA = "arena-main";
 
 /**
- * Start the arena if it is not running, and give the caller a ticket to
- * join it as themselves. An action: starting a shard is not part of a
- * database transaction.
+ * Start an arena if it is not running, and give the caller a ticket to join
+ * it as themselves. An action: starting a shard is not part of a database
+ * transaction.
+ *
+ * `arena` names another arena (a shard per arena). On an app that runs on
+ * several machines, `machine` places a new arena on that machine; without
+ * it the arena goes to the machine with the most free capacity.
  */
 export default action({
   // Anyone with a guest session (POST /api/auth/guest) may play.
   auth: "guest",
-  args: {},
-  async handler(ctx) {
+  args: {
+    arena: v.optional(v.string()),
+    machine: v.optional(v.string()),
+  },
+  async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
-    if (!(await ctx.shards.get(SHARD_ID))) {
+    const shardId = (args.arena as string | undefined) ?? DEFAULT_ARENA;
+    const existing = await ctx.shards.get(shardId);
+    let machine = existing?.machine;
+    if (!existing) {
       try {
-        await ctx.shards.create("arena", SHARD_ID, { width: 800, height: 500 });
+        const info = await ctx.shards.create(
+          "arena",
+          shardId,
+          { width: 800, height: 500 },
+          { machine: args.machine as string | undefined },
+        );
+        machine = info.machine;
       } catch (err) {
         // Two first players at once: the other call created it.
         if ((err as { code?: string }).code !== "SHARD_EXISTS") throw err;
       }
     }
-    const ticket = await ctx.shards.ticket(SHARD_ID, { ttlSecs: 300 });
-    return { shardId: SHARD_ID, subscriberId: ctx.auth.userId, ticket };
+    const ticket = await ctx.shards.ticket(shardId, { ttlSecs: 300 });
+    return { shardId, subscriberId: ctx.auth.userId, ticket, machine };
   },
 });

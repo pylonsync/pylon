@@ -867,11 +867,21 @@ export interface Shards {
    * `params` reach the module's `init`. Actions only: a mutation's
    * rollback cannot undo it.
    *
+   * On an app that runs on several machines, the shard runs on the one
+   * with the most free capacity, or on `opts.machine` (a machine id, as
+   * `ShardInfo.machine` reports it). `maxInstances` counts every machine.
+   *
    * Throws `SHARD_EXISTS` when the id is running, `SHARD_LIMIT_REACHED`
    * at the kind's `maxInstances`, `SHARD_KIND_NOT_FOUND`,
-   * `SHARD_ID_INVALID`, or `SHARD_INIT_FAILED` when `init` refuses.
+   * `SHARD_ID_INVALID`, `SHARD_INIT_FAILED` when `init` refuses, or
+   * `SHARD_MACHINE_UNAVAILABLE` when `opts.machine` is not running.
    */
-  create(kind: string, shardId: string, params?: unknown): Promise<ShardInfo>;
+  create(
+    kind: string,
+    shardId: string,
+    params?: unknown,
+    opts?: { machine?: string },
+  ): Promise<ShardInfo>;
 
   /** Stop a shard and close its subscribers' connections. Resolves to
    *  `false` when no shard has that id. Actions only. */
@@ -900,6 +910,8 @@ export interface ShardInfo {
   running: boolean;
   /** Why the module stopped, when it trapped. */
   error?: string;
+  /** The machine that runs it, when the app runs on several. */
+  machine?: string;
 }
 
 /** Context for query handlers (read-only).

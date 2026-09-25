@@ -475,6 +475,58 @@ subscriber, or stop the shard. The same actions are HTTP routes, admin-only:
   subscriber's connections,
 - `POST /api/shards/<id>/stop` stops the shard and closes every connection.
 
+## Shards across machines
+
+An app on Postgres can run on several machines. Each machine joins a shard
+directory in the database, and shards spread across them:
+
+- **Placement.** `ctx.shards.create` runs the shard on the live machine with
+  the most free capacity (`PYLON_SHARD_CAPACITY` shards a machine, default
+  100), or on the machine you name:
+  `ctx.shards.create("arena", id, params, { machine })`. `maxInstances`
+  counts every machine. `ctx.shards.get` and `list` report each shard's
+  `machine`.
+- **Routing.** A client can connect to any machine. The machine that gets a
+  connection for a shard it does not run sends it on. On Fly (Stack0 Cloud),
+  it answers with `fly-replay: instance=<machine>`, and Fly's proxy connects
+  the client to that machine directly, with no extra hop. Elsewhere, it
+  proxies the connection over the machines' private addresses. The
+  WebSocket, the SSE stream, and HTTP inputs all route this way.
+- **Failover.** A machine with no heartbeat for 10 seconds is dead. A live
+  machine takes over each of its shards and starts it again: from its saved
+  state when the module saves state (below), or from `init` with its create
+  params when it does not. Clients reconnect on their own (the client
+  libraries retry, and a ticket function gets a new ticket). A machine that
+  shuts down saves its shards and leaves the directory, so they move at
+  once.
+
+A module saves state by implementing `save` and `restore` on its `Shard`:
+
+```rust
+fn save(&self) -> Option<Vec<u8>> {
+    serde_json::to_vec(&self.players).ok()
+}
+
+fn restore(shard_id: &str, params: Params, state: &[u8]) -> Result<Self, String> {
+    let mut arena = Self::init(shard_id, params)?;
+    arena.players = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+    Ok(arena)
+}
+```
+
+The host saves every 5 seconds (`PYLON_SHARD_SAVE_SECS`), between ticks, so
+a failover loses at most that much. A `Replicated` store saves with
+`full_changes` and loads with `apply_changes`.
+
+| Setting | Meaning |
+| --- | --- |
+| `PYLON_REPLICA_ID` | The machine's id. On Fly, `FLY_MACHINE_ID` is used. Without either, the host name and process id: a restart is a new machine. |
+| `PYLON_SHARD_ADVERTISE_URL` | The URL other machines reach this one at, for proxying and machine-to-machine calls. On Fly, `http://[FLY_PRIVATE_IP]:<port>`. |
+| `PYLON_SHARD_TICKET_SECRET` | The same on every machine: it signs tickets and machine-to-machine calls. |
+| `PYLON_SHARD_DIRECTORY=off` | Keep each shard on the machine that created it, with no directory. |
+
+An app on SQLite runs on one machine, and the directory is off.
+
 ## Limits and failures
 
 - A tick that runs past `tickBudgetMs` stops the shard.

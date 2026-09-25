@@ -2178,6 +2178,17 @@ fn start_server(
         jobs_in_memory,
         cluster_required,
     )?;
+    // Shards across machines: on Postgres, the WebAssembly shard host joins
+    // the shard directory (see shard_cluster). PYLON_SHARD_DIRECTORY=off
+    // keeps every shard on the machine that created it.
+    if let (Some(host), Some(pg)) = (&wasm_shards, runtime.pg_data_store_pub()) {
+        let off = std::env::var("PYLON_SHARD_DIRECTORY").is_ok_and(|v| v.trim() == "off");
+        if !off {
+            let dir = crate::shard_cluster::PgShardDirectory::open(pg.shared_pool())
+                .map_err(|e| format!("Failed to open the shard directory: {e}"))?;
+            host.attach_cluster(dir, crate::shard_cluster::MachineConfig::from_env(port));
+        }
+    }
     if !jobs_in_memory {
         if let Some(pg) = runtime.pg_data_store_pub() {
             let owner = pylon_cluster::new_instance_id();
@@ -3305,7 +3316,12 @@ fn start_server(
         // body's per-request `peer_ip` String AND the access-log
         // `request_peer_ip` String — both pre-existing — we just need the
         // parsed IpAddr for the limiters.
-        let dispatch_peer_ip_str = resolve_client_ip(&request, trust_proxy_hops);
+        // A request another machine forwarded for a shard it does not run
+        // carries the client's IP, signed (see shard_route).
+        let shard_forwarded_ip = crate::shard_route::forwarded_client_ip(&request);
+        let dispatch_peer_ip_str = shard_forwarded_ip
+            .clone()
+            .unwrap_or_else(|| resolve_client_ip(&request, trust_proxy_hops));
         let dispatch_peer_ip: std::net::IpAddr = dispatch_peer_ip_str
             .parse()
             .unwrap_or_else(|_| std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
@@ -3372,6 +3388,7 @@ fn start_server(
         let fn_ops_maybe = fn_ops_maybe.clone();
         let fn_ops_dyn = fn_ops_dyn.clone();
         let shard_registry = shard_registry.clone();
+        let wasm_shards = wasm_shards.clone();
         let cors_allowlist = cors_allowlist.clone();
         let cookie_config = Arc::clone(&cookie_config);
         let ws_auth = Arc::clone(&ws_auth);
@@ -3435,6 +3452,7 @@ fn start_server(
         let we = Arc::clone(&workflow_engine);
         let fn_ops_ref = fn_ops_maybe.clone();
         let shards_ref = shard_registry.clone();
+        let wasm_host_ref = wasm_shards.clone();
         // Compute the per-request CORS origin to echo back. Match the
         // request's Origin header against the allowlist; loopback is
         // always trusted via `is_localhost_origin` so dev tools on
@@ -3590,6 +3608,97 @@ fn start_server(
         // 443. The socket leaves tiny_http after the 101 (upgrade_detached)
         // and runs on the shard connection runtime, so thousands of game
         // connections do not each hold an HTTP worker thread.
+        // Machine-to-machine shard operations (see shard_cluster), signed
+        // with the cluster key.
+        if url == "/_pylon/shards/op" && method == Method::Post {
+            let reply_json = |request: tiny_http::Request, status: u16, body: String| {
+                let _ = request.respond(
+                    Response::from_string(body)
+                        .with_status_code(status)
+                        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()),
+                );
+            };
+            let Some(host) = wasm_host_ref.clone() else {
+                reply_json(request, 404, json_error("NOT_FOUND", "no shard host"));
+                return;
+            };
+            let signature = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv(crate::shard_cluster::AUTH_HEADER))
+                .map(|h| h.value.as_str().to_string());
+            let mut body = Vec::new();
+            let _ = std::io::Read::read_to_end(&mut request.as_reader().take(1 << 20), &mut body);
+            if let Err(why) = signature
+                .as_deref()
+                .ok_or("missing signature")
+                .and_then(|sig| crate::shard_cluster::verify(sig, &body))
+            {
+                reply_json(request, 401, json_error("UNAUTHORIZED", why));
+                mt.record_request("POST", 401);
+                return;
+            }
+            let reply = match serde_json::from_slice::<crate::shard_cluster::RemoteOp>(&body) {
+                Ok(op) => host.run_remote(op),
+                Err(e) => crate::shard_cluster::RemoteReply::Err {
+                    code: "BAD_REQUEST".into(),
+                    message: e.to_string(),
+                },
+            };
+            reply_json(request, 200, serde_json::to_string(&reply).unwrap_or_default());
+            mt.record_request("POST", 200);
+            return;
+        }
+
+        // A shard request (its WebSocket, SSE stream, or inputs) for a shard
+        // another machine runs goes there (see shard_route). A request a
+        // machine already forwarded is served here.
+        if shard_forwarded_ip.is_none() {
+            if let (Some(host), Some(shard_id)) =
+                (wasm_host_ref.as_ref(), crate::shard_route::shard_of(&url))
+            {
+                if let pylon_realtime::ShardLocation::Remote {
+                    machine_id,
+                    address,
+                    fly,
+                } = host.locate(&shard_id)
+                {
+                    let upgrade = request.headers().iter().any(|h| {
+                        h.field.equiv("Upgrade") && h.value.as_str().eq_ignore_ascii_case("websocket")
+                    });
+                    let guard = if upgrade && !fly {
+                        match crate::shard_ws::admit_main_port(dispatch_peer_ip) {
+                            Some(g) => Some(g),
+                            None => {
+                                let _ = request.respond(
+                                    Response::from_string(json_error(
+                                        "TOO_MANY_CONNECTIONS",
+                                        "Too many shard connections from this address (PYLON_SHARD_WS_MAX_PER_IP)",
+                                    ))
+                                    .with_status_code(429u16),
+                                );
+                                mt.record_request("GET", 429);
+                                return;
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let method_str = request.method().as_str().to_string();
+                    let status = crate::shard_route::route(
+                        request,
+                        &machine_id,
+                        address.as_deref(),
+                        fly,
+                        &dispatch_peer_ip_str,
+                        guard,
+                    );
+                    mt.record_request(&method_str, status);
+                    return;
+                }
+            }
+        }
+
         if (url == "/shard" || url.starts_with("/shard?")) && method == Method::Get {
             let respond_json = |request: tiny_http::Request, status: u16, code: &str, msg: &str| {
                 let response = with_security_headers(

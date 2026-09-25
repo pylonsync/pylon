@@ -35,7 +35,8 @@ use tokio_tungstenite::tungstenite::{
     Message,
 };
 
-use crate::ip_limit::{IpConnCounter, IpConnGuard};
+use crate::ip_limit::IpConnCounter;
+pub use crate::ip_limit::IpConnGuard;
 
 /// The server sends a ping this often.
 const PING_INTERVAL: Duration = Duration::from_secs(20);
@@ -167,6 +168,44 @@ pub fn serve_upgraded(
         if let Err(e) = run_connection(ws, params, registry, sessions).await {
             tracing::warn!("[shard-ws] connection error: {e}");
         }
+    });
+}
+
+/// Splice a client connection to the machine that runs its shard (see
+/// `shard_route`): `early` is what the machine sent after its 101, which
+/// goes to the client first; then bytes flow both ways until either side
+/// closes.
+pub fn splice(
+    client: std::net::TcpStream,
+    upstream: std::net::TcpStream,
+    early: Vec<u8>,
+    guard: Option<IpConnGuard>,
+) {
+    let Some(rt) = runtime() else { return };
+    for s in [&client, &upstream] {
+        if let Err(e) = s.set_nonblocking(true) {
+            tracing::warn!("[shard-ws] could not make the socket non-blocking: {e}");
+            return;
+        }
+        let _ = s.set_nodelay(true);
+    }
+    rt.spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let _guard = guard;
+        let (mut client, mut upstream) = match (
+            tokio::net::TcpStream::from_std(client),
+            tokio::net::TcpStream::from_std(upstream),
+        ) {
+            (Ok(c), Ok(u)) => (c, u),
+            _ => {
+                tracing::warn!("[shard-ws] could not register the proxied sockets");
+                return;
+            }
+        };
+        if !early.is_empty() && client.write_all(&early).await.is_err() {
+            return;
+        }
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
     });
 }
 

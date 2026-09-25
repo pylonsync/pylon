@@ -536,13 +536,14 @@ function buildShards(callId: string): Shards {
         ttl_secs: opts?.ttlSecs,
       }) as Promise<string>;
     },
-    async create(kind, shardId, params) {
+    async create(kind, shardId, params, opts) {
       return rpc(callId, {
         type: "shard_op",
         op: "create",
         kind,
         id: shardId,
         params: params ?? {},
+        ...(opts?.machine ? { machine: opts.machine } : {}),
       }) as Promise<ShardInfo>;
     },
     async stop(shardId) {

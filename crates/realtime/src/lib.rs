@@ -57,7 +57,7 @@ pub mod transport;
 pub mod wire;
 
 pub use aoi::AreaOfInterest;
-pub use dyn_shard::{DynShard, DynShardRegistry};
+pub use dyn_shard::{DynShard, DynShardRegistry, ShardLocation};
 pub use interest::{
     EntityId, EntityPos, InterestArea, InterestConfig, InterestManager, SpatialGrid, Visibility,
 };

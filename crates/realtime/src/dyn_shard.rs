@@ -215,6 +215,23 @@ pub fn rejection_for(client_seq: Option<u64>, err: &ShardError) -> InputRejectio
 // DynShardRegistry — object-safe wrapper over ShardRegistry<S>
 // ---------------------------------------------------------------------------
 
+/// Where a shard runs, for routing a connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ShardLocation {
+    /// In this process.
+    Local,
+    /// On another machine of the app.
+    Remote {
+        machine_id: String,
+        /// Where other machines reach it, when it advertised an address.
+        address: Option<String>,
+        /// True on Fly: answer with `fly-replay` instead of proxying.
+        fly: bool,
+    },
+    /// Nowhere this process knows of.
+    Unknown,
+}
+
 pub trait DynShardRegistry: Send + Sync {
     fn get(&self, id: &str) -> Option<Arc<dyn DynShard>>;
     fn ids(&self) -> Vec<String>;
@@ -226,6 +243,14 @@ pub trait DynShardRegistry: Send + Sync {
     /// Why shard `id` stopped on its own (its module trapped), if it did.
     fn failure(&self, _id: &str) -> Option<String> {
         None
+    }
+    /// Where shard `id` runs. The default knows only this process's shards.
+    fn locate(&self, id: &str) -> ShardLocation {
+        if self.get(id).is_some() {
+            ShardLocation::Local
+        } else {
+            ShardLocation::Unknown
+        }
     }
     /// Stop shard `id` and close its subscribers' connections. False when
     /// there is no such shard.

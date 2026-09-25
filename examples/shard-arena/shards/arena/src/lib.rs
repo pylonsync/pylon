@@ -30,7 +30,7 @@ enum Input {
     },
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Deserialize, Clone)]
 struct Player {
     id: String,
     x: f32,
@@ -137,6 +137,19 @@ impl Shard for Arena {
             height: self.height,
             players: self.players.clone(),
         }
+    }
+
+    // Saved state: the players, so the arena starts again where it was when
+    // its machine goes away (see "Shards across machines" in the docs).
+
+    fn save(&self) -> Option<Vec<u8>> {
+        serde_json::to_vec(&self.players).ok()
+    }
+
+    fn restore(shard_id: &str, params: Params, state: &[u8]) -> Result<Self, String> {
+        let mut arena = Self::init(shard_id, params)?;
+        arena.players = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+        Ok(arena)
     }
 }
 

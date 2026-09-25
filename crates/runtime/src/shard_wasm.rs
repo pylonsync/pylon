@@ -33,7 +33,11 @@ use pylon_realtime::{
     ReplicatedRef, ReplicationConfig, Shard, ShardAuth, ShardConfig, ShardRegistry, SimState,
     SnapshotFormat, SubscriberId, Visibility,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::shard_cluster::{
+    self, choose, Claim, Machine, MachineConfig, PgShardDirectory, Placement, RemoteOp, RemoteReply,
+};
 use wasmtime::{
     Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
     TypedFunc, UpdateDeadline,
@@ -1099,8 +1103,20 @@ pub enum CreateError {
     UnknownKind(String),
     InvalidId(String),
     Exists(String),
-    LimitReached { kind: String, max: usize },
+    LimitReached {
+        kind: String,
+        max: usize,
+    },
     Init(String),
+    /// The shard directory could not be read or written.
+    Cluster(String),
+    /// The requested machine is not live, or cannot be reached.
+    MachineUnavailable(String),
+    /// Another machine refused the create.
+    Remote {
+        code: String,
+        message: String,
+    },
 }
 
 impl CreateError {
@@ -1111,6 +1127,9 @@ impl CreateError {
             CreateError::Exists(_) => "SHARD_EXISTS",
             CreateError::LimitReached { .. } => "SHARD_LIMIT_REACHED",
             CreateError::Init(_) => "SHARD_INIT_FAILED",
+            CreateError::Cluster(_) => "SHARD_CLUSTER_ERROR",
+            CreateError::MachineUnavailable(_) => "SHARD_MACHINE_UNAVAILABLE",
+            CreateError::Remote { .. } => "SHARD_REMOTE_ERROR",
         }
     }
 }
@@ -1128,12 +1147,15 @@ impl std::fmt::Display for CreateError {
                 )
             }
             CreateError::Init(why) => write!(f, "shard init failed: {why}"),
+            CreateError::Cluster(why) => write!(f, "shard directory: {why}"),
+            CreateError::MachineUnavailable(why) => f.write_str(why),
+            CreateError::Remote { message, .. } => f.write_str(message),
         }
     }
 }
 
 /// A live shard, as `ctx.shards.get` reports it.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ShardInfo {
     pub id: String,
     pub kind: String,
@@ -1142,6 +1164,9 @@ pub struct ShardInfo {
     pub running: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The machine that runs it, when the app runs on several.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub machine: Option<String>,
 }
 
 /// The app's shard kinds and the shards created from them.
@@ -1153,6 +1178,41 @@ pub struct WasmShardHost {
     idle_since: Mutex<HashMap<String, Instant>>,
     create_lock: Mutex<()>,
     stopped: AtomicBool,
+    /// The directory, when the app runs on several machines.
+    cluster: std::sync::OnceLock<ClusterState>,
+}
+
+/// This machine's place in the shard directory.
+struct ClusterState {
+    dir: PgShardDirectory,
+    me: MachineConfig,
+    save_every: Duration,
+    /// Local shards stopped because another machine runs them now: their
+    /// placement is not this machine's to release.
+    fenced: Mutex<std::collections::HashSet<String>>,
+    /// When each local shard's state was last saved.
+    saved_at: Mutex<HashMap<String, Instant>>,
+}
+
+impl ClusterState {
+    /// This machine as a live-machine row, before its first heartbeat lands.
+    fn me_as_machine(&self) -> Machine {
+        Machine {
+            id: self.me.id.clone(),
+            address: self.me.address.clone(),
+            capacity: self.me.capacity,
+            load: 0,
+        }
+    }
+
+    /// `Some(address)` when `machine_id` is live (the address may be
+    /// unknown); `None` when it is not.
+    fn live_address(&self, machine_id: &str) -> Option<Option<String>> {
+        let live = self.dir.live_machines().ok()?;
+        live.into_iter()
+            .find(|m| m.id == machine_id)
+            .map(|m| m.address)
+    }
 }
 
 impl WasmShardHost {
@@ -1168,6 +1228,7 @@ impl WasmShardHost {
             idle_since: Mutex::new(HashMap::new()),
             create_lock: Mutex::new(()),
             stopped: AtomicBool::new(false),
+            cluster: std::sync::OnceLock::new(),
         });
         let weak: Weak<Self> = Arc::downgrade(&host);
         let _ = std::thread::Builder::new()
@@ -1189,11 +1250,128 @@ impl WasmShardHost {
     }
 
     /// Start shard `id` of `kind`, running the module's init with `params`.
+    /// On several machines (see [`WasmShardHost::attach_cluster`]) it runs
+    /// on the machine with the most free capacity.
     pub fn create(
         &self,
         kind: &str,
         id: &str,
         params: &serde_json::Value,
+    ) -> Result<ShardInfo, CreateError> {
+        self.create_on(kind, id, params, None)
+    }
+
+    /// [`WasmShardHost::create`] on machine `machine` when it is `Some`.
+    pub fn create_on(
+        &self,
+        kind: &str,
+        id: &str,
+        params: &serde_json::Value,
+        machine: Option<&str>,
+    ) -> Result<ShardInfo, CreateError> {
+        if !self.kinds.contains_key(kind) {
+            return Err(CreateError::UnknownKind(kind.to_string()));
+        }
+        validate_shard_id(id)?;
+        let Some(cluster) = self.cluster.get() else {
+            if let Some(m) = machine {
+                return Err(CreateError::MachineUnavailable(format!(
+                    "this app runs on one machine; there is no machine \"{m}\""
+                )));
+            }
+            return self.create_local(kind, id, params, None);
+        };
+        if self.registry.get(id).is_some_and(|s| s.is_running()) {
+            return Err(CreateError::Exists(id.to_string()));
+        }
+        let live = cluster.dir.live_machines().map_err(CreateError::Cluster)?;
+        let target = match machine {
+            Some(m) => live.iter().find(|x| x.id == m).cloned().ok_or_else(|| {
+                CreateError::MachineUnavailable(format!("machine \"{m}\" is not live"))
+            })?,
+            None => choose(&live)
+                .cloned()
+                .unwrap_or_else(|| cluster.me_as_machine()),
+        };
+        if target.id == cluster.me.id {
+            return self.create_claimed(kind, id, params, machine.is_some());
+        }
+        let Some(address) = target.address.as_deref() else {
+            return Err(CreateError::MachineUnavailable(format!(
+                "machine \"{}\" has no address (set PYLON_SHARD_ADVERTISE_URL)",
+                target.id
+            )));
+        };
+        let op = RemoteOp::Create {
+            kind: kind.to_string(),
+            id: id.to_string(),
+            params: params.clone(),
+            pinned: machine.is_some(),
+        };
+        match shard_cluster::call(address, &op) {
+            Ok(RemoteReply::Ok(v)) => serde_json::from_value(v)
+                .map_err(|e| CreateError::Cluster(format!("bad reply from {}: {e}", target.id))),
+            // Known codes keep their meaning, so a caller that catches
+            // SHARD_EXISTS still does when the shard is on another machine.
+            Ok(RemoteReply::Err { code, message }) => Err(match code.as_str() {
+                "SHARD_EXISTS" => CreateError::Exists(id.to_string()),
+                "SHARD_LIMIT_REACHED" => CreateError::LimitReached {
+                    kind: kind.to_string(),
+                    max: self.kinds[kind].limits.max_instances,
+                },
+                "SHARD_INIT_FAILED" => CreateError::Init(message),
+                _ => CreateError::Remote { code, message },
+            }),
+            Err(e) => Err(CreateError::MachineUnavailable(e)),
+        }
+    }
+
+    /// Place the shard on this machine in the directory, then start it.
+    fn create_claimed(
+        &self,
+        kind: &str,
+        id: &str,
+        params: &serde_json::Value,
+        pinned: bool,
+    ) -> Result<ShardInfo, CreateError> {
+        let cluster = self
+            .cluster
+            .get()
+            .expect("create_claimed runs in a cluster");
+        let spec = &self.kinds[kind];
+        let placement = Placement {
+            shard_id: id.to_string(),
+            kind: kind.to_string(),
+            params: params.clone(),
+            machine_id: cluster.me.id.clone(),
+            pinned,
+        };
+        match cluster
+            .dir
+            .claim(&placement, spec.limits.max_instances)
+            .map_err(CreateError::Cluster)?
+        {
+            Claim::Claimed => {}
+            Claim::Taken => return Err(CreateError::Exists(id.to_string())),
+            Claim::LimitReached => {
+                return Err(CreateError::LimitReached {
+                    kind: kind.to_string(),
+                    max: spec.limits.max_instances,
+                })
+            }
+        }
+        self.create_local(kind, id, params, None).inspect_err(|_| {
+            let _ = cluster.dir.release(id, &cluster.me.id);
+        })
+    }
+
+    /// Start the shard in this process, from `state` when given.
+    fn create_local(
+        &self,
+        kind: &str,
+        id: &str,
+        params: &serde_json::Value,
+        state: Option<&[u8]>,
     ) -> Result<ShardInfo, CreateError> {
         let spec = self
             .kinds
@@ -1206,24 +1384,31 @@ impl WasmShardHost {
                 return Err(CreateError::Exists(id.to_string()));
             }
         }
-        // Count only running shards, so a stopped one waiting for the sweep
-        // does not hold a slot.
-        let running = self
-            .kind_of
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|(sid, k)| {
-                k.as_str() == kind && self.registry.get(sid).is_some_and(|s| s.is_running())
-            })
-            .count();
-        if running >= spec.limits.max_instances {
-            return Err(CreateError::LimitReached {
-                kind: kind.to_string(),
-                max: spec.limits.max_instances,
-            });
+        // In a cluster the directory counts every machine's shards (see
+        // `create_claimed`); here, count only running shards, so a stopped
+        // one waiting for the sweep does not hold a slot.
+        if self.cluster.get().is_none() {
+            let running = self
+                .kind_of
+                .read()
+                .unwrap()
+                .iter()
+                .filter(|(sid, k)| {
+                    k.as_str() == kind && self.registry.get(sid).is_some_and(|s| s.is_running())
+                })
+                .count();
+            if running >= spec.limits.max_instances {
+                return Err(CreateError::LimitReached {
+                    kind: kind.to_string(),
+                    max: spec.limits.max_instances,
+                });
+            }
         }
-        let sim = spec.instantiate(id, params).map_err(CreateError::Init)?;
+        let sim = match state {
+            Some(state) => spec.restore(id, params, state),
+            None => spec.instantiate(id, params),
+        }
+        .map_err(CreateError::Init)?;
         let shard = Shard::new(id, sim, spec.config.clone());
         let info = ShardInfo {
             id: id.to_string(),
@@ -1232,6 +1417,7 @@ impl WasmShardHost {
             subscribers: 0,
             running: true,
             error: None,
+            machine: self.cluster.get().map(|c| c.me.id.clone()),
         };
         self.kind_of
             .write()
@@ -1239,12 +1425,62 @@ impl WasmShardHost {
             .insert(id.to_string(), kind.to_string());
         self.idle_since.lock().unwrap().remove(id);
         self.registry.insert(shard);
-        tracing::info!("[shard {id}] started ({kind})");
+        tracing::info!(
+            "[shard {id}] started ({kind}{})",
+            if state.is_some() {
+                ", from saved state"
+            } else {
+                ""
+            }
+        );
         Ok(info)
     }
 
-    /// Stop and remove a shard. Its subscribers' connections close.
+    /// Stop and remove a shard. Its subscribers' connections close. On
+    /// several machines, the machine that runs it stops it.
     pub fn stop(&self, id: &str) -> bool {
+        if self.registry.get(id).is_some() {
+            let stopped = self.stop_local(id);
+            if let Some(c) = self.cluster.get() {
+                if let Err(e) = c.dir.release(id, &c.me.id) {
+                    tracing::warn!("[shard {id}] could not release its placement: {e}");
+                }
+            }
+            return stopped;
+        }
+        let Some(c) = self.cluster.get() else {
+            return false;
+        };
+        let placement = match c.dir.placement(id) {
+            Ok(Some(p)) => p,
+            Ok(None) => return false,
+            Err(e) => {
+                tracing::warn!("[shard {id}] stop: directory lookup failed: {e}");
+                return false;
+            }
+        };
+        match c.live_address(&placement.machine_id) {
+            // Its machine runs it: that machine stops it.
+            Some(Some(address)) if placement.machine_id != c.me.id => {
+                match shard_cluster::call(&address, &RemoteOp::Stop { id: id.to_string() }) {
+                    Ok(RemoteReply::Ok(v)) => v.as_bool().unwrap_or(false),
+                    Ok(RemoteReply::Err { message, .. }) | Err(message) => {
+                        tracing::warn!(
+                            "[shard {id}] stop on {} failed: {message}",
+                            placement.machine_id
+                        );
+                        false
+                    }
+                }
+            }
+            // Placed here but not running (it failed to start), or on a dead
+            // machine: forget it so failover does not start it again.
+            _ => c.dir.forget(id).is_ok(),
+        }
+    }
+
+    /// Stop and remove a shard running in this process.
+    fn stop_local(&self, id: &str) -> bool {
         // Serialized with create and the sweep, so a stop never removes the
         // bookkeeping of a shard created under the same id meanwhile.
         let _guard = self.create_lock.lock().unwrap();
@@ -1254,7 +1490,39 @@ impl WasmShardHost {
         removed
     }
 
+    /// A shard, on this machine or (in a cluster) any live one.
     pub fn info(&self, id: &str) -> Option<ShardInfo> {
+        if let Some(info) = self.info_local(id) {
+            return Some(info);
+        }
+        let c = self.cluster.get()?;
+        let placement = c.dir.placement(id).ok()??;
+        match c.live_address(&placement.machine_id) {
+            Some(Some(address)) if placement.machine_id != c.me.id => {
+                match shard_cluster::call(&address, &RemoteOp::Get { id: id.to_string() }) {
+                    Ok(RemoteReply::Ok(v)) => serde_json::from_value(v).ok(),
+                    _ => None,
+                }
+            }
+            // On a dead machine: failover starts it again soon.
+            None => Some(ShardInfo {
+                id: id.to_string(),
+                kind: placement.kind,
+                tick: 0,
+                subscribers: 0,
+                running: false,
+                error: Some(format!(
+                    "machine {} stopped responding; the shard is starting again on another machine",
+                    placement.machine_id
+                )),
+                machine: Some(placement.machine_id),
+            }),
+            _ => None,
+        }
+    }
+
+    /// A shard running in this process.
+    fn info_local(&self, id: &str) -> Option<ShardInfo> {
         let shard = self.registry.get(id)?;
         let kind = self.kind_of.read().unwrap().get(id).cloned()?;
         let error = shard.with_state(|s| s.failure());
@@ -1265,20 +1533,327 @@ impl WasmShardHost {
             subscribers: shard.subscriber_count(),
             running: shard.is_running(),
             error,
+            machine: self.cluster.get().map(|c| c.me.id.clone()),
         })
     }
 
+    /// Every shard: this machine's, and in a cluster every live machine's.
     pub fn list(&self) -> Vec<ShardInfo> {
-        let mut ids = self.registry.ids();
-        ids.sort();
-        ids.iter().filter_map(|id| self.info(id)).collect()
+        let mut out = self.list_local();
+        if let Some(c) = self.cluster.get() {
+            if let Ok(live) = c.dir.live_machines() {
+                for m in live.iter().filter(|m| m.id != c.me.id) {
+                    let Some(address) = &m.address else { continue };
+                    match shard_cluster::call(address, &RemoteOp::List) {
+                        Ok(RemoteReply::Ok(v)) => out.extend(
+                            serde_json::from_value::<Vec<ShardInfo>>(v).unwrap_or_default(),
+                        ),
+                        other => tracing::warn!("[shards] list on {} failed: {other:?}", m.id),
+                    }
+                }
+            }
+            out.sort_by(|a, b| a.id.cmp(&b.id));
+            out.dedup_by(|a, b| a.id == b.id);
+        }
+        out
     }
 
-    /// Stop every shard. Called at shutdown.
+    fn list_local(&self) -> Vec<ShardInfo> {
+        let mut ids = self.registry.ids();
+        ids.sort();
+        ids.iter().filter_map(|id| self.info_local(id)).collect()
+    }
+
+    /// Stop every shard. Called at shutdown. On several machines, each
+    /// shard's state is saved first and its placement kept, and this machine
+    /// leaves the directory, so the others start its shards again at once.
     pub fn stop_all(&self) {
         self.stopped.store(true, Ordering::Release);
+        if let Some(c) = self.cluster.get() {
+            for id in self.registry.ids() {
+                self.save_one(c, &id);
+            }
+            if let Err(e) = c.dir.leave(&c.me.id) {
+                tracing::warn!("[shards] could not leave the directory: {e}");
+            }
+            for id in self.registry.ids() {
+                c.fenced.lock().unwrap().insert(id.clone());
+                self.stop_local(&id);
+            }
+            return;
+        }
         for id in self.registry.ids() {
             self.stop(&id);
+        }
+    }
+
+    // -- Several machines ------------------------------------------------
+
+    /// Run shards on several machines through the directory in Postgres.
+    /// Starts a thread that sends heartbeats, saves shard state, stops
+    /// shards placed elsewhere, and starts dead machines' shards here when
+    /// this machine is their new home.
+    pub fn attach_cluster(self: &Arc<Self>, dir: PgShardDirectory, me: MachineConfig) {
+        let save_every = std::env::var("PYLON_SHARD_SAVE_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .filter(|&s| s > 0)
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(5));
+        tracing::info!(
+            "[shards] machine {} in the shard directory (address {}, capacity {})",
+            me.id,
+            me.address.as_deref().unwrap_or("none"),
+            me.capacity
+        );
+        if self
+            .cluster
+            .set(ClusterState {
+                dir,
+                me,
+                save_every,
+                fenced: Mutex::new(std::collections::HashSet::new()),
+                saved_at: Mutex::new(HashMap::new()),
+            })
+            .is_err()
+        {
+            return;
+        }
+        let weak: Weak<Self> = Arc::downgrade(self);
+        let _ = std::thread::Builder::new()
+            .name("pylon-shard-cluster".into())
+            .spawn(move || loop {
+                match weak.upgrade() {
+                    Some(host) if !host.stopped.load(Ordering::Acquire) => host.cluster_round(),
+                    _ => return,
+                }
+                std::thread::sleep(shard_cluster::HEARTBEAT);
+            });
+    }
+
+    /// The machine id when the host runs in a cluster.
+    pub fn machine_id(&self) -> Option<&str> {
+        self.cluster.get().map(|c| c.me.id.as_str())
+    }
+
+    /// One pass of the cluster thread.
+    fn cluster_round(&self) {
+        let Some(c) = self.cluster.get() else { return };
+        let local: Vec<String> = self.registry.ids();
+        let load = local
+            .iter()
+            .filter(|id| self.registry.get(id).is_some_and(|s| s.is_running()))
+            .count() as u32;
+        if let Err(e) = c.dir.heartbeat(&c.me, load) {
+            tracing::warn!("[shards] heartbeat failed: {e}");
+            return;
+        }
+        // Fencing: a shard placed elsewhere was moved while this machine
+        // was cut off. Its copy here stops without touching the placement.
+        match c.dir.shards_on(&c.me.id) {
+            Ok(mine) => {
+                let mine: std::collections::HashSet<String> = mine.into_iter().collect();
+                for id in &local {
+                    if !mine.contains(id) && self.registry.get(id).is_some_and(|s| s.is_running()) {
+                        tracing::warn!(
+                            "[shard {id}] placed on another machine now; stopping this copy"
+                        );
+                        c.fenced.lock().unwrap().insert(id.clone());
+                        self.stop_local(id);
+                    }
+                }
+            }
+            Err(e) => tracing::warn!("[shards] directory read failed: {e}"),
+        }
+        // Save state that is due.
+        for id in self.registry.ids() {
+            let due = c
+                .saved_at
+                .lock()
+                .unwrap()
+                .get(&id)
+                .is_none_or(|at| at.elapsed() >= c.save_every);
+            if due {
+                self.save_one(c, &id);
+            }
+        }
+        // Failover: dead machines' shards move to the machine `choose`
+        // picks; this machine takes the ones it picks for itself.
+        let Ok(mut live) = c.dir.live_machines() else {
+            return;
+        };
+        let ids: Vec<String> = live.iter().map(|m| m.id.clone()).collect();
+        let Ok(orphans) = c.dir.orphans(&ids) else {
+            return;
+        };
+        for orphan in orphans.into_iter().take(32) {
+            let Some(target) = choose(&live).map(|m| m.id.clone()) else {
+                break;
+            };
+            if let Some(m) = live.iter_mut().find(|m| m.id == target) {
+                m.load += 1;
+            }
+            if target != c.me.id {
+                continue;
+            }
+            match c
+                .dir
+                .take_over(&orphan.shard_id, &orphan.machine_id, &c.me.id)
+            {
+                Ok(true) => {
+                    tracing::info!(
+                        "[shard {}] machine {} is dead; starting it here",
+                        orphan.shard_id,
+                        orphan.machine_id
+                    );
+                    if let Err(e) = self.adopt(&orphan) {
+                        tracing::error!("[shard {}] could not start: {e}", orphan.shard_id);
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("[shard {}] take over failed: {e}", orphan.shard_id),
+            }
+        }
+        let _ = c.dir.prune_machines();
+    }
+
+    /// Save one local shard's state to the directory, when its module keeps
+    /// state.
+    fn save_one(&self, c: &ClusterState, id: &str) {
+        let Some(shard) = self.registry.get(id) else {
+            return;
+        };
+        if !shard.is_running() {
+            return;
+        }
+        let saves = self
+            .kind_of
+            .read()
+            .unwrap()
+            .get(id)
+            .is_some_and(|k| self.kinds[k].saves_state());
+        if !saves {
+            return;
+        }
+        c.saved_at
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), Instant::now());
+        match shard.with_state(|sim| sim.save()) {
+            Ok(Some(state)) => match c.dir.save_state(id, &c.me.id, &state) {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!("[shard {id}] not saved: placed on another machine"),
+                Err(e) => tracing::warn!("[shard {id}] save failed: {e}"),
+            },
+            Ok(None) => {}
+            Err(e) => tracing::warn!("[shard {id}] save failed: {e}"),
+        }
+    }
+
+    /// Start a shard this machine took over, from its saved state when there
+    /// is one. A shard that cannot start is forgotten, so no machine keeps
+    /// trying.
+    fn adopt(&self, p: &Placement) -> Result<ShardInfo, String> {
+        let c = self.cluster.get().expect("adopt runs in a cluster");
+        let state = c.dir.load_state(&p.shard_id)?;
+        let saves = self.kinds.get(&p.kind).is_some_and(|k| k.saves_state());
+        let started = self
+            .create_local(
+                &p.kind,
+                &p.shard_id,
+                &p.params,
+                state.as_deref().filter(|_| saves),
+            )
+            .map_err(|e| e.to_string());
+        if started.is_err() {
+            let _ = c.dir.release(&p.shard_id, &c.me.id);
+        }
+        started
+    }
+
+    /// Run an operation another machine sent, on this machine only.
+    pub fn run_remote(&self, op: RemoteOp) -> RemoteReply {
+        let err = |e: CreateError| RemoteReply::Err {
+            code: e.code().to_string(),
+            message: e.to_string(),
+        };
+        let json = |info: &ShardInfo| serde_json::to_value(info).unwrap_or_default();
+        match op {
+            RemoteOp::Create {
+                kind,
+                id,
+                params,
+                pinned,
+            } => {
+                if self.cluster.get().is_none() {
+                    return RemoteReply::Err {
+                        code: "SHARD_CLUSTER_ERROR".into(),
+                        message: "this machine is not in the shard directory".into(),
+                    };
+                }
+                if !self.kinds.contains_key(&kind) {
+                    return err(CreateError::UnknownKind(kind));
+                }
+                if let Err(e) = validate_shard_id(&id) {
+                    return err(e);
+                }
+                match self.create_claimed(&kind, &id, &params, pinned) {
+                    Ok(info) => RemoteReply::Ok(json(&info)),
+                    Err(e) => err(e),
+                }
+            }
+            RemoteOp::Stop { id } => {
+                let stopped = self.registry.get(&id).is_some() && self.stop(&id);
+                RemoteReply::Ok(serde_json::json!(stopped))
+            }
+            RemoteOp::Get { id } => RemoteReply::Ok(
+                self.info_local(&id)
+                    .map(|i| json(&i))
+                    .unwrap_or(serde_json::Value::Null),
+            ),
+            RemoteOp::List => {
+                RemoteReply::Ok(serde_json::to_value(self.list_local()).unwrap_or_default())
+            }
+            RemoteOp::Adopt { id } => {
+                let Some(c) = self.cluster.get() else {
+                    return RemoteReply::Ok(serde_json::Value::Null);
+                };
+                match c.dir.placement(&id) {
+                    Ok(Some(p)) if p.machine_id == c.me.id => match self.adopt(&p) {
+                        Ok(info) => RemoteReply::Ok(json(&info)),
+                        Err(message) => RemoteReply::Err {
+                            code: "SHARD_INIT_FAILED".into(),
+                            message,
+                        },
+                    },
+                    _ => RemoteReply::Ok(serde_json::Value::Null),
+                }
+            }
+        }
+    }
+
+    /// Where shard `id` runs, for routing a client that reached this machine.
+    pub fn locate(&self, id: &str) -> pylon_realtime::ShardLocation {
+        use pylon_realtime::ShardLocation;
+        if self.registry.get(id).is_some() {
+            return ShardLocation::Local;
+        }
+        let Some(c) = self.cluster.get() else {
+            return ShardLocation::Unknown;
+        };
+        let Ok(Some(p)) = c.dir.placement(id) else {
+            return ShardLocation::Unknown;
+        };
+        if p.machine_id == c.me.id {
+            return ShardLocation::Unknown;
+        }
+        match c.live_address(&p.machine_id) {
+            Some(address) => ShardLocation::Remote {
+                machine_id: p.machine_id,
+                address,
+                fly: c.me.fly,
+            },
+            None => ShardLocation::Unknown,
         }
     }
 
@@ -1323,6 +1898,16 @@ impl WasmShardHost {
             kind_of.remove(id);
             idle.remove(id);
             tracing::info!("[shard {id}] removed after it stopped");
+            // It ended (finished, idle, or failed): forget its placement,
+            // unless another machine runs it now.
+            if let Some(c) = self.cluster.get() {
+                c.saved_at.lock().unwrap().remove(id);
+                if !c.fenced.lock().unwrap().remove(id) {
+                    if let Err(e) = c.dir.release(id, &c.me.id) {
+                        tracing::warn!("[shard {id}] could not release its placement: {e}");
+                    }
+                }
+            }
         }
     }
 }
@@ -1350,6 +1935,10 @@ impl pylon_realtime::DynShardRegistry for WasmShardHost {
 
     fn stop(&self, id: &str) -> bool {
         WasmShardHost::stop(self, id)
+    }
+
+    fn locate(&self, id: &str) -> pylon_realtime::ShardLocation {
+        WasmShardHost::locate(self, id)
     }
 }
 
@@ -1491,7 +2080,7 @@ pub fn handle_shard_op(
             } else {
                 req.params.clone()
             };
-            host.create(kind, id()?, &params)
+            host.create_on(kind, id()?, &params, req.machine.as_deref())
                 .map(|info| to_json(&info))
                 .map_err(|e| (e.code().to_string(), e.to_string()))
         }
