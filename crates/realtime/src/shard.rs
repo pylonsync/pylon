@@ -395,6 +395,10 @@ pub struct Shard<S: SimState> {
     auths: Mutex<HashMap<SubscriberId, ShardAuth>>,
     /// Subscribers being moved to another shard: their inputs are refused.
     transferring: Mutex<std::collections::HashSet<SubscriberId>>,
+    /// Subscribers moved to another shard recently, with the notice and when
+    /// it stops being repeated. A connection that was down during the move
+    /// gets the notice when it comes back.
+    moved: Mutex<HashMap<SubscriberId, (crate::wire::TransferNotice, Instant)>>,
     running: AtomicBool,
     /// Monotonically increasing tick number. Used for reconciliation and
     /// lockstep protocols.
@@ -458,6 +462,7 @@ impl<S: SimState> Shard<S> {
             subscribers: Mutex::new(Vec::new()),
             auths: Mutex::new(HashMap::new()),
             transferring: Mutex::new(std::collections::HashSet::new()),
+            moved: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
             tick_no: Mutex::new(0),
             input_seq: Mutex::new(0),
@@ -678,6 +683,15 @@ impl<S: SimState> Shard<S> {
         sub: Subscriber<S::Snapshot>,
         auth: &ShardAuth,
     ) -> Result<(), ShardError> {
+        self.authorize_only(sub.id(), auth)?;
+        let id = sub.id().clone();
+        self.add_subscriber(sub)?;
+        self.auths.lock().unwrap().insert(id, auth.clone());
+        Ok(())
+    }
+
+    /// The checks of [`Shard::add_subscriber_authorized`], without adding.
+    fn authorize_only(&self, id: &SubscriberId, auth: &ShardAuth) -> Result<(), ShardError> {
         if let Some(ticket) = &auth.ticket {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -689,7 +703,7 @@ impl<S: SimState> Shard<S> {
                     ticket.shard
                 )));
             }
-            if ticket.sid != sub.id().as_str() {
+            if ticket.sid != id.as_str() {
                 return Err(ShardError::Unauthorized(format!(
                     "ticket is for subscriber \"{}\"",
                     ticket.sid
@@ -701,7 +715,7 @@ impl<S: SimState> Shard<S> {
         }
         {
             let state = self.state.lock().unwrap();
-            if let Err(reason) = state.authorize_subscribe(sub.id(), auth) {
+            if let Err(reason) = state.authorize_subscribe(id, auth) {
                 let finished = self.end_if_finished(&state);
                 drop(state);
                 if finished {
@@ -710,9 +724,6 @@ impl<S: SimState> Shard<S> {
                 return Err(ShardError::Unauthorized(reason));
             }
         }
-        let id = sub.id().clone();
-        self.add_subscriber(sub)?;
-        self.auths.lock().unwrap().insert(id, auth.clone());
         Ok(())
     }
 
@@ -734,15 +745,33 @@ impl<S: SimState> Shard<S> {
         }
     }
 
+    /// Subscriber `id` came (back) into this shard: stop repeating an
+    /// earlier move to its new connections.
+    pub fn forget_move(&self, id: &SubscriberId) {
+        self.moved.lock().unwrap().remove(id);
+    }
+
     /// The move did not happen: subscriber `id`'s inputs are accepted again.
     pub fn cancel_hand_off(&self, id: &SubscriberId) {
         self.transferring.lock().unwrap().remove(id);
     }
 
     /// Subscriber `id` moved to another shard: send each of its connections
-    /// `notice` as their last frame, then remove it. True when it was
-    /// connected.
-    pub fn hand_off(&self, id: &SubscriberId, notice: &crate::wire::TransferNotice) -> bool {
+    /// `notice` as their last frame, then remove it. A connection that
+    /// subscribes as `id` within `remember` gets `notice` too. True when it
+    /// was connected.
+    pub fn hand_off(
+        &self,
+        id: &SubscriberId,
+        notice: &crate::wire::TransferNotice,
+        remember: Duration,
+    ) -> bool {
+        {
+            let now = Instant::now();
+            let mut moved = self.moved.lock().unwrap();
+            moved.retain(|_, (_, until)| *until > now);
+            moved.insert(id.clone(), (notice.clone(), now + remember));
+        }
         let bytes: Arc<[u8]> = Arc::from(serde_json::to_vec(notice).unwrap_or_default());
         let tick = self.tick_number();
         let ack = self.acks.lock().unwrap().get(id).copied().unwrap_or(0);
@@ -781,6 +810,21 @@ impl<S: SimState> Shard<S> {
         auth: &ShardAuth,
     ) -> Result<Arc<OutboundQueue>, ShardError> {
         let queue = OutboundQueue::new(self.config.outbound());
+        let moved = self
+            .moved
+            .lock()
+            .unwrap()
+            .get(&id)
+            .filter(|(_, until)| *until > Instant::now())
+            .map(|(notice, _)| notice.clone());
+        if let Some(notice) = moved {
+            // Moved while this connection was down: repeat the notice, after
+            // the same checks a subscribe gets.
+            self.authorize_only(&id, auth)?;
+            let bytes: Arc<[u8]> = Arc::from(serde_json::to_vec(&notice).unwrap_or_default());
+            queue.push_transfer_and_close(self.tick_number(), 0, bytes);
+            return Ok(queue);
+        }
         self.add_subscriber_authorized(Subscriber::with_queue(id, Arc::clone(&queue)), auth)?;
         Ok(queue)
     }

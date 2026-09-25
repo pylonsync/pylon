@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use pylon_shard_guest::{export_shard, Shard};
+use pylon_shard_guest::{export_shard, Auth, Shard};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -63,6 +63,9 @@ struct Zone {
     params: Params,
     players: BTreeMap<String, Player>,
     leaving: Vec<(String, String)>,
+    /// Players past the edge whose move was asked for. Asked again only
+    /// after they step back, so a refused move is not retried every tick.
+    asked: std::collections::BTreeSet<String>,
 }
 
 fn count_down(ms: &mut u64, dt: Duration) {
@@ -80,6 +83,7 @@ impl Shard for Zone {
             params,
             players: BTreeMap::new(),
             leaving: Vec::new(),
+            asked: Default::default(),
         })
     }
 
@@ -127,7 +131,9 @@ impl Shard for Zone {
                 count_down(ms, dt);
             }
             if let (Some(edge), Some(next)) = (self.params.edge, &self.params.next) {
-                if p.x >= edge && !self.leaving.iter().any(|(s, _)| s == sid) {
+                if p.x < edge {
+                    self.asked.remove(sid);
+                } else if self.asked.insert(sid.clone()) {
                     self.leaving.push((sid.clone(), next.clone()));
                 }
             }
@@ -143,6 +149,7 @@ impl Shard for Zone {
 
     fn transfer_out(&mut self, subscriber: &str) -> Result<Option<Vec<u8>>, String> {
         self.leaving.retain(|(s, _)| s != subscriber);
+        self.asked.remove(subscriber);
         match self.players.remove(subscriber) {
             Some(p) => serde_json::to_vec(&p).map(Some).map_err(|e| e.to_string()),
             None => Ok(None),
@@ -153,6 +160,7 @@ impl Shard for Zone {
         &mut self,
         subscriber: &str,
         state: &[u8],
+        _auth: &Auth,
         returning: bool,
     ) -> Result<(), String> {
         // A closed zone keeps newcomers out, not its own players coming back.
@@ -165,8 +173,6 @@ impl Shard for Zone {
     }
 
     fn transfer_requests(&mut self) -> Vec<(String, String)> {
-        // Asked once each; a refused player that is still past the edge is
-        // asked again next tick.
         std::mem::take(&mut self.leaving)
     }
 

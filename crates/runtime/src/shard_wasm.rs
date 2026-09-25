@@ -641,7 +641,7 @@ struct Exports {
 #[derive(Clone)]
 struct TransferExports {
     out: TypedFunc<(i32, i32), i32>,
-    accept: TypedFunc<(i32, i32, i32, i32, i32), i32>,
+    accept: TypedFunc<(i32, i32, i32, i32, i32, i32, i32), i32>,
     requests: TypedFunc<(), i32>,
 }
 
@@ -909,14 +909,16 @@ impl WasmSim {
         &self,
         subscriber: &str,
         state: &[u8],
+        auth: &ShardAuth,
         returning: bool,
     ) -> Result<(), String> {
         let mut inner = self.inner.borrow_mut();
         let t = Self::transfer_exports(&inner)?;
         inner.begin_op();
-        let args = inner.write_args(&[subscriber.as_bytes(), state])?;
-        let ((sp, sl), (tp, tl)) = (args[0], args[1]);
-        match inner.call(&t.accept, (sp, sl, tp, tl, i32::from(returning)))? {
+        let auth = auth_json(auth);
+        let args = inner.write_args(&[subscriber.as_bytes(), state, &auth])?;
+        let ((sp, sl), (tp, tl), (ap, al)) = (args[0], args[1], args[2]);
+        match inner.call(&t.accept, (sp, sl, tp, tl, ap, al, i32::from(returning)))? {
             STATUS_OK => Ok(()),
             STATUS_ERR => Err(format!(
                 "pylon_transfer_in refused: {}",
@@ -1370,8 +1372,15 @@ pub struct WasmShardHost {
     /// Players whose source refused them back and that no directory row
     /// holds; the sweep offers them again (see `transfer::retry_stranded`).
     stranded: Mutex<Vec<crate::shard_cluster::Transfer>>,
+    /// Transfer steps whose commit is unknown, by transfer id.
+    unsettled: Mutex<HashMap<String, transfer::Unsettled>>,
+    /// Transfers whose row holds the player (`out`), to finish next round.
+    pending: Mutex<HashMap<String, crate::shard_cluster::Transfer>>,
+    /// Shards whose unfinished transfers could not be read when they
+    /// started; read again next round.
+    resume: Mutex<std::collections::HashSet<String>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
-    transfer_requests: std::sync::mpsc::Sender<(String, String, String)>,
+    transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
     kind_of: RwLock<HashMap<String, String>>,
     /// When each shard last lost its last subscriber.
@@ -1492,7 +1501,7 @@ fn lease_error() -> CreateError {
 impl WasmShardHost {
     /// A host for `kinds`. Starts a thread that removes stopped shards.
     pub fn new(kinds: Vec<WasmShardKind>) -> Arc<Self> {
-        let (transfer_requests, requested) = std::sync::mpsc::channel();
+        let (transfer_requests, requested) = std::sync::mpsc::sync_channel(transfer::REQUEST_QUEUE);
         let host = Arc::new(Self {
             kinds: kinds
                 .into_iter()
@@ -1500,6 +1509,9 @@ impl WasmShardHost {
                 .collect(),
             transferring: Mutex::new(std::collections::HashSet::new()),
             stranded: Mutex::new(Vec::new()),
+            unsettled: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+            resume: Mutex::new(std::collections::HashSet::new()),
             transfer_requests,
             registry: ShardRegistry::new(),
             kind_of: RwLock::new(HashMap::new()),
@@ -1736,7 +1748,11 @@ impl WasmShardHost {
             shard.set_on_tick(move |sim, _| match sim.transfer_requests() {
                 Ok(list) => {
                     for (sid, to) in list {
-                        let _ = requests.send((source.clone(), sid, to));
+                        if requests.try_send((source.clone(), sid, to)).is_err() {
+                            tracing::warn!(
+                                "[shard {source}] too many moves waiting; dropped one (the module may ask again)"
+                            );
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("[shard {source}] transfer requests: {e}"),
@@ -2248,7 +2264,7 @@ impl WasmShardHost {
         }
         // Transfers whose source runs here and that nothing finished.
         if let Some(epoch) = c.current_epoch() {
-            self.settle_stale_transfers(epoch);
+            self.settle_transfers(epoch);
         }
         // Failover: each orphan has one new home; this machine takes the
         // ones whose home it is.
@@ -2369,7 +2385,14 @@ impl WasmShardHost {
             Some(epoch),
         );
         match started {
-            Ok(info) => Ok(info),
+            Ok(info) => {
+                // Moves out of it that a crash left unfinished: its players
+                // in them cannot act here until the next round finishes them.
+                if let Some(shard) = self.registry.get(&p.shard_id) {
+                    self.resume_transfers(&shard);
+                }
+                Ok(info)
+            }
             Err(e @ CreateError::Cluster(_)) => Err(e.to_string()),
             Err(e) => {
                 let why = e.to_string();
@@ -2439,6 +2462,7 @@ impl WasmShardHost {
                 from,
                 subscriber,
                 to,
+                claims,
             } => {
                 if !self.registry.get(&from).is_some_and(|s| s.is_running()) {
                     let e = TransferError::NotFound(from);
@@ -2447,7 +2471,7 @@ impl WasmShardHost {
                         message: e.to_string(),
                     };
                 }
-                match self.transfer(&from, &subscriber, &to) {
+                match self.transfer(&from, &subscriber, &to, claims) {
                     Ok(done) => RemoteReply::Ok(serde_json::to_value(done).unwrap_or_default()),
                     Err(e) => RemoteReply::Err {
                         code: e.code().into(),
@@ -2456,14 +2480,10 @@ impl WasmShardHost {
                 }
             }
             RemoteOp::TransferIn { id } => {
+                // `accept` reads the row again and settles every status: a
+                // repeated delivery of a row already `in` here succeeds.
                 let t = match c.dir.transfer(&id) {
-                    Ok(Some(t)) if t.status == "out" => t,
-                    Ok(Some(t)) => {
-                        return RemoteReply::Err {
-                            code: "SHARD_TRANSFER_REFUSED".into(),
-                            message: format!("transfer {id} is already {}", t.status),
-                        }
-                    }
+                    Ok(Some(t)) => t,
                     Ok(None) => {
                         return RemoteReply::Err {
                             code: "SHARD_TRANSFER_REFUSED".into(),
@@ -2782,7 +2802,7 @@ pub fn handle_shard_op(
                 .to
                 .as_deref()
                 .ok_or_else(|| missing("the target shard"))?;
-            host.transfer(id()?, subscriber, to)
+            host.transfer(id()?, subscriber, to, req.claims.clone())
                 .map(|done| serde_json::to_value(done).unwrap_or_default())
                 .map_err(|e| (e.code().to_string(), e.to_string()))
         }

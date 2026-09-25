@@ -158,3 +158,45 @@ test("an explicit wsUrl follows a transfer", async () => {
   expect(sockets[sockets.length - 1].url).toBe("ws://h/shard?shard=east&sid=p1&v=2");
   client.close();
 });
+
+test("after a transfer, retries keep the transfer ticket until the new shard opens", async () => {
+  const client = connectShard("west", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: (shard) => `own-${shard}`,
+  });
+  await settle();
+  const first = sockets[sockets.length - 1];
+  first.readyState = 1;
+  first.onopen?.();
+  first.onmessage?.({ data: jsonFrame(4, 1, { shard: "east", ticket: "from-server" }) });
+  first.close();
+  await settle();
+  // The first attempt at east fails before opening: the retry still uses
+  // the server's ticket.
+  const failed = sockets[sockets.length - 1];
+  expect(failed.protocols).toEqual(["ticket.from-server"]);
+  failed.close();
+  await settle();
+  expect(sockets[sockets.length - 1].protocols).toEqual(["ticket.from-server"]);
+  client.close();
+});
+
+test("a fixed ticket names the first shard and is not sent after a transfer", async () => {
+  const client = connectShard("west", { subscriberId: "p1", baseUrl: "h", ticket: "for-west" });
+  await settle();
+  const first = sockets[sockets.length - 1];
+  expect(first.protocols).toEqual(["ticket.for-west"]);
+  first.readyState = 1;
+  first.onopen?.();
+  first.onmessage?.({ data: jsonFrame(4, 1, { shard: "east", ticket: "for-east" }) });
+  first.close();
+  await settle();
+  const second = sockets[sockets.length - 1];
+  second.readyState = 1;
+  second.onopen?.();
+  second.close();
+  await settle();
+  expect(sockets[sockets.length - 1].protocols).toEqual(["ticket.for-east"]);
+  client.close();
+});

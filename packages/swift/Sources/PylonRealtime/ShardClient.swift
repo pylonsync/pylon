@@ -166,7 +166,9 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     /// The shard the client is connected (or connecting) to. It changes when
     /// the server moves the subscriber to another shard.
     public private(set) var shardId: String
-    /// The ticket a transfer frame carried, for the next connection only.
+    /// The ticket a transfer frame carried. Used until a frame arrives from
+    /// the new shard (then `ticketProvider` takes over), and for good with a
+    /// fixed `ticket`, which names the old shard.
     private(set) var transferTicket: String?
     /// A transfer frame arrived: reconnect at once when the socket closes.
     private var transferring = false
@@ -341,11 +343,10 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         reconnectAttempts += 1
     }
 
-    /// The ticket for the next connection: a transfer's, once; else the
-    /// provider's; else the configured one.
+    /// The ticket for the next connection: a transfer's, until the new
+    /// shard has answered; else the provider's; else the configured one.
     func nextTicket() async -> String? {
         if let ticket = transferTicket {
-            transferTicket = nil
             return ticket
         }
         if let provider = config.ticketProvider {
@@ -392,6 +393,10 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
 
     func handleFrame(_ data: Data) {
         guard let frame = try? ShardWire.parse(data) else { return }
+        if frame.kind != ShardWire.Kind.transfer.rawValue, config.ticketProvider != nil {
+            // The new shard answered: the provider gives the next tickets.
+            transferTicket = nil
+        }
         if frame.kind == ShardWire.Kind.replication.rawValue {
             do {
                 let summary = try entities.apply(frame.payload)

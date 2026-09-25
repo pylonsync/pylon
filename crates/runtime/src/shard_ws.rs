@@ -602,10 +602,16 @@ async fn run_connection(
     let mut writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
         ping.tick().await; // the first tick fires at once
-        let mut transferred = false;
+                           // The shard a transfer frame named, for the close reason.
+        let mut transferred: Option<String> = None;
         loop {
             while let Some(frame) = writer_queue.pop() {
-                transferred |= frame.kind == FrameKind::Transfer;
+                if frame.kind == FrameKind::Transfer {
+                    transferred = serde_json::from_slice::<wire::TransferNotice>(&frame.bytes)
+                        .map(|n| n.shard)
+                        .ok()
+                        .or(Some(String::new()));
+                }
                 let payload = match (version, frame.kind) {
                     (2, FrameKind::Snapshot) => wire::frame_v2(
                         wire::kind::SNAPSHOT,
@@ -654,8 +660,16 @@ async fn run_connection(
                 }
             }
             if writer_queue.is_closed() {
-                let (code, reason) = if transferred {
-                    (CloseCode::Normal, "moved to another shard")
+                let moved;
+                let (code, reason) = if let Some(shard) = &transferred {
+                    // A close reason is at most 123 bytes.
+                    moved = format!("moved to shard {shard}");
+                    let reason = if moved.len() <= 123 {
+                        moved.as_str()
+                    } else {
+                        "moved to another shard"
+                    };
+                    (CloseCode::Normal, reason)
                 } else if writer_shard.is_running() {
                     (CloseCode::Again, "client too slow")
                 } else {

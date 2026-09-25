@@ -556,13 +556,14 @@ function buildShards(callId: string): Shards {
     async list() {
       return rpc(callId, { type: "shard_op", op: "list" }) as Promise<ShardInfo[]>;
     },
-    async transfer(from, subscriberId, to) {
+    async transfer(from, subscriberId, to, opts) {
       return rpc(callId, {
         type: "shard_op",
         op: "transfer",
         id: from,
         subscriber: subscriberId,
         to,
+        claims: opts?.claims ?? null,
       }) as Promise<ShardTransfer>;
     },
   };

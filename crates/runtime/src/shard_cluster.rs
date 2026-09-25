@@ -622,7 +622,7 @@ impl PgShardDirectory {
         epoch: i64,
         source_state: Option<&[u8]>,
     ) -> Result<bool, String> {
-        self.pool.with_client(|c| {
+        self.pool.with_client_once(|c| {
             let mut tx = c.transaction()?;
             if !holds(&mut tx, &t.from_shard, machine, epoch)? {
                 return Ok(false);
@@ -687,7 +687,7 @@ impl PgShardDirectory {
         epoch: i64,
         state: Option<&[u8]>,
     ) -> Result<Settle, String> {
-        self.pool.with_client(|c| {
+        self.pool.with_client_once(|c| {
             let mut tx = c.transaction()?;
             if !holds(&mut tx, shard, machine, epoch)? {
                 return Ok(Settle::NotHeld);
@@ -705,6 +705,32 @@ impl PgShardDirectory {
             }
             tx.commit()?;
             Ok(Settle::Done)
+        })
+    }
+
+    /// Every transfer row of `subscriber`, oldest first.
+    pub fn transfers_of(&self, subscriber: &str) -> Result<Vec<Transfer>, String> {
+        self.pool.with_client(|c| {
+            let rows = c.query(
+                "SELECT transfer_id, subscriber, from_shard, to_shard, state, auth, status
+                 FROM _pylon_shard_transfers WHERE subscriber = $1 ORDER BY created_at",
+                &[&subscriber],
+            )?;
+            Ok(rows.iter().map(transfer_of).collect())
+        })
+    }
+
+    /// Transfers still `out` from `shard`, of any age: a shard just started
+    /// from saved state finishes them first.
+    pub fn open_transfers_from(&self, shard: &str) -> Result<Vec<Transfer>, String> {
+        self.pool.with_client(|c| {
+            let rows = c.query(
+                "SELECT transfer_id, subscriber, from_shard, to_shard, state, auth, status
+                 FROM _pylon_shard_transfers WHERE from_shard = $1 AND status = 'out'
+                 ORDER BY created_at",
+                &[&shard],
+            )?;
+            Ok(rows.iter().map(transfer_of).collect())
         })
     }
 
@@ -878,6 +904,9 @@ pub enum RemoteOp {
         from: String,
         subscriber: String,
         to: String,
+        /// Claims for the target's ticket.
+        #[serde(default)]
+        claims: serde_json::Value,
     },
     /// Take the player in transfer `id` into its target shard (on the
     /// receiver). The state is in the transfer row.

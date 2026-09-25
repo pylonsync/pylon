@@ -79,8 +79,12 @@ final class ShardTransferTests: XCTestCase {
         XCTAssertEqual(shard, "east")
         url = await client.deriveURL()
         XCTAssertTrue(url.absoluteString.contains("shard=east"), url.absoluteString)
+        // Until the new shard answers, every attempt uses the server's ticket.
         var ticket = await client.nextTicket()
         XCTAssertEqual(ticket, "from-server")
+        ticket = await client.nextTicket()
+        XCTAssertEqual(ticket, "from-server")
+        await client.handleFrame(ShardBackoffTests.frame(kind: 1, codec: 0, payload: Array("{}".utf8)))
         ticket = await client.nextTicket()
         XCTAssertEqual(ticket, "own-east")
         let shards = await asked.shards
@@ -98,5 +102,25 @@ final class ShardTransferTests: XCTestCase {
         await client.handleFrame(ShardBackoffTests.frame(kind: 4, codec: 0, payload: notice))
         let url = await client.deriveURL()
         XCTAssertEqual(url.absoluteString, "ws://h/shard?shard=east&sid=p1&v=2")
+    }
+}
+
+final class ShardTransferFixedTicketTests: XCTestCase {
+    struct Nothing: Codable, Sendable {}
+
+    /// A fixed ticket names the first shard: after a transfer it is never
+    /// sent again.
+    func testAFixedTicketIsNotSentAfterATransfer() async {
+        let client = ShardClient<Nothing, Nothing>(
+            shardId: "west",
+            config: ShardClientConfig(
+                baseURL: URL(string: "http://h")!, subscriberId: "p1", ticket: "for-west"))
+        var ticket = await client.nextTicket()
+        XCTAssertEqual(ticket, "for-west")
+        let notice = Array(#"{"shard":"east","ticket":"for-east"}"#.utf8)
+        await client.handleFrame(ShardBackoffTests.frame(kind: 4, codec: 0, payload: notice))
+        await client.handleFrame(ShardBackoffTests.frame(kind: 1, codec: 0, payload: Array("{}".utf8)))
+        ticket = await client.nextTicket()
+        XCTAssertEqual(ticket, "for-east")
     }
 }

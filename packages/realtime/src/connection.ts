@@ -129,7 +129,9 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 ): ShardClient<TSnapshot, TInput> {
   const now = options.now ?? (() => performance.now());
   let currentShard = shardId;
-  // The ticket a transfer frame carried, for the next connection only.
+  // The ticket a transfer frame carried. Used until a connection to the new
+  // shard opens (then a ticket function takes over), and for good with a
+  // fixed `ticket`, which names the old shard.
   let transferTicket: string | null = null;
   let ws: WebSocket | null = null;
   let clientSeq = 0;
@@ -211,9 +213,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   const connect = () => {
     if (closed) return;
     if (transferTicket !== null) {
-      const ticket = transferTicket;
-      transferTicket = null;
-      open(ticket);
+      open(transferTicket);
       return;
     }
     const source = options.ticket;
@@ -261,6 +261,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
     ws.onopen = () => {
       connected = true;
+      if (typeof options.ticket === "function") transferTicket = null;
       // Inputs sent on the old connection are never acknowledged on this
       // one (acks restart with the connection).
       sentAt.clear();

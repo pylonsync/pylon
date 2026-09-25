@@ -898,8 +898,9 @@ export interface Shards {
    * a match), possibly on another machine. The source module's
    * `transfer_out` removes the player's entity and the target's
    * `transfer_in` adds it, with its state. The player's connections get a
-   * transfer frame with a ticket for `to`, and the client libraries
-   * reconnect there. Actions only.
+   * transfer frame with a ticket for `to` (for the same user, with
+   * `opts.claims`), and the client libraries reconnect there. The target's
+   * `transfer_in` sees that ticket to decide. Actions only.
    *
    * On an error the player stays in `from`. Throws
    * `SHARD_TRANSFER_REFUSED` when a module refuses,
@@ -907,7 +908,12 @@ export interface Shards {
    * subscriber, `SHARD_TRANSFER_BUSY` while it is already moving,
    * `SHARD_TRANSFER_UNSUPPORTED`, or `SHARD_NOT_FOUND`.
    */
-  transfer(from: string, subscriberId: string, to: string): Promise<ShardTransfer>;
+  transfer(
+    from: string,
+    subscriberId: string,
+    to: string,
+    opts?: { claims?: Record<string, unknown> },
+  ): Promise<ShardTransfer>;
 }
 
 /** A finished `ctx.shards.transfer`. */

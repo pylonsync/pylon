@@ -99,7 +99,7 @@
 //! | Export | Meaning |
 //! | --- | --- |
 //! | `pylon_transfer_out(sid_ptr, sid_len) -> status` | Remove the subscriber's entity; its state to the output. Status `3` means the subscriber has no entity here. |
-//! | `pylon_transfer_in(sid_ptr, sid_len, state_ptr, state_len, returning) -> status` | Add the subscriber's entity from state `pylon_transfer_out` produced. `returning` is `1` when it is this shard's own player coming back from a failed move. Status `1` refuses. |
+//! | `pylon_transfer_in(sid_ptr, sid_len, state_ptr, state_len, auth_ptr, auth_len, returning) -> status` | Add the subscriber's entity from state `pylon_transfer_out` produced. The auth bytes are JSON ([`Auth`]): the player's user and the ticket it gets for this shard. `returning` is `1` when it is this shard's own player coming back from a failed move. Status `1` refuses. |
 //! | `pylon_transfer_requests() -> status` | Players the shard wants moved, as JSON `[[sid, target shard], ...]`, to the output. Status `3` means none. The host calls it after each tick. |
 //!
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
@@ -292,14 +292,17 @@ pub trait Shard: Sized + 'static {
     }
 
     /// Add `subscriber`'s entity from `state` that a `transfer_out` returned.
-    /// `returning` is true when it is this shard's own player coming back
-    /// because the move failed: accept it, whatever keeps other players out
-    /// (a full or closed zone). A refused return stays with the host, which
-    /// offers it again. `Err` refuses. Default: refuses.
+    /// `auth` is the player's user and the ticket it will connect with (the
+    /// claims the server function passed to `ctx.shards.transfer`), to decide
+    /// who may come in. `returning` is true when it is this shard's own
+    /// player coming back because the move failed: accept it, whatever keeps
+    /// other players out (a full or closed zone). A refused return stays
+    /// with the host, which offers it again. `Err` refuses. Default: refuses.
     fn transfer_in(
         &mut self,
         _subscriber: &str,
         _state: &[u8],
+        _auth: &Auth,
         _returning: bool,
     ) -> Result<(), String> {
         Err("this shard does not accept players".into())
@@ -554,9 +557,11 @@ macro_rules! export_shard {
                 sl: i32,
                 tp: i32,
                 tl: i32,
+                ap: i32,
+                al: i32,
                 returning: i32,
             ) -> i32 {
-                RUNTIME.transfer_in(sp, sl, tp, tl, returning)
+                RUNTIME.transfer_in(sp, sl, tp, tl, ap, al, returning)
             }
             #[no_mangle]
             pub extern "C" fn pylon_transfer_requests() -> i32 {
@@ -677,11 +682,25 @@ pub mod __rt {
             }
         }
 
-        pub fn transfer_in(&self, sp: i32, sl: i32, tp: i32, tl: i32, returning: i32) -> i32 {
+        #[allow(clippy::too_many_arguments)]
+        pub fn transfer_in(
+            &self,
+            sp: i32,
+            sl: i32,
+            tp: i32,
+            tl: i32,
+            ap: i32,
+            al: i32,
+            returning: i32,
+        ) -> i32 {
             let s = self.state();
             // SAFETY: host-written arguments in the scratch buffer.
-            let (sid, state) = unsafe { (arg_str(sp, sl), arg(tp, tl)) };
-            match shard(&mut s.shard).transfer_in(sid, state, returning != 0) {
+            let (sid, state, auth) = unsafe { (arg_str(sp, sl), arg(tp, tl), arg(ap, al)) };
+            let auth: Auth = match serde_json::from_slice(auth) {
+                Ok(a) => a,
+                Err(e) => return fail(&mut s.output, format!("invalid auth: {e}")),
+            };
+            match shard(&mut s.shard).transfer_in(sid, state, &auth, returning != 0) {
                 Ok(()) => OK,
                 Err(e) => fail(&mut s.output, e),
             }

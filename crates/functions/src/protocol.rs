@@ -823,6 +823,9 @@ pub struct ShardOpMessage {
     /// The shard to move it to (`transfer`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<String>,
+    /// Claims for the target's ticket (`transfer`).
+    #[serde(default)]
+    pub claims: serde_json::Value,
 }
 
 /// Send a transactional email via the runtime's configured provider.

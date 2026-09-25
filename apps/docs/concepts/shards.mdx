@@ -413,11 +413,20 @@ fn transfer_out(&mut self, subscriber: &str) -> Result<Option<Vec<u8>>, String> 
     }
 }
 
-fn transfer_in(&mut self, subscriber: &str, state: &[u8], returning: bool) -> Result<(), String> {
-    // `returning`: this shard's own player, back from a move that failed.
-    // Always take it back.
-    if self.full() && !returning {
-        return Err("the zone is full".into()); // refuse: the player stays
+fn transfer_in(
+    &mut self,
+    subscriber: &str,
+    state: &[u8],
+    auth: &Auth,      // the player's user and its ticket for this shard
+    returning: bool,  // this shard's own player, back from a failed move
+) -> Result<(), String> {
+    // Always take a returning player back. Refusing keeps the player in
+    // the source.
+    if !returning && self.full() {
+        return Err("the zone is full".into());
+    }
+    if !returning && auth.claim("party").is_none() {
+        return Err("join a party first".into());
     }
     let p: Player = serde_json::from_slice(state).map_err(|e| e.to_string())?;
     self.players.insert(subscriber.to_string(), p);
@@ -431,10 +440,16 @@ A server function moves a player:
 export default action({
   args: { from: v.string(), to: v.string() },
   async handler(ctx, args) {
-    return ctx.shards.transfer(args.from, ctx.auth.userId!, args.to);
+    return ctx.shards.transfer(args.from, ctx.auth.userId!, args.to, {
+      claims: { party: "north" },
+    });
   },
 });
 ```
+
+The target's ticket names the same user (the source ticket's, else the
+session's) and carries only `opts.claims`: claims issued for the source are
+not copied.
 
 Or the module asks for the move itself, after a tick, from
 `transfer_requests`:
@@ -455,21 +470,29 @@ What happens:
    `ctx.shards.transfer` throws `SHARD_TRANSFER_REFUSED` (or
    `SHARD_NOT_FOUND`). The player stays in the source, still connected.
 3. Each of the player's connections to the source gets a transfer frame:
-   the target shard and a ticket for it, with the same user and claims.
+   the target shard and a ticket for it (valid 10 minutes). A connection
+   that comes back to the source within that time gets the frame again.
    `connectShard`, `connectShardGame`, `useShard`, and the Swift
    `ShardClient` reconnect to the target at once, and `onTransfer` (or
    `transfers()` in Swift) reports it. The target sends a baseline.
 
 A ticket function (`ticket: (shardId) => ...`) gets the current shard, so a
-later reconnect asks for a ticket to the right one.
+later reconnect asks for a ticket to the right one. The clients use the
+transfer frame's ticket until the new shard answers; a fixed `ticket`,
+which names the first shard, is not sent after a move.
+
+A module asks for a move once per player: a move that failed is not tried
+again for 5 seconds, and one already in progress is skipped.
 
 On several machines a row in the directory holds the player while it is in
 flight. The source saves its state without the player and writes the row
 in one transaction; the target saves its state with the player and marks
 the row taken in one transaction; a refusal gives the row back to the
 source the same way. One of the two takes the row, so the player is never
-in two shards and never lost. When a machine dies halfway, the machine that
-runs the source afterwards finishes the move within 15 seconds.
+in two shards and never lost. A step whose commit the database did not
+confirm is settled from the row in the next round. When a machine dies
+halfway, the machine that starts the source from saved state finishes the
+move at once, and the player cannot act in the source until then.
 
 ## Load test
 
