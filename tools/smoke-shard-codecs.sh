@@ -23,7 +23,8 @@ ROOT="$(pwd)"
 TMP="$(mktemp -d -t pylon-shard-e2e.XXXXXX)"
 PIDS=()
 cleanup() {
-	for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+	# Guarded: an empty array is "unbound" under `set -u` in older bash.
+	for pid in ${PIDS[@]+"${PIDS[@]}"}; do kill "$pid" 2>/dev/null || true; done
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -31,7 +32,9 @@ trap cleanup EXIT
 echo "→ build the example shard servers"
 cargo build -p pylon-runtime --example shard_codec_server --example shard_replication_server --quiet
 
-# Start an example server and print its ready line.
+# Start an example server in this shell (not a subshell, so its pid reaches
+# PIDS for cleanup) and set READY to its ready line.
+READY=""
 start() {
 	local name="$1" out="$TMP/$1.out"
 	"$ROOT/target/debug/examples/$name" >"$out" 2>&1 &
@@ -40,19 +43,18 @@ start() {
 		[[ -s "$out" ]] && break
 		sleep 0.1
 	done
-	local line
-	line="$(head -1 "$out")"
-	[[ "$line" == \{* ]] || {
-		echo "::error::$name did not start: $line" >&2
+	READY="$(head -1 "$out")"
+	[[ "$READY" == \{* ]] || {
+		echo "::error::$name did not start: $READY" >&2
 		exit 1
 	}
-	echo "$line"
 }
 
 echo "→ start them"
-PYLON_SHARD_E2E="$(start shard_codec_server)"
-PYLON_SHARD_REPLICATION_E2E="$(start shard_replication_server)"
-export PYLON_SHARD_E2E PYLON_SHARD_REPLICATION_E2E
+start shard_codec_server
+export PYLON_SHARD_E2E="$READY"
+start shard_replication_server
+export PYLON_SHARD_REPLICATION_E2E="$READY"
 
 echo "→ TypeScript client"
 (cd "$ROOT/packages/react" && bun test src/shard.e2e.test.ts src/shard-replication.e2e.test.ts)

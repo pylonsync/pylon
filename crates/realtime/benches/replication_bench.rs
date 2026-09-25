@@ -81,7 +81,7 @@ fn run(name: &str, precision: f32, budget: usize) {
                 },
             );
             if sub == 0 {
-                ours = frame;
+                ours = frame.bytes;
             }
         }
         build += start.elapsed();
