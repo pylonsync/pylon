@@ -1368,21 +1368,20 @@ pub struct ShardInfo {
 pub struct WasmShardHost {
     kinds: HashMap<String, Arc<WasmShardKind>>,
     /// Transfers in progress here, by (source shard, subscriber).
-    transferring: Mutex<std::collections::HashSet<(String, String)>>,
+    transferring: Mutex<HashMap<(String, String), transfer::Instance>>,
     /// Players whose source refused them back and that no directory row
     /// holds; the sweep offers them again (see `transfer::retry_stranded`).
-    stranded: Mutex<Vec<crate::shard_cluster::Transfer>>,
+    stranded: Mutex<Vec<(crate::shard_cluster::Transfer, transfer::Instance)>>,
     /// Transfer steps whose commit is unknown, by transfer id and the side
     /// (source or target) they left holding the player.
     unsettled: Mutex<HashMap<(String, transfer::Role), transfer::Unsettled>>,
     /// Moves out of shards here that are not finished (the row holds the
     /// player, or its outcome is unknown); each round finishes them.
-    waiting: Mutex<HashMap<String, crate::shard_cluster::Transfer>>,
+    waiting: Mutex<HashMap<String, (crate::shard_cluster::Transfer, transfer::Instance)>>,
     /// Transfers a call is working on right now; a round leaves them alone.
     live: Mutex<std::collections::HashSet<String>>,
-    /// Shards whose unfinished transfers could not be read when they
-    /// started; read again next round.
-    resume: Mutex<std::collections::HashSet<String>>,
+    /// Each running shard's run number (see `transfer::Instance`).
+    instances: Mutex<HashMap<String, u64>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1511,12 +1510,12 @@ impl WasmShardHost {
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
                 .collect(),
-            transferring: Mutex::new(std::collections::HashSet::new()),
+            transferring: Mutex::new(HashMap::new()),
             stranded: Mutex::new(Vec::new()),
             unsettled: Mutex::new(HashMap::new()),
             waiting: Mutex::new(HashMap::new()),
             live: Mutex::new(std::collections::HashSet::new()),
-            resume: Mutex::new(std::collections::HashSet::new()),
+            instances: Mutex::new(HashMap::new()),
             transfer_requests,
             registry: ShardRegistry::new(),
             kind_of: RwLock::new(HashMap::new()),
@@ -1578,7 +1577,7 @@ impl WasmShardHost {
                     "this app runs on one machine; there is no machine \"{m}\""
                 )));
             }
-            return self.create_local(kind, id, params, None, None);
+            return self.create_local(kind, id, params, None, None, None);
         };
         if self.registry.get(id).is_some_and(|s| s.is_running()) {
             return Err(CreateError::Exists(id.to_string()));
@@ -1676,7 +1675,7 @@ impl WasmShardHost {
                 })
             }
         }
-        self.create_local(kind, id, params, None, Some(placement.epoch))
+        self.create_local(kind, id, params, None, Some(placement.epoch), None)
             .inspect_err(|_| {
                 let _ = cluster.dir.release(id, &cluster.me.id, placement.epoch);
             })
@@ -1692,6 +1691,7 @@ impl WasmShardHost {
         params: &serde_json::Value,
         state: Option<&[u8]>,
         epoch: Option<i64>,
+        resume: Option<&transfer::ResumePlan>,
     ) -> Result<ShardInfo, CreateError> {
         let spec = self
             .kinds
@@ -1775,7 +1775,9 @@ impl WasmShardHost {
         // The lease check and the start are one step under the lease lock,
         // which the fence takes to stop everything: a shard never starts
         // after the fence ran.
-        let _lease = match self.cluster.get() {
+        static RUNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let serial = RUNS.fetch_add(1, Ordering::Relaxed);
+        let (_lease, run_epoch) = match self.cluster.get() {
             Some(c) => {
                 let lease = c.lease.lock().unwrap();
                 let current = lease.startable();
@@ -1783,10 +1785,22 @@ impl WasmShardHost {
                     return Err(lease_error());
                 };
                 c.owned.lock().unwrap().insert(id.to_string(), epoch);
-                Some(lease)
+                (Some(lease), epoch)
             }
-            None => None,
+            None => (None, 0),
         };
+        self.instances
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), serial);
+        // Moves a crash left open: in place before any input reaches it.
+        if let Some(plan) = resume {
+            let at = transfer::Instance {
+                epoch: run_epoch,
+                serial,
+            };
+            self.apply_resume_plan(&shard, at, plan);
+        }
         self.kind_of
             .write()
             .unwrap()
@@ -1869,6 +1883,7 @@ impl WasmShardHost {
 
     /// Stop and remove a shard running in this process.
     fn stop_local(&self, id: &str) -> bool {
+        self.instances.lock().unwrap().remove(id);
         // Serialized with create and the sweep, so a stop never removes the
         // bookkeeping of a shard created under the same id meanwhile.
         let _guard = self.create_lock.lock().unwrap();
@@ -2382,22 +2397,19 @@ impl WasmShardHost {
             return Err("no longer placed here".into());
         };
         let saves = self.kinds.get(&p.kind).is_some_and(|k| k.saves_state());
+        // Its moves a crash left unfinished, read before it starts; when the
+        // directory cannot say, it starts in a later round.
+        let plan = self.resume_plan(&p.shard_id)?;
         let started = self.create_local(
             &p.kind,
             &p.shard_id,
             &p.params,
             state.as_deref().filter(|_| saves),
             Some(epoch),
+            Some(&plan),
         );
         match started {
-            Ok(info) => {
-                // Moves out of it that a crash left unfinished: its players
-                // in them cannot act here until the next round finishes them.
-                if let Some(shard) = self.registry.get(&p.shard_id) {
-                    self.resume_transfers(&shard);
-                }
-                Ok(info)
-            }
+            Ok(info) => Ok(info),
             Err(e @ CreateError::Cluster(_)) => Err(e.to_string()),
             Err(e) => {
                 let why = e.to_string();
@@ -2557,7 +2569,8 @@ impl WasmShardHost {
                     continue;
                 };
                 let limit = self.kinds[kind].limits.idle_shutdown;
-                if shard.subscriber_count() > 0 || limit.is_zero() {
+                // A player moving out keeps it up until the move ends.
+                if shard.subscriber_count() > 0 || limit.is_zero() || self.moving_out(id) {
                     idle.remove(id);
                     continue;
                 }
@@ -2609,7 +2622,13 @@ impl WasmShardHost {
                     let held = c.owned.lock().unwrap().remove(id);
                     held.filter(|&epoch| in_force && !lapsed && epoch == lease.epoch)
                 };
-                if let Some(epoch) = held {
+                // A move out of it still open keeps the placement: the shard
+                // starts again here and finishes the move.
+                let moving = self.moving_out(id)
+                    || c.dir
+                        .open_transfers_from(id)
+                        .map_or(true, |open| !open.is_empty());
+                if let Some(epoch) = held.filter(|_| !moving) {
                     if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
                         tracing::warn!("[shard {id}] could not release its placement: {e}");
                     }

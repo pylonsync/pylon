@@ -624,6 +624,8 @@ impl PgShardDirectory {
     ) -> Result<bool, String> {
         self.pool.with_client_once(|c| {
             let mut tx = c.transaction()?;
+            // A client that dies mid-transaction releases its locks soon.
+            tx.batch_execute("SET LOCAL idle_in_transaction_session_timeout = '15s'")?;
             if !holds(&mut tx, &t.from_shard, machine, epoch)? {
                 return Ok(false);
             }
@@ -689,6 +691,7 @@ impl PgShardDirectory {
     ) -> Result<Settle, String> {
         self.pool.with_client_once(|c| {
             let mut tx = c.transaction()?;
+            tx.batch_execute("SET LOCAL idle_in_transaction_session_timeout = '15s'")?;
             if !holds(&mut tx, shard, machine, epoch)? {
                 return Ok(Settle::NotHeld);
             }
@@ -708,12 +711,19 @@ impl PgShardDirectory {
         })
     }
 
+    /// The pool, for tests that write rows directly.
+    #[cfg(test)]
+    pub(crate) fn pool_for_tests(&self) -> &PgPool {
+        &self.pool
+    }
+
     /// Every transfer row of `subscriber`, oldest first.
     pub fn transfers_of(&self, subscriber: &str) -> Result<Vec<Transfer>, String> {
         self.pool.with_client(|c| {
             let rows = c.query(
                 "SELECT transfer_id, subscriber, from_shard, to_shard, state, auth, status
-                 FROM _pylon_shard_transfers WHERE subscriber = $1 ORDER BY created_at",
+                 FROM _pylon_shard_transfers WHERE subscriber = $1 AND status <> 'void'
+                 ORDER BY created_at",
                 &[&subscriber],
             )?;
             Ok(rows.iter().map(transfer_of).collect())
@@ -756,11 +766,68 @@ impl PgShardDirectory {
         })
     }
 
+    /// The status of transfer `id` once no transaction on it is still in
+    /// flight: `None` when it has no row (and never will: a `void` row takes
+    /// the id, so a late insert fails). Waits for an uncommitted insert or
+    /// update of the row, so a commit whose reply was lost is counted.
+    pub fn confirm_status(&self, id: &str) -> Result<Option<String>, String> {
+        self.pool.with_client_once(|c| {
+            let mut tx = c.transaction()?;
+            tx.batch_execute(
+                "SET LOCAL lock_timeout = '20s';
+                 SET LOCAL idle_in_transaction_session_timeout = '15s'",
+            )?;
+            // Blocks behind an uncommitted insert of the same id.
+            tx.execute(
+                "INSERT INTO _pylon_shard_transfers
+                    (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
+                 VALUES ($1, '', '', '', ''::bytea, '{}'::jsonb, 'void',
+                         (extract(epoch from clock_timestamp()) * 1000)::bigint)
+                 ON CONFLICT (transfer_id) DO NOTHING",
+                &[&id],
+            )?;
+            // Blocks behind an uncommitted update of it.
+            let status: String = tx
+                .query_one(
+                    "SELECT status FROM _pylon_shard_transfers WHERE transfer_id = $1 FOR UPDATE",
+                    &[&id],
+                )?
+                .get(0);
+            tx.commit()?;
+            Ok((status != "void").then_some(status))
+        })
+    }
+
+    /// Transfers still `out` for longer than `older_than_ms` whose source
+    /// shard has no placement (it was stopped) and whose target `machine`
+    /// holds under `epoch`: the target's machine finishes them.
+    pub fn ownerless_transfers(
+        &self,
+        machine: &str,
+        epoch: i64,
+        older_than_ms: i64,
+    ) -> Result<Vec<Transfer>, String> {
+        self.pool.with_client(|c| {
+            let rows = c.query(
+                "SELECT t.transfer_id, t.subscriber, t.from_shard, t.to_shard, t.state, t.auth, t.status
+                 FROM _pylon_shard_transfers t
+                 JOIN _pylon_shard_placements p ON p.shard_id = t.to_shard
+                 WHERE t.status = 'out' AND p.machine_id = $1 AND p.epoch = $2
+                   AND NOT EXISTS (SELECT 1 FROM _pylon_shard_placements s
+                                   WHERE s.shard_id = t.from_shard)
+                   AND t.created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - $3
+                 ORDER BY t.created_at",
+                &[&machine, &epoch, &older_than_ms],
+            )?;
+            Ok(rows.iter().map(transfer_of).collect())
+        })
+    }
+
     pub fn transfer(&self, id: &str) -> Result<Option<Transfer>, String> {
         self.pool.with_client(|c| {
             let row = c.query_opt(
                 "SELECT transfer_id, subscriber, from_shard, to_shard, state, auth, status
-                 FROM _pylon_shard_transfers WHERE transfer_id = $1",
+                 FROM _pylon_shard_transfers WHERE transfer_id = $1 AND status <> 'void'",
                 &[&id],
             )?;
             Ok(row.map(|r| transfer_of(&r)))

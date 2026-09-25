@@ -1413,10 +1413,10 @@ fn a_transfer_needs_a_player_and_a_target() {
 
 /// The transfer protocol against the directory in Postgres, on one machine:
 /// each step saves the shards' states with the transfer row, and a row left
-/// `out` (the source crashed after step 1) is finished by the source's
-/// machine.
+/// `out` for 15 s (as a source that crashed after step 1 leaves it; the
+/// row is written directly here) is finished by the source's machine.
 #[test]
-fn transfers_on_a_cluster_save_both_shards_and_finish_after_a_crash() {
+fn transfers_on_a_cluster_save_both_shards_and_finish_a_row_left_open() {
     let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     use pylon_runtime::shard_cluster::{MachineConfig, PgShardDirectory, Transfer};
     let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
@@ -1524,7 +1524,7 @@ fn transfers_on_a_cluster_save_both_shards_and_finish_after_a_crash() {
     ));
     assert!(saved(&z3)["p1"].is_null());
 
-    // The source crashed right after step 1: the row holds the player.
+    // A row as a source that crashed right after step 1 leaves it.
     let p = check.placement(&z1).unwrap().unwrap();
     let orphaned = Transfer {
         id: format!("t-{run}"),

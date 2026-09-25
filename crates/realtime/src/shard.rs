@@ -746,8 +746,8 @@ impl<S: SimState> Shard<S> {
     /// dropped and new ones refused until [`Shard::hand_off`] or
     /// [`Shard::cancel_hand_off`].
     pub fn begin_hand_off(&self, id: &SubscriberId) {
-        self.transferring.lock().unwrap().insert(id.clone());
         let mut inputs = self.inputs.lock().unwrap();
+        self.transferring.lock().unwrap().insert(id.clone());
         inputs.queue.retain(|p| &p.subscriber_id != id);
         if let Some(entry) = inputs.per_subscriber.get_mut(id) {
             entry.queued = 0;
@@ -959,13 +959,14 @@ impl<S: SimState> Shard<S> {
         if !self.is_running() {
             return Err(ShardError::Stopped);
         }
-        if self.transferring.lock().unwrap().contains(&subscriber_id) {
-            return Err(ShardError::Transferring);
-        }
-
         let now = Instant::now();
         {
             let mut q = self.inputs.lock().unwrap();
+            // Under the inputs lock, which `begin_hand_off` also takes: an
+            // input is refused, or queued before the hand-off drops it.
+            if self.transferring.lock().unwrap().contains(&subscriber_id) {
+                return Err(ShardError::Transferring);
+            }
             let cfg = &self.config;
             let entry = q
                 .per_subscriber
