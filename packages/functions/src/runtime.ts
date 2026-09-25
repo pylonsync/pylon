@@ -556,6 +556,15 @@ function buildShards(callId: string): Shards {
     async list() {
       return rpc(callId, { type: "shard_op", op: "list" }) as Promise<ShardInfo[]>;
     },
+    async publish(to, topic, data) {
+      await rpc(callId, {
+        type: "shard_op",
+        op: "publish",
+        to,
+        topic,
+        params: data ?? null,
+      });
+    },
     async transfer(from, subscriberId, to, opts) {
       return rpc(callId, {
         type: "shard_op",

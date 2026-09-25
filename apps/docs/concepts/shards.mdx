@@ -376,6 +376,7 @@ export default action({
 | `list()` | Every running shard. |
 | `ticket(id, opts)` | A signed ticket. See [shard tickets](/concepts/functions#shard-tickets). |
 | `transfer(from, subscriberId, to)` | Moves a player to another shard with its state. See [Move a player to another shard](#move-a-player-to-another-shard). Actions only. |
+| `publish(to, topic, data)` | Sends a message to shards. See [Messages between shards](#messages-between-shards). Actions only. |
 
 A shard id is 1 to 128 letters, digits, `-`, `_`, `.`, or `:`.
 
@@ -497,6 +498,58 @@ move at once, and the player cannot act in the source until then. When the
 source ended (it finished, or an operator stopped it), the target's machine
 takes the player; a target that refuses it for 30 minutes gives up, the row
 marked `dropped` with the player's state for a week.
+
+## Messages between shards
+
+Shards send each other messages: a realm-wide event ("the relic of Midgard
+is taken") to every frontier zone, a keep-under-attack alert to the zones
+of one realm, a chat channel across zones, a GM command.
+
+A message goes to one shard (`shard:<id>`), to a group (`group:<name>`), or
+to every shard (`all`), on any machine. A module lists its groups, sends
+from its outbox after each tick, and receives in `on_message` at the start
+of its next tick:
+
+```rust
+fn groups(&self) -> Vec<String> {
+    vec![format!("realm:{}", self.realm)]
+}
+
+fn outbox(&mut self) -> Vec<Outgoing> {
+    // Filled during the tick, taken after it.
+    std::mem::take(&mut self.to_send)
+}
+
+fn on_message(&mut self, from: &str, topic: &str, data: &[u8]) {
+    if topic == "relic_taken" {
+        self.banner = Some(String::from_utf8_lossy(data).into_owned());
+    }
+}
+```
+
+```rust
+self.to_send.push(Outgoing {
+    to: Target::Group("realm:midgard".into()),
+    topic: "relic_taken".into(),
+    data: b"the relic of Midgard is taken".to_vec(),
+});
+```
+
+A server function sends with `ctx.shards.publish`; the data arrives as
+JSON bytes, with an empty sender:
+
+```ts
+await ctx.shards.publish("all", "gm", { command: "restart", inSecs: 300 });
+```
+
+Between machines a message travels on the cluster bus when the app has
+one (`PYLON_CLUSTER_BUS`), else as a signed call to each live machine.
+
+Delivery is at most once. A message is dropped, with no notice, when its
+shard is stopped, when the shard already holds 1024 messages for
+its next tick, or when a machine cannot be reached. A sender never gets
+its own message. Limits: 64 messages per tick, topics of 1 to 128 bytes,
+data up to 64 KB, 64 groups per shard.
 
 ## Load test
 

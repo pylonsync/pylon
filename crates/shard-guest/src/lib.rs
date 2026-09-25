@@ -102,6 +102,20 @@
 //! | `pylon_transfer_in(sid_ptr, sid_len, state_ptr, state_len, auth_ptr, auth_len, returning) -> status` | Add the subscriber's entity from state `pylon_transfer_out` produced. The auth bytes are JSON ([`Auth`]): the player's user and the ticket it gets for this shard. `returning` is `1` when it is this shard's own player coming back from a failed move. Status `1` refuses. |
 //! | `pylon_transfer_requests() -> status` | Players the shard wants moved, as JSON `[[sid, target shard], ...]`, to the output. Status `3` means none. The host calls it after each tick. |
 //!
+//! Optional exports for messages between shards. A module exports both or
+//! neither.
+//!
+//! | Export | Meaning |
+//! | --- | --- |
+//! | `pylon_outbox() -> status` | What the shard sends and the groups it is in, to the output (see below). Status `3` means nothing to send and no change of groups. The host calls it after each tick. |
+//! | `pylon_on_message(from_ptr, from_len, topic_ptr, topic_len, data_ptr, data_len) -> status` | A message for this shard. `from` is the sending shard's id (empty for a server function). |
+//!
+//! The outbox output, little-endian: a byte `1` when the groups follow
+//! (else `0`), then a u16 count and each group as a u16 length and UTF-8;
+//! then a u32 message count, and each message as a u16 length and a target
+//! (`shard:<id>`, `group:<name>`, or `all`), a u16 length and a topic, and
+//! a u32 length and the data.
+//!
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
 //! message in the output. A trap stops the shard.
 //!
@@ -314,6 +328,60 @@ pub trait Shard: Sized + 'static {
     fn transfer_requests(&mut self) -> Vec<(String, String)> {
         Vec::new()
     }
+
+    // -- Messages between shards (optional) ---------------------------------
+    //
+    // A realm-wide event ("the relic of Midgard is taken"), an alert to the
+    // zones of one realm, a chat channel across zones, a GM command. The
+    // host delivers them to shards on any machine. Delivery is at most
+    // once: a message to a shard that is stopped or full (1024 waiting),
+    // or on a machine that cannot be reached, is dropped.
+
+    /// The groups this shard is in, for messages sent to `Target::Group`.
+    /// The host reads them after each tick. Default: none.
+    fn groups(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Messages to send, taken after each tick. Default: none.
+    fn outbox(&mut self) -> Vec<Outgoing> {
+        Vec::new()
+    }
+
+    /// A message for this shard, applied at the start of the tick after it
+    /// arrived. `from` is the sending shard's id, or `""` for a server
+    /// function. Default: ignored.
+    fn on_message(&mut self, _from: &str, _topic: &str, _data: &[u8]) {}
+}
+
+/// Where a message goes (see [`Shard::outbox`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// One shard, by id.
+    Shard(String),
+    /// Every shard whose [`Shard::groups`] include this name.
+    Group(String),
+    /// Every shard of the app.
+    All,
+}
+
+impl Target {
+    fn wire(&self) -> String {
+        match self {
+            Target::Shard(id) => format!("shard:{id}"),
+            Target::Group(name) => format!("group:{name}"),
+            Target::All => "all".into(),
+        }
+    }
+}
+
+/// A message a shard sends (see [`Shard::outbox`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    pub to: Target,
+    /// The app's name for the message, for example `"relic_taken"`.
+    pub topic: String,
+    pub data: Vec<u8>,
 }
 
 /// Replication settings (see `Shard::replicated`).
@@ -567,6 +635,21 @@ macro_rules! export_shard {
             pub extern "C" fn pylon_transfer_requests() -> i32 {
                 RUNTIME.transfer_requests()
             }
+            #[no_mangle]
+            pub extern "C" fn pylon_outbox() -> i32 {
+                RUNTIME.outbox()
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_on_message(
+                fp: i32,
+                fl: i32,
+                tp: i32,
+                tl: i32,
+                dp: i32,
+                dl: i32,
+            ) -> i32 {
+                RUNTIME.on_message(fp, fl, tp, tl, dp, dl)
+            }
         };
     };
 }
@@ -590,6 +673,8 @@ pub mod __rt {
         /// The store the host holds a full copy of (by `store_id`); only
         /// that store's changes can follow as a log.
         replication_synced: Option<u64>,
+        /// The groups last sent to the host.
+        groups_sent: Option<Vec<String>>,
     }
 
     /// The module's global state. A `wasm32-unknown-unknown` module runs on
@@ -617,6 +702,7 @@ pub mod __rt {
                     scratch: Vec::new(),
                     output: Vec::new(),
                     replication_synced: None,
+                    groups_sent: None,
                 }),
             }
         }
@@ -704,6 +790,50 @@ pub mod __rt {
                 Ok(()) => OK,
                 Err(e) => fail(&mut s.output, e),
             }
+        }
+
+        pub fn outbox(&self) -> i32 {
+            let s = self.state();
+            let shard = shard(&mut s.shard);
+            let groups = shard.groups();
+            let messages = shard.outbox();
+            let changed = s.groups_sent.as_ref() != Some(&groups);
+            if !changed && messages.is_empty() {
+                return NONE;
+            }
+            let out = &mut s.output;
+            out.clear();
+            let u16_str = |out: &mut Vec<u8>, v: &str| {
+                let bytes = &v.as_bytes()[..v.len().min(u16::MAX as usize)];
+                out.extend_from_slice(&(bytes.len() as u16).to_le_bytes());
+                out.extend_from_slice(bytes);
+            };
+            if changed {
+                out.push(1);
+                out.extend_from_slice(&(groups.len().min(u16::MAX as usize) as u16).to_le_bytes());
+                for g in groups.iter().take(u16::MAX as usize) {
+                    u16_str(out, g);
+                }
+            } else {
+                out.push(0);
+            }
+            out.extend_from_slice(&(messages.len() as u32).to_le_bytes());
+            for m in &messages {
+                u16_str(out, &m.to.wire());
+                u16_str(out, &m.topic);
+                out.extend_from_slice(&(m.data.len() as u32).to_le_bytes());
+                out.extend_from_slice(&m.data);
+            }
+            s.groups_sent = Some(groups);
+            OK
+        }
+
+        pub fn on_message(&self, fp: i32, fl: i32, tp: i32, tl: i32, dp: i32, dl: i32) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written arguments in the scratch buffer.
+            let (from, topic, data) = unsafe { (arg_str(fp, fl), arg_str(tp, tl), arg(dp, dl)) };
+            shard(&mut s.shard).on_message(from, topic, data);
+            OK
         }
 
         pub fn transfer_requests(&self) -> i32 {

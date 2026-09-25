@@ -1701,3 +1701,178 @@ fn a_move_left_open_by_a_crash_is_finished_when_the_source_starts_elsewhere() {
     h2.stop(&dst);
     h2.stop_all();
 }
+
+// -- Messages between shards --------------------------------------------------
+
+/// The last snapshot on `q` whose `heard` list satisfies `ok`, within 5 s.
+fn wait_heard(q: &pylon_realtime::OutboundQueue, ok: impl Fn(&[String]) -> bool) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(Instant::now() < deadline, "not heard within 5 s");
+        let Some(f) = q.pop_blocking(Duration::from_millis(100)) else {
+            continue;
+        };
+        if f.kind != FrameKind::Snapshot {
+            continue;
+        }
+        let snap: Value = serde_json::from_slice(&f.bytes).unwrap();
+        let heard: Vec<String> = serde_json::from_value(snap["heard"].clone()).unwrap_or_default();
+        if ok(&heard) {
+            return heard;
+        }
+    }
+}
+
+/// Snapshots on `q` for `for_ms`; true when any heard satisfies `ok`.
+fn heard_within(
+    q: &pylon_realtime::OutboundQueue,
+    for_ms: u64,
+    ok: impl Fn(&[String]) -> bool,
+) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(for_ms);
+    while Instant::now() < deadline {
+        if let Some(f) = q.pop_blocking(Duration::from_millis(50)) {
+            if f.kind == FrameKind::Snapshot {
+                let snap: Value = serde_json::from_slice(&f.bytes).unwrap();
+                let heard: Vec<String> =
+                    serde_json::from_value(snap["heard"].clone()).unwrap_or_default();
+                if ok(&heard) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn messages_reach_one_shard_a_group_or_all() {
+    let host = zone_host();
+    host.create("zone", "n1", &json!({ "group": "north" }))
+        .unwrap();
+    host.create("zone", "n2", &json!({ "group": "north" }))
+        .unwrap();
+    host.create("zone", "s1", &json!({ "group": "south" }))
+        .unwrap();
+    let qn1 = subscribe(&host, "n1", "watch");
+    let qn2 = subscribe(&host, "n2", "watch");
+    let qs1 = subscribe(&host, "s1", "watch");
+    // A tick after start: the groups are known.
+    wait_heard(&qn1, |_| true);
+    wait_heard(&qs1, |_| true);
+    let _p = subscribe(&host, "n1", "p1");
+    input(&host, "n1", "p1", json!("join")).unwrap();
+
+    // To a group: the other north zone hears; south does not.
+    input(
+        &host,
+        "n1",
+        "p1",
+        json!({ "shout": { "text": "rally", "to": "group:north" } }),
+    )
+    .unwrap();
+    wait_heard(&qn2, |h| h.iter().any(|m| m == "n1> p1: rally"));
+    assert!(!heard_within(&qs1, 400, |h| h
+        .iter()
+        .any(|m| m.contains("rally"))));
+
+    // To all: everyone but the sender.
+    input(
+        &host,
+        "n1",
+        "p1",
+        json!({ "shout": { "text": "relic taken" } }),
+    )
+    .unwrap();
+    wait_heard(&qs1, |h| h.iter().any(|m| m == "n1> p1: relic taken"));
+    wait_heard(&qn2, |h| h.iter().any(|m| m == "n1> p1: relic taken"));
+    assert!(!heard_within(&qn1, 400, |h| h
+        .iter()
+        .any(|m| m.contains("relic"))));
+
+    // To one shard.
+    input(
+        &host,
+        "n1",
+        "p1",
+        json!({ "shout": { "text": "psst", "to": "shard:s1" } }),
+    )
+    .unwrap();
+    wait_heard(&qs1, |h| h.iter().any(|m| m == "n1> p1: psst"));
+    assert!(!heard_within(&qn2, 400, |h| h
+        .iter()
+        .any(|m| m.contains("psst"))));
+
+    // From a server function: no sender; the data is JSON.
+    host.publish("all", "shout", br#""server restart in 5""#)
+        .unwrap();
+    wait_heard(&qn1, |h| {
+        h.iter().any(|m| m == r#"> "server restart in 5""#)
+    });
+    assert_eq!(
+        host.publish("north", "shout", b"x").unwrap_err().code(),
+        "SHARD_MESSAGE_INVALID"
+    );
+    assert!(host.publish("all", "", b"x").is_err());
+}
+
+/// A cluster bus that delivers each envelope to every other subscriber in
+/// this process.
+struct LoopbackBus {
+    id: String,
+    hub: Arc<std::sync::Mutex<Vec<(String, pylon_cluster::SubscriberHandler)>>>,
+}
+
+impl pylon_cluster::ClusterBus for LoopbackBus {
+    fn publish(&self, envelope: &pylon_cluster::Envelope) {
+        let handlers: Vec<_> = self.hub.lock().unwrap().iter().cloned().collect();
+        for (_, handler) in handlers {
+            handler(envelope.clone());
+        }
+    }
+    fn subscribe(&self, handler: pylon_cluster::SubscriberHandler) {
+        self.hub.lock().unwrap().push((self.id.clone(), handler));
+    }
+    fn instance_id(&self) -> &str {
+        &self.id
+    }
+}
+
+#[test]
+fn messages_cross_machines_on_the_cluster_bus() {
+    let hub = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (h1, h2) = (zone_host(), zone_host());
+    for (host, id) in [(&h1, "m1"), (&h2, "m2")] {
+        host.attach_bus(Arc::new(LoopbackBus {
+            id: id.into(),
+            hub: Arc::clone(&hub),
+        }));
+    }
+    h1.create("zone", "west", &json!({})).unwrap();
+    h2.create("zone", "east", &json!({ "group": "realm" }))
+        .unwrap();
+    let q = subscribe(&h2, "east", "watch");
+    wait_heard(&q, |_| true);
+    let _p = subscribe(&h1, "west", "p1");
+    input(&h1, "west", "p1", json!("join")).unwrap();
+    input(&h1, "west", "p1", json!({ "shout": { "text": "to all" } })).unwrap();
+    wait_heard(&q, |h| h.iter().any(|m| m == "west> p1: to all"));
+    // Groups are per machine: the bus carries the message, and the machine
+    // that runs a member delivers it.
+    input(
+        &h1,
+        "west",
+        "p1",
+        json!({ "shout": { "text": "realm", "to": "group:realm" } }),
+    )
+    .unwrap();
+    wait_heard(&q, |h| h.iter().any(|m| m == "west> p1: realm"));
+    input(
+        &h1,
+        "west",
+        "p1",
+        json!({ "shout": { "text": "direct", "to": "shard:east" } }),
+    )
+    .unwrap();
+    wait_heard(&q, |h| h.iter().any(|m| m == "west> p1: direct"));
+}

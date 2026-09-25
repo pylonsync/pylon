@@ -914,6 +914,20 @@ export interface Shards {
     to: string,
     opts?: { claims?: Record<string, unknown> },
   ): Promise<ShardTransfer>;
+
+  /**
+   * Send a message to shards on any machine: `"shard:<id>"` for one,
+   * `"group:<name>"` for the shards whose module lists that group, `"all"`
+   * for every shard. The module's `on_message` gets `topic` and `data` as
+   * JSON bytes at the start of its next tick, with an empty sender. For a
+   * GM command, a realm-wide event, or a server-side alert. Actions only.
+   *
+   * Delivery is at most once: a shard that is stopped, busy (1024 messages
+   * waiting), or on a machine that cannot be reached, misses it. Throws
+   * `SHARD_MESSAGE_INVALID` for a bad target, an empty topic (at most 128
+   * bytes), or data over 64 KB.
+   */
+  publish(to: string, topic: string, data?: unknown): Promise<void>;
 }
 
 /** A finished `ctx.shards.transfer`. */

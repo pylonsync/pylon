@@ -802,7 +802,7 @@ pub struct SignShardTicketMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardOpMessage {
     pub call_id: String,
-    /// "create" | "stop" | "get" | "list" | "transfer"
+    /// "create" | "stop" | "get" | "list" | "transfer" | "publish"
     pub op: String,
     /// The shard kind (`create`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -826,6 +826,10 @@ pub struct ShardOpMessage {
     /// Claims for the target's ticket (`transfer`).
     #[serde(default)]
     pub claims: serde_json::Value,
+    /// The message's topic (`publish`, whose target is `to` and whose data
+    /// is `params`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic: Option<String>,
 }
 
 /// Send a transactional email via the runtime's configured provider.

@@ -11,6 +11,9 @@
 #   2c. transfer: packages/realtime's shard-transfer.e2e.test.ts moves a
 #      player with buffs and cooldowns from a zone on a to a zone on b, and
 #      a move the target refuses leaves it in the source.
+#   2d. messages: packages/realtime's shard-messages.e2e.test.ts has a zone
+#      on a shout to all zones and to a group, and a server function
+#      announce; a zone on b hears all three.
 #   3. packages/realtime's shard-cluster.e2e.test.ts creates an arena through
 #      a, pinned to b; connects through a (proxied to b: b is not on Fly);
 #      moves a player; kills b; and finds the arena started on a from b's
@@ -182,6 +185,11 @@ echo "→ 2c. transfer: a player moves from a zone on a to one on b"
 	PYLON_SHARD_TRANSFER_E2E="127.0.0.1:$PORT_A,127.0.0.1:$PORT_B" \
 		bun test src/shard-transfer.e2e.test.ts) || fail "the transfer e2e test failed"
 grep -q "moved to shard east-" "$TMP/a.log" || fail "a did not log the transfer"
+
+echo "→ 2d. messages: a zone on a shouts, a zone on b hears it"
+(cd "$ROOT/packages/realtime" &&
+	PYLON_SHARD_MESSAGES_E2E="127.0.0.1:$PORT_A,127.0.0.1:$PORT_B" \
+		bun test src/shard-messages.e2e.test.ts) || fail "the messages e2e test failed"
 
 echo "→ 3. e2e: create on b through a, connect through a, kill b"
 (cd "$ROOT/packages/realtime" &&

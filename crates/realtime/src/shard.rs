@@ -118,6 +118,11 @@ pub trait SimState: Send + 'static {
         false
     }
 
+    /// A message another shard (or a server function) sent this one (see
+    /// [`Shard::push_message`]). Called at the start of the tick after it
+    /// arrived, before that tick's inputs. Default: ignored.
+    fn on_message(&mut self, _message: &ShardMessage) {}
+
     /// Authorize a subscriber joining this shard. Return `Err(reason)` to reject.
     ///
     /// Default: allow an admin; allow a caller with a ticket (the shard has
@@ -335,6 +340,24 @@ impl std::fmt::Display for ShardError {
 impl std::error::Error for ShardError {}
 
 // ---------------------------------------------------------------------------
+// Messages between shards
+// ---------------------------------------------------------------------------
+
+/// A message from another shard or a server function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShardMessage {
+    /// The sending shard's id, or `""` for a server function.
+    pub from: String,
+    /// The app's name for the message.
+    pub topic: String,
+    pub data: Arc<[u8]>,
+}
+
+/// Messages a shard holds for its next tick. Past this, new ones are
+/// dropped (delivery is at most once).
+pub const MAX_QUEUED_MESSAGES: usize = 1024;
+
+// ---------------------------------------------------------------------------
 // Pending input — bundles the input with its originator
 // ---------------------------------------------------------------------------
 
@@ -402,6 +425,8 @@ pub struct Shard<S: SimState> {
     /// Each connected subscriber's auth at its latest subscribe: a transfer
     /// gives the next shard's ticket the same user and claims.
     auths: Mutex<HashMap<SubscriberId, ShardAuth>>,
+    /// Messages for the next tick (see [`Shard::push_message`]).
+    messages: Mutex<VecDeque<ShardMessage>>,
     /// Subscribers being moved to another shard: their inputs are refused.
     transferring: Mutex<std::collections::HashSet<SubscriberId>>,
     /// Subscribers moved to another shard recently, with the notice and when
@@ -471,6 +496,7 @@ impl<S: SimState> Shard<S> {
             subscribers: Mutex::new(Vec::new()),
             auths: Mutex::new(HashMap::new()),
             transferring: Mutex::new(std::collections::HashSet::new()),
+            messages: Mutex::new(VecDeque::new()),
             moved: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
             tick_no: Mutex::new(0),
@@ -776,6 +802,20 @@ impl<S: SimState> Shard<S> {
                 at,
             },
         );
+    }
+
+    /// Queue `message` for the next tick. False (and dropped) when the shard
+    /// is stopped or already holds [`MAX_QUEUED_MESSAGES`].
+    pub fn push_message(&self, message: ShardMessage) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        let mut queue = self.messages.lock().unwrap();
+        if queue.len() >= MAX_QUEUED_MESSAGES {
+            return false;
+        }
+        queue.push_back(message);
+        true
     }
 
     /// Subscriber `id` came (back) into this shard: stop repeating an
@@ -1315,6 +1355,12 @@ impl<S: SimState> Shard<S> {
                 return;
             }
             let started = Instant::now();
+            // Messages first: they arrived before this tick's inputs were
+            // applied.
+            let messages: Vec<ShardMessage> = self.messages.lock().unwrap().drain(..).collect();
+            for message in &messages {
+                state.on_message(message);
+            }
             let generations = self.generations.lock().unwrap();
             let mut acks = self.acks.lock().unwrap();
             let recorder = self.input_recorder.lock().unwrap();
@@ -1644,6 +1690,78 @@ mod tests {
             .add_queued_subscriber_authorized(SubscriberId::new("p1"), &auth(now - 30))
             .unwrap();
         assert!(!q.is_closed());
+    }
+
+    /// Records what reached it, in order.
+    struct Log {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SimState for Log {
+        type Input = i64;
+        type Snapshot = u64;
+        type Error = String;
+
+        fn apply_input(&mut self, _: &SubscriberId, input: i64, _: Instant) -> Result<(), String> {
+            self.seen.lock().unwrap().push(format!("input {input}"));
+            Ok(())
+        }
+        fn tick(&mut self, _dt: Duration) {}
+        fn snapshot(&self) -> u64 {
+            0
+        }
+        fn on_message(&mut self, message: &ShardMessage) {
+            self.seen.lock().unwrap().push(format!(
+                "{} from {}: {}",
+                message.topic,
+                message.from,
+                String::from_utf8_lossy(&message.data)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_message_reaches_the_next_tick_before_its_inputs() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let shard = Shard::new(
+            "zone",
+            Log {
+                seen: Arc::clone(&seen),
+            },
+            ShardConfig::default(),
+        );
+        shard.push_input(SubscriberId::new("p1"), 7, None).unwrap();
+        assert!(shard.push_message(ShardMessage {
+            from: "west".into(),
+            topic: "relic".into(),
+            data: Arc::from(&b"taken"[..]),
+        }));
+        assert!(seen.lock().unwrap().is_empty(), "applied before a tick");
+        shard.run_tick();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["relic from west: taken".to_string(), "input 7".to_string()]
+        );
+
+        // Bounded: past the limit, messages are dropped.
+        for _ in 0..MAX_QUEUED_MESSAGES {
+            assert!(shard.push_message(ShardMessage {
+                from: String::new(),
+                topic: "x".into(),
+                data: Arc::from(&b""[..]),
+            }));
+        }
+        assert!(!shard.push_message(ShardMessage {
+            from: String::new(),
+            topic: "x".into(),
+            data: Arc::from(&b""[..]),
+        }));
+        shard.stop();
+        assert!(!shard.push_message(ShardMessage {
+            from: String::new(),
+            topic: "x".into(),
+            data: Arc::from(&b""[..]),
+        }));
     }
 
     #[test]

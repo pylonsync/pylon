@@ -2575,6 +2575,10 @@ fn start_server(
     // requires the bus.
     let cluster_bus: Arc<dyn pylon_cluster::ClusterBus> =
         build_cluster_bus(&runtime.manifest().name);
+    // Messages between shards on different machines travel on the bus too.
+    if let Some(host) = &wasm_shards {
+        host.attach_bus(Arc::clone(&cluster_bus));
+    }
     // Reactive query registry — backs useReactiveQuery hooks. Created
     // before the notifier so the notifier can hold a strong ref and
     // forward every change event into the registry's `on_change`.

@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use pylon_shard_guest::{export_shard, Auth, Shard};
+use pylon_shard_guest::{export_shard, Auth, Outgoing, Shard, Target};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -24,6 +24,9 @@ struct Params {
     edge: Option<i64>,
     #[serde(default)]
     next: Option<String>,
+    /// A group for messages (`shout` with `to: "group:<name>"`).
+    #[serde(default)]
+    group: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
@@ -46,16 +49,35 @@ struct Player {
 struct Snapshot {
     zone: String,
     players: BTreeMap<String, Player>,
+    /// The last shouts heard from other zones.
+    heard: Vec<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Input {
     Join,
-    Move { dx: i64 },
-    Buff { name: String, ms: u64 },
-    Cast { ability: String, cooldown_ms: u64 },
-    Hit { damage: i64 },
+    Move {
+        dx: i64,
+    },
+    Buff {
+        name: String,
+        ms: u64,
+    },
+    Cast {
+        ability: String,
+        cooldown_ms: u64,
+    },
+    Hit {
+        damage: i64,
+    },
+    /// Send `text` to other zones: `to` is "all" (default),
+    /// "group:<name>", or "shard:<id>".
+    Shout {
+        text: String,
+        #[serde(default)]
+        to: Option<String>,
+    },
 }
 
 struct Zone {
@@ -63,6 +85,8 @@ struct Zone {
     params: Params,
     players: BTreeMap<String, Player>,
     leaving: Vec<(String, String)>,
+    heard: std::collections::VecDeque<String>,
+    shouts: Vec<Outgoing>,
     /// Players past the edge whose move was asked for. Asked again only
     /// after they step back, so a refused move is not retried every tick.
     asked: std::collections::BTreeSet<String>,
@@ -83,6 +107,8 @@ impl Shard for Zone {
             params,
             players: BTreeMap::new(),
             leaving: Vec::new(),
+            heard: Default::default(),
+            shouts: Vec::new(),
             asked: Default::default(),
         })
     }
@@ -117,6 +143,21 @@ impl Shard for Zone {
                 p.cooldowns.insert(ability, cooldown_ms);
             }
             Input::Hit { damage } => p.hp -= damage,
+            Input::Shout { text, to } => {
+                let to = match to.as_deref() {
+                    None | Some("all") => Target::All,
+                    Some(t) => match t.split_once(':') {
+                        Some(("group", name)) => Target::Group(name.to_string()),
+                        Some(("shard", id)) => Target::Shard(id.to_string()),
+                        _ => return Err(format!("cannot shout to {t}")),
+                    },
+                };
+                self.shouts.push(Outgoing {
+                    to,
+                    topic: "shout".into(),
+                    data: format!("{subscriber}: {text}").into_bytes(),
+                });
+            }
         }
         Ok(())
     }
@@ -144,6 +185,7 @@ impl Shard for Zone {
         Snapshot {
             zone: self.id.clone(),
             players: self.players.clone(),
+            heard: self.heard.iter().cloned().collect(),
         }
     }
 
@@ -178,6 +220,24 @@ impl Shard for Zone {
 
     fn transfer_requests(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.leaving)
+    }
+
+    fn groups(&self) -> Vec<String> {
+        self.params.group.iter().cloned().collect()
+    }
+
+    fn outbox(&mut self) -> Vec<Outgoing> {
+        std::mem::take(&mut self.shouts)
+    }
+
+    fn on_message(&mut self, from: &str, topic: &str, data: &[u8]) {
+        if topic == "shout" {
+            if self.heard.len() == 10 {
+                self.heard.pop_front();
+            }
+            self.heard
+                .push_back(format!("{from}> {}", String::from_utf8_lossy(data)));
+        }
     }
 
     fn save(&self) -> Option<Vec<u8>> {

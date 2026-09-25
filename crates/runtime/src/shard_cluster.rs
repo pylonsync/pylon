@@ -1062,6 +1062,13 @@ pub enum RemoteOp {
     TransferIn {
         id: String,
     },
+    /// Deliver a message to the shards on the receiver that `to` names.
+    Deliver {
+        from: String,
+        to: String,
+        topic: String,
+        data_b64: String,
+    },
 }
 
 /// The answer to a [`RemoteOp`]: a JSON value, or an error code and message.
