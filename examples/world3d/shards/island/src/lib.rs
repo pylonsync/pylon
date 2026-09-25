@@ -11,8 +11,9 @@
 //! The shard picks every spawn point (spawns.json, the points the client's
 //! worldgen finds for the fixed seed), keeps health, range-checks hits,
 //! and limits the damage a shooter deals per second. A player who leaves
-//! and joins again within a minute comes back where they were, with the
-//! health they had.
+//! stays in the world, where others can shoot them, for 5 seconds; one who
+//! joins again within a minute comes back where they were, with the health
+//! they had.
 //!
 //! Subscribers are Avatar row ids: `joinIsland` mints the ticket with the
 //! caller's avatar id as the subscriber id, and only ticket holders join.
@@ -41,10 +42,11 @@ const HEALTH: u8 = 3;
 /// frame timing.
 const GROUND_SPEED: f64 = 18.0;
 const GROUND_SAVED: f64 = GROUND_SPEED;
-/// Sustained climbing speed (a steep hill at a sprint), and the most saved
-/// up for one climb: a rocket jump (jump plus a grenade's lift) rises
-/// about 13 m.
-const UP_SPEED: f64 = 6.0;
+/// Sustained climbing speed: the player controller has no slope limit, so a
+/// sprint (11.5 m/s) up a steep hill climbs nearly as fast. The most saved
+/// up for one climb: a rocket jump (jump plus a grenade's lift) rises about
+/// 13 m.
+const UP_SPEED: f64 = 12.0;
 const UP_SAVED: f64 = 14.0;
 /// Falling: gravity is 22 m/s^2 and the tallest drop is about 90 m.
 const DOWN_SPEED: f64 = 45.0;
@@ -59,16 +61,18 @@ const HIT_RANGE: f64 = 280.0;
 const MAX_DAMAGE: u8 = 60;
 /// Damage one shooter may deal per second, and at once: the rifle (18 per
 /// 105 ms) is about 170 per second, and a grenade can hit several players
-/// for up to 55 each.
+/// for up to 55 each (five for 275).
 const DAMAGE_PER_SEC: f64 = 200.0;
-const DAMAGE_SAVED: f64 = 200.0;
+const DAMAGE_SAVED: f64 = 300.0;
 /// A dead player may spawn again after this long.
 const RESPAWN_DELAY: Duration = Duration::from_millis(2500);
 /// A player who sends nothing for this long leaves.
 const IDLE_LIMIT: Duration = Duration::from_secs(15);
-/// A player who left may join again after this long...
-const REJOIN_DELAY: Duration = Duration::from_secs(5);
-/// ...and comes back where they were, with their health, within this long.
+/// A player who leaves stays in the world this long, so leaving is no
+/// escape from a fight. Joining again in the meantime cancels it.
+const LINGER: Duration = Duration::from_secs(5);
+/// A player who joins again within this long comes back where they were,
+/// with their health.
 const REMEMBER_LEFT: Duration = Duration::from_secs(60);
 
 #[derive(Deserialize)]
@@ -107,6 +111,8 @@ struct Player {
     idle: Duration,
     /// Time since health reached 0.
     dead_for: Duration,
+    /// Time since the player left, while they linger.
+    leaving: Option<Duration>,
 }
 
 /// What the shard keeps of a player who left.
@@ -159,8 +165,9 @@ fn encode_look(heading: f32, pitch: f32) -> [u8; 4] {
 }
 
 /// The share of `wanted` meters that `left` meters of budget allows, in
-/// [0, 1].
+/// [0, 1]. A budget rounded just below zero allows nothing.
 fn allowed(wanted: f64, left: f64) -> f64 {
+    let left = left.max(0.0);
     if wanted > left {
         left / wanted
     } else {
@@ -175,16 +182,12 @@ impl Island {
         p
     }
 
-    fn join(&mut self, subscriber: &str) -> Result<(), String> {
-        if self.players.contains_key(subscriber) {
-            return Ok(());
+    fn join(&mut self, subscriber: &str) {
+        if let Some(p) = self.players.get_mut(subscriber) {
+            p.leaving = None;
+            return;
         }
         let (pos, health, dead_for) = match self.departed.remove(subscriber) {
-            Some(d) if d.gone_for < REJOIN_DELAY => {
-                let wait = REJOIN_DELAY - d.gone_for;
-                self.departed.insert(subscriber.to_string(), d);
-                return Err(format!("wait {} ms to join again", wait.as_millis()));
-            }
             Some(d) => (d.pos, d.health, d.dead_for),
             None => (self.spawn_point(), 100, Duration::ZERO),
         };
@@ -206,12 +209,19 @@ impl Island {
                 damage: DAMAGE_SAVED,
                 idle: Duration::ZERO,
                 dead_for,
+                leaving: None,
             },
         );
-        Ok(())
     }
 
+    /// Start the player's linger; `tick` removes them after it.
     fn leave(&mut self, subscriber: &str) {
+        if let Some(p) = self.players.get_mut(subscriber) {
+            p.leaving.get_or_insert(Duration::ZERO);
+        }
+    }
+
+    fn remove(&mut self, subscriber: &str) {
         if let Some(p) = self.players.remove(subscriber) {
             self.store.despawn(p.entity);
             self.departed.insert(
@@ -226,10 +236,13 @@ impl Island {
         }
     }
 
+    /// The player, if they are in and not leaving.
     fn player_mut(&mut self, subscriber: &str) -> Result<&mut Player, String> {
-        self.players
-            .get_mut(subscriber)
-            .ok_or_else(|| "join the island first".to_string())
+        match self.players.get_mut(subscriber) {
+            Some(p) if p.leaving.is_none() => Ok(p),
+            Some(_) => Err("left the island".into()),
+            None => Err("join the island first".into()),
+        }
     }
 }
 
@@ -269,7 +282,7 @@ impl Shard for Island {
             p.idle = Duration::ZERO;
         }
         match input {
-            Input::Join => self.join(subscriber)?,
+            Input::Join => self.join(subscriber),
             Input::Move {
                 dx,
                 dy,
@@ -289,14 +302,17 @@ impl Shard for Island {
                 let g = allowed(ground, p.moves[0]);
                 let vertical = if dy >= 0.0 { 1 } else { 2 };
                 let v = allowed(dy.abs(), p.moves[vertical]);
-                p.moves[0] -= ground * g;
-                p.moves[vertical] -= dy.abs() * v;
-                debug_assert!(p.moves.iter().all(|m| m.is_finite() && *m >= -1e-9));
-                p.pos = clamp_pos([
+                p.moves[0] = (p.moves[0] - ground * g).max(0.0);
+                p.moves[vertical] = (p.moves[vertical] - dy.abs() * v).max(0.0);
+                let next = clamp_pos([
                     (p.pos[0] as f64 + dx * g) as f32,
                     (p.pos[1] as f64 + dy * v) as f32,
                     (p.pos[2] as f64 + dz * g) as f32,
                 ]);
+                if !next.iter().all(|c| c.is_finite()) {
+                    return Err("the move does not add up".into());
+                }
+                p.pos = next;
                 let (entity, pos) = (p.entity, p.pos);
                 self.store.set_pos(entity, pos);
                 self.store
@@ -319,7 +335,9 @@ impl Shard for Island {
                     return Err(format!("no player {target}"));
                 };
                 let d = [0, 1, 2].map(|i| victim.pos[i] as f64 - from[i] as f64);
-                if (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() > HIT_RANGE {
+                // A NaN distance fails too.
+                let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                if dist.is_nan() || dist > HIT_RANGE {
                     return Err("target out of weapon range".into());
                 }
                 if victim.health == 0 {
@@ -360,6 +378,7 @@ impl Shard for Island {
 
     fn tick(&mut self, dt: Duration) {
         let secs = dt.as_secs_f64();
+        let mut idle = Vec::new();
         let mut gone = Vec::new();
         for (id, p) in &mut self.players {
             let earn = |left: f64, rate: f64, cap: f64| (left + rate * secs).min(cap);
@@ -371,12 +390,20 @@ impl Shard for Island {
             if p.health == 0 {
                 p.dead_for += dt;
             }
-            if p.idle >= IDLE_LIMIT {
-                gone.push(id.clone());
+            if let Some(t) = &mut p.leaving {
+                *t += dt;
+                if *t >= LINGER {
+                    gone.push(id.clone());
+                }
+            } else if p.idle >= IDLE_LIMIT {
+                idle.push(id.clone());
             }
         }
-        for id in gone {
+        for id in idle {
             self.leave(&id);
+        }
+        for id in gone {
+            self.remove(&id);
         }
         self.departed.retain(|_, d| {
             d.gone_for += dt;
@@ -451,8 +478,11 @@ mod tests {
         assert_eq!(s.store.get(e).unwrap().component(AVATAR), Some(&b"a"[..]));
         assert_eq!(s.store.get(e).unwrap().component(HEALTH), Some(&[100][..]));
         s.apply_input("a", Input::Leave).unwrap();
-        assert_eq!(s.store.len(), 1);
         assert!(s.apply_input("a", mv(1.0, 0.0, 0.0)).is_err());
+        // It lingers, then goes.
+        assert_eq!(s.store.len(), 2);
+        ticks(&mut s, (LINGER.as_millis() / TICK.as_millis()) as u32);
+        assert_eq!(s.store.len(), 1);
     }
 
     #[test]
@@ -521,8 +551,8 @@ mod tests {
     fn climbing_is_slow_and_the_height_is_capped() {
         let mut s = island();
         place(&mut s, "a", [0.0, 0.0, 0.0]);
-        // Straight up for 10 s at 45 m/s: at most the saved climb plus
-        // 6 m/s.
+        // Straight up for 10 s at 45 m/s: at most the saved climb plus the
+        // climbing speed.
         for _ in 0..200 {
             s.apply_input("a", mv(0.0, 45.0 / 20.0, 0.0)).unwrap();
             s.tick(TICK);
@@ -612,7 +642,7 @@ mod tests {
                 s.players[&id].entity
             })
             .collect();
-        // Everything at once, in one tick: the saved 200 damage, no more.
+        // Everything at once, in one tick: the saved 300 damage, no more.
         let mut dealt = 0;
         for &t in &targets {
             for _ in 0..2 {
@@ -629,12 +659,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(dealt, 180);
+        assert_eq!(dealt, 300);
         let dead = s.players.values().filter(|p| p.health == 0).count();
-        assert_eq!(dead, 1);
+        assert_eq!(dead, 2);
         // A second of rifle fire (about 10 shots of 18) goes through.
         ticks(&mut s, 20);
-        let t = targets[5];
+        let t = targets[9];
         let mut hits = 0;
         for _ in 0..10 {
             if s.apply_input(
@@ -651,7 +681,7 @@ mod tests {
             ticks(&mut s, 2);
         }
         assert_eq!(hits, 10);
-        assert_eq!(s.players["t5"].health, 0);
+        assert_eq!(s.players["t9"].health, 0);
     }
 
     #[test]
@@ -669,35 +699,113 @@ mod tests {
     }
 
     #[test]
-    fn leaving_and_joining_again_neither_heals_nor_moves_a_player() {
+    fn leaving_is_no_escape_and_joining_again_neither_heals_nor_moves_a_player() {
+        let linger = (LINGER.as_millis() / TICK.as_millis()) as u32;
         let mut s = island();
+        place(&mut s, "a", [-235.0, 5.0, 235.0]);
         place(&mut s, "b", [-240.0, 5.0, 240.0]);
-        s.players.get_mut("b").unwrap().health = 0;
+        let b = s.players["b"].entity;
+        // B leaves under fire: still there to be shot for the linger.
         s.apply_input("b", Input::Leave).unwrap();
-        // Right away: refused.
-        assert!(s.apply_input("b", Input::Join).is_err());
-        ticks(&mut s, 120);
+        s.apply_input(
+            "a",
+            Input::Hit {
+                target: b,
+                damage: 60,
+            },
+        )
+        .unwrap();
+        ticks(&mut s, 10);
+        s.apply_input(
+            "a",
+            Input::Hit {
+                target: b,
+                damage: 60,
+            },
+        )
+        .unwrap();
+        assert_eq!(s.players["b"].health, 0);
+        // Leaving players neither move nor shoot.
+        assert!(s.apply_input("b", mv(1.0, 0.0, 0.0)).is_err());
+        ticks(&mut s, linger);
+        assert!(!s.players.contains_key("b"));
         // Within a minute: back where they were, still dead.
         s.apply_input("b", Input::Join).unwrap();
         assert_eq!(pos(&s, "b"), [-240.0, 5.0, 240.0]);
         assert_eq!(s.players["b"].health, 0);
-        // The idle kick counts as leaving too.
+        // Joining again during the linger cancels it.
         s.players.get_mut("b").unwrap().health = 70;
-        ticks(&mut s, (IDLE_LIMIT.as_millis() / TICK.as_millis()) as u32);
+        s.apply_input("b", Input::Leave).unwrap();
+        s.apply_input("b", Input::Join).unwrap();
+        ticks(&mut s, linger);
+        assert_eq!(s.players["b"].health, 70);
+        // The idle kick is a leave too.
+        s.apply_input("a", Input::Leave).unwrap();
+        ticks(
+            &mut s,
+            (IDLE_LIMIT.as_millis() / TICK.as_millis()) as u32 + linger,
+        );
         assert!(!s.players.contains_key("b"));
-        ticks(&mut s, 120);
         s.apply_input("b", Input::Join).unwrap();
         assert_eq!(s.players["b"].health, 70);
         // After a minute away the record is gone: a fresh spawn.
         s.apply_input("b", Input::Leave).unwrap();
         ticks(
             &mut s,
-            (REMEMBER_LEFT.as_millis() / TICK.as_millis()) as u32 + 1,
+            linger + (REMEMBER_LEFT.as_millis() / TICK.as_millis()) as u32 + 1,
         );
         assert!(s.departed.is_empty());
         s.apply_input("b", Input::Join).unwrap();
         assert!(s.spawns.contains(&pos(&s, "b")));
         assert_eq!(s.players["b"].health, 100);
+    }
+
+    #[test]
+    fn a_budget_spent_to_rounding_error_moves_nothing_and_never_nan() {
+        let mut s = island();
+        place(&mut s, "a", [0.0, 5.0, 0.0]);
+        // Spend each budget with moves that do not divide evenly.
+        s.apply_input("a", mv(23.47, 16.51, 23.47)).unwrap();
+        for m in [
+            mv(0.0, 1.0, 0.0),
+            mv(1.0, 0.0, 0.0),
+            mv(0.0, -0.0, 0.0),
+            mv(0.3, 0.7, -0.2),
+        ] {
+            s.apply_input("a", m).unwrap();
+            assert!(
+                pos(&s, "a").iter().all(|c| c.is_finite()),
+                "{:?}",
+                pos(&s, "a")
+            );
+            assert!(s.players["a"]
+                .moves
+                .iter()
+                .all(|m| m.is_finite() && *m >= 0.0));
+        }
+        // Many uneven moves over many ticks stay finite.
+        for i in 0..2000 {
+            s.apply_input("a", mv(0.37 + (i % 7) as f32, 0.53, -0.29))
+                .unwrap();
+            s.apply_input("a", mv(0.0, -0.11, 0.0)).unwrap();
+            if i % 3 == 0 {
+                s.tick(TICK);
+            }
+            assert!(pos(&s, "a").iter().all(|c| c.is_finite()));
+        }
+        // A player far away cannot be hit.
+        place(&mut s, "t", [250.0, 0.0, 250.0]);
+        let t = s.players["t"].entity;
+        s.players.get_mut("a").unwrap().pos = [-250.0, 90.0, -250.0];
+        assert!(s
+            .apply_input(
+                "a",
+                Input::Hit {
+                    target: t,
+                    damage: 10
+                }
+            )
+            .is_err());
     }
 
     #[test]
@@ -711,6 +819,9 @@ mod tests {
         assert_eq!(s.store.len(), 1);
         s.apply_input("a", mv(0.0, 0.0, 0.0)).unwrap();
         ticks(&mut s, (IDLE_LIMIT.as_millis() / TICK.as_millis()) as u32);
+        // Kicked: it lingers, then goes.
+        assert!(s.apply_input("a", mv(1.0, 0.0, 0.0)).is_err());
+        ticks(&mut s, (LINGER.as_millis() / TICK.as_millis()) as u32);
         assert!(s.store.is_empty());
     }
 

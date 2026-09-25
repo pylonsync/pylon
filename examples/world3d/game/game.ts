@@ -597,8 +597,10 @@ export class Game {
     });
   }
 
-  /** Join the island shard as avatar `id`. */
-  setAvatarId(id: string) {
+  /** Join the island shard as avatar `id`. `onIdentityLost` runs when the
+   *  server no longer has that avatar (pruned while the tab slept). */
+  setAvatarId(id: string, onIdentityLost: () => void) {
+    this.net.onIdentityLost = onIdentityLost;
     this.net.connect(id);
   }
 

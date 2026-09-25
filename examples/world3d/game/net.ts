@@ -118,7 +118,9 @@ export class Net implements GameSystem {
   private lastLook = { heading: Infinity, pitch: Infinity };
   private lastJoinAt = -Infinity;
   private lastSeenSelfAt = 0;
-  private lastTouchAt = 0;
+  private touchTimer: ReturnType<typeof setInterval> | null = null;
+  /** Called when the server no longer has our Avatar row. */
+  onIdentityLost: (() => void) | null = null;
   private dead = false;
   private readonly decoder = new TextDecoder();
   /** Avatar id per entity, decoded once per entity. */
@@ -162,13 +164,29 @@ export class Net implements GameSystem {
     const shard = connectShardGame<IslandInput>(SHARD_ID, {
       subscriberId: avatarId,
       // A new ticket for every connection attempt: they expire.
-      ticket: async () => (await callFn<{ ticket: string }>("joinIsland", {})).ticket,
+      ticket: async () => {
+        try {
+          return (await callFn<{ ticket: string }>("joinIsland", {})).ticket;
+        } catch (err) {
+          // The row was pruned (the tab slept for half an hour): this
+          // identity cannot join again.
+          if ((err as { code?: string }).code === "NOT_FOUND") this.onIdentityLost?.();
+          throw err;
+        }
+      },
       tickRate: 20,
       // A respawn moves a player across the island: jump, do not slide.
       interpolation: { snapDistance: 12 },
     });
     this.shard = shard;
     this.me = shard.predict<Vec3>(step);
+    // Wall-clock, not the frame loop: a hidden tab pauses the loop, and
+    // spawnAvatar prunes rows untouched for 30 minutes.
+    this.touchTimer = setInterval(() => {
+      callFn("touchAvatar", {}).catch(() => {
+        // The next interval retries; joinIsland touches the row too.
+      });
+    }, TOUCH_S * 1000);
     shard.onOpen(() => this.join());
     shard.onReplication((table, _summary, _tick, ack) => this.reconcile(ack));
   }
@@ -269,12 +287,6 @@ export class Net implements GameSystem {
 
   update(ctx: FrameCtx) {
     const shard = this.shard;
-    if (shard && ctx.time - this.lastTouchAt >= TOUCH_S) {
-      this.lastTouchAt = ctx.time;
-      callFn("touchAvatar", {}).catch(() => {
-        // Next interval retries; joinIsland touches the row too.
-      });
-    }
     if (shard) {
       shard.frame();
       for (const id of shard.left) this.avatarOf.delete(id);
@@ -365,6 +377,7 @@ export class Net implements GameSystem {
 
   dispose() {
     this.pendingKeys = [];
+    if (this.touchTimer) clearInterval(this.touchTimer);
     this.shard?.send("leave");
     this.shard?.close();
     this.shard = null;

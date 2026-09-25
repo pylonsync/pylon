@@ -160,20 +160,26 @@ test.skipIf(!host)("two players on the island shard with connectShardGame", asyn
   expect(predicted).toBeCloseTo(x, 6);
   expect(checked).toBeGreaterThan(20);
 
-  // A shoots B twice and C twice at once. Damage is capped at 60 a hit and
-  // 200 a second: B goes down, and the last hit on C is refused.
-  const c = await player();
-  await waitFor("C connected", () => (c.game.connected ? true : undefined));
+  // A shoots B, C, and D twice each at once. Damage is capped at 60 a hit
+  // and 300 at once: B and C go down, D takes one hit, and the last is
+  // refused.
+  const [c, d] = await Promise.all([player(), player()]);
+  await waitFor("C and D connected", () => (c.game.connected && d.game.connected ? true : undefined));
   c.game.send("join");
+  d.game.send("join");
   const cEntity = await waitFor("A sees C", () => entityOf(a, c.avatarId));
-  const hits = [bEntity, bEntity, cEntity, cEntity].map((target) =>
+  const dEntity = await waitFor("A sees D", () => entityOf(a, d.avatarId));
+  const hits = [bEntity, bEntity, cEntity, cEntity, dEntity, dEntity].map((target) =>
     a.game.send({ hit: { target, damage: 255 } }),
   );
   await waitFor("B dead in B's own table", () =>
     b.game.latest.get(bEntity)?.components.get(HEALTH)?.[0] === 0 ? true : undefined,
   );
-  await waitFor("the fourth hit refused", () =>
-    a.rejections.find((r) => r.clientSeq === hits[3] && r.message.includes("faster")),
+  await waitFor("the last hit refused", () =>
+    a.rejections.find((r) => r.clientSeq === hits[5] && r.message.includes("faster")),
+  );
+  await waitFor("D hit once", () =>
+    d.game.latest.get(dEntity)?.components.get(HEALTH)?.[0] === 40 ? true : undefined,
   );
   // Too soon to respawn: refused, with the shard's reason.
   const spawnSeq = b.game.send("spawn");
@@ -182,21 +188,32 @@ test.skipIf(!host)("two players on the island shard with connectShardGame", asyn
   );
   expect(refused.message).toContain("too soon");
 
-  // A leaves: B draws A until the tick it left, then drops it.
+  // A leaves: the shard keeps A for 5 s (leaving is no escape from a
+  // fight), then B drops it.
   a.game.send("leave");
-  await waitFor("A gone from B's view", () => {
-    b.game.frame();
-    return b.game.entities.has(aEntity) ? undefined : true;
-  });
+  await waitFor(
+    "A gone from B's view",
+    () => {
+      b.game.frame();
+      return b.game.entities.has(aEntity) ? undefined : true;
+    },
+    12_000,
+  );
 
   expect(a.errors).toEqual([]);
   expect(b.errors).toEqual([]);
   a.game.close();
   b.game.close();
   c.game.close();
-});
+  d.game.close();
+  // A leave lingers 5 s before the entity goes.
+}, 30_000);
 
 test.skipIf(!host)("a connection without a joinIsland ticket is refused", async () => {
+  // The shard runs (a player joined through joinIsland), so the refusal is
+  // for the missing ticket.
+  const other = await player();
+  await waitFor("the shard running", () => (other.game.connected ? true : undefined));
   // A guest session names itself as the subscriber, with no ticket.
   const guest = await fetch(`${origin}/api/auth/guest`, { method: "POST" });
   const { token, user_id } = (await guest.json()) as { token: string; user_id: string };
@@ -211,5 +228,7 @@ test.skipIf(!host)("a connection without a joinIsland ticket is refused", async 
   game.onError(() => {});
   await waitFor("the refused connection to close", () => (closed ? true : undefined));
   expect(game.latest.size).toBe(0);
+  expect(game.connected).toBe(false);
   game.close();
+  other.game.close();
 });

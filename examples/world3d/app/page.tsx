@@ -139,7 +139,8 @@ export default function IslandPage() {
           setUserId(uid);
           const r = await callFn<{ id: string }>("spawnAvatar", { userId: uid });
           if (!disposed) {
-            g.setAvatarId(r.id);
+            // A pruned avatar cannot rejoin: start over with a new one.
+            g.setAvatarId(r.id, () => window.location.reload());
             setBootError(null);
           }
           break;
