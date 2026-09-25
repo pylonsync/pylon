@@ -285,6 +285,13 @@ mod tests {
             shard.push_input(SubscriberId::new("p"), v, None).unwrap();
             std::thread::sleep(Duration::from_millis(73));
         }
+        // On a slow machine the last input may not have ticked yet: stop
+        // only once every input is applied (and so recorded).
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while log.len() < 5 {
+            assert!(Instant::now() < deadline, "only {} inputs applied", log.len());
+            std::thread::sleep(Duration::from_millis(5));
+        }
         shard.stop();
         handle.join();
 
