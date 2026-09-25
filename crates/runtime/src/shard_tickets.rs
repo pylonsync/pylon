@@ -63,6 +63,7 @@ pub fn mint(
             sid: sid.to_string(),
             user_id,
             exp: unix_now() + ttl,
+            iat: unix_now(),
             claims,
         },
     )

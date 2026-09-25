@@ -734,6 +734,28 @@ impl PgShardDirectory {
         })
     }
 
+    /// Moves out of `shard` that ended in the target within the last
+    /// `within_ms`, the latest per subscriber, with each one's age in ms.
+    pub fn recent_moves_from(
+        &self,
+        shard: &str,
+        within_ms: i64,
+    ) -> Result<Vec<(Transfer, i64)>, String> {
+        self.pool.with_client(|c| {
+            let rows = c.query(
+                "SELECT DISTINCT ON (subscriber)
+                        transfer_id, subscriber, from_shard, to_shard, state, auth, status,
+                        (extract(epoch from clock_timestamp()) * 1000)::bigint - created_at
+                 FROM _pylon_shard_transfers
+                 WHERE from_shard = $1 AND status = 'in'
+                   AND created_at > (extract(epoch from clock_timestamp()) * 1000)::bigint - $2
+                 ORDER BY subscriber, created_at DESC",
+                &[&shard, &within_ms],
+            )?;
+            Ok(rows.iter().map(|r| (transfer_of(r), r.get(7))).collect())
+        })
+    }
+
     pub fn transfer(&self, id: &str) -> Result<Option<Transfer>, String> {
         self.pool.with_client(|c| {
             let row = c.query_opt(

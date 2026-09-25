@@ -32,6 +32,10 @@ pub struct ShardTicket {
     pub user_id: Option<String>,
     /// Expiry, in seconds since the Unix epoch.
     pub exp: u64,
+    /// When it was issued, in seconds since the Unix epoch (0 for tickets
+    /// from before this field).
+    #[serde(default)]
+    pub iat: u64,
     /// App claims, for example `{ "character": "c_12", "realm": "north" }`.
     #[serde(default)]
     pub claims: serde_json::Value,
@@ -122,6 +126,7 @@ mod tests {
             sid: "char_12".into(),
             user_id: Some("u_1".into()),
             exp,
+            iat: 0,
             claims: serde_json::json!({ "realm": "north" }),
         }
     }

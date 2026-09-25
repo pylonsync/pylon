@@ -168,6 +168,10 @@ impl Shard for Zone {
             return Err(format!("zone {} is closed", self.id));
         }
         let p: Player = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+        if returning {
+            // Back from a refused move: not asked again until it steps back.
+            self.asked.insert(subscriber.to_string());
+        }
         self.players.insert(subscriber.to_string(), p);
         Ok(())
     }

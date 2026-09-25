@@ -1372,10 +1372,14 @@ pub struct WasmShardHost {
     /// Players whose source refused them back and that no directory row
     /// holds; the sweep offers them again (see `transfer::retry_stranded`).
     stranded: Mutex<Vec<crate::shard_cluster::Transfer>>,
-    /// Transfer steps whose commit is unknown, by transfer id.
-    unsettled: Mutex<HashMap<String, transfer::Unsettled>>,
-    /// Transfers whose row holds the player (`out`), to finish next round.
-    pending: Mutex<HashMap<String, crate::shard_cluster::Transfer>>,
+    /// Transfer steps whose commit is unknown, by transfer id and the side
+    /// (source or target) they left holding the player.
+    unsettled: Mutex<HashMap<(String, transfer::Role), transfer::Unsettled>>,
+    /// Moves out of shards here that are not finished (the row holds the
+    /// player, or its outcome is unknown); each round finishes them.
+    waiting: Mutex<HashMap<String, crate::shard_cluster::Transfer>>,
+    /// Transfers a call is working on right now; a round leaves them alone.
+    live: Mutex<std::collections::HashSet<String>>,
     /// Shards whose unfinished transfers could not be read when they
     /// started; read again next round.
     resume: Mutex<std::collections::HashSet<String>>,
@@ -1510,7 +1514,8 @@ impl WasmShardHost {
             transferring: Mutex::new(std::collections::HashSet::new()),
             stranded: Mutex::new(Vec::new()),
             unsettled: Mutex::new(HashMap::new()),
-            pending: Mutex::new(HashMap::new()),
+            waiting: Mutex::new(HashMap::new()),
+            live: Mutex::new(std::collections::HashSet::new()),
             resume: Mutex::new(std::collections::HashSet::new()),
             transfer_requests,
             registry: ShardRegistry::new(),

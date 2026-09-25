@@ -380,6 +380,15 @@ struct InputQueue<I> {
 // Shard
 // ---------------------------------------------------------------------------
 
+/// A subscriber's recent move to another shard (see `Shard::hand_off`).
+struct Moved {
+    notice: crate::wire::TransferNotice,
+    /// When the notice stops being repeated.
+    until: Instant,
+    /// When the move happened, in seconds since the Unix epoch.
+    at: u64,
+}
+
 /// An isolated, authoritative simulation driven by a tick loop.
 ///
 /// Each shard has its own lock, state, inputs, and subscribers. Shards
@@ -398,7 +407,7 @@ pub struct Shard<S: SimState> {
     /// Subscribers moved to another shard recently, with the notice and when
     /// it stops being repeated. A connection that was down during the move
     /// gets the notice when it comes back.
-    moved: Mutex<HashMap<SubscriberId, (crate::wire::TransferNotice, Instant)>>,
+    moved: Mutex<HashMap<SubscriberId, Moved>>,
     running: AtomicBool,
     /// Monotonically increasing tick number. Used for reconciliation and
     /// lockstep protocols.
@@ -745,6 +754,30 @@ impl<S: SimState> Shard<S> {
         }
     }
 
+    /// Repeat `notice` to connections that subscribe as `id` within
+    /// `remember` with a ticket issued before `at` (seconds since the Unix
+    /// epoch), or with none: they missed the move. A ticket issued after it
+    /// is a new join and subscribes as usual.
+    pub fn remember_move(
+        &self,
+        id: &SubscriberId,
+        notice: &crate::wire::TransferNotice,
+        remember: Duration,
+        at: u64,
+    ) {
+        let now = Instant::now();
+        let mut moved = self.moved.lock().unwrap();
+        moved.retain(|_, m| m.until > now);
+        moved.insert(
+            id.clone(),
+            Moved {
+                notice: notice.clone(),
+                until: now + remember,
+                at,
+            },
+        );
+    }
+
     /// Subscriber `id` came (back) into this shard: stop repeating an
     /// earlier move to its new connections.
     pub fn forget_move(&self, id: &SubscriberId) {
@@ -766,12 +799,11 @@ impl<S: SimState> Shard<S> {
         notice: &crate::wire::TransferNotice,
         remember: Duration,
     ) -> bool {
-        {
-            let now = Instant::now();
-            let mut moved = self.moved.lock().unwrap();
-            moved.retain(|_, (_, until)| *until > now);
-            moved.insert(id.clone(), (notice.clone(), now + remember));
-        }
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.remember_move(id, notice, remember, at);
         let bytes: Arc<[u8]> = Arc::from(serde_json::to_vec(notice).unwrap_or_default());
         let tick = self.tick_number();
         let ack = self.acks.lock().unwrap().get(id).copied().unwrap_or(0);
@@ -815,8 +847,14 @@ impl<S: SimState> Shard<S> {
             .lock()
             .unwrap()
             .get(&id)
-            .filter(|(_, until)| *until > Instant::now())
-            .map(|(notice, _)| notice.clone());
+            .filter(|m| m.until > Instant::now())
+            // A ticket issued after the move is a new join.
+            .filter(|m| {
+                auth.ticket
+                    .as_ref()
+                    .is_none_or(|t| t.iat < m.at || t.iat == 0)
+            })
+            .map(|m| m.notice.clone());
         if let Some(notice) = moved {
             // Moved while this connection was down: repeat the notice, after
             // the same checks a subscribe gets.
@@ -1549,6 +1587,65 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_subscriber_gets_the_notice_again_unless_its_ticket_is_newer() {
+        let shard = Shard::new(
+            "west",
+            Counter {
+                value: 0,
+                finished: false,
+            },
+            ShardConfig::default(),
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let auth = |iat: u64| ShardAuth {
+            user_id: Some("u_1".into()),
+            ticket: Some(ShardTicket {
+                shard: "west".into(),
+                sid: "p1".into(),
+                user_id: Some("u_1".into()),
+                exp: now + 600,
+                iat,
+                claims: serde_json::Value::Null,
+            }),
+            ..Default::default()
+        };
+        let p1 = SubscriberId::new("p1");
+        let notice = crate::wire::TransferNotice {
+            shard: "east".into(),
+            ticket: "for-east".into(),
+        };
+        shard.remember_move(&p1, &notice, Duration::from_secs(60), now);
+
+        // Its old ticket (issued before the move): the notice, then close.
+        let q = shard
+            .add_queued_subscriber_authorized(p1.clone(), &auth(now - 30))
+            .unwrap();
+        let f = q.pop().expect("a frame");
+        assert_eq!(f.kind, crate::outbound::FrameKind::Transfer);
+        let got: crate::wire::TransferNotice = serde_json::from_slice(&f.bytes).unwrap();
+        assert_eq!(got, notice);
+        assert!(q.is_closed());
+        assert_eq!(shard.subscriber_count(), 0);
+
+        // A ticket issued after the move is a new join: it subscribes.
+        let q = shard
+            .add_queued_subscriber_authorized(p1.clone(), &auth(now + 1))
+            .unwrap();
+        assert!(!q.is_closed());
+        assert_eq!(shard.subscriber_count(), 1);
+
+        // Once the player arrives here again, no notice for anyone.
+        shard.forget_move(&p1);
+        let q = shard
+            .add_queued_subscriber_authorized(SubscriberId::new("p1"), &auth(now - 30))
+            .unwrap();
+        assert!(!q.is_closed());
+    }
+
+    #[test]
     fn stop_and_wait_returns_only_after_the_running_tick() {
         let ticks = Arc::new(AtomicU64::new(0));
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -2077,6 +2174,7 @@ mod tests {
                 sid: sid.into(),
                 user_id: Some("u_1".into()),
                 exp,
+                iat: 0,
                 claims: serde_json::json!({ "realm": realm }),
             }),
             ..Default::default()

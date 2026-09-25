@@ -159,7 +159,7 @@ test("an explicit wsUrl follows a transfer", async () => {
   client.close();
 });
 
-test("after a transfer, retries keep the transfer ticket until the new shard opens", async () => {
+test("after a transfer, retries keep the transfer ticket until the new shard sends a frame", async () => {
   const client = connectShard("west", {
     subscriberId: "p1",
     baseUrl: "h",
@@ -178,7 +178,23 @@ test("after a transfer, retries keep the transfer ticket until the new shard ope
   expect(failed.protocols).toEqual(["ticket.from-server"]);
   failed.close();
   await settle();
-  expect(sockets[sockets.length - 1].protocols).toEqual(["ticket.from-server"]);
+  // Opened, then closed before any frame (the shard refused the ticket, say):
+  // still the server's ticket.
+  const opened = sockets[sockets.length - 1];
+  expect(opened.protocols).toEqual(["ticket.from-server"]);
+  opened.readyState = 1;
+  opened.onopen?.();
+  opened.close();
+  await settle();
+  const answered = sockets[sockets.length - 1];
+  expect(answered.protocols).toEqual(["ticket.from-server"]);
+  // A frame from the new shard: the ticket function takes over.
+  answered.readyState = 1;
+  answered.onopen?.();
+  answered.onmessage?.({ data: jsonFrame(1, 2, { zone: "east" }) });
+  answered.close();
+  await settle();
+  expect(sockets[sockets.length - 1].protocols).toEqual(["ticket.own-east"]);
   client.close();
 });
 

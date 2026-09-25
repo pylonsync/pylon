@@ -471,7 +471,8 @@ What happens:
    `SHARD_NOT_FOUND`). The player stays in the source, still connected.
 3. Each of the player's connections to the source gets a transfer frame:
    the target shard and a ticket for it (valid 10 minutes). A connection
-   that comes back to the source within that time gets the frame again.
+   that comes back to the source within that time gets the frame again,
+   unless it brings a ticket issued after the move (a new join).
    `connectShard`, `connectShardGame`, `useShard`, and the Swift
    `ShardClient` reconnect to the target at once, and `onTransfer` (or
    `transfers()` in Swift) reports it. The target sends a baseline.

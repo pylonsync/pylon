@@ -337,6 +337,7 @@ fn authorization_hooks_run_in_the_module() {
             sid: "watcher".into(),
             user_id: Some("u9".into()),
             exp: u64::MAX,
+            iat: 0,
             claims: json!({ "role": "spectator" }),
         }),
         ..Default::default()
@@ -1481,7 +1482,12 @@ fn transfers_on_a_cluster_save_both_shards_and_finish_after_a_crash() {
         ("in", z2.as_str())
     );
 
-    // A second delivery of the same row (a retried call) changes nothing.
+    // A second delivery of the same row (a retried call) changes nothing:
+    // the player, hurt in z2 since (hp 92), is not replaced by the row's
+    // state (hp 95).
+    let q2 = subscribe(&host, &z2, "p1");
+    input(&host, &z2, "p1", json!({ "hit": { "damage": 3 } })).unwrap();
+    wait_frame(&q2, |s| s["players"]["p1"]["hp"] == 92);
     use pylon_runtime::shard_cluster::{RemoteOp, RemoteReply};
     assert!(matches!(
         host.run_remote(RemoteOp::TransferIn {
@@ -1489,7 +1495,11 @@ fn transfers_on_a_cluster_save_both_shards_and_finish_after_a_crash() {
         }),
         RemoteReply::Ok(_)
     ));
-    assert_eq!(saved(&z2)["p1"]["hp"], 95);
+    let after = dyn_shard(&host, &z2).tick_number() + 1;
+    assert_eq!(
+        wait_frame_from(&q2, after, |_| true)["players"]["p1"]["hp"],
+        92
+    );
 
     // Refused: the player stays, in the source's saved state too.
     assert_eq!(
@@ -1498,7 +1508,7 @@ fn transfers_on_a_cluster_save_both_shards_and_finish_after_a_crash() {
             .code(),
         "SHARD_TRANSFER_REFUSED"
     );
-    assert_eq!(saved(&z2)["p1"]["hp"], 95);
+    assert_eq!(saved(&z2)["p1"]["hp"], 92);
     assert!(saved(&z3)["p1"].is_null());
     let refused = check.transfers_of("p1").unwrap().last().unwrap().clone();
     assert_eq!(
@@ -1651,6 +1661,20 @@ fn a_move_left_open_by_a_crash_is_finished_when_the_source_starts_elsewhere() {
     assert!(check
         .begin_transfer(&open, &m1, p.epoch, Some(b"{}"))
         .unwrap());
+    // p8 moved src -> dst earlier, before m1 went away.
+    let done = Transfer {
+        id: format!("d-{run}"),
+        subscriber: "p8".into(),
+        ..open.clone()
+    };
+    assert!(check.begin_transfer(&done, &m1, p.epoch, None).unwrap());
+    let dst_epoch = check.placement(&dst).unwrap().unwrap().epoch;
+    assert_eq!(
+        check
+            .accept_transfer(&done.id, &dst, &m2, dst_epoch, None)
+            .unwrap(),
+        pylon_runtime::shard_cluster::Settle::Done
+    );
     let written = Instant::now();
     h1.stop_all();
 
@@ -1668,6 +1692,11 @@ fn a_move_left_open_by_a_crash_is_finished_when_the_source_starts_elsewhere() {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert_eq!(check.placement(&src).unwrap().unwrap().machine_id, m2);
+    // p8's connection comes back to src, now on m2: it still learns where
+    // p8 went.
+    let back = subscribe(&h2, &src, "p8");
+    let notice = wait_frame(&back, |v| v.get("transfer").is_some());
+    assert_eq!(notice["transfer"]["shard"], dst.as_str());
     h2.stop(&src);
     h2.stop(&dst);
     h2.stop_all();

@@ -46,7 +46,10 @@ const REQUEST_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
 /// How many module-requested moves wait for the transfer thread.
 pub(super) const REQUEST_QUEUE: usize = 1024;
 
-/// A step whose commit is unknown (see the module docs).
+/// A step whose commit is unknown (see the module docs). Each exists only
+/// while its shard is in the state the step left it in: the source without
+/// the player (Begin), the target with a copy (Accept), the source with a
+/// copy (Back).
 #[derive(Debug, Clone)]
 pub(super) enum Unsettled {
     /// The source removed the player; the row may not exist.
@@ -57,10 +60,25 @@ pub(super) enum Unsettled {
     Back(Transfer),
 }
 
+/// Which shard an unsettled step is about: a source and a target on one
+/// machine can each have one for the same transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Role {
+    Source,
+    Target,
+}
+
 impl Unsettled {
     fn transfer(&self) -> &Transfer {
         match self {
             Self::Begin(t) | Self::Accept(t) | Self::Back(t) => t,
+        }
+    }
+
+    fn role(&self) -> Role {
+        match self {
+            Self::Accept(_) => Role::Target,
+            Self::Begin(_) | Self::Back(_) => Role::Source,
         }
     }
 }
@@ -234,7 +252,11 @@ impl WasmShardHost {
             status: "out".into(),
         };
         let t = self.begin(&source, &sid, t)?;
-        self.deliver_and_settle(&source, &sid, &t)
+        // A live move: the round's finisher leaves its row alone.
+        self.live.lock().unwrap().insert(t.id.clone());
+        let done = self.deliver_and_settle(&source, &sid, &t);
+        self.live.lock().unwrap().remove(&t.id);
+        done
     }
 
     /// Step 1: take the player out of the source and record the transfer.
@@ -256,7 +278,7 @@ impl WasmShardHost {
         }
         source.begin_hand_off(sid);
         let started = self.take_out(source, sid, &mut t);
-        if started.is_err() && !self.is_unsettled(&t.id) {
+        if started.is_err() && !self.held_elsewhere(&t.id) {
             source.cancel_hand_off(sid);
             self.end_transfer(&t);
         }
@@ -328,43 +350,51 @@ impl WasmShardHost {
         })
     }
 
-    /// Steps 2 and 3.
+    /// Steps 2 and 3. On an error the player is in the source, or (in a
+    /// cluster) the move waits for a round to finish it from its row, with
+    /// the player's inputs to the source still refused.
     fn deliver_and_settle(
         &self,
         source: &Arc<Shard<WasmSim>>,
         sid: &SubscriberId,
         t: &Transfer,
     ) -> Result<Transferred, TransferError> {
-        let result = match self.deliver(t) {
-            Ok(()) => Ok(()),
-            Err(e) => match self.take_back(source, sid, t) {
-                // The source has the player: the delivery error stands.
-                Ok(Back::Returned) => Err(e),
-                // The target has it after all (its reply was lost).
-                Ok(Back::TargetHas) => Ok(()),
-                Err(e) => Err(e),
-            },
+        let e = match self.deliver(t) {
+            Ok(()) => return Ok(self.complete(source, sid, t)),
+            Err(e) => e,
         };
-        match result {
-            Ok(()) => {
-                let done = self.finish_move(source, sid, t);
-                self.end_transfer(t);
-                Ok(done)
-            }
-            Err(e) => {
-                // The row still holds the player (`out`), or the outcome is
-                // unknown: the player's inputs stay refused and a round
-                // finishes it. Otherwise the source has the player again.
-                if self.is_unsettled(&t.id) {
-                } else if self.row_is_out(t) {
-                    self.pending.lock().unwrap().insert(t.id.clone(), t.clone());
-                } else {
-                    source.cancel_hand_off(sid);
-                    self.end_transfer(t);
-                }
+        match self.take_back(source, sid, t) {
+            Ok(Back::Returned) => {
+                self.returned(source, sid, t);
                 Err(e)
             }
+            // The target has it after all (its reply was lost).
+            Ok(Back::TargetHas) => Ok(self.complete(source, sid, t)),
+            Err(x) => {
+                if self.cluster.get().is_some() {
+                    self.waiting.lock().unwrap().insert(t.id.clone(), t.clone());
+                }
+                // Without a directory the player is kept (stranded) and the
+                // sweep offers it back; its inputs stay refused until then.
+                Err(x)
+            }
         }
+    }
+
+    /// The target has the player: tell the source's connections, and end
+    /// the move here.
+    fn complete(&self, source: &Shard<WasmSim>, sid: &SubscriberId, t: &Transfer) -> Transferred {
+        let done = self.finish_move(source, sid, t);
+        self.waiting.lock().unwrap().remove(&t.id);
+        self.end_transfer(t);
+        done
+    }
+
+    /// The source has the player again: its inputs are accepted again.
+    fn returned(&self, source: &Shard<WasmSim>, sid: &SubscriberId, t: &Transfer) {
+        source.cancel_hand_off(sid);
+        self.waiting.lock().unwrap().remove(&t.id);
+        self.end_transfer(t);
     }
 
     /// The player is in the target: tell its connections to the source.
@@ -390,12 +420,6 @@ impl WasmShardHost {
             t.to_shard
         );
         done
-    }
-
-    fn row_is_out(&self, t: &Transfer) -> bool {
-        self.cluster
-            .get()
-            .is_some_and(|c| matches!(reread(&c.dir, &t.id), Ok(Some(s)) if s == "out"))
     }
 
     /// Step 2, here or on the target's machine.
@@ -425,7 +449,8 @@ impl WasmShardHost {
     }
 
     /// Add the player in `t` to its target, which runs here. Safe to call
-    /// twice for one transfer: the row is read first, under the save lock.
+    /// again for one transfer: the row is read first, under the save lock,
+    /// and a copy an earlier attempt left here is not added twice.
     pub(super) fn accept(&self, t: &Transfer) -> Result<(), TransferError> {
         let Some(target) = self.registry.get(&t.to_shard).filter(|s| s.is_running()) else {
             return Err(TransferError::NotFound(t.to_shard.clone()));
@@ -453,30 +478,42 @@ impl WasmShardHost {
             .get(&t.to_shard)
             .copied()
             .ok_or_else(|| TransferError::NotFound(t.to_shard.clone()))?;
-        // An earlier attempt left the player here with the row unknown.
-        let already_here = matches!(
-            self.unsettled.lock().unwrap().get(&t.id),
-            Some(Unsettled::Accept(_))
-        );
-        match c.dir.transfer(&t.id).map_err(TransferError::Cluster)? {
-            Some(row) if row.status == "out" => {}
-            Some(row) if row.status == "in" => {
-                self.unsettled.lock().unwrap().remove(&t.id);
+        let key = (t.id.clone(), Role::Target);
+        let has_copy = self.unsettled.lock().unwrap().contains_key(&key);
+        let status = c
+            .dir
+            .transfer(&t.id)
+            .map_err(TransferError::Cluster)?
+            .map(|r| r.status);
+        match status.as_deref() {
+            Some("out") => {}
+            // Ours: the copy here is the player.
+            Some("in") => {
+                self.unsettled.lock().unwrap().remove(&key);
+                if has_copy {
+                    self.arrived(&target, &sid, t);
+                }
                 return Ok(());
             }
-            Some(row) => {
-                return Err(TransferError::Refused(format!(
-                    "transfer {} is already {}",
-                    t.id, row.status
-                )))
+            other => {
+                if has_copy {
+                    let _ = target.with_state(|sim| sim.transfer_out(&t.subscriber));
+                    self.unsettled.lock().unwrap().remove(&key);
+                }
+                return Err(TransferError::Refused(match other {
+                    Some(s) => format!("transfer {} is already {s}", t.id),
+                    None => format!("no transfer {}", t.id),
+                }));
             }
-            None => return Err(TransferError::Refused(format!("no transfer {}", t.id))),
         }
         let saves = self.saves_state(&t.to_shard);
-        let outcome = target.with_state(|sim| {
-            if !already_here {
-                sim.transfer_in(&t.subscriber, &t.state, &auth, false)
-                    .map_err(TransferError::Refused)?;
+        // (outcome, whether the target now holds a copy the row may not
+        // count)
+        let (outcome, unknown) = target.with_state(|sim| {
+            if !has_copy {
+                if let Err(e) = sim.transfer_in(&t.subscriber, &t.state, &auth, false) {
+                    return (Err(TransferError::Refused(e)), false);
+                }
             }
             let settled = sim
                 .save()
@@ -503,41 +540,34 @@ impl WasmShardHost {
                 }
             };
             match settled {
-                Ok(Settle::Done) => Ok(()),
+                Ok(Settle::Done) => (Ok(()), false),
                 Ok(Settle::Taken) => {
                     undo();
-                    Err(TransferError::Refused(format!(
-                        "transfer {} was settled by the source",
-                        t.id
-                    )))
+                    let why = format!("transfer {} was settled by the source", t.id);
+                    (Err(TransferError::Refused(why)), false)
                 }
                 Ok(Settle::NotHeld) => {
                     undo();
-                    Err(TransferError::Cluster(format!(
-                        "this machine no longer holds shard \"{}\"",
-                        t.to_shard
-                    )))
+                    let why = format!("this machine no longer holds shard \"{}\"", t.to_shard);
+                    (Err(TransferError::Cluster(why)), false)
                 }
                 Err(e) => match reread(&c.dir, &t.id) {
-                    Ok(Some(s)) if s == "in" => Ok(()),
+                    Ok(Some(s)) if s == "in" => (Ok(()), false),
                     Ok(_) => {
                         undo();
-                        Err(e)
+                        (Err(e), false)
                     }
-                    Err(_) => {
-                        self.unsettle(Unsettled::Accept(t.clone()));
-                        Err(e)
-                    }
+                    Err(_) => (Err(e), true),
                 },
             }
         });
-        if outcome.is_ok() || !self.is_unsettled(&t.id) {
-            self.unsettled.lock().unwrap().remove(&t.id);
+        if unknown {
+            self.unsettle(Unsettled::Accept(t.clone()));
+        } else {
+            self.unsettled.lock().unwrap().remove(&key);
         }
         if outcome.is_ok() {
             self.arrived(&target, &sid, t);
-        } else if self.is_unsettled(&t.id) {
-            // Kept for the round to settle.
         }
         outcome
     }
@@ -549,7 +579,9 @@ impl WasmShardHost {
         self.idle_since.lock().unwrap().remove(&t.to_shard);
     }
 
-    /// Step 3: give the player back to the source.
+    /// Step 3: give the player back to the source. The row is read first,
+    /// under the save lock: a row another attempt already settled is not
+    /// settled again.
     fn take_back(
         &self,
         source: &Arc<Shard<WasmSim>>,
@@ -576,13 +608,38 @@ impl WasmShardHost {
                 t.from_shard
             )));
         };
-        let already_back = matches!(
-            self.unsettled.lock().unwrap().get(&t.id),
+        let key = (t.id.clone(), Role::Source);
+        let has_copy = matches!(
+            self.unsettled.lock().unwrap().get(&key),
             Some(Unsettled::Back(_))
         );
+        let status = c
+            .dir
+            .transfer(&t.id)
+            .map_err(TransferError::Cluster)?
+            .map(|r| r.status);
+        match status.as_deref() {
+            Some("out") => {}
+            // Settled for the source (by this or another attempt): it has
+            // the player.
+            Some("back") => {
+                self.unsettled.lock().unwrap().remove(&key);
+                return Ok(Back::Returned);
+            }
+            Some("in") => {
+                if has_copy {
+                    let _ = source.with_state(|sim| sim.transfer_out(sid.as_str()));
+                    self.unsettled.lock().unwrap().remove(&key);
+                }
+                return Ok(Back::TargetHas);
+            }
+            _ => {
+                return Err(TransferError::Cluster(format!("no transfer {}", t.id)));
+            }
+        }
         let saves = self.saves_state(&t.from_shard);
-        let outcome = source.with_state(|sim| {
-            if !already_back {
+        let (outcome, unknown) = source.with_state(|sim| {
+            if !has_copy {
                 if let Err(e) = sim.transfer_in(sid.as_str(), &t.state, &auth, true) {
                     // The row keeps the player; a later round offers it
                     // again.
@@ -592,9 +649,8 @@ impl WasmShardHost {
                         t.subscriber,
                         t.id
                     );
-                    return Err(TransferError::Cluster(format!(
-                        "the source refused the player back: {e}"
-                    )));
+                    let why = format!("the source refused the player back: {e}");
+                    return (Err(TransferError::Cluster(why)), false);
                 }
             }
             let settled = sim
@@ -616,58 +672,48 @@ impl WasmShardHost {
                 let _ = sim.transfer_out(sid.as_str());
             };
             match settled {
-                Ok(Settle::Done) => Ok(Back::Returned),
-                // Only the target moves a row this machine's source holds
-                // away from `out`: the target has the player.
+                Ok(Settle::Done) => (Ok(Back::Returned), false),
+                // The row was `out` under the save lock a moment ago; the
+                // target settled it since.
                 Ok(Settle::Taken) => {
                     undo();
-                    Ok(Back::TargetHas)
+                    (Ok(Back::TargetHas), false)
                 }
                 Ok(Settle::NotHeld) => {
                     undo();
-                    Err(TransferError::Cluster(format!(
-                        "this machine no longer holds shard \"{}\"",
-                        t.from_shard
-                    )))
+                    let why = format!("this machine no longer holds shard \"{}\"", t.from_shard);
+                    (Err(TransferError::Cluster(why)), false)
                 }
                 Err(e) => match reread(&c.dir, &t.id) {
-                    Ok(Some(s)) if s == "back" => Ok(Back::Returned),
+                    Ok(Some(s)) if s == "back" => (Ok(Back::Returned), false),
                     Ok(Some(s)) if s == "in" => {
                         undo();
-                        Ok(Back::TargetHas)
+                        (Ok(Back::TargetHas), false)
                     }
                     Ok(_) => {
                         undo();
-                        Err(e)
+                        (Err(e), false)
                     }
-                    Err(_) => {
-                        self.unsettle(Unsettled::Back(t.clone()));
-                        Err(e)
-                    }
+                    Err(_) => (Err(e), true),
                 },
             }
         });
-        if !matches!(outcome, Err(_)) || !self.is_unsettled(&t.id) {
-            if !matches!(outcome, Err(_)) {
-                self.unsettled.lock().unwrap().remove(&t.id);
-            }
+        if unknown {
+            self.unsettle(Unsettled::Back(t.clone()));
+        } else {
+            self.unsettled.lock().unwrap().remove(&key);
         }
         outcome
     }
 
     /// One round's transfer work, on a machine in a cluster: settle steps
-    /// whose outcome was unknown, then finish rows still `out` whose source
-    /// runs here.
+    /// whose outcome was unknown, then finish each move whose source runs
+    /// here and that is not done: waiting ones, ones a restarted source
+    /// left, and rows `out` for 15 s.
     pub(super) fn settle_transfers(&self, epoch: i64) {
         let Some(c) = self.cluster.get() else { return };
         self.resolve_unsettled();
-        let mut rows: Vec<Transfer> = self
-            .pending
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, t)| t)
-            .collect();
+        let mut rows: Vec<Transfer> = self.waiting.lock().unwrap().values().cloned().collect();
         let resumed: Vec<String> = self.resume.lock().unwrap().drain().collect();
         for shard in resumed {
             match c.dir.open_transfers_from(&shard) {
@@ -684,38 +730,62 @@ impl WasmShardHost {
         }
         let mut seen = std::collections::HashSet::new();
         for t in rows {
-            if !seen.insert(t.id.clone()) || self.is_unsettled(&t.id) {
+            if !seen.insert(t.id.clone()) {
+                continue;
+            }
+            // A live call, or a step still unknown, owns it for now.
+            if self.live.lock().unwrap().contains(&t.id) || self.is_unsettled(&t.id) {
                 continue;
             }
             let Some(source) = self.registry.get(&t.from_shard).filter(|s| s.is_running()) else {
+                // Its source moved: the new holder finishes it.
+                self.waiting.lock().unwrap().remove(&t.id);
                 self.end_transfer(&t);
                 continue;
             };
-            // Held already by a live attempt or a pending one; otherwise
-            // take it now.
+            let sid = SubscriberId::new(t.subscriber.as_str());
             self.transferring
                 .lock()
                 .unwrap()
                 .insert((t.from_shard.clone(), t.subscriber.clone()));
-            tracing::info!(
-                "[shard {}] finishing transfer {} of subscriber {} to shard {}",
-                t.from_shard,
-                t.id,
-                t.subscriber,
-                t.to_shard
-            );
-            let sid = SubscriberId::new(t.subscriber.as_str());
             source.begin_hand_off(&sid);
-            if let Err(e) = self.deliver_and_settle(&source, &sid, &t) {
-                tracing::warn!("[shard {}] transfer {}: {e}", t.from_shard, t.id);
+            self.waiting.lock().unwrap().insert(t.id.clone(), t.clone());
+            self.live.lock().unwrap().insert(t.id.clone());
+            match reread(&c.dir, &t.id) {
+                Ok(Some(s)) if s == "in" => {
+                    self.complete(&source, &sid, &t);
+                }
+                Ok(Some(s)) if s == "back" => self.returned(&source, &sid, &t),
+                Ok(Some(_)) => {
+                    tracing::info!(
+                        "[shard {}] finishing transfer {} of subscriber {} to shard {}",
+                        t.from_shard,
+                        t.id,
+                        t.subscriber,
+                        t.to_shard
+                    );
+                    if let Err(e) = self.deliver_and_settle(&source, &sid, &t) {
+                        tracing::warn!("[shard {}] transfer {}: {e}", t.from_shard, t.id);
+                    }
+                }
+                // No row: nothing to finish.
+                Ok(None) => {
+                    self.waiting.lock().unwrap().remove(&t.id);
+                    source.cancel_hand_off(&sid);
+                    self.end_transfer(&t);
+                }
+                // Unknown: next round.
+                Err(_) => {}
             }
+            self.live.lock().unwrap().remove(&t.id);
         }
         let _ = c.dir.prune_transfers();
     }
 
-    /// A shard just started here from saved state: its transfers still
-    /// `out` are finished in the next round, and until then the players in
-    /// them cannot act in it.
+    /// A shard just started here from saved state: its moves still `out`
+    /// are finished in the next round, and until then the players in them
+    /// cannot act in it. Moves it finished recently are repeated to
+    /// connections that come back to it, as on the machine that ran it.
     pub(super) fn resume_transfers(&self, shard: &Shard<WasmSim>) {
         let Some(c) = self.cluster.get() else { return };
         let open = match c.dir.open_transfers_from(shard.id()) {
@@ -735,90 +805,105 @@ impl WasmShardHost {
                 .lock()
                 .unwrap()
                 .insert((t.from_shard.clone(), t.subscriber.clone()));
-            self.pending.lock().unwrap().insert(t.id.clone(), t);
+            self.waiting.lock().unwrap().insert(t.id.clone(), t);
+        }
+        match c
+            .dir
+            .recent_moves_from(shard.id(), TICKET_TTL_SECS as i64 * 1000)
+        {
+            Ok(moves) => {
+                for (t, age_ms) in moves {
+                    let left = TICKET_TTL_SECS.saturating_sub((age_ms.max(0) as u64) / 1000);
+                    if left == 0 {
+                        continue;
+                    }
+                    let done = self.ticket_for(&t);
+                    shard.remember_move(
+                        &SubscriberId::new(t.subscriber.as_str()),
+                        &pylon_realtime::wire::TransferNotice {
+                            shard: done.shard,
+                            ticket: done.ticket,
+                        },
+                        std::time::Duration::from_secs(left),
+                        crate::shard_tickets::unix_now()
+                            .saturating_sub((age_ms.max(0) as u64) / 1000),
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                "[shard {}] reading its recent moves failed: {e}",
+                shard.id()
+            ),
         }
     }
 
-    /// Settle each unknown step from its row.
+    /// Settle each unknown step from its row. A step whose shard no longer
+    /// runs here is dropped: the copy (or the gap) stopped with the shard,
+    /// and the shard's next holder works from the row.
     fn resolve_unsettled(&self) {
         let Some(c) = self.cluster.get() else { return };
         let steps: Vec<Unsettled> = self.unsettled.lock().unwrap().values().cloned().collect();
         for step in steps {
             let t = step.transfer().clone();
-            let status = match reread(&c.dir, &t.id) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-            let source = self.registry.get(&t.from_shard).filter(|s| s.is_running());
+            let key = (t.id.clone(), step.role());
             let sid = SubscriberId::new(t.subscriber.as_str());
+            let source = self.registry.get(&t.from_shard).filter(|s| s.is_running());
             match step {
                 Unsettled::Begin(_) => {
-                    self.unsettled.lock().unwrap().remove(&t.id);
+                    let Some(source) = source else {
+                        self.unsettled.lock().unwrap().remove(&key);
+                        self.end_transfer(&t);
+                        continue;
+                    };
+                    let status = match reread(&c.dir, &t.id) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    self.unsettled.lock().unwrap().remove(&key);
                     match status {
                         // The row exists: finish the move from it.
                         Some(_) => {
-                            self.pending.lock().unwrap().insert(t.id.clone(), t);
+                            self.waiting.lock().unwrap().insert(t.id.clone(), t);
                         }
                         // It never landed: the player goes back.
                         None => {
-                            if let Some(source) = source {
-                                let auth = back_auth(&t);
-                                if let Err(e) = source.with_state(|sim| {
-                                    sim.transfer_in(&t.subscriber, &t.state, &auth, true)
-                                }) {
-                                    self.strand(&t, &e);
-                                }
-                                source.cancel_hand_off(&sid);
+                            let auth = back_auth(&t);
+                            match source.with_state(|sim| {
+                                sim.transfer_in(&t.subscriber, &t.state, &auth, true)
+                            }) {
+                                Ok(()) => self.returned(&source, &sid, &t),
+                                Err(e) => self.strand(&t, &e),
                             }
-                            self.end_transfer(&t);
                         }
                     }
                 }
-                Unsettled::Accept(_) => match status.as_deref() {
-                    Some("in") => {
-                        self.unsettled.lock().unwrap().remove(&t.id);
+                Unsettled::Accept(_) => {
+                    if self
+                        .registry
+                        .get(&t.to_shard)
+                        .is_none_or(|s| !s.is_running())
+                    {
+                        self.unsettled.lock().unwrap().remove(&key);
+                        continue;
                     }
-                    Some("out") => {
-                        let _ = self.accept(&t);
-                    }
-                    _ => {
-                        // The source took it back: remove the copy here.
-                        self.unsettled.lock().unwrap().remove(&t.id);
-                        if let Some(target) = self.registry.get(&t.to_shard) {
-                            let _ = target.with_state(|sim| sim.transfer_out(&t.subscriber));
+                    // `accept` sees the copy and settles from the row.
+                    let _ = self.accept(&t);
+                }
+                Unsettled::Back(_) => {
+                    let Some(source) = source else {
+                        self.unsettled.lock().unwrap().remove(&key);
+                        continue;
+                    };
+                    match self.take_back(&source, &sid, &t) {
+                        Ok(Back::Returned) => self.returned(&source, &sid, &t),
+                        Ok(Back::TargetHas) => {
+                            self.complete(&source, &sid, &t);
+                        }
+                        Err(_) => {
+                            self.waiting.lock().unwrap().insert(t.id.clone(), t.clone());
                         }
                     }
-                },
-                Unsettled::Back(_) => match status.as_deref() {
-                    Some("back") => {
-                        self.unsettled.lock().unwrap().remove(&t.id);
-                        if let Some(source) = source {
-                            source.cancel_hand_off(&sid);
-                        }
-                        self.end_transfer(&t);
-                    }
-                    Some("out") => {
-                        if let Some(source) = source {
-                            if let Ok(Back::TargetHas) = self.take_back(&source, &sid, &t) {
-                                self.finish_move(&source, &sid, &t);
-                            }
-                            if !self.is_unsettled(&t.id) {
-                                source.cancel_hand_off(&sid);
-                                self.end_transfer(&t);
-                            }
-                        }
-                    }
-                    _ => {
-                        // The target has it: remove the copy here, and send
-                        // the player there.
-                        self.unsettled.lock().unwrap().remove(&t.id);
-                        if let Some(source) = source {
-                            let _ = source.with_state(|sim| sim.transfer_out(&t.subscriber));
-                            self.finish_move(&source, &sid, &t);
-                        }
-                        self.end_transfer(&t);
-                    }
-                },
+                }
             }
         }
     }
@@ -831,11 +916,18 @@ impl WasmShardHost {
             t.id,
             t.subscriber
         );
-        self.unsettled.lock().unwrap().insert(t.id.clone(), step);
+        let key = (t.id.clone(), step.role());
+        self.unsettled.lock().unwrap().insert(key, step);
     }
 
     fn is_unsettled(&self, id: &str) -> bool {
-        self.unsettled.lock().unwrap().contains_key(id)
+        self.unsettled.lock().unwrap().keys().any(|(i, _)| i == id)
+    }
+
+    /// True when something other than the caller holds the player of
+    /// transfer `id`: an unknown step, or the stranded list.
+    fn held_elsewhere(&self, id: &str) -> bool {
+        self.is_unsettled(id) || self.stranded.lock().unwrap().iter().any(|t| t.id == id)
     }
 
     /// The source is on another machine: that machine moves the player.
@@ -906,15 +998,19 @@ impl WasmShardHost {
                     t.from_shard,
                     t.subscriber
                 );
+                self.end_transfer(&t);
                 continue;
             };
             let auth = back_auth(&t);
             match source.with_state(|sim| sim.transfer_in(&t.subscriber, &t.state, &auth, true)) {
-                Ok(()) => tracing::info!(
-                    "[shard {}] took subscriber {} back",
-                    t.from_shard,
-                    t.subscriber
-                ),
+                Ok(()) => {
+                    tracing::info!(
+                        "[shard {}] took subscriber {} back",
+                        t.from_shard,
+                        t.subscriber
+                    );
+                    self.returned(&source, &SubscriberId::new(t.subscriber.as_str()), &t);
+                }
                 Err(_) => self.stranded.lock().unwrap().push(t),
             }
         }
@@ -982,6 +1078,7 @@ fn arrival_auth(t: &Transfer) -> ShardAuth {
             sid: t.subscriber.clone(),
             user_id: auth.user_id,
             exp: crate::shard_tickets::unix_now() + TICKET_TTL_SECS,
+            iat: crate::shard_tickets::unix_now(),
             claims: auth.claims,
         }),
         ..Default::default()
@@ -1005,6 +1102,13 @@ mod tests {
     use pylon_realtime::ShardConfig;
     use pylon_storage::pg_datastore::PgPool;
     use std::time::{Duration, Instant};
+
+    fn hp(host: &WasmShardHost, shard: &str, sid: &str) -> i64 {
+        let shard = host.registry.get(shard).expect("running");
+        let saved = shard.with_state(|sim| sim.save()).unwrap().unwrap();
+        let players: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        players[sid]["hp"].as_i64().unwrap()
+    }
 
     fn has(host: &WasmShardHost, shard: &str, sid: &str) -> bool {
         let shard = host.registry.get(shard).expect("running");
@@ -1060,6 +1164,10 @@ mod tests {
             "x": 0, "hp": 50, "buffs": [], "cooldowns": {}
         }))
         .unwrap();
+        let changed = serde_json::to_vec(&serde_json::json!({
+            "x": 0, "hp": 77, "buffs": [], "cooldowns": {}
+        }))
+        .unwrap();
         let transfer = |id: &str, sid: &str| Transfer {
             id: format!("{id}-{run}"),
             subscriber: sid.into(),
@@ -1105,18 +1213,19 @@ mod tests {
         assert!(!has(&host, &b, "p3"));
 
         // Accept, and the row is still out: the target settles it and keeps
-        // the player, without adding it a second time.
+        // its copy (changed since: hp 77), without adding the row's again.
         let t4 = transfer("t4", "p4");
         assert!(c.dir.begin_transfer(&t4, &me, epoch, None).unwrap());
         host.registry
             .get(&b)
             .unwrap()
-            .with_state(|sim| sim.transfer_in("p4", &player, &arrival_auth(&t4), false))
+            .with_state(|sim| sim.transfer_in("p4", &changed, &arrival_auth(&t4), false))
             .unwrap();
         host.unsettle(Unsettled::Accept(t4.clone()));
         host.resolve_unsettled();
         assert_eq!(c.dir.transfer(&t4.id).unwrap().unwrap().status, "in");
-        assert!(has(&host, &b, "p4") && !host.is_unsettled(&t4.id));
+        assert_eq!(hp(&host, &b, "p4"), 77);
+        assert!(!host.is_unsettled(&t4.id));
 
         // Back, and the target took it first: the source's copy goes, and
         // the player is sent on.
@@ -1134,6 +1243,116 @@ mod tests {
         host.unsettle(Unsettled::Back(t5.clone()));
         host.resolve_unsettled();
         assert!(!has(&host, &a, "p5"));
+
+        // An Accept whose target no longer runs here is dropped: the copy
+        // stopped with the shard.
+        let mut t6 = transfer("t6", "p6");
+        t6.to_shard = format!("gone-{run}");
+        host.unsettle(Unsettled::Accept(t6.clone()));
+        host.resolve_unsettled();
+        assert!(!host.is_unsettled(&t6.id));
+
+        // Taking back a row another attempt already returned does not add
+        // the player again (the source's copy changed since: hp 77).
+        let t7 = transfer("t7", "p7");
+        assert!(c.dir.begin_transfer(&t7, &me, epoch, None).unwrap());
+        assert_eq!(
+            c.dir.return_transfer(&t7.id, &a, &me, epoch, None).unwrap(),
+            Settle::Done
+        );
+        let source = host.registry.get(&a).unwrap();
+        source
+            .with_state(|sim| sim.transfer_in("p7", &changed, &back_auth(&t7), true))
+            .unwrap();
+        let sid7 = SubscriberId::new("p7");
+        assert!(matches!(
+            host.take_back(&source, &sid7, &t7),
+            Ok(Back::Returned)
+        ));
+        assert_eq!(hp(&host, &a, "p7"), 77);
+
+        // A move waiting for its row: finished from what the row says.
+        // `in`: the source's connection gets the transfer frame.
+        let t8 = transfer("t8", "p8");
+        let sid8 = SubscriberId::new("p8");
+        let q8 = source
+            .add_queued_subscriber_authorized(
+                sid8.clone(),
+                &ShardAuth {
+                    user_id: Some("p8".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(c.dir.begin_transfer(&t8, &me, epoch, None).unwrap());
+        assert_eq!(
+            c.dir.accept_transfer(&t8.id, &b, &me, epoch, None).unwrap(),
+            Settle::Done
+        );
+        host.transferring
+            .lock()
+            .unwrap()
+            .insert((a.clone(), "p8".into()));
+        source.begin_hand_off(&sid8);
+        host.waiting
+            .lock()
+            .unwrap()
+            .insert(t8.id.clone(), t8.clone());
+        // A live call owns it: the round leaves it.
+        host.live.lock().unwrap().insert(t8.id.clone());
+        host.settle_transfers(epoch);
+        assert!(host.waiting.lock().unwrap().contains_key(&t8.id));
+        host.live.lock().unwrap().remove(&t8.id);
+        host.settle_transfers(epoch);
+        assert!(!host.waiting.lock().unwrap().contains_key(&t8.id));
+        assert!(!host
+            .transferring
+            .lock()
+            .unwrap()
+            .contains(&(a.clone(), "p8".into())));
+        let mut notice = None;
+        while let Some(f) = q8.pop() {
+            if f.kind == pylon_realtime::FrameKind::Transfer {
+                notice = Some(f);
+            }
+        }
+        assert!(notice.is_some(), "no transfer frame");
+
+        // `back`: the source has the player; its inputs are accepted again.
+        let t9 = transfer("t9", "p9");
+        let sid9 = SubscriberId::new("p9");
+        assert!(c.dir.begin_transfer(&t9, &me, epoch, None).unwrap());
+        assert_eq!(
+            c.dir.return_transfer(&t9.id, &a, &me, epoch, None).unwrap(),
+            Settle::Done
+        );
+        host.transferring
+            .lock()
+            .unwrap()
+            .insert((a.clone(), "p9".into()));
+        source.begin_hand_off(&sid9);
+        host.waiting
+            .lock()
+            .unwrap()
+            .insert(t9.id.clone(), t9.clone());
+        host.settle_transfers(epoch);
+        assert!(!host.waiting.lock().unwrap().contains_key(&t9.id));
+        assert!(!host
+            .transferring
+            .lock()
+            .unwrap()
+            .contains(&(a.clone(), "p9".into())));
+        assert!(!matches!(
+            source.push_input(
+                sid9,
+                pylon_realtime::RawInput::new(
+                    pylon_realtime::SnapshotFormat::Json,
+                    serde_json::json!("join").to_string().into_bytes(),
+                ),
+                None
+            ),
+            Err(pylon_realtime::ShardError::Transferring)
+        ));
 
         host.stop(&a);
         host.stop(&b);

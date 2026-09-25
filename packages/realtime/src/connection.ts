@@ -129,9 +129,9 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 ): ShardClient<TSnapshot, TInput> {
   const now = options.now ?? (() => performance.now());
   let currentShard = shardId;
-  // The ticket a transfer frame carried. Used until a connection to the new
-  // shard opens (then a ticket function takes over), and for good with a
-  // fixed `ticket`, which names the old shard.
+  // The ticket a transfer frame carried. Used until the new shard sends a
+  // frame (then a ticket function takes over), and for good with a fixed
+  // `ticket`, which names the old shard.
   let transferTicket: string | null = null;
   let ws: WebSocket | null = null;
   let clientSeq = 0;
@@ -261,7 +261,6 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
     ws.onopen = () => {
       connected = true;
-      if (typeof options.ticket === "function") transferTicket = null;
       // Inputs sent on the old connection are never acknowledged on this
       // one (acks restart with the connection).
       sentAt.clear();
@@ -291,6 +290,8 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
           transferring = true;
           return;
         }
+        // The new shard answered: a ticket function gives the next tickets.
+        if (typeof options.ticket === "function") transferTicket = null;
         if (frame.kind === ShardFrameKind.Replication || frame.kind === ShardFrameKind.Snapshot) {
           // Only the per-tick frames: a rejection can go out before its
           // tick's frame is built, and would make the clock run early.
