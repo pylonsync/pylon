@@ -1465,6 +1465,71 @@ mod tests {
         host.stop_all();
     }
 
+    /// A held zone that ended before the sweep removed it is not handed
+    /// over or kept at shutdown: its last writes go out and its placement
+    /// is released.
+    #[test]
+    fn shutdown_releases_a_shard_that_ended() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (rt, fns) = runtime();
+        let pool =
+            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let run = pylon_cluster::new_instance_id();
+        let kind = format!("ended-{run}");
+        let host = WasmShardHost::new(vec![WasmShardKind::compile(
+            &kind,
+            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
+            ShardConfig::default(),
+            WasmLimits::default(),
+        )
+        .unwrap()]);
+        let me = format!("m-{run}");
+        host.attach_cluster(
+            crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+            crate::shard_cluster::MachineConfig {
+                id: me.clone(),
+                address: None,
+                capacity: 10,
+                fly_instance: None,
+            },
+        );
+        let weak: Weak<dyn pylon_router::FnOps> =
+            Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
+        host.attach_data(Some(weak), writer(&rt));
+        let zone = format!("ended-{run}");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host
+            .create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
+            .is_err()
+        {
+            assert!(Instant::now() < deadline, "no lease");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        host.take_writes(
+            &zone,
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(44))]),
+            }],
+        );
+        // It ends (as an idle stop does); shutdown comes before the sweep.
+        host.registry.get(&zone).unwrap().stop();
+        host.stop_all();
+        let dir = crate::shard_cluster::PgShardDirectory::open(pool).unwrap();
+        assert_eq!(dir.placement(&zone).unwrap(), None);
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            44
+        );
+    }
+
     #[test]
     fn retryable_codes_are_the_infrastructure_ones() {
         for code in [

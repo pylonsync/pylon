@@ -625,6 +625,28 @@ impl PgShardDirectory {
         })
     }
 
+    /// Forget the shard `machine_id` holds, under any epoch, with its saved
+    /// state: for a shard that ended on that machine while no new run of it
+    /// can start there (a take-over by the same machine under a newer lease
+    /// is released too). A placement another machine took is left alone.
+    pub fn release_here(&self, shard_id: &str, machine_id: &str) -> Result<bool, String> {
+        self.pool.with_client(|c| {
+            let mut tx = c.transaction()?;
+            let n = tx.execute(
+                "DELETE FROM _pylon_shard_placements WHERE shard_id = $1 AND machine_id = $2",
+                &[&shard_id, &machine_id],
+            )?;
+            if n == 1 {
+                tx.execute(
+                    "DELETE FROM _pylon_shard_state WHERE shard_id = $1",
+                    &[&shard_id],
+                )?;
+            }
+            tx.commit()?;
+            Ok(n == 1)
+        })
+    }
+
     /// Store the state of the shard `machine_id` holds under `epoch`. The
     /// placement row stays share-locked until the state is written, so a
     /// takeover waits for this save and every later save by the old owner
@@ -1531,6 +1553,37 @@ pub(crate) mod tests {
             failed: None,
             epoch: 1,
         }
+    }
+
+    /// release_here removes the machine's placement under any epoch (a
+    /// take-over by the same machine under a newer lease), and leaves one
+    /// another machine holds.
+    #[test]
+    fn release_here_takes_any_epoch_of_this_machine_only() {
+        let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(dir) = test_dir() else { return };
+        let run = pylon_cluster::new_instance_id();
+        let (mine, theirs, me, other) = (
+            format!("rh-a-{run}"),
+            format!("rh-b-{run}"),
+            format!("me-{run}"),
+            format!("other-{run}"),
+        );
+        let kind = format!("rh-{run}");
+        for (shard, machine) in [(&mine, &me), (&theirs, &other)] {
+            let p = Placement {
+                machine_id: machine.clone(),
+                ..placement(shard, &kind, machine)
+            };
+            assert_eq!(dir.claim(&p, 10).unwrap(), Claim::Claimed);
+        }
+        // Taken over by the same machine under a newer lease.
+        assert!(dir.hand_over(&mine, &me, 1, &me, 2).unwrap());
+        assert!(dir.release_here(&mine, &me).unwrap());
+        assert_eq!(dir.placement(&mine).unwrap(), None);
+        assert!(!dir.release_here(&theirs, &me).unwrap());
+        assert!(dir.placement(&theirs).unwrap().is_some());
+        assert!(dir.release_here(&theirs, &other).unwrap());
     }
 
     /// A table from before the insert sequence: its rows are numbered by

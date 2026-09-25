@@ -2343,6 +2343,18 @@ impl WasmShardHost {
                 })
                 .collect()
         };
+        // A held shard that ended (finished, idle, failed) before the sweep
+        // removed it is not handed over or saved to run again: its last
+        // writes go out and its placement is released, as the sweep does.
+        let (held, ended): (Vec<_>, Vec<_>) = held
+            .into_iter()
+            .partition(|(_, _, shard, _)| shard.is_running());
+        for (id, _, _, _) in ended {
+            self.flush_writes(data::Flush::Shard(&id));
+            if let Err(e) = c.dir.release_here(&id, &c.me.id) {
+                tracing::warn!("[shard {id}] could not release its placement: {e}");
+            }
+        }
         // Each held shard goes to another machine with its clients, while
         // the drain time lasts (see drain.rs).
         let held = self.drain(c, held);
@@ -3073,7 +3085,7 @@ impl WasmShardHost {
         let Some(c) = self.cluster.get() else {
             return;
         };
-        for (id, epoch) in ended {
+        for (id, _) in ended {
             // Its last writes, while the placement still says it is ours
             // (the flush's fence reads the placement), tried a few times.
             for attempt in 0..data::FINAL_WRITE_ATTEMPTS {
@@ -3091,7 +3103,10 @@ impl WasmShardHost {
                 }
             }
             let _guard = self.create_lock.lock().unwrap();
-            if let Err(e) = c.dir.release(&id, &c.me.id, epoch) {
+            // Any epoch of this machine: the lease can have lapsed and the
+            // orphan loop taken it over meanwhile; no run of the id can
+            // start here while it is ending.
+            if let Err(e) = c.dir.release_here(&id, &c.me.id) {
                 tracing::warn!("[shard {id}] could not release its placement: {e}");
             }
             self.ending.lock().unwrap().remove(&id);
