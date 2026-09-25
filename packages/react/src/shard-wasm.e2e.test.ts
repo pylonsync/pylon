@@ -1,15 +1,18 @@
 // End-to-end: examples/shard-arena on a real `pylon start`. Its shard logic
 // is Rust compiled to WebAssembly and loaded by the stock binary.
 //
-// Runs only when PYLON_WASM_SHARD_E2E holds the server's host:port
-// (tools/smoke-wasm-shard.sh sets it up).
+// Runs only when PYLON_WASM_SHARD_E2E holds the server's host:port or its
+// origin (tools/smoke-wasm-shard.sh sets it up; an https:// origin tests a
+// deployed app over wss://).
 
 import { afterAll, beforeAll, expect, test } from "bun:test";
 
 import { connectShard } from "./useShard";
 import type { ShardInputRejection } from "./shardWire";
 
-const host = process.env.PYLON_WASM_SHARD_E2E ?? "";
+const target = process.env.PYLON_WASM_SHARD_E2E ?? "";
+const origin = target.includes("://") ? target.replace(/\/$/, "") : `http://${target}`;
+const host = target ? new URL(origin).host : "";
 
 // The test preload installs happy-dom, whose fetch enforces CORS against the
 // page URL. Put the page on the server's origin for these tests.
@@ -18,7 +21,7 @@ let previousUrl = "";
 beforeAll(() => {
   if (!host || !happyDOM) return;
   previousUrl = location.href;
-  happyDOM.setURL(`http://${host}/`);
+  happyDOM.setURL(`${origin}/`);
 });
 afterAll(() => {
   if (previousUrl && happyDOM) happyDOM.setURL(previousUrl);
@@ -48,10 +51,10 @@ interface Join {
 }
 
 async function guestJoin(): Promise<Join> {
-  const guest = await fetch(`http://${host}/api/auth/guest`, { method: "POST" });
+  const guest = await fetch(`${origin}/api/auth/guest`, { method: "POST" });
   expect(guest.ok).toBe(true);
   const { token } = (await guest.json()) as { token: string };
-  const res = await fetch(`http://${host}/api/fn/joinArena`, {
+  const res = await fetch(`${origin}/api/fn/joinArena`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: "{}",

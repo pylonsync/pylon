@@ -8,7 +8,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-# Outside this repo: pylon-shard-guest = "0.12"
+# Outside this repo: pylon-shard-guest = "0.13"
 pylon-shard-guest = { path = "../../../../crates/shard-guest" }
 serde = { version = "1", features = ["derive"] }
 
