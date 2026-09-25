@@ -12,7 +12,9 @@ pub mod cron;
 pub mod datastore;
 pub mod dev_diagnostics;
 pub mod encryption;
+pub mod entity_writer;
 pub mod file_urls;
+pub mod fn_calls;
 pub mod frontend;
 pub mod image_optim;
 pub mod ip_limit;
@@ -853,6 +855,13 @@ impl Runtime {
             .map_err(|e| RuntimeError {
                 code: "CRDT_SIDECAR_BOOTSTRAP_FAILED".into(),
                 message: format!("ensure pg crdt sidecar: {e}"),
+            })?;
+        // Idempotent function calls (see fn_calls.rs), same as the sidecar.
+        store
+            .with_client(|c| crate::fn_calls::ensure_pg(c))
+            .map_err(|e| RuntimeError {
+                code: "FN_CALLS_BOOTSTRAP_FAILED".into(),
+                message: format!("create _pylon_fn_calls: {e}"),
             })?;
         // `pylon migrate` never sees the injected `_CronLease` (it's not in the
         // app's manifest file), so create its table here — idempotently — the
@@ -1858,6 +1867,10 @@ impl Runtime {
         crate::loro_store::ensure_sidecar(&conn).map_err(|e| RuntimeError {
             code: "CRDT_SIDECAR_FAILED".into(),
             message: format!("create CRDT sidecar table: {e}"),
+        })?;
+        crate::fn_calls::ensure_sqlite(&conn).map_err(|e| RuntimeError {
+            code: "FN_CALLS_BOOTSTRAP_FAILED".into(),
+            message: format!("create _pylon_fn_calls: {e}"),
         })?;
 
         let encrypted_fields = encryption_field_map(&entities);

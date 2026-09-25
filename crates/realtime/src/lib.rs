@@ -74,7 +74,8 @@ pub use registry::ShardRegistry;
 pub use replay::{replay, replay_to, ReplayEntry, ReplayLog};
 pub use replication::{Plane, ReplicatedRef, ReplicationConfig, Replicator};
 pub use shard::{
-    Shard, ShardAuth, ShardConfig, ShardError, ShardMessage, SimState, MAX_QUEUED_MESSAGES,
+    CallResult, Shard, ShardAuth, ShardConfig, ShardError, ShardMessage, SimState,
+    MAX_QUEUED_CALL_RESULTS, MAX_QUEUED_MESSAGES,
 };
 pub use snapshot::{encode_snapshot, EncodeSnapshot, SnapshotFormat};
 pub use stats::ShardStats;

@@ -13,6 +13,11 @@
 //! its own messages. Delivery is at most once: a message to a shard that is
 //! stopped, whose queue is full, or on a machine that cannot be reached or
 //! is behind, is dropped, and no one is told.
+//!
+//! A server function also sends an input to one shard with
+//! `ctx.shards.send` (see [`WasmShardHost::send_input`]); the module's
+//! `apply_input` gets it, from the empty subscriber id. From a mutation it
+//! is sent after the commit.
 
 use std::sync::Arc;
 
@@ -93,6 +98,51 @@ impl std::fmt::Display for MessageError {
 }
 
 impl std::error::Error for MessageError {}
+
+/// A server input that cannot be sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// No shard with that id runs, here or (in a cluster) anywhere.
+    NotFound,
+    /// A bad shard id, or an input that is not valid for the shard.
+    Invalid(String),
+    /// The shard's input queue, or the queue to other machines, is full.
+    Busy(String),
+}
+
+impl SendError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            SendError::NotFound => "SHARD_NOT_FOUND",
+            SendError::Invalid(_) => "SHARD_INPUT_INVALID",
+            SendError::Busy(_) => "SHARD_BUSY",
+        }
+    }
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::NotFound => f.write_str("no shard with that id is running"),
+            SendError::Invalid(why) | SendError::Busy(why) => f.write_str(why),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
+
+/// What the routing thread passes to other machines.
+pub(super) enum Outgoing {
+    Message(Routed),
+    /// A server input for shard `shard`, which does not run here.
+    Input {
+        shard: String,
+        input: serde_json::Value,
+    },
+}
+
+/// The largest server input, as JSON.
+const MAX_INPUT: usize = 64 * 1024;
 
 /// One message for other machines.
 #[derive(Debug, Clone)]
@@ -196,6 +246,24 @@ fn check(topic: &str, data: &[u8]) -> Result<(), MessageError> {
     Ok(())
 }
 
+/// Check a server input's shard id and size, before it is sent.
+pub fn check_send(id: &str, input: &serde_json::Value) -> Result<(), SendError> {
+    check_input(id, input).map(|_| ())
+}
+
+/// Check a server input's shard id and size; its JSON text.
+fn check_input(id: &str, input: &serde_json::Value) -> Result<String, SendError> {
+    super::validate_shard_id(id).map_err(|e| SendError::Invalid(e.to_string()))?;
+    let text = input.to_string();
+    if text.len() > MAX_INPUT {
+        return Err(SendError::Invalid(format!(
+            "an input is at most {} KB as JSON",
+            MAX_INPUT / 1024
+        )));
+    }
+    Ok(text)
+}
+
 /// Other machines, as the routing thread last read them.
 #[derive(Default)]
 pub(super) struct PeerCache {
@@ -218,6 +286,72 @@ impl WasmShardHost {
             data: Arc::from(data),
         });
         Ok(())
+    }
+
+    /// Queue `input` for shard `id`'s next tick, as from the server (the
+    /// empty subscriber id). A shard here has it when this returns; for a
+    /// shard on another machine it is sent from the routing thread, at most
+    /// once.
+    pub fn send_input(&self, id: &str, input: &serde_json::Value) -> Result<(), SendError> {
+        let text = check_input(id, input)?;
+        if let Some(pushed) = self.push_input_here(id, &text) {
+            return pushed;
+        }
+        if self.cluster.get().is_none() {
+            return Err(SendError::NotFound);
+        }
+        if self
+            .outgoing
+            .try_send(Outgoing::Input {
+                shard: id.to_string(),
+                input: input.clone(),
+            })
+            .is_err()
+        {
+            return Err(SendError::Busy(
+                "too many messages wait for other machines".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// A server input another machine sent: for a shard here only.
+    pub(super) fn receive_input(
+        &self,
+        id: &str,
+        input: &serde_json::Value,
+    ) -> Result<(), SendError> {
+        let text = check_input(id, input)?;
+        self.push_input_here(id, &text)
+            .unwrap_or(Err(SendError::NotFound))
+    }
+
+    /// Queue a server input for shard `id` when it runs here; `None` when
+    /// it does not.
+    fn push_input_here(&self, id: &str, text: &str) -> Option<Result<(), SendError>> {
+        let shard = self.registry.get(id).filter(|s| s.is_running())?;
+        let format = self
+            .kind_of
+            .read()
+            .unwrap()
+            .get(id)
+            .and_then(|kind| self.kinds.get(kind))
+            .map(|k| k.config.snapshot_format)?;
+        let raw = match <pylon_realtime::RawInput as pylon_realtime::ShardInput>::decode_json(
+            text, format,
+        ) {
+            Ok(raw) => raw,
+            Err(why) => return Some(Err(SendError::Invalid(why))),
+        };
+        Some(
+            shard
+                .push_server_input(raw)
+                .map(|_| ())
+                .map_err(|e| match e {
+                    pylon_realtime::ShardError::Stopped => SendError::NotFound,
+                    other => SendError::Busy(other.to_string()),
+                }),
+        )
     }
 
     /// Take a module's outbox (from its tick hook): record its groups and
@@ -255,7 +389,7 @@ impl WasmShardHost {
         if local_shard || !others {
             return;
         }
-        if self.outgoing.try_send(m).is_err() {
+        if self.outgoing.try_send(Outgoing::Message(m)).is_err() {
             tracing::warn!("[shards] too many messages waiting for other machines; one dropped");
         }
     }
@@ -482,14 +616,24 @@ impl WasmShardHost {
     /// Pass queued messages to other machines until the host goes away.
     pub(super) fn run_routing(
         weak: std::sync::Weak<Self>,
-        queue: std::sync::mpsc::Receiver<Routed>,
+        queue: std::sync::mpsc::Receiver<Outgoing>,
     ) {
         while let Ok(m) = queue.recv() {
             let Some(host) = weak.upgrade() else { return };
             if host.stopped.load(std::sync::atomic::Ordering::Acquire) {
                 return;
             }
-            host.forward(&m);
+            match m {
+                Outgoing::Message(m) => host.forward(&m),
+                Outgoing::Input { shard, input } => match host.located(&shard) {
+                    Some((machine, address)) => {
+                        host.to_peer(&machine, &address, RemoteOp::Input { id: shard, input })
+                    }
+                    None => tracing::debug!(
+                        "[shard {shard}] server input dropped: no machine runs the shard"
+                    ),
+                },
+            }
         }
     }
 

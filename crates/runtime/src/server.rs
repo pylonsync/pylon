@@ -2665,6 +2665,32 @@ fn start_server(
             .map(|f| Arc::clone(f) as Arc<dyn pylon_router::FnOps>)
     });
 
+    // Shards call functions and write entity fields (issue #33). The host
+    // holds the functions weakly: they hold the host for ctx.shards. Writes
+    // take the entity API's pipeline, with the request loop's notifier.
+    if let Some(host) = &wasm_shards {
+        let notifier: Arc<dyn pylon_router::ChangeNotifier> = Arc::new(
+            WsSseNotifier::with_cluster_bus(
+                Arc::clone(&ws_hub),
+                Arc::clone(&sse_hub),
+                runtime.manifest().auth.user.clone(),
+                Arc::clone(&cluster_bus),
+            )
+            .with_reactive(Arc::clone(&reactive_registry))
+            .with_policy(Arc::clone(&policy_engine)),
+        );
+        host.attach_data(
+            fn_ops_dyn.as_ref().map(Arc::downgrade),
+            Arc::new(crate::entity_writer::EntityWriter::new(
+                Arc::clone(&runtime),
+                Arc::clone(&change_log),
+                notifier,
+                Arc::clone(&policy_engine),
+                Arc::clone(&plugin_reg),
+            )),
+        );
+    }
+
     // Reactive registry needs FnOps to invoke handlers for initial
     // run + re-run. Wire it now that fn_ops is built, then spawn the
     // re-runner thread. If functions aren't available (no functions/
@@ -3213,6 +3239,20 @@ fn start_server(
                     ),
                     Ok(_) => {}
                     Err(e) => tracing::warn!("[crdt] snapshot prune failed: {}", e.message),
+                }
+            });
+    }
+
+    // Stored results of idempotent calls (see crate::fn_calls) older than
+    // fn_calls::KEEP_MS: deleted once an hour.
+    {
+        let rt = Arc::clone(&runtime);
+        let _ = std::thread::Builder::new()
+            .name("pylon-fn-calls-prune".into())
+            .spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(3600));
+                if let Err(e) = crate::fn_calls::prune(&rt) {
+                    tracing::warn!("[fn-calls] prune failed: {e}");
                 }
             });
     }

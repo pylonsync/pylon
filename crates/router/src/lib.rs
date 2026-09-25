@@ -557,6 +557,25 @@ pub trait FnOps: Send + Sync {
         pylon_functions::runner::FnCallError,
     >;
 
+    /// Run mutation `fn_name` once for idempotency key `key`: the key and
+    /// the result commit in the mutation's own transaction, and a later call
+    /// with the key returns the stored result without running it again (see
+    /// the runtime's fn_calls.rs). A query runs as usual; an action is
+    /// refused (it has no transaction). The default refuses, so an
+    /// implementation that cannot keep the promise says so.
+    fn call_once(
+        &self,
+        fn_name: &str,
+        _args: serde_json::Value,
+        _auth: pylon_functions::protocol::AuthInfo,
+        _key: &str,
+    ) -> Result<serde_json::Value, pylon_functions::runner::FnCallError> {
+        Err(pylon_functions::runner::FnCallError {
+            code: "NOT_SUPPORTED".into(),
+            message: format!("idempotent calls of \"{fn_name}\" are not supported here"),
+        })
+    }
+
     /// Render an SSR route. Bridges an incoming HTTP GET to the Bun-
     /// side `@pylonsync/ssr` adapter, which dynamically imports
     /// `component`, calls `renderToReadableStream`, and streams base64-

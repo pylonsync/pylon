@@ -123,6 +123,11 @@ pub trait SimState: Send + 'static {
     /// arrived, before that tick's inputs. Default: ignored.
     fn on_message(&mut self, _message: &ShardMessage) {}
 
+    /// The result of a server function the shard called (see
+    /// [`Shard::push_call_result`]). Called at the start of the tick after it
+    /// arrived, before that tick's messages and inputs. Default: ignored.
+    fn on_call_result(&mut self, _result: &CallResult) {}
+
     /// Authorize a subscriber joining this shard. Return `Err(reason)` to reject.
     ///
     /// Default: allow an admin; allow a caller with a ticket (the shard has
@@ -353,6 +358,21 @@ pub struct ShardMessage {
     pub data: Arc<[u8]>,
 }
 
+/// The result of a server function a shard called.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallResult {
+    /// The key the shard gave the call.
+    pub key: String,
+    /// True when the function returned; `data` is then its JSON value.
+    /// False when it failed; `data` is then an error text.
+    pub ok: bool,
+    pub data: Arc<[u8]>,
+}
+
+/// Call results a shard holds for its next ticks. A shard sends at most
+/// this many calls at once (the host enforces it), so none is dropped.
+pub const MAX_QUEUED_CALL_RESULTS: usize = 1024;
+
 /// Messages a shard holds for its next ticks. Past this, new ones are
 /// dropped (delivery is at most once).
 pub const MAX_QUEUED_MESSAGES: usize = 1024;
@@ -430,6 +450,8 @@ pub struct Shard<S: SimState> {
     auths: Mutex<HashMap<SubscriberId, ShardAuth>>,
     /// Messages for the next tick (see [`Shard::push_message`]).
     messages: Mutex<VecDeque<ShardMessage>>,
+    /// Call results for the next tick (see [`Shard::push_call_result`]).
+    call_results: Mutex<VecDeque<CallResult>>,
     /// Subscribers being moved to another shard: their inputs are refused.
     transferring: Mutex<std::collections::HashSet<SubscriberId>>,
     /// Subscribers moved to another shard recently, with the notice and when
@@ -500,6 +522,7 @@ impl<S: SimState> Shard<S> {
             auths: Mutex::new(HashMap::new()),
             transferring: Mutex::new(std::collections::HashSet::new()),
             messages: Mutex::new(VecDeque::new()),
+            call_results: Mutex::new(VecDeque::new()),
             moved: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
             tick_no: Mutex::new(0),
@@ -689,6 +712,11 @@ impl<S: SimState> Shard<S> {
     /// by accident, this becomes an auth bypass on shard state.
     #[doc(hidden)]
     pub fn add_subscriber(&self, sub: Subscriber<S::Snapshot>) -> Result<(), ShardError> {
+        if sub.id().as_str().is_empty() {
+            return Err(ShardError::Unauthorized(
+                "the empty subscriber id is the server's".into(),
+            ));
+        }
         let mut subs = self.subscribers.lock().unwrap();
         // Under the lock `end` flips `running` in; see there.
         if !self.is_running() {
@@ -730,6 +758,11 @@ impl<S: SimState> Shard<S> {
 
     /// The checks of [`Shard::add_subscriber_authorized`], without adding.
     fn authorize_only(&self, id: &SubscriberId, auth: &ShardAuth) -> Result<(), ShardError> {
+        if id.as_str().is_empty() {
+            return Err(ShardError::Unauthorized(
+                "the empty subscriber id is the server's".into(),
+            ));
+        }
         if let Some(ticket) = &auth.ticket {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -818,6 +851,21 @@ impl<S: SimState> Shard<S> {
             return false;
         }
         queue.push_back(message);
+        true
+    }
+
+    /// Queue a call's result for the next tick. False (and dropped) when the
+    /// shard is stopped or already holds [`MAX_QUEUED_CALL_RESULTS`]; the
+    /// shard then sends the call again and gets the same result.
+    pub fn push_call_result(&self, result: CallResult) -> bool {
+        if !self.is_running() {
+            return false;
+        }
+        let mut queue = self.call_results.lock().unwrap();
+        if queue.len() >= MAX_QUEUED_CALL_RESULTS {
+            return false;
+        }
+        queue.push_back(result);
         true
     }
 
@@ -1023,10 +1071,13 @@ impl<S: SimState> Shard<S> {
                 });
 
             // This subscriber's limits first, so one client flooding the
-            // shard only loses its own inputs.
-            let mut limited = cfg.max_queued_inputs_per_subscriber > 0
+            // shard only loses its own inputs. The server's inputs (the
+            // empty id, see `push_server_input`) have only the queue's.
+            let server = subscriber_id.as_str().is_empty();
+            let mut limited = !server
+                && cfg.max_queued_inputs_per_subscriber > 0
                 && entry.queued >= cfg.max_queued_inputs_per_subscriber;
-            if !limited && cfg.input_rate_per_subscriber > 0.0 {
+            if !limited && !server && cfg.input_rate_per_subscriber > 0.0 {
                 let burst = cfg.input_burst_per_subscriber.max(1.0);
                 let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
                 entry.tokens = (entry.tokens + elapsed * cfg.input_rate_per_subscriber).min(burst);
@@ -1085,6 +1136,13 @@ impl<S: SimState> Shard<S> {
         let mut seq_guard = self.input_seq.lock().unwrap();
         *seq_guard += 1;
         Ok(*seq_guard)
+    }
+
+    /// Queue an input from the server (a function's `ctx.shards.send`). The
+    /// simulation gets it with the empty subscriber id, which no connection
+    /// can have. Only the input queue's limit applies.
+    pub fn push_server_input(&self, input: S::Input) -> Result<u64, ShardError> {
+        self.push_input(SubscriberId::new(""), input, None)
     }
 
     /// Queue an input after running the user's authorization hook.
@@ -1358,8 +1416,13 @@ impl<S: SimState> Shard<S> {
                 return;
             }
             let started = Instant::now();
-            // Messages first: they arrived before this tick's inputs were
-            // applied.
+            // Call results and messages first: they arrived before this
+            // tick's inputs were applied. Results are few (the host bounds
+            // the calls in flight) and each is small, so all apply at once.
+            let results: Vec<CallResult> = self.call_results.lock().unwrap().drain(..).collect();
+            for result in &results {
+                state.on_call_result(result);
+            }
             let messages: Vec<ShardMessage> = {
                 let mut queue = self.messages.lock().unwrap();
                 let n = queue.len().min(MAX_MESSAGES_PER_TICK);

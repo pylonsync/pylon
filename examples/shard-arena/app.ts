@@ -7,12 +7,43 @@
  * when the Rust changes). The stock pylon binary runs the module on the
  * shard's tick thread, on Pylon Cloud too.
  */
-import { buildManifest, discoverAppRoutes, shard } from "@pylonsync/sdk";
+import { buildManifest, discoverAppRoutes, entity, field, shard } from "@pylonsync/sdk";
+
+// A zone player's durable data. Zones load it on join and write x back;
+// items come only from grantItem, once per key. No policies: clients cannot
+// read or write these; zones and functions do.
+const Character = entity("Character", {
+  userId: field.string().unique(),
+  x: field.int(),
+  /** The number of the next grant, which makes its key. */
+  nextGrant: field.int(),
+});
+
+const Item = entity(
+  "Item",
+  {
+    characterId: field.string(),
+    name: field.string(),
+    grantKey: field.string(),
+  },
+  {
+    indexes: [
+      { name: "by_character", fields: ["characterId"], unique: false },
+      { name: "by_grant", fields: ["grantKey"], unique: true },
+    ],
+  },
+);
+
+const GmAction = entity("GmAction", {
+  zone: field.string(),
+  userId: field.string(),
+  action: field.string(),
+});
 
 const manifest = buildManifest({
   name: "shard-arena",
   version: "0.1.0",
-  entities: [],
+  entities: [Character, Item, GmAction],
   queries: [],
   actions: [],
   policies: [],

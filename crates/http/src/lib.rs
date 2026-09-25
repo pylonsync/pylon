@@ -248,6 +248,37 @@ pub trait DataStore: Send + Sync {
         })
     }
 
+    /// The stored result of the idempotent call of `fn_name` with `key`,
+    /// inside the current mutation transaction (see
+    /// [`DataStore::record_fn_call`]). `None` when no such call committed.
+    fn fn_call_result(
+        &self,
+        _fn_name: &str,
+        _key: &str,
+    ) -> Result<Option<serde_json::Value>, DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "idempotent calls require a mutation transaction".into(),
+        })
+    }
+
+    /// Record that the idempotent call of `fn_name` with `key` returned
+    /// `result`, in the current mutation transaction: it commits or rolls
+    /// back with the mutation's own writes. A second record of the same
+    /// function and key fails (the pair is unique), so two concurrent calls
+    /// cannot both commit.
+    fn record_fn_call(
+        &self,
+        _fn_name: &str,
+        _key: &str,
+        _result: &serde_json::Value,
+    ) -> Result<(), DataError> {
+        Err(DataError {
+            code: "NOT_SUPPORTED".into(),
+            message: "idempotent calls require a mutation transaction".into(),
+        })
+    }
+
     /// Run a faceted full-text search against a searchable entity. `query`
     /// is a JSON object with the keys defined by `SearchQuery` in
     /// `pylon_storage::search`; returns a JSON object shaped like

@@ -5,11 +5,19 @@
 //!
 //! Params: `closed` refuses players coming in; `edge` and `next` make a zone
 //! line: a player whose x reaches `edge` is moved to shard `next`.
+//!
+//! The app's data (see `Shard::calls` and `writes`): a player's `Character`
+//! row loads when it joins (`functions/loadCharacter.ts`); `loot` grants an
+//! `Item` through `functions/grantItem.ts`, once per key, and the item shows
+//! only after that mutation commits; x is written back every few seconds.
+//! A zone restored from its last save loads its characters' items again:
+//! a grant can have committed after that save.
+//! `functions/gmHeal.ts` heals a player through `ctx.shards.send`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use pylon_shard_guest::{export_shard, Auth, Outgoing, Shard, Target};
+use pylon_shard_guest::{export_shard, Auth, Call, Outgoing, Shard, Target, Write};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -39,6 +47,40 @@ struct Player {
     buffs: Vec<Buff>,
     /// Ability name to milliseconds until it can be used again.
     cooldowns: BTreeMap<String, u64>,
+    /// True once the character row has loaded.
+    #[serde(default)]
+    loaded: bool,
+    /// The character row's id.
+    #[serde(default)]
+    character: String,
+    /// Items whose grant committed, by Item row id.
+    #[serde(default)]
+    items: BTreeMap<String, String>,
+    /// The number of the character's next grant (its key), from the row.
+    #[serde(default)]
+    next_grant: u64,
+}
+
+/// A grant sent to `grantItem` and not answered yet. Saved, so a zone that
+/// restarts sends it again under the same key.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+struct Grant {
+    player: String,
+    character: String,
+    item: String,
+    /// Test hook: how long the mutation waits before it writes.
+    #[serde(default)]
+    delay_ms: u64,
+}
+
+/// What a zone saves.
+#[derive(Serialize, Deserialize, Default)]
+struct Saved {
+    #[serde(default)]
+    players: BTreeMap<String, Player>,
+    /// Grants in flight, by key.
+    #[serde(default)]
+    grants: BTreeMap<String, Grant>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +102,10 @@ enum Input {
     /// Send `text` to other zones: `to` is "all" (default),
     /// "group:<name>", or "shard:<id>".
     Shout { text: String, #[serde(default)] to: Option<String> },
+    /// Grant `item` (through the `grantItem` mutation).
+    Loot { item: String, #[serde(default)] delay_ms: u64 },
+    /// From the server only (`ctx.shards.send`): heal `who` by `hp`.
+    Heal { who: String, hp: i64 },
 }
 
 struct Zone {
@@ -71,7 +117,16 @@ struct Zone {
     shouts: Vec<Outgoing>,
     /// Players past the edge whose move was asked for. Asked again only
     /// after they step back, so a refused move is not retried every tick.
-    asked: std::collections::BTreeSet<String>,
+    asked: BTreeSet<String>,
+    /// Grants in flight, by key.
+    grants: BTreeMap<String, Grant>,
+    /// Players whose x changed since the last write.
+    moved: BTreeSet<String>,
+}
+
+/// The key of a character load: a query, so it is not stored.
+fn load_key(player: &str) -> String {
+    format!("load:{player}")
 }
 
 fn count_down(ms: &mut u64, dt: Duration) {
@@ -92,6 +147,8 @@ impl Shard for Zone {
             heard: Default::default(),
             shouts: Vec::new(),
             asked: Default::default(),
+            grants: BTreeMap::new(),
+            moved: BTreeSet::new(),
         })
     }
 
@@ -102,7 +159,19 @@ impl Shard for Zone {
                 hp: 100,
                 buffs: Vec::new(),
                 cooldowns: BTreeMap::new(),
+                loaded: false,
+                character: String::new(),
+                items: BTreeMap::new(),
+                next_grant: 0,
             });
+            return Ok(());
+        }
+        if let Input::Heal { who, hp } = &input {
+            if !subscriber.is_empty() {
+                return Err("heal comes from the server only".into());
+            }
+            let p = self.players.get_mut(who).ok_or("no such player")?;
+            p.hp += hp;
             return Ok(());
         }
         let p = self
@@ -110,8 +179,33 @@ impl Shard for Zone {
             .get_mut(subscriber)
             .ok_or("join first")?;
         match input {
-            Input::Join => {}
-            Input::Move { dx } => p.x += dx.clamp(-10, 10),
+            Input::Join | Input::Heal { .. } => {}
+            Input::Move { dx } => {
+                // x comes from the character row: no move before it loads.
+                if !p.loaded {
+                    return Err("the character has not loaded yet".into());
+                }
+                p.x += dx.clamp(-10, 10);
+                self.moved.insert(subscriber.to_string());
+            }
+            Input::Loot { item, delay_ms } => {
+                if !p.loaded {
+                    return Err("the character has not loaded yet".into());
+                }
+                // The character's grant number makes the key: unique for
+                // good, and the same when a restarted zone sends it again.
+                let key = format!("loot:{}:{}", p.character, p.next_grant);
+                p.next_grant += 1;
+                self.grants.insert(
+                    key,
+                    Grant {
+                        player: subscriber.to_string(),
+                        character: p.character.clone(),
+                        item,
+                        delay_ms,
+                    },
+                );
+            }
             Input::Buff { name, ms } => p.buffs.push(Buff { name, remaining_ms: ms }),
             Input::Cast {
                 ability,
@@ -170,6 +264,10 @@ impl Shard for Zone {
     }
 
     fn transfer_out(&mut self, subscriber: &str) -> Result<Option<Vec<u8>>, String> {
+        // Its result comes back here: the player waits for it.
+        if self.grants.values().any(|g| g.player == subscriber) {
+            return Err("a grant for the player is in flight".into());
+        }
         self.leaving.retain(|(s, _)| s != subscriber);
         self.asked.remove(subscriber);
         match self.players.remove(subscriber) {
@@ -220,13 +318,103 @@ impl Shard for Zone {
         }
     }
 
+    fn calls(&mut self) -> Vec<Call> {
+        // Every call waiting, every tick: the host skips the ones in
+        // flight, and one that a crash lost goes out again.
+        let loads = self.players.iter().filter(|(_, p)| !p.loaded).map(|(sid, _)| Call {
+            key: load_key(sid),
+            function: "loadCharacter".into(),
+            args: serde_json::json!({ "userId": sid }),
+        });
+        let grants = self.grants.iter().map(|(key, g)| Call {
+            key: key.clone(),
+            function: "grantItem".into(),
+            args: serde_json::json!({
+                "characterId": g.character,
+                "item": g.item,
+                "key": key,
+                "delayMs": g.delay_ms,
+            }),
+        });
+        loads.chain(grants).collect()
+    }
+
+    fn on_call_result(&mut self, key: &str, result: Result<serde_json::Value, String>) {
+        if let Some(sid) = key.strip_prefix("load:") {
+            let Some(p) = self.players.get_mut(sid) else { return };
+            match result {
+                Ok(row) if !p.loaded => {
+                    p.loaded = true;
+                    // The first load places the player; a reload after a
+                    // restore keeps the saved x, newer than the row's.
+                    if p.character.is_empty() {
+                        p.x = row["x"].as_i64().unwrap_or(p.x);
+                    }
+                    p.character = row["id"].as_str().unwrap_or_default().to_string();
+                    p.next_grant = p.next_grant.max(row["nextGrant"].as_u64().unwrap_or(0));
+                    for item in row["items"].as_array().into_iter().flatten() {
+                        if let (Some(id), Some(name)) = (item["id"].as_str(), item["name"].as_str()) {
+                            p.items.insert(id.to_string(), name.to_string());
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => pylon_shard_guest::log(pylon_shard_guest::Level::Warn, &format!("loading {sid} failed: {e}")),
+            }
+            return;
+        }
+        let Some(grant) = self.grants.remove(key) else {
+            // Answered already (a result can arrive twice).
+            return;
+        };
+        match result {
+            Ok(done) => {
+                // By row id: a reload may have shown it already.
+                if let (Some(p), Some(id)) =
+                    (self.players.get_mut(&grant.player), done["itemId"].as_str())
+                {
+                    p.items.insert(id.to_string(), grant.item);
+                }
+            }
+            // Refused: the mutation rolled back, so no item exists.
+            Err(e) => pylon_shard_guest::log(pylon_shard_guest::Level::Warn, &format!("grant {key} failed: {e}")),
+        }
+    }
+
+    fn writes(&mut self) -> Vec<Write> {
+        std::mem::take(&mut self.moved)
+            .into_iter()
+            .filter_map(|sid| {
+                let p = self.players.get(&sid).filter(|p| p.loaded)?;
+                let mut set = serde_json::Map::new();
+                set.insert("x".into(), p.x.into());
+                Some(Write {
+                    entity: "Character".into(),
+                    id: p.character.clone(),
+                    set,
+                })
+            })
+            .collect()
+    }
+
     fn save(&self) -> Option<Vec<u8>> {
-        serde_json::to_vec(&self.players).ok()
+        serde_json::to_vec(&Saved {
+            players: self.players.clone(),
+            grants: self.grants.clone(),
+        })
+        .ok()
     }
 
     fn restore(shard_id: &str, params: Params, state: &[u8]) -> Result<Self, String> {
         let mut zone = Self::init(shard_id, params)?;
-        zone.players = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+        let saved: Saved = serde_json::from_slice(state).map_err(|e| e.to_string())?;
+        zone.players = saved.players;
+        // Load every character again: a grant can have committed after
+        // the save this state is from.
+        for p in zone.players.values_mut() {
+            p.loaded = false;
+        }
+        zone.grants = saved.grants;
         Ok(zone)
     }
 }

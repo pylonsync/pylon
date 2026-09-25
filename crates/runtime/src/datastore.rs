@@ -41,6 +41,23 @@ thread_local! {
     /// primitive — no cross-thread leakage.
     pub(crate) static MUTATION_SCHEDULE_BUFFER: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<PendingSchedule>>>>>
         = const { std::cell::RefCell::new(None) };
+
+    /// `ctx.shards.send` calls from the mutation handler on this thread,
+    /// as (shard id, input): sent after COMMIT, dropped on rollback. Set
+    /// and restored with [`MUTATION_SCHEDULE_BUFFER`].
+    pub(crate) static MUTATION_SHARD_SENDS: std::cell::RefCell<Option<std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+/// Buffer a `ctx.shards.send` when a mutation handler runs on this thread.
+/// False when none does (the send happens now).
+pub(crate) fn buffer_shard_send(id: &str, input: &serde_json::Value) -> bool {
+    MUTATION_SHARD_SENDS.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|b| b.borrow_mut().push((id.to_string(), input.clone())))
+            .is_some()
+    })
 }
 
 /// RAII guard that pushes a schedule buffer onto the thread-local for
@@ -50,6 +67,8 @@ thread_local! {
 pub(crate) struct ScheduleBufferGuard {
     previous: Option<std::rc::Rc<std::cell::RefCell<Vec<PendingSchedule>>>>,
     current: std::rc::Rc<std::cell::RefCell<Vec<PendingSchedule>>>,
+    previous_sends: Option<std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>>,
+    sends: std::rc::Rc<std::cell::RefCell<Vec<(String, serde_json::Value)>>>,
 }
 
 impl ScheduleBufferGuard {
@@ -61,7 +80,20 @@ impl ScheduleBufferGuard {
             *slot = Some(current.clone());
             old
         });
-        Self { previous, current }
+        let sends = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let previous_sends = MUTATION_SHARD_SENDS.with(|cell| cell.replace(Some(sends.clone())));
+        Self {
+            previous,
+            current,
+            previous_sends,
+            sends,
+        }
+    }
+
+    /// Drain the `ctx.shards.send` calls captured during this guard's
+    /// lifetime, to send after COMMIT.
+    pub(crate) fn take_sends(&self) -> Vec<(String, serde_json::Value)> {
+        std::mem::take(&mut *self.sends.borrow_mut())
     }
 
     /// Drain the buffer captured during this guard's lifetime. Caller
@@ -88,6 +120,9 @@ impl Drop for ScheduleBufferGuard {
     fn drop(&mut self) {
         MUTATION_SCHEDULE_BUFFER.with(|cell| {
             *cell.borrow_mut() = self.previous.take();
+        });
+        MUTATION_SHARD_SENDS.with(|cell| {
+            *cell.borrow_mut() = self.previous_sends.take();
         });
     }
 }
@@ -2602,6 +2637,23 @@ unsafe impl<'a> Sync for TxStore<'a> {}
 unsafe impl<'a> Send for TxStore<'a> {}
 
 impl<'a> DataStore for TxStore<'a> {
+    fn fn_call_result(
+        &self,
+        fn_name: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DataError> {
+        crate::fn_calls::sqlite_result(self.conn, fn_name, key)
+    }
+
+    fn record_fn_call(
+        &self,
+        fn_name: &str,
+        key: &str,
+        result: &serde_json::Value,
+    ) -> Result<(), DataError> {
+        crate::fn_calls::sqlite_record(self.conn, fn_name, key, result)
+    }
+
     fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.runtime.manifest()
     }
@@ -4236,9 +4288,24 @@ pub struct FnOpsImpl {
     /// would silently skip TS-mutation writes — caught in the
     /// 2026-05-10 codex pass-2 audit (P1 BYPASSABLE).
     pub plugins: Arc<pylon_plugin::PluginRegistry>,
+    /// The shards `ctx.shards.send` from a mutation reaches after COMMIT.
+    pub shards: Option<Arc<crate::shard_wasm::WasmShardHost>>,
 }
 
 impl FnOpsImpl {
+    /// Send the `ctx.shards.send` inputs a committed mutation buffered.
+    /// Delivery is at most once: a failure is logged.
+    fn flush_shard_sends(&self, sends: Vec<(String, serde_json::Value)>) {
+        let Some(host) = &self.shards else {
+            return;
+        };
+        for (id, input) in sends {
+            if let Err(e) = host.send_input(&id, &input) {
+                tracing::warn!("[shard {id}] input from a committed mutation dropped: {e}");
+            }
+        }
+    }
+
     /// Workflows the TS runtime declared in its ready handshake. All pool
     /// runners load the same workflows/ dir, so the first runner's list is
     /// authoritative.
@@ -4331,39 +4398,11 @@ fn pending_schedule_delay_secs(schedule: &PendingSchedule) -> u64 {
     }
 }
 
-impl pylon_router::FnOps for FnOpsImpl {
-    fn get_fn(&self, name: &str) -> Option<FnDef> {
-        self.registry.get(name)
-    }
-
-    fn list_fns(&self) -> Vec<FnDef> {
-        self.registry.list()
-    }
-
-    fn reload_runtime(&self) -> Result<usize, String> {
-        // Same sequence the supervisor runs on a crash (`respawn_runner`):
-        // respawn, then replace the registry so a deleted function stops
-        // being callable. Every runner loads the same modules, so the last
-        // definition set is the one to keep.
-        let mut latest: Option<Vec<FnDef>> = None;
-        for runner in self.pool.runners() {
-            latest = Some(runner.respawn()?);
-        }
-        let defs = latest.unwrap_or_default();
-        let count = defs.len();
-        self.registry.replace_all(defs);
-        Ok(count)
-    }
-
-    fn wait_for_runner_ready(&self, timeout: std::time::Duration) -> bool {
-        // Bridge the cold-boot window where the Rust listener is up but the
-        // Bun runner hasn't finished spawning — see
-        // `FnRunnerPool::wait_until_responsive`. Without this, a render
-        // landing in that window fails with `RUNNER_NOT_STARTED` → a 500.
-        self.pool.wait_until_responsive(timeout)
-    }
-
-    fn call(
+impl FnOpsImpl {
+    /// [`pylon_router::FnOps::call`], with an idempotency key for a mutation
+    /// (see `call_once`): checked and recorded inside its transaction.
+    #[allow(clippy::too_many_arguments)]
+    fn call_keyed(
         &self,
         fn_name: &str,
         args: serde_json::Value,
@@ -4371,6 +4410,7 @@ impl pylon_router::FnOps for FnOpsImpl {
         on_stream: Option<pylon_functions::runner::StreamCallback>,
         request: Option<pylon_functions::protocol::RequestInfo>,
         stream_id: Option<String>,
+        once: Option<&str>,
     ) -> Result<(serde_json::Value, FnTrace), FnCallError> {
         let def = self.registry.get(fn_name).ok_or_else(|| FnCallError {
             code: "FN_NOT_FOUND".into(),
@@ -4412,6 +4452,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                     let fn_type = def.fn_type;
                     let caller_internal = def.internal;
                     let fn_name_owned = fn_name.to_string();
+                    let once_owned = once.map(str::to_string);
 
                     // Push the schedule buffer onto the thread-local for
                     // the duration of the handler. Drain after COMMIT
@@ -4448,6 +4489,27 @@ impl pylon_router::FnOps for FnOpsImpl {
                         let hook_auth = auth_info_to_context(&auth);
                         let hooked =
                             HookEnforcingDataStore::new(&buffered, Arc::clone(&plugins), hook_auth);
+                        // A call with this key committed already: its result,
+                        // and nothing runs or is written.
+                        if let Some(key) = &once_owned {
+                            let stored =
+                                inner_store
+                                    .fn_call_result(&fn_name_owned, key)
+                                    .map_err(|e| FnCallError {
+                                        code: e.code,
+                                        message: e.message,
+                                    })?;
+                            if let Some(value) = stored {
+                                let trace = pylon_functions::trace::TraceBuilder::new(
+                                    format!("once:{key}"),
+                                    fn_name_owned.clone(),
+                                    fn_type,
+                                    auth.user_id.clone(),
+                                )
+                                .finish_ok(Some(value.clone()));
+                                return Ok((value, trace, Vec::new()));
+                            }
+                        }
                         let (value, trace) = runner.call_with_caller_internal(
                             &hooked,
                             &fn_name_owned,
@@ -4459,6 +4521,15 @@ impl pylon_router::FnOps for FnOpsImpl {
                             stream_id,
                             caller_internal,
                         )?;
+                        // The key and the result commit with the writes.
+                        if let Some(key) = &once_owned {
+                            inner_store
+                                .record_fn_call(&fn_name_owned, key, &value)
+                                .map_err(|e| FnCallError {
+                                    code: e.code,
+                                    message: e.message,
+                                })?;
+                        }
                         Self::persist_pending_schedules_in_tx(
                             tx_job_queue.as_ref(),
                             inner_store,
@@ -4507,6 +4578,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                             // On rollback the early `Err(e)` arm below
                             // skips this and the buffer is dropped.
                             self.flush_pending_schedules(sched_guard.take());
+                            self.flush_shard_sends(sched_guard.take_sends());
                             drop(sched_guard);
                             Ok((value, trace))
                         }
@@ -4550,17 +4622,64 @@ impl pylon_router::FnOps for FnOpsImpl {
                 let hook_auth = auth_info_to_context(&auth);
                 let hooked =
                     HookEnforcingDataStore::new(&tx_store, Arc::clone(&self.plugins), hook_auth);
-                let result = runner.call_with_caller_internal(
-                    &hooked,
-                    fn_name,
-                    def.fn_type,
-                    args,
-                    auth,
-                    on_stream,
-                    request,
-                    stream_id,
-                    def.internal,
-                );
+                // A call with this key committed already: its result, and
+                // nothing runs or is written.
+                let stored = match once {
+                    Some(key) => tx_store
+                        .fn_call_result(fn_name, key)
+                        .map_err(|e| FnCallError {
+                            code: e.code,
+                            message: e.message,
+                        }),
+                    None => Ok(None),
+                };
+                let stored = match stored {
+                    Ok(stored) => stored,
+                    Err(e) => {
+                        let _ = conn_guard.execute("ROLLBACK", []);
+                        return Err(e);
+                    }
+                };
+                if let (Some(key), Some(value)) = (once, stored) {
+                    if let Err(e) = conn_guard.execute("ROLLBACK", []) {
+                        return Err(FnCallError {
+                            code: "ROLLBACK_FAILED".into(),
+                            message: format!("Failed to end transaction: {e}"),
+                        });
+                    }
+                    let trace = pylon_functions::trace::TraceBuilder::new(
+                        format!("once:{key}"),
+                        fn_name.to_string(),
+                        def.fn_type,
+                        auth.user_id.clone(),
+                    )
+                    .finish_ok(Some(value.clone()));
+                    return Ok((value, trace));
+                }
+                let result = runner
+                    .call_with_caller_internal(
+                        &hooked,
+                        fn_name,
+                        def.fn_type,
+                        args,
+                        auth,
+                        on_stream,
+                        request,
+                        stream_id,
+                        def.internal,
+                    )
+                    .and_then(|(value, trace)| {
+                        // The key and the result commit with the writes.
+                        if let Some(key) = once {
+                            tx_store.record_fn_call(fn_name, key, &value).map_err(|e| {
+                                FnCallError {
+                                    code: e.code,
+                                    message: e.message,
+                                }
+                            })?;
+                        }
+                        Ok((value, trace))
+                    });
 
                 // Surface commit/rollback errors. A swallowed COMMIT failure
                 // is the worst possible outcome: the caller sees success but
@@ -4647,6 +4766,7 @@ impl pylon_router::FnOps for FnOpsImpl {
                         // Durable commit landed — flush deferred runAfter jobs.
                         // Their schedule-row inserts need write_conn, now free.
                         self.flush_pending_schedules(sched_guard.take());
+                        self.flush_shard_sends(sched_guard.take_sends());
                         drop(sched_guard);
                         Ok(value)
                     }
@@ -4700,6 +4820,94 @@ impl pylon_router::FnOps for FnOpsImpl {
                     stream_id,
                     def.internal,
                 )
+            }
+        }
+    }
+}
+
+impl pylon_router::FnOps for FnOpsImpl {
+    fn get_fn(&self, name: &str) -> Option<FnDef> {
+        self.registry.get(name)
+    }
+
+    fn list_fns(&self) -> Vec<FnDef> {
+        self.registry.list()
+    }
+
+    fn reload_runtime(&self) -> Result<usize, String> {
+        // Same sequence the supervisor runs on a crash (`respawn_runner`):
+        // respawn, then replace the registry so a deleted function stops
+        // being callable. Every runner loads the same modules, so the last
+        // definition set is the one to keep.
+        let mut latest: Option<Vec<FnDef>> = None;
+        for runner in self.pool.runners() {
+            latest = Some(runner.respawn()?);
+        }
+        let defs = latest.unwrap_or_default();
+        let count = defs.len();
+        self.registry.replace_all(defs);
+        Ok(count)
+    }
+
+    fn wait_for_runner_ready(&self, timeout: std::time::Duration) -> bool {
+        // Bridge the cold-boot window where the Rust listener is up but the
+        // Bun runner hasn't finished spawning — see
+        // `FnRunnerPool::wait_until_responsive`. Without this, a render
+        // landing in that window fails with `RUNNER_NOT_STARTED` → a 500.
+        self.pool.wait_until_responsive(timeout)
+    }
+
+    fn call(
+        &self,
+        fn_name: &str,
+        args: serde_json::Value,
+        auth: FnAuth,
+        on_stream: Option<pylon_functions::runner::StreamCallback>,
+        request: Option<pylon_functions::protocol::RequestInfo>,
+        stream_id: Option<String>,
+    ) -> Result<(serde_json::Value, FnTrace), FnCallError> {
+        self.call_keyed(fn_name, args, auth, on_stream, request, stream_id, None)
+    }
+
+    fn call_once(
+        &self,
+        fn_name: &str,
+        args: serde_json::Value,
+        auth: FnAuth,
+        key: &str,
+    ) -> Result<serde_json::Value, FnCallError> {
+        let def = self.registry.get(fn_name).ok_or_else(|| FnCallError {
+            code: "FN_NOT_FOUND".into(),
+            message: format!("Function \"{fn_name}\" is not registered"),
+        })?;
+        match def.fn_type {
+            FnType::Query => self
+                .call_keyed(fn_name, args, auth, None, None, None, None)
+                .map(|(v, _)| v),
+            FnType::Action => Err(FnCallError {
+                code: "FN_NOT_TRANSACTIONAL".into(),
+                message: format!(
+                    "\"{fn_name}\" is an action; only a mutation can run once per key"
+                ),
+            }),
+            FnType::Mutation => {
+                if key.is_empty() || key.len() > 256 {
+                    return Err(FnCallError {
+                        code: "INVALID_KEY".into(),
+                        message: "an idempotency key is 1 to 256 bytes".into(),
+                    });
+                }
+                match self.call_keyed(fn_name, args, auth, None, None, None, Some(key)) {
+                    Ok((value, _)) => Ok(value),
+                    // A call with the same key committed first (this one
+                    // lost on the unique key and rolled back): its result.
+                    Err(e) => {
+                        match crate::fn_calls::committed_result(&self.runtime, fn_name, key) {
+                            Ok(Some(value)) => Ok(value),
+                            _ => Err(e),
+                        }
+                    }
+                }
             }
         }
     }
@@ -5350,6 +5558,7 @@ pub fn try_spawn_functions(
         notifier,
         job_queue: Arc::clone(&job_queue_for_handlers),
         plugins,
+        shards: shards.clone(),
     });
 
     // Per-runner nested-call hooks. Has to be done AFTER
@@ -5402,6 +5611,16 @@ pub fn try_spawn_functions(
         if let Some(host) = &shards {
             let host = Arc::clone(host);
             runner.set_shard_op_hook(Box::new(move |req| {
+                // `send` from a mutation waits for its COMMIT (the runner
+                // refuses it in a query). A bad id or input fails now.
+                if req.op == "send" {
+                    let id = req.id.as_deref().unwrap_or_default();
+                    crate::shard_wasm::check_send(id, &req.params)
+                        .map_err(|e| (e.code().to_string(), e.to_string()))?;
+                    if buffer_shard_send(id, &req.params) {
+                        return Ok(serde_json::json!(true));
+                    }
+                }
                 crate::shard_wasm::handle_shard_op(&host, req)
             }));
         }
@@ -6702,6 +6921,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                     );
                                 }
                                 ops.flush_pending_schedules(sched_guard.take());
+                                ops.flush_shard_sends(sched_guard.take_sends());
                                 drop(sched_guard);
                                 Ok(value)
                             }
@@ -6806,6 +7026,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                                 );
                             }
                             ops.flush_pending_schedules(sched_guard.take());
+                                ops.flush_shard_sends(sched_guard.take_sends());
                             drop(sched_guard);
                             Ok(value)
                         }

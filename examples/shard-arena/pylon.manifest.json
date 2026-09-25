@@ -2,7 +2,95 @@
   "manifest_version": 1,
   "name": "shard-arena",
   "version": "0.1.0",
-  "entities": [],
+  "entities": [
+    {
+      "name": "Character",
+      "fields": [
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "x",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "nextGrant",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    },
+    {
+      "name": "Item",
+      "fields": [
+        {
+          "name": "characterId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "name",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "grantKey",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_character",
+          "fields": [
+            "characterId"
+          ],
+          "unique": false
+        },
+        {
+          "name": "by_grant",
+          "fields": [
+            "grantKey"
+          ],
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "GmAction",
+      "fields": [
+        {
+          "name": "zone",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "userId",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "action",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
+    }
+  ],
   "routes": [
     {
       "path": "/",
@@ -51,6 +139,14 @@
       "tickRate": 20,
       "maxInstances": 4,
       "maxSubscribers": 1000,
+      "idleShutdownSecs": 0
+    },
+    {
+      "name": "zone",
+      "wasm": "shards/zone.wasm",
+      "crate": "shards/zone",
+      "tickRate": 20,
+      "maxInstances": 16,
       "idleShutdownSecs": 0
     }
   ]

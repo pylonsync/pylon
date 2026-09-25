@@ -40,9 +40,10 @@ use crate::shard_cluster::{
     RemoteReply,
 };
 
+mod data;
 mod messages;
 mod transfer;
-pub use messages::{MessageError, Outbox, Target};
+pub use messages::{check_send, MessageError, Outbox, SendError, Target};
 pub use transfer::{TransferError, Transferred};
 use wasmtime::{
     Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
@@ -204,6 +205,8 @@ const REQUIRED_EXPORTS: &[&str] = &[
 const SAVE_EXPORTS: &[&str] = &["pylon_save", "pylon_restore"];
 /// Optional: messages between shards. Both or neither.
 const MESSAGE_EXPORTS: &[&str] = &["pylon_outbox", "pylon_on_message"];
+/// Optional: calling the app's functions. Both or neither.
+const CALL_EXPORTS: &[&str] = &["pylon_calls", "pylon_call_result"];
 /// Optional: moving players between shards. All or none.
 const TRANSFER_EXPORTS: &[&str] = &[
     "pylon_transfer_out",
@@ -260,6 +263,7 @@ impl WasmShardKind {
             SAVE_EXPORTS,
             TRANSFER_EXPORTS,
             MESSAGE_EXPORTS,
+            CALL_EXPORTS,
         ] {
             let present: Vec<&str> = group
                 .iter()
@@ -315,6 +319,16 @@ impl WasmShardKind {
     /// True when the module sends or receives messages between shards.
     pub fn messages(&self) -> bool {
         self.module.exports().any(|e| e.name() == "pylon_outbox")
+    }
+
+    /// True when the module calls the app's functions.
+    pub fn calls(&self) -> bool {
+        self.module.exports().any(|e| e.name() == "pylon_calls")
+    }
+
+    /// True when the module writes entity fields.
+    pub fn writes(&self) -> bool {
+        self.module.exports().any(|e| e.name() == "pylon_writes")
     }
 
     /// True when the module can move players to and from other shards.
@@ -447,6 +461,19 @@ impl WasmShardKind {
                     outbox: func!("pylon_outbox"),
                     on_message: func!("pylon_on_message"),
                 })
+            } else {
+                None
+            },
+            calls: if instance.get_export(&mut store, "pylon_calls").is_some() {
+                Some(CallExports {
+                    calls: func!("pylon_calls"),
+                    result: func!("pylon_call_result"),
+                })
+            } else {
+                None
+            },
+            writes: if instance.get_export(&mut store, "pylon_writes").is_some() {
+                Some(func!("pylon_writes"))
             } else {
                 None
             },
@@ -659,6 +686,14 @@ struct Exports {
     save: Option<SaveExports>,
     transfer: Option<TransferExports>,
     messages: Option<MessageExports>,
+    calls: Option<CallExports>,
+    writes: Option<TypedFunc<(), i32>>,
+}
+
+#[derive(Clone)]
+struct CallExports {
+    calls: TypedFunc<(), i32>,
+    result: TypedFunc<(i32, i32, i32, i32, i32), i32>,
 }
 
 #[derive(Clone)]
@@ -980,6 +1015,50 @@ impl WasmSim {
         }
     }
 
+    /// The function calls the module asks for. Called from the tick hook,
+    /// inside the tick's time budget.
+    pub(crate) fn calls(&self) -> Result<Vec<data::Call>, String> {
+        let mut inner = self.inner.borrow_mut();
+        let Some(c) = inner.exports.calls.clone() else {
+            return Ok(Vec::new());
+        };
+        if !inner.in_tick {
+            inner.begin_op();
+        }
+        match inner.call(&c.calls, ())? {
+            STATUS_OK => {
+                let bytes = inner.output()?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| inner.fail(&format!("pylon_calls sent bad JSON: {e}")))
+            }
+            STATUS_NONE => Ok(Vec::new()),
+            STATUS_ERR => Err(format!("pylon_calls refused: {}", inner.output_text()?)),
+            other => Err(inner.fail(&format!("pylon_calls returned status {other}"))),
+        }
+    }
+
+    /// The entity fields the module asks to write. Called from the tick
+    /// hook, inside the tick's time budget.
+    pub(crate) fn writes(&self) -> Result<Vec<data::Write>, String> {
+        let mut inner = self.inner.borrow_mut();
+        let Some(f) = inner.exports.writes.clone() else {
+            return Ok(Vec::new());
+        };
+        if !inner.in_tick {
+            inner.begin_op();
+        }
+        match inner.call(&f, ())? {
+            STATUS_OK => {
+                let bytes = inner.output()?;
+                serde_json::from_slice(&bytes)
+                    .map_err(|e| inner.fail(&format!("pylon_writes sent bad JSON: {e}")))
+            }
+            STATUS_NONE => Ok(Vec::new()),
+            STATUS_ERR => Err(format!("pylon_writes refused: {}", inner.output_text()?)),
+            other => Err(inner.fail(&format!("pylon_writes returned status {other}"))),
+        }
+    }
+
     /// The players the module wants moved, as (subscriber, target shard).
     /// Called from the tick hook, inside the tick's time budget.
     pub fn transfer_requests(&self) -> Result<Vec<(String, String)>, String> {
@@ -1065,6 +1144,27 @@ impl SimState for WasmSim {
                 let why = inner.output_text().unwrap_or_default();
                 tracing::warn!(
                     "[shard {}] pylon_on_message refused: {why}",
+                    inner.store.data().shard_id
+                );
+            }
+        }
+    }
+
+    fn on_call_result(&mut self, result: &pylon_realtime::CallResult) {
+        let inner = self.inner.get_mut();
+        let Some(c) = inner.exports.calls.clone() else {
+            return;
+        };
+        inner.enter_tick();
+        let Ok(args) = inner.write_args(&[result.key.as_bytes(), &result.data]) else {
+            return;
+        };
+        let ((kp, kl), (dp, dl)) = (args[0], args[1]);
+        if let Ok(status) = inner.call(&c.result, (kp, kl, i32::from(result.ok), dp, dl)) {
+            if status == STATUS_ERR {
+                let why = inner.output_text().unwrap_or_default();
+                tracing::warn!(
+                    "[shard {}] pylon_call_result refused: {why}",
                     inner.store.data().shard_id
                 );
             }
@@ -1471,13 +1571,27 @@ pub struct WasmShardHost {
     /// Each shard's groups, for messages to a group.
     groups: Mutex<HashMap<String, Vec<String>>>,
     /// Messages for the routing thread.
-    outgoing: std::sync::mpsc::SyncSender<messages::Routed>,
+    outgoing: std::sync::mpsc::SyncSender<messages::Outgoing>,
     /// The cluster bus, when the app has one: messages travel on it.
     bus: OnceLock<Arc<dyn pylon_cluster::ClusterBus>>,
     /// A worker per other machine that messages go to, by machine id.
     peers: Mutex<HashMap<String, std::sync::mpsc::SyncSender<RemoteOp>>>,
     /// Live machines and shard locations for messages, read every 2 s.
     peer_cache: Mutex<messages::PeerCache>,
+    /// The app's functions, for shards' calls (see `data`).
+    functions: OnceLock<Option<Weak<dyn pylon_router::FnOps>>>,
+    /// Writes shards' entity fields (see `data`).
+    writer: OnceLock<Arc<crate::entity_writer::EntityWriter>>,
+    /// Calls for the call workers.
+    calls: std::sync::mpsc::SyncSender<data::QueuedCall>,
+    /// The workers' end of `calls`, until they start.
+    call_rx: Mutex<Option<std::sync::mpsc::Receiver<data::QueuedCall>>>,
+    /// Each shard's calls in flight, as function and key.
+    calls_in_flight: Mutex<data::InFlight>,
+    /// Entity fields waiting to be written.
+    dirty: Mutex<data::Dirty>,
+    /// One flush of `dirty` at a time.
+    flush_lock: Mutex<()>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1602,7 +1716,15 @@ impl WasmShardHost {
     pub fn new(kinds: Vec<WasmShardKind>) -> Arc<Self> {
         let (transfer_requests, requested) = std::sync::mpsc::sync_channel(transfer::REQUEST_QUEUE);
         let (outgoing, to_route) = std::sync::mpsc::sync_channel(messages::ROUTE_QUEUE);
+        let (calls, call_rx) = data::call_queue();
         let host = Arc::new(Self {
+            functions: OnceLock::new(),
+            writer: OnceLock::new(),
+            calls,
+            call_rx,
+            calls_in_flight: Mutex::new(HashMap::new()),
+            dirty: Mutex::new(HashMap::new()),
+            flush_lock: Mutex::new(()),
             kinds: kinds
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
@@ -1855,15 +1977,40 @@ impl WasmShardHost {
             }
         })?;
         let shard = Shard::new(id, sim, spec.config.clone());
-        if spec.transfers() || spec.messages() {
+        if spec.transfers() || spec.messages() || spec.calls() || spec.writes() {
             // After each tick: the players the module wants moved go to the
             // transfer thread, and its messages to the routing thread (both
-            // take locks this hook runs under).
+            // take locks this hook runs under); its calls go to the call
+            // workers, and its writes to the buffer.
             let requests = self.transfer_requests.clone();
             let host = self.weak_self.get().cloned();
             let source = id.to_string();
             let (transfers, sends) = (spec.transfers(), spec.messages());
+            let (calls, writes) = (spec.calls(), spec.writes());
             shard.set_on_tick(move |sim, _| {
+                let host_now = || host.as_ref().and_then(|w| w.upgrade());
+                if calls {
+                    match sim.calls() {
+                        Ok(list) if !list.is_empty() => {
+                            if let Some(host) = host_now() {
+                                host.take_calls(&source, list);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("[shard {source}] calls: {e}"),
+                    }
+                }
+                if writes {
+                    match sim.writes() {
+                        Ok(list) if !list.is_empty() => {
+                            if let Some(host) = host_now() {
+                                host.take_writes(&source, list);
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("[shard {source}] writes: {e}"),
+                    }
+                }
                 if transfers {
                     match sim.transfer_requests() {
                         Ok(list) => {
@@ -2019,6 +2166,11 @@ impl WasmShardHost {
         let removed = self.registry.remove(id);
         self.kind_of.write().unwrap().remove(id);
         self.idle_since.lock().unwrap().remove(id);
+        drop(_guard);
+        // Its last writes, before another machine may start it and read
+        // them. A tick running during the stop can buffer more; the next
+        // flush writes those.
+        self.flush_writes(Some(id));
         removed
     }
 
@@ -2120,9 +2272,14 @@ impl WasmShardHost {
     pub fn stop_all(&self) {
         self.stopped.store(true, Ordering::Release);
         let Some(c) = self.cluster.get() else {
+            // Every tick finishes first, so the last writes are buffered.
             for id in self.registry.ids() {
+                if let Some(shard) = self.registry.get(&id) {
+                    shard.stop_and_wait();
+                }
                 self.stop(&id);
             }
+            self.flush_writes(None);
             return;
         };
         // No create, adoption, or stop runs from here on, and no shard
@@ -2161,6 +2318,7 @@ impl WasmShardHost {
         for id in self.registry.ids() {
             self.stop_local(&id);
         }
+        self.flush_writes(None);
         let _beat = c.beat_lock.lock().unwrap();
         c.left.store(true, Ordering::Release);
         let epoch = c.lease.lock().unwrap().epoch;
@@ -2644,6 +2802,13 @@ impl WasmShardHost {
                     message,
                 },
             },
+            RemoteOp::Input { id, input } => match self.receive_input(&id, &input) {
+                Ok(()) => RemoteReply::Ok(serde_json::json!(true)),
+                Err(e) => RemoteReply::Err {
+                    code: e.code().into(),
+                    message: e.to_string(),
+                },
+            },
             RemoteOp::TransferIn { id } => {
                 // `accept` reads the row again and settles every status: a
                 // repeated delivery of a row already `in` here succeeds.
@@ -3004,6 +3169,10 @@ pub fn handle_shard_op(
                 .map(|()| serde_json::json!(true))
                 .map_err(|e| (e.code().to_string(), e.to_string()))
         }
+        "send" => host
+            .send_input(id()?, &req.params)
+            .map(|()| serde_json::json!(true))
+            .map_err(|e| (e.code().to_string(), e.to_string())),
         "transfer" => {
             let missing = |what: &str| ("INVALID_SHARD".to_string(), format!("{what} is required"));
             let subscriber = req

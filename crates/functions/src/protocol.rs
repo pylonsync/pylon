@@ -802,7 +802,7 @@ pub struct SignShardTicketMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardOpMessage {
     pub call_id: String,
-    /// "create" | "stop" | "get" | "list" | "transfer" | "publish"
+    /// "create" | "stop" | "get" | "list" | "transfer" | "publish" | "send"
     pub op: String,
     /// The shard kind (`create`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -810,7 +810,8 @@ pub struct ShardOpMessage {
     /// The shard id (`create`, `stop`, `get`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    /// Passed to the module's init (`create`).
+    /// Passed to the module's init (`create`); the message's data
+    /// (`publish`); the input (`send`).
     #[serde(default)]
     pub params: serde_json::Value,
     /// The machine to create the shard on (`create`), when the app runs on

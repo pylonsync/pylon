@@ -116,6 +116,15 @@
 //! (`shard:<id>`, `group:<name>`, or `all`), a u16 length and a topic, and
 //! a u32 length and the data.
 //!
+//! Optional exports for the app's data. `pylon_calls` and
+//! `pylon_call_result` come as a pair; `pylon_writes` stands alone.
+//!
+//! | Export | Meaning |
+//! | --- | --- |
+//! | `pylon_calls() -> status` | Function calls to make, as JSON `[{"key", "fn", "args"}]`, to the output. Status `3` means none. The host calls it after each tick. |
+//! | `pylon_call_result(key_ptr, key_len, ok, data_ptr, data_len) -> status` | A call's result: `ok` `1` and the function's JSON value, or `0` and an error text. |
+//! | `pylon_writes() -> status` | Entity fields to write, as JSON `[{"entity", "id", "set"}]`, to the output. Status `3` means none. The host calls it after each tick and writes them in batches. |
+//!
 //! Status `0` is success. Status `1` is an error or a refusal, with a UTF-8
 //! message in the output. A trap stops the shard.
 //!
@@ -352,6 +361,37 @@ pub trait Shard: Sized + 'static {
     /// arrived. `from` is the sending shard's id, or `""` for a server
     /// function. Default: ignored.
     fn on_message(&mut self, _from: &str, _topic: &str, _data: &[u8]) {}
+
+    // -- The app's data (optional) --------------------------------------------
+    //
+    // A shard reads and changes the app's entities through its functions:
+    // a query loads a character when a player joins; a mutation grants an
+    // item, currency, or XP, and runs once per key, so a grant never
+    // happens twice, even across a crash. The shard applies a grant's
+    // effect only when its result arrives (the mutation committed).
+    // Frequent, low-stakes changes (position, health) go through `writes`,
+    // which the host batches.
+
+    /// Function calls to make, taken after each tick. Send each one again,
+    /// with the same key, until its result arrives; keep the ones waiting in
+    /// the saved state, so a restarted shard sends them again. A key sent
+    /// while its call is running is ignored. Default: none.
+    fn calls(&mut self) -> Vec<Call> {
+        Vec::new()
+    }
+
+    /// A call's result, at the start of the tick after it arrived: the
+    /// function's value, or an error text (`CODE: message`). It can arrive
+    /// more than once for one key; the value is the same. Default: ignored.
+    fn on_call_result(&mut self, _key: &str, _result: Result<serde_json::Value, String>) {}
+
+    /// Entity fields to write, taken after each tick. The host keeps the
+    /// latest value of each field and writes them every few seconds and
+    /// when the shard stops; a crash can lose the last few seconds. For
+    /// grants, use a mutation (`calls`). Default: none.
+    fn writes(&mut self) -> Vec<Write> {
+        Vec::new()
+    }
 }
 
 /// Where a message goes (see [`Shard::outbox`]).
@@ -382,6 +422,28 @@ pub struct Outgoing {
     /// The app's name for the message, for example `"relic_taken"`.
     pub topic: String,
     pub data: Vec<u8>,
+}
+
+/// A call of one of the app's functions (see [`Shard::calls`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Call {
+    /// Names the call. A mutation runs once per key, whatever the number of
+    /// times it is sent: send it again with the same key until its result
+    /// arrives (after a restart too), and the result is the first run's.
+    pub key: String,
+    /// The function's name, as exported from `functions/`.
+    #[serde(rename = "fn")]
+    pub function: String,
+    pub args: serde_json::Value,
+}
+
+/// Entity fields for the host to write (see [`Shard::writes`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Write {
+    pub entity: String,
+    pub id: String,
+    /// The fields to set, as a JSON object.
+    pub set: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Replication settings (see `Shard::replicated`).
@@ -640,6 +702,24 @@ macro_rules! export_shard {
                 RUNTIME.outbox()
             }
             #[no_mangle]
+            pub extern "C" fn pylon_calls() -> i32 {
+                RUNTIME.calls()
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_call_result(
+                kp: i32,
+                kl: i32,
+                ok: i32,
+                dp: i32,
+                dl: i32,
+            ) -> i32 {
+                RUNTIME.call_result(kp, kl, ok, dp, dl)
+            }
+            #[no_mangle]
+            pub extern "C" fn pylon_writes() -> i32 {
+                RUNTIME.writes()
+            }
+            #[no_mangle]
             pub extern "C" fn pylon_on_message(
                 fp: i32,
                 fl: i32,
@@ -842,6 +922,45 @@ pub mod __rt {
             }
             s.groups_sent = Some(groups);
             OK
+        }
+
+        pub fn calls(&self) -> i32 {
+            let s = self.state();
+            let calls = shard(&mut s.shard).calls();
+            if calls.is_empty() {
+                return NONE;
+            }
+            s.output.clear();
+            match serde_json::to_writer(&mut s.output, &calls) {
+                Ok(()) => OK,
+                Err(e) => fail(&mut s.output, format!("calls: {e}")),
+            }
+        }
+
+        pub fn call_result(&self, kp: i32, kl: i32, ok: i32, dp: i32, dl: i32) -> i32 {
+            let s = self.state();
+            // SAFETY: host-written arguments in the scratch buffer.
+            let (key, data) = unsafe { (arg_str(kp, kl), arg(dp, dl)) };
+            let result = if ok != 0 {
+                serde_json::from_slice(data).map_err(|e| format!("BAD_RESULT: {e}"))
+            } else {
+                Err(String::from_utf8_lossy(data).into_owned())
+            };
+            shard(&mut s.shard).on_call_result(key, result);
+            OK
+        }
+
+        pub fn writes(&self) -> i32 {
+            let s = self.state();
+            let writes = shard(&mut s.shard).writes();
+            if writes.is_empty() {
+                return NONE;
+            }
+            s.output.clear();
+            match serde_json::to_writer(&mut s.output, &writes) {
+                Ok(()) => OK,
+                Err(e) => fail(&mut s.output, format!("writes: {e}")),
+            }
         }
 
         pub fn on_message(&self, fp: i32, fl: i32, tp: i32, tl: i32, dp: i32, dl: i32) -> i32 {

@@ -75,6 +75,7 @@ export type {
   RequireMemberOptions,
   Shards,
   ShardsReader,
+  ShardsWriter,
   ShardInfo,
   ShardTransfer,
   MemberRow,

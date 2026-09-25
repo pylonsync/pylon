@@ -1,8 +1,9 @@
 import { action, v } from "@pylonsync/functions";
 
 /**
- * Start zone `zone` if it is not running (on `machine`, when given), and give
- * the caller a ticket to join it as themselves.
+ * Start zone `zone` if it is not running (on `machine`, when given), create
+ * the caller's character if it has none, and give the caller a ticket to
+ * join it as themselves.
  *
  * `params` reach the zone's init: `{ closed: true }` refuses players moving
  * in; `{ edge, next }` moves a player whose x reaches `edge` to zone `next`.
@@ -17,6 +18,8 @@ export default action({
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
     const zone = args.zone as string;
+    // The zone loads this row when the player joins (functions/loadCharacter.ts).
+    await ctx.runMutation("ensureCharacter", {});
     if (!(await ctx.shards.get(zone))) {
       try {
         await ctx.shards.create("zone", zone, args.params ?? {}, {

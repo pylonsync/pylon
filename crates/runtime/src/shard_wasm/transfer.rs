@@ -1439,11 +1439,11 @@ mod tests {
     }
 
     fn hp(host: &WasmShardHost, shard: &str, sid: &str) -> i64 {
-        saved(host, shard)[sid]["hp"].as_i64().unwrap()
+        saved(host, shard)["players"][sid]["hp"].as_i64().unwrap()
     }
 
     fn has(host: &WasmShardHost, shard: &str, sid: &str) -> bool {
-        !saved(host, shard)[sid].is_null()
+        !saved(host, shard)["players"][sid].is_null()
     }
 
     fn user(sid: &str) -> ShardAuth {

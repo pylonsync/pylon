@@ -377,6 +377,7 @@ export default action({
 | `ticket(id, opts)` | A signed ticket. See [shard tickets](/concepts/functions#shard-tickets). |
 | `transfer(from, subscriberId, to)` | Moves a player to another shard with its state. See [Move a player to another shard](#move-a-player-to-another-shard). Actions only. |
 | `publish(to, topic, data)` | Sends a message to shards. See [Messages between shards](#messages-between-shards). Actions only. |
+| `send(id, input)` | Sends an input to a shard. In a mutation, after the commit. See [Send an input from a function](#send-an-input-from-a-function). Mutations and actions. |
 
 A shard id is 1 to 128 letters, digits, `-`, `_`, `.`, or `:`.
 
@@ -555,6 +556,141 @@ sender never gets its own message. A shard applies at most 64 messages a
 tick; more wait for the next ones. Limits: 64 messages sent per tick,
 topics of 1 to 128 bytes, data up to 64 KB, 64 groups per shard; a
 message over a limit is dropped with a log line.
+
+## The app's data
+
+A game keeps durable data in entities: characters, inventory, currency, XP.
+A shard reads and changes it through the app's functions and through
+buffered writes. Each has a different promise.
+
+| Path | For | Promise |
+| --- | --- | --- |
+| `calls` with a query | Loading a character when a player joins | The result arrives on a later tick. |
+| `calls` with a mutation | Items, currency, XP | Runs once per key, even when the shard crashes and sends it again. |
+| `writes` | Position, health, and other frequent changes | The latest value, written every 2 s and when the shard stops. A crash loses the last 2 s. |
+| `ctx.shards.send` | A GM command, a keep claimed on the website | In a mutation, sent after the commit. At most once. |
+
+### Call a function
+
+After each tick the host takes the module's `calls`. Worker threads run
+them, so a slow function never delays a tick. The result reaches
+`on_call_result` at the start of a later tick, before its messages and
+inputs:
+
+```rust
+fn calls(&mut self) -> Vec<Call> {
+    // Every call still waiting, every tick. The host skips a key that is
+    // in flight, so a call is sent again only after a crash.
+    self.grants
+        .iter()
+        .map(|(key, g)| Call {
+            key: key.clone(),
+            function: "grantItem".into(),
+            args: serde_json::json!({ "characterId": g.character, "item": g.item }),
+        })
+        .collect()
+}
+
+fn on_call_result(&mut self, key: &str, result: Result<serde_json::Value, String>) {
+    let Some(grant) = self.grants.remove(key) else { return };
+    match result {
+        // The mutation committed: show the item now.
+        Ok(_) => self.give(&grant),
+        // It rolled back: no item exists. The text is "CODE: message".
+        Err(e) => log(Level::Warn, &format!("grant {key} failed: {e}")),
+    }
+}
+```
+
+A mutation called with a key runs once per function and key. The key and
+the mutation's result are written in the mutation's own transaction. A
+later call with the same key returns the stored result and changes
+nothing. So a grant has these rules:
+
+- Save the calls in flight with the shard's state (`save`). A shard that
+  restarts from its last save sends them again under the same keys.
+- Apply the effect (the item in the player's inventory) only in
+  `on_call_result`. Before that, the mutation may not have committed.
+- Load the characters again after a restore. A grant can commit after the
+  last save, and a zone restored from that save does not know it yet. Keep
+  items by row id (the mutation returns it), so an item that both the
+  reload and a late result bring shows once.
+- Make the key unique for good. A stored result is kept for 7 days, and a
+  key used again in that time returns the old result. The example keeps
+  the next grant number in the character row and uses
+  `loot:<character>:<n>`.
+
+An error result means the mutation did not commit. The one exception is a
+database failure during the commit itself: send the call again with the
+same key, and the stored result (or a fresh run) answers.
+
+A query runs each time it is called. An action is refused
+(`FN_NOT_TRANSACTIONAL`): it has no transaction to store the result in.
+Calls run with admin rights, like a scheduled job, so a function that
+shards call must check the caller (`ctx.auth.isAdmin`) if players can also
+reach it. A shard has at most 256 calls in flight. A result can arrive
+twice for one key; its value is the same.
+
+### Write entity fields
+
+After each tick the host takes the module's `writes`. It keeps the latest
+value of each field, per row, and writes them every 2 s
+(`PYLON_SHARD_WRITE_EVERY_MS`) and when the shard stops. A write goes
+through the same path as `PATCH /api/entities/<entity>/<id>` with admin
+rights: plugins run, and synced clients see the change.
+
+```rust
+fn writes(&mut self) -> Vec<Write> {
+    std::mem::take(&mut self.moved)
+        .into_iter()
+        .map(|id| Write {
+            entity: "Character".into(),
+            id: self.players[&id].character.clone(),
+            set: serde_json::Map::from_iter([("x".into(), self.players[&id].x.into())]),
+        })
+        .collect()
+}
+```
+
+A write to a row that does not exist, or that a plugin refuses, is
+dropped with a log line. A write that fails in the database is tried again
+on the next 4 flushes. A shard holds at most 10,000 rows to write.
+
+### Send an input from a function
+
+`ctx.shards.send(id, input)` queues `input` for the shard's next tick, on
+any machine. The module's `apply_input` gets it from the empty subscriber
+id. No connection can use that id, so a module can trust it:
+
+```rust
+Input::Heal { who, hp } => {
+    if !subscriber.is_empty() {
+        return Err("from the server only".into());
+    }
+    self.players.get_mut(&who).ok_or("no such player")?.hp += hp;
+}
+```
+
+```ts functions/gmHeal.ts
+export default mutation({
+  args: { zone: v.string(), userId: v.string(), hp: v.number() },
+  async handler(ctx, args) {
+    if (!ctx.auth.isAdmin) throw ctx.error("FORBIDDEN", "GMs only");
+    await ctx.db.insert("GmAction", { zone: args.zone, userId: args.userId, action: "heal" });
+    await ctx.shards.send(args.zone, { heal: { who: args.userId, hp: args.hp } });
+  },
+});
+```
+
+In a mutation the input is sent after the commit, and not at all when the
+mutation rolls back. In an action it is sent at once, and a shard on this
+machine has it when the call returns. Delivery is at most once: a shard
+that stops, a full input queue, or a machine that cannot be reached loses
+it. An input is at most 64 KB as JSON. A query cannot send.
+
+`examples/shard-arena` has all four: its zone loads a `Character` on join,
+grants `Item`s through `functions/grantItem.ts`, writes x back, and takes
+heals from `functions/gmHeal.ts`.
 
 ## Load test
 

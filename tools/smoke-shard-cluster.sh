@@ -14,6 +14,11 @@
 #   2d. messages: packages/realtime's shard-messages.e2e.test.ts has a zone
 #      on a shout to all zones and to a group, and a server function
 #      announce; a zone on b hears all three.
+#   2e. data: packages/realtime's shard-data.e2e.test.ts has a zone load a
+#      character, grant an item through a mutation once per key, write x
+#      back, and take a GM's heal sent after a commit (and none after a
+#      rollback). Machines f and g are killed during a grant and right after
+#      one commits; the zones start elsewhere and each item exists once.
 #   3. packages/realtime's shard-cluster.e2e.test.ts creates an arena through
 #      a, pinned to b; connects through a (proxied to b: b is not on Fly);
 #      moves a player; kills b; and finds the arena started on a from b's
@@ -50,6 +55,8 @@ PORT_B=4861
 PORT_C=4871
 PORT_D=4881
 PORT_E=4891
+PORT_F=4901
+PORT_G=4911
 PG_PROXY_PORT=55432
 TMP="$(mktemp -d -t pylon-shard-cluster.XXXXXX)"
 PIDS=()
@@ -129,10 +136,18 @@ wait_log() {
 	fail "no \"$2\" in $1 within $3 s"
 }
 
-# join <port> <token> <json args>
+# join <port> <token> <json args>: the reply; on an error it prints the body.
 join() {
-	curl -sf -X POST "http://127.0.0.1:$1/api/fn/joinArena" \
-		-H "Authorization: Bearer $2" -H "Content-Type: application/json" -d "$3"
+	local out code
+	out=$(curl -s -w '\n%{http_code}' -X POST "http://127.0.0.1:$1/api/fn/joinArena" \
+		-H "Authorization: Bearer $2" -H "Content-Type: application/json" -d "$3")
+	code="${out##*$'\n'}"
+	out="${out%$'\n'*}"
+	[[ "$code" == 200 ]] || {
+		echo "joinArena $3 on :$1: $code $out" >&2
+		return 1
+	}
+	echo "$out"
 }
 
 echo "→ machines a (:$PORT_A, Fly), b (:$PORT_B), c (:$PORT_C, Fly)"
@@ -191,6 +206,20 @@ echo "→ 2d. messages: a zone on a shouts, a zone on b hears it"
 	PYLON_SHARD_MESSAGES_E2E="127.0.0.1:$PORT_A,127.0.0.1:$PORT_B" \
 		PYLON_SHARD_ADMIN_TOKEN="$ADMIN_TOKEN" \
 		bun test src/shard-messages.e2e.test.ts) || fail "the messages e2e test failed"
+
+echo "→ 2e. data: loads, grants once across a kill, writes, sends after a commit"
+start f "$PORT_F" PYLON_REPLICA_ID=f
+PID_F=$PID
+start g "$PORT_G" PYLON_REPLICA_ID=g
+PID_G=$PID
+up "$PORT_F"
+up "$PORT_G"
+sleep 3
+(cd "$ROOT/packages/realtime" &&
+	PYLON_SHARD_DATA_E2E="127.0.0.1:$PORT_A,127.0.0.1:$PORT_F,127.0.0.1:$PORT_G" \
+		PYLON_SHARD_DATA_KILL="$PID_F,$PID_G" \
+		PYLON_SHARD_ADMIN_TOKEN="$ADMIN_TOKEN" \
+		bun test src/shard-data.e2e.test.ts) || fail "the data e2e test failed"
 
 echo "→ 3. e2e: create on b through a, connect through a, kill b"
 (cd "$ROOT/packages/realtime" &&

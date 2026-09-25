@@ -817,6 +817,47 @@ impl<'a> DataStore for PgTxStore<'a> {
         })
     }
 
+    fn fn_call_result(
+        &self,
+        fn_name: &str,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, DataError> {
+        self.with_tx(|tx| {
+            let row = tx
+                .query_opt(
+                    "SELECT result FROM _pylon_fn_calls WHERE fn = $1 AND key = $2",
+                    &[&fn_name, &key],
+                )
+                .map_err(pg_err_to_data)?;
+            row.map(|r| {
+                let text: String = r.get(0);
+                serde_json::from_str(&text).map_err(|e| DataError {
+                    code: "FN_CALL_RESULT_CORRUPT".into(),
+                    message: format!("stored result of call {key}: {e}"),
+                })
+            })
+            .transpose()
+        })
+    }
+
+    fn record_fn_call(
+        &self,
+        fn_name: &str,
+        key: &str,
+        result: &serde_json::Value,
+    ) -> Result<(), DataError> {
+        let text = result.to_string();
+        self.with_tx(|tx| {
+            tx.execute(
+                "INSERT INTO _pylon_fn_calls (fn, key, result, created_at)
+                 VALUES ($1, $2, $3, (extract(epoch from clock_timestamp()) * 1000)::bigint)",
+                &[&fn_name, &key, &text],
+            )
+            .map_err(pg_err_to_data)?;
+            Ok(())
+        })
+    }
+
     fn enqueue_internal_job(&self, job: &serde_json::Value) -> Result<(), DataError> {
         let required_str = |name: &str| {
             job.get(name)

@@ -1764,6 +1764,8 @@ impl FnRunner {
                     // Starting or stopping a shard is a side effect outside
                     // the database: a query re-runs whenever its reads
                     // change, and a mutation's rollback cannot undo it.
+                    // A mutation's `send` is held until its COMMIT (the
+                    // hook buffers it); a query has no commit.
                     let reply = if !matches!(fn_type, crate::protocol::FnType::Action)
                         && matches!(req.op.as_str(), "create" | "stop" | "transfer" | "publish")
                     {
@@ -1771,6 +1773,13 @@ impl FnRunner {
                             call_id.clone(),
                             "SHARD_OP_ACTIONS_ONLY",
                             "ctx.shards.create, stop, transfer, and publish are available in actions only (a mutation's rollback cannot undo them)",
+                        )
+                    } else if matches!(fn_type, crate::protocol::FnType::Query) && req.op == "send"
+                    {
+                        DbResultMessage::err(
+                            call_id.clone(),
+                            "SHARD_OP_NOT_IN_QUERY",
+                            "ctx.shards.send is available in mutations and actions (a query re-runs whenever its reads change)",
                         )
                     } else {
                         let hook = self

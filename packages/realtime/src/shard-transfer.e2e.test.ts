@@ -18,6 +18,7 @@ interface Player {
   hp: number;
   buffs: Array<{ name: string; remaining_ms: number }>;
   cooldowns: Record<string, number>;
+  loaded: boolean;
 }
 interface Zone {
   zone: string;
@@ -95,8 +96,10 @@ test.skipIf(!hostA || !hostB)(
     client.send({ buff: { name: "haste", ms: 120_000 } });
     client.send({ cast: { ability: "fireball", cooldown_ms: 120_000 } });
     client.send({ hit: { damage: 30 } });
-    client.send({ move: { dx: 2 } });
     const mine = () => latest?.players[me];
+    // x comes from the character row: the zone refuses a move before it loads.
+    await waitFor("the character to load", () => (mine()?.loaded ? true : undefined), 10_000);
+    client.send({ move: { dx: 2 } });
     const before = await waitFor(
       "the player's state in west",
       () => (mine()?.hp === 70 && mine()?.x === 2 && mine()?.buffs.length ? mine() : undefined),

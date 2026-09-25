@@ -928,6 +928,21 @@ export interface Shards {
    * bytes), or data over 64 KB.
    */
   publish(to: string, topic: string, data?: unknown): Promise<void>;
+
+  /**
+   * Send `input` to shard `shardId`, on any machine. The module's
+   * `apply_input` gets it on the shard's next tick, from the empty
+   * subscriber id (no connection can have it), in the shard's input
+   * format. For a GM command, or a keep claimed on the website.
+   *
+   * In a mutation the input is sent after the mutation commits, and not
+   * at all when it rolls back. Delivery is at most once: a shard that
+   * stops, a full input queue, or a machine that cannot be reached loses
+   * it. In an action, a shard on this machine has it when this resolves.
+   * Throws `SHARD_INPUT_INVALID` for a bad id or an input over 64 KB of
+   * JSON, and in an action `SHARD_NOT_FOUND` or `SHARD_BUSY`.
+   */
+  send(shardId: string, input: unknown): Promise<void>;
 }
 
 /** A finished `ctx.shards.transfer`. */
@@ -938,8 +953,11 @@ export interface ShardTransfer {
   ticket: string;
 }
 
-/** `ctx.shards` in a query or mutation: tickets and reads, no start or stop. */
+/** `ctx.shards` in a query: tickets and reads, no start or stop. */
 export type ShardsReader = Pick<Shards, "ticket" | "get" | "list">;
+
+/** `ctx.shards` in a mutation: a query's, and inputs sent after the commit. */
+export type ShardsWriter = Pick<Shards, "ticket" | "get" | "list" | "send">;
 
 /** A running shard, from `ctx.shards.create`, `get`, or `list`. */
 export interface ShardInfo {
@@ -1013,8 +1031,8 @@ export interface MutationCtx<R extends AuthRequirement = "optional"> {
   workflows: Workflows;
   /** Signed file-download URLs — see {@link Files}. */
   files: Files;
-  /** Shard tickets and reads — see {@link Shards}. */
-  shards: ShardsReader;
+  /** Shard tickets, reads, and inputs after the commit — see {@link Shards}. */
+  shards: ShardsWriter;
   /** Create a typed error that triggers rollback. */
   error(code: string, message: string): Error;
   /** Assert org membership (optionally a role) — see {@link RequireMember}. */

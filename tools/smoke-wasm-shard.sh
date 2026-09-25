@@ -8,6 +8,9 @@
 # 2. `pylon start app.ts` boots from source; packages/react's
 #    shard-wasm.e2e.test.ts joins as two guests over /shard on the main port,
 #    moves, gets a rejection, and has a stolen ticket refused.
+#    packages/realtime's shard-data.e2e.test.ts has the zone load a
+#    character, grant an item through a mutation once per key, write x
+#    back, and take a GM's heal after a commit, on SQLite.
 # 3. `pylon bench shard` runs 50 bots through the app's join function and
 #    must connect all of them and see their inputs acked.
 # 4. `pylon build` writes an artifact with the module in it; `pylon start
@@ -33,6 +36,7 @@ APP="$ROOT/examples/shard-arena"
 WORLD="$ROOT/examples/world3d"
 PORT="${PYLON_SMOKE_PORT:-4793}"
 TMP="$(mktemp -d -t pylon-wasm-shard.XXXXXX)"
+ADMIN_TOKEN="wasm-shard-smoke-admin-0123456789"
 SERVER_PID=""
 cleanup() {
 	[[ -n "$SERVER_PID" ]] && kill "$SERVER_PID" 2>/dev/null || true
@@ -51,6 +55,7 @@ trap cleanup EXIT
 serve() {
 	local dir="$1" target="$2" log="$3"
 	(cd "$dir" && PYLON_DB_PATH="$TMP/$log.db" PYLON_CORS_ORIGIN="http://localhost:$PORT" \
+		PYLON_ADMIN_TOKEN="$ADMIN_TOKEN" \
 		PYLON_SHARD_WS_MAX_PER_IP=0 \
 		exec "$PYLON" start "$target" --port "$PORT") >"$TMP/$log.log" 2>&1 &
 	SERVER_PID=$!
@@ -86,12 +91,15 @@ cp "$APP/shards/arena.wasm" "$TMP/arena.wasm.committed"
 
 echo "→ pylon start app.ts"
 serve "$APP" app.ts source
-grep -q "compiled 1 kind(s)" "$TMP/source.log" || {
+grep -q "compiled 2 kind(s)" "$TMP/source.log" || {
 	cat "$TMP/source.log" >&2
-	echo "::error::the server did not compile the shard module" >&2
+	echo "::error::the server did not compile the shard modules" >&2
 	exit 1
 }
 e2e
+echo "→ data on SQLite: a zone loads, grants once, writes, takes a heal after a commit"
+(cd "$ROOT/packages/realtime" && PYLON_SHARD_DATA_E2E="localhost:$PORT" \
+	PYLON_SHARD_ADMIN_TOKEN="$ADMIN_TOKEN" bun test src/shard-data.e2e.test.ts)
 
 echo "→ pylon bench shard (50 bots)"
 (cd "$APP" && "$PYLON" bench shard --url "http://localhost:$PORT" --join joinArena \

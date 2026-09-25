@@ -565,6 +565,14 @@ function buildShards(callId: string): Shards {
         params: data ?? null,
       });
     },
+    async send(shardId, input) {
+      await rpc(callId, {
+        type: "shard_op",
+        op: "send",
+        id: shardId,
+        params: input ?? null,
+      });
+    },
     async transfer(from, subscriberId, to, opts) {
       return rpc(callId, {
         type: "shard_op",

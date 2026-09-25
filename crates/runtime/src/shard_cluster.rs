@@ -35,7 +35,6 @@
 //! machine with the database has it; nothing to configure). A signature
 //! binds the receiving machine and a nonce, and each is accepted once.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -1062,6 +1061,12 @@ pub enum RemoteOp {
     TransferIn {
         id: String,
     },
+    /// Queue a server input (`ctx.shards.send`) for shard `id` on the
+    /// receiver.
+    Input {
+        id: String,
+        input: serde_json::Value,
+    },
     /// Deliver a message to the shards on the receiver that `to` names.
     Deliver {
         from: String,
@@ -1255,6 +1260,7 @@ pub fn call_with(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn m(id: &str, capacity: u32, load: u32) -> Machine {
         Machine {
