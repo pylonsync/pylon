@@ -12,10 +12,6 @@ use crate::tick::TickLoop;
 /// shard for a given match, room, lot, or document.
 pub struct ShardRegistry<S: SimState> {
     shards: RwLock<HashMap<String, Entry<S>>>,
-    /// Told when a sweep starts to wait for a stopped shard's tick, for
-    /// tests.
-    #[cfg(test)]
-    sweep_waits: std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 struct Entry<S: SimState> {
@@ -28,8 +24,6 @@ impl<S: SimState> ShardRegistry<S> {
     pub fn new() -> Self {
         Self {
             shards: RwLock::new(HashMap::new()),
-            #[cfg(test)]
-            sweep_waits: std::sync::Mutex::new(None),
         }
     }
 
@@ -124,10 +118,6 @@ impl<S: SimState> ShardRegistry<S> {
             .map(|(id, e)| (id.clone(), Arc::clone(&e.shard)))
             .collect();
         for (_, shard) in &stopped {
-            #[cfg(test)]
-            if let Some(tx) = self.sweep_waits.lock().unwrap().as_ref() {
-                let _ = tx.send(());
-            }
             shard.wait_for_tick();
         }
         let mut map = self.shards.write().unwrap();
@@ -254,17 +244,17 @@ mod tests {
         entered.recv_timeout(Duration::from_secs(5)).unwrap();
         shard.stop();
         let (waits_tx, waits) = mpsc::channel();
-        *reg.sweep_waits.lock().unwrap() = Some(waits_tx);
+        *shard.waits_on_tick.lock().unwrap() = Some(waits_tx);
         let sweeper = {
             let reg = Arc::clone(&reg);
             std::thread::spawn(move || reg.sweep_finished())
         };
-        // The sweep reached the shard while the hook still runs, and does
-        // not remove it meanwhile.
-        waits.recv_timeout(Duration::from_secs(5)).unwrap();
-        std::thread::sleep(Duration::from_millis(100));
+        // The sweep waits on the tick the hook holds up before it removes
+        // the shard.
+        waits
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the sweep did not wait for the tick");
         assert!(reg.get("x").is_some(), "swept during the hook");
-        assert!(!sweeper.is_finished());
         release.send(()).unwrap();
         assert_eq!(sweeper.join().unwrap(), 1);
         assert!(found.load(Ordering::SeqCst), "the hook did not find it");

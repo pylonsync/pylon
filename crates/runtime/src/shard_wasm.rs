@@ -1704,9 +1704,11 @@ impl ClusterState {
     }
 
     /// `machine_id`, when it is live.
-    fn live(&self, machine_id: &str) -> Option<Machine> {
-        let live = self.dir.live_machines().ok()?;
-        live.into_iter().find(|m| m.id == machine_id)
+    /// Machine `machine_id` when it is live; an error when the directory
+    /// could not say.
+    fn live(&self, machine_id: &str) -> Result<Option<Machine>, String> {
+        let live = self.dir.live_machines()?;
+        Ok(live.into_iter().find(|m| m.id == machine_id))
     }
 
     /// The lease epoch, when the lease has at least [`LEASE_MARGIN`] left.
@@ -2149,13 +2151,25 @@ impl WasmShardHost {
     /// Stop and remove a shard. Its subscribers' connections close. On
     /// several machines, the machine that runs it stops it.
     pub fn stop(&self, id: &str) -> bool {
+        self.stop_where(id, true)
+    }
+
+    /// Stop `id`. With `forward`, a shard another live machine runs is
+    /// stopped there; a request from another machine passes false, and
+    /// acts only on this machine's shard and placement.
+    fn stop_where(&self, id: &str, forward: bool) -> bool {
         let Some(c) = self.cluster.get() else {
             return self.registry.get(id).is_some() && self.stop_local(id);
         };
         let own = c.own_lock.lock().unwrap();
-        // An id ending here has no run here (none starts until its
-        // release), so this takes the placement path below.
-        if self.registry.get(id).is_some() {
+        // Read under the create lock, which the sweep holds from removing a
+        // stopped shard until it reserves its id: an id with its last
+        // writes pending is either registered or ending here.
+        let running = {
+            let _guard = self.create_lock.lock().unwrap();
+            self.registry.get(id).is_some()
+        };
+        if running {
             let stopped = self.stop_local(id);
             c.saved_at.lock().unwrap().remove(id);
             let held = c.owned.lock().unwrap().remove(id);
@@ -2185,40 +2199,53 @@ impl WasmShardHost {
                 return false;
             }
         };
-        // Ending here: the stop, sweep or shutdown writing its last fields
-        // releases this machine's placement after them. One another machine
-        // took over meanwhile is stopped as any other.
-        if placement.machine_id == c.me.id && self.ending.lock().unwrap().contains(id) {
+        if placement.machine_id == c.me.id {
+            // Ending here: the stop, sweep or shutdown writing its last
+            // fields releases the placement after them.
+            if self.ending.lock().unwrap().contains(id) {
+                return false;
+            }
+            // Placed here but not running (it failed to start, or it is
+            // from an earlier lease): remove exactly that placement, so no
+            // machine starts it again.
+            return c
+                .dir
+                .release(id, &placement.machine_id, placement.epoch)
+                .unwrap_or(false);
+        }
+        if !forward {
             return false;
         }
-        let owner = (placement.machine_id != c.me.id)
-            .then(|| c.live(&placement.machine_id))
-            .flatten()
-            .filter(|m| m.epoch == placement.epoch);
+        let owner = match c.live(&placement.machine_id) {
+            Ok(owner) => owner,
+            Err(e) => {
+                tracing::warn!("[shard {id}] stop: machine lookup failed: {e}");
+                return false;
+            }
+        };
         match owner {
             // Its machine runs it: that machine stops it.
-            Some(Machine {
-                id: machine,
-                address: Some(address),
-                ..
-            }) => {
+            Some(m) if m.epoch == placement.epoch => {
+                let Some(address) = m.address else {
+                    tracing::warn!(
+                        "[shard {id}] not stopped: machine {} runs it and has no address",
+                        m.id
+                    );
+                    return false;
+                };
                 drop(own);
                 let op = RemoteOp::Stop { id: id.to_string() };
-                match shard_cluster::call(&machine, &address, &op) {
+                match shard_cluster::call(&m.id, &address, &op) {
                     Ok(RemoteReply::Ok(v)) => v.as_bool().unwrap_or(false),
                     Ok(RemoteReply::Err { message, .. }) | Err(message) => {
-                        tracing::warn!(
-                            "[shard {id}] stop on {} failed: {message}",
-                            placement.machine_id
-                        );
+                        tracing::warn!("[shard {id}] stop on {} failed: {message}", m.id);
                         false
                     }
                 }
             }
-            // Placed here but not running (it failed to start, or it is from
-            // an earlier lease), on a dead machine, or on a machine with no
-            // address: remove exactly that placement, so no machine starts
-            // it again. A machine that took it over meanwhile keeps it.
+            // On a dead machine, or placed under an earlier lease of a live
+            // one: remove exactly that placement, so no machine starts it
+            // again. A machine that took it over meanwhile keeps it.
             _ => c
                 .dir
                 .release(id, &placement.machine_id, placement.epoch)
@@ -2276,7 +2303,10 @@ impl WasmShardHost {
             // next round.
             return Some(not_running("starting on this machine".into()));
         }
-        match c.live(&placement.machine_id) {
+        let Ok(owner) = c.live(&placement.machine_id) else {
+            return None;
+        };
+        match owner {
             Some(Machine {
                 id: machine,
                 address: Some(address),
@@ -2886,18 +2916,9 @@ impl WasmShardHost {
             // Stop what runs here, or forget a placement on this machine
             // with nothing running. Never passed on again.
             RemoteOp::Stop { id } => {
-                let placed_here = c
-                    .dir
-                    .placement(&id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|p| p.machine_id == c.me.id);
-                let stopped = if self.registry.get(&id).is_some() || placed_here {
-                    self.stop(&id)
-                } else {
-                    false
-                };
-                RemoteReply::Ok(serde_json::json!(stopped))
+                // Only this machine's shard and placement: never passed on
+                // again.
+                RemoteReply::Ok(serde_json::json!(self.stop_where(&id, false)))
             }
             RemoteOp::Get { id } => RemoteReply::Ok(
                 self.info_local(&id)
@@ -2998,7 +3019,12 @@ impl WasmShardHost {
         if p.machine_id == c.me.id {
             return ShardLocation::Unknown;
         }
-        match c.live(&p.machine_id).filter(|m| m.epoch == p.epoch) {
+        match c
+            .live(&p.machine_id)
+            .ok()
+            .flatten()
+            .filter(|m| m.epoch == p.epoch)
+        {
             Some(m) => ShardLocation::Remote {
                 machine_id: m.id,
                 address: m.address,

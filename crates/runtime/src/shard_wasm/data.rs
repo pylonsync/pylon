@@ -1890,6 +1890,97 @@ mod tests {
         host.stop_all();
     }
 
+    /// `stop` acts only where it may: not in the sweep's gap between
+    /// removing a stopped shard and reserving its id, not on another
+    /// machine for a request from another machine, and not on a live
+    /// machine it cannot reach.
+    #[test]
+    fn stop_acts_only_where_it_may() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (rt, fns) = runtime();
+        let pool =
+            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let run = pylon_cluster::new_instance_id();
+        let kind = format!("stops-{run}");
+        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
+        let me = format!("m-{run}");
+        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        host.manual_flush();
+        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+        let placed = |id: &str| dir.placement(id).unwrap().map(|p| p.machine_id);
+
+        // The sweep's gap: the shard is out of the registry and its id not
+        // yet reserved, under the create lock. A stop waits for the lock,
+        // then finds the id ending and leaves the placement.
+        let zone = format!("gap-{run}");
+        host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
+            .unwrap();
+        let stopper = {
+            let guard = host.create_lock.lock().unwrap();
+            host.registry.remove(&zone);
+            let stopper = {
+                let (host, zone) = (Arc::clone(&host), zone.clone());
+                std::thread::spawn(move || host.stop(&zone))
+            };
+            std::thread::sleep(Duration::from_millis(200));
+            host.ending.lock().unwrap().insert(zone.clone());
+            drop(guard);
+            stopper
+        };
+        assert!(!stopper.join().unwrap());
+        assert_eq!(placed(&zone), Some(me.clone()));
+        host.ending.lock().unwrap().remove(&zone);
+
+        let place = |id: &str, machine: &str, epoch: i64| {
+            let p = crate::shard_cluster::Placement {
+                shard_id: id.to_string(),
+                kind: kind.clone(),
+                params: serde_json::json!({}),
+                machine_id: machine.to_string(),
+                pinned: false,
+                failed: None,
+                epoch,
+            };
+            dir.claim(&p, 100).unwrap();
+        };
+        // A request from another machine: another machine's placement is
+        // not touched. A local stop removes it (its machine is dead).
+        let elsewhere = format!("elsewhere-{run}");
+        place(&elsewhere, &format!("gone-{run}"), 3);
+        assert!(!host.stop_where(&elsewhere, false));
+        assert!(placed(&elsewhere).is_some());
+        assert!(host.stop(&elsewhere));
+        assert_eq!(placed(&elsewhere), None);
+
+        // A live machine with no address: not reachable, so its placement
+        // stays.
+        let unreachable = crate::shard_cluster::MachineConfig {
+            id: format!("live-{run}"),
+            address: None,
+            capacity: 0,
+            fly_instance: None,
+        };
+        assert!(dir.heartbeat(&unreachable, 5).unwrap());
+        struct Leave<'a>(&'a crate::shard_cluster::PgShardDirectory, String);
+        impl Drop for Leave<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.leave(&self.1, 5);
+            }
+        }
+        let _leave = Leave(&dir, unreachable.id.clone());
+        let there = format!("there-{run}");
+        place(&there, &unreachable.id, 5);
+        assert!(!host.stop(&there));
+        assert_eq!(placed(&there), Some(unreachable.id.clone()));
+        host.stop_all();
+    }
+
     /// While an id is ending here, no hand-over and no orphan take-over
     /// places it on this machine: the release that ends it deletes any
     /// placement of the id here.
