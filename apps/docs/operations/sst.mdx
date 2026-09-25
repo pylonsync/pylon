@@ -404,7 +404,7 @@ new sst.aws.Service("PylonService", {
 });
 ```
 
-Shards spread across the service's machines through the shard directory in Postgres. Set `PYLON_REPLICA_ID` per task, `PYLON_SHARD_ADVERTISE_URL` to each task's private address, and the same `PYLON_SHARD_TICKET_SECRET` on all of them; see [Shards across machines](/concepts/shards#shards-across-machines).
+Shards spread across the service's machines through the shard directory in Postgres. Set `PYLON_SHARD_ADVERTISE_URL` to each task's private address so tasks can pass connections to each other; see [Shards across machines](/concepts/shards#shards-across-machines).
 
 ## Observability
 

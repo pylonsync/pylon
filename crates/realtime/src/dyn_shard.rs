@@ -225,8 +225,9 @@ pub enum ShardLocation {
         machine_id: String,
         /// Where other machines reach it, when it advertised an address.
         address: Option<String>,
-        /// True on Fly: answer with `fly-replay` instead of proxying.
-        fly: bool,
+        /// Its Fly instance, when both machines run on Fly: answer with
+        /// `fly-replay` instead of proxying.
+        fly_replay: Option<String>,
     },
     /// Nowhere this process knows of.
     Unknown,

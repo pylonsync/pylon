@@ -487,18 +487,28 @@ directory in the database, and shards spread across them:
   counts every machine. `ctx.shards.get` and `list` report each shard's
   `machine`.
 - **Routing.** A client can connect to any machine. The machine that gets a
-  connection for a shard it does not run sends it on. On Fly (Stack0 Cloud),
-  it answers with `fly-replay: instance=<machine>`, and Fly's proxy connects
-  the client to that machine directly, with no extra hop. Elsewhere, it
-  proxies the connection over the machines' private addresses. The
-  WebSocket, the SSE stream, and HTTP inputs all route this way.
-- **Failover.** A machine with no heartbeat for 10 seconds is dead. A live
-  machine takes over each of its shards and starts it again: from its saved
-  state when the module saves state (below), or from `init` with its create
-  params when it does not. Clients reconnect on their own (the client
-  libraries retry, and a ticket function gets a new ticket). A machine that
-  shuts down saves its shards and leaves the directory, so they move at
-  once.
+  connection for a shard it does not run sends it on. Between Fly machines
+  (Stack0 Cloud), it answers with `fly-replay: instance=<machine>`, and
+  Fly's proxy connects the client to that machine directly, with no extra
+  hop. Elsewhere, it proxies the connection over the machines' private
+  addresses. The WebSocket (on `/shard` and on the shard port), the SSE
+  stream, and HTTP inputs all route this way.
+- **Failover.** A machine with no heartbeat for 10 seconds is dead. Each of
+  its shards moves to one live machine (the same choice on every machine)
+  and starts again: from its saved state when the module saves state
+  (below), or from `init` with its create params when it does not. Clients
+  reconnect on their own (the client libraries retry, and a ticket function
+  gets a new ticket).
+- **Restarts and deploys.** A machine that stops on SIGTERM stops ticking,
+  saves its shards, and leaves the directory, so they start on another
+  machine at once. A machine that comes back under the same id (a crash and
+  restart, or a deploy on Fly, where the machine id stays) starts the
+  shards still placed on it from their saved state.
+- **Fencing.** A machine that cannot reach the database for 5 seconds stops
+  its shards and closes their connections, before the others (at 10
+  seconds) start them elsewhere. Two copies of a shard never run at once.
+- A shard that cannot start (its module refuses the saved state) keeps its
+  state, and `ctx.shards.get` reports why. Stopping it forgets it.
 
 A module saves state by implementing `save` and `restore` on its `Shard`:
 
@@ -522,8 +532,11 @@ a failover loses at most that much. A `Replicated` store saves with
 | --- | --- |
 | `PYLON_REPLICA_ID` | The machine's id. On Fly, `FLY_MACHINE_ID` is used. Without either, the host name and process id: a restart is a new machine. |
 | `PYLON_SHARD_ADVERTISE_URL` | The URL other machines reach this one at, for proxying and machine-to-machine calls. On Fly, `http://[FLY_PRIVATE_IP]:<port>`. |
-| `PYLON_SHARD_TICKET_SECRET` | The same on every machine: it signs tickets and machine-to-machine calls. |
 | `PYLON_SHARD_DIRECTORY=off` | Keep each shard on the machine that created it, with no directory. |
+
+The machines sign their calls to each other, and shard tickets, with a key
+kept in the directory: there is no secret to share. A
+`PYLON_SHARD_TICKET_SECRET` you set still signs tickets.
 
 An app on SQLite runs on one machine, and the directory is off.
 

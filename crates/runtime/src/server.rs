@@ -478,6 +478,70 @@ pub fn request_shutdown() {
     }
 }
 
+/// Turn SIGTERM and SIGINT into a graceful shutdown: the request loop stops,
+/// in-flight requests drain, and shards stop (on several machines, after
+/// saving their state and leaving the shard directory, so they move at
+/// once). A second signal ends the process at once. The handler only writes
+/// a byte to a pipe; a thread reads it and calls [`request_shutdown`].
+#[cfg(unix)]
+fn install_shutdown_signals() {
+    use std::sync::atomic::AtomicI32;
+    static WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+
+    extern "C" fn on_signal(_: libc::c_int) {
+        let fd = WRITE_FD.load(Ordering::Relaxed);
+        if fd >= 0 {
+            let byte = 1u8;
+            // SAFETY: write(2) is async-signal-safe; the fd is a pipe we own.
+            unsafe {
+                libc::write(fd, (&byte as *const u8).cast(), 1);
+            }
+        }
+    }
+
+    INSTALLED.call_once(|| {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: pipe(2) fills the two-element array.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            tracing::warn!(
+                "[shutdown] could not create the signal pipe; SIGTERM ends the process at once"
+            );
+            return;
+        }
+        WRITE_FD.store(fds[1], Ordering::Relaxed);
+        let read_fd = fds[0];
+        // SAFETY: installing a handler that only calls write(2).
+        unsafe {
+            let handler =
+                on_signal as extern "C" fn(libc::c_int) as *const () as libc::sighandler_t;
+            libc::signal(libc::SIGTERM, handler);
+            libc::signal(libc::SIGINT, handler);
+        }
+        let _ = std::thread::Builder::new()
+            .name("pylon-signals".into())
+            .spawn(move || {
+                let mut byte = [0u8; 1];
+                // SAFETY: reading one byte from our own pipe.
+                let n = unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), 1) };
+                if n == 1 {
+                    tracing::warn!(
+                        "[shutdown] signal received; shutting down (send it again to stop at once)"
+                    );
+                    // SAFETY: restoring the default handlers.
+                    unsafe {
+                        libc::signal(libc::SIGTERM, libc::SIG_DFL);
+                        libc::signal(libc::SIGINT, libc::SIG_DFL);
+                    }
+                    request_shutdown();
+                }
+            });
+    });
+}
+
+#[cfg(not(unix))]
+fn install_shutdown_signals() {}
+
 /// Global handle to the *current* `tiny_http::Server` so `request_shutdown()`
 /// can call `unblock()` without holding a reference — and so the request loop
 /// can swap in a freshly-built server after a recv() give-up (see
@@ -1974,6 +2038,7 @@ fn start_server(
 
     // Stash a handle so `request_shutdown()` can unblock the loop.
     set_server_handle(&server);
+    install_shutdown_signals();
 
     let session_lifetime = runtime.manifest().auth.session.expires_in;
     // Boot-time warning: at-rest encryption (per-org SSO + SAML
@@ -3318,7 +3383,10 @@ fn start_server(
         // parsed IpAddr for the limiters.
         // A request another machine forwarded for a shard it does not run
         // carries the client's IP, signed (see shard_route).
-        let shard_forwarded_ip = crate::shard_route::forwarded_client_ip(&request);
+        let shard_forwarded_ip = crate::shard_route::forwarded_client_ip(
+            &request,
+            wasm_shards.as_ref().and_then(|h| h.machine_id()),
+        );
         let dispatch_peer_ip_str = shard_forwarded_ip
             .clone()
             .unwrap_or_else(|| resolve_client_ip(&request, trust_proxy_hops));
@@ -3632,7 +3700,10 @@ fn start_server(
             if let Err(why) = signature
                 .as_deref()
                 .ok_or("missing signature")
-                .and_then(|sig| crate::shard_cluster::verify(sig, &body))
+                .and_then(|sig| {
+                    let me = host.machine_id().ok_or("this machine is not in the shard directory")?;
+                    crate::shard_cluster::verify(me, sig, &body)
+                })
             {
                 reply_json(request, 401, json_error("UNAUTHORIZED", why));
                 mt.record_request("POST", 401);
@@ -3660,15 +3731,21 @@ fn start_server(
                 if let pylon_realtime::ShardLocation::Remote {
                     machine_id,
                     address,
-                    fly,
+                    fly_replay,
                 } = host.locate(&shard_id)
                 {
                     let upgrade = request.headers().iter().any(|h| {
                         h.field.equiv("Upgrade") && h.value.as_str().eq_ignore_ascii_case("websocket")
                     });
-                    let guard = if upgrade && !fly {
+                    let method_str = request.method().as_str().to_string();
+                    // A proxied WebSocket holds a per-IP shard connection
+                    // slot and a proxied stream a stream slot, as they would
+                    // here.
+                    let slot: Option<crate::shard_route::Slot> = if fly_replay.is_some() {
+                        None
+                    } else if upgrade {
                         match crate::shard_ws::admit_main_port(dispatch_peer_ip) {
-                            Some(g) => Some(g),
+                            Some(g) => Some(Box::new(g)),
                             None => {
                                 let _ = request.respond(
                                     Response::from_string(json_error(
@@ -3677,21 +3754,37 @@ fn start_server(
                                     ))
                                     .with_status_code(429u16),
                                 );
-                                mt.record_request("GET", 429);
+                                mt.record_request(&method_str, 429);
+                                return;
+                            }
+                        }
+                    } else if crate::shard_route::is_stream(&url) {
+                        match stream_limiter.acquire(dispatch_peer_ip) {
+                            Some(g) => Some(Box::new(g)),
+                            None => {
+                                let _ = request.respond(
+                                    Response::from_string(json_error(
+                                        "TOO_MANY_STREAMS",
+                                        "Too many open streams from this address",
+                                    ))
+                                    .with_status_code(503u16),
+                                );
+                                mt.record_request(&method_str, 503);
                                 return;
                             }
                         }
                     } else {
                         None
                     };
-                    let method_str = request.method().as_str().to_string();
                     let status = crate::shard_route::route(
                         request,
-                        &machine_id,
-                        address.as_deref(),
-                        fly,
+                        crate::shard_route::Target {
+                            machine_id: &machine_id,
+                            address: address.as_deref(),
+                            fly_replay: fly_replay.as_deref(),
+                        },
                         &dispatch_peer_ip_str,
-                        guard,
+                        slot,
                     );
                     mt.record_request(&method_str, status);
                     return;

@@ -179,7 +179,7 @@ pub fn splice(
     client: std::net::TcpStream,
     upstream: std::net::TcpStream,
     early: Vec<u8>,
-    guard: Option<IpConnGuard>,
+    slot: Option<Box<dyn Send>>,
 ) {
     let Some(rt) = runtime() else { return };
     for s in [&client, &upstream] {
@@ -191,7 +191,7 @@ pub fn splice(
     }
     rt.spawn(async move {
         use tokio::io::AsyncWriteExt;
-        let _guard = guard;
+        let _slot = slot;
         let (mut client, mut upstream) = match (
             tokio::net::TcpStream::from_std(client),
             tokio::net::TcpStream::from_std(upstream),
@@ -265,11 +265,125 @@ pub fn serve(
                     return;
                 }
             };
+            // A shard another machine runs: pass the connection there.
+            let stream = match route_to_owner(stream, &registry, ip).await {
+                Some(stream) => stream,
+                None => return,
+            };
             if let Err(e) = handle_connection(stream, registry, sessions).await {
                 tracing::warn!("[shard-ws] connection error: {e}");
             }
         });
     }
+}
+
+/// The upgrade request's head, read without consuming it, or None when it
+/// does not arrive complete within a few seconds.
+async fn peek_head(stream: &tokio::net::TcpStream) -> Option<Vec<u8>> {
+    let mut buf = vec![0u8; 16 * 1024];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let n = tokio::time::timeout_at(deadline, stream.peek(&mut buf))
+            .await
+            .ok()?
+            .ok()?;
+        if let Some(i) = buf[..n].windows(4).position(|w| w == b"\r\n\r\n") {
+            return Some(buf[..i + 4].to_vec());
+        }
+        if n == buf.len() || tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// For a connection to a shard another machine runs (see `shard_cluster`),
+/// proxy it to that machine's `/shard` and return None; otherwise hand the
+/// stream back, unread, for this machine to serve.
+async fn route_to_owner(
+    stream: tokio::net::TcpStream,
+    registry: &Arc<dyn DynShardRegistry>,
+    client_ip: std::net::IpAddr,
+) -> Option<tokio::net::TcpStream> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Some(head) = peek_head(&stream).await else {
+        return Some(stream);
+    };
+    let text = String::from_utf8_lossy(&head).into_owned();
+    let mut lines = text.split("\r\n");
+    let url = lines.next()?.split_whitespace().nth(1)?.to_string();
+    let Some(shard) = crate::shard_route::shard_of(&url) else {
+        return Some(stream);
+    };
+    // The lookup reads the shard directory with a blocking Postgres client,
+    // which must not run on a tokio worker.
+    let lookup = Arc::clone(registry);
+    let location = tokio::task::spawn_blocking(move || lookup.locate(&shard))
+        .await
+        .ok()?;
+    let pylon_realtime::ShardLocation::Remote {
+        machine_id,
+        address: Some(address),
+        ..
+    } = location
+    else {
+        return Some(stream);
+    };
+    // The owner serves shard WebSockets at /shard on its main port.
+    let query = url.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let target_url = format!("/shard?{query}");
+    let host = crate::shard_route::authority(&address)?.to_string();
+    let forwarded = crate::shard_route::forwarded_value(
+        &client_ip.to_string(),
+        "GET",
+        &target_url,
+        &machine_id,
+    )?;
+    let mut out = format!("GET {target_url} HTTP/1.1\r\nHost: {host}\r\n");
+    for line in lines.filter(|l| !l.is_empty()) {
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let k = k.trim();
+        if k.eq_ignore_ascii_case("host")
+            || k.eq_ignore_ascii_case(crate::shard_cluster::FORWARDED_HEADER)
+        {
+            continue;
+        }
+        out.push_str(&format!("{k}: {}\r\n", v.trim()));
+    }
+    out.push_str(&format!(
+        "{}: {forwarded}\r\n\r\n",
+        crate::shard_cluster::FORWARDED_HEADER
+    ));
+    let mut client = stream;
+    let mut consumed = vec![0u8; head.len()];
+    if client.read_exact(&mut consumed).await.is_err() {
+        return None;
+    }
+    let mut upstream = match tokio::time::timeout(
+        Duration::from_secs(3),
+        tokio::net::TcpStream::connect(host.as_str()),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        _ => {
+            tracing::warn!("[shard-ws] could not reach machine {machine_id} at {address}");
+            let _ = client
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await;
+            return None;
+        }
+    };
+    let _ = upstream.set_nodelay(true);
+    if upstream.write_all(out.as_bytes()).await.is_err() {
+        return None;
+    }
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+    None
 }
 
 // ---------------------------------------------------------------------------

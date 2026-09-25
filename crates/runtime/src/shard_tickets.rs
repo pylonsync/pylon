@@ -25,6 +25,11 @@ pub fn ticket_secret() -> &'static [u8] {
                 return v.into_bytes();
             }
         }
+        // On several machines, the key in the shard directory: a ticket one
+        // machine mints verifies on the machine that runs the shard.
+        if let Some(key) = crate::shard_cluster::ticket_key() {
+            return key;
+        }
         // Domain separation: a ticket signature is never valid as a file-URL
         // signature, or the reverse.
         let mut mac = Hmac::<Sha256>::new_from_slice(crate::file_urls::signing_secret())
