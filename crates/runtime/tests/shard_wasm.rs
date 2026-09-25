@@ -1687,7 +1687,12 @@ fn a_move_left_open_by_a_crash_is_finished_when_the_source_starts_elsewhere() {
         }
         assert!(
             Instant::now() < deadline,
-            "the move was not finished (still {status})"
+            "the move was not finished (still {status}); src placed {:?}; h2 runs {:?}",
+            check.placement(&src).unwrap(),
+            h2.list()
+                .iter()
+                .map(|i| (&i.id, i.running))
+                .collect::<Vec<_>>(),
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -1966,11 +1971,30 @@ fn a_dead_machine_does_not_hold_up_messages_and_deliver_reaches_a_shard() {
             }
         });
     }
-    for (id, address) in [
+    let fakes = [
         (format!("dead-{run}"), "http://10.255.255.1:9".to_string()),
         (format!("stalled-{run}"), stalled_addr),
         (healthy_id.clone(), healthy_addr),
-    ] {
+    ];
+    // They look live for a minute: gone when this test ends (a panic too),
+    // or a later test's shard could be homed on a machine that never runs
+    // it.
+    struct Forget(Arc<pylon_storage::pg_datastore::PgPool>, Vec<String>);
+    impl Drop for Forget {
+        fn drop(&mut self) {
+            let _ = self.0.with_client_once(|c| {
+                c.execute(
+                    "DELETE FROM _pylon_shard_machines WHERE machine_id = ANY($1)",
+                    &[&self.1],
+                )
+            });
+        }
+    }
+    let _forget = Forget(
+        Arc::clone(&pool),
+        fakes.iter().map(|(id, _)| id.clone()).collect(),
+    );
+    for (id, address) in fakes {
         pool.with_client_once(|c| {
             c.execute(
                 "INSERT INTO _pylon_shard_machines (machine_id, address, capacity, heartbeat_at, epoch)

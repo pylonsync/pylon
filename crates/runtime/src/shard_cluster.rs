@@ -343,6 +343,11 @@ impl PgShardDirectory {
             if !column(&mut tx, "_pylon_shard_transfers", "refused_at")? {
                 tx.batch_execute("ALTER TABLE _pylon_shard_transfers ADD COLUMN refused_at BIGINT")?;
             }
+            // Insert order: a move out of a shard is written after the move
+            // in that brought the player there, whatever the clocks say.
+            if !column(&mut tx, "_pylon_shard_transfers", "seq")? {
+                tx.batch_execute("ALTER TABLE _pylon_shard_transfers ADD COLUMN seq BIGSERIAL")?;
+            }
             if !exists(&mut tx, "_pylon_shard_transfers_age_idx")? {
                 tx.batch_execute(
                     "CREATE INDEX _pylon_shard_transfers_age_idx
@@ -754,7 +759,7 @@ impl PgShardDirectory {
             let rows = c.query(
                 "SELECT transfer_id, subscriber, from_shard, to_shard, state, auth, status
                  FROM _pylon_shard_transfers WHERE subscriber = $1 AND status <> 'void'
-                 ORDER BY created_at",
+                 ORDER BY seq",
                 &[&subscriber],
             )?;
             Ok(rows.iter().map(transfer_of).collect())
@@ -768,7 +773,7 @@ impl PgShardDirectory {
             let rows = c.query(
                 "SELECT transfer_id, subscriber, from_shard, to_shard, state, auth, status
                  FROM _pylon_shard_transfers WHERE from_shard = $1 AND status = 'out'
-                 ORDER BY created_at",
+                 ORDER BY seq",
                 &[&shard],
             )?;
             Ok(rows.iter().map(transfer_of).collect())
@@ -795,8 +800,8 @@ impl PgShardDirectory {
                    AND NOT EXISTS (
                      SELECT 1 FROM _pylon_shard_transfers back
                      WHERE back.subscriber = t.subscriber AND back.to_shard = $1
-                       AND back.status = 'in' AND back.created_at > t.created_at)
-                 ORDER BY subscriber, created_at DESC",
+                       AND back.status = 'in' AND back.seq > t.seq)
+                 ORDER BY subscriber, seq DESC",
                 &[&shard, &within_ms],
             )?;
             Ok(rows.iter().map(|r| (transfer_of(r), r.get(7))).collect())
@@ -854,7 +859,7 @@ impl PgShardDirectory {
                    AND NOT EXISTS (SELECT 1 FROM _pylon_shard_placements s
                                    WHERE s.shard_id = t.from_shard)
                    AND t.created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - $3
-                 ORDER BY t.created_at",
+                 ORDER BY t.seq",
                 &[&machine, &epoch, &older_than_ms],
             )?;
             Ok(rows.iter().map(|r| (transfer_of(r), r.get(7))).collect())
@@ -887,7 +892,7 @@ impl PgShardDirectory {
                  JOIN _pylon_shard_placements p ON p.shard_id = t.from_shard
                  WHERE t.status = 'out' AND p.machine_id = $1 AND p.epoch = $2
                    AND t.created_at < (extract(epoch from clock_timestamp()) * 1000)::bigint - $3
-                 ORDER BY t.created_at",
+                 ORDER BY t.seq",
                 &[&machine, &epoch, &older_than_ms],
             )?;
             Ok(rows.iter().map(transfer_of).collect())
@@ -1123,6 +1128,13 @@ pub enum RemoteReply {
 
 /// The key machines sign calls with, loaded from the directory.
 static CALL_KEY: OnceLock<Vec<u8>> = OnceLock::new();
+
+/// A call key for tests with no directory (a directory's own key wins when
+/// a test opened one first).
+#[cfg(test)]
+pub(crate) fn call_key_for_tests() {
+    let _ = CALL_KEY.set(vec![7; 32]);
+}
 
 /// The shard ticket key derived from the directory's key, when this
 /// machine joined the directory (see `shard_tickets::ticket_secret`).
@@ -1500,22 +1512,27 @@ pub(crate) mod tests {
         }
     }
 
-    /// A -> B, then B -> A: A's restart must not send the subscriber to B.
+    /// A -> B, then B -> A: A's restart must not send the subscriber to B,
+    /// even when both rows carry the same time (the insert order decides).
     #[test]
     fn a_move_the_subscriber_came_back_from_is_not_recent() {
         let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let Some(dir) = test_dir() else { return };
         let run = pylon_cluster::new_instance_id();
         let (a, b, sid) = (format!("a-{run}"), format!("b-{run}"), format!("p-{run}"));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
         let row = |id: &str, from: &str, to: &str, ago_ms: i64| {
+            let at = now - ago_ms;
             dir.pool_for_tests()
                 .with_client(|c| {
                     c.execute(
                         "INSERT INTO _pylon_shard_transfers
                             (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
-                         VALUES ($1, $2, $3, $4, ''::bytea, '{}'::jsonb, 'in',
-                                 (extract(epoch from clock_timestamp()) * 1000)::bigint - $5)",
-                        &[&id, &sid, &from, &to, &ago_ms],
+                         VALUES ($1, $2, $3, $4, ''::bytea, '{}'::jsonb, 'in', $5)",
+                        &[&id, &sid, &from, &to, &at],
                     )?;
                     Ok::<(), postgres::Error>(())
                 })
@@ -1524,7 +1541,8 @@ pub(crate) mod tests {
         row(&format!("t1-{run}"), &a, &b, 60_000);
         let moves = dir.recent_moves_from(&a, 600_000).unwrap();
         assert_eq!(moves.len(), 1, "A -> B is recent");
-        row(&format!("t2-{run}"), &b, &a, 30_000);
+        // Written later, with the same clock reading.
+        row(&format!("t2-{run}"), &b, &a, 60_000);
         assert!(dir.recent_moves_from(&a, 600_000).unwrap().is_empty());
         // Out again later: that move is the recent one.
         row(&format!("t3-{run}"), &a, &b, 10_000);

@@ -462,6 +462,9 @@ pub struct Shard<S: SimState> {
     running: AtomicBool,
     /// Set by [`Shard::pause`]: no tick runs, and connections stay open.
     paused: AtomicBool,
+    /// Test hook: told when a tick is about to take the state lock.
+    #[cfg(test)]
+    tick_at_state_lock: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     /// Monotonically increasing tick number. Used for reconciliation and
     /// lockstep protocols.
     tick_no: Mutex<u64>,
@@ -529,6 +532,8 @@ impl<S: SimState> Shard<S> {
             moved: Mutex::new(HashMap::new()),
             running: AtomicBool::new(true),
             paused: AtomicBool::new(false),
+            #[cfg(test)]
+            tick_at_state_lock: Mutex::new(None),
             tick_no: Mutex::new(0),
             input_seq: Mutex::new(0),
             acks: Mutex::new(HashMap::new()),
@@ -1434,6 +1439,10 @@ impl<S: SimState> Shard<S> {
         let mut failed: Vec<(SubscriberId, InputRejection)> = Vec::new();
         let mut phases = Phases::default();
         let (snapshots, shared, finished) = {
+            #[cfg(test)]
+            if let Some(tx) = self.tick_at_state_lock.lock().unwrap().as_ref() {
+                let _ = tx.send(());
+            }
             let mut state = self.state.lock().unwrap();
             // Stopped or paused while this tick waited for the state: it
             // never runs.
@@ -1766,18 +1775,22 @@ mod tests {
         ));
         let p1 = SubscriberId::new("p1");
         shard.push_input(p1.clone(), 1, None).unwrap();
+        let (reached, at_lock) = std::sync::mpsc::channel();
+        *shard.tick_at_state_lock.lock().unwrap() = Some(reached);
         shard
             .with_state(|roster| {
                 let ticking = Arc::clone(&shard);
                 let tick = std::thread::spawn(move || ticking.run_tick());
-                // The tick is waiting for the state lock this closure holds.
-                std::thread::sleep(Duration::from_millis(100));
+                // The tick is at the state lock this closure holds; a little
+                // longer, so it is blocked on it.
+                at_lock.recv_timeout(Duration::from_secs(5)).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
                 shard.begin_hand_off(&p1);
                 roster.players.lock().unwrap().remove("p1");
                 tick
             })
             .join()
-            .unwrap_or(());
+            .unwrap();
         shard.with_state(|roster| assert!(roster.players.lock().unwrap().is_empty()));
     }
 

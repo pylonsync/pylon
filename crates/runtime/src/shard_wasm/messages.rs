@@ -45,6 +45,9 @@ pub(super) struct Peer {
     /// Tells this worker from a later one for the same machine.
     serial: u64,
     sender: std::sync::mpsc::SyncSender<RemoteOp>,
+    /// Set when a newer worker replaces this one: it stops after the call
+    /// it is making, and its queue is dropped.
+    cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 /// How long the list of live machines, and where a shard runs, are reused.
 const PEER_CACHE: std::time::Duration = std::time::Duration::from_secs(2);
@@ -577,8 +580,12 @@ impl WasmShardHost {
             match peers.get(machine) {
                 Some(p) if p.address == address => p.sender.clone(),
                 _ => {
-                    // A replaced worker ends when its sender drops.
-                    peers.remove(machine);
+                    // A replaced worker stops after its current call; the
+                    // messages queued for the old address are dropped.
+                    if let Some(old) = peers.remove(machine) {
+                        old.cancelled
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
                     let Some(peer) = self.spawn_peer(machine, address) else {
                         return;
                     };
@@ -597,6 +604,8 @@ impl WasmShardHost {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = std::sync::mpsc::sync_channel::<RemoteOp>(PEER_QUEUE);
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = std::sync::Arc::clone(&cancelled);
         let host = self.weak_self.get().cloned();
         let (m, a) = (machine.to_string(), address.to_string());
         let spawned = std::thread::Builder::new()
@@ -604,7 +613,11 @@ impl WasmShardHost {
             .spawn(move || {
                 let agent = shard_cluster::call_agent();
                 loop {
+                    if stop.load(std::sync::atomic::Ordering::Acquire) {
+                        return;
+                    }
                     match rx.recv_timeout(PEER_IDLE) {
+                        Ok(_) if stop.load(std::sync::atomic::Ordering::Acquire) => return,
                         Ok(op) => {
                             if let Err(e) = shard_cluster::call_with(&agent, &m, &a, &op) {
                                 tracing::debug!("[shards] message to machine {m} dropped: {e}");
@@ -630,6 +643,7 @@ impl WasmShardHost {
                 address: address.to_string(),
                 serial,
                 sender: tx,
+                cancelled,
             }),
             Err(e) => {
                 tracing::warn!("[shards] no worker for machine {machine}: {e}");
@@ -839,6 +853,42 @@ mod tests {
         let mut groups = vec![1u8];
         groups.extend_from_slice(&((MAX_RECORDS + 1) as u16).to_le_bytes());
         assert!(Outbox::parse(&groups).unwrap_err().contains("groups"));
+    }
+
+    /// A worker replaced for a new address stops after the call it is
+    /// making: the old address gets no more of its queue.
+    #[test]
+    fn a_replaced_peer_worker_drops_its_queue() {
+        use std::io::{Read, Write};
+        crate::shard_cluster::call_key_for_tests();
+        let host = host();
+        let slow = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let slow_addr = format!("http://{}", slow.local_addr().unwrap());
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let calls = std::sync::Arc::clone(&calls);
+            std::thread::spawn(move || {
+                for mut conn in slow.incoming().flatten() {
+                    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let mut buf = [0u8; 4096];
+                    let _ = conn.read(&mut buf);
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let _ = conn.write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 8\r\nconnection: close\r\n\r\n{\"ok\":1}",
+                    );
+                }
+            });
+        }
+        for _ in 0..20 {
+            host.to_peer("m", &slow_addr, RemoteOp::List);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        host.to_peer("m", "http://127.0.0.1:1", RemoteOp::List);
+        let at_replace = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(at_replace >= 1, "the old worker made no call");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let after = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after <= at_replace + 1, "{at_replace} calls, then {after}");
     }
 
     /// A machine that came back at a new address gets a new worker; an
