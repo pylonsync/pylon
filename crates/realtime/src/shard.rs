@@ -1404,13 +1404,14 @@ mod tests {
         }
     }
 
-    /// Counts ticks; each tick takes `tick_for`.
-    struct Slow {
+    /// Counts ticks. With a gate, each tick reports that it started and
+    /// then waits until the test lets it finish.
+    struct Gated {
         ticks: Arc<AtomicU64>,
-        tick_for: Duration,
+        gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     }
 
-    impl SimState for Slow {
+    impl SimState for Gated {
         type Input = i64;
         type Snapshot = u64;
         type Error = String;
@@ -1419,7 +1420,10 @@ mod tests {
             Ok(())
         }
         fn tick(&mut self, _dt: Duration) {
-            std::thread::sleep(self.tick_for);
+            if let Some((entered, open)) = &self.gate {
+                entered.send(()).unwrap();
+                open.recv().unwrap();
+            }
             self.ticks.fetch_add(1, Ordering::SeqCst);
         }
         fn snapshot(&self) -> u64 {
@@ -1428,39 +1432,63 @@ mod tests {
     }
 
     #[test]
-    fn stop_and_wait_returns_after_the_running_tick_and_no_tick_follows() {
+    fn stop_and_wait_returns_only_after_the_running_tick() {
         let ticks = Arc::new(AtomicU64::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (open_tx, open_rx) = std::sync::mpsc::channel();
         let shard = Shard::new(
-            "slow",
-            Slow {
+            "gated",
+            Gated {
                 ticks: Arc::clone(&ticks),
-                tick_for: Duration::from_millis(300),
+                gate: Some((entered_tx, open_rx)),
             },
             ShardConfig::default(),
         );
-        // One tick holds the state; a second waits for it.
-        let first = {
+        let tick = {
             let shard = Arc::clone(&shard);
             std::thread::spawn(move || shard.run_tick())
         };
-        std::thread::sleep(Duration::from_millis(50));
-        let second = {
+        entered_rx.recv().unwrap();
+        let stopper = {
             let shard = Arc::clone(&shard);
-            std::thread::spawn(move || shard.run_tick())
+            std::thread::spawn(move || shard.stop_and_wait())
         };
-        std::thread::sleep(Duration::from_millis(50));
-
-        let started = Instant::now();
-        shard.stop_and_wait();
-        // It waited for the running tick...
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
-        assert!(started.elapsed() >= Duration::from_millis(150));
-        first.join().unwrap();
-        second.join().unwrap();
-        // ...and the waiting tick never ran.
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+        // The tick is held at the gate: stop_and_wait cannot have returned.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!stopper.is_finished(), "returned while a tick was running");
+        assert!(!shard.is_running());
+        open_tx.send(()).unwrap();
+        stopper.join().unwrap();
+        assert_eq!(ticks.load(Ordering::SeqCst), 1, "the running tick finished");
+        tick.join().unwrap();
         shard.run_tick();
-        assert_eq!(ticks.load(Ordering::SeqCst), 1);
+        assert_eq!(ticks.load(Ordering::SeqCst), 1, "no tick after the stop");
+    }
+
+    #[test]
+    fn a_tick_that_waited_for_the_state_does_not_run_after_a_stop() {
+        let ticks = Arc::new(AtomicU64::new(0));
+        let shard = Shard::new(
+            "waiting",
+            Gated {
+                ticks: Arc::clone(&ticks),
+                gate: None,
+            },
+            ShardConfig::default(),
+        );
+        // Hold the state while a tick starts, then stop. Whether the tick
+        // got past its first check or not, it must not run.
+        let waiting = shard.with_state(|_| {
+            let waiting = {
+                let shard = Arc::clone(&shard);
+                std::thread::spawn(move || shard.run_tick())
+            };
+            std::thread::sleep(Duration::from_millis(100));
+            shard.stop();
+            waiting
+        });
+        waiting.join().unwrap();
+        assert_eq!(ticks.load(Ordering::SeqCst), 0);
     }
 
     #[test]
