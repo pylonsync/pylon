@@ -418,6 +418,7 @@ async fn run_connection(
         queue.set_notifier(move || wake.notify_one());
     }
     let writer_queue = Arc::clone(&queue);
+    let writer_shard = Arc::clone(&shard);
     let codec = wire::codec_byte(shard.snapshot_format());
     let mut writer = tokio::spawn(async move {
         let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -439,16 +440,37 @@ async fn run_connection(
                         frame.ack,
                         &frame.bytes,
                     ),
+                    (2, FrameKind::Replication) => wire::frame_v2(
+                        wire::kind::REPLICATION,
+                        wire::codec::REPLICATION,
+                        frame.tick,
+                        frame.ack,
+                        &frame.bytes,
+                    ),
                     (_, FrameKind::Snapshot) => wire::frame_v1(frame.tick, &frame.bytes),
                     // Version 1 has no rejection frame.
                     (_, FrameKind::InputRejected) => continue,
+                    // Version 1 cannot mark a frame as replication.
+                    (_, FrameKind::Replication) => {
+                        close_with(
+                            &mut sink,
+                            CloseCode::Protocol,
+                            "this shard replicates entities; connect with protocol v=2".into(),
+                        )
+                        .await;
+                        return;
+                    }
                 };
                 if sink.send(Message::Binary(payload)).await.is_err() {
                     return;
                 }
             }
             if writer_queue.is_closed() {
-                close_with(&mut sink, CloseCode::Again, "client too slow".into()).await;
+                if writer_shard.is_running() {
+                    close_with(&mut sink, CloseCode::Again, "client too slow".into()).await;
+                } else {
+                    close_with(&mut sink, CloseCode::Normal, "shard stopped".into()).await;
+                }
                 return;
             }
             tokio::select! {

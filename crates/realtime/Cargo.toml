@@ -19,6 +19,7 @@ bincode = ["dep:bincode"]
 
 [dependencies]
 pylon-kernel = { path = "../core", version = "0.13.0" }  # x-release-please-version
+pylon-replication = { path = "../replication", version = "0.13.0" }  # x-release-please-version
 serde = { workspace = true }
 # raw_value: RawInput cuts the `input` out of a JSON envelope undecoded.
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -34,4 +35,8 @@ bincode = { version = "1.3", optional = true }
 
 [[bench]]
 name = "interest_bench"
+harness = false
+
+[[bench]]
+name = "replication_bench"
 harness = false

@@ -149,6 +149,16 @@ impl<T: EncodeSnapshot> Subscriber<T> {
         self.delta_mode
     }
 
+    /// Send an entity replication frame built for this subscription.
+    pub fn send_replication(&self, tick: u64, frame: Arc<[u8]>, ack: u64) {
+        match &self.delivery {
+            Delivery::Sink(sink) => sink(tick, &frame),
+            Delivery::Queue(q) => {
+                q.push_replication(tick, ack, frame);
+            }
+        }
+    }
+
     /// Send a snapshot encoded elsewhere (one encoding shared by several
     /// subscribers). A delta-mode subscriber diffs it like `send` does.
     pub fn send_encoded(&self, tick: u64, encoded: Arc<[u8]>, ack: u64) {

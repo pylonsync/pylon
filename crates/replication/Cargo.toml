@@ -1,0 +1,13 @@
+[package]
+name = "pylon-replication"
+description = "Pylon realtime entity replication: the entity store, change log, and frame format shared by the server and WebAssembly shard modules."
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+keywords = ["pylon", "realtime", "game", "replication", "netcode"]
+categories = ["game-development", "network-programming"]
+version.workspace = true
+
+# No dependencies: pylon-shard-guest builds it for wasm32-unknown-unknown.
+[dependencies]

@@ -421,28 +421,51 @@ pub struct RunInfo {
 }
 
 impl Report {
+    /// Add another run's report. Fails, leaving `self` unchanged, when a
+    /// counter would overflow.
     pub fn merge(&mut self, other: &Report) -> Result<(), String> {
-        self.runs.extend(other.runs.iter().cloned());
-        self.bots += other.bots;
-        self.connected += other.connected;
-        self.failed += other.failed;
-        self.dropped += other.dropped;
+        let mut next = self.clone();
+        let add = |a: &mut u64, b: u64, what: &str| -> Result<(), String> {
+            *a = a
+                .checked_add(b)
+                .ok_or_else(|| format!("merged {what} overflows"))?;
+            Ok(())
+        };
+        next.runs.extend(other.runs.iter().cloned());
+        add(&mut next.bots, other.bots, "bots")?;
+        add(&mut next.connected, other.connected, "connected")?;
+        add(&mut next.failed, other.failed, "failed")?;
+        add(&mut next.dropped, other.dropped, "dropped")?;
         for (k, v) in &other.errors {
-            *self.errors.entry(k.clone()).or_insert(0) += v;
+            add(next.errors.entry(k.clone()).or_insert(0), *v, "errors")?;
         }
-        self.frames += other.frames;
-        self.inputs_sent += other.inputs_sent;
-        self.inputs_acked += other.inputs_acked;
-        self.bots_acked += other.bots_acked;
-        self.inputs_unacked_dropped += other.inputs_unacked_dropped;
+        add(&mut next.frames, other.frames, "frames")?;
+        add(&mut next.inputs_sent, other.inputs_sent, "inputs_sent")?;
+        add(&mut next.inputs_acked, other.inputs_acked, "inputs_acked")?;
+        add(&mut next.bots_acked, other.bots_acked, "bots_acked")?;
+        add(
+            &mut next.inputs_unacked_dropped,
+            other.inputs_unacked_dropped,
+            "inputs_unacked_dropped",
+        )?;
         for (k, v) in &other.rejections {
-            *self.rejections.entry(k.clone()).or_insert(0) += v;
+            add(
+                next.rejections.entry(k.clone()).or_insert(0),
+                *v,
+                "rejections",
+            )?;
         }
-        self.decode_errors += other.decode_errors;
-        self.snapshot_interval_us.merge(&other.snapshot_interval_us)?;
-        self.ack_latency_us.merge(&other.ack_latency_us)?;
-        self.tick_rate_mhz.merge(&other.tick_rate_mhz)?;
-        self.bytes_per_sec.merge(&other.bytes_per_sec)?;
+        add(
+            &mut next.decode_errors,
+            other.decode_errors,
+            "decode_errors",
+        )?;
+        next.snapshot_interval_us
+            .merge(&other.snapshot_interval_us)?;
+        next.ack_latency_us.merge(&other.ack_latency_us)?;
+        next.tick_rate_mhz.merge(&other.tick_rate_mhz)?;
+        next.bytes_per_sec.merge(&other.bytes_per_sec)?;
+        *self = next;
         Ok(())
     }
 
@@ -820,6 +843,7 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
     let mut codec: Option<u8> = None;
     let mut last_frame: Option<Instant> = None;
     let mut last_tick: u64 = 0;
+    let mut replica = pylon_realtime::ReplicaTable::new();
     let mut input_timer = (config.rate > 0.0).then(|| {
         let mut t = tokio::time::interval(Duration::from_secs_f64(1.0 / config.rate));
         t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -884,11 +908,22 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
                     stats.decode_errors += 1;
                     continue;
                 };
-                codec = Some(frame.codec);
+                // A replication frame's codec byte names the frame format,
+                // not the shard's input codec.
+                if frame.kind != wire::kind::REPLICATION {
+                    codec = Some(frame.codec);
+                }
                 match frame.kind {
-                    wire::kind::SNAPSHOT => {
+                    wire::kind::SNAPSHOT | wire::kind::REPLICATION => {
                         stats.frames += 1;
-                        if decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload).is_none() {
+                        let decoded = if frame.kind == wire::kind::REPLICATION {
+                            // Apply it like a client: a frame that does not
+                            // apply to this bot's table is a decode error.
+                            replica.apply(frame.payload).is_ok()
+                        } else {
+                            decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload).is_some()
+                        };
+                        if !decoded {
                             stats.decode_errors += 1;
                         }
                         if let Some(prev) = last_frame {
@@ -1129,6 +1164,21 @@ mod tests {
         let mut a = big(1);
         assert!(a.merge(&big(2)).is_err());
         assert_eq!(a, big(1));
+    }
+
+    #[test]
+    fn a_report_merge_that_would_overflow_a_counter_is_refused() {
+        let mut a = Report {
+            frames: u64::MAX,
+            ..Report::default()
+        };
+        let b = Report {
+            frames: 1,
+            ..Report::default()
+        };
+        let before = a.clone();
+        assert!(a.merge(&b).is_err());
+        assert_eq!(a, before);
     }
 
     #[test]

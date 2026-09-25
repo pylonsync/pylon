@@ -31,6 +31,9 @@ pub trait DynShard: Send + Sync {
     fn snapshot_format(&self) -> SnapshotFormat;
     /// The highest `client_seq` processed for a subscriber (0 = none).
     fn ack(&self, id: &SubscriberId) -> u64;
+    /// True when the shard sends entity replication frames (binary)
+    /// instead of snapshots.
+    fn replicates(&self) -> bool;
 
     /// Decode an input envelope `{ input, client_seq? }` encoded in
     /// `format`, authorize it, and queue it. On failure, returns the
@@ -110,6 +113,9 @@ impl<S: SimState> DynShard for Shard<S> {
     }
     fn ack(&self, id: &SubscriberId) -> u64 {
         Shard::ack(self, id)
+    }
+    fn replicates(&self) -> bool {
+        self.with_state(|s| s.replicated().is_some())
     }
 
     fn push_input_envelope(

@@ -3170,6 +3170,7 @@ dependencies = [
  "bincode",
  "hmac 0.12.1",
  "pylon-kernel",
+ "pylon-replication",
  "rmp",
  "rmp-serde",
  "serde",
@@ -3177,6 +3178,10 @@ dependencies = [
  "sha2 0.10.9",
  "tracing",
 ]
+
+[[package]]
+name = "pylon-replication"
+version = "0.13.0"
 
 [[package]]
 name = "pylon-router"

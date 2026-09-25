@@ -48,6 +48,10 @@ pub enum FrameKind {
     Snapshot,
     /// An [`crate::wire::InputRejection`]. Never dropped.
     InputRejected,
+    /// An entity replication frame (see `pylon_replication::frame`).
+    /// Dropped like a snapshot when the queue is full; the shard then sends
+    /// the next one as a full baseline.
+    Replication,
 }
 
 /// One frame for the transport to write.
@@ -168,6 +172,18 @@ impl OutboundQueue {
         })
     }
 
+    /// Queue a replication frame, dropping older snapshot and replication
+    /// frames when full. The caller must make a frame pushed into a full
+    /// queue a full baseline: the dropped deltas are gone.
+    pub fn push_replication(&self, tick: u64, ack: u64, bytes: Arc<[u8]>) -> PushOutcome {
+        self.push(Frame {
+            tick,
+            kind: FrameKind::Replication,
+            ack,
+            bytes,
+        })
+    }
+
     /// Queue an input-rejected frame. It is never dropped; a queue that
     /// cannot take one closes.
     pub fn push_rejection(&self, tick: u64, ack: u64, bytes: Arc<[u8]>) -> PushOutcome {
@@ -202,7 +218,7 @@ impl OutboundQueue {
             if st.frames.len() >= self.config.max_frames {
                 st.full_since.get_or_insert(now);
                 let before = st.frames.len();
-                st.frames.retain(|f| f.kind != FrameKind::Snapshot);
+                st.frames.retain(|f| f.kind == FrameKind::InputRejected);
                 st.dropped_snapshots += (before - st.frames.len()) as u64;
                 if st.frames.len() >= self.config.max_frames {
                     // Full of frames that cannot be dropped: the client is

@@ -10,8 +10,8 @@
 //!
 //! | Offset | Size | Field |
 //! | --- | --- | --- |
-//! | 0 | 1 | Frame kind: `1` snapshot, `2` input rejected |
-//! | 1 | 1 | Codec of the payload: `0` JSON, `1` MessagePack, `2` bincode, `3` custom |
+//! | 0 | 1 | Frame kind: `1` snapshot, `2` input rejected, `3` replication |
+//! | 1 | 1 | Codec of the payload: `0` JSON, `1` MessagePack, `2` bincode, `3` custom, `4` replication |
 //! | 2 | 8 | Tick number, u64 big-endian |
 //! | 10 | 8 | Ack: the highest `client_seq` the shard has processed for this subscriber, u64 big-endian, `0` when none |
 //! | 18 | .. | Payload |
@@ -53,6 +53,9 @@ pub const HEADER_LEN: usize = 18;
 pub mod kind {
     pub const SNAPSHOT: u8 = 1;
     pub const INPUT_REJECTED: u8 = 2;
+    /// An entity replication frame (`pylon_replication::frame`). Its codec
+    /// byte is [`super::codec::REPLICATION`].
+    pub const REPLICATION: u8 = 3;
 }
 
 /// Codec bytes in the version 2 header.
@@ -62,6 +65,8 @@ pub mod codec {
     pub const BINCODE: u8 = 2;
     /// Reserved for a game's own encoding.
     pub const CUSTOM: u8 = 3;
+    /// The replication frame format, version 1.
+    pub const REPLICATION: u8 = 4;
 }
 
 /// The codec byte for a snapshot format.

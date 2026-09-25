@@ -259,6 +259,56 @@ fn stopping_a_shard_closes_every_subscriber_queue() {
     assert!(a.is_closed() && b.is_closed());
 }
 
+/// The ack in the newest snapshot frame.
+fn last_ack(q: &OutboundQueue) -> u64 {
+    let mut ack = None;
+    while let Some(f) = q.pop() {
+        if f.kind == FrameKind::Snapshot {
+            ack = Some(f.ack);
+        }
+    }
+    ack.expect("a snapshot frame")
+}
+
+#[test]
+fn a_reconnect_does_not_inherit_the_ack_of_an_input_the_old_connection_sent() {
+    let shard = world(vec![unit(1, 0.0, 0.0, false)], false);
+    let old = join(&shard, "u1");
+    shard
+        .push_input(SubscriberId::new("u1"), (1, 1.0, 1.0), Some(100))
+        .unwrap();
+    // Gone before the tick that applies the input; back before it runs.
+    shard.remove_queued_subscriber(&old);
+    let new = join(&shard, "u1");
+    shard.run_tick();
+    assert_eq!(last_ack(&new), 0);
+    // The new connection's own inputs are acked as usual.
+    shard
+        .push_input(SubscriberId::new("u1"), (1, 2.0, 2.0), Some(1))
+        .unwrap();
+    shard.run_tick();
+    assert_eq!(last_ack(&new), 1);
+}
+
+#[test]
+fn a_subscriber_the_tick_drops_is_forgotten() {
+    let shard = world(vec![unit(1, 0.0, 0.0, false)], false);
+    let q = join(&shard, "u1");
+    shard
+        .push_input(SubscriberId::new("u1"), (1, 1.0, 1.0), Some(7))
+        .unwrap();
+    shard.run_tick();
+    assert_eq!(shard.ack(&SubscriberId::new("u1")), 7);
+    // The client stops reading and its queue closes; the tick drops it.
+    q.close();
+    shard.run_tick();
+    assert_eq!(shard.subscriber_count(), 0);
+    assert_eq!(shard.ack(&SubscriberId::new("u1")), 0);
+    let again = join(&shard, "u1");
+    shard.run_tick();
+    assert_eq!(last_ack(&again), 0);
+}
+
 #[test]
 fn without_an_interest_config_snapshot_for_is_used() {
     struct Plain;

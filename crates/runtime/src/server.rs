@@ -6210,15 +6210,17 @@ fn start_server(
                         }
                     };
 
-                    // SSE carries text: a shard with a binary codec is WebSocket-only.
+                    // SSE carries text: a shard with a binary codec, or one
+                    // that replicates entities, is WebSocket-only.
                     if !matches!(
                         shard.snapshot_format(),
                         pylon_realtime::SnapshotFormat::Json
                             | pylon_realtime::SnapshotFormat::JsonCompact
-                    ) {
+                    ) || shard.replicates()
+                    {
                         let err = json_error(
                             "SHARD_CODEC_NOT_SSE",
-                            "This shard encodes snapshots in a binary codec; connect over the shard WebSocket",
+                            "This shard sends binary frames (a binary codec or entity replication); connect over the shard WebSocket",
                         );
                         let response = with_security_headers(
                             Response::from_string(&err)

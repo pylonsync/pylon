@@ -9,6 +9,9 @@ use crate::interest::{
     EntityId, EntityPos, InterestArea, InterestConfig, InterestManager, Visibility,
 };
 use crate::outbound::{OutboundConfig, OutboundQueue};
+use crate::replication::{
+    entity_positions, FrameInput, ReplicatedRef, ReplicationConfig, Replicator,
+};
 use crate::snapshot::EncodeSnapshot;
 use crate::subscriber::{Subscriber, SubscriberId};
 use crate::ticket::ShardTicket;
@@ -197,6 +200,24 @@ pub trait SimState: Send + 'static {
     fn shares_visible_snapshots(&self) -> bool {
         false
     }
+
+    // -- Entity replication (optional; see crate::replication) ---------------
+
+    /// Return the entity store to send subscribers replication frames
+    /// (spawn, update, despawn) instead of snapshots. With an interest
+    /// config, each subscriber's view comes from the store's positions and
+    /// `interest_area`; without one, every entity is in view. Either way
+    /// `can_see` / `filter_visible` hides entities. `entities`,
+    /// `snapshot_visible`, and `snapshot_for` are not used.
+    fn replicated(&self) -> Option<ReplicatedRef<'_>> {
+        None
+    }
+
+    /// Settings for the replication frames. Called once per tick while
+    /// `replicated` returns a store.
+    fn replication_config(&self) -> ReplicationConfig {
+        ReplicationConfig::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +336,11 @@ impl std::error::Error for ShardError {}
 
 struct PendingInput<I> {
     subscriber_id: SubscriberId,
+    /// The subscriber id's connection generation when the input was
+    /// queued. Its ack is recorded only while the generation is current, so
+    /// a reconnect never inherits an ack for an input the old connection
+    /// sent.
+    generation: u64,
     input: I,
     /// The client's sequence number, echoed back as the subscriber's ack
     /// (see [`crate::wire`]).
@@ -386,6 +412,13 @@ pub struct Shard<S: SimState> {
     /// (under the state lock) touches it.
     interest: Mutex<Option<InterestManager<u64>>>,
     entity_scratch: Mutex<Vec<EntityPos>>,
+    /// Per-subscription replication baselines. Only the tick touches it.
+    replicator: Mutex<Replicator>,
+    /// Per subscriber id with a live connection: its connection
+    /// generation, new each time the id goes from no connection to one.
+    /// Lock order: inputs, subscribers, generations, acks.
+    generations: Mutex<HashMap<SubscriberId, u64>>,
+    next_generation: std::sync::atomic::AtomicU64,
 }
 
 /// One subscriber's snapshot this tick: its own, or one shared with every
@@ -393,6 +426,8 @@ pub struct Shard<S: SimState> {
 enum TickSnapshot<T> {
     Own(T),
     Shared(usize),
+    /// An entity replication frame, built for this subscription.
+    Replication(Arc<[u8]>),
 }
 
 impl<S: SimState> Shard<S> {
@@ -421,6 +456,9 @@ impl<S: SimState> Shard<S> {
             overrun_ticks: std::sync::atomic::AtomicU64::new(0),
             interest: Mutex::new(None),
             entity_scratch: Mutex::new(Vec::new()),
+            replicator: Mutex::new(Replicator::new()),
+            generations: Mutex::new(HashMap::new()),
+            next_generation: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -569,6 +607,16 @@ impl<S: SimState> Shard<S> {
         if self.config.max_subscribers > 0 && subs.len() >= self.config.max_subscribers {
             return Err(ShardError::Full);
         }
+        if !subs.iter().any(|s| s.id() == sub.id()) {
+            // The id's first live connection: a new generation, and no ack
+            // carried over from an earlier connection.
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
+            self.generations
+                .lock()
+                .unwrap()
+                .insert(sub.id().clone(), generation);
+            self.acks.lock().unwrap().remove(sub.id());
+        }
         subs.push(Arc::new(sub));
         Ok(())
     }
@@ -691,6 +739,7 @@ impl<S: SimState> Shard<S> {
     /// Drop per-id state once no connection uses the id. The caller holds
     /// the inputs and subscribers locks.
     fn forget_locked(&self, inputs: &mut InputQueue<S::Input>, id: &SubscriberId) {
+        self.generations.lock().unwrap().remove(id);
         self.acks.lock().unwrap().remove(id);
         // Keep the entry while inputs from this subscriber are still
         // queued; the tick removes it once they drain.
@@ -777,8 +826,17 @@ impl<S: SimState> Shard<S> {
                 .get_mut(&subscriber_id)
                 .expect("entry inserted above")
                 .queued += 1;
+            // 0 for an id with no live connection: its ack is never recorded.
+            let generation = self
+                .generations
+                .lock()
+                .unwrap()
+                .get(&subscriber_id)
+                .copied()
+                .unwrap_or(0);
             q.queue.push_back(PendingInput {
                 subscriber_id,
+                generation,
                 input,
                 seq: client_seq,
                 received_at: now,
@@ -846,13 +904,97 @@ impl<S: SimState> Shard<S> {
     /// Only steps 1-4 hold the state lock. Delivery never waits on a client:
     /// a queued subscriber's frame goes into its outbound queue, and a
     /// subscriber whose queue closed is removed.
+    /// Each subscription's replication frame this tick. Runs under the
+    /// state lock.
+    fn replication_frames(
+        &self,
+        state: &S,
+        store: &crate::Replicated,
+        subs: &[Arc<Subscriber<S::Snapshot>>],
+        tick: u64,
+    ) -> Vec<TickSnapshot<S::Snapshot>> {
+        let config = state.replication_config();
+        let mut replicator = self.replicator.lock().unwrap();
+        let live: std::collections::HashSet<u64> = subs.iter().map(|s| s.instance()).collect();
+        replicator.retain(|k| live.contains(&k));
+        replicator.begin_tick(store);
+
+        let mut interest = self.interest.lock().unwrap();
+        let manager = match state.interest_config() {
+            Some(icfg) => {
+                let m = interest.get_or_insert_with(|| InterestManager::new(icfg));
+                if m.config() != icfg {
+                    m.set_config(icfg);
+                }
+                let mut entities = self.entity_scratch.lock().unwrap();
+                entities.clear();
+                entity_positions(store, config.plane, &mut entities);
+                m.rebuild(&entities);
+                m.retain(|k| live.contains(k));
+                Some(m)
+            }
+            None => None,
+        };
+        let all: Vec<EntityId> = match manager {
+            Some(_) => Vec::new(),
+            None => store.iter().map(|(id, _)| id).collect(),
+        };
+        let mut manager = manager;
+
+        let mut out = Vec::with_capacity(subs.len());
+        let mut ids: Vec<EntityId> = Vec::new();
+        for sub in subs {
+            let id = sub.id();
+            let area = state.interest_area(id);
+            ids.clear();
+            match manager.as_deref_mut() {
+                Some(m) => {
+                    let view = m.update(&sub.instance(), area, |v| state.filter_visible(id, v));
+                    ids.extend_from_slice(&view.visible);
+                }
+                None => {
+                    ids.extend_from_slice(&all);
+                    state.filter_visible(id, &mut ids);
+                    if !ids.windows(2).all(|w| w[0] < w[1]) {
+                        ids.sort_unstable();
+                        ids.dedup();
+                    }
+                }
+            }
+            let (dropped, queue_full) = sub
+                .queue()
+                .map_or((0, false), |q| (q.dropped_snapshots(), q.is_full()));
+            let frame = replicator.frame(
+                store,
+                &config,
+                tick,
+                FrameInput {
+                    key: sub.instance(),
+                    visible: Some(&ids),
+                    area,
+                    dropped,
+                    queue_full,
+                },
+            );
+            out.push(TickSnapshot::Replication(Arc::from(frame)));
+        }
+        out
+    }
+
     /// Each subscriber's snapshot this tick, plus the snapshots shared by
     /// subscribers with the same view. Runs under the state lock.
     fn take_snapshots(
         &self,
         state: &S,
         subs: &[Arc<Subscriber<S::Snapshot>>],
+        tick: u64,
     ) -> (Vec<TickSnapshot<S::Snapshot>>, Vec<S::Snapshot>) {
+        if let Some(store) = state.replicated() {
+            return (
+                self.replication_frames(state, &store, subs, tick),
+                Vec::new(),
+            );
+        }
         let Some(config) = state.interest_config() else {
             let own = subs
                 .iter()
@@ -928,6 +1070,7 @@ impl<S: SimState> Shard<S> {
         let mut failed: Vec<(SubscriberId, InputRejection)> = Vec::new();
         let (snapshots, shared, finished) = {
             let mut state = self.state.lock().unwrap();
+            let generations = self.generations.lock().unwrap();
             let mut acks = self.acks.lock().unwrap();
             let recorder = self.input_recorder.lock().unwrap();
             for pending in drained {
@@ -935,8 +1078,11 @@ impl<S: SimState> Shard<S> {
                     record(tick_number, &pending.subscriber_id, &pending.input);
                 }
                 if let Some(seq) = pending.seq {
-                    let ack = acks.entry(pending.subscriber_id.clone()).or_insert(0);
-                    *ack = (*ack).max(seq);
+                    // Only for the connection generation that sent it.
+                    if generations.get(&pending.subscriber_id) == Some(&pending.generation) {
+                        let ack = acks.entry(pending.subscriber_id.clone()).or_insert(0);
+                        *ack = (*ack).max(seq);
+                    }
                 }
                 if let Err(e) =
                     state.apply_input(&pending.subscriber_id, pending.input, pending.received_at)
@@ -953,6 +1099,7 @@ impl<S: SimState> Shard<S> {
                 }
             }
             drop(acks);
+            drop(generations);
             drop(recorder);
 
             state.tick(dt);
@@ -961,7 +1108,7 @@ impl<S: SimState> Shard<S> {
                 cb(&state, tick_number);
             }
 
-            let (snapshots, shared) = self.take_snapshots(&state, &subs);
+            let (snapshots, shared) = self.take_snapshots(&state, &subs, tick_number);
             (snapshots, shared, state.is_finished())
         };
 
@@ -989,6 +1136,9 @@ impl<S: SimState> Shard<S> {
                 TickSnapshot::Own(snap) => {
                     sub.send(tick_number, snap, self.config.snapshot_format, ack)
                 }
+                TickSnapshot::Replication(bytes) => {
+                    sub.send_replication(tick_number, Arc::clone(bytes), ack)
+                }
                 TickSnapshot::Shared(i) => {
                     let bytes = shared_bytes[*i].get_or_insert_with(|| {
                         match shared[*i].encode_as(self.config.snapshot_format) {
@@ -1010,7 +1160,10 @@ impl<S: SimState> Shard<S> {
             closed |= sub.is_closed();
         }
         if closed {
+            // The same cleanup as an explicit removal, in the same lock order.
+            let mut inputs = self.inputs.lock().unwrap();
             let mut all = self.subscribers.lock().unwrap();
+            let mut gone: Vec<SubscriberId> = Vec::new();
             all.retain(|s| {
                 if s.is_closed() {
                     tracing::warn!(
@@ -1018,11 +1171,17 @@ impl<S: SimState> Shard<S> {
                         self.id,
                         s.id()
                     );
+                    gone.push(s.id().clone());
                     false
                 } else {
                     true
                 }
             });
+            for id in gone {
+                if !all.iter().any(|s| s.id() == &id) {
+                    self.forget_locked(&mut inputs, &id);
+                }
+            }
         }
 
         if finished {

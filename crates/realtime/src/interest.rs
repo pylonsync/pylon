@@ -494,8 +494,14 @@ mod tests {
             margin: 0.0,
         });
         m.rebuild(&[e(1, 1.0, 0.0), e(2, 0.3, 0.7)]);
-        assert_eq!(m.update(&sid("a"), area(1.0, 0.0, 0.0), |_| {}).visible, vec![1]);
-        assert_eq!(m.update(&sid("b"), area(0.3, 0.7, 0.0), |_| {}).visible, vec![2]);
+        assert_eq!(
+            m.update(&sid("a"), area(1.0, 0.0, 0.0), |_| {}).visible,
+            vec![1]
+        );
+        assert_eq!(
+            m.update(&sid("b"), area(0.3, 0.7, 0.0), |_| {}).visible,
+            vec![2]
+        );
     }
 
     #[test]
