@@ -90,6 +90,7 @@ fn run() -> ExitCode {
     match positional.first().copied() {
         Some("add") => commands::add::run(&args, json_mode),
         Some("admin") => commands::admin::run(&args, json_mode),
+        Some("bench") => commands::bench::run(&args, json_mode),
         Some("build") => commands::build::run(&args, json_mode),
         Some("cache") => commands::cache::run(&args, json_mode),
         Some("deploy") => commands::deploy::run(&args, json_mode),
@@ -332,6 +333,19 @@ fn print_command_help(cmd: &str) -> bool {
             println!("  PYLON_CORS_ORIGIN Allowed CORS origin for the API");
             true
         }
+        "bench" => {
+            println!("pylon bench — load-test a realtime shard with headless bots");
+            println!();
+            println!("{}", commands::bench::USAGE);
+            println!();
+            println!("Example, against examples/shard-arena under `pylon dev`:");
+            println!("  pylon bench shard --join joinArena --bots 300 \\");
+            println!("    --input '\"join\"' --input '{{\"move_to\":{{\"x\":\"$rand:0:800\",\"y\":\"$rand:0:500\"}}}}'");
+            println!();
+            println!("`pylon dev` lifts the per-IP shard connection cap. Against `pylon start`,");
+            println!("set PYLON_SHARD_WS_MAX_PER_IP=0 on the server for bots from one machine.");
+            true
+        }
         "shards" => {
             println!("pylon shards — build WebAssembly shard modules");
             println!();
@@ -465,6 +479,7 @@ fn print_usage() {
     );
     println!("  build                     Build for production");
     println!("  shards build              Build WebAssembly shard modules from their Rust crates");
+    println!("  bench shard               Load-test a realtime shard with headless bots");
     println!(
         "  deploy                    Deploy to Stack0 Cloud (or --target docker|fly|compose|workers|systemd|manifest)"
     );

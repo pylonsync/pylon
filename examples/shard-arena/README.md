@@ -24,4 +24,13 @@ Open http://localhost:4321 in two windows. `pylon dev` builds
 it without a Rust toolchain on the builder. Run `pylon shards build` after a
 Rust change you want to deploy.
 
+## Load test
+
+With `pylon dev` running, put 300 bots in the arena:
+
+```bash
+pylon bench shard --join joinArena --bots 300 --input '"join"' \
+  --input '{"move_to":{"x":"$rand:0:800","y":"$rand:0:500"}}'
+```
+
 See [Realtime shards](https://pylonsync.com/docs/concepts/shards).

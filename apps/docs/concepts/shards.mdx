@@ -238,6 +238,51 @@ The client connects to `/shard` on the app's own origin, so it needs no
 extra port or proxy rule. See [React client](/clients/react#multiplayer-shards)
 for acks, rejections, and custom decoders.
 
+## Load test
+
+`pylon bench shard` starts headless bots that join like players, send
+inputs, and decode every frame:
+
+```bash
+pylon bench shard --join joinArena --bots 300 --duration 30 --rate 10 \
+  --input '"join"' \
+  --input '{"move_to":{"x":"$rand:0:800","y":"$rand:0:500"}}'
+```
+
+- `--join <function>` signs each bot in as a guest and calls the function,
+  which returns `{ shardId, subscriberId, ticket }`.
+- `--shard <id>` joins a running shard with tickets the command mints. Run it
+  from the app directory, so it uses the same key as `pylon dev`, or set
+  `PYLON_SHARD_TICKET_SECRET` to the server's value.
+- `--input` is a JSON template, and repeated templates are sent in turn. The
+  strings `"$rand:A:B"`, `"$int:A:B"`, `"$bot"`, and `"$sid"` are replaced
+  for each input.
+- `--url` defaults to `http://localhost:4321`. An `https://` origin connects
+  over `wss://`.
+
+The report gives:
+
+| Line | Meaning |
+| --- | --- |
+| tick rate seen | New ticks per second each bot received |
+| snapshot interval | Time between frames at a bot (p50, p99, max) |
+| input to ack | Time from sending an input to the first frame that acks it |
+| bytes per bot | Bytes each bot received per second |
+| rejections | Refused inputs, by code |
+
+`pylon dev` lifts the per-IP connection cap. Against `pylon start`, set
+`PYLON_SHARD_WS_MAX_PER_IP=0` on the server when all bots run on one
+machine.
+
+To run bots from several machines, give each machine its own
+`--bot-offset` and `--report <file>`, then combine the reports:
+
+```bash
+pylon bench shard ... --bots 300 --bot-offset 0   --report a.json   # machine 1
+pylon bench shard ... --bots 300 --bot-offset 300 --report b.json   # machine 2
+pylon bench merge a.json b.json
+```
+
 ## Limits and failures
 
 - A tick that runs past `tickBudgetMs` stops the shard.

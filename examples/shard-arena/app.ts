@@ -25,6 +25,8 @@ const manifest = buildManifest({
       codec: "msgpack",
       tickRate: 20,
       maxInstances: 4,
+      // Room for `pylon bench shard --bots 300` (see README).
+      maxSubscribers: 1000,
       // The lobby stays up with nobody in it.
       idleShutdownSecs: 0,
     }),

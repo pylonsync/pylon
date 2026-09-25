@@ -8,7 +8,9 @@
 # 2. `pylon start app.ts` boots from source; packages/react's
 #    shard-wasm.e2e.test.ts joins as two guests over /shard on the main port,
 #    moves, gets a rejection, and has a stolen ticket refused.
-# 3. `pylon build` writes an artifact with the module in it; `pylon start
+# 3. `pylon bench shard` runs 50 bots through the app's join function and
+#    must connect all of them and see their inputs acked.
+# 4. `pylon build` writes an artifact with the module in it; `pylon start
 #    <dir>` boots it and the same test runs again.
 #
 # Needs Rust with the wasm32-unknown-unknown target, and `bun install` at the
@@ -44,6 +46,7 @@ trap cleanup EXIT
 serve() {
 	local dir="$1" target="$2" log="$3"
 	(cd "$dir" && PYLON_DB_PATH="$TMP/$log.db" PYLON_CORS_ORIGIN="http://localhost:$PORT" \
+		PYLON_SHARD_WS_MAX_PER_IP=0 \
 		exec "$PYLON" start "$target" --port "$PORT") >"$TMP/$log.log" 2>&1 &
 	SERVER_PID=$!
 	for _ in $(seq 1 120); do
@@ -84,6 +87,23 @@ grep -q "compiled 1 kind(s)" "$TMP/source.log" || {
 	exit 1
 }
 e2e
+
+echo "→ pylon bench shard (50 bots)"
+(cd "$APP" && "$PYLON" bench shard --url "http://localhost:$PORT" --join joinArena \
+	--bots 50 --duration 5 --ramp 1 --rate 10 --input '"join"' \
+	--input '{"move_to":{"x":"$rand:0:800","y":"$rand:0:500"}}' --json) >"$TMP/bench.json" || {
+	cat "$TMP/bench.json" >&2
+	exit 1
+}
+node -e '
+const r = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+const fail = (m) => { console.error("::error::" + m + "\n" + JSON.stringify(r, null, 2)); process.exit(1); };
+if (r.connected !== 50) fail(`${r.connected} of 50 bots connected`);
+if (!(r.inputs_acked > 0)) fail("no input was acked");
+if (r.decode_errors !== 0) fail(`${r.decode_errors} frames did not decode`);
+if (!(r.tick_rate_hz.p50 > 15)) fail(`bots saw ${r.tick_rate_hz.p50} Hz`);
+console.log(`  50 bots: ${r.tick_rate_hz.p50} Hz, ack p99 ${r.ack_latency_ms.p99} ms`);
+' "$TMP/bench.json"
 stop
 
 echo "→ pylon build"

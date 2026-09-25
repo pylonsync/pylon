@@ -2,6 +2,7 @@ pub mod add;
 pub mod admin;
 pub mod args;
 pub mod backup;
+pub mod bench;
 pub mod build;
 pub mod cache;
 pub mod cloud_billing;

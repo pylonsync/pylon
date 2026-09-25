@@ -392,6 +392,11 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
             if std::env::var("PYLON_FN_RATE_LIMIT_MAX").is_err() {
                 std::env::set_var("PYLON_FN_RATE_LIMIT_MAX", "100000");
             }
+            // Every local client (browser tabs, `pylon bench shard` bots)
+            // comes from one address; the production cap is 64.
+            if std::env::var("PYLON_SHARD_WS_MAX_PER_IP").is_err() {
+                std::env::set_var("PYLON_SHARD_WS_MAX_PER_IP", "0");
+            }
         }
 
         // Auto-push schema to the dev database. Postgres path uses

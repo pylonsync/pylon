@@ -50,6 +50,7 @@
       "codec": "msgpack",
       "tickRate": 20,
       "maxInstances": 4,
+      "maxSubscribers": 1000,
       "idleShutdownSecs": 0
     }
   ]
