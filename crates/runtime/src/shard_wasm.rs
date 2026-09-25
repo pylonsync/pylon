@@ -2695,13 +2695,7 @@ impl WasmShardHost {
             if round_started.elapsed() >= Duration::from_secs(3) {
                 break;
             }
-            if home(&orphan.shard_id, &live).map(|m| m.id.as_str()) != Some(c.me.id.as_str()) {
-                continue;
-            }
-            // Ending here and about to be released: not started again, and
-            // not taken over from another machine either (the release
-            // deletes any placement of the id on this machine).
-            if self.ending.lock().unwrap().contains(&orphan.shard_id) {
+            if !self.may_take_orphan(c, &orphan.shard_id, &live) {
                 continue;
             }
             let _own = c.own_lock.lock().unwrap();
@@ -3070,7 +3064,14 @@ impl WasmShardHost {
             if let Some(c) = self.cluster.get() {
                 c.saved_at.lock().unwrap().remove(id);
                 let held = c.owned.lock().unwrap().remove(id);
-                let held = held.filter(|&epoch| Self::ended_here(c, shard, epoch));
+                let ends = held.filter(|&epoch| Self::ended_here(c, shard, epoch));
+                if held.is_some() && ends.is_none() {
+                    // Stopped by a lapsed lease: the fence no longer finds
+                    // it in `owned`, so its writes are dropped here. No run
+                    // of the id starts meanwhile (the create lock is held).
+                    self.discard_writes(id);
+                }
+                let held = ends;
                 // It ended (finished, failed, or idle with no move out): a
                 // move out of it still open is finished by its target's
                 // machine once the placement is gone.
@@ -3094,6 +3095,15 @@ impl WasmShardHost {
         for (id, _) in ended {
             self.end_placement(c, &id);
         }
+    }
+
+    /// Whether this machine takes over orphan `id`: it is the id's home
+    /// among `live`, and the id is not ending here (its release deletes
+    /// any placement of the id on this machine, whichever machine the
+    /// orphan came from).
+    fn may_take_orphan(&self, c: &ClusterState, id: &str, live: &[Machine]) -> bool {
+        home(id, live).map(|m| m.id.as_str()) == Some(c.me.id.as_str())
+            && !self.ending.lock().unwrap().contains(id)
     }
 
     /// Whether a held shard that stopped ended here (finished, idle, or
