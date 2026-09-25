@@ -298,3 +298,44 @@ fn a_ticket_admits_a_character_id_and_a_bad_ticket_is_refused() {
         Some(&forged)
     )));
 }
+
+/// A connection the server rejects right after the upgrade gets a
+/// request-log row with the reason, so `pylon logs` shows why a client keeps
+/// reconnecting instead of a list of `GET /shard 101` lines.
+#[test]
+fn a_rejected_connection_logs_the_reason() {
+    pylon_runtime::log_ring::init_log_ring();
+    let server = start();
+    let token = server.sessions.create("rejected".to_string()).token;
+    let stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    let mut req = format!(
+        "ws://127.0.0.1:{}/?shard=no-such-zone&sid=rejected",
+        server.port
+    )
+    .into_client_request()
+    .unwrap();
+    req.headers_mut()
+        .insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut ws, _) = tungstenite::client(req, stream).expect("handshake");
+    // Read until the server's close frame arrives and the socket ends.
+    while ws.read().is_ok() {}
+
+    let expected = r#"shard "no-such-zone" not found"#;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows = pylon_runtime::log_ring::log_ring()
+            .unwrap()
+            .tail_since(None);
+        if let Some(row) = rows.iter().find(|r| r.error.as_deref() == Some(expected)) {
+            assert_eq!(row.method, "WS");
+            assert_eq!(row.path, "/shard");
+            assert_eq!(row.status, 101);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no log row for the rejection: {rows:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

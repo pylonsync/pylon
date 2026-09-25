@@ -20,7 +20,7 @@
 
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
 use pylon_auth::SessionStore;
@@ -159,15 +159,15 @@ pub fn serve_upgraded(
         };
         let (params, _) =
             read_handshake(uri, headers.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let started = Instant::now();
         let ws = tokio_tungstenite::WebSocketStream::from_raw_socket(
             stream,
             tokio_tungstenite::tungstenite::protocol::Role::Server,
             None,
         )
         .await;
-        if let Err(e) = run_connection(ws, params, registry, sessions).await {
-            tracing::warn!("[shard-ws] connection error: {e}");
-        }
+        let end = run_connection(ws, params, registry, sessions).await;
+        log_connection_end(started, &end);
     });
 }
 
@@ -265,14 +265,15 @@ pub fn serve(
                     return;
                 }
             };
-            // A shard another machine runs: pass the connection there.
+            // A shard another machine runs: pass the connection there. That
+            // machine logs the connection's end.
             let stream = match route_to_owner(stream, &registry, ip).await {
                 Some(stream) => stream,
                 None => return,
             };
-            if let Err(e) = handle_connection(stream, registry, sessions).await {
-                tracing::warn!("[shard-ws] connection error: {e}");
-            }
+            let started = Instant::now();
+            let end = handle_connection(stream, registry, sessions).await;
+            log_connection_end(started, &end);
         });
     }
 }
@@ -394,7 +395,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     registry: Arc<dyn DynShardRegistry>,
     sessions: Arc<SessionStore>,
-) -> Result<(), String> {
+) -> ConnectionEnd {
     // Capture the HTTP handshake so we can read the Request-URI and headers.
     let params = Arc::new(Mutex::new(HandshakeParams::default()));
     let params_clone = Arc::clone(&params);
@@ -417,11 +418,40 @@ async fn handle_connection(
             Ok(resp)
         },
     )
-    .await
-    .map_err(|e| format!("handshake: {e}"))?;
+    .await;
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(e) => return ConnectionEnd::Closed(format!("handshake: {e}")),
+    };
 
     let params = params.lock().unwrap().clone();
     run_connection(ws, params, registry, sessions).await
+}
+
+/// How a shard connection ended. Written to the request log when the
+/// connection closes.
+enum ConnectionEnd {
+    /// The client closed the connection.
+    ClientClosed,
+    /// The server closed the connection, or the connection failed. The text
+    /// is the reason.
+    Closed(String),
+}
+
+/// Write the end of a shard connection to the request log, with its
+/// duration. The upgrade itself is logged as a `GET /shard 101`, which shows
+/// nothing about a connection that the server rejects right after the
+/// upgrade. This row shows the reason.
+fn log_connection_end(started: Instant, end: &ConnectionEnd) {
+    let ms = u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX);
+    let reason = match end {
+        ConnectionEnd::ClientClosed => None,
+        ConnectionEnd::Closed(reason) => {
+            tracing::info!("[shard-ws] connection closed after {ms}ms: {reason}");
+            Some(reason.as_str())
+        }
+    };
+    crate::metrics::record_log_row("WS", "/shard", 101, ms, 0, 0, reason);
 }
 
 /// Read the shard parameters from an upgrade request's URI and headers.
@@ -477,14 +507,16 @@ async fn run_connection(
     params: HandshakeParams,
     registry: Arc<dyn DynShardRegistry>,
     sessions: Arc<SessionStore>,
-) -> Result<(), String> {
+) -> ConnectionEnd {
     let query = params
         .uri
         .split_once('?')
         .map(|(_, q)| q.to_string())
         .unwrap_or_default();
 
-    let shard_id = query_param(&query, "shard").ok_or("missing ?shard= parameter")?;
+    let Some(shard_id) = query_param(&query, "shard") else {
+        return ConnectionEnd::Closed("missing ?shard= parameter".into());
+    };
     let sid = query_param(&query, "sid").unwrap_or_else(|| "anon".to_string());
     // Wire protocol version (see pylon_realtime::wire): `?v=2`, else 1.
     let version: u8 = if query_param(&query, "v").as_deref() == Some("2") {
@@ -512,21 +544,18 @@ async fn run_connection(
         match crate::shard_tickets::shard_auth(&auth_ctx, params.ticket.as_deref()) {
             Ok(a) => a,
             Err(e) => {
-                close_with(&mut sink, CloseCode::Policy, format!("unauthorized: {e}")).await;
-                return Ok(());
+                let reason = format!("unauthorized: {e}");
+                close_with(&mut sink, CloseCode::Policy, reason.clone()).await;
+                return ConnectionEnd::Closed(reason);
             }
         };
 
     let shard = match registry.get(&shard_id) {
         Some(s) => s,
         None => {
-            close_with(
-                &mut sink,
-                CloseCode::Policy,
-                format!("shard \"{shard_id}\" not found"),
-            )
-            .await;
-            return Ok(());
+            let reason = format!("shard \"{shard_id}\" not found");
+            close_with(&mut sink, CloseCode::Policy, reason.clone()).await;
+            return ConnectionEnd::Closed(reason);
         }
     };
 
@@ -548,23 +577,20 @@ async fn run_connection(
     let queue = match joined {
         Ok(q) => q,
         Err(ShardError::Unauthorized(reason)) => {
-            close_with(
-                &mut sink,
-                CloseCode::Policy,
-                format!("unauthorized: {reason}"),
-            )
-            .await;
-            return Ok(());
+            let reason = format!("unauthorized: {reason}");
+            close_with(&mut sink, CloseCode::Policy, reason.clone()).await;
+            return ConnectionEnd::Closed(reason);
         }
         Err(e) => {
-            close_with(&mut sink, CloseCode::Again, e.to_string()).await;
-            return Ok(());
+            let reason = e.to_string();
+            close_with(&mut sink, CloseCode::Again, reason.clone()).await;
+            return ConnectionEnd::Closed(reason);
         }
     };
 
     // Writer: drain the queue into the socket. The tick thread wakes it
     // through the notifier; `Notify` keeps a wakeup that arrives while the
-    // writer is busy, so none is lost.
+    // writer is busy, so none is lost. It returns the reason it stopped.
     let wake = Arc::new(Notify::new());
     {
         let wake = Arc::clone(&wake);
@@ -605,32 +631,30 @@ async fn run_connection(
                     (_, FrameKind::InputRejected) => continue,
                     // Version 1 cannot mark a frame as replication.
                     (_, FrameKind::Replication) => {
-                        close_with(
-                            &mut sink,
-                            CloseCode::Protocol,
-                            "this shard replicates entities; connect with protocol v=2".into(),
-                        )
-                        .await;
-                        return;
+                        let reason =
+                            "this shard replicates entities; connect with protocol v=2".to_string();
+                        close_with(&mut sink, CloseCode::Protocol, reason.clone()).await;
+                        return reason;
                     }
                 };
-                if sink.send(Message::Binary(payload)).await.is_err() {
-                    return;
+                if let Err(e) = sink.send(Message::Binary(payload)).await {
+                    return format!("ws write: {e}");
                 }
             }
             if writer_queue.is_closed() {
-                if writer_shard.is_running() {
-                    close_with(&mut sink, CloseCode::Again, "client too slow".into()).await;
+                let (code, reason) = if writer_shard.is_running() {
+                    (CloseCode::Again, "client too slow")
                 } else {
-                    close_with(&mut sink, CloseCode::Normal, "shard stopped".into()).await;
-                }
-                return;
+                    (CloseCode::Normal, "shard stopped")
+                };
+                close_with(&mut sink, code, reason.into()).await;
+                return reason.to_string();
             }
             tokio::select! {
                 _ = wake.notified() => {}
                 _ = ping.tick() => {
-                    if sink.send(Message::Ping(Vec::new())).await.is_err() {
-                        return;
+                    if let Err(e) = sink.send(Message::Ping(Vec::new())).await {
+                        return format!("ws write: {e}");
                     }
                 }
             }
@@ -642,18 +666,22 @@ async fn run_connection(
     // pongs to the writer's pings, counts as activity for the idle timeout.
     let mut check = tokio::time::interval(Duration::from_millis(500));
     let mut last_activity = tokio::time::Instant::now();
-    let read_result = loop {
+    let end = loop {
         let next = tokio::select! {
             // The writer ended (socket error, or it saw the queue close).
-            _ = &mut writer => break Ok(()),
+            stopped = &mut writer => {
+                break ConnectionEnd::Closed(
+                    stopped.unwrap_or_else(|e| format!("writer task failed: {e}")),
+                );
+            }
             // The queue closed while the writer is stuck in a send to a
             // client that stopped reading; or the client went silent.
             _ = check.tick() => {
                 if queue.is_closed() {
-                    break Err("client too slow; outbound queue closed".to_string());
+                    break ConnectionEnd::Closed("client too slow; outbound queue closed".into());
                 }
                 if last_activity.elapsed() >= IDLE_TIMEOUT {
-                    break Err("idle timeout".to_string());
+                    break ConnectionEnd::Closed("idle timeout".into());
                 }
                 continue;
             }
@@ -661,8 +689,8 @@ async fn run_connection(
         };
         last_activity = tokio::time::Instant::now();
         let msg = match next {
-            None => break Ok(()),
-            Some(Err(e)) => break Err(format!("ws read: {e}")),
+            None => break ConnectionEnd::ClientClosed,
+            Some(Err(e)) => break ConnectionEnd::Closed(format!("ws read: {e}")),
             Some(Ok(m)) => m,
         };
         match msg {
@@ -698,7 +726,7 @@ async fn run_connection(
                 )
                 .await;
             }
-            Message::Close(_) => break Ok(()),
+            Message::Close(_) => break ConnectionEnd::ClientClosed,
             // tungstenite answers pings itself; pongs only prove liveness.
             _ => {}
         }
@@ -709,7 +737,7 @@ async fn run_connection(
     // when both halves drop.
     shard.remove_queued_subscriber(&queue);
     writer.abort();
-    read_result
+    end
 }
 
 type WsSink = futures_util::stream::SplitSink<
