@@ -167,13 +167,14 @@ struct FieldWrite {
     /// The lease epoch the shard was held under here (None with no shard
     /// directory): the write is made only while that still holds.
     epoch: Option<i64>,
+    /// Flushes that failed with a store error on this field.
+    failures: u32,
 }
 
 /// Fields waiting to be written to one row.
 #[derive(Debug, Default)]
 pub(super) struct DirtyRow {
     fields: HashMap<String, FieldWrite>,
-    failures: u32,
 }
 
 /// Buffered writes, by (entity, id).
@@ -301,6 +302,13 @@ impl WasmShardHost {
             .spawn(move || loop {
                 std::thread::sleep(every);
                 let Some(host) = host.upgrade() else { return };
+                #[cfg(test)]
+                if host
+                    .periodic_flush_off
+                    .load(std::sync::atomic::Ordering::Acquire)
+                {
+                    continue;
+                }
                 host.flush_writes(Flush::Held);
             });
     }
@@ -530,12 +538,16 @@ impl WasmShardHost {
             }
             let row = dirty.entry(key).or_default();
             for (field, value) in w.set {
+                // A newer value keeps the field's failure count: the store
+                // error is the row's, not the value's.
+                let failures = row.fields.get(&field).map_or(0, |f| f.failures);
                 row.fields.insert(
                     field,
                     FieldWrite {
                         value,
                         shard: shard.to_string(),
                         epoch,
+                        failures,
                     },
                 );
             }
@@ -547,13 +559,19 @@ impl WasmShardHost {
         }
     }
 
-    /// Drop the fields shard `id` wrote: a copy that lost its place.
+    /// Drop the fields shard `id` wrote: a copy that lost its place. A
+    /// flush in progress does not put back the ones it took and failed to
+    /// write. It does not wait for that flush (the fence calls it while the
+    /// database stalls).
     pub(super) fn discard_writes(&self, id: &str) {
         let mut dirty = self.dirty.lock().unwrap();
         for row in dirty.values_mut() {
             row.fields.retain(|_, f| f.shard != id);
         }
         dirty.retain(|_, row| !row.fields.is_empty());
+        if let Some(ids) = self.discarded_mid_flush.lock().unwrap().as_mut() {
+            ids.insert(id.to_string());
+        }
     }
 
     /// Write the buffered fields `scope` names, each with the fence of the
@@ -594,6 +612,8 @@ impl WasmShardHost {
             HashMap::new();
         {
             let mut dirty = self.dirty.lock().unwrap();
+            // Shards discarded from here on: their fields are not put back.
+            *self.discarded_mid_flush.lock().unwrap() = Some(Default::default());
             for (key, row) in dirty.iter_mut() {
                 let names: Vec<String> = row
                     .fields
@@ -605,11 +625,16 @@ impl WasmShardHost {
                     let f = row.fields.remove(&name).expect("listed above");
                     let group = groups
                         .entry((key.clone(), f.shard, f.epoch))
-                        .or_insert_with(|| (serde_json::Map::new(), row.failures));
+                        .or_insert_with(|| (serde_json::Map::new(), 0));
+                    group.1 = group.1.max(f.failures);
                     group.0.insert(name, f.value);
                 }
             }
             dirty.retain(|_, row| !row.fields.is_empty());
+        }
+        #[cfg(test)]
+        if let Some(hook) = self.flush_hook.lock().unwrap().as_ref() {
+            hook();
         }
         let mut failed: Vec<(Group, serde_json::Map<String, serde_json::Value>, u32)> = Vec::new();
         for (((entity, id), shard, epoch), (set, failures)) in groups {
@@ -659,12 +684,19 @@ impl WasmShardHost {
                 }
             }
         }
-        let kept = failed.len();
-        if failed.is_empty() {
-            return 0;
-        }
         let mut dirty = self.dirty.lock().unwrap();
+        let discarded = self
+            .discarded_mid_flush
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_default();
+        let mut kept = 0;
         for ((key, shard, epoch), set, failures) in failed {
+            if discarded.contains(&shard) {
+                continue;
+            }
+            kept += 1;
             let row = dirty.entry(key).or_default();
             // Values buffered since the flush took these are newer.
             for (field, value) in set {
@@ -672,11 +704,18 @@ impl WasmShardHost {
                     value,
                     shard: shard.clone(),
                     epoch,
+                    failures,
                 });
             }
-            row.failures = row.failures.max(failures);
         }
         kept
+    }
+
+    /// Stop the periodic flush, for tests that flush by hand.
+    #[cfg(test)]
+    pub(super) fn manual_flush(&self) {
+        self.periodic_flush_off
+            .store(true, std::sync::atomic::Ordering::Release);
     }
 
     /// Rows with a field shard `shard` wrote waiting, for tests.
@@ -1523,6 +1562,7 @@ mod tests {
         let weak: Weak<dyn pylon_router::FnOps> =
             Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
         host.attach_data(Some(weak), writer(&rt));
+        host.manual_flush();
         let zone = format!("ended-{run}");
         let deadline = Instant::now() + Duration::from_secs(10);
         while host
@@ -1630,6 +1670,7 @@ mod tests {
         let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
         let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        host.manual_flush();
         let zone = format!("lapsed-{run}");
         host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
             .unwrap();
@@ -1677,6 +1718,7 @@ mod tests {
         let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
         let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        host.manual_flush();
         let zone = format!("swept-{run}");
         host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
             .unwrap();
@@ -1703,6 +1745,56 @@ mod tests {
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             0
         );
+    }
+
+    /// A held zone stopped by `stop` gets its last writes a few tries
+    /// before its placement is released: out of `owned`, no periodic
+    /// flush takes what is left.
+    #[test]
+    fn a_stop_retries_the_last_writes() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (rt, fns) = runtime();
+        let pool =
+            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let run = pylon_cluster::new_instance_id();
+        let kind = format!("stopped-{run}");
+        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
+        let me = format!("m-{run}");
+        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        host.manual_flush();
+        let zone = format!("stopped-{run}");
+        host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
+            .unwrap();
+        host.take_writes(
+            &zone,
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(99))]),
+            }],
+        );
+        host.flush_failures
+            .store(2, std::sync::atomic::Ordering::Release);
+        assert!(host.stop(&zone));
+        assert_eq!(
+            host.flush_failures
+                .load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+        assert_eq!(host.dirty_rows(&zone), 0);
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            99
+        );
+        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+        assert_eq!(dir.placement(&zone).unwrap(), None);
+        host.stop_all();
     }
 
     /// While an id is ending here, no hand-over and no orphan take-over
@@ -1834,6 +1926,7 @@ mod tests {
     fn a_shard_flush_keeps_a_field_that_failed_before() {
         let (rt, fns) = runtime();
         let host = joined(&fns, &rt, "w1");
+        host.manual_flush();
         host.take_writes(
             "w1",
             vec![Write {
@@ -1857,6 +1950,79 @@ mod tests {
         assert_eq!(
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             66
+        );
+    }
+
+    /// A shard discarded while a flush writes its fields does not get
+    /// them back when the write fails: the flush put them back after the
+    /// discard, and a later flush wrote them.
+    #[test]
+    fn a_discard_during_a_flush_drops_the_fields_it_took() {
+        let (rt, fns) = runtime();
+        let host = joined(&fns, &rt, "w1");
+        host.manual_flush();
+        host.take_writes(
+            "w1",
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(88))]),
+            }],
+        );
+        let weak = Arc::downgrade(&host);
+        *host.flush_hook.lock().unwrap() = Some(Box::new(move || {
+            if let Some(host) = weak.upgrade() {
+                host.discard_writes("w1");
+            }
+        }));
+        host.flush_failures
+            .store(1, std::sync::atomic::Ordering::Release);
+        assert_eq!(host.flush_writes(Flush::Held), 0);
+        *host.flush_hook.lock().unwrap() = None;
+        assert_eq!(host.dirty_rows("w1"), 0);
+        host.flush_writes(Flush::Held);
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            0
+        );
+    }
+
+    /// Failures count per field: one shard's failed last flushes do not
+    /// use up the attempts of another shard's field in the same row.
+    #[test]
+    fn failures_count_per_field() {
+        let (rt, fns) = runtime();
+        let host = joined(&fns, &rt, "w1");
+        host.manual_flush();
+        host.create("zone", "w2", &serde_json::json!({})).unwrap();
+        let set = |field: &str, n: i64| {
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([(field.to_string(), serde_json::json!(n))]),
+            }]
+        };
+        host.take_writes("w1", set("x", 1));
+        host.take_writes("w2", set("nextGrant", 9));
+        let fail = |n| {
+            host.flush_failures
+                .store(n, std::sync::atomic::Ordering::Release)
+        };
+        fail(WRITE_ATTEMPTS);
+        for _ in 0..WRITE_ATTEMPTS {
+            assert_eq!(host.flush_writes(Flush::Shard("w1")), 1);
+        }
+        // w1's fields go (the row keeps w2's). w2's field fails once: it
+        // is kept, not dropped under w1's count.
+        host.discard_writes("w1");
+        fail(1);
+        assert_eq!(host.flush_writes(Flush::Held), 1);
+        assert_eq!(host.dirty_rows("w2"), 1);
+        host.flush_writes(Flush::Held);
+        let row = rt.get_by_id("Character", &fns.character).unwrap().unwrap();
+        assert_eq!(
+            (row["x"].clone(), row["nextGrant"].clone()),
+            (0.into(), 9.into())
         );
     }
 

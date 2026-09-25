@@ -1608,6 +1608,9 @@ pub struct WasmShardHost {
     dirty: Mutex<data::Dirty>,
     /// One flush of `dirty` at a time.
     flush_lock: Mutex<()>,
+    /// Shards discarded while a flush runs (None between flushes): the
+    /// flush does not put back their fields. Locked after `dirty`.
+    discarded_mid_flush: Mutex<Option<std::collections::HashSet<String>>>,
     /// Shards that ended here (at a sweep or at shutdown) whose last writes
     /// and placement release are in progress: no shard starts, and no
     /// hand-over or take-over places one, under these ids meanwhile.
@@ -1616,6 +1619,12 @@ pub struct WasmShardHost {
     /// writer, for tests.
     #[cfg(test)]
     flush_failures: std::sync::atomic::AtomicU32,
+    /// Stops the periodic flush, for tests that flush by hand.
+    #[cfg(test)]
+    periodic_flush_off: std::sync::atomic::AtomicBool,
+    /// Runs in a flush after it takes its fields, before it writes them.
+    #[cfg(test)]
+    flush_hook: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1747,9 +1756,14 @@ impl WasmShardHost {
             calls_in_flight: Mutex::new(HashMap::new()),
             dirty: Mutex::new(HashMap::new()),
             flush_lock: Mutex::new(()),
+            discarded_mid_flush: Mutex::new(None),
             ending: Mutex::new(std::collections::HashSet::new()),
             #[cfg(test)]
             flush_failures: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            periodic_flush_off: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            flush_hook: Mutex::new(None),
             kinds: kinds
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
@@ -2139,6 +2153,9 @@ impl WasmShardHost {
             c.saved_at.lock().unwrap().remove(id);
             let held = c.owned.lock().unwrap().remove(id);
             if let Some(epoch) = held {
+                // stop_local tried once; out of `owned`, a periodic flush
+                // no longer takes what is left.
+                self.final_writes(id);
                 if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
                     tracing::warn!("[shard {id}] could not release its placement: {e}");
                 }
@@ -3125,8 +3142,21 @@ impl WasmShardHost {
     /// of it starts, and no hand-over or take-over places it here, until
     /// the release.
     fn end_placement(&self, c: &ClusterState, id: &str) {
-        // Its last writes, while the placement still says it is ours (the
-        // flush's fence reads the placement), tried a few times.
+        self.final_writes(id);
+        let _guard = self.create_lock.lock().unwrap();
+        // Any epoch of this machine: the lease can have lapsed and been
+        // renewed meanwhile.
+        if let Err(e) = c.dir.release_here(id, &c.me.id) {
+            tracing::warn!("[shard {id}] could not release its placement: {e}");
+        }
+        self.ending.lock().unwrap().remove(id);
+    }
+
+    /// Write a stopped shard's last fields before its placement goes,
+    /// while the placement still says it is ours (the flush's fence reads
+    /// the placement), tried a few times. Fields still unwritten are
+    /// dropped: a later run of the id must not write them.
+    fn final_writes(&self, id: &str) {
         for attempt in 0..data::FINAL_WRITE_ATTEMPTS {
             if self.flush_writes(data::Flush::Shard(id)) == 0 {
                 break;
@@ -3135,19 +3165,11 @@ impl WasmShardHost {
                 tracing::error!(
                     "[shard {id}] its last entity writes failed; they are lost with its placement"
                 );
-                // Gone: a later run of the id must not write them.
                 self.discard_writes(id);
             } else {
                 std::thread::sleep(Duration::from_millis(200));
             }
         }
-        let _guard = self.create_lock.lock().unwrap();
-        // Any epoch of this machine: the lease can have lapsed and been
-        // renewed meanwhile.
-        if let Err(e) = c.dir.release_here(id, &c.me.id) {
-            tracing::warn!("[shard {id}] could not release its placement: {e}");
-        }
-        self.ending.lock().unwrap().remove(id);
     }
 }
 
