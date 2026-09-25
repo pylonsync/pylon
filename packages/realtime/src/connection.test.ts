@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 
-import { connectShard } from "./connection";
+import { connectShard, ticketExpired } from "./connection";
 
 const sockets: FakeWebSocket[] = [];
 class FakeWebSocket {
@@ -214,5 +214,81 @@ test("a fixed ticket names the first shard and is not sent after a transfer", as
   second.close();
   await settle();
   expect(sockets[sockets.length - 1].protocols).toEqual(["ticket.for-east"]);
+  client.close();
+});
+
+/** A ticket shaped like the server's, expiring at `exp` (Unix seconds). */
+function ticketWithExp(exp: number): string {
+  const payload = btoa(JSON.stringify({ shard: "east", sid: "p1", exp }))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return `v1.${payload}.sig`;
+}
+
+test("ticketExpired reads the ticket's exp", () => {
+  const now = 1_000_000_000_000;
+  expect(ticketExpired(ticketWithExp(now / 1000 + 600), now)).toBe(false);
+  expect(ticketExpired(ticketWithExp(now / 1000 - 1), now)).toBe(true);
+  // Within the margin counts as expired.
+  expect(ticketExpired(ticketWithExp(now / 1000 + 2), now)).toBe(true);
+  expect(ticketExpired("not-a-ticket", now)).toBe(false);
+});
+
+test("an expired transfer ticket gives way to the ticket function", async () => {
+  const client = connectShard("west", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: (shard) => `own-${shard}`,
+  });
+  await settle();
+  const first = sockets[sockets.length - 1];
+  first.readyState = 1;
+  first.onopen?.();
+  const stale = ticketWithExp(Math.floor(Date.now() / 1000) - 60);
+  first.onmessage?.({ data: jsonFrame(4, 1, { shard: "east", ticket: stale }) });
+  first.close();
+  await settle();
+  expect(sockets[sockets.length - 1].protocols).toEqual(["ticket.own-east"]);
+  client.close();
+});
+
+test("an expired transfer ticket with a fixed ticket for another shard stops with an error", async () => {
+  const client = connectShard("west", { subscriberId: "p1", baseUrl: "h", ticket: "for-west" });
+  const errors: string[] = [];
+  client.onError((e) => errors.push(e.message));
+  await settle();
+  const first = sockets[sockets.length - 1];
+  first.readyState = 1;
+  first.onopen?.();
+  const stale = ticketWithExp(Math.floor(Date.now() / 1000) - 60);
+  first.onmessage?.({ data: jsonFrame(4, 1, { shard: "east", ticket: stale }) });
+  const before = sockets.length;
+  first.close();
+  await settle();
+  expect(sockets.length).toBe(before);
+  expect(errors).toEqual([
+    "the ticket for shard east expired before the client reconnected; pass a ticket function to get new ones",
+  ]);
+  client.close();
+});
+
+test("the same shard on another machine: reconnect at once, no transfer reported", async () => {
+  const client = connectShard("west", { subscriberId: "p1", baseUrl: "h", ticket: "for-west" });
+  const moves: string[] = [];
+  client.onTransfer((to) => moves.push(to));
+  await settle();
+  const first = sockets[sockets.length - 1];
+  first.readyState = 1;
+  first.onopen?.();
+  first.onmessage?.({ data: jsonFrame(4, 7, { shard: "west", ticket: "fresh-west" }) });
+  first.close();
+  await settle();
+  const second = sockets[sockets.length - 1];
+  expect(second.url).toContain("shard=west");
+  expect(second.protocols).toEqual(["ticket.fresh-west"]);
+  expect(delays[delays.length - 1]).toBe(0);
+  expect(moves).toEqual([]);
+  expect(client.shardId).toBe("west");
   client.close();
 });

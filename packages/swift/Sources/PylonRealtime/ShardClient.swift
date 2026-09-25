@@ -166,6 +166,8 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     /// The shard the client is connected (or connecting) to. It changes when
     /// the server moves the subscriber to another shard.
     public private(set) var shardId: String
+    /// The shard the client was created for (a fixed `ticket` names it).
+    private let initialShardId: String
     /// The ticket a transfer frame carried. Used until a frame arrives from
     /// the new shard (then `ticketProvider` takes over), and for good with a
     /// fixed `ticket`, which names the old shard.
@@ -206,6 +208,7 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         session: URLSession = .shared
     ) {
         self.shardId = shardId
+        self.initialShardId = shardId
         self.config = config
         self.session = session
         self.decoder = JSONDecoder()
@@ -294,7 +297,10 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
         if !protocols.isEmpty {
             req.setValue(protocols.joined(separator: ", "), forHTTPHeaderField: "Sec-WebSocket-Protocol")
         }
-        if let ticket = await nextTicket(), !ticket.isEmpty {
+        let ticket = await nextTicket()
+        // An expired transfer ticket with nothing to replace it stopped it.
+        guard running else { return }
+        if let ticket, !ticket.isEmpty {
             req.setValue(ticket, forHTTPHeaderField: "X-Pylon-Shard-Ticket")
         }
         let task = session.webSocketTask(with: req)
@@ -348,6 +354,20 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
     /// The ticket for the next connection: a transfer's, until the new
     /// shard has answered; else the provider's; else the configured one.
     func nextTicket() async -> String? {
+        // A transfer's ticket that expired before the client got through: a
+        // provider gives a new one; a fixed ticket still works for the shard
+        // it names.
+        if let ticket = transferTicket, Self.ticketExpired(ticket) {
+            transferTicket = nil
+            if config.ticketProvider == nil, shardId != initialShardId {
+                stateContinuation?.yield(
+                    .failed(
+                        "the ticket for shard \(shardId) expired before the client reconnected; set ticketProvider to get new ones"
+                    ))
+                running = false
+                return nil
+            }
+        }
         if let ticket = transferTicket {
             return ticket
         }
@@ -360,6 +380,25 @@ public actor ShardClient<State: Decodable & Sendable, Input: Encodable & Sendabl
             }
         }
         return config.ticket
+    }
+
+    /// True when a shard ticket (`v1.<payload>.<signature>`, the payload
+    /// base64url JSON with `exp` in Unix seconds) expires within `margin`
+    /// seconds. A ticket that does not parse counts as not expired: the
+    /// server decides.
+    public static func ticketExpired(_ ticket: String, now: Date = Date(), margin: TimeInterval = 5)
+        -> Bool
+    {
+        let parts = ticket.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return false }
+        var b64 = String(parts[1]).replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        while b64.count % 4 != 0 { b64 += "=" }
+        guard let data = Data(base64Encoded: b64),
+            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let exp = (json["exp"] as? NSNumber)?.doubleValue
+        else { return false }
+        return exp <= now.timeIntervalSince1970 + margin
     }
 
     func deriveURL() -> URL {

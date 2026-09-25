@@ -118,6 +118,25 @@ export interface ShardClient<TSnapshot = unknown, TInput = unknown> {
   readonly connected: boolean;
 }
 
+/**
+ * True when a shard ticket (`v1.<payload>.<signature>`, the payload
+ * base64url JSON with `exp` in Unix seconds) expires within `marginSecs`.
+ * A ticket that does not parse counts as not expired: the server decides.
+ */
+export function ticketExpired(ticket: string, nowMs = Date.now(), marginSecs = 5): boolean {
+  const payload = ticket.split(".")[1];
+  if (!payload) return false;
+  try {
+    const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const json = JSON.parse(atob(b64.padEnd(Math.ceil(b64.length / 4) * 4, "="))) as {
+      exp?: unknown;
+    };
+    return typeof json.exp === "number" && json.exp * 1000 <= nowMs + marginSecs * 1000;
+  } catch {
+    return false;
+  }
+}
+
 /** Input send times kept for the round-trip estimate. */
 const MAX_TIMED = 256;
 
@@ -214,11 +233,26 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
 
   const connect = () => {
     if (closed) return;
+    const source = options.ticket;
+    // A transfer's ticket that expired before the client got through: a
+    // ticket function gives a new one; a fixed ticket still works for the
+    // shard it names.
+    if (transferTicket !== null && ticketExpired(transferTicket)) {
+      transferTicket = null;
+      if (typeof source !== "function" && currentShard !== shardId) {
+        dispatchError(
+          new Error(
+            `the ticket for shard ${currentShard} expired before the client reconnected; pass a ticket function to get new ones`,
+          ),
+        );
+        closed = true;
+        return;
+      }
+    }
     if (transferTicket !== null) {
       open(transferTicket);
       return;
     }
-    const source = options.ticket;
     if (typeof source !== "function") {
       open(source);
       return;

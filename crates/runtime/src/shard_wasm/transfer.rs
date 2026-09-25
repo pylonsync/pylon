@@ -241,6 +241,15 @@ impl WasmShardHost {
         Some(Instance { epoch, serial })
     }
 
+    /// Running shard `id` with its run, read together: a stop (which takes
+    /// the create lock) cannot come between, so the run is this object's.
+    pub(super) fn current(&self, id: &str) -> Option<(Arc<Shard<WasmSim>>, Instance)> {
+        let _stable = self.create_lock.lock().unwrap();
+        let shard = self.registry.get(id).filter(|s| s.is_running())?;
+        let at = self.instance(id)?;
+        Some((shard, at))
+    }
+
     fn is_current(&self, id: &str, at: Instance) -> bool {
         self.instance(id) == Some(at)
     }
@@ -269,12 +278,12 @@ impl WasmShardHost {
                 "the source and the target are the same shard".into(),
             ));
         }
-        let Some(source) = self.registry.get(from).filter(|s| s.is_running()) else {
+        let Some((source, at)) = self.current(from) else {
+            if self.registry.get(from).is_some_and(|s| s.is_running()) {
+                return Err(TransferError::NotFound(from.to_string()));
+            }
             return self.transfer_elsewhere(from, subscriber, to, claims);
         };
-        let at = self
-            .instance(from)
-            .ok_or_else(|| TransferError::NotFound(from.to_string()))?;
         // The target must exist before the player leaves the source.
         if self.registry.get(to).filter(|s| s.is_running()).is_none()
             && !matches!(
@@ -534,12 +543,7 @@ impl WasmShardHost {
     /// and a copy an earlier attempt left in this run is not added twice.
     pub(super) fn accept(&self, t: &Transfer) -> Result<(), TransferError> {
         let not_found = || TransferError::NotFound(t.to_shard.clone());
-        let target = self
-            .registry
-            .get(&t.to_shard)
-            .filter(|s| s.is_running())
-            .ok_or_else(not_found)?;
-        let at = self.instance(&t.to_shard).ok_or_else(not_found)?;
+        let (target, at) = self.current(&t.to_shard).ok_or_else(not_found)?;
         if !self.kind_transfers(&t.to_shard) {
             return Err(TransferError::Unsupported(format!(
                 "shard \"{}\"'s module does not accept players",
@@ -841,10 +845,7 @@ impl WasmShardHost {
             if self.live.lock().unwrap().contains(&t.id) || self.is_unsettled(&t.id) {
                 continue;
             }
-            let (Some(source), Some(at)) = (
-                self.registry.get(&t.from_shard).filter(|s| s.is_running()),
-                self.instance(&t.from_shard),
-            ) else {
+            let Some((source, at)) = self.current(&t.from_shard) else {
                 // Its source stopped or moved: whoever holds it next
                 // finishes the move.
                 if let Some(old) = registered {
@@ -1100,11 +1101,15 @@ impl WasmShardHost {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
-                    self.unsettled.lock().unwrap().remove(&key);
                     match status {
                         // The row exists: finish the move from it.
-                        Some(_) => self.wait(&t, u.at),
-                        // It never landed: the player goes back.
+                        Some(_) => {
+                            self.unsettled.lock().unwrap().remove(&key);
+                            self.wait(&t, u.at);
+                        }
+                        // It never landed: the player goes back. The step
+                        // stays unsettled (no save, no other move's step
+                        // on the source) until the player is back or kept.
                         None => {
                             let auth = back_auth(&t);
                             match source.with_state(|sim| {
@@ -1113,6 +1118,7 @@ impl WasmShardHost {
                                 Ok(()) => self.returned(&source, u.at, &sid, &t),
                                 Err(e) => self.strand(&t, u.at, &e),
                             }
+                            self.unsettled.lock().unwrap().remove(&key);
                         }
                     }
                 }
@@ -1304,7 +1310,15 @@ impl WasmShardHost {
     /// whose source no longer runs is dropped, with an error log: nothing is
     /// left to return it to.
     pub(super) fn retry_stranded(&self) {
-        let kept = std::mem::take(&mut *self.stranded.lock().unwrap());
+        // Each player stays in the list (a barrier to saves and to other
+        // moves' steps on its source) until it is back, or dropped.
+        let kept: Vec<(Transfer, Instance)> = self.stranded.lock().unwrap().clone();
+        let settle = |t: &Transfer, at: Instance| {
+            self.stranded
+                .lock()
+                .unwrap()
+                .retain(|(s, a)| !(s.id == t.id && *a == at));
+        };
         for (t, at) in kept {
             // In a cluster a stranded player blocked the source's saves, so
             // a later run started from a save that still has it.
@@ -1314,6 +1328,7 @@ impl WasmShardHost {
                     t.from_shard,
                     t.subscriber
                 );
+                settle(&t, at);
                 self.end_transfer(&t, at);
                 continue;
             }
@@ -1323,6 +1338,7 @@ impl WasmShardHost {
                     t.from_shard,
                     t.subscriber
                 );
+                settle(&t, at);
                 self.end_transfer(&t, at);
                 continue;
             };
@@ -1335,8 +1351,10 @@ impl WasmShardHost {
                         t.subscriber
                     );
                     self.returned(&source, at, &SubscriberId::new(t.subscriber.as_str()), &t);
+                    settle(&t, at);
                 }
-                Err(_) => self.stranded.lock().unwrap().push((t, at)),
+                // Still refused: it stays in the list.
+                Err(_) => {}
             }
         }
     }

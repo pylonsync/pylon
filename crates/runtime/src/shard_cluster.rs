@@ -776,7 +776,9 @@ impl PgShardDirectory {
     }
 
     /// Moves out of `shard` that ended in the target within the last
-    /// `within_ms`, the latest per subscriber, with each one's age in ms.
+    /// `within_ms`, the latest per subscriber, with each one's age in ms. A
+    /// move the subscriber came back from (a later move into `shard` that
+    /// ended there) is left out.
     pub fn recent_moves_from(
         &self,
         shard: &str,
@@ -787,9 +789,13 @@ impl PgShardDirectory {
                 "SELECT DISTINCT ON (subscriber)
                         transfer_id, subscriber, from_shard, to_shard, state, auth, status,
                         (extract(epoch from clock_timestamp()) * 1000)::bigint - created_at
-                 FROM _pylon_shard_transfers
+                 FROM _pylon_shard_transfers t
                  WHERE from_shard = $1 AND status = 'in'
                    AND created_at > (extract(epoch from clock_timestamp()) * 1000)::bigint - $2
+                   AND NOT EXISTS (
+                     SELECT 1 FROM _pylon_shard_transfers back
+                     WHERE back.subscriber = t.subscriber AND back.to_shard = $1
+                       AND back.status = 'in' AND back.created_at > t.created_at)
                  ORDER BY subscriber, created_at DESC",
                 &[&shard, &within_ms],
             )?;
@@ -1494,6 +1500,41 @@ pub(crate) mod tests {
         }
     }
 
+    /// A -> B, then B -> A: A's restart must not send the subscriber to B.
+    #[test]
+    fn a_move_the_subscriber_came_back_from_is_not_recent() {
+        let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(dir) = test_dir() else { return };
+        let run = pylon_cluster::new_instance_id();
+        let (a, b, sid) = (format!("a-{run}"), format!("b-{run}"), format!("p-{run}"));
+        let row = |id: &str, from: &str, to: &str, ago_ms: i64| {
+            dir.pool_for_tests()
+                .with_client(|c| {
+                    c.execute(
+                        "INSERT INTO _pylon_shard_transfers
+                            (transfer_id, subscriber, from_shard, to_shard, state, auth, status, created_at)
+                         VALUES ($1, $2, $3, $4, ''::bytea, '{}'::jsonb, 'in',
+                                 (extract(epoch from clock_timestamp()) * 1000)::bigint - $5)",
+                        &[&id, &sid, &from, &to, &ago_ms],
+                    )?;
+                    Ok::<(), postgres::Error>(())
+                })
+                .unwrap();
+        };
+        row(&format!("t1-{run}"), &a, &b, 60_000);
+        let moves = dir.recent_moves_from(&a, 600_000).unwrap();
+        assert_eq!(moves.len(), 1, "A -> B is recent");
+        row(&format!("t2-{run}"), &b, &a, 30_000);
+        assert!(dir.recent_moves_from(&a, 600_000).unwrap().is_empty());
+        // Out again later: that move is the recent one.
+        row(&format!("t3-{run}"), &a, &b, 10_000);
+        let moves = dir.recent_moves_from(&a, 600_000).unwrap();
+        assert_eq!(
+            moves.iter().map(|(t, _)| t.id.clone()).collect::<Vec<_>>(),
+            [format!("t3-{run}")]
+        );
+    }
+
     #[test]
     fn the_directory_claims_moves_fences_fails_and_forgets() {
         let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1503,6 +1544,8 @@ pub(crate) mod tests {
         let run = pylon_cluster::new_instance_id();
         let (a, b) = (format!("a-{run}"), format!("b-{run}"));
         let shard = format!("s-{run}");
+        // A kind of its own: the cluster-wide limit counts only this run.
+        let kind = format!("arena-{run}");
         assert!(dir.heartbeat(&me(&a), 7).unwrap());
         assert!(dir.heartbeat(&me(&b), 1).unwrap());
         let orphan = |dir: &PgShardDirectory| {
@@ -1512,7 +1555,7 @@ pub(crate) mod tests {
                 .find(|o| o.shard_id == shard)
         };
 
-        let p = placement(&shard, "arena", &b);
+        let p = placement(&shard, &kind, &b);
         assert_eq!(dir.claim(&p, 10).unwrap(), Claim::Claimed);
         let other = Placement {
             machine_id: a.clone(),
@@ -1596,7 +1639,8 @@ pub(crate) mod tests {
         let (a, b) = (format!("a-{run}"), format!("b-{run}"));
         let shard = format!("s-{run}");
         assert!(dir.heartbeat(&me(&a), 1).unwrap());
-        let p = placement(&shard, "arena", &b);
+        // A kind of its own: the cluster-wide limit counts only this run.
+        let p = placement(&shard, &format!("arena-{run}"), &b);
         assert_eq!(dir.claim(&p, 10).unwrap(), Claim::Claimed);
         // B never heartbeat: its placement is an orphan.
 

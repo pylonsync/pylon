@@ -1417,8 +1417,7 @@ impl<S: SimState> Shard<S> {
         let tick_number = *tick_no_guard;
         drop(tick_no_guard);
 
-        let drained = self.drain_inputs();
-        let had_inputs = !drained.is_empty();
+        let mut had_inputs = false;
         // Clone the list so delivery below runs without the subscribers
         // lock: a transport can add or remove subscribers meanwhile.
         let subs: Vec<Arc<Subscriber<S::Snapshot>>> = self.subscribers.lock().unwrap().clone();
@@ -1433,6 +1432,11 @@ impl<S: SimState> Shard<S> {
             if !self.is_running() || self.paused.load(Ordering::Acquire) {
                 return;
             }
+            // Inputs are taken under the state lock: a hand-off (which drops
+            // a subscriber's queued inputs, then takes its entity out under
+            // this lock) never races an input this tick took before it.
+            let drained = self.drain_inputs();
+            had_inputs = !drained.is_empty();
             let started = Instant::now();
             // Call results and messages first: they arrived before this
             // tick's inputs were applied. Results are few (the host bounds
@@ -1719,6 +1723,54 @@ mod tests {
         fn snapshot(&self) -> u64 {
             self.ticks.load(Ordering::SeqCst)
         }
+    }
+
+    /// A set of players; "join" (1) adds the subscriber, "leave" is the
+    /// hand-off taking it out.
+    #[derive(Default)]
+    struct Roster {
+        players: Mutex<std::collections::BTreeSet<String>>,
+    }
+
+    impl SimState for Roster {
+        type Input = i64;
+        type Snapshot = u64;
+        type Error = String;
+
+        fn apply_input(&mut self, id: &SubscriberId, _: i64, _: Instant) -> Result<(), String> {
+            self.players.lock().unwrap().insert(id.as_str().to_string());
+            Ok(())
+        }
+        fn tick(&mut self, _dt: Duration) {}
+        fn snapshot(&self) -> u64 {
+            self.players.lock().unwrap().len() as u64
+        }
+    }
+
+    /// A tick waiting for the state while a hand-off takes the player out
+    /// does not apply an input queued before the hand-off.
+    #[test]
+    fn a_tick_waiting_for_the_state_does_not_bring_back_a_moved_player() {
+        let shard = Arc::new(Shard::new(
+            "west",
+            Roster::default(),
+            ShardConfig::default(),
+        ));
+        let p1 = SubscriberId::new("p1");
+        shard.push_input(p1.clone(), 1, None).unwrap();
+        shard
+            .with_state(|roster| {
+                let ticking = Arc::clone(&shard);
+                let tick = std::thread::spawn(move || ticking.run_tick());
+                // The tick is waiting for the state lock this closure holds.
+                std::thread::sleep(Duration::from_millis(100));
+                shard.begin_hand_off(&p1);
+                roster.players.lock().unwrap().remove("p1");
+                tick
+            })
+            .join()
+            .unwrap_or(());
+        shard.with_state(|roster| assert!(roster.players.lock().unwrap().is_empty()));
     }
 
     #[test]

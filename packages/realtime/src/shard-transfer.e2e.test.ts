@@ -140,9 +140,23 @@ test.skipIf(!hostA || !hostB)(
       () => (rejections.some((r) => r.message.includes("cooling down")) ? true : undefined),
       10_000,
     );
-    // West no longer has the player.
-    const westNow = await call<Joined>(hostB, await guest(hostB), "joinZone", { zone: west });
-    expect(westNow.machine).toBe("a");
+    // West no longer has the player: an observer there sees no entity for
+    // it, in the running zone.
+    const observerToken = await guest(hostA);
+    const observer = await call<Joined>(hostA, observerToken, "joinZone", { zone: west });
+    expect(observer.machine).toBe("a");
+    let westView: Zone | undefined;
+    const watcher = connectShard<Zone, unknown>(west, {
+      subscriberId: observer.subscriberId,
+      baseUrl: hostA,
+      ticket: async (shard) =>
+        (await call<Joined>(hostA, observerToken, "joinZone", { zone: shard })).ticket,
+    });
+    watcher.onSnapshot((snap) => (westView = snap));
+    await waitFor("a snapshot of west", () => westView, 10_000);
+    expect(westView!.zone).toBe(west);
+    expect(westView!.players[me]).toBeUndefined();
+    watcher.close();
     client.close();
   },
   60_000,
