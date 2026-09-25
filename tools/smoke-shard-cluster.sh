@@ -239,7 +239,8 @@ up "$PORT_A"
 wait_log a-restarted.log "\[shard replay-check\] started (arena, from saved state)" 30
 
 echo "→ 5. deploy: d gets SIGTERM with players on it; its shards move with them"
-start d "$PORT_D" PYLON_REPLICA_ID=d
+# d saves shards only when it stops: the hand-over's final save carries them.
+start d "$PORT_D" PYLON_REPLICA_ID=d PYLON_SHARD_SAVE_SECS=3600
 PID_D=$PID
 up "$PORT_D"
 sleep 3

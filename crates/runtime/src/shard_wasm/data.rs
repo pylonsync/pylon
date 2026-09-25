@@ -558,17 +558,17 @@ impl WasmShardHost {
     /// one. Fields that fail with a store error are kept (under newer
     /// values) for [`WRITE_ATTEMPTS`] flushes; ones refused (missing row,
     /// plugin, validation, a shard no longer held) are dropped with a log
-    /// line.
-    pub(super) fn flush_writes(&self, scope: Flush<'_>) {
+    /// line. Returns the number of field groups kept after a failure.
+    pub(super) fn flush_writes(&self, scope: Flush<'_>) -> usize {
         let Some(writer) = self.writer.get() else {
-            return;
+            return 0;
         };
         let _one = self.flush_lock.lock().unwrap();
         let machine = self.cluster.get().map(|c| c.me.id.clone());
         let held: Option<HashMap<String, i64>> = match (&scope, self.cluster.get()) {
             (Flush::Held, Some(c)) => {
                 if c.current_epoch().is_none() {
-                    return;
+                    return 0;
                 }
                 Some(c.owned.lock().unwrap().clone())
             }
@@ -635,8 +635,9 @@ impl WasmShardHost {
                 }
             }
         }
+        let kept = failed.len();
         if failed.is_empty() {
-            return;
+            return 0;
         }
         let mut dirty = self.dirty.lock().unwrap();
         for ((key, shard, epoch), set, failures) in failed {
@@ -651,6 +652,7 @@ impl WasmShardHost {
             }
             row.failures = row.failures.max(failures);
         }
+        kept
     }
 
     /// Rows with a field shard `shard` wrote waiting, for tests.

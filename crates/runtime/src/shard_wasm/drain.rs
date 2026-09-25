@@ -26,11 +26,12 @@ use pylon_realtime::Shard;
 use super::{ClusterState, ShardInfo, WasmShardHost, WasmSim};
 use crate::shard_cluster::{self, Machine, Placement, RemoteOp, RemoteReply};
 
+/// How long a ticket in a deploy's transfer frame is good for.
+const TICKET_TTL_SECS: u64 = 600;
+
 /// The drain time when `PYLON_SHARD_DRAIN_SECS` is unset. A platform's
 /// kill timeout must be longer (Fly: `kill_timeout` in fly.toml).
 pub(super) const DRAIN_SECS: u64 = 20;
-/// How long a new connection's ticket is good for.
-const TICKET_TTL_SECS: u64 = 600;
 
 pub(super) fn drain_time() -> Duration {
     Duration::from_secs(
@@ -42,9 +43,10 @@ pub(super) fn drain_time() -> Duration {
 }
 
 impl WasmShardHost {
-    /// Hand shard `id`, held here under `epoch`, to another machine. True
-    /// when that machine runs it now and its connections were told; false
-    /// leaves it paused and placed here (the caller saves and stops it).
+    /// Hand shard `id`, held here under `epoch`, paused and saved, to
+    /// another machine, within `deadline`. True when that machine runs it
+    /// now and its connections were told; false leaves it placed here (the
+    /// caller saves it again and stops it).
     pub(super) fn hand_over(
         &self,
         c: &ClusterState,
@@ -60,29 +62,28 @@ impl WasmShardHost {
                 return false;
             }
         };
-        if targets.is_empty() {
-            return false;
-        }
-        shard.pause();
-        self.flush_writes(super::data::Flush::Shard(id));
-        if !self.final_save(c, id, epoch, shard) {
-            return false;
-        }
         let op = RemoteOp::HandOver {
             id: id.to_string(),
             from: c.me.id.clone(),
             epoch,
         };
         for target in targets {
-            if Instant::now() >= deadline {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
                 return false;
-            }
+            };
             let Some(address) = target.address.as_deref() else {
                 continue;
             };
-            match shard_cluster::call(&target.id, address, &op) {
+            // Bounded by the drain time left, so a target that does not
+            // answer cannot hold the shutdown past it.
+            let agent = ureq::AgentBuilder::new()
+                .timeout_connect(left.min(Duration::from_secs(3)))
+                .timeout(left.min(Duration::from_secs(10)))
+                .redirects(0)
+                .build();
+            match shard_cluster::call_with(&agent, &target.id, address, &op) {
                 Ok(RemoteReply::Ok(_)) => {
-                    self.tell_moved(id, shard);
+                    self.tell_moved(c, id, shard);
                     tracing::info!("[shard {id}] handed over to machine {}", target.id);
                     return true;
                 }
@@ -96,7 +97,7 @@ impl WasmShardHost {
             // then the connections go to the machine that has it.
             match c.dir.placement(id) {
                 Ok(Some(p)) if p.machine_id != c.me.id || p.epoch != epoch => {
-                    self.tell_moved(id, shard);
+                    self.tell_moved(c, id, shard);
                     return true;
                 }
                 _ => {}
@@ -105,9 +106,21 @@ impl WasmShardHost {
         false
     }
 
-    /// Save a paused shard's state under `epoch`. True when saved (or it
-    /// keeps no state).
-    fn final_save(&self, c: &ClusterState, id: &str, epoch: i64, shard: &Shard<WasmSim>) -> bool {
+    /// Pause shard `id`, write its buffered entity writes, and save its
+    /// state under `epoch`. True when all of that went through: only then
+    /// may another machine take it.
+    fn pause_and_save(
+        &self,
+        c: &ClusterState,
+        id: &str,
+        epoch: i64,
+        shard: &Shard<WasmSim>,
+    ) -> bool {
+        shard.pause();
+        if self.flush_writes(super::data::Flush::Shard(id)) > 0 {
+            tracing::warn!("[shard {id}] not handed over: its entity writes failed");
+            return false;
+        }
         if !self.saves_state(id) {
             return true;
         }
@@ -134,25 +147,70 @@ impl WasmShardHost {
         }
     }
 
-    /// Send each connection of shard `id` a transfer frame for the same
-    /// shard, with a new ticket for its user and claims, and close it.
-    fn tell_moved(&self, id: &str, shard: &Shard<WasmSim>) {
+    /// Tell each connection of shard `id` where to go, and close it: a
+    /// subscriber that moved to another shard (a move that finished while
+    /// this machine shut down) to that shard, with a ticket for it; one
+    /// whose move is still open, nowhere (its connection closes when the
+    /// shard stops, and the machine that takes the shard finishes the
+    /// move); every other, to the same shard, with a new ticket for its
+    /// user and claims.
+    fn tell_moved(&self, c: &ClusterState, id: &str, shard: &Shard<WasmSim>) {
+        let finished: std::collections::HashMap<String, shard_cluster::Transfer> =
+            match c.dir.recent_moves_from(id, TICKET_TTL_SECS as i64 * 1000) {
+                Ok(moves) => moves
+                    .into_iter()
+                    .map(|(t, _)| (t.subscriber.clone(), t))
+                    .collect(),
+                // Unsure: no notice at all; the clients reconnect on their own.
+                Err(e) => {
+                    tracing::warn!("[shard {id}] its connections are closed with no notice: {e}");
+                    return;
+                }
+            };
+        let open: std::collections::HashSet<String> = match c.dir.open_transfers_from(id) {
+            Ok(rows) => rows.into_iter().map(|t| t.subscriber).collect(),
+            Err(e) => {
+                tracing::warn!("[shard {id}] its connections are closed with no notice: {e}");
+                return;
+            }
+        };
         for (sid, _) in shard.subscriber_ids() {
-            let auth = shard.subscriber_auth(&sid).unwrap_or_default();
-            let claims = auth
-                .ticket
-                .as_ref()
-                .map(|t| t.claims.clone())
-                .unwrap_or(serde_json::Value::Null);
-            let notice = pylon_realtime::wire::TransferNotice {
-                shard: id.to_string(),
-                ticket: crate::shard_tickets::mint(
-                    id,
-                    sid.as_str(),
-                    auth.user_id.clone(),
-                    claims,
-                    Some(TICKET_TTL_SECS),
-                ),
+            let moving_here = self
+                .transferring
+                .lock()
+                .unwrap()
+                .contains_key(&(id.to_string(), sid.as_str().to_string()));
+            if open.contains(sid.as_str()) || moving_here {
+                continue;
+            }
+            let notice = match finished.get(sid.as_str()) {
+                Some(t) => {
+                    let to = self.ticket_for(t);
+                    pylon_realtime::wire::TransferNotice {
+                        shard: to.shard,
+                        ticket: to.ticket,
+                    }
+                }
+                None => {
+                    let auth = shard.subscriber_auth(&sid).unwrap_or_default();
+                    let ticket = auth.ticket.as_ref();
+                    pylon_realtime::wire::TransferNotice {
+                        shard: id.to_string(),
+                        ticket: crate::shard_tickets::mint(
+                            id,
+                            sid.as_str(),
+                            // The ticket's user first: a client with a
+                            // ticket and no session has only that.
+                            ticket
+                                .and_then(|t| t.user_id.clone())
+                                .or_else(|| auth.user_id.clone()),
+                            ticket
+                                .map(|t| t.claims.clone())
+                                .unwrap_or(serde_json::Value::Null),
+                            Some(TICKET_TTL_SECS),
+                        ),
+                    }
+                }
             };
             shard.hand_off(&sid, &notice, Duration::ZERO);
         }
@@ -217,7 +275,9 @@ impl WasmShardHost {
     }
 
     /// Hand every shard in `held` to another machine, within the drain
-    /// time. The ones left over are returned, paused or not.
+    /// time. First every shard is paused and saved (a kill during the
+    /// hand-overs loses no state); then each goes over the network. The
+    /// ones left over are returned.
     pub(super) fn drain(
         &self,
         c: &ClusterState,
@@ -230,11 +290,16 @@ impl WasmShardHost {
         let deadline = Instant::now() + time;
         // Others stop choosing this machine for new shards and hand-overs.
         self.heartbeat();
+        let ready: Vec<bool> = held
+            .iter()
+            .map(|(id, epoch, shard, _)| self.pause_and_save(c, id, *epoch, shard))
+            .collect();
         let mut left = Vec::new();
-        for (id, epoch, shard, saves) in held {
+        for ((id, epoch, shard, saves), ready) in held.into_iter().zip(ready) {
             // A shard with no saved state starts from `init` there; its
             // clients still reconnect at once.
-            if Instant::now() < deadline && self.hand_over(c, &id, epoch, &shard, deadline) {
+            if ready && Instant::now() < deadline && self.hand_over(c, &id, epoch, &shard, deadline)
+            {
                 shard.stop_and_wait();
                 self.stop_local(&id);
                 continue;

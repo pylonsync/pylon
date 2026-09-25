@@ -1281,7 +1281,7 @@ impl WasmShardHost {
     }
 
     /// A ticket for the target, for the user the source knew.
-    fn ticket_for(&self, t: &Transfer) -> Transferred {
+    pub(super) fn ticket_for(&self, t: &Transfer) -> Transferred {
         let auth: TicketAuth = serde_json::from_value(t.auth.clone()).unwrap_or_default();
         Transferred {
             shard: t.to_shard.clone(),

@@ -6,7 +6,8 @@
 //
 // Runs only when PYLON_SHARD_DRAIN_E2E is "<host:port of A>,<host:port of
 // D>" and PYLON_SHARD_DRAIN_PID is D's pid (tools/smoke-shard-cluster.sh
-// sets both). Machine D has PYLON_REPLICA_ID d.
+// sets both). Machine D has PYLON_REPLICA_ID d and saves shards only when
+// it stops (PYLON_SHARD_SAVE_SECS=3600).
 
 import { expect, test } from "bun:test";
 
@@ -76,6 +77,8 @@ test.skipIf(!hostA || !hostD || !pidD)(
     });
     client.onSnapshot((s) => (latest = s));
     client.onOpen(() => (opens += 1));
+    // A snapshot from before a reconnect says nothing about the new one.
+    client.onClose(() => (latest = undefined));
     client.onError((e) => errors.push(e));
     client.onTransfer((to) => transfers.push(to));
     const mine = () => latest?.players[me];
@@ -91,8 +94,8 @@ test.skipIf(!hostA || !hostD || !pidD)(
       () => (mine()?.hp === 70 && mine()?.x === 3 && mine()?.buffs.length ? true : undefined),
       10_000,
     );
-    // A save before the shutdown too, so the final save is what carries it.
-    await new Promise((r) => setTimeout(r, 1500));
+    // D saves only at shutdown (PYLON_SHARD_SAVE_SECS is an hour there):
+    // the final save is what carries this state.
 
     const openedBefore = opens;
     const killedAt = Date.now();
