@@ -619,7 +619,25 @@ impl WasmShardHost {
                 _ => None,
             };
             let fields = serde_json::Value::Object(set.clone());
-            match writer.update_fenced(&entity, &id, &fields, fence) {
+            #[cfg(test)]
+            let injected = self
+                .flush_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |n| n.checked_sub(1),
+                )
+                .is_ok();
+            #[cfg(not(test))]
+            let injected = false;
+            let result = if injected {
+                Err(crate::entity_writer::WriteError::Store(
+                    "failed for a test".into(),
+                ))
+            } else {
+                writer.update_fenced(&entity, &id, &fields, fence)
+            };
+            match result {
                 Ok(()) => {}
                 Err(crate::entity_writer::WriteError::Refused(why)) => {
                     tracing::warn!("[shard {shard}] write to {entity} {id} refused: {why}");
@@ -1521,6 +1539,9 @@ mod tests {
         );
         // It ends (as an idle stop does); shutdown comes before the sweep.
         host.registry.get(&zone).unwrap().stop();
+        // The first two tries fail; the last writes still go out.
+        host.flush_failures
+            .store(2, std::sync::atomic::Ordering::Release);
         host.stop_all();
         let dir = crate::shard_cluster::PgShardDirectory::open(pool).unwrap();
         assert_eq!(dir.placement(&zone).unwrap(), None);
@@ -1528,6 +1549,157 @@ mod tests {
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             44
         );
+    }
+
+    /// Deletes a test kind's placements when the test ends.
+    struct ForgetKind(Arc<pylon_storage::pg_datastore::PgPool>, String);
+
+    impl Drop for ForgetKind {
+        fn drop(&mut self) {
+            let _ = self.0.with_client(|c| {
+                c.execute(
+                    "DELETE FROM _pylon_shard_placements WHERE kind = $1",
+                    &[&self.1],
+                )
+            });
+        }
+    }
+
+    /// A zone host in a cluster of one machine, `me`, with its lease.
+    fn cluster_host(
+        pool: &Arc<pylon_storage::pg_datastore::PgPool>,
+        rt: &Arc<crate::Runtime>,
+        fns: &Arc<Fns>,
+        kind: &str,
+        me: &str,
+    ) -> Arc<WasmShardHost> {
+        let host = WasmShardHost::new(vec![WasmShardKind::compile(
+            kind,
+            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
+            ShardConfig::default(),
+            WasmLimits::default(),
+        )
+        .unwrap()]);
+        host.attach_cluster(
+            crate::shard_cluster::PgShardDirectory::open(Arc::clone(pool)).unwrap(),
+            crate::shard_cluster::MachineConfig {
+                id: me.to_string(),
+                address: None,
+                capacity: 10,
+                fly_instance: None,
+            },
+        );
+        let weak: Weak<dyn pylon_router::FnOps> =
+            Arc::downgrade(&(Arc::clone(fns) as Arc<dyn pylon_router::FnOps>));
+        host.attach_data(Some(weak), writer(rt));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host.cluster.get().unwrap().current_epoch().is_none() {
+            assert!(Instant::now() < deadline, "no lease");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        host
+    }
+
+    /// A held zone that stopped because the lease lapsed did not end: at
+    /// shutdown it keeps its placement (and saved state) for the machine
+    /// that takes it over, and its buffered writes are dropped.
+    #[test]
+    fn shutdown_keeps_a_shard_whose_lease_lapsed() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (rt, fns) = runtime();
+        let pool =
+            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let run = pylon_cluster::new_instance_id();
+        let kind = format!("lapsed-{run}");
+        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
+        let me = format!("m-{run}");
+        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        let zone = format!("lapsed-{run}");
+        host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
+            .unwrap();
+        host.take_writes(
+            &zone,
+            vec![Write {
+                entity: "Character".into(),
+                id: fns.character.clone(),
+                set: serde_json::Map::from_iter([("x".to_string(), serde_json::json!(55))]),
+            }],
+        );
+        // It stops as a guest call refused after the lease lapsed does.
+        let shard = host.registry.get(&zone).unwrap();
+        shard.with_state(|sim| {
+            sim.inner.borrow_mut().failed = Some(crate::shard_wasm::LEASE_LAPSED.to_string())
+        });
+        shard.stop();
+        host.stop_all();
+        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+        let placed = dir.placement(&zone).unwrap().expect("the placement stays");
+        assert_eq!(placed.machine_id, me);
+        assert_eq!(
+            rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
+            0
+        );
+    }
+
+    /// While an id is ending here, no hand-over and no orphan take-over
+    /// places it on this machine: the release that ends it deletes any
+    /// placement of the id here.
+    #[test]
+    fn an_ending_id_is_not_placed_here() {
+        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+            eprintln!("skipping: PYLON_TEST_PG_URL not set");
+            return;
+        };
+        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (rt, fns) = runtime();
+        let pool =
+            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let run = pylon_cluster::new_instance_id();
+        let kind = format!("reserved-{run}");
+        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
+        let me = format!("m-{run}");
+        let other = format!("gone-{run}");
+        let handed = format!("handed-{run}");
+        let orphan = format!("orphan-{run}");
+        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        // Reserved before the placements exist, so the background round
+        // never sees them unreserved.
+        host.ending
+            .lock()
+            .unwrap()
+            .extend([handed.clone(), orphan.clone()]);
+        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+        for id in [&handed, &orphan] {
+            let p = crate::shard_cluster::Placement {
+                shard_id: id.clone(),
+                kind: kind.clone(),
+                params: serde_json::json!({}),
+                machine_id: other.clone(),
+                pinned: false,
+                failed: None,
+                epoch: 7,
+            };
+            dir.claim(&p, 100).unwrap();
+        }
+        match host.accept_hand_over(&handed, &other, 7) {
+            Err((code, _)) => assert_eq!(code, "SHARD_UNAVAILABLE"),
+            Ok(_) => panic!("a hand-over placed an ending id here"),
+        }
+        // The other machine is not live, so both are orphans homed here.
+        host.cluster_round();
+        for id in [&handed, &orphan] {
+            let placed = dir.placement(id).unwrap().unwrap();
+            assert_eq!(placed.machine_id, other, "{id} moved here while ending");
+        }
+        host.stop_all();
     }
 
     #[test]

@@ -1608,9 +1608,14 @@ pub struct WasmShardHost {
     dirty: Mutex<data::Dirty>,
     /// One flush of `dirty` at a time.
     flush_lock: Mutex<()>,
-    /// Shards the sweep ended whose last writes and placement release are
-    /// in progress: no shard starts under these ids meanwhile.
+    /// Shards that ended here (at a sweep or at shutdown) whose last writes
+    /// and placement release are in progress: no shard starts, and no
+    /// hand-over or take-over places one, under these ids meanwhile.
     ending: Mutex<std::collections::HashSet<String>>,
+    /// Entity writes to fail with a store error before any goes to the
+    /// writer, for tests.
+    #[cfg(test)]
+    flush_failures: std::sync::atomic::AtomicU32,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1743,6 +1748,8 @@ impl WasmShardHost {
             dirty: Mutex::new(HashMap::new()),
             flush_lock: Mutex::new(()),
             ending: Mutex::new(std::collections::HashSet::new()),
+            #[cfg(test)]
+            flush_failures: std::sync::atomic::AtomicU32::new(0),
             kinds: kinds
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
@@ -2343,17 +2350,27 @@ impl WasmShardHost {
                 })
                 .collect()
         };
-        // A held shard that ended (finished, idle, failed) before the sweep
-        // removed it is not handed over or saved to run again: its last
-        // writes go out and its placement is released, as the sweep does.
-        let (held, ended): (Vec<_>, Vec<_>) = held
+        // A held shard that stopped before the sweep removed it is not
+        // handed over or saved to run again. One that ended here gets its
+        // last writes and its placement released, as the sweep does. One
+        // that stopped because the lease lapsed keeps its placement (and
+        // its saved state) for the machine that takes it over; its writes
+        // are not this machine's to make.
+        let (held, stopped): (Vec<_>, Vec<_>) = held
             .into_iter()
             .partition(|(_, _, shard, _)| shard.is_running());
-        for (id, _, _, _) in ended {
-            self.flush_writes(data::Flush::Shard(&id));
-            if let Err(e) = c.dir.release_here(&id, &c.me.id) {
-                tracing::warn!("[shard {id}] could not release its placement: {e}");
+        let mut ended = Vec::new();
+        for (id, epoch, shard, _) in stopped {
+            if Self::ended_here(c, &shard, epoch) {
+                ended.push(id);
+            } else {
+                tracing::warn!("[shard {id}] stopped when its lease lapsed; its placement stays");
+                self.discard_writes(&id);
             }
+        }
+        self.ending.lock().unwrap().extend(ended.iter().cloned());
+        for id in ended {
+            self.end_placement(c, &id);
         }
         // Each held shard goes to another machine with its clients, while
         // the drain time lasts (see drain.rs).
@@ -2681,11 +2698,10 @@ impl WasmShardHost {
             if home(&orphan.shard_id, &live).map(|m| m.id.as_str()) != Some(c.me.id.as_str()) {
                 continue;
             }
-            // Ended here and about to be released by the sweep: not
-            // started again.
-            if orphan.machine_id == c.me.id
-                && self.ending.lock().unwrap().contains(&orphan.shard_id)
-            {
+            // Ending here and about to be released: not started again, and
+            // not taken over from another machine either (the release
+            // deletes any placement of the id on this machine).
+            if self.ending.lock().unwrap().contains(&orphan.shard_id) {
                 continue;
             }
             let _own = c.own_lock.lock().unwrap();
@@ -3053,18 +3069,8 @@ impl WasmShardHost {
             // its placement.
             if let Some(c) = self.cluster.get() {
                 c.saved_at.lock().unwrap().remove(id);
-                // A shard stops on its own when its lease lapses (its guest
-                // calls are refused) before the fence runs: that is not an
-                // ending, and it keeps its placement.
-                let lapsed = shard
-                    .with_state(|sim| sim.failure())
-                    .is_some_and(|why| why == LEASE_LAPSED);
-                let held = {
-                    let lease = c.lease.lock().unwrap();
-                    let in_force = lease.until.is_some_and(|until| Instant::now() < until);
-                    let held = c.owned.lock().unwrap().remove(id);
-                    held.filter(|&epoch| in_force && !lapsed && epoch == lease.epoch)
-                };
+                let held = c.owned.lock().unwrap().remove(id);
+                let held = held.filter(|&epoch| Self::ended_here(c, shard, epoch));
                 // It ended (finished, failed, or idle with no move out): a
                 // move out of it still open is finished by its target's
                 // machine once the placement is gone.
@@ -3086,31 +3092,52 @@ impl WasmShardHost {
             return;
         };
         for (id, _) in ended {
-            // Its last writes, while the placement still says it is ours
-            // (the flush's fence reads the placement), tried a few times.
-            for attempt in 0..data::FINAL_WRITE_ATTEMPTS {
-                if self.flush_writes(data::Flush::Shard(&id)) == 0 {
-                    break;
-                }
-                if attempt + 1 == data::FINAL_WRITE_ATTEMPTS {
-                    tracing::error!(
-                        "[shard {id}] its last entity writes failed; they are lost with its placement"
-                    );
-                    // Gone: a later run of the id must not write them.
-                    self.discard_writes(&id);
-                } else {
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-            }
-            let _guard = self.create_lock.lock().unwrap();
-            // Any epoch of this machine: the lease can have lapsed and the
-            // orphan loop taken it over meanwhile; no run of the id can
-            // start here while it is ending.
-            if let Err(e) = c.dir.release_here(&id, &c.me.id) {
-                tracing::warn!("[shard {id}] could not release its placement: {e}");
-            }
-            self.ending.lock().unwrap().remove(&id);
+            self.end_placement(c, &id);
         }
+    }
+
+    /// Whether a held shard that stopped ended here (finished, idle, or
+    /// failed) under `epoch`, so its placement is released. A shard stops
+    /// on its own when its lease lapses (its guest calls are refused)
+    /// before the fence runs: that is not an ending, and it keeps its
+    /// placement for the machine that takes it over.
+    fn ended_here(c: &ClusterState, shard: &Shard<WasmSim>, epoch: i64) -> bool {
+        let lapsed = shard
+            .with_state(|sim| sim.failure())
+            .is_some_and(|why| why == LEASE_LAPSED);
+        let lease = c.lease.lock().unwrap();
+        let in_force = lease.until.is_some_and(|until| Instant::now() < until);
+        !shard.is_running() && !lapsed && in_force && epoch == lease.epoch
+    }
+
+    /// Write an ended shard's last fields, then release its placement and
+    /// its reservation. The caller put `id` in `ending` first, so no run
+    /// of it starts, and no hand-over or take-over places it here, until
+    /// the release.
+    fn end_placement(&self, c: &ClusterState, id: &str) {
+        // Its last writes, while the placement still says it is ours (the
+        // flush's fence reads the placement), tried a few times.
+        for attempt in 0..data::FINAL_WRITE_ATTEMPTS {
+            if self.flush_writes(data::Flush::Shard(id)) == 0 {
+                break;
+            }
+            if attempt + 1 == data::FINAL_WRITE_ATTEMPTS {
+                tracing::error!(
+                    "[shard {id}] its last entity writes failed; they are lost with its placement"
+                );
+                // Gone: a later run of the id must not write them.
+                self.discard_writes(id);
+            } else {
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        }
+        let _guard = self.create_lock.lock().unwrap();
+        // Any epoch of this machine: the lease can have lapsed and been
+        // renewed meanwhile.
+        if let Err(e) = c.dir.release_here(id, &c.me.id) {
+            tracing::warn!("[shard {id}] could not release its placement: {e}");
+        }
+        self.ending.lock().unwrap().remove(id);
     }
 }
 
