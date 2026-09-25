@@ -89,7 +89,7 @@ fn is_build_output(dir: &Path, name: &str) -> bool {
         .any(|(d, manifest)| *d == name && dir.join(manifest).is_file())
 }
 
-/// Upload attempts before giving up. Smallware's ephemeral Fly builder can
+/// Upload attempts before giving up. Stack0 Cloud's ephemeral Fly builder can
 /// fail to start transiently, and the control plane itself redeploys — both
 /// resolve on their own, so the backoff (3s/8s/15s ≈ 26s) is sized to outlast
 /// a restart rather than to be merely polite.
@@ -292,7 +292,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
                         });
                         if !json_mode {
                             println!(
-                                "  Smallware didn't accept the upload (attempt {attempt}/{MAX_UPLOAD_ATTEMPTS}) — retrying in {}s…",
+                                "  Stack0 Cloud didn't accept the upload (attempt {attempt}/{MAX_UPLOAD_ATTEMPTS}) — retrying in {}s…",
                                 wait.as_secs()
                             );
                         }

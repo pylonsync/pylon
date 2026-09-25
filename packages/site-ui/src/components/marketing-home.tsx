@@ -353,7 +353,7 @@ const { data } = db.useQuery("Order");`}
 							<div className="text-[#6ee7b7]">✓ Schema applied</div>
 							<div className="text-[#6ee7b7]">✓ Traffic moved with 0 errors</div>
 							<div className="mt-5 text-[#a8a8b2]">
-								→ https://your-app.smallware.run
+								→ https://your-app.stack0.app
 							</div>
 						</div>
 					</div>

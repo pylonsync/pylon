@@ -20,8 +20,8 @@ use crate::cloud_client::{post_json, require_credentials, set_default_project};
 use crate::output;
 use crate::project_context::{clear_context_file, write_context_file};
 
-/// System hostname suffix for projects on the hosted Smallware service.
-const HOSTED_APP_DOMAIN: &str = "smallware.run";
+/// System hostname suffix for projects on Stack0 Cloud.
+const HOSTED_APP_DOMAIN: &str = "stack0.app";
 
 fn hosted_project_url(slug: &str) -> String {
     format!("https://{slug}.{HOSTED_APP_DOMAIN}")
@@ -753,7 +753,7 @@ mod tests {
     }
 
     #[test]
-    fn hosted_project_url_uses_the_smallware_app_domain() {
-        assert_eq!(hosted_project_url("my-app"), "https://my-app.smallware.run");
+    fn hosted_project_url_uses_the_stack0_app_domain() {
+        assert_eq!(hosted_project_url("my-app"), "https://my-app.stack0.app");
     }
 }
