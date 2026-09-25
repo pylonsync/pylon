@@ -35,13 +35,14 @@ use pylon_realtime::{
 use serde::Serialize;
 use wasmtime::{
     Caller, Config, Engine, Linker, Memory, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
-    TypedFunc,
+    TypedFunc, UpdateDeadline,
 };
 
 /// The guest ABI version this host speaks.
 pub const ABI_VERSION: i32 = 1;
 
-/// How often the engine's epoch advances. Time budgets round up to it.
+/// How often the engine's epoch advances: how often a running call checks
+/// its deadline.
 const EPOCH_TICK: Duration = Duration::from_millis(2);
 
 /// Native stack a guest call may use.
@@ -224,12 +225,21 @@ impl WasmShardKind {
                 shard_id: shard_id.to_string(),
                 log_budget: LogBudget::new(self.limits.log_lines_per_sec),
                 last_error_line: None,
+                deadline: Instant::now() + self.limits.budget,
             },
         );
         store.limiter(|s| &mut s.limits);
-        store.epoch_deadline_trap();
-        let budget_ticks = budget_ticks(self.limits.budget);
-        store.set_epoch_deadline(budget_ticks);
+        // The epoch thread only wakes the check. The deadline itself is wall
+        // time: on a loaded machine the thread's 2 ms sleeps run long, and a
+        // budget counted in epoch ticks would stretch with them.
+        store.epoch_deadline_callback(|ctx| {
+            Ok(if Instant::now() >= ctx.data().deadline {
+                UpdateDeadline::Interrupt
+            } else {
+                UpdateDeadline::Continue(1)
+            })
+        });
+        store.set_epoch_deadline(1);
 
         let instance = self
             .linker
@@ -264,7 +274,6 @@ impl WasmShardKind {
             memory,
             exports,
             budget: self.limits.budget,
-            budget_ticks,
             in_tick: false,
             format: self.config.snapshot_format,
             broadcast: None,
@@ -303,11 +312,6 @@ fn codec_id(format: SnapshotFormat) -> Result<i32, String> {
     }
 }
 
-fn budget_ticks(budget: Duration) -> u64 {
-    // One extra tick: the epoch may advance right after the deadline is set.
-    (budget.as_nanos() / EPOCH_TICK.as_nanos()) as u64 + 1
-}
-
 // ---------------------------------------------------------------------------
 // Host state and the log import
 // ---------------------------------------------------------------------------
@@ -319,6 +323,8 @@ struct HostState {
     /// The last error-level line the module logged. The guest SDK logs a
     /// panic's message just before it traps.
     last_error_line: Option<String>,
+    /// When the current operation's time budget ends.
+    deadline: Instant,
 }
 
 struct LogBudget {
@@ -422,7 +428,6 @@ struct Inner {
     memory: Memory,
     exports: Exports,
     budget: Duration,
-    budget_ticks: u64,
     /// True from the first call of a tick (an input or `tick`) through
     /// `is_finished`, which the shard calls last. The whole tick shares one
     /// deadline.
@@ -457,7 +462,8 @@ impl Inner {
 
     /// Start a time budget. Every call until the next `begin_op` shares it.
     fn begin_op(&mut self) {
-        self.store.set_epoch_deadline(self.budget_ticks);
+        self.store.data_mut().deadline = Instant::now() + self.budget;
+        self.store.set_epoch_deadline(1);
     }
 
     /// Start the tick's budget at its first call.
