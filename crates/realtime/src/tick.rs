@@ -289,7 +289,11 @@ mod tests {
         // only once every input is applied (and so recorded).
         let deadline = Instant::now() + Duration::from_secs(10);
         while log.len() < 5 {
-            assert!(Instant::now() < deadline, "only {} inputs applied", log.len());
+            assert!(
+                Instant::now() < deadline,
+                "only {} inputs applied",
+                log.len()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
         shard.stop();
