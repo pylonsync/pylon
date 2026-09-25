@@ -65,6 +65,8 @@ interface Life {
 }
 
 const EMPTY: ReadonlyMap<number, Uint8Array> = new Map();
+/** Ticks an ended life is kept for a render tick that lags behind. */
+const ENDED_TICKS = 256;
 
 export class EntityInterpolator {
   /** Entities that exist at the last `update`'s render tick. */
@@ -85,6 +87,12 @@ export class EntityInterpolator {
   private readonly holdWhenQuiet: boolean;
   private readonly maxSamples: number;
   private lastTick = -1;
+  /** The newest tick the last `update` drew; a render tick never goes
+   *  below it. */
+  private floor = -Infinity;
+  /** Lives that ended, oldest first, so `record` can drop them when
+   *  `update` does not run (a hidden tab keeps receiving frames). */
+  private ended: Array<{ id: number; life: Life }> = [];
 
   constructor(options: InterpolationOptions = {}) {
     this.snapDistance = options.snapDistance ?? Infinity;
@@ -100,7 +108,9 @@ export class EntityInterpolator {
   /** Forget everything. The next `update` removes every entity. */
   clear(): void {
     this.lives.clear();
+    this.ended = [];
     this.lastTick = -1;
+    this.floor = -Infinity;
   }
 
   /**
@@ -110,16 +120,17 @@ export class EntityInterpolator {
   record(table: EntityTable, summary: ReplicationSummary, tick: number): void {
     if (tick < this.lastTick) {
       // Ticks went back: a restarted or different shard.
-      this.lives.clear();
+      this.clear();
     }
     this.lastTick = tick;
+    this.dropEnded(tick);
 
     if (summary.full) {
       // The table was rebuilt: what it lacks now is gone.
       const present = new Set(summary.spawned);
       for (const [id, lives] of this.lives) {
         const open = lives[lives.length - 1];
-        if (open.despawnTick === null && !present.has(id)) open.despawnTick = tick;
+        if (open.despawnTick === null && !present.has(id)) this.end(id, open, tick);
       }
       for (const id of summary.spawned) {
         const e = table.get(id);
@@ -133,7 +144,7 @@ export class EntityInterpolator {
 
     for (const id of summary.despawned) {
       const open = this.openLife(id);
-      if (open) open.despawnTick = tick;
+      if (open) this.end(id, open, tick);
     }
     for (const id of summary.spawned) {
       const e = table.get(id);
@@ -146,10 +157,16 @@ export class EntityInterpolator {
     }
   }
 
-  /** Place every entity at `renderTick` (fractional). */
+  /**
+   * Place every entity at `renderTick` (fractional). A render tick below
+   * one already drawn is raised to it, so nothing drawn goes back in time.
+   */
   update(renderTick: number): void {
     this.entered.length = 0;
     this.left.length = 0;
+    renderTick = Math.max(renderTick, this.floor);
+    // What this update draws is at most the newest tick recorded.
+    this.floor = Math.min(renderTick, this.lastTick);
     for (const [id, lives] of this.lives) {
       // Lives that ended by the render tick are over.
       while (lives.length > 0 && lives[0].despawnTick !== null && lives[0].despawnTick <= renderTick) {
@@ -173,6 +190,30 @@ export class EntityInterpolator {
     }
   }
 
+  private end(id: number, life: Life, tick: number): void {
+    life.despawnTick = tick;
+    this.ended.push({ id, life });
+  }
+
+  /**
+   * Forget lives that ended long before `tick`. `update` removes them
+   * when it runs; this bounds them when it does not.
+   */
+  private dropEnded(tick: number): void {
+    let n = 0;
+    while (n < this.ended.length && (this.ended[n].life.despawnTick as number) < tick - ENDED_TICKS) {
+      const { id, life } = this.ended[n];
+      const lives = this.lives.get(id);
+      if (lives) {
+        const i = lives.indexOf(life);
+        if (i >= 0) lives.splice(i, 1);
+        if (lives.length === 0) this.lives.delete(id);
+      }
+      n++;
+    }
+    if (n > 0) this.ended.splice(0, n);
+  }
+
   private openLife(id: number): Life | null {
     const lives = this.lives.get(id);
     const last = lives?.[lives.length - 1];
@@ -186,7 +227,7 @@ export class EntityInterpolator {
       this.lives.set(id, lives);
     }
     const open = lives[lives.length - 1];
-    if (open && open.despawnTick === null) open.despawnTick = tick;
+    if (open && open.despawnTick === null) this.end(id, open, tick);
     lives.push({
       spawnTick: tick,
       despawnTick: null,

@@ -131,4 +131,33 @@ describe("EntityInterpolator", () => {
     expect(h.at(10).get(1)?.x).toBeCloseTo(47);
     expect(h.at(49.5).get(1)?.x).toBeCloseTo(49.5);
   });
+
+  test("a render tick never goes back below one already drawn", () => {
+    const h = harness();
+    h.frame(10, { full: true, spawn: [{ id: 5 }] });
+    h.frame(12, { update: [{ id: 5, from: [0, 0, 0], pos: [2, 0, 0] }] });
+    h.at(11);
+    expect(h.interp.entered).toEqual([5]);
+    h.at(9);
+    expect(h.interp.left).toEqual([]);
+    expect(h.interp.entities.get(5)?.x).toBeCloseTo(0);
+    // It stood still until tick 11, then moved 2 by tick 12.
+    h.at(11.5);
+    expect(h.interp.entered).toEqual([]);
+    expect(h.interp.entities.get(5)?.x).toBeCloseTo(1);
+  });
+
+  test("ended entities do not pile up when update does not run", () => {
+    const h = harness();
+    h.frame(0, { full: true });
+    let tick = 1;
+    for (let id = 1; id <= 20_000; id++) {
+      h.frame(tick++, { spawn: [{ id }] });
+      h.frame(tick++, { despawn: [id] });
+    }
+    const lives = (h.interp as unknown as { lives: Map<number, unknown> }).lives;
+    expect(lives.size).toBeLessThan(200);
+    // A render tick past them all draws nothing.
+    expect(h.at(tick).size).toBe(0);
+  });
 });

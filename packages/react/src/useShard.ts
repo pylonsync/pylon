@@ -103,14 +103,27 @@ export function useShard<TSnapshot = unknown, TInput = unknown>(
   // excluded `options` entirely, so a user logging out would keep the
   // old socket alive under the old identity until `shardId` changed.
   const token = options.token;
-  const ticket = options.ticket;
+  // A ticket function is called on each connection attempt; a new function
+  // on each render must not reconnect, so the effect reads the latest one.
+  const ticketRef = useRef(options.ticket);
+  ticketRef.current = options.ticket;
+  const ticket = typeof options.ticket === "function" ? "function" : options.ticket;
   const subscriberId = options.subscriberId;
   const baseUrl = options.baseUrl;
   const wsUrl = options.wsUrl;
   const wsPort = options.wsPort;
 
   useEffect(() => {
-    const client = connectShard<TSnapshot, TInput>(shardId, options);
+    const client = connectShard<TSnapshot, TInput>(shardId, {
+      ...options,
+      ticket:
+        typeof options.ticket === "function"
+          ? () => {
+              const current = ticketRef.current;
+              return typeof current === "function" ? current() : (current ?? "");
+            }
+          : options.ticket,
+    });
     clientRef.current = client;
 
     client.onSnapshot((snap, t, a) => {

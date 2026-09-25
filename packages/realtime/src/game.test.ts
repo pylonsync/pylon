@@ -47,11 +47,11 @@ afterAll(() => {
   globalThis.setTimeout = realSetTimeout;
 });
 
-function rejection(tick: number, clientSeq: number): ArrayBuffer {
+function rejection(tick: number, ack: number, clientSeq: number): ArrayBuffer {
   const body = new TextEncoder().encode(
     JSON.stringify({ client_seq: clientSeq, code: "invalid", message: "no" }),
   );
-  return shardFrame(ShardFrameKind.InputRejected, ShardCodec.Json, tick, 0, body);
+  return shardFrame(ShardFrameKind.InputRejected, ShardCodec.Json, tick, ack, body);
 }
 
 test("a render loop draws entities between frames, and prediction follows acks", async () => {
@@ -107,10 +107,16 @@ test("a render loop draws entities between frames, and prediction follows acks",
   // Sent at 520 ms, acknowledged by the frame at 570 ms.
   expect(game.rttMs).toBeCloseTo(50);
 
-  // The shard refuses input 3: it drops out of the prediction.
-  ws.deliver(rejection(11, 3));
-  deliver(12, 2, {});
+  // The shard refuses input 3: it drops out of the prediction. A rejection
+  // frame moves neither the ack nor the clock.
+  const tickBefore = game.clock.serverTick(time);
+  ws.deliver(rejection(12, 0, 3));
+  expect(game.ack).toBe(2);
+  expect(game.tick).toBe(11);
+  expect(game.clock.serverTick(time)).toBeCloseTo(tickBefore);
+  deliver(12, 3, {});
   expect(predicted).toBeCloseTo(1.5);
+  expect(game.ack).toBe(3);
 
   // A reconnect drops inputs sent on the old connection.
   game.send({ dx: 5 });

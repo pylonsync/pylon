@@ -18,7 +18,10 @@
  *   const mine = table.get(myEntityId);
  *   if (mine) local = me.reconcile({ x: mine.x, y: mine.y, z: mine.z }, ack);
  * });
- * onKey((input) => { local = move(local, input); game.send(input); });
+ * onKey((input) => {
+ *   // 0: not sent (the connection is down), so do not predict it.
+ *   if (game.send(input)) local = move(local, input);
+ * });
  * ```
  */
 

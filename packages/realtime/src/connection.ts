@@ -32,8 +32,11 @@ export interface ShardConnectOptions {
    * a `ticket.<ticket>` WebSocket subprotocol. The shard checks it names
    * this shard and `subscriberId`, and passes its claims to the game's
    * authorization hooks.
+   *
+   * Tickets expire. Pass a function to get a new one for each connection
+   * attempt, so a reconnect after the expiry still gets in.
    */
-  ticket?: string;
+  ticket?: string | (() => string | Promise<string>);
   /** Host (and port) of the Pylon server. Defaults to `window.location.host`. */
   baseUrl?: string;
   /**
@@ -176,15 +179,50 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     }
   };
 
+  const scheduleReconnect = () => {
+    if (closed || options.autoReconnect === false) return;
+    reconnectTimer = setTimeout(connect, backoff);
+    backoff = Math.min(backoff * 2, 10_000);
+  };
+
   const connect = () => {
     if (closed) return;
+    const source = options.ticket;
+    if (typeof source !== "function") {
+      open(source);
+      return;
+    }
+    let ticket: string | Promise<string>;
+    try {
+      ticket = source();
+    } catch (e) {
+      dispatchError(e instanceof Error ? e : new Error(String(e)));
+      scheduleReconnect();
+      return;
+    }
+    if (typeof ticket === "string") {
+      open(ticket);
+      return;
+    }
+    ticket.then(
+      (t) => {
+        if (!closed) open(t);
+      },
+      (e) => {
+        dispatchError(e instanceof Error ? e : new Error(String(e)));
+        scheduleReconnect();
+      },
+    );
+  };
+
+  const open = (ticket: string | undefined) => {
     const url = buildWsUrl();
     try {
       // Subprotocol values must be RFC 6455 tokens; encode them so spaces
       // and punctuation do not break the handshake.
       const protocols: string[] = [];
       if (options.token) protocols.push(`bearer.${encodeURIComponent(options.token)}`);
-      if (options.ticket) protocols.push(`ticket.${encodeURIComponent(options.ticket)}`);
+      if (ticket) protocols.push(`ticket.${encodeURIComponent(ticket)}`);
       ws = protocols.length ? new WebSocket(url, protocols) : new WebSocket(url);
     } catch (e) {
       dispatchError(e instanceof Error ? e : new Error(String(e)));
@@ -205,10 +243,14 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       const at = now();
       try {
         const frame = parseShardFrame(event.data);
-        clock.observe(frame.tick, at);
-        lastTick = frame.tick;
-        lastAck = frame.ack;
-        timeAcks(frame.ack, at);
+        if (frame.kind === ShardFrameKind.Replication || frame.kind === ShardFrameKind.Snapshot) {
+          // Only the per-tick frames: a rejection can go out before its
+          // tick's frame is built, and would make the clock run early.
+          clock.observe(frame.tick, at);
+          lastTick = frame.tick;
+          lastAck = frame.ack;
+          timeAcks(frame.ack, at);
+        }
         if (frame.kind === ShardFrameKind.Replication) {
           let summary: ReplicationSummary;
           try {
@@ -251,11 +293,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     ws.onclose = () => {
       connected = false;
       for (const h of closeHandlers) h();
-      if (closed) return;
-      if (options.autoReconnect !== false) {
-        reconnectTimer = setTimeout(connect, backoff);
-        backoff = Math.min(backoff * 2, 10_000);
-      }
+      scheduleReconnect();
     };
   };
 

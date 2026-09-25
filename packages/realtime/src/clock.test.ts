@@ -98,6 +98,41 @@ describe("ShardClock", () => {
     expect(clock.serverTick(at + 1500)).toBeCloseTo(110, 1);
   });
 
+  for (const tickRate of [20, undefined]) {
+    test(`a network burst neither moves it back nor throws it off (rate ${tickRate ?? "measured"})`, () => {
+      const clock = new ShardClock({ tickRate });
+      const r = rng(3);
+      let prev = -Infinity;
+      let worst = 0;
+      for (let tick = 1; tick <= 300; tick++) {
+        const built = tick * 50;
+        // Ticks 100..107 are held up by a 400 ms stall and arrive together.
+        const at = tick >= 100 && tick <= 107 ? 107 * 50 + 50 : built + 50 + r() * 10;
+        clock.observe(tick, at);
+        const est = clock.serverTick(at);
+        expect(est).toBeGreaterThanOrEqual(prev);
+        prev = est;
+        // The truth at `at`: the tick being built then, less the least delay.
+        if (tick > 120) worst = Math.max(worst, Math.abs(est - (at - 50) / 50));
+      }
+      expect(worst).toBeLessThan(1);
+      expect(clock.tickMs).toBeGreaterThan(47);
+      expect(clock.tickMs).toBeLessThan(53);
+    });
+  }
+
+  test("after a stall it steps back no further than the newest tick received", () => {
+    const clock = new ShardClock({ tickRate: 20 });
+    feed(clock, 1, 40, 50, 0);
+    const before = clock.serverTick(40 * 50 + 50 + 1999);
+    expect(before).toBeGreaterThan(79);
+    for (let tick = 41; tick <= 43; tick++) {
+      const at = tick * 50 + 50 + 2000;
+      clock.observe(tick, at);
+      expect(clock.serverTick(at)).toBeGreaterThanOrEqual(tick - 1);
+    }
+  });
+
   test("ticks that go back (a restarted shard) reset it", () => {
     const clock = new ShardClock({ tickRate: 20 });
     feed(clock, 1000, 1010, 30, 0);
