@@ -1,5 +1,6 @@
 import React, { use } from "react";
 import { Link, type Metadata, type PageProps } from "@pylonsync/react";
+import { ArrowUpRight } from "lucide-react";
 import { siteConfig } from "@/lib/site.config";
 import { UserMenu, SubscriberDashboard } from "./dashboard-client";
 
@@ -35,35 +36,34 @@ export default function DashboardPage({ auth, response, serverData }: PageProps)
   );
 }
 
-// Dashboard chrome: a slim top bar with the logo, a link back to the public
-// site, and the account menu (a client island for sign-out).
+// Dashboard chrome in the site's own look: the cream page, the serif face,
+// the headshot and name from the site header, a link back to the public site,
+// and the account menu (a client island for sign-out).
 function Shell({ email, children }: { email: string; children: React.ReactNode }) {
-  const { brand } = siteConfig;
+  const { brand, newsletter } = siteConfig;
   return (
-    <div className="flex min-h-screen flex-col bg-white text-zinc-900">
-      <header className="border-b border-zinc-200">
-        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-6">
-          <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-              {brand.letter}
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight">
-              {brand.name} <span className="text-zinc-400">/ newsletter</span>
-            </span>
-          </div>
-          <div className="flex items-center gap-4">
+    <div className="font-display flex min-h-screen flex-col bg-paper text-ink">
+      <header className="border-b border-rule">
+        <div className="mx-auto flex h-16 w-full max-w-4xl items-center justify-between px-6">
+          <Link href="/" className="flex items-center gap-3">
+            <img src="/images/headshot.jpg" alt="" className="size-8 rounded-full object-cover" />
+            <span className="text-[17px] font-medium text-ink">{brand.name}</span>
+            <span className="hidden text-[15px] italic text-ink-2 sm:inline">{newsletter.name}</span>
+          </Link>
+          <div className="flex items-center gap-5">
             <Link
               href="/"
-              className="text-[13px] text-zinc-500 transition-colors hover:text-zinc-900"
+              className="inline-flex items-center gap-1 text-[15px] text-ink-2 transition-colors hover:text-ink"
             >
-              View site ↗
+              View site
+              <ArrowUpRight aria-hidden className="size-4" />
             </Link>
             <UserMenu email={email} />
           </div>
         </div>
       </header>
       <main className="flex-1">
-        <div className="mx-auto max-w-4xl px-6 py-8">{children}</div>
+        <div className="mx-auto w-full max-w-4xl px-6 py-10 sm:py-14">{children}</div>
       </main>
     </div>
   );

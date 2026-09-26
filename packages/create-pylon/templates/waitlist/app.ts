@@ -44,8 +44,8 @@ const Signup = entity(
 );
 
 // A single-row, PII-FREE aggregate the public page can safely read live. It
-// holds only the signup count — no emails. `joinWaitlist` keeps it in sync with
-// the real Signup count on every new join. The landing page subscribes with
+// holds only the signup count — no emails. Every Signup writer recounts into
+// it (lib/stats.ts → syncWaitlistStat). The landing page subscribes with
 // `db.useQuery("WaitlistStat")`, which syncs across every open tab through the
 // replica — so the counter ticks up everywhere the instant someone joins. This
 // is the cross-tab-safe realtime primitive (entity sync), not a per-connection
@@ -81,9 +81,9 @@ const User = entity(
 // PRIVACY — the heart of the spec. Signup holds visitor emails, so it denies
 // EVERY client read and write. No `db.useQuery("Signup")` can ever pull a row,
 // and no client can insert/update/delete directly. Writes happen only inside
-// the server-side `joinWaitlist` mutation (functions bypass policies); reads
-// happen only inside `waitlistCount` (returns a bare integer) and the
-// owner-gated `waitlistStats`. A marketing site must never leak its own
+// the server-side `joinWaitlist` and dev-only `seedDemo` mutations (functions
+// bypass policies); reads happen only inside the owner-gated `waitlistStats`.
+// The public page sees the count through WaitlistStat. A marketing site must never leak its own
 // customers' emails — this policy is what guarantees it.
 const signupPolicy = policy({
   name: "signup_private",
@@ -96,7 +96,7 @@ const signupPolicy = policy({
 
 // The aggregate count is public to READ (it's just a number — the whole point
 // is that the landing page shows it live to everyone). Clients can't WRITE it;
-// only the joinWaitlist mutation maintains it server-side.
+// only the Signup writers maintain it server-side.
 const waitlistStatPolicy = policy({
   name: "waitlist_stat_public_read",
   entity: "WaitlistStat",

@@ -57,8 +57,9 @@ export type RestaurantConfig = BaseConfig & {
   location: {
     headline: string;
     address: string;
+    // A Google Maps embed URL (Share → Embed a map → the iframe's src). When
+    // empty, the page shows the week's service hours beside the address.
     mapEmbedUrl?: string;
-    hoursText: string;
     phone: string;
     email: string;
   };
@@ -99,7 +100,7 @@ export const siteConfig: RestaurantConfig = {
       "Seasonal small plates, wood-fired mains, and a short natural-wine list. The reservation calendar shows current table availability.",
     ctaLabel: "Reserve a table",
     quickFacts: {
-      hours: "Wed–Sun, 5–10",
+      hours: "Wed–Sun from 5 PM",
       area: "Bishop Arts, Dallas",
       phone: "(214) 555-0172",
     },
@@ -194,7 +195,6 @@ export const siteConfig: RestaurantConfig = {
     headline: "Find us in Bishop Arts.",
     address: "412 N Bishop Ave, Dallas, TX 75208",
     mapEmbedUrl: "",
-    hoursText: "Wed–Thu 5–9:30 · Fri–Sat 5–10 · Sun 5–9 · Mon–Tue closed",
     phone: "(214) 555-0172",
     email: "hello@cedarandvine.example",
   },

@@ -18,21 +18,21 @@ export default function LoginPage({ auth, response }: PageProps) {
   if (auth.user_id && !auth.user_id.startsWith("guest_")) response.redirect("/dashboard");
   const { brand } = siteConfig;
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12">
-      <div className="w-full max-w-[400px] rounded-2xl border border-zinc-200/70 p-8">
-        <Link href="/" className="inline-flex">
-          <span className="flex size-9 items-center justify-center rounded-xl bg-zinc-900 text-base font-bold text-white">
-            {brand.letter}
-          </span>
-        </Link>
-        <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">
-          {brand.name} dashboard
-        </h1>
-        <p className="mt-1 text-[13px] text-zinc-500">
-          Sign in to manage your reservations.
-        </p>
-        <div className="mt-6">
-          <AuthForm />
+    <div className="flex min-h-screen flex-col bg-[var(--ink)] text-[var(--cream)]">
+      <div className="border-b border-white/10">
+        <div className="mx-auto flex h-16 w-full max-w-5xl items-center px-6">
+          <Link href="/" className="font-display text-[22px] tracking-tight">
+            {brand.name}
+          </Link>
+        </div>
+      </div>
+      <div className="flex flex-1 items-center justify-center px-6 py-16">
+        <div className="w-full max-w-[380px]">
+          <h1 className="font-display text-[2.5rem] font-medium leading-none">Owner sign in</h1>
+          <p className="mt-3 text-[15px] text-[var(--cream-2)]">Tonight&apos;s book, confirmations, and cancellations.</p>
+          <div className="mt-8 rounded-[6px] border border-white/10 bg-[var(--ink-2)] p-6">
+            <AuthForm />
+          </div>
         </div>
       </div>
     </div>

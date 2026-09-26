@@ -18,21 +18,21 @@ export default function LoginPage({ auth, response }: PageProps) {
   if (auth.user_id && !auth.user_id.startsWith("guest_")) response.redirect("/dashboard");
   const { brand } = siteConfig;
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12">
-      <div className="w-full max-w-[400px] rounded-2xl border border-zinc-200/70 p-8">
-        <Link href="/" className="inline-flex">
-          <span className="flex size-9 items-center justify-center rounded-xl bg-zinc-900 text-base font-bold text-white">
-            {brand.letter}
-          </span>
+    <div className="flex min-h-screen flex-col bg-ink px-6 text-chalk">
+      <div className="mx-auto flex h-16 w-full max-w-5xl items-center">
+        <Link href="/" className="font-display text-[17px] font-bold tracking-tight text-chalk">
+          {brand.name}
         </Link>
-        <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">
-          {brand.name} dashboard
-        </h1>
-        <p className="mt-1 text-[13px] text-zinc-500">
-          Sign in to see who&apos;s on your waitlist.
-        </p>
-        <div className="mt-6">
-          <AuthForm />
+      </div>
+      <div className="flex flex-1 items-center justify-center pb-24">
+        <div className="w-full max-w-[380px]">
+          <h1 className="font-display text-[1.75rem] font-bold leading-tight tracking-[-0.02em]">
+            Sign in to the waitlist
+          </h1>
+          <p className="mt-2 text-[14px] text-chalk-2">Owner access to signups and the export.</p>
+          <div className="mt-8 rounded-lg border border-line bg-paper p-6">
+            <AuthForm />
+          </div>
         </div>
       </div>
     </div>

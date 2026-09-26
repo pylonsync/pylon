@@ -22,7 +22,9 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
   const { brand } = siteConfig;
 
   return (
-    <>
+    // The ink background sits behind the translucent nav, so the nav reads as
+    // dark glass over the page instead of grey over the white body.
+    <div className="flex min-h-screen flex-col bg-[var(--ink)]">
       {/* The nav sits over the hero photo: dark, translucent, cream type. */}
       <header className="sticky top-0 z-30 border-b border-white/10 bg-[var(--ink)]/80 text-[var(--cream)] backdrop-blur">
         <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-6">
@@ -57,7 +59,7 @@ export default function MarketingLayout({ children, auth }: LayoutProps) {
       <main className="flex-1">{children}</main>
 
       <SiteFooter />
-    </>
+    </div>
   );
 }
 

@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import { EnsureGuest } from "@pylonsync/client";
 import type { CreatorConfig } from "@/lib/site.config";
+import { publicCount } from "@/lib/stats";
 
 // The newsletter signup — email capture plus a LIVE subscriber counter. This is
 // the realtime proof: the counter is a live `db.useQuery("SubscriberCount")`
@@ -23,7 +24,11 @@ export function NewsletterSignup({ newsletter }: Props) {
     <div>
       <SubscribeForm newsletter={newsletter} />
       <div className="mt-3">
-        <LiveCounter seed={newsletter.seedCount ?? 0} label={newsletter.counterLabel} />
+        <LiveCounter
+          importedCount={newsletter.importedCount}
+          label={newsletter.counterLabel}
+          labelOne={newsletter.counterLabelOne}
+        />
       </div>
     </div>
   );
@@ -100,27 +105,43 @@ interface SubscriberCountRow {
   count: number;
 }
 
-function LiveCounter({ seed, label }: { seed: number; label: string }) {
+type CounterProps = { importedCount: number; label: string; labelOne: string };
+
+export function LiveCounter(props: CounterProps) {
   return (
-    <EnsureGuest fallback={<CounterView value={seed} label={label} />}>
-      <LiveCounterInner seed={seed} label={label} />
+    <EnsureGuest fallback={null}>
+      <LiveCounterInner {...props} />
     </EnsureGuest>
   );
 }
 
-function LiveCounterInner({ seed, label }: { seed: number; label: string }) {
+function LiveCounterInner({ importedCount, label, labelOne }: CounterProps) {
   const { data, loading } = db.useQuery<SubscriberCountRow>("SubscriberCount");
-  const real = data.length > 0 ? data[0].count : 0;
-  return <CounterView value={seed + real} label={label} live={!loading} />;
+
+  // In `pylon dev` an empty list gets demo subscribers (functions/seedDemo.ts).
+  // The call goes out only when the synced count is empty, so a live site with
+  // subscribers never makes it.
+  const empty = !loading && data.length === 0;
+  const sent = useRef(false);
+  useEffect(() => {
+    if (!empty || sent.current) return;
+    sent.current = true;
+    void callFn("seedDemo", {}).catch(() => {});
+  }, [empty]);
+
+  if (loading) return null;
+  const value = publicCount(data, importedCount);
+  // A new newsletter has no subscribers yet; show nothing rather than "0".
+  if (value === 0) return null;
+  return <CounterView value={value} label={value === 1 ? labelOne : label} />;
 }
 
-// Plain text under the form. The fallback shows the seed until the guest
-// session connects; `live` is set once the count is synced.
-function CounterView({ value, label, live }: { value: number; label: string; live?: boolean }) {
+// Plain text under the form, shown once the count has synced.
+function CounterView({ value, label }: { value: number; label: string }) {
   const shown = useCountUp(value);
   return (
-    <p className="text-[15px] text-ink-2" data-live={live ? "true" : undefined}>
-      <span className="tabular-nums text-ink">{shown.toLocaleString()}</span> {label}
+    <p className="text-[15px] text-ink-2" data-testid="live-count">
+      <span className="tabular-nums text-ink">{shown.toLocaleString("en-US")}</span> {label}
     </p>
   );
 }

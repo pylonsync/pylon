@@ -3,6 +3,7 @@ import { type Metadata } from "@pylonsync/react";
 import { WRAP, Divider, ImagePlaceholder, LiveBadge } from "@/components/marketing";
 import { BookingWidget } from "./booking-widget";
 import { siteConfig } from "@/lib/site.config";
+import { directionsUrl, hoursRows } from "@/lib/hours";
 
 export const metadata: Metadata = {
   title: siteConfig.seo.title,
@@ -30,13 +31,13 @@ export default function LandingPage() {
   return (
     <div className="bg-cream text-ink">
       {/* ============================= HERO ============================= */}
-      <section className={`${WRAP} pt-10 pb-12 sm:pt-14`}>
-        <h1 className="font-display text-balance text-[4.25rem] leading-[0.9] tracking-[0.005em] sm:text-[7rem] lg:text-[9.5rem]">
+      <section className={`${WRAP} pt-10 pb-12 sm:pt-12`}>
+        <h1 className="font-display text-balance text-[4.25rem] leading-[0.9] tracking-[0.005em] sm:text-[7rem] lg:text-[8rem]">
           {hero.headline}
         </h1>
 
-        <div className="mt-8 grid gap-8 lg:mt-10 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:gap-12">
-          <div className="flex flex-col justify-between gap-8">
+        <div className="mt-8 grid gap-8 lg:mt-8 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:gap-12">
+          <div className="flex flex-col gap-8">
             <p className="max-w-xl text-[17px] leading-relaxed sm:text-[19px]">{hero.subcopy}</p>
             <div>
               <div className="flex flex-wrap items-center gap-4">
@@ -108,9 +109,9 @@ export default function LandingPage() {
       {booking.enabled ? (
         <section id="book" className="bg-ink text-cream">
           <div className={`${WRAP} py-14`}>
-            <div className="grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] lg:gap-12">
-              <div>
-                <h2 className="font-display text-[3rem] leading-none sm:text-[4rem]">
+            <div className="grid grid-cols-[minmax(0,1fr)] gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] lg:gap-12">
+              <div className="min-w-0">
+                <h2 className="font-display text-balance text-[3rem] leading-none sm:text-[4rem]">
                   {booking.headline}
                 </h2>
                 <p className="mt-5 max-w-sm text-[15px] leading-relaxed text-cream/75">
@@ -156,49 +157,44 @@ export default function LandingPage() {
       {/* =========================== LOCATION ========================== */}
       <Divider />
       <section id="visit" className={`${WRAP} py-12`}>
-        <div className="grid gap-8 lg:grid-cols-2 lg:gap-12">
-          <div>
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-8 lg:grid-cols-2 lg:gap-12">
+          <div className="min-w-0">
             <h2 className="font-display text-[3rem] leading-none sm:text-[4rem]">{location.headline}</h2>
-            <dl className="mt-6 grid gap-5 text-[15px] leading-relaxed">
-              <div>
-                <dt className="text-[11px] font-medium uppercase tracking-wide text-ink/60">Address</dt>
-                <dd className="mt-1">{location.address}</dd>
-              </div>
-              <div>
-                <dt className="text-[11px] font-medium uppercase tracking-wide text-ink/60">Hours</dt>
-                <dd className="mt-1">{location.hoursText}</dd>
-              </div>
-              <div>
-                <dt className="text-[11px] font-medium uppercase tracking-wide text-ink/60">Contact</dt>
-                <dd className="mt-1">
-                  <a href={`tel:${location.phone}`} className="text-brand">
-                    {location.phone}
-                  </a>{" "}
-                  ·{" "}
-                  <a href={`mailto:${location.email}`} className="underline underline-offset-4">
-                    {location.email}
-                  </a>
-                </dd>
-              </div>
-            </dl>
-            <a
-              href="#book"
-              className="mt-8 inline-flex h-12 items-center bg-ink px-7 font-display text-[22px] tracking-[0.04em] text-cream transition-opacity hover:opacity-90"
-            >
-              {hero.ctaLabel}
-            </a>
+            <p className="mt-6 max-w-sm font-display text-[2rem] leading-[1.05] sm:text-[2.5rem]">
+              {location.address}
+            </p>
+            <div className="mt-6 flex flex-wrap items-center gap-3">
+              <a
+                href={directionsUrl(location.address)}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex h-12 items-center bg-ink px-6 font-display text-[22px] tracking-[0.04em] text-cream transition-opacity hover:opacity-90"
+              >
+                Get directions
+              </a>
+              <a
+                href={`tel:${location.phone}`}
+                className="inline-flex h-12 items-center border border-ink px-6 font-display text-[22px] tracking-[0.04em] transition-colors hover:bg-ink hover:text-cream"
+              >
+                Call {location.phone}
+              </a>
+            </div>
+            <p className="mt-5 text-[14px] text-ink/70">
+              Or email{" "}
+              <a href={`mailto:${location.email}`} className="underline underline-offset-4 hover:text-ink">
+                {location.email}
+              </a>
+            </p>
           </div>
           {location.mapEmbedUrl ? (
             <iframe
-              title="Map"
+              title={`Map to ${siteConfig.brand.name}`}
               src={location.mapEmbedUrl}
-              className="h-72 w-full border border-ink"
+              className="h-80 w-full border border-ink"
               loading="lazy"
             />
           ) : (
-            <div className="grid h-72 place-items-center border border-ink bg-paper text-sm text-ink/60">
-              Drop a Google Maps embed URL in <code className="mx-1">location.mapEmbedUrl</code>
-            </div>
+            <HoursBoard />
           )}
         </div>
       </section>
@@ -225,6 +221,34 @@ export default function LandingPage() {
           </section>
         </>
       ) : null}
+    </div>
+  );
+}
+
+// The weekly hours as a printed board, read from the same config the booking
+// grid uses. Shown in place of a map when `location.mapEmbedUrl` is empty.
+function HoursBoard() {
+  const rows = hoursRows(siteConfig.booking.hours);
+  return (
+    <div className="border border-ink bg-paper">
+      <div className="flex items-baseline justify-between border-b border-ink px-5 py-4">
+        <h3 className="font-display text-[2rem] leading-none">Hours</h3>
+        <span className="text-[13px] text-ink/60">{siteConfig.hero.quickFacts.area}</span>
+      </div>
+      <dl className="divide-y divide-ink/20 px-5">
+        {rows.map((r) => (
+          <div key={r.days} className="flex items-baseline justify-between gap-4 py-3">
+            <dt className="font-display text-[1.5rem] leading-none">{r.days}</dt>
+            <dd
+              className={
+                "text-[15px] tabular-nums " + (r.closed ? "text-ink/50" : "font-medium text-ink")
+              }
+            >
+              {r.time}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </div>
   );
 }

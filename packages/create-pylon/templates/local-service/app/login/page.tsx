@@ -18,21 +18,21 @@ export default function LoginPage({ auth, response }: PageProps) {
   if (auth.user_id && !auth.user_id.startsWith("guest_")) response.redirect("/dashboard");
   const { brand } = siteConfig;
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12">
-      <div className="w-full max-w-[400px] rounded-2xl border border-zinc-200/70 p-8">
-        <Link href="/" className="inline-flex">
-          <span className="flex size-9 items-center justify-center rounded-xl bg-zinc-900 text-base font-bold text-white">
-            {brand.letter}
-          </span>
-        </Link>
-        <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">
-          {brand.name} dashboard
-        </h1>
-        <p className="mt-1 text-[13px] text-zinc-500">
-          Sign in to manage your bookings.
-        </p>
-        <div className="mt-6">
-          <AuthForm />
+    <div className="flex min-h-screen flex-col bg-cream text-ink">
+      <div className="border-b border-ink">
+        <div className="mx-auto flex h-14 w-full max-w-5xl items-center px-6">
+          <Link href="/" className="font-display text-[26px] leading-none tracking-[0.02em]">
+            {brand.name}
+          </Link>
+        </div>
+      </div>
+      <div className="flex flex-1 items-center justify-center px-6 py-16">
+        <div className="w-full max-w-[400px]">
+          <h1 className="font-display text-[3.5rem] leading-none">Owner sign in</h1>
+          <p className="mt-3 text-[15px] text-ink/70">Bookings, confirmations, and cancellations.</p>
+          <div className="mt-8 border border-ink bg-paper/60 p-6">
+            <AuthForm />
+          </div>
         </div>
       </div>
     </div>

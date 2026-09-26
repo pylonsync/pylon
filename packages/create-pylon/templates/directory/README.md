@@ -45,11 +45,27 @@ details), Approve / Reject, and a live count of published listings.
 Set `PYLON_OWNER_EMAIL` in `.env` (see `.env.example`) to the email you'll sign
 in with, then create that account at `/login`.
 
+## Demo data
+
+The curator's first dashboard load in `pylon dev` fills an empty review queue
+with fictional submissions (`functions/seedDemo.ts`, `lib/demo.ts`). Seeding
+runs only for the owner, only when `PYLON_DEMO_DATA` is on or when it is unset and the app runs under `pylon dev`, and only while the `Submission` table is empty. `pylon start`, Docker, and Pylon Cloud deploys do not seed, because only `pylon dev` sets `PYLON_DEV_WATCH_DIR`. Set `PYLON_DEMO_DATA=0` to start
+empty in development.
+
+The starter listings seed in every environment (`functions/seedListings.ts`),
+because they are your directory's own content from `lib/site.config.ts`. Their
+names are made up; replace them with real entries. Each listing shows a
+monogram mark (`monogram` in `lib/directory.ts`) until you add logos.
+
 ## Rebrand it
 
 Brand, colors, hero copy, categories, starter listings, and submission copy
 live in **`lib/site.config.ts`**. Editing that file updates the directory, and
 a fresh database seeds from its starter listings.
+
+The tab icon is `app/icon.svg` (with `public/favicon.ico` for browsers that
+request `/favicon.ico`). Both carry this brand's letter and colors; replace
+them when you rename the brand.
 
 ## Layout
 
@@ -57,13 +73,16 @@ a fresh database seeds from its starter listings.
 app.ts                          Listing (public, FTS) + Submission (PII) + User
 lib/site.config.ts              ALL copy + brand + categories + seed listings
 functions/seedListings.ts       idempotent seed from config
+functions/seedDemo.ts           dev-only demo review queue (see Demo data)
+lib/directory.ts                shared types, tags, monogram marks
+lib/demo.ts                     demo submissions + the dev-only gate
 functions/submitListing.ts      public mutation: write a pending Submission (PII)
 functions/upvote.ts             public mutation: bump Listing.votes (live)
 functions/submissionsForOwner.ts  owner-only query: queue + submitter PII
 functions/{approve,reject}Submission.ts  owner-only moderation
-app/page.tsx                    hero + browse island
-app/directory-browse.tsx        client island: live db.useSearch + facets + votes
-app/submit/page.tsx, submit-form.tsx  the submit flow
+app/(marketing)/page.tsx        headline + browse island
+app/(marketing)/directory-browse.tsx        client island: live db.useSearch + facets + votes
+app/(marketing)/submit/page.tsx, submit-form.tsx  the submit flow
 app/dashboard/                  curator moderation queue (auth-gated, live)
 ```
 

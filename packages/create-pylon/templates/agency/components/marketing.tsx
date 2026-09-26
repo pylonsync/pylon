@@ -41,11 +41,16 @@ export function SectionTitle({ title, body }: { title: string; body?: string }) 
 // A linked portfolio entry: the 4:3 cover, then the title, client label, and
 // a one-line summary in small type. Used on the homepage work grid and the
 // full /work index, so both stay in lockstep.
-export function ProjectCard({ p }: { p: ProjectView }) {
+// `wide` spans both grid columns with a wider cover (see isWideCard).
+export function ProjectCard({ p, wide = false }: { p: ProjectView; wide?: boolean }) {
   return (
-    <Link href={`/work/${p.slug}`} className="group block">
+    <Link href={`/work/${p.slug}`} className={"group block" + (wide ? " sm:col-span-2" : "")}>
       {/* Case-study cover: public/images/work/<slug>.jpg. */}
-      <ImagePlaceholder shape="landscape" title={`${p.title} product shot`} src={`/images/work/${p.slug}.jpg`} />
+      <ImagePlaceholder
+        shape={wide ? "wide" : "landscape"}
+        title={`${p.title} product shot`}
+        src={`/images/work/${p.slug}.jpg`}
+      />
       <div className="mt-4 flex items-baseline justify-between gap-4">
         <h3 className="font-display text-[1.5rem] leading-none text-ink transition-colors group-hover:text-brand">
           {p.title}
@@ -73,7 +78,7 @@ export function ImagePlaceholder({
   src,
   className = "",
 }: {
-  shape?: "landscape" | "portrait" | "square" | "circle";
+  shape?: "landscape" | "wide" | "portrait" | "square" | "circle";
   title: string;
   hint?: string;
   /** A real image. The template ships one under public/images; swap it for yours. */
@@ -85,7 +90,9 @@ export function ImagePlaceholder({
       ? "aspect-[3/4]"
       : shape === "square" || shape === "circle"
         ? "aspect-square"
-        : "aspect-[4/3]";
+        : shape === "wide"
+          ? "aspect-[4/3] sm:aspect-[2/1]"
+          : "aspect-[4/3]";
   const radius = shape === "circle" ? "rounded-full" : "rounded-sm";
   if (src) {
     return (

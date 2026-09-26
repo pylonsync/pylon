@@ -16,11 +16,13 @@ export const metadata: Metadata = {
 // Listing table. Copy comes from siteConfig; the listings seed on first visit.
 // Doesn't read `auth`, so the public page stays cacheable.
 export default function LandingPage() {
-  const { brand, intro } = siteConfig;
+  const { intro } = siteConfig;
   return (
-    <div className={`${WRAP} pb-20 pt-8`}>
-      <h1 className="font-display text-[22px] leading-tight text-zinc-900">{brand.name}</h1>
-      <p className="mt-1 max-w-2xl text-[14px] leading-relaxed text-zinc-600">{intro.description}</p>
+    <div className={`${WRAP} pb-20 pt-10 sm:pt-14`}>
+      <h1 className="text-balance text-[1.75rem] font-semibold leading-tight tracking-[-0.02em] text-zinc-900 sm:text-[2.25rem]">
+        {intro.headline}
+      </h1>
+      <p className="mt-2 max-w-2xl text-[15px] leading-relaxed text-zinc-600">{intro.description}</p>
       <div id="browse" className="mt-5">
         <DirectoryBrowse />
       </div>

@@ -3,7 +3,7 @@ import { Link, type Metadata, type PageProps, type ServerData } from "@pylonsync
 import { WRAP, TEXT_LINK, ProjectCard } from "@/components/marketing";
 import { SeedProjects } from "../seeder";
 import { siteConfig } from "@/lib/site.config";
-import { slugify, viewFromRow, type ProjectRow, type ProjectView } from "@/lib/agency";
+import { isWideCard, slugify, viewFromRow, type ProjectRow, type ProjectView } from "@/lib/agency";
 
 export const metadata: Metadata = {
   title: `Work — ${siteConfig.brand.name}`,
@@ -41,8 +41,8 @@ function WorkGrid({ serverData }: { serverData: ServerData }) {
   }
   return (
     <div className={WORK_GRID}>
-      {projects.map((p) => (
-        <ProjectCard key={p.slug} p={p} />
+      {projects.map((p, i) => (
+        <ProjectCard key={p.slug} p={p} wide={isWideCard(i, projects.length)} />
       ))}
     </div>
   );

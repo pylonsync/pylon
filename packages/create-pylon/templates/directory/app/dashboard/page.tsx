@@ -1,6 +1,8 @@
 import React, { use } from "react";
 import { Link, type Metadata, type PageProps } from "@pylonsync/react";
+import { ArrowUpRight } from "lucide-react";
 import { siteConfig } from "@/lib/site.config";
+import { WRAP } from "@/components/marketing";
 import { UserMenu, DirectoryDashboard } from "./dashboard-client";
 
 export const metadata: Metadata = {
@@ -35,35 +37,35 @@ export default function DashboardPage({ auth, response, serverData }: PageProps)
   );
 }
 
-// Dashboard chrome: a slim top bar with the logo, a link back to the public
-// site, and the account menu (a client island for sign-out).
+// Dashboard chrome in the site's own look: the same slim white nav with the
+// directory name, a link back to the site, and the account menu (a client
+// island for sign-out).
 function Shell({ email, children }: { email: string; children: React.ReactNode }) {
   const { brand } = siteConfig;
   return (
     <div className="flex min-h-screen flex-col bg-white text-zinc-900">
       <header className="border-b border-zinc-200">
-        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-6">
-          <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-              {brand.letter}
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight">
-              {brand.name} <span className="text-zinc-400">/ curator</span>
-            </span>
+        <div className={`${WRAP} flex h-12 items-center justify-between`}>
+          <div className="flex items-baseline gap-2.5">
+            <Link href="/" className="text-[15px] font-semibold text-zinc-900">
+              {brand.name}
+            </Link>
+            <span className="font-mono text-[12px] text-zinc-400">curator</span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-5">
             <Link
               href="/"
-              className="text-[13px] text-zinc-500 transition-colors hover:text-zinc-900"
+              className="hidden items-center gap-1 text-[14px] text-zinc-600 hover:text-zinc-900 sm:inline-flex"
             >
-              View site ↗
+              View site
+              <ArrowUpRight aria-hidden className="size-3.5" />
             </Link>
             <UserMenu email={email} />
           </div>
         </div>
       </header>
       <main className="flex-1">
-        <div className="mx-auto max-w-4xl px-6 py-8">{children}</div>
+        <div className={`${WRAP} py-10`}>{children}</div>
       </main>
     </div>
   );

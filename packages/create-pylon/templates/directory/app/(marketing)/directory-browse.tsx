@@ -6,7 +6,7 @@ import { EnsureGuest } from "@pylonsync/client";
 import { ArrowUpRight, ChevronUp } from "lucide-react";
 import { siteConfig } from "@/lib/site.config";
 import { LINK } from "@/components/marketing";
-import { parseTags, type ListingRow } from "@/lib/directory";
+import { monogram, parseTags, type ListingRow } from "@/lib/directory";
 
 // The browse island: search box, category rail, and the list.
 // `db.useSearch("Listing", …)` is a LIVE faceted full-text search: it re-runs
@@ -89,18 +89,18 @@ function BrowseInner() {
         className="h-10 w-full border border-zinc-300 bg-white px-3 font-mono text-[13px] text-zinc-900 outline-none placeholder:text-zinc-400 focus:border-brand"
       />
 
-      <div className="mt-6 grid gap-8 lg:grid-cols-[180px_1fr]">
+      <div className="mt-6 grid grid-cols-[minmax(0,1fr)] gap-6 lg:grid-cols-[180px_minmax(0,1fr)] lg:gap-8">
         {/* Category rail. Live counts per category come from the search. On
-            narrow screens the same links run in a horizontal row. */}
-        <aside>
+            narrow screens the same links wrap as a row of chips. */}
+        <aside className="min-w-0">
           <p className="border-b border-zinc-200 pb-2 text-[12px] font-medium uppercase tracking-wide text-zinc-500">
             Category
           </p>
-          <ul className="mt-2 flex gap-x-4 gap-y-1 overflow-x-auto pb-1 lg:flex-col lg:overflow-visible">{facetLinks}</ul>
+          <ul className="mt-3 flex flex-wrap gap-2 lg:mt-2 lg:flex-col lg:gap-0">{facetLinks}</ul>
         </aside>
 
         {/* Results */}
-        <div>
+        <div className="min-w-0">
           <div className="flex items-center justify-between border-b border-zinc-200 pb-2 text-[13px] text-zinc-500">
             <span className={MONO_SMALL}>
               {search.total} {search.total === 1 ? "tool" : "tools"}
@@ -163,14 +163,16 @@ function FacetLink({
   onClick: () => void;
 }) {
   return (
-    <li className="shrink-0">
+    <li>
       <button
         type="button"
         onClick={onClick}
         aria-pressed={active}
         className={
-          "flex w-full items-baseline gap-2 py-0.5 text-left text-[14px] lg:justify-between " +
-          (active ? "font-medium text-zinc-900" : "text-brand hover:underline")
+          "flex w-full items-baseline gap-2 border px-2.5 py-1 text-left text-[13px] lg:justify-between lg:border-0 lg:px-0 lg:py-0.5 lg:text-[14px] " +
+          (active
+            ? "border-zinc-900 font-medium text-zinc-900"
+            : "border-zinc-200 text-brand hover:border-zinc-300 lg:hover:underline")
         }
       >
         <span>{label}</span>
@@ -183,8 +185,9 @@ function FacetLink({
 function ListingRowItem({ listing }: { listing: ListingRow }) {
   const tags = parseTags(listing.tags);
   return (
-    <li className="grid grid-cols-[44px_1fr_20px] items-start gap-3 border-b border-zinc-200 py-3">
+    <li className="grid grid-cols-[44px_36px_minmax(0,1fr)_20px] items-start gap-3 border-b border-zinc-200 py-3">
       <VoteButton listingId={listing.id} votes={listing.votes} />
+      <ToolMark name={listing.name} />
       <div className="min-w-0">
         <div className="flex flex-wrap items-baseline gap-x-2">
           <a href={listing.url} target="_blank" rel="noopener noreferrer" className="text-[14px] font-semibold text-zinc-900 hover:text-brand">
@@ -208,6 +211,20 @@ function ListingRowItem({ listing }: { listing: ListingRow }) {
         <ArrowUpRight size={16} strokeWidth={1.75} aria-hidden />
       </a>
     </li>
+  );
+}
+
+// A tool's monogram mark (see monogram in lib/directory.ts).
+function ToolMark({ name }: { name: string }) {
+  const m = monogram(name);
+  return (
+    <span
+      aria-hidden
+      className="flex size-9 items-center justify-center rounded-md font-mono text-[13px] font-semibold tracking-tight"
+      style={{ backgroundColor: m.bg, color: m.fg }}
+    >
+      {m.letters}
+    </span>
   );
 }
 
@@ -267,8 +284,9 @@ function BrowseSkeleton({ bare }: { bare?: boolean }) {
   const list = (
     <ul>
       {Array.from({ length: 6 }).map((_, i) => (
-        <li key={i} className="grid grid-cols-[44px_1fr_20px] gap-3 border-b border-zinc-200 py-3">
+        <li key={i} className="grid grid-cols-[44px_36px_minmax(0,1fr)_20px] gap-3 border-b border-zinc-200 py-3">
           <div className="mx-auto h-8 w-6 animate-pulse bg-zinc-100" />
+          <div className="size-9 animate-pulse rounded-md bg-zinc-100" />
           <div className="space-y-2 py-0.5">
             <div className="h-3.5 w-1/3 animate-pulse bg-zinc-100" />
             <div className="h-3 w-2/3 animate-pulse bg-zinc-100" />
@@ -281,7 +299,7 @@ function BrowseSkeleton({ bare }: { bare?: boolean }) {
   return (
     <div>
       <div className="h-10 w-full animate-pulse border border-zinc-200 bg-zinc-50" />
-      <div className="mt-6 grid gap-8 lg:grid-cols-[180px_1fr]">
+      <div className="mt-6 grid grid-cols-[minmax(0,1fr)] gap-8 lg:grid-cols-[180px_minmax(0,1fr)]">
         <div className="hidden h-40 animate-pulse bg-zinc-50 lg:block" />
         {list}
       </div>

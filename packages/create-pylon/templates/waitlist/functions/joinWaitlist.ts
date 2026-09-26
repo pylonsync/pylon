@@ -1,4 +1,5 @@
 import { mutation, v } from "@pylonsync/functions";
+import { syncWaitlistStat } from "../lib/stats";
 
 // Normalize + sanity-check an email without pulling in a dependency. This is a
 // pragmatic "looks like an email" check, not RFC 5322 — the unique index is the
@@ -14,9 +15,8 @@ function normalizeEmail(raw: string): string | null {
 
 // joinWaitlist — the ONLY way a Signup row is ever written. It's a `mutation`
 // (not an `action`): mutations get `ctx.db` access and run as one atomic
-// transaction, and the insert fires a change event that re-runs the live
-// `waitlistCount` query for every open tab — that's what makes the counter tick
-// up in realtime.
+// transaction. It also rewrites the public WaitlistStat row, and that change
+// syncs to every open tab, which is what makes the counter tick up live.
 //
 // `auth: "public"` because a landing-page visitor has no account. Public
 // mutations are still rate-limited at the HTTP layer in production (the
@@ -61,21 +61,9 @@ export default mutation<{ email: string }, { ok: boolean; alreadyJoined: boolean
       throw e;
     }
 
-    // Keep the public, PII-free WaitlistStat singleton in sync with the real
-    // count. We RECOUNT (rather than +1) so the number can never drift, and
-    // this whole handler is one transaction — on SQLite writers serialize, so
-    // the recount-then-write is consistent. The landing page reads this row via
-    // `db.useQuery`, which syncs the new value to every open tab.
-    const total = (await ctx.db.unsafe.list("Signup")).length;
-    const stat = (await ctx.db.unsafe.list("WaitlistStat"))[0] as
-      | { id: string }
-      | undefined;
-    const now = new Date().toISOString();
-    if (stat) {
-      await ctx.db.unsafe.update("WaitlistStat", stat.id, { count: total, updatedAt: now });
-    } else {
-      await ctx.db.unsafe.insert("WaitlistStat", { count: total, updatedAt: now });
-    }
+    // Keep the public, PII-free WaitlistStat row equal to the Signup count.
+    // It is a recount, not +1, so the number cannot drift from the table.
+    await syncWaitlistStat(ctx.db.unsafe);
 
     return { ok: true, alreadyJoined: false };
   },

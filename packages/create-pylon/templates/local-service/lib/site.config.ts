@@ -30,6 +30,7 @@ export type ServiceItem = {
   name: string;
   durationMin: number; // drives the booking slot length
   price: string; // display only, e.g. "$35"
+  priceUsd: number; // the same price as a number; the dashboard sums it
   description?: string;
 };
 
@@ -65,8 +66,9 @@ export type LocalServiceConfig = BaseConfig & {
   location: {
     headline: string;
     address: string;
+    // A Google Maps embed URL (Share → Embed a map → the iframe's src). When
+    // empty, the page shows the weekly hours board beside the address.
     mapEmbedUrl?: string;
-    hoursText: string;
     phone: string;
     email: string;
   };
@@ -108,7 +110,7 @@ export const siteConfig: LocalServiceConfig = {
       "A neighborhood barbershop on Lower Greenville since 2014. Walk in or book a chair online. The calendar updates as chairs fill.",
     ctaLabel: "Book a chair",
     quickFacts: {
-      hours: "Tue–Sat, 9–6",
+      hours: "Tue–Sat from 9 AM",
       area: "Lower Greenville, Dallas",
       phone: "(214) 555-0148",
     },
@@ -122,6 +124,7 @@ export const siteConfig: LocalServiceConfig = {
         name: "Haircut",
         durationMin: 45,
         price: "$35",
+        priceUsd: 35,
         description: "Consultation, cut, and a clean finish. The classic.",
       },
       {
@@ -129,6 +132,7 @@ export const siteConfig: LocalServiceConfig = {
         name: "Beard trim",
         durationMin: 20,
         price: "$18",
+        priceUsd: 18,
         description: "Shape-up, line work, and hot-towel finish.",
       },
       {
@@ -136,6 +140,7 @@ export const siteConfig: LocalServiceConfig = {
         name: "Cut + beard",
         durationMin: 60,
         price: "$48",
+        priceUsd: 48,
         description: "The full sit-down. Haircut and beard, start to finish.",
       },
       {
@@ -143,6 +148,7 @@ export const siteConfig: LocalServiceConfig = {
         name: "Kids' cut",
         durationMin: 30,
         price: "$22",
+        priceUsd: 22,
         description: "For the under-12s. Patient barbers, no rush.",
       },
     ],
@@ -197,7 +203,6 @@ export const siteConfig: LocalServiceConfig = {
     headline: "Find us",
     address: "1845 Greenville Ave, Dallas, TX 75206",
     mapEmbedUrl: "",
-    hoursText: "Tue–Wed 9–6 · Thu–Fri 9–7 · Sat 9–4 · Sun–Mon closed",
     phone: "(214) 555-0148",
     email: "hello@northgatebarbers.example",
   },

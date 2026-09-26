@@ -51,7 +51,7 @@ export function AuthForm() {
     <div className="space-y-5">
       <form onSubmit={onSubmit} className="space-y-4">
         <label className="block">
-          <span className="mb-1.5 block text-[13px] font-medium text-zinc-700">Email</span>
+          <span className="mb-1.5 block text-[13px] font-medium text-[var(--cream-2)]">Email</span>
           <input
             type="email"
             value={email}
@@ -59,11 +59,11 @@ export function AuthForm() {
             required
             autoComplete="email"
             placeholder="you@yourbusiness.com"
-            className="h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
+            className="h-11 w-full rounded-[6px] border border-white/15 bg-[var(--ink)] px-3.5 text-[15px] text-[var(--cream)] outline-none transition placeholder:text-[var(--cream-2)]/60 focus:border-brand"
           />
         </label>
         <label className="block">
-          <span className="mb-1.5 block text-[13px] font-medium text-zinc-700">Password</span>
+          <span className="mb-1.5 block text-[13px] font-medium text-[var(--cream-2)]">Password</span>
           <input
             type="password"
             value={password}
@@ -71,24 +71,24 @@ export function AuthForm() {
             required
             autoComplete={mode === "login" ? "current-password" : "new-password"}
             placeholder={mode === "login" ? "Your password" : "At least 10 characters"}
-            className="h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
+            className="h-11 w-full rounded-[6px] border border-white/15 bg-[var(--ink)] px-3.5 text-[15px] text-[var(--cream)] outline-none transition placeholder:text-[var(--cream-2)]/60 focus:border-brand"
           />
         </label>
         {error ? (
-          <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] leading-snug text-red-700">
+          <p className="rounded-[6px] border border-brand/40 bg-brand/10 px-3 py-2 text-[13px] leading-snug text-[var(--cream)]">
             {error}
           </p>
         ) : null}
         <button
           type="submit"
           disabled={pending}
-          className="inline-flex h-10 w-full items-center justify-center rounded-lg bg-zinc-900 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-60"
+          className="inline-flex h-11 w-full items-center justify-center rounded-full bg-brand text-[14px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-60"
         >
           {pending ? "…" : mode === "login" ? "Sign in" : "Create account"}
         </button>
       </form>
 
-      <p className="text-center text-[13px] text-zinc-500">
+      <p className="text-center text-[13px] text-[var(--cream-2)]">
         {mode === "login" ? "First time here?" : "Already have an account?"}{" "}
         <button
           type="button"
@@ -96,7 +96,7 @@ export function AuthForm() {
             setMode(mode === "login" ? "signup" : "login");
             setError(null);
           }}
-          className="font-medium text-zinc-900 underline underline-offset-2"
+          className="font-medium text-[var(--cream)] underline underline-offset-4"
         >
           {mode === "login" ? "Create the owner account" : "Sign in"}
         </button>

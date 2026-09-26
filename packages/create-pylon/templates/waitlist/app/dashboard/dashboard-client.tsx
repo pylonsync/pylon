@@ -3,14 +3,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import { useAuth } from "@pylonsync/client";
+import { Download, LogOut, Search } from "lucide-react";
 import type { WaitlistStatsData, WaitlistStatsResult, SignupRow } from "@/lib/stats";
 
-// The owner's live dashboard. Liveness rides the SAME public aggregate the
+// The owner's live dashboard. Liveness rides the same public aggregate the
 // landing page uses: `db.useQuery("WaitlistStat")` re-renders the instant the
-// count changes (cross-tab, via the replica). The emails themselves never sync
-// — they come from the owner-gated `waitlistStats` function, (re)fetched on
-// mount and whenever the live count ticks. So the total, chart, and list all
-// stay live, but PII only ever travels through the gated call.
+// count changes (cross-tab, via the replica). The emails themselves never sync.
+// They come from the owner-gated `waitlistStats` function, fetched on mount and
+// again whenever the live count changes, so PII only travels through that call.
 export function WaitlistDashboard({ userEmail }: { userEmail: string }) {
   const { data: statRows } = db.useQuery<{ id: string; count: number }>("WaitlistStat");
   const liveCount = statRows.length > 0 ? statRows[0].count : 0;
@@ -18,6 +18,12 @@ export function WaitlistDashboard({ userEmail }: { userEmail: string }) {
   const [data, setData] = useState<WaitlistStatsData | null>(null);
   const [denied, setDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // In `pylon dev` an empty waitlist gets demo signups (functions/seedDemo.ts).
+  // On a deploy the call returns without writing.
+  useEffect(() => {
+    void callFn("seedDemo", {}).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,7 +52,7 @@ export function WaitlistDashboard({ userEmail }: { userEmail: string }) {
   if (denied) return <OwnerOnly email={userEmail} />;
   if (error) {
     return (
-      <div className="rounded-xl border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-700">
+      <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-5 py-4 text-sm text-red-300">
         {error}
       </div>
     );
@@ -54,15 +60,26 @@ export function WaitlistDashboard({ userEmail }: { userEmail: string }) {
   if (!data) return <Skeleton />;
 
   return (
-    <div className="space-y-8">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight">Waitlist</h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          Live — new signups appear here the moment they happen.
+    <div className="space-y-10">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h1 className="font-display text-[2rem] font-bold leading-none tracking-[-0.02em] text-chalk">
+            Waitlist
+          </h1>
+          <p className="mt-3 text-[14px] text-chalk-2">
+            Signups appear here as people join. The landing page shows the same total.
+          </p>
+        </div>
+        <p className="flex items-center gap-2 font-mono-ui text-[12px] text-chalk-2">
+          <span className="relative flex size-2">
+            <span className="absolute inline-flex size-2 animate-ping rounded-full bg-brand/60" />
+            <span className="relative inline-flex size-2 rounded-full bg-brand" />
+          </span>
+          live
         </p>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-px overflow-hidden rounded-lg border border-line bg-line grid-cols-3">
         <Stat label="Total signups" value={data.total} />
         <Stat label="Last 7 days" value={data.last7} />
         <Stat label="Today" value={data.today} />
@@ -77,12 +94,10 @@ export function WaitlistDashboard({ userEmail }: { userEmail: string }) {
 
 function Stat({ label, value }: { label: string; value: number }) {
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-4">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">
-        {label}
-      </div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums text-zinc-900">
-        {value.toLocaleString()}
+    <div className="bg-paper px-3 py-4 sm:px-5 sm:py-5">
+      <div className="font-mono-ui text-[12px] text-chalk-2">{label}</div>
+      <div className="font-display mt-2 text-[1.75rem] sm:text-[2.25rem] font-bold leading-none tabular-nums tracking-[-0.02em] text-chalk">
+        {value.toLocaleString("en-US")}
       </div>
     </div>
   );
@@ -92,121 +107,145 @@ function Stat({ label, value }: { label: string; value: number }) {
 
 function TrendChart({ daily }: { daily: { date: string; count: number }[] }) {
   const max = Math.max(1, ...daily.map((d) => d.count));
+  const total = daily.reduce((n, d) => n + d.count, 0);
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-5">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-900">Last 30 days</h2>
-        <span className="text-[12px] text-zinc-400">
-          peak {max.toLocaleString()}/day
+    <section className="rounded-lg border border-line bg-paper p-5 sm:p-6">
+      <div className="flex items-baseline justify-between gap-4">
+        <h2 className="font-display text-[17px] font-medium text-chalk">Last 30 days</h2>
+        <span className="font-mono-ui text-[12px] text-chalk-2">
+          {total.toLocaleString("en-US")} signups · peak {max}/day
         </span>
       </div>
-      {/* Each column is a FULL-HEIGHT flex cell (h-full) that bottom-aligns its
-          bar — so the bar's percentage height resolves against the 7rem track,
-          not an auto-height parent (which would collapse it to nothing). */}
-      <div className="mt-4 flex h-28 items-end gap-1">
-        {daily.map((d) => (
-          <div
-            key={d.date}
-            className="group relative flex h-full flex-1 flex-col justify-end"
-          >
+      {/* Each column is a full-height flex cell that bottom-aligns its bar, so
+          the bar's percentage height resolves against the track. */}
+      <div className="mt-6 flex h-36 items-end gap-[3px]">
+        {daily.map((d, i) => (
+          <div key={d.date} className="group relative flex h-full flex-1 flex-col justify-end">
             <div
-              className="w-full rounded-t bg-brand/80 transition-colors group-hover:bg-brand"
+              className={
+                "w-full rounded-t-[2px] transition-colors " +
+                (i === daily.length - 1 ? "bg-brand" : "bg-brand/45 group-hover:bg-brand/80")
+              }
               style={{ height: `${Math.max(2, (d.count / max) * 100)}%` }}
             />
-            {/* Tooltip on hover — date + count. */}
-            <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1 hidden -translate-x-1/2 whitespace-nowrap rounded bg-zinc-900 px-2 py-1 text-[11px] text-white group-hover:block">
+            <div className="pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 hidden -translate-x-1/2 whitespace-nowrap rounded border border-line bg-ink px-2 py-1 font-mono-ui text-[11px] text-chalk group-hover:block">
               {fmtDay(d.date)} · {d.count}
             </div>
           </div>
         ))}
       </div>
-      <div className="mt-2 flex justify-between text-[11px] text-zinc-400">
+      <div className="mt-3 flex justify-between border-t border-line pt-2 font-mono-ui text-[11px] text-chalk-2">
         <span>{fmtDay(daily[0]?.date)}</span>
-        <span>{fmtDay(daily[daily.length - 1]?.date)}</span>
+        <span>Today</span>
       </div>
-    </div>
+    </section>
   );
 }
 
 /* ----------------------------- signup list ---------------------------- */
 
+const PAGE = 50;
+
 function SignupTable({ signups }: { signups: SignupRow[] }) {
   const [q, setQ] = useState("");
+  const [shown, setShown] = useState(PAGE);
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
     if (!needle) return signups;
     return signups.filter((s) => s.email.toLowerCase().includes(needle));
   }, [q, signups]);
+  // Join order: the oldest signup is No. 1.
+  const position = useMemo(() => {
+    const m = new Map<string, number>();
+    signups.forEach((s, i) => m.set(s.id, signups.length - i));
+    return m;
+  }, [signups]);
 
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white">
-      <div className="flex flex-col gap-3 border-b border-zinc-100 p-4 sm:flex-row sm:items-center sm:justify-between">
-        <h2 className="text-sm font-semibold text-zinc-900">
+    <section className="overflow-hidden rounded-lg border border-line bg-paper">
+      <div className="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <h2 className="font-display text-[17px] font-medium text-chalk">
           Signups{" "}
-          <span className="font-normal text-zinc-400">
-            ({filtered.length.toLocaleString()})
+          <span className="font-mono-ui text-[13px] font-normal text-chalk-2">
+            {filtered.length.toLocaleString("en-US")}
           </span>
         </h2>
         <div className="flex items-center gap-2">
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search email…"
-            aria-label="Search signups"
-            className="h-9 w-44 rounded-md border border-zinc-300 bg-white px-3 text-sm outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
-          />
+          <label className="relative flex-1 sm:flex-none">
+            <Search aria-hidden className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-chalk-2" />
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Search email"
+              aria-label="Search signups"
+              className="h-9 w-full rounded-md border border-line bg-ink pl-8 pr-3 text-[13px] text-chalk outline-none transition placeholder:text-chalk-2 focus:border-brand sm:w-52"
+            />
+          </label>
           <button
             type="button"
             onClick={() => exportCsv(signups)}
             disabled={signups.length === 0}
-            className="inline-flex h-9 items-center rounded-md border border-zinc-300 px-3 text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-40"
+            className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-line px-3 text-[13px] font-medium text-chalk transition-colors hover:border-chalk-2 disabled:opacity-40"
           >
+            <Download aria-hidden className="size-3.5" />
             Export CSV
           </button>
         </div>
       </div>
 
       {filtered.length === 0 ? (
-        <p className="p-8 text-center text-sm text-zinc-500">
+        <p className="px-5 py-12 text-center text-[14px] text-chalk-2">
           {signups.length === 0
-            ? "No signups yet. Share your landing page and watch them roll in — live."
+            ? "No signups yet. They appear here as soon as someone joins."
             : "No emails match your search."}
         </p>
       ) : (
-        <ul className="divide-y divide-zinc-100">
-          {filtered.map((s) => (
-            <li key={s.id} className="flex items-center justify-between gap-3 px-4 py-2.5">
-              <span className="truncate text-sm text-zinc-800">{s.email}</span>
-              <span className="shrink-0 text-[12px] text-zinc-400">
-                {fmtDateTime(s.createdAt)}
-              </span>
-            </li>
-          ))}
-        </ul>
+        <>
+          <ul className="divide-y divide-line">
+            {filtered.slice(0, shown).map((s) => (
+              <li key={s.id} className="flex items-center gap-4 px-4 py-3 sm:px-5">
+                <span className="hidden w-12 shrink-0 sm:block font-mono-ui text-[12px] tabular-nums text-chalk-2">
+                  {position.get(s.id)}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[14px] text-chalk">{s.email}</span>
+                <span className="shrink-0 font-mono-ui text-[12px] text-chalk-2">
+                  {fmtDateTime(s.createdAt)}
+                </span>
+              </li>
+            ))}
+          </ul>
+          {filtered.length > shown ? (
+            <button
+              type="button"
+              onClick={() => setShown((n) => n + PAGE)}
+              className="w-full border-t border-line py-3 text-[13px] text-chalk-2 transition-colors hover:text-chalk"
+            >
+              Show {Math.min(PAGE, filtered.length - shown)} more
+            </button>
+          ) : null}
+        </>
       )}
-    </div>
+    </section>
   );
 }
 
 /* --------------------------- owner-only gate -------------------------- */
 
 // Shown to a signed-in user the `waitlistStats` function refused (not the
-// configured owner, or no PYLON_OWNER_EMAIL set). Fails closed — no signup data
+// configured owner, or no PYLON_OWNER_EMAIL set). Fails closed: no signup data
 // is fetched or shown.
 function OwnerOnly({ email }: { email: string }) {
   return (
-    <div className="rounded-xl border border-dashed border-zinc-300 px-6 py-12 text-center">
-      <h1 className="text-lg font-semibold">This dashboard is owner-only</h1>
-      <p className="mx-auto mt-2 max-w-md text-sm text-zinc-500">
-        You&apos;re signed in as{" "}
-        <span className="font-medium text-zinc-700">{email || "this account"}</span>.
-        A waitlist is single-tenant — only the owner can see the signups. Set{" "}
-        <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-[12px]">
+    <div className="rounded-lg border border-dashed border-line px-6 py-14 text-center">
+      <h1 className="font-display text-[1.5rem] font-bold text-chalk">This dashboard is owner-only</h1>
+      <p className="mx-auto mt-3 max-w-md text-[14px] leading-relaxed text-chalk-2">
+        You are signed in as <span className="text-chalk">{email || "this account"}</span>. Only
+        the owner can see signups. Set{" "}
+        <code className="rounded bg-ink-2 px-1.5 py-0.5 font-mono-ui text-[12px] text-chalk">
           PYLON_OWNER_EMAIL={email || "you@yourbusiness.com"}
         </code>{" "}
-        in your{" "}
-        <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-[12px]">.env</code>,
-        restart, and reload — or sign in with the owner account.
+        in <code className="rounded bg-ink-2 px-1.5 py-0.5 font-mono-ui text-[12px] text-chalk">.env</code>,
+        restart, and reload. Or sign in with the owner account.
       </p>
     </div>
   );
@@ -223,20 +262,22 @@ export function UserMenu({ email }: { email: string }) {
   }
   return (
     <details className="group relative">
-      <summary className="flex size-8 cursor-pointer select-none list-none items-center justify-center rounded-full bg-zinc-900 text-[12px] font-semibold text-white marker:hidden [&::-webkit-details-marker]:hidden">
+      <summary
+        aria-label="Account"
+        className="flex size-8 cursor-pointer select-none list-none items-center justify-center rounded-full bg-brand text-[12px] font-semibold text-white marker:hidden [&::-webkit-details-marker]:hidden"
+      >
         {initial}
       </summary>
-      <div className="absolute right-0 top-full z-40 mt-2 w-56 overflow-hidden rounded-xl border border-zinc-200 bg-white py-1 shadow-[0_16px_48px_-16px_rgba(0,0,0,0.25)]">
-        <div className="border-b border-zinc-100 px-3 py-2">
-          <div className="truncate text-[13px] font-medium text-zinc-900">
-            {email || "Signed in"}
-          </div>
+      <div className="absolute right-0 top-full z-40 mt-2 w-60 overflow-hidden rounded-lg border border-line bg-paper py-1 shadow-[0_24px_48px_-24px_rgba(0,0,0,0.8)]">
+        <div className="truncate border-b border-line px-3 py-2.5 text-[13px] text-chalk">
+          {email || "Signed in"}
         </div>
         <button
           type="button"
           onClick={onSignOut}
-          className="flex w-full items-center px-3 py-2 text-left text-[13px] text-zinc-700 transition-colors hover:bg-zinc-50"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-chalk-2 transition-colors hover:bg-ink-2 hover:text-chalk"
         >
+          <LogOut aria-hidden className="size-3.5" />
           Sign out
         </button>
       </div>
@@ -248,26 +289,22 @@ export function UserMenu({ email }: { email: string }) {
 
 function Skeleton() {
   return (
-    <div className="space-y-8">
-      <div className="h-6 w-32 animate-pulse rounded bg-zinc-100" />
+    <div className="space-y-10">
+      <div className="h-8 w-40 animate-pulse rounded bg-ink-2" />
       <div className="grid gap-4 sm:grid-cols-3">
         {[0, 1, 2].map((i) => (
-          <div key={i} className="h-20 animate-pulse rounded-xl bg-zinc-100" />
+          <div key={i} className="h-24 animate-pulse rounded-lg bg-ink-2" />
         ))}
       </div>
-      <div className="h-44 animate-pulse rounded-xl bg-zinc-100" />
-      <div className="h-64 animate-pulse rounded-xl bg-zinc-100" />
+      <div className="h-56 animate-pulse rounded-lg bg-ink-2" />
+      <div className="h-72 animate-pulse rounded-lg bg-ink-2" />
     </div>
   );
 }
 
 function exportCsv(signups: SignupRow[]) {
-  const cell = (v: string) =>
-    /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
-  const rows = [
-    "email,joined_at",
-    ...signups.map((s) => `${cell(s.email)},${cell(s.createdAt)}`),
-  ];
+  const cell = (v: string) => (/[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v);
+  const rows = ["email,joined_at", ...signups.map((s) => `${cell(s.email)},${cell(s.createdAt)}`)];
   const blob = new Blob([rows.join("\n")], { type: "text/csv;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -282,13 +319,13 @@ function exportCsv(signups: SignupRow[]) {
 function fmtDay(iso?: string) {
   if (!iso) return "";
   const d = new Date(iso + "T00:00:00Z");
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 function fmtDateTime(iso: string) {
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "";
-  return new Date(t).toLocaleString(undefined, {
+  return new Date(t).toLocaleString("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",

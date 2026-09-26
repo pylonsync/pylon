@@ -3,6 +3,7 @@ import { type Metadata } from "@pylonsync/react";
 import { WRAP, FactList, ProductMock } from "@/components/marketing";
 import { SignupForm, LiveCount } from "./waitlist-hero";
 import { siteConfig } from "@/lib/site.config";
+import { launchLabel } from "@/lib/launch";
 
 // SEO metadata: server-rendered into <head>, so the page is fully indexable.
 // All copy lives in lib/site.config.ts; edit it there to rebrand.
@@ -25,6 +26,7 @@ export const metadata: Metadata = {
 // Signed-in state (the nav's "Dashboard" link) is resolved in the layout.
 export default function LandingPage() {
   const { hero, counter, mock, facts, faq } = siteConfig;
+  const launch = launchLabel(hero.launchDate, Date.now());
 
   return (
     <div>
@@ -36,9 +38,14 @@ export default function LandingPage() {
           </h1>
           <p className="mt-6 max-w-md text-[17px] leading-relaxed text-chalk-2">{hero.subcopy}</p>
           <div className="mt-8 max-w-md">
-            <SignupForm hero={hero} />
+            <SignupForm hero={hero} showCountNote={counter.enabled} />
           </div>
-          <p className="font-mono-ui mt-6 text-[13px] text-brand">{hero.launchNote}</p>
+          <div className="mt-8 flex flex-col gap-2 border-t border-line pt-5">
+            {counter.enabled ? (
+              <LiveCount importedCount={counter.importedCount} label={counter.label} labelOne={counter.labelOne} />
+            ) : null}
+            {launch ? <p className="font-mono-ui text-[13px] text-brand">{launch}</p> : null}
+          </div>
         </div>
         <ProductMock
           windowTitle={mock.windowTitle}
@@ -56,11 +63,6 @@ export default function LandingPage() {
         <div className="mt-8">
           <FactList items={facts.items} />
         </div>
-        {counter.enabled ? (
-          <div className="mt-12 border-t border-line pt-5">
-            <LiveCount seed={counter.seedCount ?? 0} label={counter.label} />
-          </div>
-        ) : null}
       </section>
 
       {/* ============================== FAQ ============================= */}

@@ -3,7 +3,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import { useAuth } from "@pylonsync/client";
+import { ArrowUpRight, Check, Eye, EyeOff, LogOut, Plus, Star, Trash2, X } from "lucide-react";
 import {
+  bookingWindow,
   money,
   parseLineItems,
   lineItemsTotal,
@@ -46,9 +48,11 @@ export function AgencyDashboard({ userEmail }: { userEmail: string }) {
           setAuthorized(false);
           return;
         }
-        setAuthorized(true);
-        // Seed demo clients + invoices once, for the owner only (idempotent).
-        void callFn("seedStudioBackoffice", {}).catch(() => {});
+        // In `pylon dev` an empty back-office gets demo leads, clients, and
+        // invoices before the tabs load (functions/seedStudioBackoffice.ts). On
+        // a deploy the call returns without writing.
+        await callFn("seedStudioBackoffice", {}).catch(() => {});
+        if (!cancelled) setAuthorized(true);
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       }
@@ -72,17 +76,17 @@ export function AgencyDashboard({ userEmail }: { userEmail: string }) {
   ];
 
   return (
-    <div className="space-y-6">
-      <nav className="flex gap-1 border-b border-zinc-200">
+    <div className="space-y-8">
+      <nav className="flex gap-1 overflow-x-auto border-b border-zinc-200">
         {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
             onClick={() => setTab(t.id)}
             className={
-              "-mb-px border-b-2 px-3.5 py-2.5 text-[13.5px] font-medium transition-colors " +
+              "-mb-px shrink-0 border-b-2 px-3.5 py-2.5 text-[14px] font-medium transition-colors " +
               (tab === t.id
-                ? "border-brand text-zinc-900"
+                ? "border-ink text-ink"
                 : "border-transparent text-zinc-500 hover:text-zinc-800")
             }
           >
@@ -148,10 +152,10 @@ function PipelinePanel() {
 
   return (
     <div className="space-y-6">
-      <PanelHead title="Pipeline" sub="Live — leads land here the moment they're sent. Booking one drops the open-slot count on your site instantly." />
+      <PanelHead title="Pipeline" sub="Leads appear here as they are sent. Booking one lowers the open-slot count on your site." live />
 
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Stat label="Open slots" value={String(cap?.openSlots ?? 0)} hint={cap?.label} />
+      <div className="grid gap-px overflow-hidden rounded-sm border border-zinc-200 bg-zinc-200 sm:grid-cols-3">
+        <Stat label="Open slots" value={String(cap?.openSlots ?? 0)} hint={bookingWindow(cap?.label, Date.now())} />
         <Stat label="New leads" value={String(newCount)} />
         <Stat label="Booked" value={String(bookedCount)} />
       </div>
@@ -160,7 +164,7 @@ function PipelinePanel() {
 
       <Card title="Inquiries" count={active.length}>
         {inquiries.length === 0 ? (
-          <Empty>No inquiries yet — share your site.</Empty>
+          <Empty>No inquiries yet. They appear here as soon as someone sends the contact form.</Empty>
         ) : (
           <ul className="divide-y divide-zinc-100">
             {inquiries.map((i) => (
@@ -187,9 +191,10 @@ function PipelinePanel() {
                         type="button"
                         disabled={busyId === i.id}
                         onClick={() => act(i.id, "bookInquiry")}
-                        className="rounded-md bg-brand px-3 py-1.5 text-[12.5px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                        className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12.5px] font-medium text-white transition-opacity hover:opacity-85 disabled:opacity-50"
                       >
-                        {busyId === i.id ? "…" : "Book"}
+                        <Check aria-hidden className="size-3.5" />
+                        Book
                       </button>
                     ) : null}
                     {i.status !== "declined" ? (
@@ -197,7 +202,7 @@ function PipelinePanel() {
                         type="button"
                         disabled={busyId === i.id}
                         onClick={() => act(i.id, "declineInquiry")}
-                        className="rounded-md border border-zinc-300 px-3 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:border-red-300 hover:text-red-600 disabled:opacity-50"
+                        className="rounded-full border border-zinc-300 px-3.5 py-1.5 text-[12.5px] font-medium text-zinc-600 transition-colors hover:border-zinc-500 hover:text-ink disabled:opacity-50"
                       >
                         {i.status === "booked" ? "Release" : "Decline"}
                       </button>
@@ -237,17 +242,20 @@ function CapacityCard({ cap }: { cap?: CapacityRow }) {
   }
 
   return (
-    <form onSubmit={save} className="rounded-xl border border-zinc-200 bg-white p-4">
-      <div className="text-sm font-semibold text-zinc-900">Availability</div>
-      <p className="mt-1 text-[13px] text-zinc-500">Shown live on your site as “N project slots open”.</p>
+    <form onSubmit={save} className="rounded-sm border border-zinc-200 bg-white p-5">
+      <h2 className="font-display text-[1.5rem] leading-none text-ink">Availability</h2>
+      <p className="mt-2 text-[13px] text-zinc-500">
+        Your site shows this as “N project slots open”. Leave the window empty to use the next
+        quarter a project could start in.
+      </p>
       <div className="mt-4 flex flex-wrap items-end gap-3">
         <label className="block">
           <span className="mb-1 block text-[12px] font-medium text-zinc-600">Booking window</span>
           <input
             value={label}
             onChange={(e) => { setLabel(e.target.value); setSaved(false); }}
-            placeholder="Q3 2026"
-            className="h-9 w-40 rounded-lg border border-zinc-300 px-3 text-[14px] outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            placeholder={bookingWindow("", Date.now())}
+            className="h-9 w-44 rounded-sm border border-zinc-300 px-3 text-[14px] outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
           />
         </label>
         <label className="block">
@@ -257,16 +265,22 @@ function CapacityCard({ cap }: { cap?: CapacityRow }) {
             min={0}
             value={slots}
             onChange={(e) => { setSlots(e.target.value); setSaved(false); }}
-            className="h-9 w-24 rounded-lg border border-zinc-300 px-3 text-[14px] tabular-nums outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
+            className="h-9 w-24 rounded-sm border border-zinc-300 px-3 text-[14px] tabular-nums outline-none focus:border-brand focus:ring-2 focus:ring-brand/20"
           />
         </label>
         <button
           type="submit"
           disabled={saving}
-          className="h-9 rounded-lg bg-zinc-900 px-4 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-50"
+          className="inline-flex h-9 items-center gap-1.5 rounded-full bg-ink px-4 text-[13px] font-medium text-white transition-opacity hover:opacity-85 disabled:opacity-50"
         >
-          {saving ? "Saving…" : saved ? "Saved ✓" : "Save"}
+          {saving ? "Saving…" : "Save"}
         </button>
+        {saved ? (
+          <span role="status" className="inline-flex items-center gap-1 text-[13px] text-green-700">
+            <Check aria-hidden className="size-3.5" />
+            Saved
+          </span>
+        ) : null}
       </div>
     </form>
   );
@@ -310,13 +324,13 @@ function WorkPanel() {
     <div className="space-y-6">
       <PanelHead
         title="Work"
-        sub={`Your portfolio. ${selectedCount} featured on the homepage. Toggle the star to feature, the eye to publish.`}
+        sub={`Your portfolio. ${selectedCount} featured on the homepage. The star features a project; the eye publishes it.`}
         action={<NewButton onClick={() => setEditing("new")}>New project</NewButton>}
       />
 
       <Card title="Projects" count={projects.length}>
         {ordered.length === 0 ? (
-          <Empty>No projects yet — add your first case study.</Empty>
+          <Empty>No projects yet. Add your first case study.</Empty>
         ) : (
           <ul className="divide-y divide-zinc-100">
             {ordered.map((p) => (
@@ -343,7 +357,7 @@ function WorkPanel() {
                     title={p.selected ? "Featured on homepage" : "Feature on homepage"}
                     onClick={() => flag(p.id, { selected: !p.selected })}
                   >
-                    {p.selected ? "★" : "☆"}
+                    <Star aria-hidden className="size-4" fill={p.selected ? "currentColor" : "none"} />
                   </IconToggle>
                   <IconToggle
                     on={p.published}
@@ -351,16 +365,17 @@ function WorkPanel() {
                     title={p.published ? "Published" : "Draft (hidden)"}
                     onClick={() => flag(p.id, { published: !p.published })}
                   >
-                    {p.published ? "👁" : "🚫"}
+                    {p.published ? <Eye aria-hidden className="size-4" /> : <EyeOff aria-hidden className="size-4" />}
                   </IconToggle>
                   <a
                     href={`/work/${p.slug}`}
                     target="_blank"
                     rel="noreferrer"
-                    className="rounded-md px-2 py-1 text-[12px] text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800"
+                    className="rounded-md p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-800"
                     title="View case study"
+                    aria-label={`View the ${p.title} case study`}
                   >
-                    ↗
+                    <ArrowUpRight aria-hidden className="size-4" />
                   </a>
                   <button
                     type="button"
@@ -373,10 +388,11 @@ function WorkPanel() {
                     type="button"
                     disabled={busyId === p.id}
                     onClick={() => remove(p)}
-                    className="rounded-md px-2 py-1 text-[12.5px] text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                    className="rounded-md p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
                     title="Delete"
+                    aria-label="Delete"
                   >
-                    ✕
+                    <Trash2 aria-hidden className="size-4" />
                   </button>
                 </div>
               </li>
@@ -445,7 +461,7 @@ function ProjectForm({
       });
       onClose();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn't save — try again.");
+      setErr(e instanceof Error ? e.message : "Could not save. Try again.");
       setSaving(false);
     }
   }
@@ -514,7 +530,7 @@ function ClientsPanel() {
     setNote(null);
     try {
       const r = await callFn<{ ok: boolean; invoices: number }>("deleteClient", { id: c.id });
-      if (!r.ok) setNote(`${c.name} has ${r.invoices} invoice${r.invoices === 1 ? "" : "s"} — delete those first.`);
+      if (!r.ok) setNote(`${c.name} has ${r.invoices} invoice${r.invoices === 1 ? "" : "s"}. Delete those first.`);
       else await load();
     } finally {
       setBusyId(null);
@@ -527,7 +543,7 @@ function ClientsPanel() {
     <div className="space-y-6">
       <PanelHead
         title="Clients"
-        sub="Your CRM — private contact details, never exposed to the public site."
+        sub="Contacts and their status. Only you can see this tab; nothing here reaches the public site."
         action={<NewButton onClick={() => setEditing("new")}>New client</NewButton>}
       />
       {note ? (
@@ -536,7 +552,7 @@ function ClientsPanel() {
 
       <Card title="Contacts" count={clients.length}>
         {clients.length === 0 ? (
-          <Empty>No clients yet — add your first contact.</Empty>
+          <Empty>No clients yet. Add your first contact.</Empty>
         ) : (
           <ul className="divide-y divide-zinc-100">
             {clients.map((c) => (
@@ -560,10 +576,11 @@ function ClientsPanel() {
                     type="button"
                     disabled={busyId === c.id}
                     onClick={() => remove(c)}
-                    className="rounded-md px-2 py-1 text-[12.5px] text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                    className="rounded-md p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
                     title="Delete"
+                    aria-label="Delete"
                   >
-                    ✕
+                    <Trash2 aria-hidden className="size-4" />
                   </button>
                 </div>
               </li>
@@ -617,7 +634,7 @@ function ClientForm({
       await onSaved();
       onClose();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn't save — try again.");
+      setErr(e instanceof Error ? e.message : "Could not save. Try again.");
       setSaving(false);
     }
   }
@@ -713,11 +730,11 @@ function InvoicesPanel() {
     <div className="space-y-6">
       <PanelHead
         title="Invoices"
-        sub="Billing — private. View any invoice, export it to PDF, and track what's paid vs outstanding. Never syncs to the public site."
+        sub="View an invoice, export it to PDF, and track what is paid and outstanding. Only you can see this tab."
         action={<NewButton onClick={() => setEditing("new")}>New invoice</NewButton>}
       />
 
-      <div className="grid gap-4 sm:grid-cols-3">
+      <div className="grid gap-px overflow-hidden rounded-sm border border-zinc-200 bg-zinc-200 sm:grid-cols-3">
         <Stat label="Paid" value={money(totals.paid)} />
         <Stat label="Outstanding" value={money(totals.outstanding)} />
         <Stat label="Invoices" value={String(invoices.length)} />
@@ -770,10 +787,11 @@ function InvoicesPanel() {
                     type="button"
                     disabled={busyId === inv.id}
                     onClick={() => remove(inv)}
-                    className="rounded-md px-2 py-1 text-[12.5px] text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
+                    className="rounded-md p-1.5 text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-50"
                     title="Delete"
+                    aria-label="Delete"
                   >
-                    ✕
+                    <Trash2 aria-hidden className="size-4" />
                   </button>
                 </div>
               </li>
@@ -894,7 +912,7 @@ function InvoiceView({
             >
               {downloading ? "Preparing…" : "Download PDF"}
             </button>
-            <button type="button" onClick={onClose} className="rounded-md px-2 py-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700">✕</button>
+            <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"><X aria-hidden className="size-4" /></button>
           </div>
         </div>
 
@@ -1072,7 +1090,7 @@ function InvoiceForm({
       await onSaved();
       onClose();
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn't save — try again.");
+      setErr(e instanceof Error ? e.message : "Could not save. Try again.");
       setSaving(false);
     }
   }
@@ -1083,7 +1101,7 @@ function InvoiceForm({
     <Modal title={initial ? "Edit invoice" : "New invoice"} onClose={onClose} onSubmit={save} saving={saving} error={err}>
       {noClients ? (
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-[13px] text-amber-800">
-          Add a client first — an invoice needs someone to bill.
+          Add a client first. An invoice needs someone to bill.
         </p>
       ) : null}
       <div className="grid gap-3 sm:grid-cols-2">
@@ -1143,8 +1161,9 @@ function InvoiceForm({
                 disabled={items.length === 1}
                 className="shrink-0 rounded-md px-2 py-1 text-[13px] text-zinc-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-30"
                 title="Remove line"
+                aria-label="Remove line"
               >
-                ✕
+                <X aria-hidden className="size-4" />
               </button>
             </div>
           ))}
@@ -1159,7 +1178,7 @@ function InvoiceForm({
         </div>
       </div>
 
-      <Field label="Project" hint="Optional — ties the bill to a case study">
+      <Field label="Project" hint="Optional. Links the invoice to a case study">
         <select value={f.projectId} onChange={(e) => set("projectId", e.target.value)} className={inputCls}>
           <option value="">None</option>
           {projects.map((p) => (
@@ -1192,14 +1211,33 @@ function InvoiceForm({
 
 /* ============================== PRIMITIVES ============================= */
 
-function PanelHead({ title, sub, action }: { title: string; sub: string; action?: React.ReactNode }) {
+function PanelHead({
+  title,
+  sub,
+  action,
+  live,
+}: {
+  title: string;
+  sub: string;
+  action?: React.ReactNode;
+  live?: boolean;
+}) {
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3">
+    <div className="flex flex-wrap items-end justify-between gap-4">
       <div>
-        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-        <p className="mt-1 max-w-xl text-sm text-zinc-500">{sub}</p>
+        <h1 className="font-display text-[2.75rem] leading-none tracking-[-0.015em] text-ink">{title}</h1>
+        <p className="mt-3 max-w-xl text-[14px] leading-relaxed text-zinc-600">{sub}</p>
       </div>
       {action}
+      {live ? (
+        <span className="inline-flex items-center gap-2 text-[13px] text-zinc-600">
+          <span className="relative flex size-2">
+            <span className="absolute inline-flex size-2 animate-ping rounded-full bg-green-500/60" />
+            <span className="relative inline-flex size-2 rounded-full bg-green-600" />
+          </span>
+          Live
+        </span>
+      ) : null}
     </div>
   );
 }
@@ -1209,18 +1247,20 @@ function NewButton({ onClick, children }: { onClick: () => void; children: React
     <button
       type="button"
       onClick={onClick}
-      className="shrink-0 rounded-lg bg-zinc-900 px-3.5 py-2 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-ink px-4 py-2 text-[13px] font-medium text-white transition-opacity hover:opacity-85"
     >
-      + {children}
+      <Plus aria-hidden className="size-3.5" />
+      {children}
     </button>
   );
 }
 
 function Card({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white">
-      <div className="border-b border-zinc-100 px-4 py-3 text-sm font-semibold text-zinc-900">
-        {title} <span className="font-normal text-zinc-400">({count})</span>
+    <div className="rounded-sm border border-zinc-200 bg-white">
+      <div className="flex items-baseline gap-2 border-b border-zinc-100 px-4 py-3.5">
+        <h2 className="font-display text-[1.375rem] leading-none text-ink">{title}</h2>
+        <span className="text-[13px] tabular-nums text-zinc-400">{count}</span>
       </div>
       {children}
     </div>
@@ -1233,9 +1273,9 @@ function Empty({ children }: { children: React.ReactNode }) {
 
 function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-4">
-      <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-400">{label}</div>
-      <div className="mt-1 text-2xl font-semibold tabular-nums text-zinc-900">{value}</div>
+    <div className="bg-white p-5">
+      <div className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="font-display mt-2 text-[2.75rem] leading-none tabular-nums text-ink">{value}</div>
       {hint ? <div className="mt-0.5 text-[12px] text-zinc-400">{hint}</div> : null}
     </div>
   );
@@ -1284,10 +1324,12 @@ function IconToggle({
       type="button"
       disabled={disabled}
       title={title}
+      aria-label={title}
+      aria-pressed={on}
       onClick={onClick}
       className={
-        "rounded-md px-2 py-1 text-[13px] leading-none transition-colors disabled:opacity-50 " +
-        (on ? "text-amber-500 hover:bg-amber-50" : "text-zinc-300 hover:bg-zinc-100 hover:text-zinc-500")
+        "rounded-md p-1.5 leading-none transition-colors disabled:opacity-50 " +
+        (on ? "text-ink hover:bg-zinc-100" : "text-zinc-300 hover:bg-zinc-100 hover:text-zinc-500")
       }
     >
       {children}
@@ -1312,7 +1354,7 @@ function Switch({ label, checked, onChange }: { label: string; checked: boolean;
 }
 
 // A simple centered modal with a sticky footer. Submits on the footer button or
-// Enter; closes on the backdrop, the ✕, or Escape.
+// Enter; closes on the backdrop, the close button, or Escape.
 function Modal({
   title,
   onClose,
@@ -1343,7 +1385,7 @@ function Modal({
       >
         <div className="flex items-center justify-between border-b border-zinc-100 px-5 py-3.5">
           <h2 className="text-[15px] font-semibold text-zinc-900">{title}</h2>
-          <button type="button" onClick={onClose} className="rounded-md px-2 py-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700">✕</button>
+          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"><X aria-hidden className="size-4" /></button>
         </div>
         <div className="max-h-[70vh] space-y-3.5 overflow-y-auto px-5 py-4">{children}</div>
         <div className="flex items-center justify-between gap-3 border-t border-zinc-100 px-5 py-3.5">
@@ -1406,7 +1448,10 @@ export function UserMenu({ email }: { email: string }) {
   }
   return (
     <details className="group relative">
-      <summary className="flex size-8 cursor-pointer select-none list-none items-center justify-center rounded-full bg-zinc-900 text-[12px] font-semibold text-white marker:hidden [&::-webkit-details-marker]:hidden">
+      <summary
+        aria-label="Account"
+        className="flex size-8 cursor-pointer select-none list-none items-center justify-center rounded-full bg-ink text-[12px] font-semibold text-white marker:hidden [&::-webkit-details-marker]:hidden"
+      >
         {initial}
       </summary>
       <div className="absolute right-0 top-full z-40 mt-2 w-56 overflow-hidden rounded-xl border border-zinc-200 bg-white py-1 shadow-[0_16px_48px_-16px_rgba(0,0,0,0.25)]">
@@ -1416,8 +1461,9 @@ export function UserMenu({ email }: { email: string }) {
         <button
           type="button"
           onClick={onSignOut}
-          className="flex w-full items-center px-3 py-2 text-left text-[13px] text-zinc-700 transition-colors hover:bg-zinc-50"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-zinc-700 transition-colors hover:bg-zinc-50"
         >
+          <LogOut aria-hidden className="size-3.5" />
           Sign out
         </button>
       </div>

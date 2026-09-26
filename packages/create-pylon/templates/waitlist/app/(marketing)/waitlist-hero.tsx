@@ -4,9 +4,10 @@ import React, { useEffect, useRef, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import { EnsureGuest } from "@pylonsync/client";
 import type { WaitlistConfig } from "@/lib/site.config";
+import { publicCount } from "@/lib/stats";
 
 // The two client islands on the landing page: the email-capture form (in the
-// hero) and the LIVE signup count (under the facts). The count is a live
+// hero) and the LIVE signup count (in the hero, under the form). The count is a live
 // `db.useQuery("WaitlistStat")` over the public, PII-free aggregate row, so
 // the moment anyone (this tab or another) submits an email, joinWaitlist
 // updates that row and the new count syncs to every open tab through the
@@ -20,7 +21,13 @@ import type { WaitlistConfig } from "@/lib/site.config";
 
 /* ----------------------------- signup form ---------------------------- */
 
-export function SignupForm({ hero }: { hero: WaitlistConfig["hero"] }) {
+export function SignupForm({
+  hero,
+  showCountNote,
+}: {
+  hero: WaitlistConfig["hero"];
+  showCountNote: boolean;
+}) {
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "done">("idle");
   const [alreadyJoined, setAlreadyJoined] = useState(false);
@@ -57,9 +64,11 @@ export function SignupForm({ hero }: { hero: WaitlistConfig["hero"] }) {
         <p className="text-[15px] font-medium text-chalk">
           {alreadyJoined ? "You are already on the list." : hero.successMessage}
         </p>
-        <p className="mt-1 font-mono-ui text-[12px] text-chalk-2">
-          The count below went up for everyone.
-        </p>
+        {!alreadyJoined && showCountNote ? (
+          <p className="mt-1 font-mono-ui text-[12px] text-chalk-2">
+            The count below now includes you.
+          </p>
+        ) : null}
       </div>
     );
   }
@@ -76,7 +85,7 @@ export function SignupForm({ hero }: { hero: WaitlistConfig["hero"] }) {
           placeholder={hero.emailPlaceholder}
           aria-label="Email address"
           required
-          className="h-11 flex-1 rounded-md border border-line bg-paper px-3.5 text-[15px] text-chalk outline-none transition placeholder:text-chalk-2 focus:border-brand"
+          className="h-11 w-full min-w-0 rounded-md border border-line bg-paper sm:flex-1 px-3.5 text-[15px] text-chalk outline-none transition placeholder:text-chalk-2 focus:border-brand"
         />
         <button
           type="submit"
@@ -101,44 +110,68 @@ interface WaitlistStatRow {
   updatedAt: string;
 }
 
-export function LiveCount({ seed, label }: { seed: number; label: string }) {
+export function LiveCount({
+  importedCount,
+  label,
+  labelOne,
+}: {
+  importedCount: number;
+  label: string;
+  labelOne: string;
+}) {
   return (
-    <EnsureGuest fallback={<CountView value={seed} label={label} />}>
-      <LiveCountInner seed={seed} label={label} />
+    <EnsureGuest fallback={null}>
+      <LiveCountInner importedCount={importedCount} label={label} labelOne={labelOne} />
     </EnsureGuest>
   );
 }
 
-function LiveCountInner({ seed, label }: { seed: number; label: string }) {
+function LiveCountInner({
+  importedCount,
+  label,
+  labelOne,
+}: {
+  importedCount: number;
+  label: string;
+  labelOne: string;
+}) {
   // Live entity query over the public WaitlistStat row. `db.useQuery` re-renders
-  // the instant the row changes, in THIS tab and every other open tab, because
-  // the change syncs through the shared replica. `loading` is true until the
-  // first sync settles; until then we show the seed (never a flash of 0).
+  // the instant the row changes, in this tab and every other open tab, because
+  // the change syncs through the shared replica.
   const { data, loading } = db.useQuery<WaitlistStatRow>("WaitlistStat");
-  const real = data.length > 0 ? data[0].count : 0;
-  const value = seed + real;
-  return <CountView value={value} label={label} live={!loading} />;
+
+  // In `pylon dev` an empty waitlist gets demo signups (functions/seedDemo.ts).
+  // The call goes out only when the synced list is empty, so a live site with
+  // signups never makes it.
+  useSeedWhenEmpty(!loading && data.length === 0);
+
+  // Nothing renders until the first sync settles or while the list is empty,
+  // so the page never shows a placeholder number or "0 people on the list".
+  if (loading) return null;
+  const value = publicCount(data, importedCount);
+  if (value === 0) return null;
+  return <CountView value={value} label={value === 1 ? labelOne : label} />;
 }
 
-function CountView({
-  value,
-  label,
-  live,
-}: {
-  value: number;
-  label: string;
-  live?: boolean;
-}) {
+function useSeedWhenEmpty(empty: boolean) {
+  const sent = useRef(false);
+  useEffect(() => {
+    if (!empty || sent.current) return;
+    sent.current = true;
+    void callFn("seedDemo", {}).catch(() => {});
+  }, [empty]);
+}
+
+function CountView({ value, label }: { value: number; label: string }) {
   const shown = useCountUp(value);
   return (
     <p className="flex items-center gap-3 font-mono-ui text-[14px] text-chalk-2">
-      <span
-        aria-hidden
-        className={live ? "size-2 rounded-full bg-brand" : "size-2 rounded-full bg-line"}
-      />
-      <span className="tabular-nums text-chalk">{shown.toLocaleString()}</span>
+      <span aria-hidden className="size-2 rounded-full bg-brand" />
+      <span className="tabular-nums text-chalk" data-testid="live-count">
+        {shown.toLocaleString("en-US")}
+      </span>
       <span>{label}</span>
-      <span className="text-[12px]">{live ? "live" : ""}</span>
+      <span className="text-[12px]">live</span>
     </p>
   );
 }

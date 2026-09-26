@@ -3,6 +3,7 @@ import { type Metadata } from "@pylonsync/react";
 import { LiveBadge } from "@/components/marketing";
 import { ReservationWidget } from "./reservation-widget";
 import { siteConfig, type DayHours } from "@/lib/site.config";
+import { clock, directionsUrl, hoursRows } from "@/lib/hours";
 
 export const metadata: Metadata = {
   title: siteConfig.seo.title,
@@ -24,7 +25,8 @@ export default function LandingPage() {
   return (
     <div className="bg-[var(--ink)] text-[var(--cream)]">
       {/* HERO: the room, full bleed, the words on top. */}
-      <section className="relative isolate min-h-[88vh] overflow-hidden">
+      {/* -mt-16 runs the photo up under the translucent nav. */}
+      <section className="relative isolate -mt-16 min-h-[88vh] overflow-hidden">
         <img src={hero.image} alt="" className="absolute inset-0 -z-20 size-full object-cover" />
         <div className="absolute inset-0 -z-10 bg-gradient-to-t from-[var(--ink)] via-[var(--ink)]/60 to-[var(--ink)]/20" />
         <div className={`${WRAP} flex min-h-[88vh] flex-col justify-end pb-16 pt-32`}>
@@ -155,29 +157,34 @@ export default function LandingPage() {
 
       {/* VISIT */}
       <section id="visit" className="border-t border-white/10">
-        <div className={`${WRAP} grid gap-10 py-16 lg:grid-cols-2`}>
-          <div>
+        <div className={`${WRAP} grid grid-cols-[minmax(0,1fr)] gap-10 py-16 lg:grid-cols-2`}>
+          <div className="min-w-0">
             <h2 className="font-display text-balance text-[2.25rem] leading-[1.08] sm:text-[3rem]">{location.headline}</h2>
-            <div className="mt-6 space-y-2 text-[15px] leading-relaxed text-[var(--cream-2)]">
-              <p className="text-[var(--cream)]">{location.address}</p>
-              <p>{location.hoursText}</p>
-              <p>
-                <a href={`tel:${location.phone}`} className="text-[var(--cream)] underline-offset-4 hover:underline">
-                  {location.phone}
-                </a>{" "}
-                · <a href={`mailto:${location.email}`} className="underline-offset-4 hover:underline">{location.email}</a>
-              </p>
+            <p className="font-display mt-6 max-w-sm text-[1.5rem] leading-snug sm:text-[1.75rem]">{location.address}</p>
+            <div className="mt-8 flex flex-wrap items-center gap-3">
+              <a
+                href={directionsUrl(location.address)}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center rounded-full bg-brand px-5 py-2.5 text-[14px] font-medium text-white transition-opacity hover:opacity-90"
+              >
+                Get directions
+              </a>
+              <a href={`tel:${location.phone}`} className="inline-flex items-center rounded-full border border-white/25 px-5 py-2.5 text-[14px] font-medium transition-colors hover:bg-white/10">
+                Call {location.phone}
+              </a>
             </div>
-            <a href="#reserve" className="mt-8 inline-flex items-center rounded-full border border-white/25 px-5 py-2.5 text-[14px] font-medium transition-colors hover:bg-white/10">
-              {hero.ctaLabel}
-            </a>
+            <p className="mt-6 text-[14px] text-[var(--cream-2)]">
+              Or write to{" "}
+              <a href={`mailto:${location.email}`} className="text-[var(--cream)] underline-offset-4 hover:underline">
+                {location.email}
+              </a>
+            </p>
           </div>
           {location.mapEmbedUrl ? (
-            <iframe title="Map" src={location.mapEmbedUrl} className="h-72 w-full rounded-[6px] border border-white/10 grayscale" loading="lazy" />
+            <iframe title={`Map to ${siteConfig.brand.name}`} src={location.mapEmbedUrl} className="h-80 w-full rounded-[6px] border border-white/10 grayscale" loading="lazy" />
           ) : (
-            <div className="grid h-72 place-items-center rounded-[6px] border border-white/10 bg-[var(--ink-2)] text-[13px] text-[var(--cream-2)]">
-              Set <code className="mx-1 font-mono">location.mapEmbedUrl</code> to show a map here
-            </div>
+            <HoursCard />
           )}
         </div>
       </section>
@@ -210,8 +217,25 @@ function hoursLabel(h: DayHours): string {
   return `${clock(h.open)} – ${clock(h.close)}`;
 }
 
-function clock(t: string): string {
-  const [hh, mm] = t.split(":").map(Number);
-  const h12 = ((hh + 11) % 12) + 1;
-  return `${h12}${mm ? `:${String(mm).padStart(2, "0")}` : ""}${hh < 12 ? "am" : "pm"}`;
+// The week's service hours on a cream card, from the same config the
+// reservation calendar reads. Shown in place of a map when
+// `location.mapEmbedUrl` is empty.
+function HoursCard() {
+  const rows = hoursRows(siteConfig.reservations.hours);
+  return (
+    <div className="rounded-[6px] bg-[var(--cream)] p-6 text-[var(--ink)] sm:p-8">
+      <h3 className="font-display text-[1.75rem] italic leading-none">Dinner service</h3>
+      <dl className="mt-6 divide-y divide-[var(--ink)]/10">
+        {rows.map((r) => (
+          <div key={r.days} className="flex items-baseline justify-between gap-4 py-3">
+            <dt className="text-[15px] font-medium">{r.days}</dt>
+            <dd className={"text-[15px] tabular-nums " + (r.closed ? "text-[var(--ink)]/45" : "")}>{r.time}</dd>
+          </div>
+        ))}
+      </dl>
+      <a href="#reserve" className="mt-6 inline-flex items-center text-[14px] font-medium text-brand underline-offset-4 hover:underline">
+        {siteConfig.hero.ctaLabel}
+      </a>
+    </div>
+  );
 }

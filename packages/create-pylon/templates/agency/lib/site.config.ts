@@ -68,8 +68,10 @@ export type InvoiceSeed = {
   // Line items drive the total — `amountCents` is computed from them on seed.
   lineItems: { description: string; quantity: number; unitCents: number }[];
   status?: "draft" | "sent" | "paid" | "overdue";
-  issuedAt?: string; // "2026-04-01"
-  dueAt?: string;
+  // Days before the seed runs, so demo invoices stay current: an invoice
+  // issued 12 days ago with 30-day terms is always "due in 18 days".
+  issuedDaysAgo?: number;
+  termsDays?: number;
 };
 
 // The studio's billing identity — the "from" block + terms on every invoice and
@@ -89,7 +91,8 @@ export type AgencyConfig = BaseConfig & {
   };
   // Seeds the public Capacity row on first visit; after that it lives in the DB
   // and the owner manages it from the dashboard. `openSlots` is the number the
-  // hero shows live; `label` is the booking window it refers to.
+  // hero shows live; `label` is the booking window it refers to ("" = the
+  // next bookable quarter).
   capacity: { label: string; openSlots: number };
   services: { headline: string; items: Service[] };
   work: { headline: string; items: CaseStudy[] };
@@ -151,7 +154,10 @@ export const siteConfig: AgencyConfig = {
     secondaryCtaLabel: "See our work",
   },
 
-  capacity: { label: "Q3 2026", openSlots: 3 },
+  // `label` empty = the quarter a new project could start in, worked out from
+  // today's date (lib/agency.ts → bookingWindow). Set a fixed label only for a window with a
+  // real end date.
+  capacity: { label: "", openSlots: 3 },
 
   services: {
     headline: "What we do",
@@ -283,8 +289,8 @@ export const siteConfig: AgencyConfig = {
           { description: "Product design & iOS build — Ledger (12-week engagement)", quantity: 1, unitCents: 4800000 },
         ],
         status: "paid",
-        issuedAt: "2026-01-15",
-        dueAt: "2026-02-14",
+        issuedDaysAgo: 240,
+        termsDays: 30,
       },
       {
         number: "INV-002",
@@ -295,19 +301,19 @@ export const siteConfig: AgencyConfig = {
           { description: "Discovery & scoping sprint", quantity: 1, unitCents: 700000 },
         ],
         status: "paid",
-        issuedAt: "2026-03-01",
-        dueAt: "2026-03-31",
+        issuedDaysAgo: 150,
+        termsDays: 30,
       },
       {
         number: "INV-003",
         client: "Tom Reyes",
         projectSlug: "atlas-health",
         lineItems: [
-          { description: "Maintenance retainer — June", quantity: 1, unitCents: 850000 },
+          { description: "Monthly maintenance retainer", quantity: 1, unitCents: 850000 },
         ],
         status: "sent",
-        issuedAt: "2026-06-01",
-        dueAt: "2026-07-01",
+        issuedDaysAgo: 12,
+        termsDays: 30,
       },
       {
         number: "INV-004",
@@ -318,8 +324,8 @@ export const siteConfig: AgencyConfig = {
           { description: "Marketing site design & build", quantity: 1, unitCents: 1000000 },
         ],
         status: "overdue",
-        issuedAt: "2026-04-10",
-        dueAt: "2026-05-10",
+        issuedDaysAgo: 64,
+        termsDays: 30,
       },
     ],
   },

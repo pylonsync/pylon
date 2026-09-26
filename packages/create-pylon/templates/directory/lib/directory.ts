@@ -43,3 +43,30 @@ export function parseTags(tags?: string | null): string[] {
     .map((t) => t.trim())
     .filter(Boolean);
 }
+
+// A tool's mark in the list: its initials on a tinted square. The tint comes
+// from a hash of the name, so a tool keeps its color across reloads and
+// servers without storing anything. Swap in real logos by adding a `logoUrl`
+// field if your directory has them.
+const MARK_TONES = [
+  { bg: "#e0e7ff", fg: "#3730a3" },
+  { bg: "#dcfce7", fg: "#166534" },
+  { bg: "#fef3c7", fg: "#92400e" },
+  { bg: "#fce7f3", fg: "#9d174d" },
+  { bg: "#e0f2fe", fg: "#075985" },
+  { bg: "#ede9fe", fg: "#5b21b6" },
+  { bg: "#ffedd5", fg: "#9a3412" },
+  { bg: "#f1f5f9", fg: "#334155" },
+] as const;
+
+export function monogram(name: string): { letters: string; bg: string; fg: string } {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const letters =
+    words.length >= 2
+      ? (words[0][0] + words[1][0]).toUpperCase()
+      : (words[0] ?? "?").slice(0, 2).replace(/^./, (c) => c.toUpperCase());
+  let h = 0;
+  for (const ch of name.trim().toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  const tone = MARK_TONES[h % MARK_TONES.length];
+  return { letters, bg: tone.bg, fg: tone.fg };
+}

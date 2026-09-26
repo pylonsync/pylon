@@ -4,12 +4,13 @@ import React, { useEffect, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import { EnsureGuest } from "@pylonsync/client";
 import { siteConfig } from "@/lib/site.config";
+import { bookingWindow } from "@/lib/agency";
 
 // The realtime pieces of the page, both driven by the public, PII-free Capacity
 // row via `db.useQuery("Capacity")` — so when the owner books a project from the
 // dashboard, the "N slots open" number drops live in every open tab. No refresh.
 //
-//   • <LiveSlots>   — the hero line ("3 project slots open, Q3 2026").
+//   • <LiveSlots>   — the hero line ("3 project slots open, Q4 2026").
 //   • <ContactForm> — the "start a project" form. submitInquiry is a public
 //                     mutation, so it works for anonymous visitors; the Inquiry
 //                     it writes is pure PII and can never be read back by a
@@ -61,23 +62,24 @@ function SlotsPill({
   live?: boolean;
   loading?: boolean;
 }) {
-  const open = openSlots ?? siteConfig.capacity.openSlots;
-  const period = label || siteConfig.capacity.label;
+  // Until the Capacity row has synced there is no number to show. A reserved
+  // line keeps the hero from shifting when it arrives.
+  if (loading || openSlots === undefined) {
+    return <span aria-hidden className="inline-block h-5 w-56" />;
+  }
+  const open = openSlots;
+  const period = bookingWindow(label ?? siteConfig.capacity.label, Date.now());
   const bookedOut = open <= 0;
   return (
-    <span className="inline-flex items-center gap-2.5 text-[14px] text-zinc-700">
-      {loading ? (
-        <span className="inline-flex size-2 rounded-full bg-zinc-300" />
-      ) : (
-        <span className="relative flex size-2">
-          {live && !bookedOut ? (
-            <span className="absolute inline-flex size-2 animate-ping rounded-full bg-green-500/60" />
-          ) : null}
-          <span
-            className={"relative inline-flex size-2 rounded-full " + (bookedOut ? "bg-zinc-400" : "bg-green-600")}
-          />
-        </span>
-      )}
+    <span className="inline-flex items-center gap-2.5 text-[14px] text-zinc-700" data-testid="slots-line">
+      <span className="relative flex size-2">
+        {live && !bookedOut ? (
+          <span className="absolute inline-flex size-2 animate-ping rounded-full bg-green-500/60" />
+        ) : null}
+        <span
+          className={"relative inline-flex size-2 rounded-full " + (bookedOut ? "bg-zinc-400" : "bg-green-600")}
+        />
+      </span>
       {bookedOut ? (
         <span>Booked through {period}</span>
       ) : (
@@ -104,8 +106,8 @@ function ContactFormInner() {
   useSeedCapacity();
   const { data } = db.useQuery<CapacityRow>("Capacity");
   const row = data[0];
-  const bookedOut = (row?.openSlots ?? siteConfig.capacity.openSlots) <= 0;
-  return <FormShell bookedOut={bookedOut} period={row?.label} />;
+  const bookedOut = row ? row.openSlots <= 0 : false;
+  return <FormShell bookedOut={bookedOut} period={row ? bookingWindow(row.label, Date.now()) : undefined} />;
 }
 
 function FormShell({

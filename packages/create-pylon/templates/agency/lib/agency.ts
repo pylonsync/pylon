@@ -187,3 +187,25 @@ export function viewFromRow(r: ProjectRow): ProjectView {
     liveUrl: r.liveUrl,
   };
 }
+
+// The booking window the site names next to the open-slot count. An empty
+// label means the quarter a new project could start in: the quarter of the
+// date three weeks from today. It is never a past quarter, and in the last
+// three weeks of a quarter it names the next one. The owner can set a fixed
+// label ("January", "after the holidays") from the dashboard.
+const LEAD_DAYS = 21;
+export function quarterLabel(nowMs: number): string {
+  const d = new Date(nowMs);
+  return `Q${Math.floor(d.getMonth() / 3) + 1} ${d.getFullYear()}`;
+}
+
+export function bookingWindow(label: string | null | undefined, nowMs: number): string {
+  const fixed = (label ?? "").trim();
+  return fixed || quarterLabel(nowMs + LEAD_DAYS * 86_400_000);
+}
+
+// The work grid is two columns. With an odd number of case studies the first
+// one spans both columns, so the last row never holds a single card.
+export function isWideCard(index: number, count: number): boolean {
+  return count > 1 && count % 2 === 1 && index === 0;
+}

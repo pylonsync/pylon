@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import { EnsureGuest } from "@pylonsync/client";
 import { siteConfig } from "@/lib/site.config";
@@ -36,18 +36,46 @@ function Picker() {
   const { services, booking } = siteConfig;
   const { data: busyRows, loading } = db.useQuery<BookedSlotRow>("BookedSlot");
 
+  // In `pylon dev` an empty booking book gets demo appointments
+  // (functions/seedDemo.ts), which show up here as taken times. The call goes
+  // out only when no time is booked, so a live site with bookings never makes it.
+  const empty = !loading && busyRows.length === 0;
+  const seedSent = useRef(false);
+  useEffect(() => {
+    if (!empty || seedSent.current) return;
+    seedSent.current = true;
+    void callFn("seedDemo", {}).catch(() => {});
+  }, [empty]);
+
   // Stamp "now" once so slot availability + the day list are stable across
   // re-renders (and only computed client-side, post-hydration).
   const [nowMs] = useState(() => Date.now());
 
   const openDays = useMemo(() => {
     const days: string[] = [];
+    const shortest = Math.min(...services.items.map((s) => s.durationMin));
     for (let i = 0; i < booking.daysAhead; i++) {
       const key = localDateKey(i, nowMs);
-      if (booking.hours[weekdayOf(key)]) days.push(key);
+      const hrs = booking.hours[weekdayOf(key)];
+      if (!hrs) continue;
+      // Today drops out once no start time is far enough ahead to book.
+      if (i === 0) {
+        const left = slotsForDay({
+          dayISODate: key,
+          open: hrs.open,
+          close: hrs.close,
+          slotMinutes: booking.slotMinutes,
+          durationMin: shortest,
+          leadTimeHours: booking.leadTimeHours,
+          busy: [],
+          nowMs,
+        }).some((s) => s.state !== "past");
+        if (!left) continue;
+      }
+      days.push(key);
     }
     return days;
-  }, [booking.daysAhead, booking.hours, nowMs]);
+  }, [booking.daysAhead, booking.hours, booking.slotMinutes, booking.leadTimeHours, services.items, nowMs]);
 
   const [serviceSlug, setServiceSlug] = useState(services.items[0]?.slug ?? "");
   const [day, setDay] = useState(openDays[0] ?? "");
@@ -74,6 +102,10 @@ function Picker() {
     });
     // busyRows identity changes on every sync push → slots recompute live.
   }, [service, day, booking, busyRows, nowMs]);
+
+  // Times too soon to book are left out; booked times stay visible, struck out.
+  const visible = slots.filter((s) => s.state !== "past");
+  const openCount = visible.filter((s) => s.available).length;
 
   // Clear an IN-PROGRESS selection if its slot just got taken out from under us
   // (someone else booked it while this visitor was filling the form). A slot we
@@ -161,12 +193,14 @@ function Picker() {
         {loading ? (
           <SlotsSkeleton />
         ) : slots.length === 0 ? (
+          <p className="py-6 text-center text-sm text-ink/60">Closed that day. Pick another.</p>
+        ) : visible.length === 0 ? (
           <p className="py-6 text-center text-sm text-ink/60">
-            Closed that day. Pick another.
+            No times left that day. Pick another.
           </p>
         ) : (
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
-            {slots.map((slot) => {
+            {visible.map((slot) => {
               const isSelected = selected?.startsAt === slot.startsAt;
               return (
                 <button
@@ -175,10 +209,13 @@ function Picker() {
                   disabled={!slot.available}
                   onClick={() => pick(slot)}
                   aria-pressed={isSelected}
+                  aria-label={
+                    slot.available ? labelTime(slot.startsAt) : `${labelTime(slot.startsAt)}, booked`
+                  }
                   className={
                     "border py-2 text-[13px] font-medium tabular-nums transition-colors " +
                     (!slot.available
-                      ? "cursor-not-allowed border-ink/20 bg-paper text-ink/30 line-through"
+                      ? "cursor-not-allowed border-ink/15 bg-paper/60 text-ink/35 line-through decoration-ink/40"
                       : isSelected
                         ? "border-brand bg-brand text-cream"
                         : "border-ink/40 text-ink hover:border-brand hover:text-brand")
@@ -190,9 +227,11 @@ function Picker() {
             })}
           </div>
         )}
-        <p className="mt-3 text-[12px] text-ink/60">
-          Greyed-out times are booked. The list updates live as others book.
-        </p>
+        {!loading && visible.length > 0 ? (
+          <p className="mt-3 text-[12px] text-ink/60">
+            {openCount} open · struck-out times are booked. The grid updates live as people book.
+          </p>
+        ) : null}
       </div>
 
       {/* Confirmation persists after a successful booking… */}

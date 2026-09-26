@@ -21,6 +21,8 @@ export interface Slot {
   endsAt: string;
   /** False when the slot is in the past (within lead time) or overlaps a booking. */
   available: boolean;
+  /** Why it is unavailable: "past" (too soon to book) or "taken" (booked). */
+  state: "open" | "past" | "taken";
 }
 
 /** Half-open interval overlap: [aStart,aEnd) intersects [bStart,bEnd). */
@@ -75,6 +77,7 @@ export function slotsForDay(opts: {
       startsAt: new Date(s).toISOString(),
       endsAt: new Date(e).toISOString(),
       available: !past && !taken,
+      state: past ? "past" : taken ? "taken" : "open",
     });
   }
   return slots;

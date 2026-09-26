@@ -1,4 +1,5 @@
 import { mutation, v } from "@pylonsync/functions";
+import { syncSubscriberCount } from "../lib/stats";
 
 // Normalize + sanity-check an email without pulling in a dependency. This is a
 // pragmatic "looks like an email" check, not RFC 5322 — the unique index is the
@@ -61,21 +62,9 @@ export default mutation<{ email: string }, { ok: boolean; alreadyJoined: boolean
       throw e;
     }
 
-    // Keep the public, PII-free SubscriberCount singleton in sync with the real
-    // count. We RECOUNT (rather than +1) so the number can never drift, and
-    // this whole handler is one transaction — on SQLite writers serialize, so
-    // the recount-then-write is consistent. The landing page reads this row via
-    // `db.useQuery`, which syncs the new value to every open tab.
-    const total = (await ctx.db.unsafe.list("Subscriber")).length;
-    const stat = (await ctx.db.unsafe.list("SubscriberCount"))[0] as
-      | { id: string }
-      | undefined;
-    const now = new Date().toISOString();
-    if (stat) {
-      await ctx.db.unsafe.update("SubscriberCount", stat.id, { count: total, updatedAt: now });
-    } else {
-      await ctx.db.unsafe.insert("SubscriberCount", { count: total, updatedAt: now });
-    }
+    // Keep the public, PII-free SubscriberCount row equal to the Subscriber
+    // count. It is a recount, not +1, so the number cannot drift from the table.
+    await syncSubscriberCount(ctx.db.unsafe);
 
     return { ok: true, alreadyJoined: false };
   },

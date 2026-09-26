@@ -1,5 +1,6 @@
 import React, { use } from "react";
 import { Link, type Metadata, type PageProps } from "@pylonsync/react";
+import { ArrowUpRight } from "lucide-react";
 import { siteConfig } from "@/lib/site.config";
 import { UserMenu, WaitlistDashboard } from "./dashboard-client";
 
@@ -35,35 +36,35 @@ export default function DashboardPage({ auth, response, serverData }: PageProps)
   );
 }
 
-// Dashboard chrome: a slim top bar with the logo, a link back to the public
-// site, and the account menu (a client island for sign-out).
+// Dashboard chrome in the site's own look: the same near-black page, the brand
+// name in the display face, a link back to the public site, and the account
+// menu (a client island for sign-out).
 function Shell({ email, children }: { email: string; children: React.ReactNode }) {
   const { brand } = siteConfig;
   return (
-    <div className="flex min-h-screen flex-col bg-white text-zinc-900">
-      <header className="border-b border-zinc-200">
-        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-6">
-          <div className="flex items-center gap-2">
-            <span className="flex size-6 items-center justify-center rounded-[7px] bg-zinc-900 text-[13px] font-bold text-white">
-              {brand.letter}
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight">
-              {brand.name} <span className="text-zinc-400">/ waitlist</span>
-            </span>
+    <div className="flex min-h-screen flex-col bg-ink text-chalk">
+      <header className="border-b border-line">
+        <div className="mx-auto flex h-16 w-full max-w-5xl items-center justify-between px-6">
+          <div className="flex items-baseline gap-2.5">
+            <Link href="/" className="font-display text-[17px] font-bold tracking-tight text-chalk">
+              {brand.name}
+            </Link>
+            <span className="font-mono-ui text-[12px] text-chalk-2">owner</span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-5">
             <Link
               href="/"
-              className="text-[13px] text-zinc-500 transition-colors hover:text-zinc-900"
+              className="inline-flex items-center gap-1 text-[13px] text-chalk-2 transition-colors hover:text-chalk"
             >
-              View site ↗
+              View site
+              <ArrowUpRight aria-hidden className="size-3.5" />
             </Link>
             <UserMenu email={email} />
           </div>
         </div>
       </header>
       <main className="flex-1">
-        <div className="mx-auto max-w-4xl px-6 py-8">{children}</div>
+        <div className="mx-auto w-full max-w-5xl px-6 py-10 sm:py-12">{children}</div>
       </main>
     </div>
   );

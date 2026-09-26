@@ -18,21 +18,21 @@ export default function LoginPage({ auth, response }: PageProps) {
   if (auth.user_id && !auth.user_id.startsWith("guest_")) response.redirect("/dashboard");
   const { brand } = siteConfig;
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12">
-      <div className="w-full max-w-[400px] rounded-2xl border border-zinc-200/70 p-8">
-        <Link href="/" className="inline-flex">
-          <span className="flex size-9 items-center justify-center rounded-xl bg-zinc-900 text-base font-bold text-white">
-            {brand.letter}
-          </span>
+    <div className="font-display flex min-h-screen flex-col bg-paper px-6 text-ink">
+      <div className="mx-auto flex h-16 w-full max-w-[40rem] items-center">
+        <Link href="/" className="text-[17px] font-medium text-ink">
+          {brand.name}
         </Link>
-        <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">
-          {brand.name} dashboard
-        </h1>
-        <p className="mt-1 text-[13px] text-zinc-500">
-          Sign in to see your subscribers.
-        </p>
-        <div className="mt-6">
-          <AuthForm />
+      </div>
+      <div className="flex flex-1 items-center justify-center pb-24">
+        <div className="w-full max-w-[380px]">
+          <h1 className="text-[2rem] font-medium leading-tight">Sign in</h1>
+          <p className="mt-2 text-[17px] italic text-ink-2">
+            Owner access to {siteConfig.newsletter.name} subscribers.
+          </p>
+          <div className="mt-8 rounded-lg border border-rule bg-white p-6">
+            <AuthForm />
+          </div>
         </div>
       </div>
     </div>

@@ -36,7 +36,9 @@ export type MockRow = { title: string; tag: string; done?: boolean };
 
 export type WaitlistConfig = BaseConfig & {
   hero: {
-    launchNote: string; // one short line, set in mono: when it ships
+    // "YYYY-MM-DD" (UTC). The page shows the month until this date, then
+    // "Invites are going out now". See lib/launch.ts.
+    launchDate: string;
     headline: string;
     subcopy: string;
     emailPlaceholder: string;
@@ -47,9 +49,11 @@ export type WaitlistConfig = BaseConfig & {
   counter: {
     enabled: boolean;
     label: string; // e.g. "people on the list"
-    // A vanity baseline added to the real, live signup count so a brand-new
-    // page doesn't read "0". Set to 0 to show only genuine signups.
-    seedCount?: number;
+    labelOne: string; // the same label for a count of 1, e.g. "person on the list"
+    // Signups collected before this site existed (an old form, a spreadsheet),
+    // added to the Signup table's count. Keep 0 unless those people are real;
+    // the page shows the sum as one number.
+    importedCount: number;
   };
   // The HTML/CSS product window on the right of the hero. No screenshot.
   mock: {
@@ -93,11 +97,11 @@ export const siteConfig: WaitlistConfig = {
   seo: {
     title: "Lumo — projects, notes, and tasks in one workspace. Coming soon.",
     description:
-      "Lumo puts your projects, notes, and tasks in one workspace. It launches this fall. Join the waitlist for an early invite.",
+      "Lumo puts your projects, notes, and tasks in one workspace. Join the waitlist for an early invite.",
   },
 
   hero: {
-    launchNote: "Launch: fall 2026",
+    launchDate: "2027-03-02",
     headline: "Projects, notes, and tasks in one workspace.",
     subcopy:
       "Lumo is one app for the plan, the notes behind it, and the tasks that come out of it. Join the list and we send an invite before the public launch.",
@@ -110,7 +114,8 @@ export const siteConfig: WaitlistConfig = {
   counter: {
     enabled: true,
     label: "people on the list",
-    seedCount: 1200,
+    labelOne: "person on the list",
+    importedCount: 0,
   },
 
   mock: {
@@ -148,8 +153,8 @@ export const siteConfig: WaitlistConfig = {
     headline: "Questions",
     items: [
       {
-        q: "When does Lumo launch?",
-        a: "Fall 2026. People on the waitlist get an invite before the public launch.",
+        q: "Who gets invited first?",
+        a: "People get invites in the order they joined. Each invite covers one workspace for up to five people.",
       },
       {
         q: "What do I get for joining?",

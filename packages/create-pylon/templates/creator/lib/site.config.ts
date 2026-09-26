@@ -48,7 +48,11 @@ export type CreatorConfig = BaseConfig & {
     ctaLabel: string;
     successMessage: string;
     counterLabel: string; // e.g. "readers subscribed"
-    seedCount?: number; // vanity baseline added to the real live count
+    counterLabelOne: string; // the same label for a count of 1
+    // Subscribers you are moving over from another tool, added to the
+    // Subscriber table's count. Keep 0 unless those people are real; the page
+    // shows the sum as one number.
+    importedCount: number;
   };
   links?: { headline: string; body: string; items: LinkItem[] };
 };
@@ -62,7 +66,7 @@ export const siteConfig: CreatorConfig = {
     domain: "mayarivera.co",
     email: "hello@mayarivera.example",
     footerBlurb:
-      "Product design coach and writer. I help designers do braver work — through 1:1 coaching, portfolio reviews, and a weekly newsletter.",
+      "Product design coach and writer. 1:1 coaching, portfolio reviews, and a weekly newsletter.",
     copyrightName: "Maya Rivera",
     socials: [
       {
@@ -83,14 +87,14 @@ export const siteConfig: CreatorConfig = {
   seo: {
     title: "Maya Rivera — product design coach & writer",
     description:
-      "Product design coaching, portfolio reviews, and a weekly newsletter for designers who want to do braver work.",
+      "Product design coaching, portfolio reviews, and a weekly newsletter for product designers.",
   },
 
   hero: {
     name: "Maya Rivera",
     tagline: "Product design coach & writer.",
     intro:
-      "I help product designers get unstuck, sharpen their portfolios, and do the bravest work of their careers. I spent fifteen years leading design teams, and now I spend that time with you.",
+      "I coach product designers on portfolios, critique, and the move to senior roles. I led design teams for fifteen years. Now I work with designers one at a time.",
   },
 
   about: {
@@ -106,7 +110,7 @@ export const siteConfig: CreatorConfig = {
     items: [
       {
         title: "1:1 coaching",
-        body: "Monthly sessions on whatever's in your way — craft, career, confidence. We build a plan and I hold you to it.",
+        body: "Two sessions a month on your work and your next role. We agree on a plan and review it each session.",
         price: "from $400/mo",
       },
       {
@@ -151,7 +155,7 @@ export const siteConfig: CreatorConfig = {
     items: [
       {
         quote:
-          "Maya helped me land a senior role in three months. The portfolio review alone was worth ten times the price.",
+          "Maya helped me land a senior role in three months. The portfolio review changed which projects I led with.",
         name: "Daniel Reyes",
         role: "Senior Product Designer",
       },
@@ -163,7 +167,7 @@ export const siteConfig: CreatorConfig = {
       },
       {
         quote:
-          "I read the newsletter every week. It feels like a coaching session in my inbox.",
+          "I read the newsletter every week. Each issue has one thing I can use that week.",
         name: "Marcus Bell",
         role: "Product Designer",
       },
@@ -172,12 +176,13 @@ export const siteConfig: CreatorConfig = {
 
   newsletter: {
     name: "The Studio Notes",
-    subcopy: "One short email every Sunday on design, taste, and doing brave work.",
+    subcopy: "One short email every Sunday on critique, portfolios, and design careers.",
     emailPlaceholder: "you@email.com",
     ctaLabel: "Subscribe",
     successMessage: "You are in. The next issue arrives on Sunday.",
-    counterLabel: "designers reading",
-    seedCount: 2400,
+    counterLabel: "designers subscribed",
+    counterLabelOne: "designer subscribed",
+    importedCount: 0,
   },
 
   links: {

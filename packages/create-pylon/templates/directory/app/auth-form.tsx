@@ -59,7 +59,7 @@ export function AuthForm() {
             required
             autoComplete="email"
             placeholder="you@yourbusiness.com"
-            className="h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
+            className="h-10 w-full border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand"
           />
         </label>
         <label className="block">
@@ -71,18 +71,18 @@ export function AuthForm() {
             required
             autoComplete={mode === "login" ? "current-password" : "new-password"}
             placeholder={mode === "login" ? "Your password" : "At least 10 characters"}
-            className="h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand focus:ring-2 focus:ring-brand/20"
+            className="h-10 w-full border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-brand"
           />
         </label>
         {error ? (
-          <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] leading-snug text-red-700">
+          <p className="border border-red-200 bg-red-50 px-3 py-2 text-[13px] leading-snug text-red-700">
             {error}
           </p>
         ) : null}
         <button
           type="submit"
           disabled={pending}
-          className="inline-flex h-10 w-full items-center justify-center rounded-lg bg-zinc-900 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-60"
+          className="inline-flex h-10 w-full items-center justify-center bg-zinc-900 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:opacity-60"
         >
           {pending ? "…" : mode === "login" ? "Sign in" : "Create account"}
         </button>

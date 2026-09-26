@@ -18,14 +18,24 @@ increment in another without refreshing.
 ## How the realtime works
 
 - `functions/joinWaitlist.ts`: a public **mutation** that validates, lowercases,
-  and dedupes the email, then inserts one `Signup` row. The insert fires a
-  change event.
-- `functions/waitlistCount.ts`: a public **query** the landing page subscribes
-  to with `db.useReactiveQuery`. The server records that it read the `Signup`
-  table, so every new signup re-runs it and pushes the fresh count to every open
-  tab. No polling.
-- The counter island (`app/waitlist-hero.tsx`) is wrapped in `<EnsureGuest>`,
-  which mints an anonymous session so the live WebSocket can connect.
+  and dedupes the email, inserts one `Signup` row, and rewrites the PII-free
+  `WaitlistStat` row with the new count.
+- The landing page reads `WaitlistStat` with `db.useQuery`. The row syncs to
+  every open tab, so the counter moves as soon as anyone joins. No polling.
+- The counter island (`app/(marketing)/waitlist-hero.tsx`) is wrapped in
+  `<EnsureGuest>`, which mints an anonymous session so the live connection can
+  open.
+
+The counter is the `Signup` table's row count. `counter.importedCount` in
+`lib/site.config.ts` adds signups you collected somewhere else before this site
+(an old form, a spreadsheet). It ships as 0.
+
+## Demo data
+
+In `pylon dev`, an empty waitlist gets about 180 fictional signups from the last
+30 days, so the counter, chart, and list have data (`functions/seedDemo.ts`,
+`lib/demo.ts`). Seeding runs only when `PYLON_DEMO_DATA` is on, or when it is unset and the app runs under `pylon dev`, and only while the `Signup` table is empty. `pylon start`, Docker, and Pylon Cloud deploys do not seed, because only `pylon dev` sets `PYLON_DEV_WATCH_DIR`. Set `PYLON_DEMO_DATA=0` to start
+empty in development. Delete both files once you have real signups.
 
 ## Privacy
 
@@ -47,9 +57,13 @@ account can see signups; anyone else gets a locked screen.
 
 ## Rebrand it
 
-Brand, colors, hero copy, value props, social proof, and FAQ content live in
+Brand, colors, hero copy, the launch date, value props, and FAQ content live in
 **`lib/site.config.ts`**. Edit or generate that file to update the page without
 changing JSX or CSS.
+
+The tab icon is `app/icon.svg` (with `public/favicon.ico` for browsers that
+request `/favicon.ico`). Both carry this brand's letter and colors; replace
+them when you rename the brand.
 
 ## Layout
 
@@ -57,12 +71,14 @@ changing JSX or CSS.
 app.ts                       data model + manifest (Signup, User, policies, auth)
 lib/site.config.ts           ALL business copy + brand + colors (edit this)
 lib/owner.ts                 owner-email gate (PYLON_OWNER_EMAIL)
-lib/stats.ts                 shared dashboard-stats types
+lib/stats.ts                 dashboard types + the public count
+lib/launch.ts                the launch line from hero.launchDate
+lib/demo.ts                  demo signups + the dev-only gate
 functions/joinWaitlist.ts    public mutation: validate + dedupe + insert
-functions/waitlistCount.ts   public reactive query: the live counter
+functions/seedDemo.ts        dev-only demo signups (see Demo data)
 functions/waitlistStats.ts   owner-only reactive query: total + chart + list
-app/page.tsx                 the landing page (server-rendered)
-app/waitlist-hero.tsx        client island: signup form + live counter
+app/(marketing)/page.tsx     the landing page (server-rendered)
+app/(marketing)/waitlist-hero.tsx  client island: signup form + live counter
 app/login/page.tsx           owner sign-in
 app/dashboard/               owner dashboard (auth-gated, live)
 app/globals.css              Tailwind entrypoint (compiled by Pylon)

@@ -36,8 +36,11 @@ export type SeedListing = {
 };
 
 export type DirectoryConfig = BaseConfig & {
-  // The page opens with the brand name, this one line, and the search box.
+  // The page opens with a headline, one line of description, and the search
+  // box. The nav already shows the brand name, so the headline says what the
+  // directory holds.
   intro: {
+    headline: string;
     description: string;
     ctaLabel: string;
     searchPlaceholder: string;
@@ -83,29 +86,31 @@ export const siteConfig: DirectoryConfig = {
   },
 
   intro: {
+    headline: "Developer tools, checked by hand.",
     description:
-      "A hand-checked directory of developer tools. Search, filter by category, and upvote. No account needed.",
+      "Every entry is reviewed before it goes live. Search, filter by category, and upvote. No account needed.",
     ctaLabel: "Submit a tool",
     searchPlaceholder: "search: database, deploy, auth",
   },
 
   categories: ["Database", "Hosting", "Auth", "AI", "Analytics", "Design", "Productivity", "DevOps"],
 
-  // Fictional-but-plausible starter entries across categories. Replace with your
-  // own; `votes` seeds the leaderboard so "Top voted" isn't a flat list.
+  // Fictional starter entries across categories. The names are made up so no
+  // entry reads as a real product. Replace them with your own; `votes` seeds the
+  // leaderboard so "Top voted" isn't a flat list.
   seedListings: [
-    { name: "Quill", tagline: "Postgres with a realtime sync engine baked in.", url: "https://example.com/quill", category: "Database", tags: "postgres, realtime, sync", votes: 342, featured: true },
-    { name: "Tigris Store", tagline: "S3-compatible object storage at the edge.", url: "https://example.com/tigris", category: "Hosting", tags: "storage, edge, s3", votes: 218 },
-    { name: "Gatekeep", tagline: "Drop-in auth: passkeys, OAuth, and magic links.", url: "https://example.com/gatekeep", category: "Auth", tags: "auth, passkeys, oauth", votes: 287, featured: true },
-    { name: "Loom AI", tagline: "Self-hostable LLM gateway with caching + routing.", url: "https://example.com/loom", category: "AI", tags: "llm, gateway, cache", votes: 401, featured: true },
-    { name: "Pulse", tagline: "Privacy-first product analytics you can self-host.", url: "https://example.com/pulse", category: "Analytics", tags: "analytics, privacy", votes: 174 },
-    { name: "Frame", tagline: "A design-token pipeline from Figma to code.", url: "https://example.com/frame", category: "Design", tags: "design, tokens, figma", votes: 132 },
-    { name: "Cadence", tagline: "Background jobs + cron with a visual dashboard.", url: "https://example.com/cadence", category: "DevOps", tags: "jobs, cron, queue", votes: 209 },
-    { name: "Inbox Zero", tagline: "Transactional email with a real templating story.", url: "https://example.com/inbox", category: "Productivity", tags: "email, templates", votes: 96 },
-    { name: "Shipyard", tagline: "Preview deploys for every PR, in seconds.", url: "https://example.com/shipyard", category: "Hosting", tags: "deploy, ci, preview", votes: 263 },
-    { name: "Vector Vault", tagline: "Managed vector search without the ops.", url: "https://example.com/vectorvault", category: "AI", tags: "vector, search, rag", votes: 188 },
-    { name: "Schema", tagline: "Type-safe migrations that review themselves.", url: "https://example.com/schema", category: "Database", tags: "migrations, types", votes: 151 },
-    { name: "Watchtower", tagline: "Uptime + error tracking in one calm dashboard.", url: "https://example.com/watchtower", category: "DevOps", tags: "monitoring, errors", votes: 144 },
+    { name: "Tidepool DB", tagline: "Postgres with a realtime sync engine baked in.", url: "https://example.com/tidepool", category: "Database", tags: "postgres, realtime, sync", votes: 342, featured: true },
+    { name: "Brineway", tagline: "S3-compatible object storage at the edge.", url: "https://example.com/brineway", category: "Hosting", tags: "storage, edge, s3", votes: 218 },
+    { name: "Keyloft", tagline: "Drop-in auth: passkeys, OAuth, and magic links.", url: "https://example.com/keyloft", category: "Auth", tags: "auth, passkeys, oauth", votes: 287, featured: true },
+    { name: "Relaygate", tagline: "Self-hostable LLM gateway with caching + routing.", url: "https://example.com/relaygate", category: "AI", tags: "llm, gateway, cache", votes: 401, featured: true },
+    { name: "Countwell", tagline: "Privacy-first product analytics you can self-host.", url: "https://example.com/countwell", category: "Analytics", tags: "analytics, privacy", votes: 174 },
+    { name: "Tokenmill", tagline: "A design-token pipeline from Figma to code.", url: "https://example.com/tokenmill", category: "Design", tags: "design, tokens, figma", votes: 132 },
+    { name: "Cronhollow", tagline: "Background jobs + cron with a visual dashboard.", url: "https://example.com/cronhollow", category: "DevOps", tags: "jobs, cron, queue", votes: 209 },
+    { name: "Letterpane", tagline: "Transactional email with a real templating story.", url: "https://example.com/letterpane", category: "Productivity", tags: "email, templates", votes: 96 },
+    { name: "Branchlight", tagline: "Preview deploys for every PR, in seconds.", url: "https://example.com/branchlight", category: "Hosting", tags: "deploy, ci, preview", votes: 263 },
+    { name: "Nearfield", tagline: "Managed vector search without the ops.", url: "https://example.com/nearfield", category: "AI", tags: "vector, search, rag", votes: 188 },
+    { name: "Migratory", tagline: "Type-safe migrations that review themselves.", url: "https://example.com/migratory", category: "Database", tags: "migrations, types", votes: 151 },
+    { name: "Lookoutly", tagline: "Uptime + error tracking in one calm dashboard.", url: "https://example.com/lookoutly", category: "DevOps", tags: "monitoring, errors", votes: 144 },
   ],
 
   submit: {

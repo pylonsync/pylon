@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { db, callFn } from "@pylonsync/react";
 import { EnsureGuest } from "@pylonsync/client";
 import { siteConfig } from "@/lib/site.config";
@@ -33,13 +33,38 @@ export function ReservationWidget() {
 function Picker() {
   const cfg = siteConfig.reservations;
   const { data: markers, loading } = db.useQuery<SlotMarker>("ReservationSlot");
+
+  // In `pylon dev` an empty book gets demo reservations (functions/seedDemo.ts),
+  // which show up here as fewer tables left. The call goes out only when no
+  // table is reserved, so a live site with reservations never makes it.
+  const empty = !loading && markers.length === 0;
+  const seedSent = useRef(false);
+  useEffect(() => {
+    if (!empty || seedSent.current) return;
+    seedSent.current = true;
+    void callFn("seedDemo", {}).catch(() => {});
+  }, [empty]);
   const [nowMs] = useState(() => Date.now());
 
   const openDays = useMemo(() => {
     const days: string[] = [];
     for (let i = 0; i < cfg.daysAhead; i++) {
       const key = localDateKey(i, nowMs);
-      if (cfg.hours[weekdayOf(key)]) days.push(key);
+      const hrs = cfg.hours[weekdayOf(key)];
+      if (!hrs) continue;
+      // Today drops out once its last seating is too soon to book.
+      if (i === 0) {
+        const left = seatingsForDay({
+          dayISODate: key,
+          open: hrs.open,
+          close: hrs.close,
+          slotMinutes: cfg.slotMinutes,
+          leadTimeHours: cfg.leadTimeHours,
+          nowMs,
+        }).some((s) => !s.past);
+        if (!left) continue;
+      }
+      days.push(key);
     }
     return days;
   }, [cfg.daysAhead, cfg.hours, nowMs]);
@@ -68,10 +93,13 @@ function Picker() {
       slotMinutes: cfg.slotMinutes,
       leadTimeHours: cfg.leadTimeHours,
       nowMs,
-    }).map((s) => {
-      const remaining = cfg.tablesPerSlot - (takenByTime.get(s.startsAt) ?? 0);
-      return { startsAt: s.startsAt, remaining, available: !s.past && remaining > 0 };
-    });
+    })
+      // Seatings too soon to book are left out, so "Full" only ever means full.
+      .filter((s) => !s.past)
+      .map((s) => {
+        const remaining = Math.max(0, cfg.tablesPerSlot - (takenByTime.get(s.startsAt) ?? 0));
+        return { startsAt: s.startsAt, remaining, available: remaining > 0 };
+      });
   }, [day, cfg, takenByTime, nowMs]);
 
   // Clear an in-progress selection if its seating just filled up (live).
@@ -142,8 +170,10 @@ function Picker() {
       <div className="mt-5 border-t border-zinc-100 pt-5">
         {loading ? (
           <SeatingsSkeleton />
+        ) : !cfg.hours[weekdayOf(day)] ? (
+          <p className="py-6 text-center text-sm text-zinc-500">Closed that day. Pick another.</p>
         ) : seatings.length === 0 ? (
-          <p className="py-6 text-center text-sm text-zinc-500">Closed that day — pick another.</p>
+          <p className="py-6 text-center text-sm text-zinc-500">No seatings left that day. Pick another.</p>
         ) : (
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
             {seatings.map((seat) => {

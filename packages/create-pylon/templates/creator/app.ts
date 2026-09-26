@@ -41,8 +41,8 @@ const Subscriber = entity(
 );
 
 // A single-row, PII-FREE aggregate the public page can safely read live. It
-// holds only the subscriber count — no emails. `subscribe` keeps it in sync with
-// the real Subscriber count on every new join. The landing page subscribes with
+// holds only the subscriber count — no emails. Every Subscriber writer
+// recounts into it (lib/stats.ts → syncSubscriberCount). The landing page subscribes with
 // `db.useQuery("SubscriberCount")`, which syncs across every open tab through the
 // replica — so the counter ticks up everywhere the instant someone joins. This
 // is the cross-tab-safe realtime primitive (entity sync), not a per-connection
@@ -78,7 +78,7 @@ const User = entity(
 // PRIVACY. Subscriber holds visitor emails, so it denies EVERY client read and
 // write. No `db.useQuery("Subscriber")` can ever pull a row, and no client can
 // insert/update/delete directly. Writes happen only inside the server-side
-// `subscribe` mutation (functions bypass policies); the emails come back only
+// `subscribe` and dev-only `seedDemo` mutations (functions bypass policies); the emails come back only
 // through the owner-gated `subscriberStats`. A marketing site must never leak
 // its own customers' emails — this policy is what guarantees it.
 const subscriberPolicy = policy({
@@ -92,7 +92,7 @@ const subscriberPolicy = policy({
 
 // The aggregate count is public to READ (it's just a number — the whole point
 // is that the landing page shows it live to everyone). Clients can't WRITE it;
-// only the subscribe mutation maintains it server-side.
+// only the Subscriber writers maintain it server-side.
 const subscriberCountPolicy = policy({
   name: "subscriber_count_public_read",
   entity: "SubscriberCount",
