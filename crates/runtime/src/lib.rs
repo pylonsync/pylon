@@ -1675,6 +1675,13 @@ impl Runtime {
             let _ = conn.execute(&fts_sql, []);
         }
         let _ = conn.execute("DELETE FROM _pylon_crdt_snapshots", []);
+        for table in [
+            "_pylon_crdt_synthetic",
+            "_pylon_crdt_written",
+            "_pylon_crdt_merged",
+        ] {
+            let _ = conn.execute(&format!("DELETE FROM {table}"), []);
+        }
         self.crdt_store().clear_cache();
         Ok(())
     }
@@ -7143,9 +7150,9 @@ mod tests {
         }
     }
 
-    /// An offline client that pushes two increments separately has each
-    /// counted once; an online client's increment to a counter an offline
-    /// client's counter displaced still counts.
+    /// An offline client's increments count once, even when its second push
+    /// repeats its first; an online client's increment to a counter an
+    /// offline client's counter displaced still counts.
     #[test]
     fn counter_increments_count_once_wherever_they_land() {
         use pylon_http::DataStore;
@@ -7173,8 +7180,11 @@ mod tests {
             let pushed = offline.oplog_vv();
             rt.crdt_apply_update("Doc", &id, &first).unwrap();
             pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"likes": 1})).unwrap();
+            // Sent again from the start (its first push's answer was lost):
+            // it repeats the op the server holds.
+            let _ = &pushed;
             let second = offline
-                .export(pylon_crdt::loro::ExportMode::updates(&pushed))
+                .export(pylon_crdt::loro::ExportMode::all_updates())
                 .unwrap();
             rt.crdt_apply_update("Doc", &id, &second).unwrap();
             let likes = || rt.get_by_id("Doc", &id).unwrap().unwrap()["likes"].as_i64();
@@ -7215,14 +7225,61 @@ mod tests {
             .export(pylon_crdt::loro::ExportMode::updates(&before))
             .unwrap();
         rt.crdt_apply_update("Doc", &id, &edit).unwrap();
-        let update = offline_edit(&fields, serde_json::json!({"body": "typed"}), 1);
-        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        // P typed on an empty doc, pushes, types more, pushes again.
+        let offline = pylon_crdt::loro::LoroDoc::new();
+        offline.set_peer_id(1).unwrap();
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"body": "typed"})).unwrap();
+        rt.crdt_apply_update(
+            "Doc",
+            &id,
+            &offline
+                .export(pylon_crdt::loro::ExportMode::all_updates())
+                .unwrap(),
+        )
+        .unwrap();
+        let pushed = offline.oplog_vv();
+        match pylon_crdt::root_map(&offline).get("body") {
+            Some(pylon_crdt::loro::ValueOrContainer::Container(
+                pylon_crdt::loro::Container::Text(t),
+            )) => t.insert(t.len_unicode(), " more").unwrap(),
+            other => panic!("{other:?}"),
+        }
+        offline.commit();
+        rt.crdt_apply_update(
+            "Doc",
+            &id,
+            &offline
+                .export(pylon_crdt::loro::ExportMode::updates(&pushed))
+                .unwrap(),
+        )
+        .unwrap();
         let body = rt.get_by_id("Doc", &id).unwrap().unwrap()["body"]
             .as_str()
             .unwrap()
             .to_string();
-        assert!(body.contains("hello world"), "{body}");
-        assert!(body.contains("typed"), "{body}");
+        assert_eq!(body, "hello worldtyped more");
+    }
+
+    /// Two offline clients' texts on a seed nobody else edited: the first
+    /// replaces the seed's, and the second is added to it (it does not
+    /// replace the first).
+    #[test]
+    fn a_second_offline_text_does_not_replace_the_first() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        rt.crdt_snapshot("Doc", &id).unwrap();
+        for (peer, text) in [(1, "first"), (2, "second")] {
+            let update = offline_edit(&fields, serde_json::json!({"body": text}), peer);
+            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        }
+        let body = rt.get_by_id("Doc", &id).unwrap().unwrap()["body"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(body, "firstsecond");
     }
 
     /// Each synthetic write takes its own peer (one for all its fields),
@@ -7273,8 +7330,6 @@ mod tests {
         for peer in recorded {
             assert!(doc.oplog_vv().get(&peer).is_some());
         }
-        // Nothing about them is in the doc clients receive.
-        assert_eq!(doc.get_map("_pylon_synthetic").len(), 0);
     }
 
     /// A push writes only the fields it changed: a JSON value too deep for

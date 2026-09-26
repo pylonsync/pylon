@@ -421,6 +421,49 @@ pub fn apply_patch(doc: &LoroDoc, fields: &[CrdtField], patch: &Value) -> Result
     Ok(())
 }
 
+/// Append to the field's container, keeping its content and ops: `value`
+/// is text for a Text field, an array of items for a List or MovableList.
+pub fn append_to_field(doc: &LoroDoc, field: &CrdtField, value: &Value) -> Result<(), String> {
+    let map = root_map(doc);
+    match (field.kind, map.get(&field.name)) {
+        (
+            CrdtFieldKind::Text,
+            Some(ValueOrContainer::Container(loro::Container::Text(text))),
+        ) => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| format!("field {}: expected text to append", field.name))?;
+            text.insert(text.len_unicode(), s)
+                .map_err(|e| format!("append to text {}: {e}", field.name))?;
+        }
+        (
+            CrdtFieldKind::List,
+            Some(ValueOrContainer::Container(loro::Container::List(list))),
+        ) => {
+            for item in value.as_array().into_iter().flatten() {
+                let lv = json_to_loro(item)
+                    .ok_or_else(|| format!("field {}: an item it cannot hold", field.name))?;
+                list.push(lv)
+                    .map_err(|e| format!("append to list {}: {e}", field.name))?;
+            }
+        }
+        (
+            CrdtFieldKind::MovableList,
+            Some(ValueOrContainer::Container(loro::Container::MovableList(list))),
+        ) => {
+            for item in value.as_array().into_iter().flatten() {
+                let lv = json_to_loro(item)
+                    .ok_or_else(|| format!("field {}: an item it cannot hold", field.name))?;
+                list.push(lv)
+                    .map_err(|e| format!("append to list {}: {e}", field.name))?;
+            }
+        }
+        _ => return Err(format!("field {}: nothing to append to", field.name)),
+    }
+    doc.commit();
+    Ok(())
+}
+
 /// List + MovableList apply path. Replaces the container contents with
 /// the array `items`. Both Loro list types expose the same `insert /
 /// delete / clear / push` surface, but the trait objects don't unify
