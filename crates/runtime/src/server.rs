@@ -2267,6 +2267,22 @@ fn start_server(
             host.attach_cluster(dir, crate::shard_cluster::MachineConfig::from_env(port));
         }
     }
+    // CRDT docs brought in line with their rows once per SQLite database,
+    // in the background: on a large database it reads every CRDT row, and
+    // the server serves meanwhile (a push to a row seeds its doc itself).
+    if !runtime.is_postgres() && !runtime.is_in_memory() {
+        let rt = Arc::clone(&runtime);
+        let _ = std::thread::Builder::new()
+            .name("pylon-crdt-reconcile".into())
+            .spawn(move || {
+                if let Err(e) = rt.reconcile_crdt_docs() {
+                    tracing::warn!(
+                        "[crdt] could not bring CRDT docs in line with their rows: {e}; \
+                         the next start tries again"
+                    );
+                }
+            });
+    }
     if !jobs_in_memory {
         if let Some(pg) = runtime.pg_data_store_pub() {
             let owner = pylon_cluster::new_instance_id();

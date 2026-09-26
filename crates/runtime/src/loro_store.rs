@@ -342,6 +342,22 @@ impl LoroStore {
         Ok(projected)
     }
 
+    /// Whether the row has a stored snapshot (a doc cached for a read of a
+    /// row with none does not count).
+    pub fn has_snapshot(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<bool, LoroStoreError> {
+        conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM _pylon_crdt_snapshots WHERE entity = ?1 AND row_id = ?2)",
+            params![entity, row_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| LoroStoreError::Storage(format!("read snapshot: {e}")))
+    }
+
     /// The row's doc as JSON, for `fields`.
     pub fn project(
         &self,

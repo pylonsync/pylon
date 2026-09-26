@@ -1989,20 +1989,15 @@ impl Runtime {
             encrypted_fields,
             connection_manager: std::sync::OnceLock::new(),
         };
-        // Not fatal: the app runs with the docs as they are, and the next
-        // boot tries again.
-        if let Err(e) = rt.reconcile_crdt_docs_once() {
-            tracing::warn!("[crdt] could not bring CRDT docs in line with their rows: {e}");
-        }
         Ok(rt)
     }
 
-    /// Once per SQLite database, bring each CRDT row's doc in line with the
-    /// row. Server updates (`ctx.db.update`, a shard's entity writes)
-    /// changed the row but not the doc until `update_with_conn` patched
-    /// both, and a client's next push wrote the doc's older values over
-    /// the row; rows from before inserts seeded a doc have none, and a
-    /// push to one started from an empty doc.
+    /// Bring each CRDT row's doc in line with the row, once per SQLite
+    /// database (the server runs it in the background after it starts).
+    /// Server updates (`ctx.db.update`, a shard's entity writes) changed the
+    /// row but not the doc until `update_with_conn` patched both, and a
+    /// client's next push wrote the doc's older values over the row; rows
+    /// from before inserts seeded a doc have none.
     ///
     /// - A row with no doc gets one from its values.
     /// - A row with a doc: its register (LWW) and text fields take the
@@ -2011,47 +2006,83 @@ impl Runtime {
     ///   for those kinds the patch is not the value (a counter's is an
     ///   increment).
     ///
-    /// Progress is recorded per entity after each batch, so a restart
-    /// resumes where it stopped.
-    fn reconcile_crdt_docs_once(&self) -> Result<(), RuntimeError> {
+    /// Each field applies on its own: one the doc cannot take is logged and
+    /// skipped. Progress is recorded per entity after each page of rows, so
+    /// a restart resumes; an entity that is not CRDT now loses its
+    /// progress, so it is read again if it becomes CRDT later.
+    pub fn reconcile_crdt_docs(&self) -> Result<(), RuntimeError> {
+        self.reconcile_crdt_docs_in_pages(RECONCILE_BATCH)
+    }
+
+    fn reconcile_crdt_docs_in_pages(&self, page_size: usize) -> Result<(), RuntimeError> {
+        if self.is_postgres() {
+            return Ok(());
+        }
         let crdt_entities: Vec<&ManifestEntity> =
             self.manifest.entities.iter().filter(|e| e.crdt).collect();
-        let conn = self.lock_write_conn()?;
         let err = |what: &str, e: &dyn std::fmt::Display| RuntimeError {
             code: "CRDT_RECONCILE_FAILED".into(),
             message: format!("{what}: {e}"),
         };
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS _pylon_crdt_reconcile (
-                entity TEXT PRIMARY KEY,
-                last_id TEXT NOT NULL,
-                done INTEGER NOT NULL DEFAULT 0
-            )",
-        )
-        .map_err(|e| err("create _pylon_crdt_reconcile", &e))?;
+        {
+            let conn = self.lock_write_conn()?;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS _pylon_crdt_reconcile (
+                    entity TEXT PRIMARY KEY,
+                    last_id TEXT NOT NULL,
+                    done INTEGER NOT NULL DEFAULT 0
+                )",
+            )
+            .map_err(|e| err("create _pylon_crdt_reconcile", &e))?;
+            let recorded: Vec<String> = {
+                let mut stmt = conn
+                    .prepare("SELECT entity FROM _pylon_crdt_reconcile")
+                    .map_err(|e| err("read _pylon_crdt_reconcile", &e))?;
+                let rows = stmt
+                    .query_map([], |r| r.get(0))
+                    .map_err(|e| err("read _pylon_crdt_reconcile", &e))?;
+                rows.collect::<Result<_, _>>()
+                    .map_err(|e| err("read _pylon_crdt_reconcile", &e))?
+            };
+            for entity in recorded {
+                if !crdt_entities.iter().any(|e| e.name == entity) {
+                    conn.execute(
+                        "DELETE FROM _pylon_crdt_reconcile WHERE entity = ?1",
+                        [&entity],
+                    )
+                    .map_err(|e| err("clear _pylon_crdt_reconcile", &e))?;
+                }
+            }
+        }
         let (mut seeded, mut fixed, mut skipped) = (0usize, 0usize, 0usize);
         for ent in &crdt_entities {
-            let (mut last_id, done): (String, bool) = conn
-                .query_row(
-                    "SELECT last_id, done FROM _pylon_crdt_reconcile WHERE entity = ?1",
-                    [&ent.name],
-                    |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
-                )
-                .or_else(|e| match e {
-                    rusqlite::Error::QueryReturnedNoRows => Ok((String::new(), false)),
-                    e => Err(e),
-                })
-                .map_err(|e| err("read _pylon_crdt_reconcile", &e))?;
-            if done {
-                continue;
-            }
             let fields = self.crdt_fields_for(ent)?;
+            // Text ids only (every id the runtime writes): the page moves
+            // past each row it reads.
             let page = format!(
-                "SELECT * FROM {} WHERE \"id\" > ?1 ORDER BY \"id\" LIMIT {RECONCILE_BATCH}",
+                "SELECT * FROM {} WHERE typeof(\"id\") = 'text' AND \"id\" > ?1
+                 ORDER BY \"id\" LIMIT {page_size}",
                 quote_ident(&ent.name)
             );
             loop {
-                let finished = with_write_tx(self, &conn, || -> Result<bool, RuntimeError> {
+                // The write lock is taken per page, so the app's own writes
+                // go on between pages.
+                let conn = self.lock_write_conn()?;
+                let (mut last_id, done): (String, bool) = conn
+                    .query_row(
+                        "SELECT last_id, done FROM _pylon_crdt_reconcile WHERE entity = ?1",
+                        [&ent.name],
+                        |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0)),
+                    )
+                    .or_else(|e| match e {
+                        rusqlite::Error::QueryReturnedNoRows => Ok((String::new(), false)),
+                        e => Err(e),
+                    })
+                    .map_err(|e| err("read _pylon_crdt_reconcile", &e))?;
+                if done {
+                    break;
+                }
+                with_write_tx(self, &conn, || -> Result<(), RuntimeError> {
                     let rows: Vec<serde_json::Value> = {
                         let mut stmt = conn
                             .prepare_cached(&page)
@@ -2062,85 +2093,93 @@ impl Runtime {
                         rows.collect::<Result<_, _>>()
                             .map_err(|e| err(&format!("read {}", ent.name), &e))?
                     };
-                    let mut has_doc = conn
-                        .prepare_cached(
-                            "SELECT EXISTS (SELECT 1 FROM _pylon_crdt_snapshots
-                                             WHERE entity = ?1 AND row_id = ?2)",
-                        )
-                        .map_err(|e| err("read snapshots", &e))?;
                     for mut row in rows {
                         let Some(id) = row.get("id").and_then(|v| v.as_str()).map(str::to_string)
                         else {
                             continue;
                         };
+                        last_id = id.clone();
                         // The row as the doc holds it: JSON parsed, encrypted
                         // fields still encrypted.
                         parse_json_fields_in_row(ent, &mut row);
                         parse_crdt_containers_in_row(&fields, &mut row);
-                        let exists: bool = has_doc
-                            .query_row(rusqlite::params![ent.name, id], |r| r.get(0))
+                        let has_doc = self
+                            .crdt_store()
+                            .has_snapshot(&conn, &ent.name, &id)
                             .map_err(|e| err("read snapshots", &e))?;
-                        let outcome = if exists {
-                            self.reconcile_crdt_doc(&conn, &ent.name, &id, &fields, &row)
-                                .map(|changed| (0, changed as usize))
+                        if has_doc {
+                            let (changed, failed) =
+                                self.reconcile_crdt_doc(&conn, &ent.name, &id, &fields, &row)?;
+                            fixed += changed as usize;
+                            skipped += failed;
                         } else {
-                            self.seed_crdt_doc(&conn, &ent.name, &id, &fields, &row)
-                                .map(|()| (1, 0))
-                        };
-                        match outcome {
-                            Ok((s, f)) => {
-                                seeded += s;
-                                fixed += f;
-                            }
-                            Err(e) => {
-                                // One row that cannot take its values does
-                                // not stop the others; its doc is reloaded
-                                // from the stored snapshot.
-                                self.crdt_store().evict(&ent.name, &id);
-                                skipped += 1;
-                                tracing::warn!(
-                                    "[crdt] {} {id}: doc not brought in line with its row: {e}",
-                                    ent.name
-                                );
-                            }
+                            seeded += 1;
+                            skipped += self.seed_crdt_doc(&conn, &ent.name, &id, &fields, &row);
                         }
-                        last_id = id;
                     }
-                    let finished = no_rows_after(&last_id, &conn, &page)?;
+                    let done = no_rows_after(&last_id, &conn, &page)?;
                     conn.execute(
                         "INSERT INTO _pylon_crdt_reconcile (entity, last_id, done)
                          VALUES (?1, ?2, ?3)
                          ON CONFLICT (entity) DO UPDATE SET
                             last_id = excluded.last_id, done = excluded.done",
-                        rusqlite::params![ent.name, last_id, finished as i64],
+                        rusqlite::params![ent.name, last_id, done as i64],
                     )
                     .map_err(|e| err("record the reconcile", &e))?;
-                    Ok(finished)
+                    Ok(())
                 })?;
-                if finished {
-                    break;
-                }
             }
         }
         if seeded + fixed + skipped > 0 {
             tracing::info!(
                 "[crdt] {seeded} CRDT doc(s) created from their rows, {fixed} brought in line; \
-                 {skipped} could not be"
+                 {skipped} field(s) could not be"
             );
         }
         Ok(())
     }
 
-    /// Create a row's CRDT doc from its values (every field the row has).
-    fn seed_crdt_doc(
+    /// A CRDT row as its doc holds it: JSON and list fields parsed,
+    /// encrypted fields still encrypted. None when the row does not exist.
+    pub(crate) fn crdt_row_for_doc(
+        &self,
+        conn: &Connection,
+        ent: &ManifestEntity,
+        id: &str,
+        fields: &[pylon_crdt::CrdtField],
+    ) -> Result<Option<serde_json::Value>, RuntimeError> {
+        let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(&ent.name));
+        let mut stmt = conn.prepare_cached(&sql).map_err(|e| RuntimeError {
+            code: "QUERY_FAILED".into(),
+            message: format!("read {} {id}: {e}", ent.name),
+        })?;
+        let row = match stmt.query_row([id], |r| Ok(row_to_json(r, &ent.fields))) {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(e) => {
+                return Err(RuntimeError {
+                    code: "QUERY_FAILED".into(),
+                    message: format!("read {} {id}: {e}", ent.name),
+                })
+            }
+        };
+        let mut row = row;
+        parse_json_fields_in_row(ent, &mut row);
+        parse_crdt_containers_in_row(fields, &mut row);
+        Ok(Some(row))
+    }
+
+    /// Create a row's CRDT doc from its values, one field at a time. Returns
+    /// the number of fields the doc could not take (logged).
+    pub(crate) fn seed_crdt_doc(
         &self,
         conn: &Connection,
         entity: &str,
         id: &str,
         fields: &[pylon_crdt::CrdtField],
         row: &serde_json::Value,
-    ) -> Result<(), String> {
-        let patch: serde_json::Map<String, serde_json::Value> = fields
+    ) -> usize {
+        let values: Vec<(String, serde_json::Value)> = fields
             .iter()
             .filter_map(|f| {
                 row.get(&f.name)
@@ -2148,15 +2187,12 @@ impl Runtime {
                     .map(|v| (f.name.clone(), v.clone()))
             })
             .collect();
-        self.crdt_store()
-            .apply_patch(conn, entity, id, fields, &serde_json::Value::Object(patch))
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        self.apply_fields(conn, entity, id, fields, values)
     }
 
     /// Set a row's register and text fields in its CRDT doc to the row's
-    /// values where they differ (a null row value is empty text). True when
-    /// the doc changed.
+    /// values where they differ (a null row value is empty text). Returns
+    /// whether any field was set, and how many the doc could not take.
     fn reconcile_crdt_doc(
         &self,
         conn: &Connection,
@@ -2164,15 +2200,18 @@ impl Runtime {
         id: &str,
         fields: &[pylon_crdt::CrdtField],
         row: &serde_json::Value,
-    ) -> Result<bool, String> {
+    ) -> Result<(bool, usize), RuntimeError> {
         use pylon_crdt::CrdtFieldKind as K;
-        let store = self.crdt_store();
-        let doc = store
+        let doc = self
+            .crdt_store()
             .project(conn, entity, id, fields)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| RuntimeError {
+                code: "CRDT_RECONCILE_FAILED".into(),
+                message: format!("read the doc of {entity} {id}: {e}"),
+            })?;
         let null = serde_json::Value::Null;
         let empty_text = serde_json::json!("");
-        let mut patch = serde_json::Map::new();
+        let mut values = Vec::new();
         for f in fields {
             let (want, have) = (
                 row.get(&f.name).unwrap_or(&null),
@@ -2187,16 +2226,38 @@ impl Runtime {
                 K::Counter | K::List | K::MovableList | K::Tree => continue,
             };
             if !same_json_value(want, have) {
-                patch.insert(f.name.clone(), want.clone());
+                values.push((f.name.clone(), want.clone()));
             }
         }
-        if patch.is_empty() {
-            return Ok(false);
+        let wanted = values.len();
+        let failed = self.apply_fields(conn, entity, id, fields, values);
+        Ok((wanted > failed, failed))
+    }
+
+    /// Patch each `(field, value)` into the row's doc on its own; a value
+    /// the doc cannot take is logged and skipped, and the doc is reloaded
+    /// from its stored snapshot. Returns the number skipped.
+    fn apply_fields(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        id: &str,
+        fields: &[pylon_crdt::CrdtField],
+        values: Vec<(String, serde_json::Value)>,
+    ) -> usize {
+        let mut failed = 0;
+        for (name, value) in values {
+            let patch = serde_json::json!({ name.clone(): value });
+            if let Err(e) = self
+                .crdt_store()
+                .apply_patch(conn, entity, id, fields, &patch)
+            {
+                failed += 1;
+                self.crdt_store().evict(entity, id);
+                tracing::warn!("[crdt] {entity} {id}: field {name} not set in its doc: {e}");
+            }
         }
-        store
-            .apply_patch(conn, entity, id, fields, &serde_json::Value::Object(patch))
-            .map_err(|e| e.to_string())?;
-        Ok(true)
+        failed
     }
 
     /// Create the search index tables (`_facet_bitmap`, per-entity
@@ -6089,101 +6150,8 @@ mod tests {
         );
     }
 
-    /// Opening a SQLite database brings each CRDT doc in line with its row
-    /// once: a row a server update changed while its doc did not.
-    #[test]
-    fn opening_a_database_sets_stale_crdt_docs_to_their_rows_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("app.db");
-        let path = path.to_str().unwrap();
-        let id = {
-            let rt = Runtime::open(path, test_manifest()).unwrap();
-            let id = rt
-                .insert(
-                    "User",
-                    &serde_json::json!({"email": "r@y.com", "displayName": "Doc"}),
-                )
-                .unwrap();
-            // The row changes and the doc does not, as a server update did
-            // before update_with_conn patched docs; and the database has not
-            // been reconciled yet.
-            let conn = rt.lock_write_conn().unwrap();
-            conn.execute(
-                "UPDATE \"User\" SET \"displayName\" = 'Row' WHERE \"id\" = ?1",
-                [&id],
-            )
-            .unwrap();
-            conn.execute("DELETE FROM _pylon_crdt_reconcile", [])
-                .unwrap();
-            assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Doc");
-            id
-        };
-        let rt = Runtime::open(path, test_manifest()).unwrap();
-        {
-            let conn = rt.lock_write_conn().unwrap();
-            assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Row");
-            // Once: a later difference is left alone on the next open.
-            conn.execute(
-                "UPDATE \"User\" SET \"displayName\" = 'Later' WHERE \"id\" = ?1",
-                [&id],
-            )
-            .unwrap();
-        }
-        drop(rt);
-        let rt = Runtime::open(path, test_manifest()).unwrap();
-        let conn = rt.lock_write_conn().unwrap();
-        assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Row");
-    }
-
-    /// A reconcile cut off part way resumes after the last row it recorded;
-    /// rows before it are not read again.
-    #[test]
-    fn the_crdt_reconcile_resumes_after_its_last_row() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("app.db");
-        let path = path.to_str().unwrap();
-        let mut ids: Vec<String> = {
-            let rt = Runtime::open(path, test_manifest()).unwrap();
-            (0..3)
-                .map(|n| {
-                    rt.insert(
-                        "User",
-                        &serde_json::json!({"email": format!("{n}@y.com"), "displayName": "Doc"}),
-                    )
-                    .unwrap()
-                })
-                .collect()
-        };
-        ids.sort();
-        {
-            let rt = Runtime::open(path, test_manifest()).unwrap();
-            let conn = rt.lock_write_conn().unwrap();
-            for id in [&ids[0], &ids[2]] {
-                conn.execute(
-                    "UPDATE \"User\" SET \"displayName\" = 'Row' WHERE \"id\" = ?1",
-                    [id],
-                )
-                .unwrap();
-            }
-            // Cut off after the middle row.
-            conn.execute(
-                "UPDATE _pylon_crdt_reconcile SET last_id = ?1, done = 0 WHERE entity = 'User'",
-                [&ids[1]],
-            )
-            .unwrap();
-        }
-        let rt = Runtime::open(path, test_manifest()).unwrap();
-        let conn = rt.lock_write_conn().unwrap();
-        assert_eq!(user_doc(&rt, &conn, &ids[0])["displayName"], "Doc");
-        assert_eq!(user_doc(&rt, &conn, &ids[2])["displayName"], "Row");
-    }
-
-    /// The reconcile compares register and text fields as the doc holds
-    /// them (JSON parsed, a null text as empty), sets only rows that
-    /// differ, leaves counters and lists alone, and gives a row with no doc
-    /// one from its values.
-    #[test]
-    fn the_crdt_reconcile_handles_every_field_kind() {
+    /// A manifest with a `Doc` entity holding every CRDT field kind.
+    fn doc_manifest(crdt: bool) -> AppManifest {
         let mut manifest = serde_json::to_value(test_manifest()).unwrap();
         let base = manifest["entities"][0]["fields"][1].clone();
         let field = |name: &str, ty: &str, crdt: Option<&str>, optional: bool| {
@@ -6200,30 +6168,52 @@ mod tests {
             obj.insert("optional".into(), serde_json::json!(optional));
             f
         };
-        let mut doc_entity = manifest["entities"][0].clone();
-        doc_entity["name"] = serde_json::json!("Doc");
-        doc_entity["fields"] = serde_json::json!([
+        let mut doc = manifest["entities"][0].clone();
+        doc["name"] = serde_json::json!("Doc");
+        doc["crdt"] = serde_json::json!(crdt);
+        doc["fields"] = serde_json::json!([
             field("title", "string", None, false),
             field("meta", "json", None, false),
             field("tags", "json", Some("list"), false),
+            field("order", "json", Some("movable-list"), true),
+            field("outline", "json", Some("tree"), true),
             field("likes", "int", Some("counter"), false),
             field("done", "bool", None, false),
             field("body", "richtext", None, true),
         ]);
-        manifest["entities"]
-            .as_array_mut()
-            .unwrap()
-            .push(doc_entity);
-        let manifest: AppManifest = serde_json::from_value(manifest).unwrap();
+        manifest["entities"].as_array_mut().unwrap().push(doc);
+        serde_json::from_value(manifest).unwrap()
+    }
 
+    fn doc_values(rt: &Runtime, id: &str) -> serde_json::Value {
+        let ent = rt.require_entity("Doc").unwrap();
+        let fields = rt.crdt_fields_for(ent).unwrap();
+        let conn = rt.lock_write_conn().unwrap();
+        rt.crdt_store().project(&conn, "Doc", id, &fields).unwrap()
+    }
+
+    fn fresh_doc() -> serde_json::Value {
+        serde_json::json!({
+            "title": "a", "meta": {"k": 1}, "tags": ["x"], "order": ["m", "n"],
+            "outline": [{"id": "root", "parent": null}], "likes": 3,
+            "done": false, "body": "hello",
+        })
+    }
+
+    /// The reconcile sets register and text fields to the row where they
+    /// differ (JSON parsed, a null text as empty), leaves counters, lists,
+    /// and trees as the doc has them, gives a row with no doc one from its
+    /// values, and leaves a row already in line untouched.
+    #[test]
+    fn the_crdt_reconcile_handles_every_field_kind() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.db");
         let path = path.to_str().unwrap();
-        let fresh = serde_json::json!({
-            "title": "a", "meta": {"k": 1}, "tags": ["x"], "likes": 3,
-            "done": false, "body": "hello",
-        });
-        let snapshot = |rt: &Runtime, id: &str| -> Vec<u8> {
+        let rt = Runtime::open(path, doc_manifest(true)).unwrap();
+        let stale = rt.insert("Doc", &fresh_doc()).unwrap();
+        let in_line = rt.insert("Doc", &fresh_doc()).unwrap();
+        let bare = rt.insert("Doc", &fresh_doc()).unwrap();
+        let snapshot = |id: &str| -> Vec<u8> {
             rt.lock_write_conn()
                 .unwrap()
                 .query_row(
@@ -6233,18 +6223,8 @@ mod tests {
                 )
                 .unwrap()
         };
-        let (stale, in_line, bare, before) = {
-            let rt = Runtime::open(path, manifest.clone()).unwrap();
-            let stale = rt.insert("Doc", &fresh).unwrap();
-            let in_line = rt.insert("Doc", &fresh).unwrap();
-            // A row from before inserts seeded a doc: no snapshot.
-            let bare = rt.insert("Doc", &fresh).unwrap();
+        {
             let conn = rt.lock_write_conn().unwrap();
-            conn.execute(
-                "DELETE FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
-                [&bare],
-            )
-            .unwrap();
             conn.execute(
                 "UPDATE \"Doc\" SET \"title\" = 'b', \"meta\" = '{\"k\":2}',
                         \"tags\" = '[\"x\",\"y\"]', \"likes\" = 10, \"done\" = 1,
@@ -6253,46 +6233,214 @@ mod tests {
                 [&stale],
             )
             .unwrap();
-            conn.execute("DELETE FROM _pylon_crdt_reconcile", [])
-                .unwrap();
-            drop(conn);
-            let before = snapshot(&rt, &in_line);
-            (stale, in_line, bare, before)
-        };
-        let rt = Runtime::open(path, manifest).unwrap();
-        let ent = rt.require_entity("Doc").unwrap();
-        let fields = rt.crdt_fields_for(ent).unwrap();
-        let conn = rt.lock_write_conn().unwrap();
-        let doc = rt
-            .crdt_store()
-            .project(&conn, "Doc", &stale, &fields)
+            // A row from before inserts seeded a doc: no snapshot.
+            conn.execute(
+                "DELETE FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
+                [&bare],
+            )
             .unwrap();
-        let seeded = rt
-            .crdt_store()
-            .project(&conn, "Doc", &bare, &fields)
-            .unwrap();
-        drop(conn);
-        // Registers and text take the row's values.
+        }
+        rt.crdt_store().clear_cache();
+        let before = snapshot(&in_line);
+        rt.reconcile_crdt_docs().unwrap();
+        rt.crdt_store().clear_cache();
+
+        let doc = doc_values(&rt, &stale);
         assert_eq!(doc["title"], "b");
         assert_eq!(doc["meta"], serde_json::json!({"k": 2}));
         assert_eq!(doc["done"], true);
-        // A counter and a list keep the doc's values: the row holds a
-        // server write's patch, which for them is not the value.
-        assert_eq!(doc["likes"].as_f64(), Some(3.0));
-        assert_eq!(doc["tags"], serde_json::json!(["x"]));
-        // A row with no doc gets one from its values.
-        assert_eq!(seeded["title"], "a");
-        assert_eq!(seeded["meta"], serde_json::json!({"k": 1}));
-        assert_eq!(seeded["tags"], serde_json::json!(["x"]));
-        assert_eq!(seeded["likes"].as_f64(), Some(3.0));
-        assert_eq!(seeded["body"], "hello");
         assert!(
             doc["body"].is_null() || doc["body"] == "",
             "{}",
             doc["body"]
         );
-        // A row already in line keeps its doc as it was.
-        assert_eq!(snapshot(&rt, &in_line), before);
+        // The row holds a server write's patch, which for these kinds is
+        // not the value.
+        assert_eq!(doc["likes"].as_f64(), Some(3.0));
+        assert_eq!(doc["tags"], serde_json::json!(["x"]));
+
+        let seeded = doc_values(&rt, &bare);
+        assert_eq!(seeded["title"], "a");
+        assert_eq!(seeded["meta"], serde_json::json!({"k": 1}));
+        assert_eq!(seeded["tags"], serde_json::json!(["x"]));
+        assert_eq!(seeded["order"], serde_json::json!(["m", "n"]));
+        assert_eq!(seeded["outline"][0]["id"], "root");
+        assert_eq!(seeded["likes"].as_f64(), Some(3.0));
+        assert_eq!(seeded["body"], "hello");
+
+        assert_eq!(snapshot(&in_line), before);
+    }
+
+    /// A field the doc cannot take is skipped on its own: the row's other
+    /// fields still reach its doc.
+    #[test]
+    fn a_bad_field_does_not_keep_the_others_from_the_doc() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let id = rt.insert("Doc", &fresh_doc()).unwrap();
+        {
+            let conn = rt.lock_write_conn().unwrap();
+            conn.execute(
+                "UPDATE \"Doc\" SET \"likes\" = 'n/a', \"title\" = 'kept' WHERE \"id\" = ?1",
+                [&id],
+            )
+            .unwrap();
+            conn.execute(
+                "DELETE FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
+                [&id],
+            )
+            .unwrap();
+        }
+        rt.crdt_store().clear_cache();
+        rt.reconcile_crdt_docs().unwrap();
+        rt.crdt_store().clear_cache();
+        let doc = doc_values(&rt, &id);
+        assert_eq!(doc["title"], "kept");
+        assert_eq!(doc["meta"], serde_json::json!({"k": 1}));
+    }
+
+    /// The reconcile runs once per entity; an entity that stops being CRDT
+    /// loses its progress, so it is read again when it is CRDT again.
+    #[test]
+    fn the_crdt_reconcile_runs_once_and_again_after_crdt_comes_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let path = path.to_str().unwrap();
+        let id = {
+            let rt = Runtime::open(path, doc_manifest(true)).unwrap();
+            let id = rt.insert("Doc", &fresh_doc()).unwrap();
+            rt.reconcile_crdt_docs().unwrap();
+            let conn = rt.lock_write_conn().unwrap();
+            conn.execute(
+                "UPDATE \"Doc\" SET \"title\" = 'later' WHERE \"id\" = ?1",
+                [&id],
+            )
+            .unwrap();
+            id
+        };
+        {
+            // Done: a later difference is left alone.
+            let rt = Runtime::open(path, doc_manifest(true)).unwrap();
+            rt.reconcile_crdt_docs().unwrap();
+            assert_eq!(doc_values(&rt, &id)["title"], "a");
+        }
+        {
+            let rt = Runtime::open(path, doc_manifest(false)).unwrap();
+            rt.reconcile_crdt_docs().unwrap();
+        }
+        let rt = Runtime::open(path, doc_manifest(true)).unwrap();
+        rt.reconcile_crdt_docs().unwrap();
+        assert_eq!(doc_values(&rt, &id)["title"], "later");
+    }
+
+    /// The reconcile pages through the rows and resumes after the last row
+    /// it recorded; rows before it are not read again.
+    #[test]
+    fn the_crdt_reconcile_pages_and_resumes_after_its_last_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let mut ids: Vec<String> = (0..5)
+            .map(|_| rt.insert("Doc", &fresh_doc()).unwrap())
+            .collect();
+        ids.sort();
+        let stale = |id: &str| {
+            rt.lock_write_conn()
+                .unwrap()
+                .execute(
+                    "UPDATE \"Doc\" SET \"title\" = 'row' WHERE \"id\" = ?1",
+                    [id],
+                )
+                .unwrap();
+        };
+        // Pages of 2: all five rows, over three pages.
+        for id in &ids {
+            stale(id);
+        }
+        rt.reconcile_crdt_docs_in_pages(2).unwrap();
+        for id in &ids {
+            assert_eq!(doc_values(&rt, id)["title"], "row", "{id}");
+        }
+        // Cut off after the third row: only rows after it are read.
+        rt.lock_write_conn()
+            .unwrap()
+            .execute(
+                "UPDATE _pylon_crdt_reconcile SET last_id = ?1, done = 0 WHERE entity = 'Doc'",
+                [&ids[2]],
+            )
+            .unwrap();
+        for id in &ids {
+            rt.lock_write_conn()
+                .unwrap()
+                .execute(
+                    "UPDATE \"Doc\" SET \"title\" = 'again' WHERE \"id\" = ?1",
+                    [id],
+                )
+                .unwrap();
+        }
+        rt.reconcile_crdt_docs_in_pages(2).unwrap();
+        assert_eq!(doc_values(&rt, &ids[1])["title"], "row");
+        assert_eq!(doc_values(&rt, &ids[3])["title"], "again");
+        assert_eq!(doc_values(&rt, &ids[4])["title"], "again");
+    }
+
+    /// A row whose id is not text (the runtime never writes one) does not
+    /// hold the reconcile on one page.
+    #[test]
+    fn the_crdt_reconcile_finishes_past_a_non_text_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Arc::new(Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap());
+        rt.insert("Doc", &fresh_doc()).unwrap();
+        rt.lock_write_conn()
+            .unwrap()
+            .execute(
+                "INSERT INTO \"Doc\" (\"id\", \"title\", \"meta\", \"tags\", \"likes\", \"done\")
+                 VALUES (X'00', 'blob', '{}', '[]', 0, 0)",
+                [],
+            )
+            .unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || {
+                let _ = tx.send(rt.reconcile_crdt_docs_in_pages(1).is_ok());
+            });
+        }
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true));
+    }
+
+    /// A client push to a row with no doc keeps the row's other fields: the
+    /// doc is seeded from the row before the update applies.
+    #[test]
+    fn a_push_to_a_row_with_no_doc_keeps_its_other_fields() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let id = rt.insert("Doc", &fresh_doc()).unwrap();
+        rt.lock_write_conn()
+            .unwrap()
+            .execute(
+                "DELETE FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
+                [&id],
+            )
+            .unwrap();
+        rt.crdt_store().clear_cache();
+        // A peer that knew only the title.
+        let ent = rt.require_entity("Doc").unwrap();
+        let fields = rt.crdt_fields_for(ent).unwrap();
+        let peer = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_patch(&peer, &fields, &serde_json::json!({"title": "peer"})).unwrap();
+        let update = peer
+            .export(pylon_crdt::loro::ExportMode::all_updates())
+            .unwrap();
+        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["meta"], serde_json::json!({"k": 1}));
+        assert_eq!(row["body"], "hello");
+        assert_eq!(row["done"], false);
     }
 
     /// Regression: when the SQL INSERT step inside Runtime::insert fails
