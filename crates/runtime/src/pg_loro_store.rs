@@ -464,7 +464,7 @@ impl PgCrdtHook for PgCrdtHookImpl {
         entity: &str,
         id: &str,
         data: &serde_json::Value,
-    ) -> Result<(), pylon_http::DataError> {
+    ) -> Result<Option<serde_json::Value>, pylon_http::DataError> {
         let ent = self
             .manifest
             .entities
@@ -475,13 +475,17 @@ impl PgCrdtHook for PgCrdtHookImpl {
                 message: format!("Unknown entity: {entity}"),
             })?;
         let crdt_fields = crdt_fields_for(ent)?;
-        self.crdt
+        let projected = self
+            .crdt
             .apply_patch(tx, entity, id, &crdt_fields, data)
-            .map(|_| ())
             .map_err(|e| pylon_http::DataError {
                 code: "CRDT_APPLY_FAILED".into(),
                 message: format!("crdt update {entity}/{id}: {e}"),
-            })
+            })?;
+        Ok(
+            crate::crdt_container_corrections(&crdt_fields, data, &projected)
+                .map(|c| crate::serialize_json_fields_for_storage(ent, &c).unwrap_or(c)),
+        )
     }
 
     fn before_delete(

@@ -311,13 +311,25 @@ impl Runtime {
                             let crdt_fields = self.crdt_fields_for(ent.unwrap()).map_err(|e| {
                                 DataError { code: e.code, message: e.message }
                             })?;
-                            pg.crdt
+                            let projected = pg
+                                .crdt
                                 .apply_patch(tx, entity, id, &crdt_fields, data)
                                 .map_err(|e| DataError {
                                     code: "CRDT_APPLY_FAILED".into(),
                                     message: format!("crdt update {entity}/{id}: {e}"),
                                 })?;
                             let updated = tx_update(tx, &manifest, entity, id, sql_data)?;
+                            if let (true, Some(corrections)) = (
+                                updated,
+                                crate::crdt_container_corrections(&crdt_fields, data, &projected),
+                            ) {
+                                let stored = ent
+                                    .and_then(|e| {
+                                        crate::serialize_json_fields_for_storage(e, &corrections)
+                                    })
+                                    .unwrap_or(corrections);
+                                tx_update(tx, &manifest, entity, id, &stored)?;
+                            }
                             if !updated {
                                 return Err(DataError {
                                     code: "ENTITY_NOT_FOUND".into(),

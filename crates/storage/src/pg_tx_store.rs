@@ -279,13 +279,16 @@ pub trait PgCrdtHook: Send + Sync {
         data: &serde_json::Value,
     ) -> Result<Option<serde_json::Value>, DataError>;
 
+    /// Returns the column values to write after the update: the CRDT
+    /// doc's values for fields whose stored form is not the patch (a
+    /// counter's patch is an increment; the row stores the total).
     fn before_update(
         &self,
         tx: &mut postgres::Transaction<'_>,
         entity: &str,
         id: &str,
         data: &serde_json::Value,
-    ) -> Result<(), DataError>;
+    ) -> Result<Option<serde_json::Value>, DataError>;
 
     fn before_delete(
         &self,
@@ -584,8 +587,11 @@ impl<'a> DataStore for PgTxStore<'a> {
                 .expect("entity_is_crdt implies hook present")
                 .clone();
             let updated = self.with_tx(|tx| -> Result<bool, DataError> {
-                hook.before_update(tx, entity, id, data)?;
+                let corrections = hook.before_update(tx, entity, id, data)?;
                 let updated = tx_update(tx, manifest, entity, id, data)?;
+                if let (true, Some(corrections)) = (updated, &corrections) {
+                    tx_update(tx, manifest, entity, id, corrections)?;
+                }
                 if !updated {
                     // Same orphan guard as Runtime::update — refuse
                     // to commit a snapshot for a row that doesn't

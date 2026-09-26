@@ -1283,6 +1283,81 @@ fn pg_transact_maintains_crdt_sidecar_for_crdt_entities() {
     assert!(!snap.is_empty());
 }
 
+fn counter_runtime(url: &str) -> Runtime {
+    let field = |name: &str, ty: &str, crdt: Option<CrdtAnnotation>| ManifestField {
+        name: name.into(),
+        field_type: ty.into(),
+        optional: false,
+        unique: false,
+        crdt,
+        server_only: false,
+        readonly: false,
+        default: None,
+        enum_values: None,
+        encrypted: false,
+        sync_omit: false,
+    };
+    let manifest = AppManifest {
+        entities: vec![ManifestEntity {
+            name: "Tally".into(),
+            fields: vec![
+                field("name", "string", None),
+                field("likes", "int", Some(CrdtAnnotation::Counter)),
+            ],
+            indexes: vec![],
+            relations: vec![],
+            crdt: true,
+            sync: true,
+            search: None,
+            ..Default::default()
+        }],
+        ..empty_manifest()
+    };
+    let mut adapter = pylon_storage::postgres::live::LivePostgresAdapter::connect(url)
+        .expect("connect to test postgres");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS \"Tally\" CASCADE");
+    let _ = adapter.exec_raw("DROP TABLE IF EXISTS _pylon_crdt_snapshots CASCADE");
+    let plan = adapter
+        .plan_from_live(&manifest)
+        .expect("plan against fresh schema");
+    adapter.apply_plan(&plan).expect("apply schema");
+    Runtime::open_postgres(url, manifest).expect("open postgres runtime")
+}
+
+/// A counter update's value is an increment; every Postgres update path
+/// stores the counter's total in the row, as the CRDT doc holds it.
+#[test]
+fn pg_counter_updates_store_the_total() {
+    let Some(url) = pg_url() else {
+        return;
+    };
+    use pylon_http::DataStore;
+    let rt = counter_runtime(&url);
+    let id = rt
+        .insert("Tally", &serde_json::json!({"name": "t", "likes": 3}))
+        .unwrap();
+    let likes = |rt: &Runtime| rt.get_by_id("Tally", &id).unwrap().unwrap()["likes"].as_i64();
+
+    rt.update("Tally", &id, &serde_json::json!({"likes": 2}))
+        .unwrap();
+    assert_eq!(likes(&rt), Some(5), "Runtime::update");
+
+    DataStore::transact(
+        &rt,
+        &[serde_json::json!({
+            "op": "update", "entity": "Tally", "id": id, "data": {"likes": 4}
+        })],
+    )
+    .unwrap();
+    assert_eq!(likes(&rt), Some(9), "transact");
+
+    rt.run_in_pg_mutation_tx_for_tests::<_, bool, pylon_http::DataError>(|store| {
+        store.update("Tally", &id, &serde_json::json!({"likes": 1}))
+    })
+    .unwrap();
+    assert_eq!(likes(&rt), Some(10), "a mutation's ctx.db.update");
+}
+
 #[test]
 fn pg_update_rejects_id_mutation() {
     // Codex regression: build_update_sql used to include `id` in the

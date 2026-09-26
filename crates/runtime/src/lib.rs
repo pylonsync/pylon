@@ -2109,7 +2109,7 @@ impl Runtime {
                             .map_err(|e| err("read snapshots", &e))?;
                         if has_doc {
                             let (changed, failed) =
-                                self.reconcile_crdt_doc(&conn, &ent.name, &id, &fields, &row)?;
+                                self.reconcile_crdt_doc(&conn, ent, &id, &fields, &row)?;
                             fixed += changed as usize;
                             skipped += failed;
                         } else {
@@ -2185,7 +2185,7 @@ impl Runtime {
             return Ok(());
         };
         let values = if has_doc {
-            self.crdt_doc_differences(conn, &ent.name, id, &fields, &row)?
+            self.crdt_doc_differences(conn, &ent.name, id, &fields, &row, false)?
         } else {
             seed_values(&fields, &row)
         };
@@ -2252,7 +2252,7 @@ impl Runtime {
             })?;
         let null = serde_json::Value::Null;
         let values: Vec<(String, serde_json::Value)> = self
-            .crdt_doc_differences(conn, &ent.name, id, fields, &row)?
+            .crdt_doc_differences(conn, &ent.name, id, fields, &row, false)?
             .into_iter()
             .filter(|(name, _)| {
                 same_json_value(
@@ -2296,6 +2296,40 @@ impl Runtime {
             .collect();
         self.apply_fields(conn, &ent.name, id, fields, values);
         Ok(())
+    }
+
+    /// Write `corrections` (see [`crdt_container_corrections`]) into the
+    /// SQLite row, in the caller's transaction.
+    fn write_crdt_corrections(
+        &self,
+        conn: &Connection,
+        ent: &ManifestEntity,
+        id: &str,
+        corrections: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        let Some(obj) = corrections.as_object() else {
+            return Ok(());
+        };
+        let mut sets = Vec::with_capacity(obj.len());
+        let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::with_capacity(obj.len() + 1);
+        for (i, (key, val)) in obj.iter().enumerate() {
+            sets.push(format!("{} = ?{}", quote_ident(key), i + 1));
+            values.push(json_to_sql_typed(ent, key, val));
+        }
+        values.push(Box::new(id.to_string()));
+        let sql = format!(
+            "UPDATE {} SET {} WHERE \"id\" = ?{}",
+            quote_ident(&ent.name),
+            sets.join(", "),
+            values.len()
+        );
+        let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+        conn.execute(&sql, params.as_slice())
+            .map(|_| ())
+            .map_err(|e| RuntimeError {
+                code: sqlite_write_code(&e, "UPDATE_FAILED").into(),
+                message: format!("store the CRDT values of {} {id}: {e}", ent.name),
+            })
     }
 
     /// Before a server write patches a row's CRDT doc: a row with no doc
@@ -2368,25 +2402,52 @@ impl Runtime {
         self.apply_fields(conn, entity, id, fields, seed_values(fields, row))
     }
 
-    /// Set a row's register and text fields in its CRDT doc to the row's
-    /// values where they differ (a null row value is empty text). Returns
-    /// whether any field was set, and how many the doc could not take.
+    /// Bring a row and its CRDT doc in line where they differ. Register,
+    /// text, list, and tree fields take the row's values in the doc (every
+    /// server write stored the value it set in the row). A counter's total
+    /// is the doc's, written into the row: a server write stored its
+    /// increment there. Returns whether anything changed, and how many
+    /// fields the doc could not take.
     fn reconcile_crdt_doc(
         &self,
         conn: &Connection,
-        entity: &str,
+        ent: &ManifestEntity,
         id: &str,
         fields: &[pylon_crdt::CrdtField],
         row: &serde_json::Value,
     ) -> Result<(bool, usize), RuntimeError> {
-        let values = self.crdt_doc_differences(conn, entity, id, fields, row)?;
+        use pylon_crdt::CrdtFieldKind as K;
+        let values = self.crdt_doc_differences(conn, &ent.name, id, fields, row, true)?;
         let wanted = values.len();
-        let failed = self.apply_fields(conn, entity, id, fields, values);
-        Ok((wanted > failed, failed))
+        let failed = self.apply_fields(conn, &ent.name, id, fields, values);
+        let doc = self
+            .crdt_store()
+            .project(conn, &ent.name, id, fields)
+            .map_err(|e| RuntimeError {
+                code: "CRDT_RECONCILE_FAILED".into(),
+                message: format!("read the doc of {} {id}: {e}", ent.name),
+            })?;
+        let zero = serde_json::json!(0);
+        let totals: serde_json::Map<String, serde_json::Value> = fields
+            .iter()
+            .filter(|f| f.kind == K::Counter)
+            .filter_map(|f| {
+                let in_row = row.get(&f.name).filter(|v| !v.is_null()).unwrap_or(&zero);
+                let in_doc = doc.get(&f.name).filter(|v| !v.is_null()).unwrap_or(&zero);
+                (!same_json_value(in_row, in_doc)).then(|| (f.name.clone(), in_doc.clone()))
+            })
+            .collect();
+        let rows_changed = !totals.is_empty();
+        if rows_changed {
+            self.write_crdt_corrections(conn, ent, id, &serde_json::Value::Object(totals))?;
+        }
+        Ok((wanted > failed || rows_changed, failed))
     }
 
-    /// A row's register and text fields whose values differ from its CRDT
-    /// doc's (a null row value is empty text), as `(field, row value)`.
+    /// A row's register and text fields (and list and tree fields, with
+    /// `lists_and_trees`) whose values differ from its CRDT doc's, as
+    /// `(field, row value)`. A null row value is empty text or an empty
+    /// list; tree nodes compare in id order.
     fn crdt_doc_differences(
         &self,
         conn: &Connection,
@@ -2394,6 +2455,7 @@ impl Runtime {
         id: &str,
         fields: &[pylon_crdt::CrdtField],
         row: &serde_json::Value,
+        lists_and_trees: bool,
     ) -> Result<Vec<(String, serde_json::Value)>, RuntimeError> {
         use pylon_crdt::CrdtFieldKind as K;
         let doc = self
@@ -2405,22 +2467,38 @@ impl Runtime {
             })?;
         let null = serde_json::Value::Null;
         let empty_text = serde_json::json!("");
+        let empty_list = serde_json::json!([]);
         let mut values = Vec::new();
         for f in fields {
             let (want, have) = (
                 row.get(&f.name).unwrap_or(&null),
                 doc.get(&f.name).unwrap_or(&null),
             );
-            let (want, have) = match f.kind {
-                K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson => (want, have),
-                K::Text => (
+            let differs = match f.kind {
+                K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson => {
+                    !same_json_value(want, have)
+                }
+                K::Text => !same_json_value(
                     if want.is_null() { &empty_text } else { want },
                     if have.is_null() { &empty_text } else { have },
                 ),
-                K::Counter | K::List | K::MovableList | K::Tree => continue,
+                K::List | K::MovableList if lists_and_trees => !same_json_value(
+                    if want.is_null() { &empty_list } else { want },
+                    if have.is_null() { &empty_list } else { have },
+                ),
+                K::Tree if lists_and_trees => !same_json_value(
+                    &tree_for_compare(if want.is_null() { &empty_list } else { want }),
+                    &tree_for_compare(if have.is_null() { &empty_list } else { have }),
+                ),
+                K::Counter | K::List | K::MovableList | K::Tree => false,
             };
-            if !same_json_value(want, have) {
-                values.push((f.name.clone(), want.clone()));
+            if differs {
+                let value = match f.kind {
+                    K::Text if want.is_null() => empty_text.clone(),
+                    K::List | K::MovableList | K::Tree if want.is_null() => empty_list.clone(),
+                    _ => want.clone(),
+                };
+                values.push((f.name.clone(), value));
             }
         }
         Ok(values)
@@ -3214,7 +3292,8 @@ impl Runtime {
                 let result = pg
                     .store
                     .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                        pg.crdt
+                        let projected = pg
+                            .crdt
                             .apply_patch(tx, entity, id, &crdt_fields, data)
                             .map_err(|e| RuntimeError {
                                 code: "CRDT_APPLY_FAILED".into(),
@@ -3228,6 +3307,21 @@ impl Runtime {
                             pg_data,
                         )
                         .map_err(data_err_to_runtime)?;
+                        if let (true, Some(corrections)) = (
+                            updated,
+                            crdt_container_corrections(&crdt_fields, data, &projected),
+                        ) {
+                            let stored = serialize_json_fields_for_storage(ent, &corrections)
+                                .unwrap_or(corrections);
+                            pylon_storage::pg_tx_store::tx_update(
+                                tx,
+                                &self.manifest,
+                                entity,
+                                id,
+                                &stored,
+                            )
+                            .map_err(data_err_to_runtime)?;
+                        }
                         if !updated {
                             // Roll back via Err so the snapshot doesn't
                             // commit against a missing row.
@@ -3288,15 +3382,18 @@ impl Runtime {
         // Atomic block — same shape as insert. CRDT snapshot, SQL UPDATE,
         // and FTS maintenance all commit together.
         let affected = with_write_tx(self, &conn, || -> Result<i64, RuntimeError> {
+            let mut corrections = None;
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
                 self.seed_missing_crdt_doc(&conn, ent, id, &crdt_fields)?;
-                sb.crdt
+                let projected = sb
+                    .crdt
                     .apply_patch(&conn, entity, id, &crdt_fields, data)
                     .map_err(|e| RuntimeError {
                         code: "CRDT_APPLY_FAILED".into(),
                         message: format!("crdt write {entity}/{id}: {e}"),
                     })?;
+                corrections = crdt_container_corrections(&crdt_fields, data, &projected);
             }
 
             let mut set_clauses = Vec::new();
@@ -3333,6 +3430,9 @@ impl Runtime {
                     code: sqlite_write_code(&e, "UPDATE_FAILED").into(),
                     message: format!("Update {entity}/{id} failed: {e}"),
                 })? as i64;
+            if let (true, Some(corrections)) = (affected > 0, &corrections) {
+                self.write_crdt_corrections(&conn, ent, id, corrections)?;
+            }
 
             if affected > 0 && searchable {
                 if let (Some(cfg), Some(old)) = (ent.search.as_ref(), old_row) {
@@ -4153,12 +4253,16 @@ impl Runtime {
         // The row's CRDT doc takes the same fields in the same transaction
         // (as in `update`), or the next projection from the doc undoes them.
         if let (true, Some(crdt_fields)) = (affected > 0, &crdt_fields) {
-            self.crdt_store()
+            let projected = self
+                .crdt_store()
                 .apply_patch(conn, entity, id, crdt_fields, data)
                 .map_err(|e| RuntimeError {
                     code: "CRDT_APPLY_FAILED".into(),
                     message: format!("crdt write {entity}/{id}: {e}"),
                 })?;
+            if let Some(corrections) = crdt_container_corrections(crdt_fields, data, &projected) {
+                self.write_crdt_corrections(conn, ent, id, &corrections)?;
+            }
         }
 
         if affected > 0 && searchable {
@@ -5346,6 +5450,54 @@ fn json_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
 /// stability with callers that compute it from the manifest) — the
 /// name set comes from the row itself now, which always matches the
 /// SELECT's actual column shape.
+/// After a CRDT update: the counter, list, and tree fields it set, with
+/// the doc's values where they differ from what the write stored. A
+/// counter's patch is an increment and the row stores the total; a list
+/// or tree is stored as the doc holds it. None when there is nothing to
+/// set.
+pub(crate) fn crdt_container_corrections(
+    fields: &[pylon_crdt::CrdtField],
+    data: &serde_json::Value,
+    projected: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    use pylon_crdt::CrdtFieldKind as K;
+    let null = serde_json::Value::Null;
+    let out: serde_json::Map<String, serde_json::Value> = fields
+        .iter()
+        .filter(|f| matches!(f.kind, K::Counter | K::List | K::MovableList | K::Tree))
+        .filter_map(|f| {
+            let written = data.get(&f.name)?;
+            let value = projected.get(&f.name).unwrap_or(&null);
+            (!same_json_value(written, value)).then(|| (f.name.clone(), value.clone()))
+        })
+        .collect();
+    (!out.is_empty()).then_some(serde_json::Value::Object(out))
+}
+
+/// A tree value in a form that compares by content: nodes in id order,
+/// with a missing parent as null (the doc returns nodes depth-first with
+/// `parent: null` on roots; a stored value keeps the order it was sent in).
+fn tree_for_compare(value: &serde_json::Value) -> serde_json::Value {
+    let Some(nodes) = value.as_array() else {
+        return value.clone();
+    };
+    let mut nodes: Vec<serde_json::Value> = nodes
+        .iter()
+        .map(|n| {
+            let mut n = n.clone();
+            if let Some(obj) = n.as_object_mut() {
+                obj.entry("parent").or_insert(serde_json::Value::Null);
+            }
+            n
+        })
+        .collect();
+    nodes.sort_by(|a, b| {
+        let key = |n: &serde_json::Value| n.get("id").map(|v| v.to_string()).unwrap_or_default();
+        key(a).cmp(&key(b))
+    });
+    serde_json::Value::Array(nodes)
+}
+
 /// A row's non-null CRDT field values, to create its doc from.
 fn seed_values(
     fields: &[pylon_crdt::CrdtField],
@@ -6415,10 +6567,11 @@ mod tests {
         })
     }
 
-    /// The reconcile sets register and text fields to the row where they
-    /// differ (JSON parsed, a null text as empty), leaves counters, lists,
-    /// and trees as the doc has them, gives a row with no doc one from its
-    /// values, and leaves a row already in line untouched.
+    /// The reconcile sets register, text, and list fields to the row where
+    /// they differ (JSON parsed, a null text as empty), writes a counter's
+    /// total from the doc into the row, gives a row with no doc one from
+    /// its values, and leaves a row already in line unchanged, a tree
+    /// stored in another node order included.
     #[test]
     fn the_crdt_reconcile_handles_every_field_kind() {
         let dir = tempfile::tempdir().unwrap();
@@ -6428,6 +6581,10 @@ mod tests {
         let stale = rt.insert("Doc", &fresh_doc()).unwrap();
         let in_line = rt.insert("Doc", &fresh_doc()).unwrap();
         let bare = rt.insert("Doc", &fresh_doc()).unwrap();
+        // A tree stored in its own node order, a root with no parent key.
+        let mut tree_row = fresh_doc();
+        tree_row["outline"] = serde_json::json!([{"id": "b", "parent": "a"}, {"id": "a"}]);
+        let tree = rt.insert("Doc", &tree_row).unwrap();
         let snapshot = |id: &str| -> Vec<u8> {
             rt.lock_write_conn()
                 .unwrap()
@@ -6457,6 +6614,7 @@ mod tests {
         }
         rt.crdt_store().clear_cache();
         let before = snapshot(&in_line);
+        let tree_before = snapshot(&tree);
         rt.reconcile_crdt_docs().unwrap();
         rt.crdt_store().clear_cache();
 
@@ -6469,10 +6627,14 @@ mod tests {
             "{}",
             doc["body"]
         );
-        // The row holds a server write's patch, which for these kinds is
-        // not the value.
+        // A list takes the row's value; a counter's total stays the doc's,
+        // and the row takes it (a server write stored its increment).
+        assert_eq!(doc["tags"], serde_json::json!(["x", "y"]));
         assert_eq!(doc["likes"].as_f64(), Some(3.0));
-        assert_eq!(doc["tags"], serde_json::json!(["x"]));
+        assert_eq!(
+            rt.get_by_id("Doc", &stale).unwrap().unwrap()["likes"].as_i64(),
+            Some(3)
+        );
 
         let seeded = doc_values(&rt, &bare);
         assert_eq!(seeded["title"], "a");
@@ -6484,6 +6646,7 @@ mod tests {
         assert_eq!(seeded["body"], "hello");
 
         assert_eq!(snapshot(&in_line), before);
+        assert_eq!(snapshot(&tree), tree_before);
     }
 
     /// A field the doc cannot take is skipped on its own: the row's other
@@ -6658,6 +6821,30 @@ mod tests {
         assert_eq!(row["meta"], serde_json::json!({"k": 1}));
         assert_eq!(row["body"], "hello");
         assert_eq!(row["done"], false);
+    }
+
+    /// A counter update's value is an increment; the row stores the
+    /// counter's total, as the doc holds it, through `update` and through
+    /// a transaction's `update_with_conn`.
+    #[test]
+    fn counter_updates_store_the_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let id = rt.insert("Doc", &fresh_doc()).unwrap();
+        let likes = |rt: &Runtime| rt.get_by_id("Doc", &id).unwrap().unwrap()["likes"].as_i64();
+        rt.update("Doc", &id, &serde_json::json!({"likes": 2}))
+            .unwrap();
+        assert_eq!(likes(&rt), Some(5));
+        {
+            let conn = rt.lock_write_conn().unwrap();
+            with_write_tx(&rt, &conn, || {
+                rt.update_with_conn(&conn, "Doc", &id, &serde_json::json!({"likes": 4}))
+            })
+            .unwrap();
+        }
+        assert_eq!(likes(&rt), Some(9));
+        assert_eq!(doc_values(&rt, &id)["likes"].as_f64(), Some(9.0));
     }
 
     /// A server update to a row with no doc keeps the row's other fields in

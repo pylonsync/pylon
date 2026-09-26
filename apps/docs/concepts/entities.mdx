@@ -75,7 +75,7 @@ Current field behavior:
 | `int`, `float`, `bool` | LWW scalar register |
 | `richtext` | `LoroText` |
 | `.crdt("text")` on `string` / `richtext` | `LoroText` |
-| `.crdt("counter")` on `int` / `float` | `LoroCounter` — patch value is the DELTA to apply; concurrent increments add up (`+1` from two peers → `+2`, not LWW-stomp) |
+| `.crdt("counter")` on `int` / `float` | `LoroCounter` — patch value is the DELTA to apply; concurrent increments add up (`+1` from two peers → `+2`, not LWW-stomp). The row stores the total: `ctx.db.update(id, { likes: 1 })` adds 1, and a read returns the new total. |
 | `.crdt("list")` | `LoroList` — patch is the target array; first write ships snapshot, subsequent ship deltas |
 | `.crdt("movable-list")` | `LoroMovableList` — same wire shape as `list`; move-op API for true reordering is a future iteration |
 | `.crdt("tree")` | `LoroTree` — patch is `[{id, parent, ...meta}]`; reconcile maps user-supplied id → TreeID so concurrent moves merge |
