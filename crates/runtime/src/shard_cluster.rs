@@ -2367,6 +2367,20 @@ pub(crate) mod tests {
             refused.contains("another process runs the shards"),
             "{refused}"
         );
+        // The same file through a symbolic link is the same lock.
+        #[cfg(unix)]
+        {
+            let link = file.path().join("link.db");
+            std::os::unix::fs::symlink(path, &link).unwrap();
+            let refused =
+                ShardDirectory::open_sqlite_waiting(link.to_str().unwrap(), Duration::ZERO)
+                    .err()
+                    .expect("refused through the link");
+            assert!(
+                refused.contains("another process runs the shards"),
+                "{refused}"
+            );
+        }
         // A process still exiting lets go within the wait.
         let exiting = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(300));

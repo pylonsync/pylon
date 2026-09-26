@@ -518,6 +518,49 @@ pub(crate) fn sqlite_write_code(e: &rusqlite::Error, default: &'static str) -> &
     }
 }
 
+/// Start a write transaction on the SQLite write connection. It takes the
+/// database's write lock at once (`BEGIN IMMEDIATE`), waiting out the busy
+/// timeout for another connection's writer (the shard directory's). A
+/// deferred `BEGIN` reads from a snapshot and takes the lock at its first
+/// write; when another connection committed in between, that write fails
+/// with `SQLITE_BUSY_SNAPSHOT` at once, with no wait.
+pub(crate) fn begin_write(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("BEGIN IMMEDIATE")
+}
+
+#[cfg(test)]
+mod begin_write_tests {
+    /// Another connection cannot commit between a write transaction's
+    /// first read and its first write, so the write never meets a newer
+    /// snapshot.
+    #[test]
+    fn a_write_transaction_holds_the_write_lock_from_its_start() {
+        let file = tempfile::tempdir().unwrap();
+        let path = file.path().join("app.db");
+        let open = || {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            super::tune_runtime_connection(&conn, false).unwrap();
+            conn.busy_timeout(std::time::Duration::from_millis(100))
+                .unwrap();
+            conn
+        };
+        let (mine, other) = (open(), open());
+        mine.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (1)")
+            .unwrap();
+        super::begin_write(&mine).unwrap();
+        let n: i64 = mine
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert!(
+            other.execute("INSERT INTO t VALUES (2)", []).is_err(),
+            "another writer committed inside the transaction"
+        );
+        mine.execute("INSERT INTO t VALUES (3)", []).unwrap();
+        mine.execute_batch("COMMIT").unwrap();
+    }
+}
+
 #[cfg(test)]
 mod sqlite_write_code_tests {
     use super::sqlite_write_code;
@@ -1369,10 +1412,12 @@ impl Runtime {
             code: "SQLITE_LOCK_FAILED".into(),
             message: format!("write_conn lock poisoned: {e}"),
         })?;
-        let tx = conn.transaction().map_err(|e| RuntimeError {
-            code: "SQLITE_CHANGE_LOG_TX_BEGIN_FAILED".into(),
-            message: format!("BEGIN: {e}"),
-        })?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| RuntimeError {
+                code: "SQLITE_CHANGE_LOG_TX_BEGIN_FAILED".into(),
+                message: format!("BEGIN: {e}"),
+            })?;
         {
             let mut stmt = tx
                 .prepare(

@@ -400,7 +400,26 @@ impl SqliteDb {
     /// still exiting (a restart) gets `wait` to let go of it; after that,
     /// an error: one process runs a file's shards.
     pub(crate) fn open_waiting(path: &str, wait: Duration) -> Result<Self, String> {
-        let lock_path = format!("{path}.shards.lock");
+        // One lock file for the database file, whatever path names it (a
+        // relative path, or a symbolic link). A file not created yet is
+        // named by its resolved directory.
+        let resolve = |p: &std::path::Path| {
+            std::fs::canonicalize(p).map_err(|e| format!("could not resolve {path}: {e}"))
+        };
+        let given = std::path::Path::new(path);
+        let real = if given.exists() {
+            resolve(given)?
+        } else {
+            let dir = match given.parent() {
+                Some(d) if !d.as_os_str().is_empty() => d,
+                _ => std::path::Path::new("."),
+            };
+            let name = given
+                .file_name()
+                .ok_or_else(|| format!("{path} names no file"))?;
+            resolve(dir)?.join(name)
+        };
+        let lock_path = format!("{}.shards.lock", real.display());
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)

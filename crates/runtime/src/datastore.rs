@@ -585,7 +585,7 @@ impl DataStore for Runtime {
         // undefined transaction state (autocommit-or-not depending on
         // why BEGIN failed). The next caller would inherit the same
         // unknown state. Surface immediately.
-        conn.execute("BEGIN", []).map_err(|e| DataError {
+        crate::begin_write(&conn).map_err(|e| DataError {
             code: "SQLITE_BEGIN_FAILED".into(),
             message: format!("BEGIN failed: {e}"),
         })?;
@@ -4621,7 +4621,7 @@ impl FnOpsImpl {
                     message: e.message,
                 })?;
 
-                if let Err(e) = conn_guard.execute("BEGIN", []) {
+                if let Err(e) = crate::begin_write(&conn_guard) {
                     return Err(FnCallError {
                         code: "BEGIN_FAILED".into(),
                         message: format!("Failed to start transaction: {e}"),
@@ -6968,7 +6968,7 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                         .runtime
                         .lock_conn_pub()
                         .map_err(|e| (e.code, e.message))?;
-                    if let Err(e) = conn_guard.execute("BEGIN", []) {
+                    if let Err(e) = crate::begin_write(&conn_guard) {
                         return Err(("BEGIN_FAILED".into(), e.to_string()));
                     }
                     let sched_guard = ScheduleBufferGuard::enter();

@@ -117,7 +117,7 @@ impl EntityWriter {
             .runtime
             .lock_conn_pub()
             .map_err(|e| WriteError::Store(format!("{}: {}", e.code, e.message)))?;
-        conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+        crate::begin_write(&conn).map_err(|e| {
             WriteError::from(pylon_http::DataError {
                 code: crate::sqlite_write_code(&e, "BEGIN_FAILED").into(),
                 message: format!("Failed to start transaction: {e}"),
