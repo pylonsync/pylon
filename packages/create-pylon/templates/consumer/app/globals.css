@@ -16,9 +16,12 @@
    on <html>. */
 :root {
   --radius: 0.625rem;
-  /* The app's own colors: links and the follow button, and a liked heart. */
-  --brand: #2563eb;
-  --like: #e11d48;
+  /* The app's own colors: links and the follow button, and a liked heart.
+     They match the iOS app in apps/ios. */
+  --brand: #0095f6;
+  --like: #ff3040;
+  /* The ring around someone who posted in the last 24 hours. */
+  --story-ring: conic-gradient(from 180deg, #fcba45, #fa6133, #de2678, #8c38d9, #fcba45);
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
   --card: oklch(1 0 0);
@@ -147,6 +150,10 @@
 }
 
 /* The wordmark. Instrument Serif is declared in app.ts. */
+.bg-story-ring {
+  background: var(--story-ring);
+}
+
 .font-display {
   font-family: var(--font-display, "Iowan Old Style", Georgia, serif);
 }

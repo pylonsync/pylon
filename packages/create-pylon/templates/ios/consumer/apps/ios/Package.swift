@@ -1,14 +1,15 @@
 // swift-tools-version:5.9
 import PackageDescription
 
+// SwiftPM manifest for the app sources. Xcode builds use project.yml
+// (xcodegen); this file lets `swift build` resolve the Pylon packages.
 let package = Package(
 	name: "__APP_NAME_PASCAL__",
 	platforms: [
-		.iOS(.v16),
-		.macOS(.v13),
+		.iOS(.v17),
 	],
 	dependencies: [
-		.package(url: "https://github.com/pylonsync/pylon.git", from: "0.3.0"),
+		.package(url: "https://github.com/pylonsync/pylon.git", from: "__PYLON_VERSION__"),
 	],
 	targets: [
 		.executableTarget(

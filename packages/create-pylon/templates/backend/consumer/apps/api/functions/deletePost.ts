@@ -1,21 +1,23 @@
 import { mutation, v } from "@pylonsync/functions";
+import { requireProfile } from "../lib/social";
 
-/**
- * Delete a Post and any associated Likes. Post policy already gates
- * deletes to the author's Profile, so a non-author can't reach the
- * actual delete call — but we double-check so a future policy
- * loosening doesn't accidentally orphan Like rows.
- */
+/** Delete one of the caller's posts with its likes and comments. */
 export default mutation({
 	args: { id: v.id("Post") },
 	async handler(ctx, args: { id: string }) {
-		const snapshot = (await ctx.db.get("Post", args.id)) as any;
-		if (!snapshot) throw ctx.error("NOT_FOUND", "post not found");
-		const likes = (await ctx.db.query("Like", { postId: args.id })) as any[];
-		for (const like of likes) {
-			await ctx.db.delete("Like", like.id);
+		const profile = await requireProfile(ctx, ctx.auth.userId);
+		const post = await ctx.db.get("Post", args.id);
+		if (!post) throw ctx.error("NOT_FOUND", "This post no longer exists.");
+		if (post.authorId !== profile.id) {
+			throw ctx.error("FORBIDDEN", "You can only delete your own posts.");
 		}
-		await ctx.db.delete("Post", args.id);
-		return snapshot;
+		for (const like of await ctx.db.query("Like", { postId: args.id })) {
+			await ctx.db.unsafe.delete("Like", String(like.id));
+		}
+		for (const comment of await ctx.db.query("Comment", { postId: args.id })) {
+			await ctx.db.unsafe.delete("Comment", String(comment.id));
+		}
+		await ctx.db.unsafe.delete("Post", args.id);
+		return { id: args.id };
 	},
 });

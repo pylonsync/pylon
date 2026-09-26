@@ -3,18 +3,24 @@
 # Materialize the Xcode project once with:
 #     brew install xcodegen
 #     xcodegen generate
-# Then open __APP_NAME_PASCAL__.xcodeproj.
+# Then open __APP_NAME_PASCAL__.xcodeproj. Run xcodegen again after you add
+# or remove Swift files.
+#
+# The app talks to the Pylon backend in apps/api. Start it with `pylon dev`
+# there. The simulator reaches http://localhost:4321; on a device, set
+# PYLON_BASE_URL in the scheme's environment to your Mac's LAN address or
+# your deployed API.
 
 name: __APP_NAME_PASCAL__
 options:
   bundleIdPrefix: com.example
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "17.0"
 
 packages:
   pylon:
     url: https://github.com/pylonsync/pylon.git
-    from: "0.3.0"
+    from: "__PYLON_VERSION__"
 
 targets:
   __APP_NAME_PASCAL__:
@@ -25,15 +31,13 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: "__APP_NAME__"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
-        TARGETED_DEVICE_FAMILY: "1,2"
-        SWIFT_VERSION: "5.9"
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_VERSION: "5.0"
         ENABLE_PREVIEWS: YES
-        # __APP_NAME__ talks to a Pylon backend on localhost during dev.
-        # The simulator can reach localhost directly; on a physical device
-        # set PYLON_BASE_URL to your machine's LAN IP.
         INFOPLIST_KEY_NSAppTransportSecurity: "{NSAllowsLocalNetworking = YES;}"
     dependencies:
       - package: pylon

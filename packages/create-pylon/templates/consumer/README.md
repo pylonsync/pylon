@@ -10,7 +10,7 @@ saved posts. Likes, comments, and follows update live in every open tab.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. The first visit loads twelve demo people with
+Open http://localhost:4321. The first visit loads eight demo people with
 their posts, likes, comments, and follows, and gives you a guest profile.
 Post a photo with Create, like with a double tap, and open a second tab to
 watch counts change.
@@ -30,7 +30,7 @@ lib/seed.ts                     the demo people and posts
 lib/site.ts                     the app's name
 functions/                      ensureProfile, updateProfile, createPost,
                                 addComment, seedFeed
-public/images/                  demo avatars and photos
+public/images/posts/            demo photos
 ```
 
 ## How it works
@@ -55,7 +55,7 @@ public/images/                  demo avatars and photos
   move a guest's profile to the account on sign-in.
 - **Scale:** `components/social/use-social.ts` reads every row, which is fine
   for a demo. For a large network, query per screen with `where` and `limit`.
-- **Launch:** delete `functions/seedFeed.ts`, `lib/seed.ts`, and
+- **Launch:** delete `functions/seedFeed.ts`, `lib/seed.ts`, `tests/seed.test.ts`, and
   `public/images/`, and remove the `seedFeed` call in `session.tsx`.
 
 ## Deploy

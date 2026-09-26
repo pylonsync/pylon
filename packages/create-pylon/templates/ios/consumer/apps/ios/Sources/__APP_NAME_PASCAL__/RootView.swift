@@ -1,40 +1,34 @@
 import SwiftUI
-import PylonClient
-import PylonSync
-import PylonSwiftUI
 
-/// Watches the live Profile collection. If we have a saved profileId
-/// AND a Profile row in the local store with that id, render the
-/// feed; otherwise, profile setup. The profile row appears in the
-/// store via the SyncEngine, so a fresh device sees its own profile
-/// pop in moments after `upsertProfile` returns.
+/// Picks the screen for the session state: sign in, profile setup, or the app.
 struct RootView: View {
-	@EnvironmentObject var session: AppSession
-	let engine: SyncEngine
-	@StateObject private var profiles: PylonQuery<Profile>
-
-	init(engine: SyncEngine) {
-		self.engine = engine
-		_profiles = StateObject(
-			wrappedValue: PylonQuery<Profile>(engine: engine, entity: "Profile"),
-		)
-	}
+	@EnvironmentObject private var app: AppModel
 
 	var body: some View {
-		Group {
-			if let me = currentProfile {
-				FeedView(engine: engine, me: me, profiles: profiles.rows)
-			} else {
-				ProfileSetupView(
-					engine: engine,
-					existingHandles: profiles.rows.map { $0.handle },
-				)
+		ZStack {
+			switch app.phase {
+			case .launching:
+				Wordmark(size: 40)
+					.frame(maxWidth: .infinity, maxHeight: .infinity)
+			case .signedOut:
+				AuthView()
+					.transition(.opacity)
+			case .needsProfile:
+				if let social = app.social {
+					NavigationStack {
+						ProfileEditorView(mode: .create)
+					}
+					.environmentObject(social)
+					.transition(.move(edge: .trailing))
+				}
+			case .ready:
+				if let social = app.social {
+					MainTabView()
+						.environmentObject(social)
+						.transition(.opacity)
+				}
 			}
 		}
-	}
-
-	private var currentProfile: Profile? {
-		guard let id = session.myProfileId else { return nil }
-		return profiles.rows.first { $0.id == id }
+		.animation(.easeInOut(duration: 0.3), value: app.phase)
 	}
 }

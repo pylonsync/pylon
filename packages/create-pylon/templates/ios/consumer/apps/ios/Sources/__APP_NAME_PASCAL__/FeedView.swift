@@ -1,199 +1,215 @@
 import SwiftUI
-import PylonClient
-import PylonSync
-import PylonSwiftUI
 
-/// Live feed. Three subscriptions (Post / Like / Profile) joined
-/// in-memory. Every new post + every like from any client renders
-/// here without polling.
+/// The home feed: stories row, then every post, newest first. New posts
+/// from other people arrive over sync and slide in at the top.
 struct FeedView: View {
-	@EnvironmentObject var session: AppSession
-	let engine: SyncEngine
-	let me: Profile
-	let profiles: [Profile]
+	@EnvironmentObject private var social: SocialStore
+	/// Changes when the feed should scroll back to the top (after posting).
+	let scrollToken: Int
+	let onCompose: () -> Void
 
-	@StateObject private var posts: PylonQuery<Post>
-	@StateObject private var likes: PylonQuery<Like>
-	@State private var draft = ""
-	@State private var posting = false
-	@State private var errorMessage: String?
-
-	init(engine: SyncEngine, me: Profile, profiles: [Profile]) {
-		self.engine = engine
-		self.me = me
-		self.profiles = profiles
-		_posts = StateObject(
-			wrappedValue: PylonQuery<Post>(engine: engine, entity: "Post"),
-		)
-		_likes = StateObject(
-			wrappedValue: PylonQuery<Like>(engine: engine, entity: "Like"),
-		)
-	}
+	@State private var storyStart: StoryStart?
+	@State private var newPostAuthor: Profile?
+	@State private var knownTopPostId: String?
+	@State private var atTop = true
+	@State private var pillTimer: Task<Void, Never>?
 
 	var body: some View {
-		NavigationStack {
-			List {
-				Section("Post") {
-					VStack(alignment: .leading, spacing: 8) {
-						TextEditor(text: $draft)
-							.frame(minHeight: 80)
-							.font(.body)
-						HStack {
-							Text("\(draft.count)/1000")
-								.font(.caption)
-								.foregroundStyle(.secondary)
-							Spacer()
-							Button(posting ? "Posting…" : "Post") {
-								Task { await post() }
-							}
-							.disabled(posting || draft.trimmingCharacters(in: .whitespaces).isEmpty)
-						}
+		ScrollViewReader { proxy in
+			ScrollView {
+				LazyVStack(spacing: 0) {
+					Color.clear.frame(height: 0).id("top")
+						.onAppear { atTop = true }
+						.onDisappear { atTop = false }
+					StoriesRow(onCompose: onCompose) { authors, index in
+						storyStart = StoryStart(authors: authors, index: index)
 					}
-				}
+					Divider().opacity(0.6)
 
-				Section("Feed") {
-					if items.isEmpty {
-						Text("No posts yet.")
-							.foregroundStyle(.secondary)
+					if social.isLoading && social.posts.isEmpty {
+						ForEach(0..<2, id: \.self) { _ in PostSkeleton() }
+					} else if social.posts.isEmpty {
+						ContentUnavailableView(
+							"No posts yet",
+							systemImage: "photo.on.rectangle",
+							description: Text("Photos you and other people share show up here.")
+						)
+						.padding(.top, 60)
 					} else {
-						ForEach(items, id: \.post.id) { item in
-							row(item)
+						ForEach(social.posts) { post in
+							PostCard(post: post)
+								.transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
 						}
 					}
 				}
-
-				if let errorMessage {
-					Section {
-						Text(errorMessage)
-							.foregroundStyle(.red)
-							.font(.caption)
+				.animation(.spring(response: 0.45, dampingFraction: 0.85), value: social.posts.map(\.id))
+			}
+			.refreshable { await social.engine.pull() }
+			.safeAreaInset(edge: .top, spacing: 0) { header }
+			.overlay(alignment: .top) {
+				if let author = newPostAuthor {
+					NewPostPill(author: author) {
+						withAnimation { proxy.scrollTo("top", anchor: .top) }
+						newPostAuthor = nil
 					}
+					.padding(.top, 64)
+					.transition(.move(edge: .top).combined(with: .opacity))
 				}
 			}
-			.navigationTitle("__APP_NAME__")
-		}
-	}
-
-	private struct FeedRow: Hashable {
-		let post: Post
-		let author: Profile?
-		let likeCount: Int
-		let likedByMe: Bool
-	}
-
-	private var profilesById: [String: Profile] {
-		Dictionary(uniqueKeysWithValues: profiles.map { ($0.id, $0) })
-	}
-
-	private var items: [FeedRow] {
-		posts.rows
-			.sorted { $0.createdAt > $1.createdAt }
-			.prefix(100)
-			.map { post in
-				let postLikes = likes.rows.filter { $0.postId == post.id }
-				return FeedRow(
-					post: post,
-					author: profilesById[post.authorId],
-					likeCount: postLikes.count,
-					likedByMe: postLikes.contains { $0.profileId == me.id },
-				)
+			.onChange(of: scrollToken) { _, _ in
+				withAnimation { proxy.scrollTo("top", anchor: .top) }
 			}
-	}
-
-	@ViewBuilder
-	private func row(_ item: FeedRow) -> some View {
-		VStack(alignment: .leading, spacing: 6) {
-			HStack(alignment: .firstTextBaseline) {
-				Text(item.author?.displayName ?? "Unknown")
-					.font(.subheadline.weight(.medium))
-				Text("@\(item.author?.handle ?? "?")")
-					.font(.system(.caption, design: .monospaced))
-					.foregroundStyle(.secondary)
-				Spacer()
-				Text(item.post.createdAt)
-					.font(.caption2)
-					.foregroundStyle(.tertiary)
-			}
-			Text(item.post.body)
-				.font(.body)
-				.fixedSize(horizontal: false, vertical: true)
-			HStack {
-				Button {
-					Task { await toggleLike(item.post.id) }
-				} label: {
-					HStack(spacing: 4) {
-						Image(systemName: item.likedByMe ? "heart.fill" : "heart")
-						Text("\(item.likeCount)")
-					}
-					.font(.caption)
-					.foregroundStyle(item.likedByMe ? .pink : .secondary)
-				}
-				.buttonStyle(.plain)
-
-				if item.author?.id == me.id {
-					Spacer()
-					Button("Delete", role: .destructive) {
-						Task { await delete(item.post.id) }
-					}
-					.font(.caption)
-				}
+			.onChange(of: social.posts.first?.id) { _, newTop in
+				announceNewPost(topId: newTop)
 			}
 		}
-		.padding(.vertical, 4)
-	}
-
-	// MARK: - Mutations (writes flow through callFn; the engine receives
-	// the change_event and updates the local store, which re-renders the
-	// PylonQuery rows above).
-
-	private func post() async {
-		let body = draft.trimmingCharacters(in: .whitespaces)
-		guard !body.isEmpty else { return }
-		posting = true
-		defer { posting = false }
-		do {
-			// `createPost` returns the joined shape (Post + author),
-			// but we don't use the return value — the engine will
-			// surface the new Post row via the live subscription.
-			let _: PostCreatedResponse = try await session.client.callFn(
-				"createPost",
-				args: CreatePostArgs(body: body),
-			)
-			draft = ""
-			errorMessage = nil
-		} catch {
-			errorMessage = "Post failed: \(error.localizedDescription)"
+		.toolbar(.hidden, for: .navigationBar)
+		.appRoutes()
+		.fullScreenCover(item: $storyStart) { start in
+			StoryViewer(authors: start.authors, startIndex: start.index)
+				.environmentObject(social)
 		}
 	}
 
-	private func toggleLike(_ postId: String) async {
-		do {
-			let _: ToggleLikeResponse = try await session.client.callFn(
-				"toggleLike",
-				args: ToggleLikeArgs(postId: postId),
-			)
-		} catch {
-			errorMessage = "Like failed: \(error.localizedDescription)"
+	private var header: some View {
+		HStack {
+			Wordmark(size: 30)
+			Spacer()
+			Button(action: onCompose) {
+				Image(systemName: "plus.app")
+					.font(.system(size: 24))
+			}
+			.accessibilityLabel("New post")
+			.foregroundStyle(.primary)
 		}
+		.padding(.horizontal, 16)
+		.frame(height: 50)
+		.background(.bar)
 	}
 
-	private func delete(_ postId: String) async {
-		do {
-			let _: Post = try await session.client.callFn(
-				"deletePost",
-				args: DeletePostArgs(id: postId),
-			)
-		} catch {
-			errorMessage = "Delete failed: \(error.localizedDescription)"
+	/// Shows "New post from @handle" when someone else's post lands on top
+	/// while the user is scrolled down the feed.
+	private func announceNewPost(topId: String?) {
+		defer { knownTopPostId = topId }
+		guard let topId, let known = knownTopPostId, topId != known,
+		      let post = social.post(topId), post.authorId != social.myProfileId,
+		      post.date > .now.addingTimeInterval(-120) else { return }
+		guard !atTop else { return }
+		withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+			newPostAuthor = social.profile(post.authorId)
+		}
+		pillTimer?.cancel()
+		pillTimer = Task {
+			try? await Task.sleep(for: .seconds(5))
+			guard !Task.isCancelled else { return }
+			withAnimation { newPostAuthor = nil }
 		}
 	}
 }
 
-private struct PostCreatedResponse: Decodable {
-	let id: String
+struct StoryStart: Identifiable {
+	let id = UUID()
+	let authors: [Profile]
+	let index: Int
 }
 
-private struct ToggleLikeResponse: Decodable {
-	let liked: Bool
-	let likeCount: Int
+/// The row of avatars at the top of the feed. A ring means the person
+/// posted in the last 24 hours. Tapping opens those posts full screen.
+struct StoriesRow: View {
+	@EnvironmentObject private var social: SocialStore
+	let onCompose: () -> Void
+	let onOpen: ([Profile], Int) -> Void
+
+	var body: some View {
+		let authors = social.storyAuthors
+		ScrollView(.horizontal, showsIndicators: false) {
+			HStack(alignment: .top, spacing: 14) {
+				if let me = social.me {
+					Button {
+						if social.hasRecentPost(me.id) { onOpen([me], 0) } else { onCompose() }
+					} label: {
+						StoryBubble(profile: me, label: "Your story", ringed: social.hasRecentPost(me.id), showsAdd: true)
+					}
+					.buttonStyle(.plain)
+				}
+				ForEach(Array(authors.enumerated()), id: \.element.id) { index, author in
+					Button { onOpen(authors, index) } label: {
+						StoryBubble(profile: author, label: author.handle, ringed: true, showsAdd: false)
+					}
+					.buttonStyle(.plain)
+				}
+			}
+			.padding(.horizontal, 12)
+			.padding(.vertical, 10)
+		}
+	}
+}
+
+private struct StoryBubble: View {
+	let profile: Profile
+	let label: String
+	let ringed: Bool
+	let showsAdd: Bool
+
+	var body: some View {
+		VStack(spacing: 5) {
+			StoryAvatar(profile: profile, size: 64, ringed: ringed)
+				.overlay(alignment: .bottomTrailing) {
+					if showsAdd {
+						Image(systemName: "plus")
+							.font(.system(size: 11, weight: .heavy))
+							.foregroundStyle(.white)
+							.frame(width: 22, height: 22)
+							.background(Theme.accent, in: Circle())
+							.overlay(Circle().stroke(Color(uiColor: .systemBackground), lineWidth: 2.5))
+							.offset(x: -2, y: -2)
+					}
+				}
+			Text(label)
+				.font(.caption)
+				.foregroundStyle(showsAdd ? .secondary : .primary)
+				.lineLimit(1)
+				.frame(width: 74)
+		}
+	}
+}
+
+private struct NewPostPill: View {
+	let author: Profile
+	let action: () -> Void
+
+	var body: some View {
+		Button(action: action) {
+			HStack(spacing: 8) {
+				AvatarView(profile: author, size: 22)
+				Text("New post from \(author.handle)")
+					.font(.subheadline.weight(.semibold))
+				Image(systemName: "arrow.up")
+					.font(.footnote.weight(.bold))
+			}
+			.foregroundStyle(.white)
+			.padding(.leading, 6)
+			.padding(.trailing, 14)
+			.padding(.vertical, 6)
+			.background(Theme.accent, in: Capsule())
+			.shadow(color: .black.opacity(0.18), radius: 10, y: 4)
+		}
+		.buttonStyle(.plain)
+	}
+}
+
+private struct PostSkeleton: View {
+	var body: some View {
+		VStack(alignment: .leading, spacing: 10) {
+			HStack(spacing: 10) {
+				Circle().frame(width: 34, height: 34)
+				RoundedRectangle(cornerRadius: 4).frame(width: 120, height: 12)
+			}
+			.padding(.horizontal, 12)
+			Rectangle().aspectRatio(4 / 5, contentMode: .fit)
+			RoundedRectangle(cornerRadius: 4).frame(width: 180, height: 12).padding(.horizontal, 14)
+		}
+		.foregroundStyle(Theme.fieldFill)
+		.padding(.vertical, 8)
+	}
 }

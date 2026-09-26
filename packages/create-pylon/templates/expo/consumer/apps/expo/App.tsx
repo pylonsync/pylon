@@ -1,25 +1,37 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-	View,
+	ActivityIndicator,
+	Alert,
+	FlatList,
+	Image,
+	Platform,
+	Pressable,
+	StyleSheet,
 	Text,
 	TextInput,
-	Pressable,
-	FlatList,
-	ActivityIndicator,
-	StyleSheet,
-	Platform,
-	Alert,
+	View,
+	useWindowDimensions,
 } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
-import { init, db, callFn } from "@pylonsync/react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as ImagePicker from "expo-image-picker";
+import {
+	callFn,
+	db,
+	getMe,
+	init,
+	passwordLogin,
+	passwordRegister,
+	signOut,
+	uploadFile,
+} from "@pylonsync/react-native";
 
+// The Pylon backend in apps/api. The iOS simulator reaches the Mac's
+// localhost; the Android emulator reaches it at 10.0.2.2. On a device, set
+// EXPO_PUBLIC_PYLON_BASE_URL to the Mac's LAN address or your deployed API.
 const PYLON_BASE_URL =
 	process.env.EXPO_PUBLIC_PYLON_BASE_URL ??
 	(Platform.OS === "android" ? "http://10.0.2.2:4321" : "http://localhost:4321");
-
-const PROFILE_KEY = "__APP_NAME_SNAKE___profile_id";
 
 type Profile = {
 	id: string;
@@ -27,13 +39,15 @@ type Profile = {
 	handle: string;
 	displayName: string;
 	bio?: string | null;
+	avatarUrl?: string | null;
 	createdAt: string;
 };
 
 type Post = {
 	id: string;
 	authorId: string;
-	body: string;
+	imageUrl: string;
+	caption?: string | null;
 	createdAt: string;
 };
 
@@ -44,357 +58,415 @@ type Like = {
 	createdAt: string;
 };
 
+type Comment = {
+	id: string;
+	postId: string;
+	profileId: string;
+	text: string;
+	createdAt: string;
+};
+
 let initPromise: Promise<void> | null = null;
 function ensureInit() {
 	if (!initPromise) {
-		initPromise = init({
-			baseUrl: PYLON_BASE_URL,
-			appName: "__APP_NAME_SNAKE__",
-		});
+		initPromise = init({ baseUrl: PYLON_BASE_URL, appName: "__APP_NAME_SNAKE__" });
 	}
 	return initPromise;
 }
 
+/** Absolute URL for a stored image path (`/images/...` or `/api/files/<id>`). */
+function mediaUrl(path?: string | null): string | undefined {
+	if (!path) return undefined;
+	return /^https?:\/\//.test(path) ? path : `${PYLON_BASE_URL}${path}`;
+}
+
+/** "now", "5m", "2h", "3d", "2w", then the date. */
+function shortTime(iso: string): string {
+	const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+	if (seconds < 60) return "now";
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+	if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+	if (seconds < 604800) return `${Math.floor(seconds / 86400)}d`;
+	if (seconds < 2419200) return `${Math.floor(seconds / 604800)}w`;
+	return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function errorText(e: unknown): string {
+	const message = e instanceof Error ? e.message : String(e);
+	return message || "Something went wrong. Try again.";
+}
+
+type Phase = "loading" | "signedOut" | "needsProfile" | "ready";
+
 export default function App() {
 	return (
 		<SafeAreaProvider>
+			<StatusBar style="auto" />
 			<AppContent />
 		</SafeAreaProvider>
 	);
 }
 
 function AppContent() {
-	const [ready, setReady] = useState(false);
+	const [phase, setPhase] = useState<Phase>("loading");
 	const [profileId, setProfileId] = useState<string | null>(null);
+
+	const resolveProfile = useCallback(async () => {
+		const me = (await callFn("myProfile", {})) as Profile | null;
+		setProfileId(me?.id ?? null);
+		setPhase(me ? "ready" : "needsProfile");
+	}, []);
+
 	useEffect(() => {
 		(async () => {
-			await ensureInit();
-			const stored = await AsyncStorage.getItem(PROFILE_KEY);
-			setProfileId(stored);
-			setReady(true);
+			try {
+				await ensureInit();
+				// Demo content for a new install. The server writes it once.
+				await callFn("seedDemo", {}).catch(() => undefined);
+				const me = await getMe();
+				if (!me?.user_id) {
+					setPhase("signedOut");
+					return;
+				}
+				await resolveProfile();
+			} catch {
+				// The server cannot be reached. Sign-in shows the error on retry.
+				setPhase("signedOut");
+			}
 		})();
-	}, []);
-	if (!ready) {
+	}, [resolveProfile]);
+
+	if (phase === "loading") {
 		return (
-			<View style={[styles.screen, styles.center]}>
+			<View style={[styles.fill, styles.center]}>
 				<ActivityIndicator />
 			</View>
 		);
 	}
+	if (phase === "signedOut") {
+		return <AuthScreen onSignedIn={resolveProfile} />;
+	}
+	if (phase === "needsProfile" || !profileId) {
+		return (
+			<ProfileSetup
+				onSaved={(p) => {
+					setProfileId(p.id);
+					setPhase("ready");
+				}}
+			/>
+		);
+	}
 	return (
-		<Root
-			profileId={profileId}
-			onProfileChange={async (id) => {
-				if (id) await AsyncStorage.setItem(PROFILE_KEY, id);
-				else await AsyncStorage.removeItem(PROFILE_KEY);
-				setProfileId(id);
+		<Feed
+			myProfileId={profileId}
+			onSignOut={async () => {
+				await signOut();
+				setProfileId(null);
+				setPhase("signedOut");
 			}}
 		/>
 	);
 }
 
-function Root({
-	profileId,
-	onProfileChange,
-}: {
-	profileId: string | null;
-	onProfileChange: (id: string | null) => void;
-}) {
-	const { data: profiles = [] } = db.useQuery<Profile>("Profile", {});
-	const me = useMemo(
-		() => (profileId ? (profiles.find((p) => p.id === profileId) ?? null) : null),
-		[profileId, profiles],
-	);
+function AuthScreen({ onSignedIn }: { onSignedIn: () => Promise<void> }) {
+	const [mode, setMode] = useState<"signIn" | "signUp">("signIn");
+	const [email, setEmail] = useState("");
+	const [password, setPassword] = useState("");
+	const [busy, setBusy] = useState(false);
+	const [error, setError] = useState<string | null>(null);
 
-	if (!me) {
-		return (
-			<ProfileSetup
-				existingHandles={profiles.map((p) => p.handle)}
-				onSaved={(p) => onProfileChange(p.id)}
-			/>
-		);
-	}
-	return <Feed me={me} profiles={profiles} />;
-}
+	const canSubmit = email.includes("@") && (mode === "signIn" ? password.length > 0 : password.length >= 8);
 
-function Feed({ me, profiles }: { me: Profile; profiles: Profile[] }) {
-	const { data: posts = [] } = db.useQuery<Post>("Post", {
-		orderBy: { createdAt: "desc" },
-		limit: 100,
-	});
-	const { data: likes = [] } = db.useQuery<Like>("Like", {});
-
-	const profilesById = useMemo(() => {
-		const map = new Map<string, Profile>();
-		for (const p of profiles) map.set(p.id, p);
-		return map;
-	}, [profiles]);
-
-	const items = useMemo(
-		() =>
-			posts.map((post) => {
-				const author = profilesById.get(post.authorId) ?? null;
-				const postLikes = likes.filter((l) => l.postId === post.id);
-				const likedByMe = postLikes.some((l) => l.profileId === me.id);
-				return { post, author, likeCount: postLikes.length, likedByMe };
-			}),
-		[posts, profilesById, likes, me.id],
-	);
-
-	const [draft, setDraft] = useState("");
-	const [posting, setPosting] = useState(false);
-
-	async function post() {
-		const body = draft.trim();
-		if (!body) return;
-		setDraft("");
-		setPosting(true);
+	async function submit() {
+		if (!canSubmit || busy) return;
+		setBusy(true);
+		setError(null);
 		try {
-			await callFn("createPost", { body });
+			const address = email.trim().toLowerCase();
+			if (mode === "signIn") await passwordLogin(address, password);
+			else await passwordRegister(address, password);
+			await onSignedIn();
 		} catch (e) {
-			Alert.alert("Post failed", String(e));
-			setDraft(body);
+			setError(errorText(e));
 		} finally {
-			setPosting(false);
+			setBusy(false);
 		}
 	}
 
 	return (
-		<SafeAreaView style={styles.screen}>
-			<StatusBar style="auto" />
-			<View style={styles.headerRow}>
-				<View>
-					<Text style={styles.title}>__APP_NAME__</Text>
-					<Text style={styles.handle}>@{me.handle}</Text>
-				</View>
-			</View>
-
-			<View style={styles.composerCard}>
-				<TextInput
-					style={styles.composerInput}
-					placeholder="What's on your mind?"
-					value={draft}
-					onChangeText={setDraft}
-					multiline
-					maxLength={1000}
-				/>
-				<View style={styles.composerFoot}>
-					<Text style={styles.counter}>{draft.length}/1000</Text>
-					<Pressable
-						onPress={post}
-						disabled={posting || !draft.trim()}
-						style={({ pressed }) => [
-							styles.buttonSmall,
-							(posting || !draft.trim()) && styles.buttonDisabled,
-							pressed && styles.buttonPressed,
-						]}
-					>
-						<Text style={styles.buttonLabel}>{posting ? "Posting…" : "Post"}</Text>
-					</Pressable>
-				</View>
-			</View>
-
-			{items.length === 0 ? (
-				<Text style={styles.empty}>No posts yet.</Text>
-			) : (
-				<FlatList
-					data={items}
-					keyExtractor={(it) => it.post.id}
-					contentContainerStyle={{ paddingTop: 8, paddingBottom: 32 }}
-					ItemSeparatorComponent={() => <View style={styles.separator} />}
-					renderItem={({ item }) => <Row item={item} myId={me.id} />}
-				/>
-			)}
+		<SafeAreaView style={[styles.fill, styles.authScreen]}>
+			<Text style={styles.wordmark}>__APP_NAME__</Text>
+			<Text style={styles.muted}>
+				{mode === "signIn" ? "Sign in to see photos from people you follow." : "Create an account to share your photos."}
+			</Text>
+			<TextInput
+				style={styles.field}
+				placeholder="Email"
+				autoCapitalize="none"
+				autoCorrect={false}
+				keyboardType="email-address"
+				textContentType="emailAddress"
+				value={email}
+				onChangeText={setEmail}
+			/>
+			<TextInput
+				style={styles.field}
+				placeholder="Password"
+				secureTextEntry
+				textContentType={mode === "signIn" ? "password" : "newPassword"}
+				value={password}
+				onChangeText={setPassword}
+				onSubmitEditing={submit}
+			/>
+			{error ? <Text style={styles.error}>{error}</Text> : null}
+			<Pressable
+				onPress={submit}
+				disabled={!canSubmit || busy}
+				style={({ pressed }) => [styles.primary, (!canSubmit || busy) && styles.dim, pressed && styles.pressed]}
+			>
+				{busy ? (
+					<ActivityIndicator color="#fff" />
+				) : (
+					<Text style={styles.primaryLabel}>{mode === "signIn" ? "Log in" : "Create account"}</Text>
+				)}
+			</Pressable>
+			<Pressable onPress={() => setMode(mode === "signIn" ? "signUp" : "signIn")}>
+				<Text style={styles.switchText}>
+					{mode === "signIn" ? "No account yet? " : "Already have an account? "}
+					<Text style={styles.link}>{mode === "signIn" ? "Sign up" : "Log in"}</Text>
+				</Text>
+			</Pressable>
 		</SafeAreaView>
 	);
 }
 
-function Row({
-	item,
-	myId,
-}: {
-	item: {
-		post: Post;
-		author: Profile | null;
-		likeCount: number;
-		likedByMe: boolean;
-	};
-	myId: string;
-}) {
-	async function toggleLike() {
-		try {
-			await callFn("toggleLike", { postId: item.post.id });
-		} catch (e) {
-			Alert.alert("Like failed", String(e));
-		}
-	}
-	async function remove() {
-		try {
-			await callFn("deletePost", { id: item.post.id });
-		} catch (e) {
-			Alert.alert("Delete failed", String(e));
-		}
-	}
-	return (
-		<View style={styles.post}>
-			<View style={styles.postHead}>
-				<Text style={styles.postName}>
-					{item.author?.displayName ?? "Unknown"}
-				</Text>
-				<Text style={styles.postHandle}>@{item.author?.handle ?? "?"}</Text>
-			</View>
-			<Text style={styles.postBody}>{item.post.body}</Text>
-			<View style={styles.postFoot}>
-				<Pressable onPress={toggleLike}>
-					<Text
-						style={[styles.likeBtn, item.likedByMe && styles.likeBtnActive]}
-					>
-						{item.likedByMe ? "♥" : "♡"} {item.likeCount}
-					</Text>
-				</Pressable>
-				{item.author?.id === myId && (
-					<Pressable onPress={remove}>
-						<Text style={styles.deleteBtn}>Delete</Text>
-					</Pressable>
-				)}
-			</View>
-		</View>
-	);
-}
-
-function ProfileSetup({
-	existingHandles,
-	onSaved,
-}: {
-	existingHandles: string[];
-	onSaved: (p: Profile) => void;
-}) {
-	const [handle, setHandle] = useState("");
+function ProfileSetup({ onSaved }: { onSaved: (p: Profile) => void }) {
 	const [displayName, setDisplayName] = useState("");
+	const [handle, setHandle] = useState("");
 	const [bio, setBio] = useState("");
 	const [saving, setSaving] = useState(false);
 
+	const canSave = displayName.trim().length > 0 && handle.length >= 2;
+
 	async function save() {
-		const lower = handle.trim().toLowerCase();
-		if (existingHandles.includes(lower)) {
-			Alert.alert("Handle taken", `@${lower} is already in use.`);
-			return;
-		}
+		if (!canSave || saving) return;
 		setSaving(true);
 		try {
 			const profile = (await callFn("upsertProfile", {
-				handle: lower,
+				handle,
 				displayName: displayName.trim(),
 				bio: bio.trim(),
 			})) as Profile;
 			onSaved(profile);
 		} catch (e) {
-			Alert.alert("Save failed", String(e));
+			Alert.alert("Could not save your profile", errorText(e));
 		} finally {
 			setSaving(false);
 		}
 	}
 
 	return (
-		<SafeAreaView style={styles.screen}>
-			<StatusBar style="auto" />
-			<View style={styles.content}>
-				<Text style={styles.title}>__APP_NAME__</Text>
-				<Text style={styles.subtitle}>Set up your profile</Text>
-				<TextInput
-					style={styles.input}
-					placeholder="handle (lowercase, 2–20)"
-					autoCapitalize="none"
-					autoCorrect={false}
-					value={handle}
-					onChangeText={setHandle}
-				/>
-				<TextInput
-					style={styles.input}
-					placeholder="Display name"
-					value={displayName}
-					onChangeText={setDisplayName}
-				/>
-				<TextInput
-					style={styles.input}
-					placeholder="Bio (optional)"
-					value={bio}
-					onChangeText={setBio}
-				/>
-				<Pressable
-					onPress={save}
-					disabled={saving || !handle.trim() || !displayName.trim()}
-					style={({ pressed }) => [
-						styles.button,
-						(saving || !handle.trim() || !displayName.trim()) && styles.buttonDisabled,
-						pressed && styles.buttonPressed,
-					]}
-				>
-					<Text style={styles.buttonLabel}>{saving ? "Saving…" : "Save"}</Text>
-				</Pressable>
-			</View>
+		<SafeAreaView style={[styles.fill, styles.authScreen]}>
+			<Text style={styles.screenTitle}>Create your profile</Text>
+			<TextInput style={styles.field} placeholder="Your name" value={displayName} onChangeText={setDisplayName} />
+			<TextInput
+				style={styles.field}
+				placeholder="username"
+				autoCapitalize="none"
+				autoCorrect={false}
+				value={handle}
+				onChangeText={(v) => setHandle(v.toLowerCase().replace(/[^a-z0-9._]/g, ""))}
+			/>
+			<TextInput style={styles.field} placeholder="A line about you" value={bio} onChangeText={setBio} maxLength={150} />
+			<Pressable
+				onPress={save}
+				disabled={!canSave || saving}
+				style={({ pressed }) => [styles.primary, (!canSave || saving) && styles.dim, pressed && styles.pressed]}
+			>
+				{saving ? <ActivityIndicator color="#fff" /> : <Text style={styles.primaryLabel}>Continue</Text>}
+			</Pressable>
 		</SafeAreaView>
 	);
 }
 
+function Feed({ myProfileId, onSignOut }: { myProfileId: string; onSignOut: () => void }) {
+	// Live queries: a post, like, or comment from any client re-renders this.
+	const { data: profiles = [] } = db.useQuery<Profile>("Profile", {});
+	const { data: posts = [] } = db.useQuery<Post>("Post", { orderBy: { createdAt: "desc" }, limit: 100 });
+	const { data: likes = [] } = db.useQuery<Like>("Like", {});
+	const { data: comments = [] } = db.useQuery<Comment>("Comment", {});
+	const [posting, setPosting] = useState(false);
+
+	const profilesById = useMemo(() => new Map(profiles.map((p) => [p.id, p])), [profiles]);
+	const likesByPost = useMemo(() => {
+		const map = new Map<string, Like[]>();
+		for (const like of likes) map.set(like.postId, [...(map.get(like.postId) ?? []), like]);
+		return map;
+	}, [likes]);
+	const commentCounts = useMemo(() => {
+		const map = new Map<string, number>();
+		for (const c of comments) map.set(c.postId, (map.get(c.postId) ?? 0) + 1);
+		return map;
+	}, [comments]);
+
+	async function newPost() {
+		const picked = await ImagePicker.launchImageLibraryAsync({
+			mediaTypes: ["images"],
+			quality: 0.8,
+			allowsEditing: true,
+			aspect: [4, 5],
+		});
+		if (picked.canceled || !picked.assets[0]) return;
+		setPosting(true);
+		try {
+			const blob = await (await fetch(picked.assets[0].uri)).blob();
+			const file = await uploadFile(blob, { filename: "photo.jpg", contentType: "image/jpeg", visibility: "public" });
+			// Store the server path. With S3 or Stack0 storage `file.url` is a CDN
+			// address; `/api/files/<id>` works for every backend.
+			await callFn("createPost", { imageUrl: `/api/files/${file.id}`, caption: "" });
+		} catch (e) {
+			Alert.alert("Could not share the photo", errorText(e));
+		} finally {
+			setPosting(false);
+		}
+	}
+
+	return (
+		<SafeAreaView style={styles.fill} edges={["top"]}>
+			<View style={styles.header}>
+				<Text style={styles.wordmarkSmall}>__APP_NAME__</Text>
+				<View style={styles.headerActions}>
+					<Pressable onPress={newPost} disabled={posting} hitSlop={8}>
+						{posting ? <ActivityIndicator /> : <Text style={styles.headerAction}>New post</Text>}
+					</Pressable>
+					<Pressable onPress={onSignOut} hitSlop={8}>
+						<Text style={styles.headerActionMuted}>Sign out</Text>
+					</Pressable>
+				</View>
+			</View>
+			<FlatList
+				data={posts}
+				keyExtractor={(p) => p.id}
+				ListEmptyComponent={<Text style={styles.empty}>No posts yet.</Text>}
+				renderItem={({ item }) => {
+					const postLikes = likesByPost.get(item.id) ?? [];
+					return (
+						<PostRow
+							post={item}
+							author={profilesById.get(item.authorId) ?? null}
+							likeCount={postLikes.length}
+							likedByMe={postLikes.some((l) => l.profileId === myProfileId)}
+							commentCount={commentCounts.get(item.id) ?? 0}
+						/>
+					);
+				}}
+			/>
+		</SafeAreaView>
+	);
+}
+
+function PostRow({
+	post,
+	author,
+	likeCount,
+	likedByMe,
+	commentCount,
+}: {
+	post: Post;
+	author: Profile | null;
+	likeCount: number;
+	likedByMe: boolean;
+	commentCount: number;
+}) {
+	const { width } = useWindowDimensions();
+	const [lastTap, setLastTap] = useState(0);
+
+	async function setLike(liked: boolean) {
+		try {
+			await callFn("setLike", { postId: post.id, liked });
+		} catch (e) {
+			Alert.alert("Could not update the like", errorText(e));
+		}
+	}
+
+	function onPhotoPress() {
+		const now = Date.now();
+		if (now - lastTap < 300 && !likedByMe) void setLike(true);
+		setLastTap(now);
+	}
+
+	return (
+		<View style={styles.post}>
+			<View style={styles.postHead}>
+				{author?.avatarUrl ? (
+					<Image source={{ uri: mediaUrl(author.avatarUrl) }} style={styles.avatar} />
+				) : (
+					<View style={[styles.avatar, styles.avatarFallback]}>
+						<Text style={styles.avatarLetter}>{(author?.displayName ?? "?").slice(0, 1).toUpperCase()}</Text>
+					</View>
+				)}
+				<Text style={styles.handle}>{author?.handle ?? ""}</Text>
+				<Text style={styles.muted}>{shortTime(post.createdAt)}</Text>
+			</View>
+			<Pressable onPress={onPhotoPress}>
+				<Image source={{ uri: mediaUrl(post.imageUrl) }} style={{ width, height: width * 1.25 }} resizeMode="cover" />
+			</Pressable>
+			<View style={styles.postBody}>
+				<Pressable onPress={() => setLike(!likedByMe)} hitSlop={8}>
+					<Text style={[styles.likeLabel, likedByMe && styles.liked]}>{likedByMe ? "Liked" : "Like"}</Text>
+				</Pressable>
+				{likeCount > 0 ? <Text style={styles.bold}>{likeCount === 1 ? "1 like" : `${likeCount} likes`}</Text> : null}
+				{post.caption ? (
+					<Text>
+						<Text style={styles.bold}>{author?.handle ?? ""} </Text>
+						{post.caption}
+					</Text>
+				) : null}
+				{commentCount > 0 ? (
+					<Text style={styles.muted}>{commentCount === 1 ? "1 comment" : `${commentCount} comments`}</Text>
+				) : null}
+			</View>
+		</View>
+	);
+}
+
 const styles = StyleSheet.create({
-	screen: { flex: 1, paddingTop: 64, paddingHorizontal: 20, backgroundColor: "#fff" },
+	fill: { flex: 1, backgroundColor: "#fff" },
 	center: { alignItems: "center", justifyContent: "center" },
-	content: { padding: 20, gap: 12 },
-	title: { fontSize: 28, fontWeight: "600" },
-	subtitle: { color: "#666", marginBottom: 12 },
-	handle: { fontFamily: "Menlo", fontSize: 12, color: "#999" },
-	headerRow: { flexDirection: "row", justifyContent: "space-between", marginBottom: 16 },
-	input: {
-		borderWidth: 1,
-		borderColor: "#d4d4d8",
-		borderRadius: 6,
-		paddingHorizontal: 12,
-		paddingVertical: 8,
-		fontSize: 14,
-		marginBottom: 8,
-	},
-	composerCard: {
-		borderWidth: 1,
-		borderColor: "#e5e5e5",
-		borderRadius: 8,
-		padding: 12,
-		marginBottom: 12,
-	},
-	composerInput: { minHeight: 70, fontSize: 14, textAlignVertical: "top" },
-	composerFoot: {
-		flexDirection: "row",
-		justifyContent: "space-between",
-		alignItems: "center",
-		marginTop: 6,
-	},
-	counter: { color: "#999", fontSize: 12 },
-	button: {
-		backgroundColor: "#171717",
-		borderRadius: 6,
+	authScreen: { paddingHorizontal: 24, justifyContent: "center", gap: 12 },
+	wordmark: { fontSize: 44, fontWeight: "600", fontStyle: "italic", textAlign: "center", fontFamily: Platform.OS === "ios" ? "Georgia" : "serif" },
+	wordmarkSmall: { fontSize: 26, fontWeight: "600", fontStyle: "italic", fontFamily: Platform.OS === "ios" ? "Georgia" : "serif" },
+	screenTitle: { fontSize: 22, fontWeight: "600", marginBottom: 8 },
+	muted: { color: "#8e8e93", textAlign: "left" },
+	field: { backgroundColor: "#f2f2f7", borderRadius: 12, paddingHorizontal: 14, height: 50, fontSize: 16 },
+	error: { color: "#ff3b30" },
+	primary: { backgroundColor: "#0a84ff", borderRadius: 12, height: 50, alignItems: "center", justifyContent: "center" },
+	primaryLabel: { color: "#fff", fontSize: 16, fontWeight: "600" },
+	dim: { opacity: 0.6 },
+	pressed: { opacity: 0.8 },
+	switchText: { textAlign: "center", color: "#8e8e93", marginTop: 6 },
+	link: { color: "#0a84ff", fontWeight: "600" },
+	header: {
+		height: 50,
 		paddingHorizontal: 16,
-		paddingVertical: 12,
-		justifyContent: "center",
+		flexDirection: "row",
 		alignItems: "center",
+		justifyContent: "space-between",
+		borderBottomWidth: StyleSheet.hairlineWidth,
+		borderBottomColor: "#d1d1d6",
 	},
-	buttonSmall: {
-		backgroundColor: "#171717",
-		borderRadius: 6,
-		paddingHorizontal: 12,
-		paddingVertical: 6,
-	},
-	buttonDisabled: { opacity: 0.5 },
-	buttonPressed: { opacity: 0.8 },
-	buttonLabel: { color: "#fff", fontWeight: "600", fontSize: 13 },
-	empty: { textAlign: "center", color: "#999", marginTop: 32 },
-	separator: { height: 1, backgroundColor: "#e5e5e5" },
-	post: { paddingVertical: 12 },
-	postHead: { flexDirection: "row", alignItems: "baseline", gap: 6 },
-	postName: { fontSize: 14, fontWeight: "500" },
-	postHandle: { fontFamily: "Menlo", fontSize: 12, color: "#999" },
-	postBody: { fontSize: 15, marginTop: 4, lineHeight: 20 },
-	postFoot: { flexDirection: "row", gap: 16, marginTop: 8 },
-	likeBtn: { fontSize: 13, color: "#666" },
-	likeBtnActive: { color: "#ec4899" },
-	deleteBtn: { fontSize: 13, color: "#ef4444" },
+	headerActions: { flexDirection: "row", gap: 18, alignItems: "center" },
+	headerAction: { fontWeight: "600", color: "#0a84ff" },
+	headerActionMuted: { color: "#8e8e93" },
+	empty: { textAlign: "center", color: "#8e8e93", marginTop: 48 },
+	post: { paddingBottom: 16 },
+	postHead: { flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 10 },
+	avatar: { width: 32, height: 32, borderRadius: 16 },
+	avatarFallback: { backgroundColor: "#5856d6", alignItems: "center", justifyContent: "center" },
+	avatarLetter: { color: "#fff", fontWeight: "600" },
+	handle: { fontWeight: "600" },
+	postBody: { paddingHorizontal: 14, paddingTop: 10, gap: 4 },
+	likeLabel: { fontWeight: "600", color: "#1c1c1e" },
+	liked: { color: "#ff3040" },
+	bold: { fontWeight: "600" },
 });

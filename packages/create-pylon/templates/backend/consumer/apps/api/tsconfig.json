@@ -7,7 +7,17 @@
     "skipLibCheck": true,
     "noEmit": true,
     "esModuleInterop": true,
-    "allowSyntheticDefaultImports": true
+    "allowSyntheticDefaultImports": true,
+    "jsx": "react",
+    "lib": [
+      "ES2022",
+      "DOM"
+    ]
   },
-  "include": ["schema.ts", "functions/**/*.ts"]
+  "include": [
+    "app.ts",
+    "app/**/*",
+    "functions/**/*",
+    "lib/**/*"
+  ]
 }

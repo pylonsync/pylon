@@ -1,8 +1,10 @@
-// Demo data for a new app: twelve people who post, follow each other, like,
-// and comment, so the first visit opens on a feed that looks lived in.
+// Demo data for a new app: eight people who post, follow each other, like,
+// and comment, so the first visit opens on a feed with content in it.
 //
-// Photos live in public/images (avatars/ and posts/). Demo user ids start
-// with "demo_" so they never collide with a real or guest account.
+// Post photos live in public/images/posts and the server serves them at
+// /images/posts/<key>.jpg. Demo people have no profile photo, so the app
+// draws their initial. Demo user ids start with "demo_" so they never
+// collide with a real or guest account.
 // Pure data + pure shaping; functions/seedFeed.ts is a thin wrapper.
 
 export interface SeedProfile {
@@ -12,6 +14,7 @@ export interface SeedProfile {
 }
 
 export interface SeedPost {
+  /** File name under public/images/posts, without `.jpg`. */
   key: string;
   author: string;
   caption: string;
@@ -29,99 +32,54 @@ export interface SeedComment {
 }
 
 export const SEED_PROFILES: SeedProfile[] = [
-  { username: "mara.bakes", displayName: "Mara Lindqvist", bio: "Sourdough, mostly. Stockholm." },
-  { username: "theo.climbs", displayName: "Theo Adeyemi", bio: "Bouldering most evenings. Route setter at Blocworks." },
-  { username: "ines.clay", displayName: "Inés Moreno", bio: "Wheel-thrown stoneware from a small studio in Valencia." },
-  { username: "kenji.rides", displayName: "Kenji Watanabe", bio: "Gravel on weekends, commuting on weekdays." },
-  { username: "lou.streets", displayName: "Louise Carter", bio: "35mm film, mostly Brooklyn." },
-  { username: "sam.grows", displayName: "Sam Okafor", bio: "Allotment 14B. Tomatoes, beans, too many courgettes." },
-  { username: "rosa.roasts", displayName: "Rosa Delgado", bio: "Head roaster at a small shop in Oakland." },
-  { username: "biscuit.corgi", displayName: "Biscuit", bio: "Corgi. Professional napper. Managed by @nora.h" },
-  { username: "nora.h", displayName: "Nora Hughes", bio: "Product designer. Biscuit's person." },
-  { username: "ari.wanders", displayName: "Ari Cohen", bio: "Trains over planes." },
-  { username: "dev.draws", displayName: "Dev Patel", bio: "Architect. A sketch every morning before work." },
-  { username: "june.surfs", displayName: "June Tanaka", bio: "Cold water surfer on the Oregon coast." },
+  { username: "maya.rivera", displayName: "Maya Rivera", bio: "Travel photographer. Currently in Lisbon." },
+  { username: "jordan.eats", displayName: "Jordan Brooks", bio: "Cooking at home, eating out, writing it all down." },
+  { username: "priya.home", displayName: "Priya Shah", bio: "Interior designer. Small rooms, good light." },
+  { username: "kenji.mori", displayName: "Kenji Mori", bio: "Architecture and night walks. Tokyo." },
+  { username: "elena.runs", displayName: "Elena Berg", bio: "Trail runner. Mountains most weekends." },
+  { username: "sam.and.juno", displayName: "Sam Whitaker", bio: "Juno is the golden one." },
+  { username: "amara.o", displayName: "Amara Okafor", bio: "Coffee, markets, and early mornings." },
+  { username: "leo.haddad", displayName: "Leo Haddad", bio: "Road trips and sunsets. Film when I can." },
 ];
 
 export const SEED_POSTS: SeedPost[] = [
-  { key: "mara-loaf", author: "mara.bakes", caption: "Sunday loaf. 78% hydration and finally an ear I am happy with.", shape: "portrait", age: 3 },
-  { key: "june-dawn", author: "june.surfs", caption: "Glassy at 6am and nobody else out. Worth the cold hands.", shape: "portrait", age: 5 },
-  { key: "biscuit-couch", author: "biscuit.corgi", caption: "Guarding the couch from nothing in particular.", shape: "square", age: 8 },
-  { key: "rosa-roaster", author: "rosa.roasts", caption: "New Ethiopia lot on the roaster today. Blueberry and jasmine in the cup.", shape: "square", age: 11 },
-  { key: "ines-glaze", author: "ines.clay", caption: "Out of the kiln: the speckled oat glaze on a batch of mugs. Shop update Friday.", shape: "portrait", age: 14 },
-  { key: "lou-crosswalk", author: "lou.streets", caption: "Bedford Ave, late afternoon. Portra 400.", shape: "portrait", age: 20 },
-  { key: "dev-sketch", author: "dev.draws", caption: "Morning sketch of the old library stairs. Twenty minutes, one pen.", shape: "square", age: 26 },
-  { key: "kenji-gravel", author: "kenji.rides", caption: "82 km, 1,400 m of climbing, one flat. Good day.", shape: "portrait", age: 30 },
-  { key: "sam-tomatoes", author: "sam.grows", caption: "First proper harvest of the year. The yellow ones are Sungold.", shape: "square", age: 34 },
-  { key: "theo-boulder", author: "theo.climbs", caption: "Set a new blue circuit this week. This one is the crux of number 6.", shape: "portrait", age: 40 },
-  { key: "ari-train", author: "ari.wanders", caption: "Night train from Vienna to Venice. Woke up to this.", shape: "portrait", age: 46 },
-  { key: "nora-desk", author: "nora.h", caption: "New desk setup. @biscuit.corgi approved the rug.", shape: "square", age: 52 },
-  { key: "mara-buns", author: "mara.bakes", caption: "Cardamom buns for the neighbours. Kept two.", shape: "square", age: 60 },
-  { key: "june-board", author: "june.surfs", caption: "Waxed and ready for tomorrow.", shape: "square", age: 70 },
-  { key: "rosa-latte", author: "rosa.roasts", caption: "Tuesday latte art practice. Getting there.", shape: "square", age: 78 },
-  { key: "ines-wheel", author: "ines.clay", caption: "Trimming feet on a batch of bowls. The quiet part of the week.", shape: "portrait", age: 90 },
-  { key: "lou-diner", author: "lou.streets", caption: "Counter seats at the diner on Graham. Coffee refills forever.", shape: "square", age: 100 },
-  { key: "biscuit-beach", author: "biscuit.corgi", caption: "First time at the beach. Sand everywhere. No regrets.", shape: "portrait", age: 110 },
-  { key: "dev-model", author: "dev.draws", caption: "Card model for the community centre competition entry.", shape: "square", age: 124 },
-  { key: "kenji-coffee", author: "kenji.rides", caption: "Mid-ride coffee stop. The bike rests too.", shape: "square", age: 140 },
-  { key: "sam-shed", author: "sam.grows", caption: "Seed trays in the shed. Kale, chard, and far too much basil.", shape: "portrait", age: 155 },
-  { key: "theo-chalk", author: "theo.climbs", caption: "Chalk bag, tape, and a very tired pair of shoes.", shape: "square", age: 170 },
-  { key: "ari-market", author: "ari.wanders", caption: "Morning market in Palermo. I bought too many lemons.", shape: "square", age: 190 },
-  { key: "nora-sketches", author: "nora.h", caption: "Paper first, screens later. Wireframes for the booking flow.", shape: "square", age: 210 },
-  { key: "mara-starter", author: "mara.bakes", caption: "Meet Olof, the starter. Eleven years old this month.", shape: "portrait", age: 240 },
-  { key: "june-van", author: "june.surfs", caption: "Home for the weekend.", shape: "square", age: 280 },
-  { key: "ines-studio", author: "ines.clay", caption: "The studio shelves on a good week.", shape: "portrait", age: 320 },
-  { key: "lou-rain", author: "lou.streets", caption: "Rain on the J train platform.", shape: "portrait", age: 360 },
+  { key: "lisbon", author: "maya.rivera", caption: "Tram 28 at golden hour. Waited twenty minutes for this one and it was worth it.", shape: "square", age: 1.5 },
+  { key: "coffee", author: "amara.o", caption: "Flat white and a croissant before the market opens.", shape: "square", age: 3 },
+  { key: "dog", author: "sam.and.juno", caption: "Juno found the tall grass again.", shape: "square", age: 5 },
+  { key: "run", author: "elena.runs", caption: "Sunrise on the ridge. 18 km, 900 m up, legs gone.", shape: "square", age: 8 },
+  { key: "ramen", author: "jordan.eats", caption: "Tonkotsu from the new place on 5th. Broth cooked for 14 hours and you can tell.", shape: "square", age: 11 },
+  { key: "arch", author: "kenji.mori", caption: "Curves and shadows. The museum extension at noon.", shape: "square", age: 14 },
+  { key: "sunset", author: "leo.haddad", caption: "Big Sur, last light. 30 second exposure.", shape: "square", age: 20 },
 ];
 
 export const SEED_COMMENTS: SeedComment[] = [
-  { post: "mara-loaf", author: "rosa.roasts", text: "That crumb. Trading you a bag of the new Ethiopia for one.", after: 0.5 },
-  { post: "mara-loaf", author: "sam.grows", text: "What flour are you using?", after: 1 },
-  { post: "mara-loaf", author: "mara.bakes", text: "@sam.grows 80% bread flour, 20% whole wheat from the mill down the road.", after: 1.5 },
-  { post: "june-dawn", author: "kenji.rides", text: "Unreal colours.", after: 1 },
-  { post: "june-dawn", author: "ari.wanders", text: "Which beach is this?", after: 2 },
-  { post: "biscuit-couch", author: "nora.h", text: "He has not moved in three hours.", after: 0.2 },
-  { post: "biscuit-couch", author: "lou.streets", text: "A very serious job.", after: 2 },
-  { post: "biscuit-couch", author: "theo.climbs", text: "Those ears.", after: 3 },
-  { post: "rosa-roaster", author: "mara.bakes", text: "Saving me a bag?", after: 1 },
-  { post: "rosa-roaster", author: "rosa.roasts", text: "@mara.bakes already set aside.", after: 1.2 },
-  { post: "ines-glaze", author: "dev.draws", text: "The speckle on that glaze is lovely.", after: 2 },
-  { post: "ines-glaze", author: "nora.h", text: "Setting an alarm for Friday.", after: 3 },
-  { post: "lou-crosswalk", author: "ari.wanders", text: "The light in this one.", after: 4 },
-  { post: "dev-sketch", author: "ines.clay", text: "Twenty minutes? Show-off.", after: 1 },
-  { post: "kenji-gravel", author: "june.surfs", text: "Where was the flat?", after: 2 },
-  { post: "kenji-gravel", author: "kenji.rides", text: "@june.surfs about 5 km from the end, of course.", after: 3 },
-  { post: "sam-tomatoes", author: "mara.bakes", text: "Tomato and bread season.", after: 1 },
-  { post: "theo-boulder", author: "kenji.rides", text: "Looks sandbagged.", after: 2 },
-  { post: "theo-boulder", author: "theo.climbs", text: "@kenji.rides it is a fair blue. Mostly.", after: 2.5 },
-  { post: "ari-train", author: "lou.streets", text: "Adding this to the list.", after: 5 },
-  { post: "nora-desk", author: "dev.draws", text: "Where is the lamp from?", after: 1 },
-  { post: "mara-buns", author: "rosa.roasts", text: "Recipe please.", after: 2 },
-  { post: "biscuit-beach", author: "june.surfs", text: "Surf lessons next.", after: 1 },
-  { post: "dev-model", author: "ines.clay", text: "Good luck with the entry.", after: 3 },
-  { post: "sam-shed", author: "mara.bakes", text: "Pesto for the whole street then.", after: 4 },
-  { post: "mara-starter", author: "biscuit.corgi", text: "Can I eat Olof.", after: 2 },
-  { post: "mara-starter", author: "mara.bakes", text: "@biscuit.corgi no.", after: 2.2 },
+  { post: "lisbon", author: "leo.haddad", text: "The light on those tiles. Which street is this?", after: 0.3 },
+  { post: "lisbon", author: "maya.rivera", text: "@leo.haddad Rua da Conceição, just before it turns up to the cathedral.", after: 0.6 },
+  { post: "lisbon", author: "amara.o", text: "Adding this to the list for May.", after: 0.9 },
+  { post: "coffee", author: "jordan.eats", text: "That rosetta is perfect.", after: 0.5 },
+  { post: "coffee", author: "priya.home", text: "Where is this? I need that table.", after: 1 },
+  { post: "dog", author: "elena.runs", text: "Juno looks so happy.", after: 0.4 },
+  { post: "dog", author: "amara.o", text: "Best dog on this app.", after: 1.2 },
+  { post: "run", author: "kenji.mori", text: "Incredible view. How early did you start?", after: 1 },
+  { post: "run", author: "elena.runs", text: "@kenji.mori headlamps on at 4:30.", after: 1.5 },
+  { post: "ramen", author: "maya.rivera", text: "Going this week.", after: 2 },
+  { post: "arch", author: "priya.home", text: "Those shadows are unreal.", after: 1 },
+  { post: "sunset", author: "sam.and.juno", text: "Colors like this make me want to drive up the coast tonight.", after: 2 },
 ];
 
 /** Who each demo user follows, as username → usernames. */
 export const SEED_FOLLOWS: Record<string, string[]> = {
-  "mara.bakes": ["rosa.roasts", "sam.grows", "ines.clay", "biscuit.corgi", "lou.streets"],
-  "theo.climbs": ["kenji.rides", "june.surfs", "ari.wanders", "biscuit.corgi"],
-  "ines.clay": ["dev.draws", "mara.bakes", "nora.h", "lou.streets"],
-  "kenji.rides": ["theo.climbs", "june.surfs", "rosa.roasts", "ari.wanders"],
-  "lou.streets": ["ari.wanders", "dev.draws", "biscuit.corgi", "ines.clay"],
-  "sam.grows": ["mara.bakes", "rosa.roasts", "biscuit.corgi"],
-  "rosa.roasts": ["mara.bakes", "kenji.rides", "ines.clay", "sam.grows"],
-  "biscuit.corgi": ["nora.h", "june.surfs"],
-  "nora.h": ["biscuit.corgi", "dev.draws", "ines.clay", "lou.streets", "mara.bakes"],
-  "ari.wanders": ["lou.streets", "june.surfs", "kenji.rides", "theo.climbs"],
-  "dev.draws": ["ines.clay", "nora.h", "lou.streets"],
-  "june.surfs": ["kenji.rides", "biscuit.corgi", "ari.wanders", "theo.climbs"],
+  "maya.rivera": ["leo.haddad", "amara.o", "priya.home", "kenji.mori"],
+  "jordan.eats": ["amara.o", "maya.rivera", "sam.and.juno"],
+  "priya.home": ["kenji.mori", "maya.rivera", "amara.o", "elena.runs"],
+  "kenji.mori": ["priya.home", "leo.haddad", "elena.runs"],
+  "elena.runs": ["sam.and.juno", "leo.haddad", "maya.rivera", "kenji.mori"],
+  "sam.and.juno": ["elena.runs", "jordan.eats", "amara.o"],
+  "amara.o": ["jordan.eats", "maya.rivera", "priya.home", "sam.and.juno", "elena.runs"],
+  "leo.haddad": ["maya.rivera", "elena.runs", "kenji.mori"],
 };
 
 export const demoUserId = (username: string) => `demo_${username.replace(/\./g, "_")}`;
-export const avatarPath = (username: string) => `/images/avatars/${username}.jpg`;
 export const postImagePath = (key: string) => `/images/posts/${key}.jpg`;
 
 /**
@@ -158,7 +116,7 @@ export function shapeSeed(now: number = Date.now()): ShapedSeed {
       username: p.username,
       displayName: p.displayName,
       bio: p.bio,
-      avatarUrl: avatarPath(p.username),
+      avatarUrl: null,
       createdAt: hoursAgo(2000 - i * 40),
     })),
     posts: SEED_POSTS.map((p) => ({

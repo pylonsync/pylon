@@ -1,5 +1,5 @@
 import { mutation } from "@pylonsync/functions";
-import { shapeSeed } from "../lib/seed";
+import { SEED_PROFILES, demoUserId, shapeSeed } from "../lib/seed";
 
 /**
  * Load the demo people, posts, likes, comments, and follows once. The feed
@@ -8,7 +8,7 @@ import { shapeSeed } from "../lib/seed";
  *
  * Public so an anonymous first visitor seeds it. `unsafe.insert` writes past
  * the policies, which only accept the caller's own id, so the posts read as
- * twelve different people. It only writes lib/seed.ts. Delete this function
+ * eight different people. It only writes lib/seed.ts. Delete this function
  * and lib/seed.ts when you launch.
  */
 export default mutation<Record<string, never>, { seeded: boolean }>({
@@ -16,7 +16,7 @@ export default mutation<Record<string, never>, { seeded: boolean }>({
   args: {},
   async handler(ctx) {
     await ctx.db.advisoryLock("consumer_seed_feed");
-    const existing = await ctx.db.unsafe.query("Profile", { userId: "demo_mara_bakes", $limit: 1 });
+    const existing = await ctx.db.unsafe.query("Profile", { userId: demoUserId(SEED_PROFILES[0].username), $limit: 1 });
     if (existing.length > 0) return { seeded: false };
 
     const seed = shapeSeed();

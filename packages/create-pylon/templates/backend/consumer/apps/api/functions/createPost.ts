@@ -1,48 +1,31 @@
 import { mutation, v } from "@pylonsync/functions";
+import { CAPTION_MAX, isImageUrl, requireProfile } from "../lib/social";
 
 /**
- * Post something. Resolves the caller's Profile, then writes a Post
- * with `authorId = profile.id`. Returns the inserted row + author
- * card so the client can render it without a follow-up read.
+ * Publish a photo. The client uploads the file first (`/api/files/init`
+ * with visibility "public", so every viewer can load it) and sends the
+ * file URL here with the caption.
  */
 export default mutation({
-	args: { body: v.string() },
-	async handler(ctx, args: { body: string }) {
-		if (!ctx.auth.userId) {
-			throw ctx.error("UNAUTHENTICATED", "log in first");
+	args: { imageUrl: v.string(), caption: v.optional(v.string()) },
+	async handler(ctx, args: { imageUrl: string; caption?: string }) {
+		const profile = await requireProfile(ctx, ctx.auth.userId);
+		const imageUrl = args.imageUrl.trim();
+		if (!isImageUrl(imageUrl)) {
+			throw ctx.error("INVALID_IMAGE", "Upload the photo again.");
 		}
-		const body = args.body.trim();
-		if (!body) throw ctx.error("EMPTY_BODY", "post body cannot be empty");
-		if (body.length > 1000) {
-			throw ctx.error("TOO_LONG", "post body capped at 1000 chars");
+		const caption = (args.caption ?? "").trim();
+		if (caption.length > CAPTION_MAX) {
+			throw ctx.error("CAPTION_TOO_LONG", `Use at most ${CAPTION_MAX} characters.`);
 		}
-		const profiles = (await ctx.db.query("Profile", {
-			userId: ctx.auth.userId,
-		})) as any[];
-		if (profiles.length === 0) {
-			throw ctx.error(
-				"NO_PROFILE",
-				"create a profile first via upsertProfile",
-			);
-		}
-		const profile = profiles[0];
-		const id = await ctx.db.insert("Post", {
+		// The Post policy refuses client writes. This function is the checked
+		// write path, so it writes past the policy.
+		const id = await ctx.db.unsafe.insert("Post", {
 			authorId: profile.id,
-			body,
+			imageUrl,
+			caption: caption || null,
 			createdAt: new Date().toISOString(),
 		});
-		const post = (await ctx.db.get("Post", id)) as any;
-		return {
-			id: post.id,
-			body: post.body,
-			createdAt: post.createdAt,
-			author: {
-				id: profile.id,
-				handle: profile.handle,
-				displayName: profile.displayName,
-			},
-			likeCount: 0,
-			likedByMe: false,
-		};
+		return { id };
 	},
 });

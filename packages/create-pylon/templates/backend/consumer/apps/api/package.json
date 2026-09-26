@@ -6,15 +6,21 @@
   "scripts": {
     "dev": "pylon dev",
     "build": "pylon build",
+    "check": "tsc --noEmit",
     "schema:push": "pylon schema push --sqlite .pylon/dev.db",
     "schema:inspect": "pylon schema inspect --sqlite .pylon/dev.db"
   },
   "dependencies": {
     "@pylonsync/sdk": "^__PYLON_VERSION__",
-    "@pylonsync/functions": "^__PYLON_VERSION__"
+    "@pylonsync/functions": "^__PYLON_VERSION__",
+    "@pylonsync/react": "^__PYLON_VERSION__",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
     "@pylonsync/cli": "^__PYLON_VERSION__",
-    "typescript": "^5.5.0"
+    "typescript": "^5.5.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
   }
 }

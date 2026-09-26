@@ -20,6 +20,14 @@
     },
     "web": {
       "bundler": "metro"
-    }
+    },
+    "plugins": [
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose photos from your library to share."
+        }
+      ]
+    ]
   }
 }
