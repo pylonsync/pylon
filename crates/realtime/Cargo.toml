@@ -18,8 +18,8 @@ msgpack = ["dep:rmp-serde", "dep:rmp"]
 bincode = ["dep:bincode"]
 
 [dependencies]
-pylon-kernel = { path = "../core", version = "0.17.1" }  # x-release-please-version
-pylon-replication = { path = "../replication", version = "0.17.1" }  # x-release-please-version
+pylon-kernel = { path = "../core", version = "0.18.0" }  # x-release-please-version
+pylon-replication = { path = "../replication", version = "0.18.0" }  # x-release-please-version
 serde = { workspace = true }
 # raw_value: RawInput cuts the `input` out of a JSON envelope undecoded.
 serde_json = { workspace = true, features = ["raw_value"] }
