@@ -61,6 +61,18 @@ const manifest = buildManifest({
       // The lobby stays up with nobody in it.
       idleShutdownSecs: 0,
     }),
+    // A large zone with interest management and entity replication: each
+    // player gets only the players within its view radius, as deltas within
+    // a byte budget. For `pylon bench shard --join joinFrontier`.
+    shard({
+      name: "frontier",
+      wasm: "shards/frontier.wasm",
+      crate: "shards/frontier",
+      tickRate: 20,
+      maxInstances: 4,
+      maxSubscribers: 1000,
+      idleShutdownSecs: 0,
+    }),
     // Zones that players move between with their state (functions/moveZone.ts).
     shard({
       name: "zone",

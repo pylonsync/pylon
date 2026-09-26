@@ -1,3 +1,5 @@
 shards/arena/target/
 shards/arena/Cargo.lock
 .pylon/
+shards/frontier/target/
+shards/frontier/Cargo.lock

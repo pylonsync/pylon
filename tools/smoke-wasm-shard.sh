@@ -91,9 +91,11 @@ cp "$APP/shards/arena.wasm" "$TMP/arena.wasm.committed"
 
 echo "→ pylon start app.ts"
 serve "$APP" app.ts source
-grep -q "compiled 2 kind(s)" "$TMP/source.log" || {
+# Every kind the app declares compiles.
+KINDS="$(jq '.shards | length' "$APP/pylon.manifest.json")"
+grep -q "compiled $KINDS kind(s)" "$TMP/source.log" || {
 	cat "$TMP/source.log" >&2
-	echo "::error::the server did not compile the shard modules" >&2
+	echo "::error::the server did not compile the app's $KINDS shard kinds" >&2
 	exit 1
 }
 e2e
