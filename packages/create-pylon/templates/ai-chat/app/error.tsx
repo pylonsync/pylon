@@ -1,26 +1,23 @@
 import React from "react";
 import { type ErrorBoundaryProps } from "@pylonsync/react";
 
-// `app/error.tsx` → the GLOBAL error boundary. Sitting at the app root
-// (outside the `(chat)` group), it catches a throw from any section — the chat
-// or /login — and renders at HTTP 500 in the bare root shell. Hydrated +
-// interactive: `reset()` re-attempts the route. The thrown error reaches the
-// client as `{ message, digest }` only — the stack stays in the dev overlay /
-// server logs.
+// The global error boundary. Renders at HTTP 500 for a throw anywhere in the
+// app. The client receives `{ message, digest }` only; the stack stays in the
+// server log.
 export default function Error({ error, reset }: ErrorBoundaryProps) {
   return (
-    <div className="mx-auto flex min-h-[60vh] max-w-3xl flex-col items-center justify-center px-6 text-center">
-      <h1 className="text-2xl font-semibold tracking-tight">Something went wrong</h1>
-      <p className="mt-2 text-zinc-500">{error.message}</p>
+    <div className="flex min-h-[100dvh] flex-col items-center justify-center bg-bg px-6 text-center">
+      <h1 className="font-serif text-[30px] tracking-[-0.02em] text-ink">Something went wrong</h1>
+      <p className="mt-2 max-w-md text-[15px] text-ink-2">{error.message}</p>
       {error.digest ? (
-        <p className="mt-1 text-xs text-zinc-400">
-          Reference: <code>{error.digest}</code>
+        <p className="mt-1 text-[12.5px] text-ink-3">
+          Reference: <code className="inline-code">{error.digest}</code>
         </p>
       ) : null}
       <button
         type="button"
         onClick={reset}
-        className="mt-6 inline-flex h-10 items-center rounded-full bg-zinc-900 px-5 text-sm font-medium text-white transition-colors hover:bg-zinc-700"
+        className="press mt-7 inline-flex h-10 items-center rounded-full bg-ink px-5 text-[14px] font-medium text-bg transition-opacity hover:opacity-90"
       >
         Try again
       </button>

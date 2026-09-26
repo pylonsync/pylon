@@ -1,38 +1,30 @@
 import React from "react";
 import { siteConfig } from "@/lib/site.config";
 
-// The root layout is only the document shell: <html>, <head>, <body>, and the
-// theme variables. The app shell (top bar) lives in the `(chat)` route-group
-// layout, so /login — outside the group — renders bare with its own chrome.
-interface LayoutProps {
-  children: React.ReactNode;
-}
-
-export default function RootLayout({ children }: LayoutProps) {
+// The document shell: <html>, <head>, <body>, and the brand colors from
+// lib/site.config.ts as CSS variables. The paper and soft-brand colors apply
+// to the light theme; globals.css sets their dark values. Fonts are declared in app.ts and
+// injected into <head> by the runtime.
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   const { colors } = siteConfig;
-
   return (
     <html
       lang="en"
       style={
         {
           "--brand": colors.brand,
-          "--brand-soft": colors.brandSoft,
-          "--paper": colors.paper,
+          "--brand-soft-light": colors.brandSoft,
+          "--paper-light": colors.paper,
         } as React.CSSProperties
       }
     >
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        {/* Inter is declared in app.ts (fonts: [...]) and self-hosted by the
-            build — the runtime injects @font-face + <link rel=preload> + a
-            size-adjusted fallback here automatically. No third-party request,
-            no layout shift; change the family in app.ts. */}
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        <meta name="theme-color" content="#fbfaf7" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#161513" media="(prefers-color-scheme: dark)" />
       </head>
-      <body className="bg-background text-foreground antialiased">
-        {children}
-      </body>
+      <body className="bg-bg text-ink antialiased">{children}</body>
     </html>
   );
 }

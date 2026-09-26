@@ -1,11 +1,9 @@
 # __APP_NAME__
 
-A streaming AI chat app built with [Pylon](https://pylonsync.com). One server
-handles token streaming, conversation history, and cross-tab sync.
-
-Tokens stream from the built-in `POST /api/ai/stream` endpoint, so your provider
-API key never reaches the browser. Conversations are sync-backed and
-owner-scoped; a chat sent in one tab appears in the other.
+Lumen, a streaming AI assistant built with [Pylon](https://pylonsync.com).
+Visitors chat right away in a guest session. Signing in moves their chats to
+the account. Conversations sync live across tabs and devices, and the provider
+key stays on the server.
 
 ## Develop
 
@@ -13,80 +11,75 @@ owner-scoped; a chat sent in one tab appears in the other.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. You can create chats immediately. Configure an LLM
-provider to receive replies, then open a second tab to see conversations and
-messages sync.
+Open http://localhost:4321. With no provider key, the app shows the setup
+steps, seeds three example conversations (labeled as examples and read-only),
+and still stores the messages you send.
 
-## Configure the model
-
-The assistant replies after you configure a provider. Without one, the app
-still boots and displays a configuration notice:
+## Add a model provider
 
 ```bash
 # .env
-PYLON_AI_PROVIDER=anthropic        # or "openai" / "custom"
-PYLON_AI_API_KEY=sk-ant-...
-PYLON_AI_MODEL=claude-sonnet-4-6   # default when none is picked
+PYLON_LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
 ```
 
-`/api/ai/stream` is auth-gated (it uses your signed-in session) and rate-limited
-per user, so a drive-by caller can't burn your budget.
+Restart `pylon dev`. For OpenAI, set `PYLON_LLM_PROVIDER=openai` and
+`OPENAI_API_KEY`, then replace the ids in `chat.models` in
+`lib/site.config.ts`. For an OpenAI-compatible gateway such as OpenRouter,
+also set `PYLON_LLM_BASE_URL` (for example `https://openrouter.ai/api`) and use
+the gateway's model ids.
 
-### Switching models / providers
-
-The composer has a **model picker** — its options live in `lib/site.config.ts`
-(`chat.models`, each with a provider label), and the chosen id is sent per
-request. Client-chosen models must be allow-listed server-side:
-
-```bash
-PYLON_AI_MODELS_ALLOWED=claude-sonnet-4-6,claude-opus-4-8,gpt-4o
-```
-
-`/api/ai/stream` talks to **one** provider. To offer models from **multiple
-providers** in one picker, route through an OpenAI-compatible gateway like
-[OpenRouter](https://openrouter.ai):
-
-```bash
-PYLON_AI_PROVIDER=custom
-PYLON_AI_BASE_URL=https://openrouter.ai/api/v1
-PYLON_AI_API_KEY=<openrouter key>
-```
-
-then set `chat.models` + `PYLON_AI_MODELS_ALLOWED` to the gateway's slugs
-(`anthropic/claude-sonnet-4`, `openai/gpt-4o`, `google/gemini-2.5-pro`, …).
+The model list in `lib/site.config.ts` is the allowlist. `app.ts` passes it to
+`llm({ allowedModels })`, and `respond` refuses any other id.
 
 ## How it works
 
-- **Streaming.** `app/chat-client.tsx` POSTs the conversation to
-  `/api/ai/stream` and reads the SSE response (`data: {choices:[{delta:…}]}` …
-  `data: [DONE]`), appending tokens to the live assistant bubble.
-- **Realtime history.** `Conversation` + `Message` are owner-scoped entities
-  read with `db.useQuery` — private to each user and synced across their tabs.
-  Messages are written with optimistic `db.insert` (userId is stamped from the
-  session via `field.owner()`), so no custom write functions are needed.
-- **Sign-in required.** Chats are tied to your account, so the home page
-  redirects unauthenticated visitors to `/login`. Once signed in, your history
-  follows you across tabs and devices.
+- **Replies.** `functions/respond.ts` is a streaming action. It calls
+  `ctx.llm.stream` and writes each token to `ctx.stream`. The client reads it
+  with `streamFn("respond", …)`.
+- **Other tabs.** `_beginTurn` stores the call's resumable stream id on the
+  assistant message. Another tab (or this one after a reload) attaches with
+  `resumeStream(streamId)` and shows the same tokens. The final text is written
+  to the message row, which syncs everywhere.
+- **Stop and regenerate.** Stop stores the text shown so far with status
+  `stopped`. Regenerate removes the last reply and writes a new one.
+- **Guests.** `<EnsureGuest>` creates a guest session on first visit. Every
+  function the chat calls accepts guests (`auth: "guest"`).
+- **Sign-in keeps history.** Before signing in, the guest gets a one-time code
+  from `prepareGuestClaim`. After sign-in, `claimGuestHistory` uses it to move
+  the guest's conversations to the account.
+- **Limits.** `repliesPerHour` in `lib/site.config.ts` caps replies per rolling
+  hour, lower for guests than for accounts.
 
 ## Privacy
 
-`Conversation` and `Message` policies are owner-scoped (`auth.userId ==
-data.userId`) — you can only ever read or write your own. `User.passwordHash` is
-`serverOnly`. The provider key lives only on the server.
+`Conversation` and `Message` rows are readable only by their owner. Clients can
+rename their own conversations; every other write goes through a server
+function that checks ownership. `GuestClaim` is never readable by clients, and
+only a hash of each claim code is stored. `User.passwordHash` is `serverOnly`.
 
 ## Rebrand it
 
-The name, colors, system prompt, empty-state copy, and starter prompts live in
-**`lib/site.config.ts`**.
+The name, colors, system prompt, suggestions, models, and limits live in
+`lib/site.config.ts`. Replace or delete the examples in `lib/examples.ts`.
 
 ## Layout
 
 ```
-app.ts                 Conversation + Message (owner-scoped) + User
-lib/site.config.ts     brand + system prompt + suggestions (edit this)
-app/page.tsx           renders the chat island
-app/chat-client.tsx    sidebar + thread + streaming via /api/ai/stream
-app/login/             optional sign-in (carries history across devices)
+app.ts                     entities, policies, llm() allowlist, fonts
+lib/site.config.ts         brand, prompt, suggestions, models, limits
+lib/chat.ts                history, titles, day groups, error copy (tested)
+lib/markdown.ts            Markdown parser for replies (tested)
+functions/respond.ts       streams a reply with ctx.llm.stream
+app/(chat)/chat-client.tsx the only file that talks to Pylon on the client
+components/chat/           sidebar, thread, composer, setup card
+app/login/                 optional sign-in
+```
+
+## Test
+
+```bash
+pylon test
 ```
 
 ## Deploy

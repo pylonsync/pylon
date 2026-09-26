@@ -1,31 +1,26 @@
 import { mutation, v } from "@pylonsync/functions";
 
-// deleteConversation — remove a conversation AND all its messages in one
-// transaction. The client could delete the Conversation row itself (it's
-// owner-scoped), but that would orphan the messages; this cascades. Gated to the
-// owner: it verifies the conversation belongs to the caller before deleting.
-export default mutation<{ conversationId: string }, { ok: boolean; deleted: number }>({
-  auth: "user",
-  args: { conversationId: v.id("Conversation") },
+// Delete a conversation and its messages in one transaction. Only the owner
+// can delete; a missing or foreign id returns `deleted: 0` without saying
+// which.
+export default mutation({
+  auth: "guest",
+  args: { conversationId: v.string() },
   async handler(ctx, args) {
-    const convo = (await ctx.db.get("Conversation", args.conversationId)) as
+    const convo = (await ctx.db.unsafe.get("Conversation", args.conversationId)) as
       | { userId: string }
       | null;
-    if (!convo) return { ok: true, deleted: 0 };
-    if (convo.userId !== ctx.auth.userId) {
-      throw ctx.error("POLICY_DENIED", "You can only delete your own conversations.");
-    }
+    if (!convo || convo.userId !== ctx.auth.userId) return { ok: true, deleted: 0 };
 
-    const messages = (await ctx.db.unsafe.list("Message")) as unknown as {
-      id: string;
-      conversationId: string;
-    }[];
+    // Reads by conversation id, then checks each row's owner as well.
+    const messages = (await ctx.db.unsafe.query("Message", {
+      conversationId: args.conversationId,
+    })) as { id: string; userId: string }[];
     let deleted = 0;
     for (const m of messages) {
-      if (m.conversationId === args.conversationId) {
-        await ctx.db.unsafe.delete("Message", m.id);
-        deleted++;
-      }
+      if (m.userId !== ctx.auth.userId) continue;
+      await ctx.db.unsafe.delete("Message", m.id);
+      deleted++;
     }
     await ctx.db.unsafe.delete("Conversation", args.conversationId);
     return { ok: true, deleted };

@@ -1,8 +1,8 @@
-// Brand-specific copy and settings live here. The layout, chat UI,
-// create-pylon scaffolder, and Mast all read this file.
+// Brand-specific copy and settings. The layout, the chat UI, the server
+// functions (system prompt, model allowlist, limits), and the scaffolder read
+// this file. Replace the values and keep the shape.
 //
-// Colors live here (applied as CSS variables on <html> in app/layout.tsx).
-// Fictional demo copy. Replace the values and keep the shape.
+// Colors are applied as CSS variables on <html> in app/layout.tsx.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -22,27 +22,33 @@ export type BaseConfig = {
   seo: { title: string; description: string };
 };
 
-// A selectable model. `id` is what's sent to /api/ai/stream; `provider` is just
-// a label for the picker. Which models are actually accepted is gated server-side
-// by PYLON_AI_MODELS_ALLOWED (+ the configured provider / gateway) — see README.
-export type ChatModel = { id: string; label: string; provider: string };
+// A selectable model. `id` is sent to the provider; `label` and `note` are
+// shown in the picker. Only ids listed here are accepted by the `respond`
+// function, and app.ts passes the same list to `llm({ allowedModels })`.
+export type ChatModel = { id: string; label: string; note: string };
+
+export type Suggestion = { title: string; prompt: string };
 
 export type ChatConfig = BaseConfig & {
   chat: {
-    assistantName: string;
-    // Prepended as a system message on every request — sets the assistant's
-    // persona. Edit to retune the assistant without touching code.
+    // Sent as the system prompt on every request.
     systemPrompt: string;
     emptyHeadline: string;
-    emptySubcopy: string;
     inputPlaceholder: string;
-    // Starter prompts shown on the empty state; clicking one sends it.
-    suggestions: string[];
-    // The model picker. Curate to your setup: a single provider's models, or —
-    // with an OpenRouter-style gateway (PYLON_AI_PROVIDER=custom) — models across
-    // providers in one list. The selected id is sent as `model` per request.
+    // Starter prompts on the empty state. Picking one sends `prompt`.
+    suggestions: Suggestion[];
     models: ChatModel[];
     defaultModel: string;
+    // Upper bound on tokens per reply.
+    maxOutputTokens: number;
+    // Messages longer than this are refused by the server.
+    maxInputChars: number;
+    // Replies per rolling hour. `guest` and `user` are per person;
+    // `allGuests` caps every guest session together, since anyone can start a
+    // new guest session.
+    repliesPerHour: { guest: number; user: number; allGuests: number };
+    // Model ids a guest session may use. Accounts may use every model.
+    guestModels: string[];
   };
 };
 
@@ -54,7 +60,7 @@ export const siteConfig: ChatConfig = {
     letter: "L",
     domain: "lumen.chat",
     email: "hello@lumen.example",
-    footerBlurb: "A fast, streaming AI assistant built on Pylon.",
+    footerBlurb: "A streaming AI assistant built on Pylon.",
     copyrightName: "Lumen",
     socials: [
       {
@@ -65,38 +71,48 @@ export const siteConfig: ChatConfig = {
     ],
   },
 
-  colors: { brand: "#6d28d9", brandSoft: "#ede9fe", paper: "#faf9fc" },
+  colors: { brand: "#1d5c4d", brandSoft: "#e3eeea", paper: "#f4f1ea" },
 
   seo: {
-    title: "Lumen — a fast streaming AI assistant.",
+    title: "Lumen, a streaming AI assistant",
     description:
-      "A streaming AI chat app built on Pylon. Conversations sync across your tabs and devices in realtime; your API key never leaves the server.",
+      "Ask questions and read answers as they stream. Conversations sync across your tabs and devices, and your API key stays on the server.",
   },
 
   chat: {
-    assistantName: "Lumen",
     systemPrompt:
-      "You are Lumen, a friendly, concise AI assistant. Answer clearly and get to the point. Use Markdown when it helps.",
-    emptyHeadline: "How can I help?",
-    emptySubcopy: "Ask anything. Your conversations are saved and stay in sync across your tabs.",
-    inputPlaceholder: "Message Lumen…",
+      "You are Lumen, a helpful AI assistant. Answer clearly and get to the point. Use Markdown: short paragraphs, lists where they help, and fenced code blocks with a language tag for code.",
+    emptyHeadline: "What can I help with?",
+    inputPlaceholder: "Message Lumen",
     suggestions: [
-      "Explain WebSockets like I'm five.",
-      "Draft a friendly out-of-office reply.",
-      "Give me 5 dinner ideas using chicken and rice.",
-      "What's the difference between SSR and SSG?",
+      {
+        title: "Explain a concept",
+        prompt: "Explain how WebSockets differ from Server-Sent Events, and when to pick each.",
+      },
+      {
+        title: "Write code",
+        prompt: "Write a TypeScript function that retries a fetch with exponential backoff and jitter.",
+      },
+      {
+        title: "Edit my writing",
+        prompt: "Rewrite this to be shorter and clearer: \"We are reaching out to let you know that we have made some changes to our pricing.\"",
+      },
+      {
+        title: "Plan something",
+        prompt: "Plan a 3-day trip to Lisbon for someone who likes food markets and walking.",
+      },
     ],
-    // Current Claude models (verify the ids for your provider before shipping —
-    // model names move fast). Whichever you keep here must be in
-    // PYLON_AI_MODELS_ALLOWED for switching to work (see .env.example). To offer
-    // models from OTHER providers (OpenAI, Google, …) in the same list, route
-    // through an OpenRouter-style gateway (PYLON_AI_PROVIDER=custom +
-    // PYLON_AI_BASE_URL) and use that gateway's slugs here.
+    // Verify the ids for your provider before shipping. Every id here is
+    // accepted by the server; remove the ones you do not want to pay for.
     models: [
-      { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", provider: "Anthropic" },
-      { id: "claude-opus-4-8", label: "Claude Opus 4.8", provider: "Anthropic" },
-      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", provider: "Anthropic" },
+      { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", note: "Balanced speed and quality" },
+      { id: "claude-opus-4-8", label: "Claude Opus 4.8", note: "Best for hard problems" },
+      { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", note: "Fastest replies" },
     ],
     defaultModel: "claude-sonnet-4-6",
+    maxOutputTokens: 4096,
+    maxInputChars: 12000,
+    repliesPerHour: { guest: 20, user: 100, allGuests: 300 },
+    guestModels: ["claude-sonnet-4-6", "claude-haiku-4-5"],
   },
 };

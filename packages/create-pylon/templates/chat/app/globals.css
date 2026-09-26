@@ -2,87 +2,101 @@
 @import "tw-animate-css";
 
 /* Tailwind v4 scans these globs for class names. `components/` is here so
-   shadcn/ui component classes are seen — add more @source lines if you put
-   markup elsewhere. */
+   shadcn/ui and chat component classes are seen. Add more @source lines if
+   you put markup elsewhere. */
 @source "../app/**/*.{tsx,ts,jsx,js}";
 @source "../components/**/*.{tsx,ts,jsx,js}";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* shadcn/ui design tokens (new-york / zinc). Edit these to re-theme the
-   whole app; `npx shadcn@latest add <component>` drops new components that
-   consume the same variables. Toggle dark mode by putting `class="dark"`
-   on <html>. */
+/* Design tokens. The shadcn/ui names (background, primary, sidebar, …) are
+   kept so `npx shadcn@latest add <component>` drops in components that match.
+   `signal` is the accent (send button, unread badges); `online` is the
+   presence dot. Toggle dark mode by putting `class="dark"` on <html>. */
 :root {
   --radius: 0.625rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.141 0.005 285.823);
+  --background: oklch(0.988 0.003 85);
+  --foreground: oklch(0.21 0.012 265);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.141 0.005 285.823);
+  --card-foreground: oklch(0.21 0.012 265);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.21 0.006 285.885);
+  --popover-foreground: oklch(0.21 0.012 265);
+  --primary: oklch(0.24 0.014 265);
   --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.967 0.001 286.375);
-  --secondary-foreground: oklch(0.21 0.006 285.885);
-  --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.552 0.016 285.938);
-  --accent: oklch(0.967 0.001 286.375);
-  --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.92 0.004 286.32);
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.705 0.015 286.067);
+  --secondary: oklch(0.955 0.004 85);
+  --secondary-foreground: oklch(0.24 0.014 265);
+  --muted: oklch(0.95 0.004 85);
+  --muted-foreground: oklch(0.53 0.012 265);
+  --accent: oklch(0.955 0.004 85);
+  --accent-foreground: oklch(0.24 0.014 265);
+  --destructive: oklch(0.577 0.215 27.325);
+  --border: oklch(0.905 0.005 85);
+  --input: oklch(0.905 0.005 85);
+  --ring: oklch(0.7 0.02 265);
+  --hover: oklch(0.955 0.004 85 / 0.7);
+  --signal: oklch(0.63 0.17 38);
+  --signal-foreground: oklch(0.99 0.005 60);
+  --online: oklch(0.72 0.17 150);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
   --chart-4: oklch(0.828 0.189 84.429);
   --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: oklch(0.21 0.006 285.885);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.967 0.001 286.375);
-  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.705 0.015 286.067);
+  --sidebar: oklch(0.2 0.013 265);
+  --sidebar-foreground: oklch(0.95 0.004 265);
+  --sidebar-muted: oklch(0.62 0.014 265);
+  --sidebar-muted-strong: oklch(0.8 0.01 265);
+  --sidebar-primary: oklch(0.63 0.17 38);
+  --sidebar-primary-foreground: oklch(0.99 0.005 60);
+  --sidebar-accent: oklch(0.275 0.016 265);
+  --sidebar-accent-foreground: oklch(0.98 0.003 265);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.63 0.17 38);
 }
 
 .dark {
-  --background: oklch(0.141 0.005 285.823);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.21 0.006 285.885);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.21 0.006 285.885);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.92 0.004 286.32);
-  --primary-foreground: oklch(0.21 0.006 285.885);
-  --secondary: oklch(0.274 0.006 286.033);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.274 0.006 286.033);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033);
-  --accent-foreground: oklch(0.985 0 0);
+  --background: oklch(0.17 0.01 265);
+  --foreground: oklch(0.95 0.004 265);
+  --card: oklch(0.22 0.012 265);
+  --card-foreground: oklch(0.95 0.004 265);
+  --popover: oklch(0.22 0.012 265);
+  --popover-foreground: oklch(0.95 0.004 265);
+  --primary: oklch(0.92 0.004 265);
+  --primary-foreground: oklch(0.21 0.012 265);
+  --secondary: oklch(0.26 0.012 265);
+  --secondary-foreground: oklch(0.95 0.004 265);
+  --muted: oklch(0.26 0.012 265);
+  --muted-foreground: oklch(0.68 0.012 265);
+  --accent: oklch(0.26 0.012 265);
+  --accent-foreground: oklch(0.95 0.004 265);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.552 0.016 285.938);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 14%);
+  --ring: oklch(0.55 0.02 265);
+  --hover: oklch(1 0 0 / 4%);
+  --signal: oklch(0.68 0.16 40);
+  --signal-foreground: oklch(0.18 0.02 40);
+  --online: oklch(0.74 0.16 150);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.21 0.006 285.885);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.274 0.006 286.033);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.552 0.016 285.938);
+  --sidebar: oklch(0.14 0.01 265);
+  --sidebar-foreground: oklch(0.95 0.004 265);
+  --sidebar-muted: oklch(0.6 0.014 265);
+  --sidebar-muted-strong: oklch(0.8 0.01 265);
+  --sidebar-primary: oklch(0.68 0.16 40);
+  --sidebar-primary-foreground: oklch(0.18 0.02 40);
+  --sidebar-accent: oklch(0.23 0.014 265);
+  --sidebar-accent-foreground: oklch(0.98 0.003 265);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.68 0.16 40);
 }
 
 @theme inline {
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, monospace;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
@@ -105,6 +119,10 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
+  --color-hover: var(--hover);
+  --color-signal: var(--signal);
+  --color-signal-foreground: var(--signal-foreground);
+  --color-online: var(--online);
   --color-chart-1: var(--chart-1);
   --color-chart-2: var(--chart-2);
   --color-chart-3: var(--chart-3);
@@ -112,12 +130,35 @@
   --color-chart-5: var(--chart-5);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-muted: var(--sidebar-muted);
+  --color-sidebar-muted-strong: var(--sidebar-muted-strong);
   --color-sidebar-primary: var(--sidebar-primary);
   --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
   --color-sidebar-accent: var(--sidebar-accent);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --shadow-composer:
+    0 0 0 1px oklch(0.21 0.012 265 / 0.08), 0 1px 2px oklch(0.21 0.012 265 / 0.04),
+    0 8px 24px -12px oklch(0.21 0.012 265 / 0.12);
+  --shadow-composer-focus:
+    0 0 0 1px oklch(0.21 0.012 265 / 0.16), 0 0 0 4px oklch(0.63 0.17 38 / 0.12),
+    0 10px 28px -12px oklch(0.21 0.012 265 / 0.16);
+  --shadow-float: 0 1px 2px oklch(0.21 0.012 265 / 0.1), 0 10px 30px -10px oklch(0.21 0.012 265 / 0.35);
+
+  --animate-message-in: message-in 260ms var(--ease-out-soft) both;
+  @keyframes message-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
 }
 
 @layer base {
@@ -129,11 +170,86 @@
     border-color: var(--color-border, currentColor);
     outline-color: var(--color-ring);
   }
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
   button {
     cursor: pointer;
+  }
+  button:disabled {
+    cursor: default;
+  }
+}
+
+/* Thin scrollbars that only show while the pointer is over the list. */
+.scroll-area {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 200ms;
+}
+.scroll-area:hover {
+  scrollbar-color: oklch(0.5 0.01 265 / 0.3) transparent;
+}
+
+/* Three dots that rise in turn, beside "Maya is typing". */
+.typing-dots > span {
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: currentColor;
+  opacity: 0.35;
+  animation: typing-dot 1.2s var(--ease-out-soft) infinite;
+}
+.typing-dots > span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.typing-dots > span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes typing-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 0.9;
+    transform: translateY(-3px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Delete button on your own messages: shown on hover or keyboard focus with a
+   mouse, always shown on touch screens (which have no hover). Hidden, it takes
+   no taps. */
+@media (hover: hover) {
+  .delete-action {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .group\/msg:hover .delete-action,
+  .delete-action:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
   }
 }
