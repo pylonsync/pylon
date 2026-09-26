@@ -10,7 +10,7 @@ import {
 } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
-// invoices — billing for a small business: clients, invoices with line items,
+// Billfold (the invoices template) — billing for a small business: clients, invoices with line items,
 // and payments against them.
 //
 // The realtime hook: recording a payment updates the balance and flips the
@@ -159,7 +159,7 @@ const manifest = buildManifest({
   auth: auth(),
   fonts: [
     font({
-      family: "Inter",
+      family: "Hanken Grotesk",
       variable: "--font-sans",
       weights: ["400", "500", "600", "700"],
       subsets: ["latin"],

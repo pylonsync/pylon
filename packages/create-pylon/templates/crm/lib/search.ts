@@ -1,15 +1,16 @@
 // Client-side search powering the ⌘K palette.
 //
-// A small team's CRM fits in the synced replica, so search runs locally against
+// A small team's workspace fits in the synced replica, so search runs locally against
 // data already in memory: results appear as you type, with no request per
 // keystroke. Swap in `db.useSearch` (Pylon's FTS) when a workspace outgrows
 // that — the component boundary doesn't change, only this file.
 
 export interface SearchItem {
   id: string;
-  type: "deal" | "company" | "contact";
+  /** The record kind, such as "deal". The palette picks its icon from this. */
+  type: string;
   title: string;
-  /** Second line: the company for a contact, the domain for a company. */
+  /** Shown on the right of the row: the company for a contact, say. */
   subtitle?: string;
   href: string;
   /** Extra text matched but not displayed — an email, say. */

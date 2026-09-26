@@ -29,7 +29,7 @@ export function TaskBoard({
   const columns = groupByStatus(tasks);
 
   return (
-    <div className="flex h-full gap-3 overflow-x-auto p-4">
+    <div className="flex h-full snap-x snap-mandatory scroll-px-4 gap-3 overflow-x-auto p-4 md:snap-none md:px-5">
       {columns.map((column) => {
         const isTarget = over === column.status.id;
         const logged = column.tasks.reduce(
@@ -62,18 +62,19 @@ export function TaskBoard({
               onMove(id, column.status.id);
             }}
             className={cn(
-              "flex w-[268px] shrink-0 flex-col rounded-xl border transition-colors",
-              isTarget ? "border-ring/60 bg-surface-2/60" : "border-border bg-surface-1/50",
+              "flex w-[84vw] shrink-0 snap-start flex-col rounded-xl border transition-colors",
+              "md:w-auto md:min-w-[220px] md:max-w-[360px] md:flex-1",
+              isTarget ? "border-ring/50 bg-primary/[0.04]" : "border-border/70 bg-surface-1",
             )}
             aria-label={column.status.label}
           >
-            <header className="flex items-center gap-2 px-3 py-2.5">
-              <h2 className="text-[12px] font-medium">{column.status.label}</h2>
-              <span className="tabular text-[11px] text-muted-foreground">
+            <header className="flex items-center gap-2 px-3 pb-2 pt-3">
+              <h2 className="text-[12.5px] font-semibold">{column.status.label}</h2>
+              <span className="tabular text-[12px] text-muted-foreground">
                 {column.tasks.length}
               </span>
               {logged > 0 ? (
-                <span className="tabular ml-auto text-[11px] text-muted-foreground">
+                <span className="tabular ml-auto text-[12px] text-muted-foreground">
                   {duration(logged)}
                 </span>
               ) : null}
@@ -96,8 +97,8 @@ export function TaskBoard({
                 />
               ))}
               {column.tasks.length === 0 ? (
-                <p className="px-1 py-6 text-center text-[11px] text-muted-foreground">
-                  {isTarget ? "Drop here" : "Nothing here"}
+                <p className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-[12px] text-muted-foreground">
+                  {isTarget ? "Drop to move here" : `No tasks in ${column.status.label}`}
                 </p>
               ) : null}
             </div>

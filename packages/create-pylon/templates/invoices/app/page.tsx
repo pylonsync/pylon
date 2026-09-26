@@ -1,20 +1,18 @@
 import React from "react";
 import type { Metadata, PageProps } from "@pylonsync/react";
+import { BRAND } from "@/lib/brand";
 import { InvoicesView } from "./invoices-view";
 
 export const metadata: Metadata = {
-  title: "Invoices",
+  title: `Invoices · ${BRAND.name}`,
   robots: "noindex",
 };
 
-/**
- * `/` — the invoice list.
- *
- */
+/** `/` — the invoice list. */
 export default function InvoicesPage({ searchParams }: PageProps) {
   return (
     <InvoicesView
-          openNew={searchParams?.new === "invoice"}
+      openNew={searchParams?.new === "invoice"}
     />
   );
 }

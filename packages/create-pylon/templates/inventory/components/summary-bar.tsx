@@ -1,20 +1,13 @@
 import React from "react";
-import { money, summarize, type Movement, type Product } from "@/lib/stock";
+import { money, type Summary } from "@/lib/stock";
 
 /**
- * What\'s on the shelves and what needs attention. All derived from the ledger —
+ * What's on the shelves and what needs attention. All derived from the ledger —
  * see lib/stock.ts, where the arithmetic is unit-tested.
  */
-export function SummaryBar({
-  products,
-  movements,
-}: {
-  products: Product[];
-  movements: Movement[];
-}) {
-  const s = summarize(products, movements);
+export function SummaryBar({ summary: s }: { summary: Summary }) {
   return (
-    <dl className="grid grid-cols-2 gap-px border-b border-border bg-border sm:grid-cols-4">
+    <dl className="grid shrink-0 grid-cols-2 gap-px border-b border-border bg-border lg:grid-cols-4">
       <Metric label="Products" value={String(s.skuCount)} hint="active SKUs" />
       <Metric label="Units on hand" value={s.unitCount.toLocaleString("en-US")} hint="across all lines" />
       <Metric label="Stock value" value={money(s.valuationCents)} hint="at cost" />
@@ -40,17 +33,17 @@ function Metric({
   alarming?: boolean;
 }) {
   return (
-    <div className="bg-background px-4 py-3">
-      <dt className="text-[11px] text-muted-foreground">{label}</dt>
+    <div className="min-w-0 bg-background px-4 py-2.5 md:px-5 md:py-3.5">
+      <dt className="truncate text-[12px] text-muted-foreground">{label}</dt>
       <dd
         className={
-          "tabular mt-0.5 text-[18px] font-semibold tracking-tight" +
+          "tabular mt-1 text-[18px] font-semibold leading-none tracking-[-0.02em] md:text-[22px]" +
           (alarming ? " text-destructive" : "")
         }
       >
         {value}
       </dd>
-      <p className="mt-0.5 text-[11px] text-muted-foreground">{hint}</p>
+      <p className="mt-1 truncate text-[11.5px] text-muted-foreground md:mt-1.5">{hint}</p>
     </div>
   );
 }

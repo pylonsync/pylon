@@ -1,8 +1,10 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { useAuth } from "@pylonsync/client";
-import { AuthForm } from "@/components/auth-form";
+import { BRAND } from "@/lib/brand";
+import { AuthForm, type AuthMode } from "@/components/auth-form";
+import { BrandMark } from "@/components/brand-mark";
 
 /**
  * Client-side auth gate.
@@ -18,44 +20,40 @@ import { AuthForm } from "@/components/auth-form";
  * It also removes a full page load from the sign-in path: authenticating swaps
  * this component's children in place instead of navigating.
  */
-export function RequireAuth({
-  title,
-  description,
-  children,
-}: {
-  title: string;
-  description: string;
-  children: React.ReactNode;
-}) {
+export function RequireAuth({ children }: { children: React.ReactNode }) {
   const { isSignedIn, isLoaded } = useAuth();
+  const [mode, setMode] = useState<AuthMode>("login");
 
   // `isLoaded` covers the beat before the engine has resolved the stored token.
   // Rendering the form during it would flash a sign-in screen at someone who is
   // already signed in.
   if (!isLoaded) {
     return (
-      <main className="flex min-h-screen items-center justify-center">
-        <span className="text-[13px] text-muted-foreground">Loading…</span>
+      <main className="flex min-h-dvh items-center justify-center" aria-busy="true">
+        <BrandMark className="size-8 animate-pulse" />
+        <span className="sr-only">Loading {BRAND.name}</span>
       </main>
     );
   }
 
   if (!isSignedIn) {
     return (
-      <main className="flex min-h-screen items-center justify-center px-6">
-        <div className="w-full max-w-[320px]">
-          <div className="mb-7 flex items-center gap-2">
-            <span className="flex size-7 items-center justify-center rounded-md bg-primary text-[12px] font-bold text-primary-foreground">
-              {title.slice(0, 1).toUpperCase()}
-            </span>
-            <span className="text-[15px] font-semibold tracking-tight">{title}</span>
+      <main className="flex min-h-dvh items-center justify-center bg-surface-1 px-4 py-10">
+        <div className="w-full max-w-[380px]">
+          <div className="mb-6 flex items-center justify-center gap-2.5">
+            <BrandMark className="size-8 rounded-[9px]" />
+            <span className="text-[17px] font-semibold tracking-[-0.015em]">{BRAND.name}</span>
           </div>
-          <h1 className="text-[19px] font-semibold tracking-tight">
-            Sign in to your workspace
-          </h1>
-          <p className="mt-1 text-[13px] text-muted-foreground">{description}</p>
-          <div className="mt-6">
-            <AuthForm />
+          <div className="rounded-xl border border-border bg-background p-6 shadow-[0_1px_2px_rgb(0_0_0/0.04),0_12px_32px_-12px_rgb(0_0_0/0.12)] sm:p-7">
+            <h1 className="text-[18px] font-semibold tracking-[-0.015em]">
+              {mode === "login" ? `Sign in to ${BRAND.name}` : `Create your ${BRAND.name} account`}
+            </h1>
+            <p className="mt-1.5 text-[13px] leading-5 text-muted-foreground">
+              {BRAND.description}
+            </p>
+            <div className="mt-6">
+              <AuthForm mode={mode} onModeChange={setMode} />
+            </div>
           </div>
         </div>
       </main>

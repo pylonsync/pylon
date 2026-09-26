@@ -17,23 +17,30 @@ export function ContactsView() {
   const [open, setOpen] = useState(false);
 
   return (
-    <RequireAuth title="CRM" description="Your team shares one pipeline. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/contacts">
       {(data) => {
         const columns: ColumnDef<ContactRow>[] = [
           {
             key: "name",
             header: "Name",
+            className: "w-[55%] md:w-[22%]",
             cell: (row) => (
-              <span className="flex items-center gap-2">
-                <Avatar name={row.name} size="sm" />
-                <span className="truncate font-medium">{row.name}</span>
+              <span className="flex min-w-0 items-center gap-2.5">
+                <Avatar name={row.name} />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{row.name}</span>
+                  <span className="block truncate text-[12px] text-muted-foreground md:hidden">
+                    {[row.title, data.companyName(row.companyId)].filter(Boolean).join(", ")}
+                  </span>
+                </span>
               </span>
             ),
           },
           {
             key: "title",
             header: "Title",
+            hideBelow: "md",
             cell: (row) => (
               <span className="text-muted-foreground">{row.title ?? "—"}</span>
             ),
@@ -41,6 +48,7 @@ export function ContactsView() {
           {
             key: "company",
             header: "Company",
+            hideBelow: "md",
             cell: (row) => (
               <span className="text-muted-foreground">
                 {data.companyName(row.companyId) ?? "—"}
@@ -50,6 +58,8 @@ export function ContactsView() {
           {
             key: "email",
             header: "Email",
+            hideBelow: "lg",
+            className: "w-[24%]",
             cell: (row) =>
               row.email ? (
                 <a
@@ -66,13 +76,25 @@ export function ContactsView() {
           {
             key: "phone",
             header: "Phone",
-            cell: (row) => (
-              <span className="text-muted-foreground">{row.phone ?? "—"}</span>
-            ),
+            className: "w-[140px]",
+            cell: (row) =>
+              row.phone ? (
+                <a
+                  href={`tel:${row.phone.replace(/[^+\d]/g, "")}`}
+                  onClick={(event) => event.stopPropagation()}
+                  className="tabular text-muted-foreground hover:text-foreground"
+                >
+                  {row.phone}
+                </a>
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              ),
           },
           {
             key: "created",
             header: "Added",
+            hideBelow: "xl",
+            className: "w-[100px]",
             cell: (row) => (
               <span className="text-muted-foreground">
                 {relativeTime(row.createdAt)}
@@ -85,16 +107,18 @@ export function ContactsView() {
 
         return (
           <>
-            <PageHeader title="Contacts" count={rows.length}>
+            <PageHeader title="Contacts" count={data.navCounts["/contacts"]}>
               <Button size="sm" onClick={() => setOpen(true)}>
                 <Plus />
-                New contact
+                <span className="max-sm:sr-only">New contact</span>
               </Button>
             </PageHeader>
 
             <DataTable
               rows={rows}
               columns={columns}
+              loading={data.loading}
+              label="Contacts"
               empty={
                 <EmptyState
                   icon={<Users />}
@@ -126,7 +150,7 @@ export function ContactsView() {
                     .sort((a, b) => a.name.localeCompare(b.name))
                     .map((company) => ({ value: company.id, label: company.name })),
                 },
-                { name: "email", label: "Email", type: "email", placeholder: "dana@acme.com" },
+                { name: "email", label: "Email", type: "email", placeholder: "dana@northwind.co" },
                 { name: "phone", label: "Phone", type: "tel", placeholder: "+1 555 0100" },
               ]}
               onCreate={async (values) => {

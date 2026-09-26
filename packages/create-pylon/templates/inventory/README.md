@@ -15,6 +15,11 @@ realistic shelf — including one line out of stock and one below its reorder
 point — so those states are visible rather than theoretical. Delete
 `functions/seedWorkspace.ts` and `lib/seed.ts` once you stock real products.
 
+The movements are spread across you and four demo teammates. Each is a User
+row with a `@demo.invalid` address and no password, so outside dev mode nobody
+can sign in as one (see `lib/demo-team.ts`). Delete those users along with the
+seed.
+
 ## The one design decision that matters
 
 **There is no `quantity` column.** On-hand is the SUM of a product\'s movements.
@@ -55,6 +60,22 @@ a stock count instead.
 
 **It\'s live.** A movement recorded at the back door updates the level on the
 shop floor\'s screen immediately, so nobody sells what was just damaged.
+
+## Brand and layout
+
+The product ships as **Stockroom**. The name lives in `lib/brand.ts`, and the
+sidebar, sign-in screen, page titles, and phone drawer all read it. The mark is
+`components/brand-mark.tsx`; `app/icon.svg`, `app/apple-icon.png`, and
+`public/favicon.ico` draw the same shape for browsers and home screens. The
+accent colour is `--brand` at the top of `app/globals.css`, and the typeface
+(IBM Plex Sans (and IBM Plex Mono for SKUs)) is set in `fonts` in `app.ts`.
+
+The frame is `components/app-shell.tsx`. From 768px up the sidebar is a fixed
+rail; below that it opens as a drawer from the menu button in each page header,
+tables drop their lower-priority columns (`hideBelow` in
+`components/data-table.tsx`), and boards scroll one column at a time. The nav
+links are in `components/nav.tsx`. Every nav count comes from `navCounts` in
+`app/workspace.tsx`, and page headers and tabs read the same numbers.
 
 ## Layout
 

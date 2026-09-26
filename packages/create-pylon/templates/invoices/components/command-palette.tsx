@@ -1,14 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Building2, Plus, Search, User } from "lucide-react";
+import { ArrowRight, FileText, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Kbd } from "@/components/kbd";
 import { moveSelection, searchItems, type SearchItem } from "@/lib/search";
-
-const TYPE_ICON: Record<SearchItem["type"], React.ReactNode> = {
-  deal: <Search />,
-  company: <Building2 />,
-  contact: <User />,
-};
 
 export interface CommandAction {
   id: string;
@@ -28,12 +22,18 @@ export function CommandPalette({
   open,
   items,
   actions = [],
+  placeholder = "Search…",
+  icons = {},
   onClose,
   onSelect,
 }: {
   open: boolean;
   items: SearchItem[];
   actions?: CommandAction[];
+  /** Input placeholder naming what can be found, such as "Search deals…". */
+  placeholder?: string;
+  /** Icon per `SearchItem.type`. Unknown types get a document icon. */
+  icons?: Record<string, React.ReactNode>;
   onClose: () => void;
   onSelect: (item: SearchItem) => void;
 }) {
@@ -76,7 +76,7 @@ export function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center bg-black/50 pt-[12vh]"
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 px-3 pt-[10vh] md:pt-[14vh]"
       // Clicking the backdrop dismisses; clicks inside the panel must not.
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -85,8 +85,8 @@ export function CommandPalette({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Search"
-        className="w-full max-w-lg overflow-hidden rounded-xl border border-border bg-popover shadow-2xl"
+        aria-label="Command menu"
+        className="w-full max-w-xl overflow-hidden rounded-xl border border-border bg-popover shadow-[0_24px_64px_-12px_rgb(0_0_0/0.3)]"
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.preventDefault();
@@ -109,14 +109,14 @@ export function CommandPalette({
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search deals, companies, contacts…"
-            aria-label="Search deals, companies and contacts"
-            className="h-11 flex-1 bg-transparent text-[13px] outline-none placeholder:text-muted-foreground"
+            placeholder={placeholder}
+            aria-label={placeholder.replace(/…$/, "")}
+            className="h-12 flex-1 bg-transparent text-base outline-none placeholder:text-muted-foreground md:text-[14px]"
           />
-          <Kbd>esc</Kbd>
+          <Kbd className="max-md:hidden">esc</Kbd>
         </div>
 
-        <div className="max-h-80 overflow-y-auto p-1.5">
+        <div className="max-h-[min(360px,60dvh)] overflow-y-auto p-1.5">
           {rows.length === 0 ? (
             <p className="px-3 py-6 text-center text-[12px] text-muted-foreground">
               No matches for “{query}”
@@ -138,12 +138,12 @@ export function CommandPalette({
               >
                 {row.kind === "action" ? (
                   <>
-                    <Plus />
+                    <ArrowRight />
                     <span className="flex-1 truncate">{row.action.label}</span>
                   </>
                 ) : (
                   <>
-                    {TYPE_ICON[row.item.type]}
+                    {icons[row.item.type] ?? <FileText />}
                     <span className="flex-1 truncate">{row.item.title}</span>
                     {row.item.subtitle ? (
                       <span className="truncate text-[12px] text-muted-foreground">

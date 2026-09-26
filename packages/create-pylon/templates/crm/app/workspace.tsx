@@ -3,9 +3,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { callFn, db, useRouter } from "@pylonsync/react";
 import { useAuth } from "@pylonsync/client";
-import { Sidebar } from "@/components/sidebar";
+import { Building2, CircleDollarSign, User } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
 import type { SearchItem } from "@/lib/search";
+import { isOpen } from "@/lib/pipeline";
 
 export interface CompanyRow {
   id: string;
@@ -58,6 +60,11 @@ export interface WorkspaceData {
   activities: ActivityRow[];
   companyName: (id: string | null | undefined) => string | null;
   ownerName: (id: string | null | undefined) => string | null;
+  /**
+   * The number beside each nav link, keyed by href. Page headers read the same
+   * map, so the sidebar and the page can't disagree.
+   */
+  navCounts: Record<string, number>;
   loading: boolean;
 }
 
@@ -94,8 +101,7 @@ export function Workspace({
 
   // Whoever is signed in, named from the synced User row rather than an
   // SSR prop — see the note on useAuth above.
-  const signedInEmail =
-    (users ?? []).find((user) => user.id === userId)?.email ?? "";
+  const me = (users ?? []).find((user) => user.id === userId);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const seeded = useRef(false);
@@ -177,6 +183,12 @@ export function Workspace({
     [dealList, companyList, contactList, byId],
   );
 
+  const navCounts = {
+    "/": dealList.filter(isOpen).length,
+    "/companies": companyList.length,
+    "/contacts": contactList.length,
+  };
+
   const data: WorkspaceData = {
     companies: companyList,
     contacts: contactList,
@@ -187,23 +199,21 @@ export function Workspace({
       const user = byId.userById.get(id ?? "");
       return user?.displayName || user?.email || null;
     },
+    navCounts,
     loading: loadingCompanies,
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar
-        workspace="CRM"
-        email={signedInEmail}
-        pathname={pathname}
-        counts={{
-          "/companies": companyList.length,
-          "/contacts": contactList.length,
-        }}
-        onOpenCommand={() => setPaletteOpen(true)}
-        onSignOut={() => void signOut()}
-      />
-      <main className="flex min-w-0 flex-1 flex-col">{children(data)}</main>
+    <AppShell
+      sidebar={{
+        user: { name: me?.displayName ?? "", email: me?.email ?? "" },
+        pathname,
+        counts: navCounts,
+        onOpenCommand: () => setPaletteOpen(true),
+        onSignOut: () => void signOut(),
+      }}
+    >
+      {children(data)}
 
       <CommandPalette
         open={paletteOpen}
@@ -225,9 +235,11 @@ export function Workspace({
             run: () => router.push("/contacts"),
           },
         ]}
+        placeholder="Search deals, companies, contacts…"
+        icons={{ deal: <CircleDollarSign />, company: <Building2 />, contact: <User /> }}
         onClose={() => setPaletteOpen(false)}
         onSelect={(item) => router.push(item.href)}
       />
-    </div>
+    </AppShell>
   );
 }

@@ -198,9 +198,35 @@ export const SEED_MOVEMENTS: SeedMovement[] = (() => {
   return SEED_PRODUCTS.flatMap((p) => ledgerFor(p, purchaseOrder));
 })();
 
+/**
+ * The demo stock team. Each becomes a User row with no
+ * password (see lib/demo-team.ts); they exist so the ledger shows who moved stock.
+ */
+export interface SeedTeammate {
+  name: string;
+  email: string;
+}
+
+export const SEED_TEAM: SeedTeammate[] = [
+  { name: "Maya Castillo", email: "maya.castillo@demo.invalid" },
+  { name: "Jordan Ellis", email: "jordan.ellis@demo.invalid" },
+  { name: "Aisha Karim", email: "aisha.karim@demo.invalid" },
+  { name: "Noah Brandt", email: "noah.brandt@demo.invalid" },
+];
+
+/**
+ * Who recorded the seeded movement at `index`, as a position in
+ * `[you, ...SEED_TEAM]`. Stepping by 3 through a team of 5 spreads the ledger
+ * across everyone.
+ */
+export function seedActor(index: number, teamSize: number = SEED_TEAM.length + 1): number {
+  return (index * 3 + 1) % teamSize;
+}
+
 export interface ShapedSeed {
   products: Array<{ key: string; row: Record<string, unknown> }>;
-  movements: Array<{ product: string; row: Record<string, unknown> }>;
+  /** `actor` is a position in `[you, ...SEED_TEAM]`; see seedActor. */
+  movements: Array<{ product: string; actor: number; row: Record<string, unknown> }>;
 }
 
 export function shapeSeed(now: number = Date.now()): ShapedSeed {
@@ -220,8 +246,9 @@ export function shapeSeed(now: number = Date.now()): ShapedSeed {
         createdAt: daysAgo(120 - index),
       },
     })),
-    movements: SEED_MOVEMENTS.map((m) => ({
+    movements: SEED_MOVEMENTS.map((m, index) => ({
       product: m.product,
+      actor: seedActor(index),
       row: {
         delta: m.delta,
         reason: m.reason,

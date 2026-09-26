@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  DEFAULT_PROJECT_TAB,
+  PROJECT_TABS,
   TASK_STATUSES,
   billableCents,
   budgetState,
   duration,
   groupByStatus,
+  inProjectTab,
   isOpen,
   isValidProjectStatus,
   isValidTaskStatus,
@@ -13,10 +16,13 @@ import {
   minutesForTask,
   money,
   parseDuration,
+  portfolio,
   progress,
+  projectTabCounts,
   type Task,
   type TimeEntry,
 } from "../lib/work";
+import { SEED_TEAM, shapeSeed } from "../lib/seed";
 
 const task = (over: Partial<Task> = {}): Task => ({
   id: "t1",
@@ -234,5 +240,64 @@ describe("money", () => {
     expect(money(24_750)).toBe("$247.50");
     expect(money(0)).toBe("$0.00");
     expect(money(null)).toBe("$0.00");
+  });
+});
+
+describe("project tabs", () => {
+  const projects = [
+    { id: "a", status: "active" },
+    { id: "b", status: "active" },
+    { id: "c", status: "paused" },
+    { id: "d", status: "complete" },
+  ];
+
+  test("the sidebar count is the default tab's row count", () => {
+    // The sidebar once counted active projects (2) while the list showed all
+    // of them (4). Both now read projectTabCounts for the default tab.
+    const counts = projectTabCounts(projects);
+    expect(counts[DEFAULT_PROJECT_TAB]).toBe(
+      projects.filter((p) => inProjectTab(DEFAULT_PROJECT_TAB, p)).length,
+    );
+    expect(counts[DEFAULT_PROJECT_TAB]).toBe(2);
+  });
+
+  test("each tab counts what it lists", () => {
+    const counts = projectTabCounts(projects);
+    for (const tab of PROJECT_TABS) {
+      expect(counts[tab.id]).toBe(projects.filter((p) => inProjectTab(tab.id, p)).length);
+    }
+    expect(counts).toEqual({ active: 2, paused: 1, complete: 1, all: 4 });
+  });
+});
+
+describe("seed", () => {
+  test("tasks are spread across the whole team, with some left unassigned", () => {
+    const tasks = shapeSeed(Date.parse("2026-07-27T12:00:00Z")).tasks;
+    const owners = new Set(tasks.map((t) => t.assignee));
+    for (let i = 0; i <= SEED_TEAM.length; i += 1) expect(owners.has(i)).toBe(true);
+    expect(owners.has(null)).toBe(true);
+    // Only work that hasn't started is unassigned.
+    for (const t of tasks) if (t.assignee === null) expect(t.row.status).toBe("todo");
+  });
+});
+
+describe("portfolio", () => {
+  test("totals active projects only and counts the ones over budget", () => {
+    const projects = [
+      { id: "a", name: "A", status: "active", budgetMinutes: 60, hourlyRateCents: 10_000 },
+      { id: "b", name: "B", status: "active", budgetMinutes: 600, hourlyRateCents: 0 },
+      { id: "c", name: "C", status: "complete", budgetMinutes: 60, hourlyRateCents: 10_000 },
+    ];
+    const entries = [
+      { id: "1", taskId: "t", projectId: "a", minutes: 90 },
+      { id: "2", taskId: "t", projectId: "b", minutes: 30 },
+      { id: "3", taskId: "t", projectId: "c", minutes: 500 },
+    ];
+    expect(portfolio(projects, entries)).toEqual({
+      activeCount: 2,
+      loggedMinutes: 120,
+      billableCents: 15_000,
+      overBudgetCount: 1,
+    });
   });
 });

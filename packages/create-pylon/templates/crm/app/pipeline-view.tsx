@@ -41,16 +41,16 @@ export function PipelineView({
   }, []);
 
   return (
-    <RequireAuth title="CRM" description="Your team shares one pipeline. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/">
       {(data) => (
         <>
-          <PageHeader title="Pipeline" count={data.deals.length}>
-            <Button size="sm" onClick={() => setDialogOpen(true)}>
+          <PageHeader title="Pipeline" count={data.navCounts["/"]}>
+            <Button size="sm" onClick={() => setDialogOpen(true)} title="New deal (c)">
               <Plus />
               New deal
-              <Kbd className="ml-1 border-primary-foreground/25 bg-primary-foreground/10 text-primary-foreground/70">
-                c
+              <Kbd className="ml-0.5 hidden border-primary-foreground/25 bg-primary-foreground/10 text-primary-foreground/75 md:inline-flex">
+                C
               </Kbd>
             </Button>
           </PageHeader>

@@ -17,6 +17,7 @@ export const PIPELINE: Stage[] = [
   { id: "lead", label: "Lead", probability: 0.1 },
   { id: "qualified", label: "Qualified", probability: 0.3 },
   { id: "proposal", label: "Proposal", probability: 0.6 },
+  { id: "negotiation", label: "Negotiation", probability: 0.8 },
   { id: "won", label: "Won", closed: "won", probability: 1 },
   { id: "lost", label: "Lost", closed: "lost", probability: 0 },
 ];
@@ -218,4 +219,40 @@ export function daysUntil(
     return d.getTime();
   };
   return Math.round((startOfDay(then) - startOfDay(now)) / 86_400_000);
+}
+
+export type CloseDue =
+  | { tone: "overdue"; days: number; label: string }
+  | { tone: "soon"; days: number; label: string };
+
+/**
+ * The close-date warning for a deal card: "3d overdue", "Today", or "5d".
+ *
+ * Only open deals get one. A won or lost deal has closed, so its expected
+ * close date is history, not a deadline. Beyond a week out there is nothing
+ * to act on yet, so that returns null too.
+ */
+export function closeDue(
+  deal: { stage: string; closeDate?: string | null },
+  now: number = Date.now(),
+): CloseDue | null {
+  if (!isOpen(deal)) return null;
+  const days = daysUntil(deal.closeDate, now);
+  if (days === null || days > 7) return null;
+  if (days < 0) return { tone: "overdue", days, label: `${Math.abs(days)}d overdue` };
+  return { tone: "soon", days, label: days === 0 ? "Today" : `${days}d` };
+}
+
+/** "Mar 3" for this year, "Mar 3, 2027" otherwise. */
+export function shortDate(iso: string | null | undefined, now: number = Date.now()): string {
+  if (!iso) return "";
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "";
+  const date = new Date(then);
+  const sameYear = date.getFullYear() === new Date(now).getFullYear();
+  return date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
+  });
 }

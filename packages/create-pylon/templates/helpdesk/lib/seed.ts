@@ -7,6 +7,40 @@
 //
 // Pure data + pure shaping; `functions/seedWorkspace.ts` stays a thin wrapper.
 
+/**
+ * The demo support team. Each becomes a User row with no
+ * password (see lib/demo-team.ts); they exist so tickets have realistic assignees.
+ */
+export interface SeedAgent {
+  name: string;
+  email: string;
+}
+
+export const SEED_TEAM: SeedAgent[] = [
+  { name: "Maya Castillo", email: "maya.castillo@demo.invalid" },
+  { name: "Jordan Ellis", email: "jordan.ellis@demo.invalid" },
+  { name: "Aisha Karim", email: "aisha.karim@demo.invalid" },
+  { name: "Noah Brandt", email: "noah.brandt@demo.invalid" },
+];
+
+/** How many unanswered tickets, from the top of SEED_TICKETS, stay unassigned. */
+export const SEED_UNASSIGNED = 4;
+
+/**
+ * Who the seeded ticket at `index` is assigned to, as a position in
+ * `[you, ...SEED_TEAM]`, or null for unassigned. The first SEED_UNASSIGNED
+ * unanswered tickets in SEED_TICKETS wait in the queue; everything else is spread across the
+ * team, including the person who signed up.
+ */
+export function seedAssignee(
+  index: number,
+  answered: boolean,
+  teamSize: number = SEED_TEAM.length + 1,
+): number | null {
+  if (!answered && index < SEED_UNASSIGNED) return null;
+  return (index * 3 + 1) % teamSize;
+}
+
 export interface SeedCustomer {
   key: string;
   name: string;
@@ -226,7 +260,13 @@ export const SEED_MESSAGES: SeedMessage[] = [
 
 export interface ShapedSeed {
   customers: Array<{ key: string; row: Record<string, unknown> }>;
-  tickets: Array<{ key: string; customer: string; row: Record<string, unknown> }>;
+  /** `assignee` is a position in `[you, ...SEED_TEAM]`, or null; see seedAssignee. */
+  tickets: Array<{
+    key: string;
+    customer: string;
+    assignee: number | null;
+    row: Record<string, unknown>;
+  }>;
   messages: Array<{ ticket: string; row: Record<string, unknown> }>;
 }
 
@@ -244,9 +284,10 @@ export function shapeSeed(now: number = Date.now()): ShapedSeed {
       key: c.key,
       row: { name: c.name, email: c.email, company: c.company, createdAt: hoursAgo(2000 - index * 60) },
     })),
-    tickets: SEED_TICKETS.map((t) => ({
+    tickets: SEED_TICKETS.map((t, index) => ({
       key: t.key,
       customer: t.customer,
+      assignee: seedAssignee(index, t.respondedAgo !== null),
       row: {
         subject: t.subject,
         status: t.status,

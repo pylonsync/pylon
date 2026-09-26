@@ -8,6 +8,11 @@ import {
   isValidPriority,
   isValidStatus,
   minutesToBreach,
+  DEFAULT_INBOX_TAB,
+  INBOX_TABS,
+  inboxCount,
+  inboxFilter,
+  sla,
   queueOrder,
   slaState,
   ticketNumber,
@@ -112,6 +117,41 @@ describe("minutesToBreach", () => {
     ).toBeNull();
     expect(minutesToBreach(ticket({ status: "closed" }), NOW)).toBeNull();
   });
+
+  test("seconds past the deadline is breached by 1m, never 0m", () => {
+    // An urgent ticket (1h window) that arrived 1h and 20s ago used to read
+    // "0m over": breached by the clock, rounded to zero minutes.
+    const late = ticket({
+      priority: "urgent",
+      createdAt: new Date(NOW - 3_600_000 - 20_000).toISOString(),
+    });
+    expect(slaState(late, NOW)).toBe("breached");
+    expect(minutesToBreach(late, NOW)).toBe(-1);
+  });
+
+  test("seconds before the deadline is due in 1m, never 0m", () => {
+    const close = ticket({
+      priority: "urgent",
+      createdAt: new Date(NOW - 3_600_000 + 20_000).toISOString(),
+    });
+    expect(slaState(close, NOW)).toBe("due");
+    expect(minutesToBreach(close, NOW)).toBe(1);
+  });
+
+  test("exactly at the deadline counts as breached", () => {
+    const edge = ticket({ priority: "urgent", createdAt: hoursAgo(1) });
+    expect(slaState(edge, NOW)).toBe("breached");
+    expect(minutesToBreach(edge, NOW)).toBe(-1);
+  });
+
+  test("state and minutes always agree in sign", () => {
+    for (let s = 3_500; s <= 3_700; s += 1) {
+      const t = ticket({ priority: "urgent", createdAt: new Date(NOW - s * 1000).toISOString() });
+      const result = sla(t, NOW);
+      if (result.state === "breached") expect(result.minutes!).toBeLessThanOrEqual(-1);
+      if (result.state === "due") expect(result.minutes!).toBeGreaterThanOrEqual(1);
+    }
+  });
 });
 
 describe("queueOrder", () => {
@@ -211,5 +251,35 @@ describe("ticketNumber", () => {
 
   test("looks like a ticket number", () => {
     expect(ticketNumber("abc", "2026-01-01")).toMatch(/^#\d{4}$/);
+  });
+});
+
+describe("inbox counts", () => {
+  const queue = [
+    ticket({ id: "a", status: "open" }),
+    ticket({ id: "b", status: "open", assigneeId: "u1" }),
+    ticket({ id: "c", status: "pending" }),
+    ticket({ id: "d", status: "solved" }),
+  ];
+
+  test("the default tab's count is exactly the rows it lists", () => {
+    // The sidebar once counted open + pending (3) while the list showed only
+    // open (2). Both now come from inboxCount on the default tab.
+    expect(inboxCount(queue, DEFAULT_INBOX_TAB)).toBe(
+      applyFilter(queue, inboxFilter(DEFAULT_INBOX_TAB)).length,
+    );
+    expect(inboxCount(queue, DEFAULT_INBOX_TAB)).toBe(2);
+  });
+
+  test("every tab counts what it lists, with and without the unassigned toggle", () => {
+    for (const tab of INBOX_TABS) {
+      for (const unassigned of [false, true]) {
+        expect(inboxCount(queue, tab.id, unassigned)).toBe(
+          applyFilter(queue, inboxFilter(tab.id, unassigned)).length,
+        );
+      }
+    }
+    expect(inboxCount(queue, "all")).toBe(4);
+    expect(inboxCount(queue, "open", true)).toBe(1);
   });
 });

@@ -17,10 +17,13 @@ const ACCENTS = [
 export function Avatar({
   name,
   size = "md",
+  shape = "round",
   className,
 }: {
   name: string | null | undefined;
   size?: "sm" | "md";
+  /** Square for an organisation, round for a person. */
+  shape?: "round" | "square";
   className?: string;
 }) {
   const label = initials(name);
@@ -28,7 +31,8 @@ export function Avatar({
     <span
       aria-hidden="true"
       className={cn(
-        "inline-flex shrink-0 select-none items-center justify-center rounded-full font-medium",
+        "inline-flex shrink-0 select-none items-center justify-center font-semibold",
+        shape === "square" ? "rounded-md" : "rounded-full",
         size === "sm" ? "size-5 text-[9px]" : "size-6 text-[10px]",
         ACCENTS[accentIndex(name ?? "?", ACCENTS.length)],
         className,

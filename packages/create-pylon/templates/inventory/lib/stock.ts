@@ -119,6 +119,38 @@ export function stockState(quantity: number, reorderPoint?: number | null): Stoc
   return "ok";
 }
 
+export interface StockTab {
+  id: string;
+  label: string;
+}
+
+/** The product list's tabs, left to right. */
+export const STOCK_TABS: StockTab[] = [
+  { id: "all", label: "All" },
+  { id: "reorder", label: "Needs reorder" },
+  { id: "out", label: "Out of stock" },
+];
+
+/** Whether an active product at `state` belongs on a tab. */
+export function inStockTab(tabId: string, state: StockState): boolean {
+  if (tabId === "reorder") return state !== "ok";
+  if (tabId === "out") return state === "out";
+  return true;
+}
+
+/**
+ * How many active products each tab lists. The sidebar badge, the tab counts,
+ * and the summary bar all read `summarize`, and this agrees with it by
+ * construction: all = skuCount, reorder = low + out, out = outCount.
+ */
+export function stockTabCounts(summary: Summary): Record<string, number> {
+  return {
+    all: summary.skuCount,
+    reorder: summary.lowCount + summary.outCount,
+    out: summary.outCount,
+  };
+}
+
 export interface Summary {
   skuCount: number;
   unitCount: number;

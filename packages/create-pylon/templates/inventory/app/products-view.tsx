@@ -12,7 +12,17 @@ import { RecordDialog } from "@/components/record-dialog";
 import { SummaryBar } from "@/components/summary-bar";
 import { StockLevel } from "@/components/stock-level";
 import { MovementDialog } from "@/components/movement-dialog";
-import { money, parseAmount, parseCount, stockState } from "@/lib/stock";
+import { FilterTabs } from "@/components/filter-tabs";
+import { CategoryTile } from "@/components/category-tile";
+import {
+  STOCK_TABS,
+  inStockTab,
+  money,
+  parseAmount,
+  parseCount,
+  stockState,
+  stockTabCounts,
+} from "@/lib/stock";
 import { RequireAuth } from "@/components/require-auth";
 import { Workspace, type ProductRow } from "./workspace";
 
@@ -26,7 +36,13 @@ export function ProductsView({
   const router = useRouter();
   const [newOpen, setNewOpen] = useState(Boolean(openNew));
   const [moveOpen, setMoveOpen] = useState(false);
-  const [reorderOnly, setReorderOnly] = useState(initialFilter === "reorder");
+  const [tab, setTab] = useState(initialFilter === "reorder" ? "reorder" : "all");
+
+  // ⌘K "Needs reorder" navigates here with ?filter=reorder while the list may
+  // already be mounted.
+  useEffect(() => {
+    if (initialFilter === "reorder") setTab("reorder");
+  }, [initialFilter]);
 
   // "m" records a movement — the thing you do twenty times a day. Ignored
   // while typing.
@@ -52,25 +68,39 @@ export function ProductsView({
   }, []);
 
   return (
-    <RequireAuth title="Inventory" description="Your team shares one stock ledger. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/">
       {(data) => {
         const level = (id: string) => data.levels.get(id) ?? 0;
 
         const columns: ColumnDef<ProductRow>[] = [
           {
-            key: "sku",
-            header: "SKU",
-            cell: (row) => <span className="tabular text-muted-foreground">{row.sku}</span>,
-          },
-          {
             key: "name",
             header: "Product",
-            cell: (row) => <span className="truncate font-medium">{row.name}</span>,
+            className: "w-[60%] md:w-[34%]",
+            cell: (row) => (
+              <span className="flex min-w-0 items-center gap-3">
+                <CategoryTile category={row.category} />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{row.name}</span>
+                  <span className="block truncate font-mono text-[11.5px] text-muted-foreground md:hidden">
+                    {row.sku}
+                  </span>
+                </span>
+              </span>
+            ),
+          },
+          {
+            key: "sku",
+            header: "SKU",
+            hideBelow: "md",
+            className: "w-[110px]",
+            cell: (row) => <span className="font-mono text-[12px] text-muted-foreground">{row.sku}</span>,
           },
           {
             key: "category",
             header: "Category",
+            hideBelow: "lg",
             cell: (row) => (
               <span className="text-muted-foreground">{row.category ?? "—"}</span>
             ),
@@ -79,6 +109,7 @@ export function ProductsView({
             key: "onhand",
             header: "On hand",
             numeric: true,
+            className: "w-[120px] md:w-[170px]",
             cell: (row) => (
               <StockLevel quantity={level(row.id)} reorderPoint={row.reorderPoint} />
             ),
@@ -87,6 +118,8 @@ export function ProductsView({
             key: "reorder",
             header: "Reorder at",
             numeric: true,
+            hideBelow: "lg",
+            className: "w-[100px]",
             cell: (row) => (
               <span className="text-muted-foreground">{row.reorderPoint || "—"}</span>
             ),
@@ -95,69 +128,77 @@ export function ProductsView({
             key: "value",
             header: "Value",
             numeric: true,
+            hideBelow: "sm",
+            className: "w-[110px]",
             cell: (row) =>
               money(Math.max(0, level(row.id)) * (Number(row.unitCostCents) || 0)),
           },
         ];
 
+        const tabCounts = stockTabCounts(data.summary);
         const rows = data.products
           .filter((product) => !product.archived)
           .filter((product) =>
-            reorderOnly
-              ? stockState(level(product.id), product.reorderPoint) !== "ok"
-              : true,
+            inStockTab(tab, stockState(level(product.id), product.reorderPoint)),
           )
           .sort((a, b) => a.sku.localeCompare(b.sku));
 
         return (
           <>
-            <PageHeader title="Products" count={rows.length}>
+            <PageHeader title="Products" count={data.navCounts["/"]}>
               <Button
                 size="sm"
-                variant={reorderOnly ? "default" : "secondary"}
-                onClick={() => setReorderOnly((on) => !on)}
+                variant="outline"
+                onClick={() => setMoveOpen(true)}
+                title="Record a movement (m)"
               >
-                Needs reorder
-              </Button>
-              <Button size="sm" variant="secondary" onClick={() => setMoveOpen(true)}>
                 <ArrowLeftRight />
-                Movement
-                <Kbd className="ml-1">m</Kbd>
+                <span className="max-sm:sr-only">Movement</span>
+                <Kbd className="ml-0.5 hidden md:inline-flex">M</Kbd>
               </Button>
-              <Button size="sm" onClick={() => setNewOpen(true)}>
+              <Button size="sm" onClick={() => setNewOpen(true)} title="New product (c)">
                 <Plus />
-                New product
+                <span className="max-sm:sr-only">New product</span>
               </Button>
             </PageHeader>
 
-            <SummaryBar products={data.products} movements={data.movements} />
+            <SummaryBar summary={data.summary} />
+
+            <FilterTabs
+              label="Stock level"
+              value={tab}
+              onChange={setTab}
+              tabs={STOCK_TABS.map((t) => ({ id: t.id, label: t.label, count: tabCounts[t.id] }))}
+            />
 
             <DataTable
               rows={rows}
               columns={columns}
+              loading={data.loading}
+              label="Products"
               onRowClick={(row) => router.push(`/products/${row.id}`)}
               empty={
                 <EmptyState
                   icon={<Boxes />}
                   title={
-                    data.loading
-                      ? "Loading…"
-                      : reorderOnly
-                        ? "Nothing needs reordering"
-                        : "No products yet"
+                    tab === "all"
+                      ? "No products yet"
+                      : tab === "out"
+                        ? "Nothing is out of stock"
+                        : "Nothing needs reordering"
                   }
                   description={
-                    reorderOnly
-                      ? "Every line is above its reorder point."
-                      : "Add a product, then record what you receive. On-hand is the sum of those movements — there is no quantity to keep in sync."
+                    tab === "all"
+                      ? "Add a product, then record what you receive. On-hand is the sum of those movements, so there is no quantity to keep in sync."
+                      : "Every active product is above its reorder point."
                   }
                   action={
-                    reorderOnly ? undefined : (
+                    tab === "all" ? (
                       <Button size="sm" onClick={() => setNewOpen(true)}>
                         <Plus />
                         New product
                       </Button>
-                    )
+                    ) : undefined
                   }
                 />
               }

@@ -2,11 +2,13 @@
 
 import React, { useState } from "react";
 import { Link, callFn, useRouter } from "@pylonsync/react";
-import { ArrowLeft, ArrowLeftRight } from "lucide-react";
+import { ArrowLeftRight, ChevronRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PageHeader } from "@/components/page-header";
 import { EmptyState } from "@/components/empty-state";
 import { StockLevel } from "@/components/stock-level";
+import { CategoryTile } from "@/components/category-tile";
+import { Avatar } from "@/components/avatar";
 import { MovementDialog } from "@/components/movement-dialog";
 import { relativeTime } from "@/lib/format";
 import { money, reasonById, signedQuantity } from "@/lib/stock";
@@ -21,7 +23,7 @@ export function ProductView({
   const [moveOpen, setMoveOpen] = useState(false);
 
   return (
-    <RequireAuth title="Inventory" description="Your team shares one stock ledger. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/">
       {(data) => {
         const product = data.products.find((p) => p.id === productId);
@@ -31,7 +33,7 @@ export function ProductView({
             <>
               <PageHeader title="Product" />
               <EmptyState
-                title={data.loading ? "Loading…" : "Product not found"}
+                title={data.loading ? "Loading product…" : "Product not found"}
                 description={
                   data.loading ? undefined : "It may have been deleted, or the link is wrong."
                 }
@@ -63,31 +65,48 @@ export function ProductView({
 
         return (
           <>
-            <PageHeader title={product.name}>
+            <PageHeader
+              title={product.name}
+              leading={
+                <Link
+                  href="/"
+                  className="hidden items-center gap-1 text-[13px] text-muted-foreground transition-colors hover:text-foreground md:inline-flex"
+                >
+                  Products
+                  <ChevronRight className="size-3.5" />
+                </Link>
+              }
+            >
               <Button size="sm" onClick={() => setMoveOpen(true)}>
                 <ArrowLeftRight />
-                Record movement
+                <span className="max-sm:sr-only">Record movement</span>
               </Button>
             </PageHeader>
 
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-6">
-                <Link
-                  href="/"
-                  className="inline-flex w-fit items-center gap-1.5 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  <ArrowLeft className="size-3.5" />
-                  Products
-                </Link>
+              <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-5 md:px-8 md:py-8">
+                <div className="flex items-center gap-3.5">
+                  <CategoryTile category={product.category} className="size-11 rounded-lg [&_svg]:size-5" />
+                  <div className="min-w-0">
+                    <h2 className="truncate text-[20px] font-semibold tracking-[-0.015em] md:text-[22px]">
+                      {product.name}
+                    </h2>
+                    <p className="mt-0.5 text-[12.5px] text-muted-foreground">
+                      <span className="font-mono">{product.sku}</span>
+                      {product.category ? ` · ${product.category}` : ""}
+                    </p>
+                  </div>
+                </div>
 
-                <dl className="grid grid-cols-2 gap-x-6 gap-y-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-4">
-                  <Field label="SKU">
-                    <span className="tabular">{product.sku}</span>
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-4 rounded-xl border border-border bg-surface-1 p-4 sm:grid-cols-4">
+                  <Field label="Reorder at">
+                    <span className="tabular">{product.reorderPoint || "—"}</span>
                   </Field>
                   <Field label="On hand">
                     <StockLevel
                       quantity={quantity}
                       reorderPoint={product.reorderPoint}
+                      className="justify-start [&>span:last-child]:min-w-0 [&>span:last-child]:text-left"
                     />
                   </Field>
                   <Field label="Unit cost">{money(product.unitCostCents)}</Field>
@@ -99,19 +118,19 @@ export function ProductView({
                 <section>
                   <h2 className="mb-2 text-[13px] font-semibold">History</h2>
                   <p className="mb-3 text-[12px] text-muted-foreground">
-                    On hand is the sum of these movements. Nothing here is ever
-                    edited — a correction is another movement.
+                    On hand is the sum of these movements. Movements are never
+                    edited; a correction is another movement.
                   </p>
                   {withBalance.length === 0 ? (
                     <p className="py-6 text-center text-[12px] text-muted-foreground">
                       No movements yet.
                     </p>
                   ) : (
-                    <ol className="space-y-1.5">
+                    <ol className="divide-y divide-border/70 overflow-hidden rounded-xl border border-border">
                       {withBalance.map(({ movement, after }) => (
                         <li
                           key={movement.id}
-                          className="flex items-center gap-3 rounded-md border border-border bg-card px-3 py-2 text-[12px]"
+                          className="flex h-11 items-center gap-3 bg-card px-3.5 text-[13px]"
                         >
                           <span
                             className={
@@ -125,15 +144,26 @@ export function ProductView({
                             {reasonById(movement.reason)?.label ?? movement.reason}
                           </span>
                           {movement.note ? (
-                            <span className="truncate text-muted-foreground">
+                            <span className="hidden truncate text-muted-foreground sm:inline">
                               {movement.note}
                             </span>
                           ) : null}
-                          <span className="tabular ml-auto shrink-0 text-muted-foreground">
+                          <span className="ml-auto hidden shrink-0 items-center gap-1.5 text-[12.5px] text-muted-foreground md:flex">
+                            {data.actorName(movement.actorId) ? (
+                              <>
+                                <Avatar name={data.actorName(movement.actorId)} size="sm" />
+                                {data.actorName(movement.actorId)}
+                              </>
+                            ) : null}
+                          </span>
+                          <span
+                            className="tabular ml-auto w-14 shrink-0 text-right text-muted-foreground md:ml-0"
+                            title="On hand after this movement"
+                          >
                             → {after}
                           </span>
                           <time
-                            className="w-20 shrink-0 text-right text-muted-foreground"
+                            className="w-16 shrink-0 text-right text-muted-foreground"
                             dateTime={movement.createdAt ?? undefined}
                           >
                             {relativeTime(movement.createdAt)}
@@ -172,8 +202,8 @@ export function ProductView({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] text-muted-foreground">{label}</dt>
-      <dd className="mt-1 truncate text-[13px]">{children}</dd>
+      <dt className="text-[11.5px] font-medium text-muted-foreground">{label}</dt>
+      <dd className="mt-1 truncate text-[14px] font-medium">{children}</dd>
     </div>
   );
 }

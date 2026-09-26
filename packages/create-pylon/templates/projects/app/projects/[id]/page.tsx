@@ -1,9 +1,10 @@
 import React from "react";
 import type { Metadata, PageProps } from "@pylonsync/react";
+import { BRAND } from "@/lib/brand";
 import { ProjectView } from "./project-view";
 
 export const metadata: Metadata = {
-  title: "Project",
+  title: `Project · ${BRAND.name}`,
   robots: "noindex",
 };
 

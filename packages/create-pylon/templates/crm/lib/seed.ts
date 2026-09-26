@@ -7,6 +7,37 @@
 // Pure data + pure shaping, so the seeding function stays a thin wrapper and
 // this file can be edited (or emptied) without reading any server code.
 
+/**
+ * The demo sales team. Each becomes a User row with no
+ * password (see lib/demo-team.ts); they exist so deals have realistic owners.
+ */
+export interface SeedTeammate {
+  name: string;
+  email: string;
+}
+
+export const SEED_TEAM: SeedTeammate[] = [
+  { name: "Maya Castillo", email: "maya.castillo@demo.invalid" },
+  { name: "Jordan Ellis", email: "jordan.ellis@demo.invalid" },
+  { name: "Aisha Karim", email: "aisha.karim@demo.invalid" },
+  { name: "Noah Brandt", email: "noah.brandt@demo.invalid" },
+];
+
+/**
+ * Who owns the seeded deal at `index`, as a position in `[you, ...SEED_TEAM]`.
+ * Stepping by 3 through a team of 5 spreads every stage across everyone,
+ * including the person who signed up.
+ */
+export function seedOwner(index: number, teamSize: number = SEED_TEAM.length + 1): number {
+  return (index * 3 + 1) % teamSize;
+}
+
+/** A fictional US number in the 555-01xx range reserved for fiction. */
+export function seedPhone(index: number): string {
+  const area = [212, 312, 415, 512, 617, 720][index % 6];
+  return `+1 (${area}) 555-01${String(index % 100).padStart(2, "0")}`;
+}
+
 export interface SeedCompany {
   key: string;
   name: string;
@@ -131,14 +162,14 @@ export const SEED_DEALS: SeedDeal[] = [
   { company: "vantage", contact: "Anita Rao", title: "Installer scheduling", value: 26500, stage: "qualified", closeInDays: 38, age: 14 },
   { company: "tidewater", contact: "Sarah Lindqvist", title: "Shop floor work orders", value: 41000, stage: "qualified", closeInDays: 33, age: 19 },
 
-  // Proposal
+  // Proposal and negotiation
   { company: "northwind", contact: "Dana Whitfield", title: "Fleet dispatch rollout", value: 48000, stage: "proposal", closeInDays: 12, age: 34 },
   { company: "riverbed", contact: "Tom Alvarez", title: "Multi-store inventory", value: 22000, stage: "proposal", closeInDays: 5, age: 29 },
-  { company: "meridian", contact: "Rachel Stone", title: "Customer tracking portal", value: 88000, stage: "proposal", closeInDays: 9, age: 41 },
+  { company: "meridian", contact: "Rachel Stone", title: "Customer tracking portal", value: 88000, stage: "negotiation", closeInDays: 9, age: 41 },
   { company: "bluefin", contact: "Elena Vasquez", title: "Embedded reporting module", value: 36000, stage: "proposal", closeInDays: 14, age: 27 },
-  { company: "harbor", contact: "Robert Chen", title: "Guest messaging platform", value: 67000, stage: "proposal", closeInDays: 7, age: 38 },
-  { company: "halcyon", contact: "Margaret O'Neill", title: "Care plan tracking", value: 52000, stage: "proposal", closeInDays: 16, age: 31 },
-  { company: "summit", contact: "Greg Holloway", title: "Security review tooling", value: 18000, stage: "proposal", closeInDays: 3, age: 24 },
+  { company: "harbor", contact: "Robert Chen", title: "Guest messaging platform", value: 67000, stage: "negotiation", closeInDays: 6, age: 38 },
+  { company: "halcyon", contact: "Margaret O'Neill", title: "Care plan tracking", value: 52000, stage: "negotiation", closeInDays: 13, age: 31 },
+  { company: "summit", contact: "Greg Holloway", title: "Security review tooling", value: 18000, stage: "negotiation", closeInDays: -2, age: 24 },
   { company: "sable", contact: "Isabel Moreau", title: "Loyalty programme", value: 11200, stage: "proposal", closeInDays: 10, age: 26 },
 
   // Won
@@ -208,7 +239,14 @@ export const SEED_ACTIVITIES: SeedActivity[] = [
 export interface ShapedSeed {
   companies: Array<{ key: string; row: Record<string, unknown> }>;
   contacts: Array<{ company: string; row: Record<string, unknown> }>;
-  deals: Array<{ company: string; contact: string; title: string; row: Record<string, unknown> }>;
+  /** `owner` is a position in `[you, ...SEED_TEAM]`; see seedOwner. */
+  deals: Array<{
+    company: string;
+    contact: string;
+    title: string;
+    owner: number;
+    row: Record<string, unknown>;
+  }>;
   activities: Array<{ deal: string; row: Record<string, unknown> }>;
 }
 
@@ -239,12 +277,19 @@ export function shapeSeed(now: number = Date.now()): ShapedSeed {
     })),
     contacts: SEED_CONTACTS.map((c, index) => ({
       company: c.company,
-      row: { name: c.name, email: c.email, title: c.title, createdAt: at(-110 + index * 2) },
+      row: {
+        name: c.name,
+        email: c.email,
+        title: c.title,
+        phone: seedPhone(index),
+        createdAt: at(-110 + index * 2),
+      },
     })),
-    deals: SEED_DEALS.map((d) => ({
+    deals: SEED_DEALS.map((d, index) => ({
       company: d.company,
       contact: d.contact,
       title: d.title,
+      owner: seedOwner(index),
       row: {
         title: d.title,
         value: d.value,

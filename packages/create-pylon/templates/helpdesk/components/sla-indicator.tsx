@@ -1,7 +1,7 @@
 import React from "react";
 import { cn } from "@/lib/utils";
 import { duration } from "@/lib/format";
-import { minutesToBreach, slaState, type Ticket } from "@/lib/tickets";
+import { sla, type Ticket } from "@/lib/tickets";
 
 /**
  * How long is left to reply, or how long we're already late.
@@ -19,19 +19,16 @@ export function SlaIndicator({
   now?: number;
   className?: string;
 }) {
-  const state = slaState(ticket, now);
-  if (state === "none" || state === "met") return null;
-
-  const minutes = minutesToBreach(ticket, now);
-  if (minutes === null) return null;
+  const { state, minutes } = sla(ticket, now);
+  if (minutes === null || (state !== "due" && state !== "breached")) return null;
 
   const breached = state === "breached";
   return (
     <span
       title={breached ? "First response overdue" : "First response due"}
       className={cn(
-        "tabular inline-flex items-center gap-1 text-[11px] whitespace-nowrap",
-        breached ? "text-destructive" : "text-muted-foreground",
+        "tabular inline-flex items-center gap-1.5 rounded px-1.5 py-px text-[11.5px] font-medium whitespace-nowrap",
+        breached ? "bg-destructive/10 text-destructive" : "text-muted-foreground",
         className,
       )}
     >

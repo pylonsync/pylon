@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   REASONS,
+  STOCK_TABS,
+  inStockTab,
   isValidReason,
   money,
   needsReorder,
@@ -11,6 +13,7 @@ import {
   reasonAllows,
   signedQuantity,
   stockState,
+  stockTabCounts,
   summarize,
   type Movement,
   type Product,
@@ -251,5 +254,31 @@ describe("parsing", () => {
     expect(parseCount("1.5")).toBeNull();
     expect(parseCount("abc")).toBeNull();
     expect(parseCount("")).toBeNull();
+  });
+});
+
+describe("stock tabs", () => {
+  const products = [
+    product({ id: "a", reorderPoint: 5 }),
+    product({ id: "b", reorderPoint: 5 }),
+    product({ id: "c", reorderPoint: 5 }),
+    product({ id: "d", reorderPoint: 5, archived: true }),
+  ];
+  const ledger = [
+    move({ id: "1", productId: "a", delta: 20 }),
+    move({ id: "2", productId: "b", delta: 3 }),
+    move({ id: "3", productId: "d", delta: 1 }),
+  ];
+
+  test("each tab's count is exactly the rows it lists", () => {
+    const counts = stockTabCounts(summarize(products, ledger));
+    const levels = onHandByProduct(ledger);
+    for (const tab of STOCK_TABS) {
+      const listed = products.filter(
+        (p) => !p.archived && inStockTab(tab.id, stockState(levels.get(p.id) ?? 0, p.reorderPoint)),
+      );
+      expect(counts[tab.id]).toBe(listed.length);
+    }
+    expect(counts).toEqual({ all: 3, reorder: 2, out: 1 });
   });
 });

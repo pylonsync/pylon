@@ -69,40 +69,52 @@ export function isOpen(ticket: { status: string }): boolean {
 
 export type SlaState = "met" | "due" | "breached" | "none";
 
+export interface Sla {
+  state: SlaState;
+  /**
+   * Whole minutes to the first-response target while `due` (at least 1), or
+   * minutes past it once `breached` (at most -1). Null when there is no
+   * target to chase. Rounded away from zero, so a label never reads "0m".
+   */
+  minutes: number | null;
+}
+
 /**
  * Where a ticket stands against its first-response target.
  *
  *   met      — an agent has already replied
- *   breached — no reply and the window has passed
- *   due      — no reply, inside the window
+ *   breached — no reply and the deadline has passed
+ *   due      — no reply, before the deadline
  *   none     — terminal, or unparseable dates; nothing to chase
  *
  * A solved ticket that was answered late is still `met`: the SLA question is
  * "did we reply", and re-flagging closed work just adds noise to the queue.
+ *
+ * State and minutes come from one calculation, so the badge can't say
+ * "breached" next to a number that rounds to zero.
  */
-export function slaState(
-  ticket: Ticket,
-  now: number = Date.now(),
-): SlaState {
-  if (!isOpen(ticket)) return "none";
-  if (ticket.firstRespondedAt) return "met";
+export function sla(ticket: Ticket, now: number = Date.now()): Sla {
+  if (!isOpen(ticket)) return { state: "none", minutes: null };
+  if (ticket.firstRespondedAt) return { state: "met", minutes: null };
   const created = Date.parse(ticket.createdAt ?? "");
-  if (!Number.isFinite(created)) return "none";
   const hours = priorityById(ticket.priority)?.firstResponseHours;
-  if (hours === undefined) return "none";
-  return now > created + hours * 3_600_000 ? "breached" : "due";
+  if (!Number.isFinite(created) || hours === undefined) {
+    return { state: "none", minutes: null };
+  }
+  const remainingMs = created + hours * 3_600_000 - now;
+  if (remainingMs > 0) {
+    return { state: "due", minutes: Math.ceil(remainingMs / 60_000) };
+  }
+  return { state: "breached", minutes: -Math.max(1, Math.ceil(-remainingMs / 60_000)) };
+}
+
+export function slaState(ticket: Ticket, now: number = Date.now()): SlaState {
+  return sla(ticket, now).state;
 }
 
 /** Minutes left before the first-response target, negative once breached. */
-export function minutesToBreach(
-  ticket: Ticket,
-  now: number = Date.now(),
-): number | null {
-  if (!isOpen(ticket) || ticket.firstRespondedAt) return null;
-  const created = Date.parse(ticket.createdAt ?? "");
-  const hours = priorityById(ticket.priority)?.firstResponseHours;
-  if (!Number.isFinite(created) || hours === undefined) return null;
-  return Math.round((created + hours * 3_600_000 - now) / 60_000);
+export function minutesToBreach(ticket: Ticket, now: number = Date.now()): number | null {
+  return sla(ticket, now).minutes;
 }
 
 /**
@@ -169,6 +181,42 @@ export function applyFilter(tickets: Ticket[], filter: Filter): Ticket[] {
     if (filter.unassigned && ticket.assigneeId) return false;
     return true;
   });
+}
+
+export interface InboxTab {
+  id: string;
+  label: string;
+  /** Status the tab shows; undefined shows every status. */
+  status?: string;
+}
+
+/** The inbox's tabs, left to right. */
+export const INBOX_TABS: InboxTab[] = [
+  { id: "open", label: "Open", status: "open" },
+  { id: "pending", label: "Pending", status: "pending" },
+  { id: "solved", label: "Solved", status: "solved" },
+  { id: "closed", label: "Closed", status: "closed" },
+  { id: "all", label: "All" },
+];
+
+/** The tab the inbox opens on. The sidebar's Inbox count is this tab's count. */
+export const DEFAULT_INBOX_TAB = "open";
+
+/** The filter behind an inbox tab, optionally narrowed to unassigned tickets. */
+export function inboxFilter(tabId: string, unassigned = false): Filter {
+  const tab = INBOX_TABS.find((t) => t.id === tabId);
+  return {
+    ...(tab?.status ? { status: tab.status } : {}),
+    ...(unassigned ? { unassigned: true } : {}),
+  };
+}
+
+/**
+ * How many tickets an inbox tab lists. The sidebar badge, the tab counts, and
+ * the list all go through this and `inboxFilter`, so they always agree.
+ */
+export function inboxCount(tickets: Ticket[], tabId: string, unassigned = false): number {
+  return applyFilter(tickets, inboxFilter(tabId, unassigned)).length;
 }
 
 /** "#1042" — short, stable, and greppable in an email thread. */

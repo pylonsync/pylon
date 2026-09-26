@@ -3,10 +3,18 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { callFn, db, useRouter } from "@pylonsync/react";
 import { useAuth } from "@pylonsync/client";
-import { Sidebar } from "@/components/sidebar";
+import { FolderKanban, SquareCheck } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
 import type { SearchItem } from "@/lib/search";
-import { minutesByTask, type Project, type Task, type TimeEntry } from "@/lib/work";
+import {
+  DEFAULT_PROJECT_TAB,
+  minutesByTask,
+  projectTabCounts,
+  type Project,
+  type Task,
+  type TimeEntry,
+} from "@/lib/work";
 
 export interface ClientRow {
   id: string;
@@ -33,6 +41,13 @@ export interface WorkspaceData {
   clientName: (id: string | null | undefined) => string | null;
   memberName: (id: string | null | undefined) => string | null;
   members: UserRow[];
+  /** Project count per list tab; see PROJECT_TABS. */
+  projectCounts: Record<string, number>;
+  /**
+   * The number beside each nav link, keyed by href. Page headers and tabs
+   * read the same counts, so the sidebar and the page can't disagree.
+   */
+  navCounts: Record<string, number>;
   loading: boolean;
 }
 
@@ -67,8 +82,7 @@ export function Workspace({
 
   // Whoever is signed in, named from the synced User row rather than an
   // SSR prop — see the note on useAuth above.
-  const signedInEmail =
-    (users ?? []).find((user) => user.id === userId)?.email ?? "";
+  const me = (users ?? []).find((user) => user.id === userId);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const seeded = useRef(false);
@@ -126,20 +140,26 @@ export function Workspace({
     () => [
       ...projectList.map((project) => ({
         id: `project:${project.id}`,
-        type: "company" as const,
+        type: "project",
         title: project.name,
         subtitle: clientById.get(project.clientId ?? "")?.name,
         href: `/projects/${project.id}`,
       })),
       ...taskList.map((task) => ({
         id: `task:${task.id}`,
-        type: "deal" as const,
+        type: "task",
         title: task.title,
         href: `/projects/${task.projectId}`,
       })),
     ],
     [projectList, taskList, clientById],
   );
+
+  const projectCounts = projectTabCounts(projectList);
+  const navCounts = {
+    "/": projectCounts[DEFAULT_PROJECT_TAB],
+    "/clients": clientList.length,
+  };
 
   const data: WorkspaceData = {
     clients: clientList,
@@ -153,23 +173,22 @@ export function Workspace({
       return user?.displayName || user?.email || null;
     },
     members: users ?? [],
+    projectCounts,
+    navCounts,
     loading,
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar
-        workspace="Projects"
-        email={signedInEmail}
-        pathname={pathname}
-        counts={{
-          "/": projectList.filter((p) => p.status === "active").length,
-          "/clients": clientList.length,
-        }}
-        onOpenCommand={() => setPaletteOpen(true)}
-        onSignOut={() => void signOut()}
-      />
-      <main className="flex min-w-0 flex-1 flex-col">{children(data)}</main>
+    <AppShell
+      sidebar={{
+        user: { name: me?.displayName ?? "", email: me?.email ?? "" },
+        pathname,
+        counts: navCounts,
+        onOpenCommand: () => setPaletteOpen(true),
+        onSignOut: () => void signOut(),
+      }}
+    >
+      {children(data)}
 
       <CommandPalette
         open={paletteOpen}
@@ -186,9 +205,11 @@ export function Workspace({
             run: () => router.push("/clients"),
           },
         ]}
+        placeholder="Search projects and tasks…"
+        icons={{ project: <FolderKanban />, task: <SquareCheck /> }}
         onClose={() => setPaletteOpen(false)}
         onSelect={(item) => router.push(item.href)}
       />
-    </div>
+    </AppShell>
   );
 }

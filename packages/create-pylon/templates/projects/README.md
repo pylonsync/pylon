@@ -10,10 +10,15 @@ API, auth, and realtime sync from one process on one port.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321 and create an account. The first sign-in seeds two
-live projects — one comfortably inside its budget, one over it — so both states
-are visible rather than theoretical. Delete `functions/seedWorkspace.ts` and
+Open http://localhost:4321 and create an account. The first sign-in seeds ten
+projects across active, paused, and complete, with two active ones over budget,
+so every state is visible on first load. Delete `functions/seedWorkspace.ts` and
 `lib/seed.ts` once you have real work.
+
+The tasks and timesheets are spread across you and four demo teammates. Each is a User
+row with a `@demo.invalid` address and no password, so outside dev mode nobody
+can sign in as one (see `lib/demo-team.ts`). Delete those users along with the
+seed.
 
 ## What's interesting here
 
@@ -45,6 +50,22 @@ computed server-side, so two simultaneous drags don\'t claim the same index.
 Rejecting "1h30" because it isn\'t "90" is the kind of friction that stops time
 being logged at all, which costs far more than a forgiving parser. Values over a
 day are refused — a typo on a timesheet becomes a typo on an invoice.
+
+## Brand and layout
+
+The product ships as **Workbench**. The name lives in `lib/brand.ts`, and the
+sidebar, sign-in screen, page titles, and phone drawer all read it. The mark is
+`components/brand-mark.tsx`; `app/icon.svg`, `app/apple-icon.png`, and
+`public/favicon.ico` draw the same shape for browsers and home screens. The
+accent colour is `--brand` at the top of `app/globals.css`, and the typeface
+(Manrope) is set in `fonts` in `app.ts`.
+
+The frame is `components/app-shell.tsx`. From 768px up the sidebar is a fixed
+rail; below that it opens as a drawer from the menu button in each page header,
+tables drop their lower-priority columns (`hideBelow` in
+`components/data-table.tsx`), and boards scroll one column at a time. The nav
+links are in `components/nav.tsx`. Every nav count comes from `navCounts` in
+`app/workspace.tsx`, and page headers and tabs read the same numbers.
 
 ## Layout
 

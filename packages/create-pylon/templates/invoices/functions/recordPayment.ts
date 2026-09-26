@@ -35,6 +35,9 @@ export default mutation<
     if (invoice.status === "void") {
       throw ctx.error("INVALID_ARGS", "That invoice is void.");
     }
+    if (invoice.status === "draft") {
+      throw ctx.error("INVALID_ARGS", "Send the invoice before recording a payment.");
+    }
 
     const items = (await ctx.db.query("LineItem", {
       invoiceId: args.invoiceId,

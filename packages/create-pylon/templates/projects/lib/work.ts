@@ -65,6 +65,39 @@ export interface TimeEntry {
   spentOn?: string | null;
 }
 
+export interface ProjectTab {
+  id: string;
+  label: string;
+  /** Project status the tab shows; undefined shows every project. */
+  status?: string;
+}
+
+/** The project list's tabs, left to right. */
+export const PROJECT_TABS: ProjectTab[] = [
+  { id: "active", label: "Active", status: "active" },
+  { id: "paused", label: "Paused", status: "paused" },
+  { id: "complete", label: "Complete", status: "complete" },
+  { id: "all", label: "All" },
+];
+
+/** The tab the list opens on. The sidebar's Projects count is this tab's count. */
+export const DEFAULT_PROJECT_TAB = "active";
+
+export function inProjectTab(tabId: string, project: { status: string }): boolean {
+  const tab = PROJECT_TABS.find((t) => t.id === tabId);
+  return !tab?.status || project.status === tab.status;
+}
+
+/**
+ * How many projects each tab lists. The sidebar badge, the page header, and
+ * the tab counts all read this, so they always agree.
+ */
+export function projectTabCounts(projects: Array<{ status: string }>): Record<string, number> {
+  return Object.fromEntries(
+    PROJECT_TABS.map((tab) => [tab.id, projects.filter((p) => inProjectTab(tab.id, p)).length]),
+  );
+}
+
 export function taskStatusById(id: string): Status | undefined {
   return TASK_STATUSES.find((s) => s.id === id);
 }
@@ -230,4 +263,34 @@ export function parseDuration(input: string): number | null {
   }
 
   return null;
+}
+
+export interface Portfolio {
+  /** Projects with status "active". */
+  activeCount: number;
+  /** Minutes logged against active projects. */
+  loggedMinutes: number;
+  /** What that time is worth at each project's rate. */
+  billableCents: number;
+  /** Active projects past their budget. */
+  overBudgetCount: number;
+}
+
+/** The numbers above the project list, over active projects only. */
+export function portfolio(projects: Project[], entries: TimeEntry[]): Portfolio {
+  const result: Portfolio = {
+    activeCount: 0,
+    loggedMinutes: 0,
+    billableCents: 0,
+    overBudgetCount: 0,
+  };
+  for (const project of projects) {
+    if (project.status !== "active") continue;
+    const minutes = minutesForProject(project.id, entries);
+    result.activeCount += 1;
+    result.loggedMinutes += minutes;
+    result.billableCents += billableCents(minutes, project.hourlyRateCents);
+    if (budgetState(project.budgetMinutes, minutes) === "over") result.overBudgetCount += 1;
+  }
+  return result;
 }

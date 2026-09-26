@@ -42,6 +42,22 @@ one from the existing rows: a counter in a synced replica is a race, and gaps in
 an invoice series get asked about by accountants. `number` is unique in the
 schema, so a genuine collision fails loudly.
 
+## Brand and layout
+
+The product ships as **Billfold**. The name lives in `lib/brand.ts`, and the
+sidebar, sign-in screen, page titles, and phone drawer all read it. The mark is
+`components/brand-mark.tsx`; `app/icon.svg`, `app/apple-icon.png`, and
+`public/favicon.ico` draw the same shape for browsers and home screens. The
+accent colour is `--brand` at the top of `app/globals.css`, and the typeface
+(Hanken Grotesk) is set in `fonts` in `app.ts`.
+
+The frame is `components/app-shell.tsx`. From 768px up the sidebar is a fixed
+rail; below that it opens as a drawer from the menu button in each page header,
+tables drop their lower-priority columns (`hideBelow` in
+`components/data-table.tsx`), and boards scroll one column at a time. The nav
+links are in `components/nav.tsx`. Every nav count comes from `navCounts` in
+`app/workspace.tsx`, and page headers and tabs read the same numbers.
+
 ## Layout
 
 ```

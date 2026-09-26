@@ -10,7 +10,7 @@ import {
 } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
-// crm — a sales CRM for a small team: companies, contacts, deals moving through
+// Dealbook (the crm template) — a sales CRM for a small team: companies, contacts, deals moving through
 // a pipeline, and an activity log.
 //
 // The realtime hook: the board subscribes to Deal, so when a teammate drags a
@@ -156,12 +156,12 @@ const manifest = buildManifest({
     userPolicy,
   ],
   auth: auth(),
-  // Self-hosted Inter: the build fetches the woff2, serves it same-origin (no
-  // third-party request, no FOUT), preloads it, and synthesizes a size-adjusted
-  // fallback so there's no layout shift.
+  // Self-hosted Instrument Sans: the build fetches the woff2, serves it
+  // same-origin, preloads it, and synthesizes a size-adjusted fallback so
+  // there's no layout shift.
   fonts: [
     font({
-      family: "Inter",
+      family: "Instrument Sans",
       variable: "--font-sans",
       weights: ["400", "500", "600", "700"],
       subsets: ["latin"],

@@ -17,7 +17,7 @@ export function ClientsView() {
   const [open, setOpen] = useState(false);
 
   return (
-    <RequireAuth title="Projects" description="Your team shares one set of projects. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/clients">
       {(data) => {
         const forClient = (clientId: string) =>
@@ -27,16 +27,23 @@ export function ClientsView() {
           {
             key: "name",
             header: "Client",
+            className: "w-[60%] md:w-[30%]",
             cell: (row) => (
-              <span className="flex items-center gap-2">
-                <Avatar name={row.name} size="sm" />
-                <span className="truncate font-medium">{row.name}</span>
+              <span className="flex min-w-0 items-center gap-2.5">
+                <Avatar name={row.name} shape="square" />
+                <span className="min-w-0">
+                  <span className="block truncate font-medium">{row.name}</span>
+                  <span className="block truncate text-[12px] text-muted-foreground md:hidden">
+                    {row.email ?? ""}
+                  </span>
+                </span>
               </span>
             ),
           },
           {
             key: "email",
             header: "Email",
+            hideBelow: "md",
             cell: (row) => (
               <span className="text-muted-foreground">{row.email ?? "—"}</span>
             ),
@@ -44,12 +51,16 @@ export function ClientsView() {
           {
             key: "projects",
             header: "Projects",
+            hideBelow: "sm",
+            className: "w-[96px]",
             numeric: true,
             cell: (row) => forClient(row.id).length,
           },
           {
             key: "logged",
             header: "Logged",
+            hideBelow: "lg",
+            className: "w-[110px]",
             numeric: true,
             cell: (row) =>
               duration(
@@ -62,6 +73,7 @@ export function ClientsView() {
           {
             key: "billable",
             header: "Billable",
+            className: "w-[120px] md:w-[140px]",
             numeric: true,
             cell: (row) =>
               money(
@@ -82,16 +94,18 @@ export function ClientsView() {
 
         return (
           <>
-            <PageHeader title="Clients" count={rows.length}>
+            <PageHeader title="Clients" count={data.navCounts["/clients"]}>
               <Button size="sm" onClick={() => setOpen(true)}>
                 <Plus />
-                New client
+                <span className="max-sm:sr-only">New client</span>
               </Button>
             </PageHeader>
 
             <DataTable
               rows={rows}
               columns={columns}
+              loading={data.loading}
+              label="Clients"
               empty={
                 <EmptyState
                   icon={<Users />}

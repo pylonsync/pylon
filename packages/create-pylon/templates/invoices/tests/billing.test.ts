@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  INVOICE_TABS,
   daysOverdue,
+  inInvoiceTab,
+  invoiceTabCounts,
   displayStatus,
   isOverdue,
   isValidStatus,
@@ -279,5 +282,29 @@ describe("statuses", () => {
     expect(isValidStatus("sent")).toBe(true);
     expect(isValidStatus("paid")).toBe(true);
     expect(isValidStatus("void")).toBe(true);
+  });
+});
+
+describe("invoice tabs", () => {
+  const invoices = [
+    invoice({ id: "a", status: "draft" }),
+    invoice({ id: "b", status: "sent", dueDate: at(10) }),
+    invoice({ id: "c", status: "sent", dueDate: at(-5) }),
+    invoice({ id: "d", status: "paid" }),
+    invoice({ id: "e", status: "sent", dueDate: at(-5) }),
+  ];
+  const items = invoices.map((inv, i) => line({ id: `l${i}`, invoiceId: inv.id }));
+  // "e" is past due but fully paid, so it reads as paid, not overdue.
+  const payments: Payment[] = [{ id: "p1", invoiceId: "e", amountCents: 10_000 }];
+
+  test("each tab's count is exactly the rows it lists", () => {
+    const counts = invoiceTabCounts(invoices, items, payments, NOW);
+    for (const tab of INVOICE_TABS) {
+      const listed = invoices.filter((inv) =>
+        inInvoiceTab(tab.id, displayStatus(inv, totals(inv, items, payments).balanceCents, NOW)),
+      );
+      expect(counts[tab.id]).toBe(listed.length);
+    }
+    expect(counts).toEqual({ all: 5, draft: 1, sent: 1, overdue: 1, paid: 2 });
   });
 });

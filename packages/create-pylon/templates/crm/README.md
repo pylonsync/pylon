@@ -14,6 +14,11 @@ Open http://localhost:4321 and create an account. The first sign-in seeds a demo
 pipeline so the board isn't empty; delete `functions/seedWorkspace.ts` and
 `lib/seed.ts` once you have real customers.
 
+The deals are spread across you and four demo teammates. Each is a User
+row with a `@demo.invalid` address and no password, so outside dev mode nobody
+can sign in as one (see `lib/demo-team.ts`). Delete those users along with the
+seed.
+
 ## What's interesting here
 
 **The board is live.** Drag a deal to another column and it moves on every
@@ -30,6 +35,22 @@ results appear as you type with no request per keystroke. `/` opens it too, and
 win rate are computed from the deals themselves in `lib/pipeline.ts` — pure
 functions with no React and no `db`, so the arithmetic is unit-tested directly
 (`tests/pipeline.test.ts`).
+
+## Brand and layout
+
+The product ships as **Dealbook**. The name lives in `lib/brand.ts`, and the
+sidebar, sign-in screen, page titles, and phone drawer all read it. The mark is
+`components/brand-mark.tsx`; `app/icon.svg`, `app/apple-icon.png`, and
+`public/favicon.ico` draw the same shape for browsers and home screens. The
+accent colour is `--brand` at the top of `app/globals.css`, and the typeface
+(Instrument Sans) is set in `fonts` in `app.ts`.
+
+The frame is `components/app-shell.tsx`. From 768px up the sidebar is a fixed
+rail; below that it opens as a drawer from the menu button in each page header,
+tables drop their lower-priority columns (`hideBelow` in
+`components/data-table.tsx`), and boards scroll one column at a time. The nav
+links are in `components/nav.tsx`. Every nav count comes from `navCounts` in
+`app/workspace.tsx`, and page headers and tabs read the same numbers.
 
 ## Layout
 
@@ -84,7 +105,7 @@ already themed.
 - **Add a stage:** `PIPELINE` in `lib/pipeline.ts`. The board, the forecast, and
   the stage picker all read from it.
 - **Add a view:** drop `app/reports/page.tsx` and add it to `NAV` in
-  `components/sidebar.tsx`.
+  `components/nav.tsx`.
 
 ## Deploy
 

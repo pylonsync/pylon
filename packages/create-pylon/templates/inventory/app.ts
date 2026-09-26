@@ -10,7 +10,7 @@ import {
 } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
-// inventory — stock control for a small business: products, an append-only
+// Stockroom (the inventory template) — stock control for a small business: products, an append-only
 // ledger of movements, and the levels derived from it.
 //
 // THE CENTRAL DECISION: there is no `quantity` column. On-hand is the SUM of a
@@ -144,12 +144,20 @@ const manifest = buildManifest({
   auth: auth(),
   fonts: [
     font({
-      family: "Inter",
+      family: "IBM Plex Sans",
       variable: "--font-sans",
       weights: ["400", "500", "600", "700"],
       subsets: ["latin"],
       display: "swap",
       preload: true,
+    }),
+    // SKUs and quantities in the ledger read best in a fixed-width face.
+    font({
+      family: "IBM Plex Mono",
+      variable: "--font-mono",
+      weights: ["400", "500"],
+      subsets: ["latin"],
+      display: "swap",
     }),
   ],
   routes: await discoverAppRoutes(),

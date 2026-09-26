@@ -12,14 +12,14 @@ import { BOARD_STAGES } from "@/lib/pipeline";
  */
 export function BoardSkeleton() {
   return (
-    <div className="flex h-full gap-3 overflow-hidden p-4" aria-hidden="true">
+    <div className="flex h-full gap-3 overflow-hidden p-4 md:px-5" aria-hidden="true">
       {BOARD_STAGES.map((stage, column) => (
         <section
           key={stage.id}
-          className="flex w-[268px] shrink-0 flex-col rounded-xl border border-border bg-surface-1/50"
+          className="flex w-[84vw] shrink-0 flex-col rounded-xl border border-border/70 bg-surface-1 md:w-auto md:min-w-[208px] md:max-w-[340px] md:flex-1"
         >
-          <header className="flex items-center gap-2 px-3 py-2.5">
-            <span className="text-[12px] font-medium text-muted-foreground">
+          <header className="flex items-center gap-2 px-3 pb-2 pt-3">
+            <span className="text-[12.5px] font-semibold text-muted-foreground">
               {stage.label}
             </span>
           </header>
@@ -29,7 +29,7 @@ export function BoardSkeleton() {
             {Array.from({ length: Math.max(1, 3 - column) }).map((_, card) => (
               <div
                 key={card}
-                className="animate-pulse rounded-lg border border-border bg-card p-2.5"
+                className="animate-pulse rounded-lg border border-border/80 bg-card p-3"
               >
                 <div className="h-3 w-3/4 rounded bg-muted" />
                 <div className="mt-2 h-2.5 w-1/2 rounded bg-muted" />

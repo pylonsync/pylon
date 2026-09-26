@@ -58,7 +58,7 @@ export function Thread({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-4 md:px-6 md:py-5">
         {ordered.length === 0 ? (
           <p className="py-8 text-center text-[12px] text-muted-foreground">
             No messages on this ticket yet.
@@ -72,7 +72,7 @@ export function Thread({
               <article
                 key={message.id}
                 className={cn(
-                  "rounded-lg border p-3",
+                  "rounded-lg border p-3 md:p-3.5",
                   message.internal
                     ? "border-stage-proposal/30 bg-stage-proposal/5"
                     : message.fromCustomer
@@ -80,7 +80,7 @@ export function Thread({
                       : "border-border bg-card",
                 )}
               >
-                <div className="mb-1.5 flex items-center gap-2 text-[11px] text-muted-foreground">
+                <div className="mb-1.5 flex items-center gap-2 text-[12px] text-muted-foreground">
                   <Avatar name={who ?? "?"} size="sm" />
                   <span className="font-medium text-foreground">{who ?? "Unknown"}</span>
                   {message.internal ? (
@@ -96,7 +96,7 @@ export function Thread({
                     {relativeTime(message.createdAt, now)}
                   </time>
                 </div>
-                <p className="whitespace-pre-wrap text-[13px] leading-6">
+                <p className="whitespace-pre-wrap text-[13.5px] leading-6 md:text-[13px]">
                   {message.body}
                 </p>
               </article>
@@ -108,20 +108,20 @@ export function Thread({
       <form
         onSubmit={submit}
         className={cn(
-          "shrink-0 border-t p-3 transition-colors",
+          "shrink-0 border-t p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] transition-colors md:px-6",
           internal ? "border-stage-proposal/40 bg-stage-proposal/5" : "border-border",
         )}
       >
         <Textarea
           value={body}
-          rows={3}
+          rows={2}
           placeholder={internal ? "Internal note — the customer won't see this…" : "Reply to the customer…"}
           aria-label={internal ? "Internal note" : "Reply"}
           onChange={(event) => setBody(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) submit(event);
           }}
-          className="min-h-20 resize-none"
+          className="min-h-16 resize-none md:min-h-20"
         />
         <div className="mt-2 flex items-center justify-between gap-2">
           <label className="flex items-center gap-2 text-[12px] text-muted-foreground">

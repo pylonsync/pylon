@@ -9,23 +9,30 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { duration, parseDuration } from "@/lib/work";
+import { Select } from "@/components/ui/select";
+import { TASK_STATUSES, duration, parseDuration } from "@/lib/work";
 
 /**
- * Log time against a task.
+ * Log time against a task, and move it between columns. The status select is
+ * how a task changes column on a touch screen, where cards can't be dragged.
  *
  * The field accepts however people write time — "90", "1.5h", "1h30", "45m".
- * Rejecting "1h30" because it isn\'t "90" is the kind of friction that stops
+ * Rejecting "1h30" because it isn't "90" is the kind of friction that stops
  * time being logged at all, which costs far more than a lenient parser.
  */
 export function TimeDialog({
   open,
   taskTitle,
+  status,
+  onMove,
   onOpenChange,
   onLog,
 }: {
   open: boolean;
   taskTitle: string;
+  /** The task's current column. With `onMove`, shows a status select. */
+  status?: string;
+  onMove?: (status: string) => void;
   onOpenChange: (open: boolean) => void;
   onLog: (minutes: number, note: string) => void | Promise<void>;
 }) {
@@ -63,7 +70,24 @@ export function TimeDialog({
           <DialogTitle>Log time</DialogTitle>
         </DialogHeader>
         <form onSubmit={submit} className="grid gap-4">
-          <p className="truncate text-[12px] text-muted-foreground">{taskTitle}</p>
+          <p className="truncate text-[13px] font-medium">{taskTitle}</p>
+
+          {status && onMove ? (
+            <div className="space-y-1.5">
+              <Label htmlFor="task-status">Status</Label>
+              <Select
+                id="task-status"
+                value={status}
+                onChange={(event) => onMove(event.target.value)}
+              >
+                {TASK_STATUSES.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.label}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          ) : null}
 
           <div className="space-y-1.5">
             <Label htmlFor="time-value">Time</Label>
@@ -79,7 +103,7 @@ export function TimeDialog({
             ) : null}
             {tooMuch ? (
               <p className="text-[11px] text-destructive">
-                That\'s more than a day — check the value.
+                That's more than a day — check the value.
               </p>
             ) : null}
             {minutes === null && value.trim() ? (

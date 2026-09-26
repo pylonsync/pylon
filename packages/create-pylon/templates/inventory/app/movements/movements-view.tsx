@@ -5,6 +5,7 @@ import { ArrowLeftRight } from "lucide-react";
 import { PageHeader } from "@/components/page-header";
 import { DataTable, type ColumnDef } from "@/components/data-table";
 import { EmptyState } from "@/components/empty-state";
+import { Avatar } from "@/components/avatar";
 import { relativeTime } from "@/lib/format";
 import { reasonById, signedQuantity } from "@/lib/stock";
 import { RequireAuth } from "@/components/require-auth";
@@ -18,13 +19,14 @@ import { Workspace, type MovementRow } from "../workspace";
  */
 export function MovementsView() {
   return (
-    <RequireAuth title="Inventory" description="Your team shares one stock ledger. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/movements">
       {(data) => {
         const columns: ColumnDef<MovementRow>[] = [
           {
             key: "when",
             header: "When",
+            className: "w-[84px] md:w-[100px]",
             cell: (row) => (
               <span className="text-muted-foreground">{relativeTime(row.createdAt)}</span>
             ),
@@ -32,15 +34,23 @@ export function MovementsView() {
           {
             key: "product",
             header: "Product",
+            className: "md:w-[30%]",
             cell: (row) => (
-              <span className="truncate font-medium">
-                {data.productName(row.productId) ?? "—"}
+              <span className="min-w-0">
+                <span className="block truncate font-medium">
+                  {data.productName(row.productId) ?? "—"}
+                </span>
+                <span className="block truncate text-[12px] text-muted-foreground md:hidden">
+                  {reasonById(row.reason)?.label ?? row.reason}
+                </span>
               </span>
             ),
           },
           {
             key: "reason",
             header: "Reason",
+            hideBelow: "md",
+            className: "w-[130px]",
             cell: (row) => (
               <span className="text-muted-foreground">
                 {reasonById(row.reason)?.label ?? row.reason}
@@ -51,6 +61,7 @@ export function MovementsView() {
             key: "delta",
             header: "Change",
             numeric: true,
+            className: "w-[80px] md:w-[90px]",
             cell: (row) => (
               <span
                 className={
@@ -64,6 +75,7 @@ export function MovementsView() {
           {
             key: "note",
             header: "Note",
+            hideBelow: "lg",
             cell: (row) => (
               <span className="text-muted-foreground">{row.note ?? "—"}</span>
             ),
@@ -71,11 +83,19 @@ export function MovementsView() {
           {
             key: "who",
             header: "By",
-            cell: (row) => (
-              <span className="text-muted-foreground">
-                {data.actorName(row.actorId) ?? "—"}
-              </span>
-            ),
+            hideBelow: "sm",
+            className: "w-[170px]",
+            cell: (row) => {
+              const name = data.actorName(row.actorId);
+              return name ? (
+                <span className="flex min-w-0 items-center gap-2">
+                  <Avatar name={name} size="sm" />
+                  <span className="truncate text-muted-foreground">{name}</span>
+                </span>
+              ) : (
+                <span className="text-muted-foreground">—</span>
+              );
+            },
           },
         ];
 
@@ -85,14 +105,16 @@ export function MovementsView() {
 
         return (
           <>
-            <PageHeader title="Movements" count={rows.length} />
+            <PageHeader title="Movements" count={data.navCounts["/movements"]} />
             <DataTable
               rows={rows}
               columns={columns}
+              loading={data.loading}
+              label="Stock movements"
               empty={
                 <EmptyState
                   icon={<ArrowLeftRight />}
-                  title={data.loading ? "Loading…" : "No movements yet"}
+                  title="No movements yet"
                   description="Every change to stock is recorded here, permanently. On-hand is the sum of these rows."
                 />
               }

@@ -10,7 +10,7 @@ import {
 } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
-// helpdesk — a support inbox for a small team: customers write in, agents triage
+// Frontdesk (the helpdesk template) — a support inbox for a small team: customers write in, agents triage
 // by priority and SLA, and every reply lands on a shared thread.
 //
 // The realtime hook: the queue subscribes to Ticket, so a new ticket appears at
@@ -132,7 +132,7 @@ const manifest = buildManifest({
   auth: auth(),
   fonts: [
     font({
-      family: "Inter",
+      family: "Public Sans",
       variable: "--font-sans",
       weights: ["400", "500", "600", "700"],
       subsets: ["latin"],

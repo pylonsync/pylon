@@ -22,6 +22,13 @@ const ICON: Record<string, React.ReactNode> = {
   meeting: <CalendarDays />,
 };
 
+const VERB: Record<string, string> = {
+  note: "added a note",
+  call: "logged a call",
+  email: "logged an email",
+  meeting: "logged a meeting",
+};
+
 /**
  * What happened on this deal, newest first, with the composer on top so logging
  * a call takes one click from landing on the page.
@@ -100,7 +107,7 @@ export function ActivityTimeline({
           No activity yet. Log the first call or note above.
         </p>
       ) : (
-        <ol className="space-y-3">
+        <ol className="space-y-4">
           {ordered.map((activity) => (
             <li key={activity.id} className="flex gap-2.5">
               <div
@@ -112,15 +119,18 @@ export function ActivityTimeline({
                 {ICON[activity.kind] ?? ICON.note}
               </div>
               <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
                   <Avatar name={ownerName(activity.ownerId) ?? "?"} size="sm" />
-                  <span className="capitalize">{activity.kind}</span>
+                  <span className="truncate font-medium text-foreground">
+                    {ownerName(activity.ownerId) ?? "Someone"}
+                  </span>
+                  <span className="shrink-0">{VERB[activity.kind] ?? "added a note"}</span>
                   <span aria-hidden="true">·</span>
                   <time dateTime={activity.createdAt ?? undefined}>
                     {relativeTime(activity.createdAt)}
                   </time>
                 </div>
-                <p className="mt-1 whitespace-pre-wrap text-[13px] leading-5">
+                <p className="mt-1 whitespace-pre-wrap text-[13px] leading-[1.55]">
                   {activity.body}
                 </p>
               </div>

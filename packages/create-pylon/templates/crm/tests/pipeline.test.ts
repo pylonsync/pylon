@@ -3,6 +3,7 @@ import {
   BOARD_STAGES,
   PIPELINE,
   accentIndex,
+  closeDue,
   daysUntil,
   groupByStage,
   initials,
@@ -17,6 +18,7 @@ import {
   sumValue,
   type Deal,
 } from "../lib/pipeline";
+import { SEED_TEAM, shapeSeed } from "../lib/seed";
 
 const deal = (over: Partial<Deal> = {}): Deal => ({
   id: "d1",
@@ -34,6 +36,7 @@ describe("stages", () => {
       "lead",
       "qualified",
       "proposal",
+      "negotiation",
       "won",
     ]);
     expect(PIPELINE.some((s) => s.id === "lost")).toBe(true);
@@ -47,7 +50,8 @@ describe("stages", () => {
 
   test("advance and retreat stop at the ends", () => {
     expect(nextStage("lead")).toBe("qualified");
-    expect(nextStage("proposal")).toBe("won");
+    expect(nextStage("proposal")).toBe("negotiation");
+    expect(nextStage("negotiation")).toBe("won");
     expect(nextStage("won")).toBeNull();
     expect(previousStage("qualified")).toBe("lead");
     expect(previousStage("lead")).toBeNull();
@@ -56,7 +60,8 @@ describe("stages", () => {
   test("an unknown stage is rejected, not coerced", () => {
     expect(isValidStage("proposal")).toBe(true);
     expect(isValidStage("Proposal")).toBe(false);
-    expect(isValidStage("negotiation")).toBe(false);
+    expect(isValidStage("Negotiation")).toBe(false);
+    expect(isValidStage("closing")).toBe(false);
     expect(nextStage("nonsense")).toBeNull();
   });
 });
@@ -83,7 +88,7 @@ describe("groupByStage", () => {
 
   test("a deal with an unknown stage is dropped, not filed under Lead", () => {
     // Silently reclassifying it would hide a typo behind a plausible board.
-    const columns = groupByStage([deal({ stage: "negotiation" })]);
+    const columns = groupByStage([deal({ stage: "closing" })]);
     expect(columns.every((c) => c.deals.length === 0)).toBe(true);
   });
 
@@ -215,5 +220,56 @@ describe("daysUntil", () => {
   test("null when there's no date", () => {
     expect(daysUntil(null, now)).toBeNull();
     expect(daysUntil("nope", now)).toBeNull();
+  });
+});
+
+describe("closeDue", () => {
+  const now = Date.parse("2026-07-27T18:00:00Z");
+  const past = "2026-07-20T12:00:00Z";
+
+  test("an open deal past its close date is overdue", () => {
+    expect(closeDue({ stage: "proposal", closeDate: past }, now)).toEqual({
+      tone: "overdue",
+      days: -7,
+      label: "7d overdue",
+    });
+  });
+
+  test("a won or lost deal is never overdue", () => {
+    // Won deals used to show "Nd overdue" in red on the board.
+    expect(closeDue({ stage: "won", closeDate: past }, now)).toBeNull();
+    expect(closeDue({ stage: "lost", closeDate: past }, now)).toBeNull();
+  });
+
+  test("inside a week reads as days left, today as Today", () => {
+    expect(closeDue({ stage: "lead", closeDate: "2026-07-30T12:00:00Z" }, now)?.label).toBe("3d");
+    expect(closeDue({ stage: "lead", closeDate: "2026-07-27T20:00:00Z" }, now)?.label).toBe("Today");
+  });
+
+  test("nothing to flag beyond a week or without a date", () => {
+    expect(closeDue({ stage: "lead", closeDate: "2026-08-20T12:00:00Z" }, now)).toBeNull();
+    expect(closeDue({ stage: "lead", closeDate: null }, now)).toBeNull();
+  });
+});
+
+describe("seed", () => {
+  test("every teammate, and the person who signed up, owns open deals", () => {
+    const seed = shapeSeed(Date.parse("2026-07-27T18:00:00Z"));
+    const owners = new Set(
+      seed.deals.filter((d) => isOpen({ stage: String(d.row.stage) })).map((d) => d.owner),
+    );
+    expect([...owners].sort()).toEqual(
+      Array.from({ length: SEED_TEAM.length + 1 }, (_, i) => i),
+    );
+  });
+
+  test("every seeded stage is a real stage", () => {
+    for (const deal of shapeSeed().deals) {
+      expect(isValidStage(String(deal.row.stage))).toBe(true);
+    }
+  });
+
+  test("demo teammates use a domain that can't receive mail", () => {
+    for (const person of SEED_TEAM) expect(person.email.endsWith("@demo.invalid")).toBe(true);
   });
 });

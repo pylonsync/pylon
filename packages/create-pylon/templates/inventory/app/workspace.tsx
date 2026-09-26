@@ -3,10 +3,17 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { callFn, db, useRouter } from "@pylonsync/react";
 import { useAuth } from "@pylonsync/client";
-import { Sidebar } from "@/components/sidebar";
+import { Package } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
 import type { SearchItem } from "@/lib/search";
-import { onHandByProduct, summarize, type Movement, type Product } from "@/lib/stock";
+import {
+  onHandByProduct,
+  summarize,
+  type Movement,
+  type Product,
+  type Summary,
+} from "@/lib/stock";
 
 export type ProductRow = Product;
 export type MovementRow = Movement;
@@ -23,6 +30,13 @@ export interface WorkspaceData {
   levels: Map<string, number>;
   productName: (id: string | null | undefined) => string | null;
   actorName: (id: string | null | undefined) => string | null;
+  /** Totals from the ledger: SKUs, units, value, low and out counts. */
+  summary: Summary;
+  /**
+   * The number beside each nav link, keyed by href. Page headers and tabs
+   * read the same summary, so the sidebar and the page can't disagree.
+   */
+  navCounts: Record<string, number>;
   loading: boolean;
 }
 
@@ -56,8 +70,7 @@ export function Workspace({
 
   // Whoever is signed in, named from the synced User row rather than an
   // SSR prop — see the note on useAuth above.
-  const signedInEmail =
-    (users ?? []).find((user) => user.id === userId)?.email ?? "";
+  const me = (users ?? []).find((user) => user.id === userId);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const seeded = useRef(false);
@@ -113,7 +126,7 @@ export function Workspace({
     () =>
       productList.map((product) => ({
         id: `product:${product.id}`,
-        type: "company" as const,
+        type: "product",
         title: product.name,
         subtitle: product.sku,
         href: `/products/${product.id}`,
@@ -123,6 +136,7 @@ export function Workspace({
   );
 
   const summary = summarize(productList, movementList);
+  const navCounts = { "/": summary.skuCount, "/movements": movementList.length };
 
   const data: WorkspaceData = {
     products: productList,
@@ -133,20 +147,22 @@ export function Workspace({
       const user = userById.get(id ?? "");
       return user?.displayName || user?.email || null;
     },
+    summary,
+    navCounts,
     loading,
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar
-        workspace="Inventory"
-        email={signedInEmail}
-        pathname={pathname}
-        counts={{ "/": summary.skuCount }}
-        onOpenCommand={() => setPaletteOpen(true)}
-        onSignOut={() => void signOut()}
-      />
-      <main className="flex min-w-0 flex-1 flex-col">{children(data)}</main>
+    <AppShell
+      sidebar={{
+        user: { name: me?.displayName ?? "", email: me?.email ?? "" },
+        pathname,
+        counts: navCounts,
+        onOpenCommand: () => setPaletteOpen(true),
+        onSignOut: () => void signOut(),
+      }}
+    >
+      {children(data)}
 
       <CommandPalette
         open={paletteOpen}
@@ -168,9 +184,11 @@ export function Workspace({
             run: () => router.push("/movements"),
           },
         ]}
+        placeholder="Search products by name, SKU, or category…"
+        icons={{ product: <Package /> }}
         onClose={() => setPaletteOpen(false)}
         onSelect={(item) => router.push(item.href)}
       />
-    </div>
+    </AppShell>
   );
 }

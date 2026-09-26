@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { Link, callFn, db, useRouter } from "@pylonsync/react";
-import { ArrowLeft, Trash2 } from "lucide-react";
+import { Banknote, ChevronRight, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { PageHeader } from "@/components/page-header";
@@ -25,7 +25,7 @@ export function InvoiceView({
   const [payOpen, setPayOpen] = useState(false);
 
   return (
-    <RequireAuth title="Invoices" description="Your team shares one set of books. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/">
       {(data) => {
         const invoice = data.invoices.find((i) => i.id === invoiceId);
@@ -35,7 +35,7 @@ export function InvoiceView({
             <>
               <PageHeader title="Invoice" />
               <EmptyState
-                title={data.loading ? "Loading…" : "Invoice not found"}
+                title={data.loading ? "Loading invoice…" : "Invoice not found"}
                 description={
                   data.loading ? undefined : "It may have been deleted, or the link is wrong."
                 }
@@ -64,36 +64,32 @@ export function InvoiceView({
 
         return (
           <>
-            <PageHeader title={invoice.number}>
-              <StatusBadge status={shown} />
-              <div className="w-28">
-                <Select
-                  aria-label="Status"
-                  value={invoice.status}
-                  className="h-7 text-[12px]"
-                  onChange={(event) =>
-                    void callFn("setInvoiceStatus", {
-                      invoiceId: invoice.id,
-                      status: event.target.value,
-                    })
-                  }
+            <PageHeader
+              title={invoice.number}
+              leading={
+                <Link
+                  href="/"
+                  className="hidden items-center gap-1 text-[13px] text-muted-foreground transition-colors hover:text-foreground md:inline-flex"
                 >
-                  {STATUSES.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.label}
-                    </option>
-                  ))}
-                </Select>
-              </div>
-              {t.balanceCents > 0 && invoice.status !== "void" ? (
+                  Invoices
+                  <ChevronRight className="size-3.5" />
+                </Link>
+              }
+            >
+              {/* Offered on a sent invoice with a balance. A draft hasn't been
+                  issued yet, and a void or paid one has nothing to collect. */}
+              {invoice.status === "sent" && t.balanceCents > 0 ? (
                 <Button size="sm" onClick={() => setPayOpen(true)}>
-                  Record payment
+                  <Banknote />
+                  <span className="max-sm:sr-only">Record payment</span>
                 </Button>
               ) : null}
               {editable ? (
                 <Button
                   size="sm"
                   variant="ghost"
+                  aria-label="Delete draft"
+                  title="Delete draft"
                   onClick={async () => {
                     await db.delete("Invoice", invoice.id);
                     router.push("/");
@@ -106,21 +102,59 @@ export function InvoiceView({
             </PageHeader>
 
             <div className="min-h-0 flex-1 overflow-y-auto">
-              <div className="mx-auto flex max-w-3xl flex-col gap-6 px-6 py-6">
-                <Link
-                  href="/"
-                  className="inline-flex w-fit items-center gap-1.5 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
-                >
-                  <ArrowLeft className="size-3.5" />
-                  Invoices
-                </Link>
+              <div className="mx-auto flex max-w-3xl flex-col gap-6 px-4 py-5 md:px-8 md:py-8">
+                <div className="flex flex-wrap items-end justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="tabular text-[22px] font-semibold tracking-[-0.02em] md:text-[26px]">
+                        {invoice.number}
+                      </h2>
+                      <StatusBadge status={shown} />
+                    </div>
+                    <p className="mt-1 text-[13px] text-muted-foreground">
+                      {client?.name ?? "No client yet"}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[12px] text-muted-foreground">
+                      {invoice.status === "draft" ? "Total" : "Balance due"}
+                    </p>
+                    <p
+                      className={
+                        "tabular text-[22px] font-semibold tracking-[-0.02em] md:text-[26px]" +
+                        (shown === "overdue" ? " text-destructive" : "")
+                      }
+                    >
+                      {money(invoice.status === "draft" ? t.totalCents : t.balanceCents)}
+                    </p>
+                  </div>
+                </div>
 
-                <dl className="grid grid-cols-2 gap-x-6 gap-y-4 rounded-lg border border-border bg-card p-4 sm:grid-cols-4">
+                <dl className="grid grid-cols-2 gap-x-6 gap-y-4 rounded-xl border border-border bg-surface-1 p-4 sm:grid-cols-4">
+                  <Field label="Status">
+                    <Select
+                      aria-label="Status"
+                      value={invoice.status}
+                      className="h-8 bg-background md:h-7.5"
+                      onChange={(event) =>
+                        void callFn("setInvoiceStatus", {
+                          invoiceId: invoice.id,
+                          status: event.target.value,
+                        })
+                      }
+                    >
+                      {STATUSES.map((s) => (
+                        <option key={s.id} value={s.id}>
+                          {s.label}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
                   <Field label="Client">
                     <Select
                       aria-label="Client"
                       value={invoice.clientId ?? ""}
-                      className="h-7 text-[12px]"
+                      className="h-8 bg-background md:h-7.5"
                       onChange={(event) =>
                         void db.update("Invoice", invoice.id, {
                           clientId: event.target.value || null,
@@ -153,16 +187,6 @@ export function InvoiceView({
                         })
                       : "—"}
                   </Field>
-                  <Field label="Balance">
-                    <span
-                      className={
-                        "tabular font-medium" +
-                        (t.balanceCents > 0 ? " text-destructive" : "")
-                      }
-                    >
-                      {money(t.balanceCents)}
-                    </span>
-                  </Field>
                 </dl>
 
                 {client?.address ? (
@@ -192,11 +216,11 @@ export function InvoiceView({
                 {paid.length > 0 ? (
                   <section>
                     <h2 className="mb-2 text-[13px] font-semibold">Payments</h2>
-                    <ul className="space-y-1.5">
+                    <ul className="divide-y divide-border/70 overflow-hidden rounded-xl border border-border">
                       {paid.map((payment) => (
                         <li
                           key={payment.id}
-                          className="flex items-center gap-3 rounded-md border border-border bg-card px-3 py-2 text-[12px]"
+                          className="flex h-11 items-center gap-3 bg-card px-3.5 text-[13px]"
                         >
                           <span className="tabular font-medium">
                             {money(payment.amountCents)}
@@ -247,7 +271,7 @@ export function InvoiceView({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="min-w-0">
-      <dt className="text-[11px] text-muted-foreground">{label}</dt>
+      <dt className="text-[11.5px] font-medium text-muted-foreground">{label}</dt>
       <dd className="mt-1 truncate text-[13px]">{children}</dd>
     </div>
   );

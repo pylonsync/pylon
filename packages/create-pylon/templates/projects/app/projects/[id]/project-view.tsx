@@ -2,7 +2,7 @@
 
 import React, { useState } from "react";
 import { Link, callFn, db, useRouter } from "@pylonsync/react";
-import { ArrowLeft, Clock, Plus } from "lucide-react";
+import { ChevronRight, Clock, Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
@@ -11,8 +11,9 @@ import { EmptyState } from "@/components/empty-state";
 import { TaskBoard } from "@/components/task-board";
 import { BoardSkeleton } from "@/components/board-skeleton";
 import { BudgetBar } from "@/components/budget-bar";
+import { Meter } from "@/components/meter";
 import { TimeDialog } from "@/components/time-dialog";
-import { PROJECT_STATUSES, duration, minutesForProject, progress } from "@/lib/work";
+import { PROJECT_STATUSES, minutesForProject, progress } from "@/lib/work";
 import { RequireAuth } from "@/components/require-auth";
 import { Workspace } from "../../workspace";
 
@@ -26,7 +27,7 @@ export function ProjectView({
   const [timeFor, setTimeFor] = useState<{ id: string; title: string } | null>(null);
 
   return (
-    <RequireAuth title="Projects" description="Your team shares one set of projects. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/">
       {(data) => {
         const project = data.projects.find((p) => p.id === projectId);
@@ -36,7 +37,7 @@ export function ProjectView({
             <>
               <PageHeader title="Project" />
               <EmptyState
-                title={data.loading ? "Loading…" : "Project not found"}
+                title={data.loading ? "Loading project…" : "Project not found"}
                 description={
                   data.loading ? undefined : "It may have been deleted, or the link is wrong."
                 }
@@ -74,15 +75,23 @@ export function ProjectView({
 
         return (
           <>
-            <PageHeader title={project.name}>
-              <span className="tabular text-[12px] text-muted-foreground">
-                {p.done}/{p.total} done · {duration(logged)}
-              </span>
-              <div className="w-28">
+            <PageHeader
+              title={project.name}
+              leading={
+                <Link
+                  href="/"
+                  className="hidden items-center gap-1 text-[13px] text-muted-foreground transition-colors hover:text-foreground md:inline-flex"
+                >
+                  Projects
+                  <ChevronRight className="size-3.5" />
+                </Link>
+              }
+            >
+              <div className="w-28 md:w-32">
                 <Select
                   aria-label="Project status"
                   value={project.status}
-                  className="h-7 text-[12px]"
+                  className="h-8 md:h-7.5"
                   onChange={(event) =>
                     void db.update("Project", project.id, {
                       status: event.target.value,
@@ -98,34 +107,36 @@ export function ProjectView({
               </div>
             </PageHeader>
 
-            <div className="flex items-center gap-6 border-b border-border px-4 py-3">
-              <Link
-                href="/"
-                className="inline-flex shrink-0 items-center gap-1.5 text-[12px] text-muted-foreground transition-colors hover:text-foreground"
-              >
-                <ArrowLeft className="size-3.5" />
-                Projects
-              </Link>
-              <span className="shrink-0 text-[12px] text-muted-foreground">
-                {data.clientName(project.clientId) ?? "No client"}
-              </span>
-              <div className="min-w-0 flex-1 max-w-md">
-                <BudgetBar
-                  budgetMinutes={project.budgetMinutes}
-                  loggedMinutes={logged}
-                  hourlyRateCents={project.hourlyRateCents}
+            <div className="grid shrink-0 gap-x-8 gap-y-3 border-b border-border px-4 py-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-center md:px-5">
+              <div className="min-w-0">
+                <p className="truncate text-[12.5px] text-muted-foreground">
+                  {data.clientName(project.clientId) ?? "No client"}
+                  {project.dueDate
+                    ? ` · due ${new Date(project.dueDate).toLocaleDateString("en-US", { month: "short", day: "numeric" })}`
+                    : ""}
+                </p>
+                <Meter
+                  className="mt-1.5"
+                  ratio={p.ratio ?? 0}
+                  label={`${p.done}/${p.total} tasks done`}
                 />
               </div>
-              <form onSubmit={addTask} className="ml-auto flex shrink-0 items-center gap-2">
+              <BudgetBar
+                budgetMinutes={project.budgetMinutes}
+                loggedMinutes={logged}
+                hourlyRateCents={project.hourlyRateCents}
+              />
+              <form onSubmit={addTask} className="flex items-center gap-2">
                 <Input
                   aria-label="New task"
                   placeholder="Add a task…"
                   value={newTask}
                   onChange={(event) => setNewTask(event.target.value)}
-                  className="h-7 w-48 text-[12px]"
+                  className="h-9 flex-1 md:h-8 md:w-52"
                 />
-                <Button type="submit" size="sm" className="h-7" disabled={!newTask.trim()}>
+                <Button type="submit" size="sm" className="h-9 md:h-8" disabled={!newTask.trim()}>
                   <Plus />
+                  <span className="sr-only">Add task</span>
                 </Button>
               </form>
             </div>
@@ -146,7 +157,7 @@ export function ProjectView({
                   minutesFor={(taskId) => data.taskMinutes.get(taskId) ?? 0}
                   onMove={(taskId, status) => {
                     // Through the mutation: the new position is computed
-                    // server-side so two simultaneous drags don\'t collide.
+                    // server-side so two simultaneous drags don't collide.
                     void callFn("moveTask", { taskId, status });
                   }}
                   onOpen={(taskId) => {
@@ -160,6 +171,10 @@ export function ProjectView({
             <TimeDialog
               open={timeFor !== null}
               taskTitle={timeFor?.title ?? ""}
+              status={tasks.find((t) => t.id === timeFor?.id)?.status}
+              onMove={(status) => {
+                if (timeFor) void callFn("moveTask", { taskId: timeFor.id, status });
+              }}
               onOpenChange={(open) => {
                 if (!open) setTimeFor(null);
               }}

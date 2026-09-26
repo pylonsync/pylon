@@ -9,15 +9,21 @@
 /* ---------------------------------------------------------------------------
    Design tokens.
 
-   Tuned for a dense internal tool rather than a marketing page: a near-neutral
-   surface ramp, hairline borders instead of shadows, and one accent used
-   sparingly so status colour still means something. Dark is the primary theme —
-   `app/layout.tsx` sets `class="dark"` — and light is a real, tested
-   alternative, not an afterthought.
+   Tuned for a dense internal tool: a near-neutral surface ramp, hairline
+   borders instead of shadows, and one accent used sparingly so status colour
+   still means something. Light is the default; `.dark` holds a complete dark
+   set (add `class="dark"` to <html> in app/layout.tsx to switch).
 
-   These are the same variable names shadcn/ui generates against, so
+   These are the variable names shadcn/ui generates against, so
    `npx shadcn@latest add <component>` drops in already themed.
 --------------------------------------------------------------------------- */
+:root {
+  /* The brand accent: primary buttons, the brand mark, focus rings, and the
+     active nav icon. Change these two lines to re-colour the product. */
+  --brand: oklch(0.53 0.1 195);
+  --brand-dark: oklch(0.66 0.1 195);
+}
+
 :root {
   --radius: 0.5rem;
 
@@ -28,7 +34,7 @@
   --popover: oklch(1 0 0);
   --popover-foreground: var(--foreground);
 
-  --primary: oklch(0.55 0.204 274.5);
+  --primary: var(--brand);
   --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.968 0.002 286.4);
   --secondary-foreground: oklch(0.27 0.006 286);
@@ -40,7 +46,7 @@
 
   --border: oklch(0.918 0.004 286.3);
   --input: oklch(0.918 0.004 286.3);
-  --ring: oklch(0.55 0.204 274.5);
+  --ring: var(--brand);
 
   /* Surfaces above the page: sidebar, popovers, hover rows. */
   --surface-1: oklch(0.985 0.001 286.4);
@@ -51,6 +57,7 @@
   --stage-lead: oklch(0.62 0.03 264);
   --stage-qualified: oklch(0.6 0.13 240);
   --stage-proposal: oklch(0.68 0.15 78);
+  --stage-negotiation: oklch(0.64 0.16 45);
   --stage-won: oklch(0.6 0.15 155);
   --stage-lost: oklch(0.6 0.11 25);
 }
@@ -63,7 +70,7 @@
   --popover: oklch(0.216 0.006 285.9);
   --popover-foreground: var(--foreground);
 
-  --primary: oklch(0.62 0.19 274.5);
+  --primary: var(--brand-dark);
   --primary-foreground: oklch(1 0 0);
   --secondary: oklch(0.25 0.006 286);
   --secondary-foreground: oklch(0.93 0.002 286.3);
@@ -75,7 +82,7 @@
 
   --border: oklch(1 0 0 / 9%);
   --input: oklch(1 0 0 / 12%);
-  --ring: oklch(0.62 0.19 274.5);
+  --ring: var(--brand-dark);
 
   --surface-1: oklch(0.186 0.004 285.9);
   --surface-2: oklch(0.216 0.006 285.9);
@@ -83,6 +90,7 @@
   --stage-lead: oklch(0.68 0.03 264);
   --stage-qualified: oklch(0.68 0.13 240);
   --stage-proposal: oklch(0.75 0.14 78);
+  --stage-negotiation: oklch(0.72 0.15 45);
   --stage-won: oklch(0.7 0.15 155);
   --stage-lost: oklch(0.68 0.14 25);
 }
@@ -118,6 +126,7 @@
   --color-stage-lead: var(--stage-lead);
   --color-stage-qualified: var(--stage-qualified);
   --color-stage-proposal: var(--stage-proposal);
+  --color-stage-negotiation: var(--stage-negotiation);
   --color-stage-won: var(--stage-won);
   --color-stage-lost: var(--stage-lost);
 }
@@ -143,13 +152,19 @@
     height: 100%;
     background-color: var(--color-background);
     color: var(--color-foreground);
-    /* 13px is the density these screens are designed at; the slight negative
-       tracking is what keeps Inter from looking loose at that size. */
-    font-size: 13px;
+    /* 14px on phones, 13px from the md breakpoint up: the density these
+       screens are designed at on a desktop. */
+    font-size: 14px;
     line-height: 1.5;
-    letter-spacing: -0.006em;
+    letter-spacing: -0.003em;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
+  }
+
+  @media (min-width: 768px) {
+    body {
+      font-size: 13px;
+    }
   }
 
   button {

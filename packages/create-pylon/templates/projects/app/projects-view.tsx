@@ -8,16 +8,23 @@ import { PageHeader } from "@/components/page-header";
 import { DataTable, type ColumnDef } from "@/components/data-table";
 import { EmptyState } from "@/components/empty-state";
 import { RecordDialog } from "@/components/record-dialog";
+import { FilterTabs } from "@/components/filter-tabs";
+import { Meter } from "@/components/meter";
 import {
+  DEFAULT_PROJECT_TAB,
+  PROJECT_STATUSES,
+  PROJECT_TABS,
   budgetState,
   duration,
-  isOpen,
+  inProjectTab,
   minutesForProject,
   parseDuration,
+  portfolio,
   progress,
 } from "@/lib/work";
+import { SummaryBar } from "@/components/summary-bar";
 import { RequireAuth } from "@/components/require-auth";
-import { Workspace, type ProjectRow } from "./workspace";
+import { Workspace, type ProjectRow, type TaskRow } from "./workspace";
 
 export function ProjectsView({
   openNew,
@@ -26,20 +33,47 @@ export function ProjectsView({
 }) {
   const router = useRouter();
   const [open, setOpen] = useState(Boolean(openNew));
+  const [tab, setTab] = useState(DEFAULT_PROJECT_TAB);
 
   return (
-    <RequireAuth title="Projects" description="Your team shares one set of projects. Anyone with an account sees it.">
+    <RequireAuth>
       <Workspace pathname="/">
       {(data) => {
+        const tasksByProject = new Map<string, TaskRow[]>();
+        for (const task of data.tasks) {
+          const list = tasksByProject.get(task.projectId) ?? [];
+          list.push(task);
+          tasksByProject.set(task.projectId, list);
+        }
+        const logged = new Map(
+          data.projects.map((p) => [p.id, minutesForProject(p.id, data.entries)] as const),
+        );
+
         const columns: ColumnDef<ProjectRow>[] = [
           {
             key: "name",
             header: "Project",
-            cell: (row) => <span className="truncate font-medium">{row.name}</span>,
+            className: "w-[58%] md:w-[28%]",
+            cell: (row) => (
+              <span className="min-w-0">
+                <span className="flex items-center gap-2">
+                  <span className="truncate font-medium">{row.name}</span>
+                  {row.status !== "active" && tab === "all" ? (
+                    <span className="shrink-0 rounded bg-foreground/[0.06] px-1.5 text-[11px] font-medium text-muted-foreground">
+                      {PROJECT_STATUSES.find((s) => s.id === row.status)?.label ?? row.status}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="block truncate text-[12px] text-muted-foreground md:hidden">
+                  {data.clientName(row.clientId) ?? "No client"}
+                </span>
+              </span>
+            ),
           },
           {
             key: "client",
             header: "Client",
+            hideBelow: "md",
             cell: (row) => (
               <span className="text-muted-foreground">
                 {data.clientName(row.clientId) ?? "—"}
@@ -47,57 +81,53 @@ export function ProjectsView({
             ),
           },
           {
-            key: "tasks",
-            header: "Tasks",
+            key: "progress",
+            header: "Progress",
+            className: "w-[42%] md:w-[190px]",
             cell: (row) => {
-              const tasks = data.tasks.filter((t) => t.projectId === row.id);
-              const p = progress(tasks);
+              const p = progress(tasksByProject.get(row.id) ?? []);
               return (
-                <span className="tabular text-muted-foreground">
-                  {p.done}/{p.total}
-                </span>
+                <Meter
+                  ratio={p.ratio ?? 0}
+                  tone="primary"
+                  label={`${p.done}/${p.total}`}
+                  title={`${p.done} of ${p.total} tasks done`}
+                />
               );
             },
           },
           {
-            key: "open",
-            header: "Open",
-            numeric: true,
-            cell: (row) =>
-              data.tasks.filter((t) => t.projectId === row.id && isOpen(t)).length,
-          },
-          {
             key: "time",
-            header: "Logged",
-            numeric: true,
+            header: "Budget used",
+            hideBelow: "lg",
+            className: "w-[220px]",
             cell: (row) => {
-              const logged = minutesForProject(row.id, data.entries);
-              const state = budgetState(row.budgetMinutes, logged);
-              return (
-                <span
-                  className={
-                    state === "over"
-                      ? "text-destructive"
-                      : state === "near"
-                        ? "text-stage-proposal"
-                        : ""
-                  }
+              const minutes = logged.get(row.id) ?? 0;
+              const state = budgetState(row.budgetMinutes, minutes);
+              const budget = Number(row.budgetMinutes) || 0;
+              return state === "none" ? (
+                <span className="text-muted-foreground">{duration(minutes)} logged</span>
+              ) : (
+                <Meter
+                  ratio={minutes / budget}
+                  tone={state === "over" ? "danger" : state === "near" ? "warn" : "neutral"}
+                  label={`${duration(minutes)} / ${duration(budget)}`}
                   title={
-                    row.budgetMinutes
-                      ? `Budget ${duration(row.budgetMinutes)}`
-                      : undefined
+                    state === "over"
+                      ? `Over budget by ${duration(minutes - budget)}`
+                      : `${duration(budget - minutes)} left`
                   }
-                >
-                  {duration(logged)}
-                </span>
+                />
               );
             },
           },
           {
             key: "due",
             header: "Due",
+            hideBelow: "sm",
+            className: "w-[90px]",
             cell: (row) => (
-              <span className="text-muted-foreground">
+              <span className="tabular text-muted-foreground">
                 {row.dueDate
                   ? new Date(row.dueDate).toLocaleDateString("en-US", {
                       month: "short",
@@ -109,36 +139,59 @@ export function ProjectsView({
           },
         ];
 
-        // Active first, then by name — a finished project shouldn\'t sit above
-        // the work in flight.
-        const rows = [...data.projects].sort((a, b) => {
-          const rank = (p: ProjectRow) => (p.status === "active" ? 0 : p.status === "paused" ? 1 : 2);
-          return rank(a) - rank(b) || a.name.localeCompare(b.name);
-        });
+        // Soonest due first, then by name. A project without a date sorts last.
+        const rows = data.projects
+          .filter((project) => inProjectTab(tab, project))
+          .sort(
+            (a, b) =>
+              (a.dueDate ?? "9999").localeCompare(b.dueDate ?? "9999") ||
+              a.name.localeCompare(b.name),
+          );
 
         return (
           <>
-            <PageHeader title="Projects" count={rows.length}>
+            <PageHeader title="Projects" count={data.navCounts["/"]}>
               <Button size="sm" onClick={() => setOpen(true)}>
                 <Plus />
-                New project
+                <span className="max-sm:sr-only">New project</span>
               </Button>
             </PageHeader>
+
+            <SummaryBar portfolio={portfolio(data.projects, data.entries)} />
+
+            <FilterTabs
+              label="Project status"
+              value={tab}
+              onChange={setTab}
+              tabs={PROJECT_TABS.map((t) => ({
+                id: t.id,
+                label: t.label,
+                count: data.projectCounts[t.id],
+              }))}
+            />
 
             <DataTable
               rows={rows}
               columns={columns}
+              loading={data.loading}
+              label="Projects"
               onRowClick={(row) => router.push(`/projects/${row.id}`)}
               empty={
                 <EmptyState
                   icon={<FolderKanban />}
-                  title={data.loading ? "Loading…" : "No projects yet"}
-                  description="A project holds a task board and the time logged against it. Create one to get started."
+                  title={data.projects.length === 0 ? "No projects yet" : "No projects with this status"}
+                  description={
+                    data.projects.length === 0
+                      ? "A project holds a task board and the time logged against it. Create one to get started."
+                      : "Pick another tab to see the rest."
+                  }
                   action={
-                    <Button size="sm" onClick={() => setOpen(true)}>
-                      <Plus />
-                      New project
-                    </Button>
+                    data.projects.length === 0 ? (
+                      <Button size="sm" onClick={() => setOpen(true)}>
+                        <Plus />
+                        New project
+                      </Button>
+                    ) : undefined
                   }
                 />
               }

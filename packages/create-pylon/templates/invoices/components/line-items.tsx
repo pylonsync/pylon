@@ -76,20 +76,20 @@ export function LineItems({
   );
 
   return (
-    <div className="rounded-lg border border-border bg-card">
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
       <table className="w-full border-collapse text-[13px]">
         <thead>
           <tr className="hairline">
-            <th scope="col" className="h-8 px-3 text-left text-[11px] font-medium text-muted-foreground">
+            <th scope="col" className="h-9 px-3.5 text-left text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
               Description
             </th>
-            <th scope="col" className="h-8 w-20 px-3 text-right text-[11px] font-medium text-muted-foreground">
+            <th scope="col" className="hidden h-9 w-20 px-3 text-right text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground sm:table-cell">
               Qty
             </th>
-            <th scope="col" className="h-8 w-28 px-3 text-right text-[11px] font-medium text-muted-foreground">
+            <th scope="col" className="hidden h-9 w-28 px-3 text-right text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground sm:table-cell">
               Unit
             </th>
-            <th scope="col" className="h-8 w-28 px-3 text-right text-[11px] font-medium text-muted-foreground">
+            <th scope="col" className="h-9 w-28 px-3.5 text-right text-[11px] font-medium uppercase tracking-[0.04em] text-muted-foreground">
               Amount
             </th>
             {editable ? <th className="w-10" /> : null}
@@ -108,14 +108,19 @@ export function LineItems({
           ) : (
             ordered.map((item) => (
               <tr key={item.id} className="border-b border-border/60 last:border-0">
-                <td className="px-3 py-2">{item.description}</td>
-                <td className="tabular px-3 py-2 text-right text-muted-foreground">
+                <td className="px-3.5 py-2.5">
+                  {item.description}
+                  <span className="tabular block text-[12px] text-muted-foreground sm:hidden">
+                    {quantity(item.quantityMilli)} × {money(item.unitPriceCents)}
+                  </span>
+                </td>
+                <td className="tabular hidden px-3 py-2.5 text-right text-muted-foreground sm:table-cell">
                   {quantity(item.quantityMilli)}
                 </td>
-                <td className="tabular px-3 py-2 text-right text-muted-foreground">
+                <td className="tabular hidden px-3 py-2.5 text-right text-muted-foreground sm:table-cell">
                   {money(item.unitPriceCents)}
                 </td>
-                <td className="tabular px-3 py-2 text-right">
+                <td className="tabular px-3.5 py-2.5 text-right font-medium">
                   {money(lineTotalCents(item))}
                 </td>
                 {editable ? (
@@ -138,20 +143,20 @@ export function LineItems({
       </table>
 
       {editable ? (
-        <form onSubmit={add} className="flex items-end gap-2 border-t border-border p-2">
+        <form onSubmit={add} className="flex flex-wrap items-end gap-2 border-t border-border bg-surface-1 p-2.5">
           <Input
             aria-label="Description"
             placeholder="Senior engineering"
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-            className="h-8 flex-1"
+            className="h-9 min-w-[12rem] flex-1 bg-background md:h-8"
           />
           <Input
             aria-label="Quantity"
             inputMode="decimal"
             value={qty}
             onChange={(event) => setQty(event.target.value)}
-            className="h-8 w-20 text-right"
+            className="h-9 w-20 bg-background text-right md:h-8"
           />
           <Input
             aria-label="Unit price"
@@ -159,9 +164,9 @@ export function LineItems({
             placeholder="165.00"
             value={price}
             onChange={(event) => setPrice(event.target.value)}
-            className="h-8 w-28 text-right"
+            className="h-9 w-28 flex-1 bg-background text-right sm:flex-none md:h-8"
           />
-          <Button type="submit" size="sm" disabled={!canAdd} className="h-8">
+          <Button type="submit" size="sm" disabled={!canAdd} className="h-9 md:h-8">
             <Plus />
             Add
           </Button>

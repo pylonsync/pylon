@@ -15,6 +15,11 @@ realistic queue — including one urgent ticket already past its first-response
 window, so the breach state is visible rather than theoretical. Delete
 `functions/seedWorkspace.ts` and `lib/seed.ts` once real tickets arrive.
 
+The tickets are spread across you and four demo teammates. Each is a User
+row with a `@demo.invalid` address and no password, so outside dev mode nobody
+can sign in as one (see `lib/demo-team.ts`). Delete those users along with the
+seed.
+
 ## What's interesting here
 
 **The queue answers "what next".** Rows are ordered by `queueOrder` in
@@ -36,6 +41,22 @@ mistake is the expensive error here, so the composer changes colour and label,
 the note stays marked in the thread, and — deliberately — an internal note does
 **not** stop the SLA clock. A team that could clear its SLA by talking to itself
 would have an SLA worth nothing.
+
+## Brand and layout
+
+The product ships as **Frontdesk**. The name lives in `lib/brand.ts`, and the
+sidebar, sign-in screen, page titles, and phone drawer all read it. The mark is
+`components/brand-mark.tsx`; `app/icon.svg`, `app/apple-icon.png`, and
+`public/favicon.ico` draw the same shape for browsers and home screens. The
+accent colour is `--brand` at the top of `app/globals.css`, and the typeface
+(Public Sans) is set in `fonts` in `app.ts`.
+
+The frame is `components/app-shell.tsx`. From 768px up the sidebar is a fixed
+rail; below that it opens as a drawer from the menu button in each page header,
+tables drop their lower-priority columns (`hideBelow` in
+`components/data-table.tsx`), and boards scroll one column at a time. The nav
+links are in `components/nav.tsx`. Every nav count comes from `navCounts` in
+`app/workspace.tsx`, and page headers and tabs read the same numbers.
 
 ## Layout
 

@@ -141,6 +141,46 @@ export function displayStatus(
   return invoice.status;
 }
 
+export interface InvoiceTab {
+  id: string;
+  label: string;
+}
+
+/** The invoice list's tabs, left to right. Each matches a `displayStatus`. */
+export const INVOICE_TABS: InvoiceTab[] = [
+  { id: "all", label: "All" },
+  { id: "draft", label: "Draft" },
+  { id: "sent", label: "Sent" },
+  { id: "overdue", label: "Overdue" },
+  { id: "paid", label: "Paid" },
+];
+
+/** Whether an invoice showing `status` (from `displayStatus`) belongs on a tab. */
+export function inInvoiceTab(tabId: string, status: string): boolean {
+  return tabId === "all" || tabId === status;
+}
+
+/**
+ * How many invoices each tab lists. The list, the tab counts, and the sidebar
+ * badge all go through `displayStatus`, so an invoice that just went overdue
+ * moves between tabs and every count follows.
+ */
+export function invoiceTabCounts(
+  invoices: Invoice[],
+  items: LineItem[],
+  payments: Payment[],
+  now: number = Date.now(),
+): Record<string, number> {
+  const counts: Record<string, number> = Object.fromEntries(INVOICE_TABS.map((t) => [t.id, 0]));
+  for (const invoice of invoices) {
+    const status = displayStatus(invoice, totals(invoice, items, payments).balanceCents, now);
+    for (const tab of INVOICE_TABS) {
+      if (inInvoiceTab(tab.id, status)) counts[tab.id] += 1;
+    }
+  }
+  return counts;
+}
+
 export function daysOverdue(
   invoice: Invoice,
   now: number = Date.now(),

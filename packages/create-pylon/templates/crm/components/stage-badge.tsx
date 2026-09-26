@@ -2,10 +2,12 @@ import React from "react";
 import { cn } from "@/lib/utils";
 import { stageById } from "@/lib/pipeline";
 
-const DOT: Record<string, string> = {
+/** The colour dot for each stage, shared by the badge and the board columns. */
+export const STAGE_DOT: Record<string, string> = {
   lead: "bg-stage-lead",
   qualified: "bg-stage-qualified",
   proposal: "bg-stage-proposal",
+  negotiation: "bg-stage-negotiation",
   won: "bg-stage-won",
   lost: "bg-stage-lost",
 };
@@ -25,7 +27,7 @@ export function StageBadge({
   return (
     <span className={cn("inline-flex items-center gap-1.5 whitespace-nowrap", className)}>
       <span
-        className={cn("size-1.5 shrink-0 rounded-full", DOT[stage] ?? "bg-muted-foreground")}
+        className={cn("size-1.5 shrink-0 rounded-full", STAGE_DOT[stage] ?? "bg-muted-foreground")}
       />
       <span className="text-muted-foreground">{meta?.label ?? stage}</span>
     </span>

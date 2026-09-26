@@ -88,6 +88,16 @@ describe("SlaIndicator", () => {
     expect(container.textContent).toContain("over");
   });
 
+  test("a ticket seconds past its deadline reads 1m over, not 0m over", () => {
+    const justLate = {
+      ...tickets[0],
+      priority: "urgent",
+      createdAt: new Date(NOW - 3_600_000 - 5_000).toISOString(),
+    };
+    const { container } = render(<SlaIndicator ticket={justLate} now={NOW} />);
+    expect(container.textContent).toBe("1m over");
+  });
+
   test("renders nothing once answered", () => {
     // A badge on every row is a badge that means nothing.
     const { container } = render(<SlaIndicator ticket={tickets[1]} now={NOW} />);

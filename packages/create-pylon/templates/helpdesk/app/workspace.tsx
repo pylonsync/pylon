@@ -3,10 +3,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { callFn, db, useRouter } from "@pylonsync/react";
 import { useAuth } from "@pylonsync/client";
-import { Sidebar } from "@/components/sidebar";
+import { Inbox, User } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
 import type { SearchItem } from "@/lib/search";
-import { counts, isOpen } from "@/lib/tickets";
+import { DEFAULT_INBOX_TAB, inboxCount } from "@/lib/tickets";
 
 export interface CustomerRow {
   id: string;
@@ -48,6 +49,13 @@ export interface WorkspaceData {
   agents: UserRow[];
   customerName: (id: string | null | undefined) => string | null;
   agentName: (id: string | null | undefined) => string | null;
+  /** The signed-in agent's user id. */
+  userId: string | null;
+  /**
+   * The number beside each nav link, keyed by href. Page headers and tabs
+   * read the same numbers, so the sidebar and the page can't disagree.
+   */
+  navCounts: Record<string, number>;
   loading: boolean;
 }
 
@@ -82,8 +90,7 @@ export function Workspace({
 
   // Whoever is signed in, named from the synced User row rather than an
   // SSR prop — see the note on useAuth above.
-  const signedInEmail =
-    (users ?? []).find((user) => user.id === userId)?.email ?? "";
+  const me = (users ?? []).find((user) => user.id === userId);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const seeded = useRef(false);
@@ -139,14 +146,14 @@ export function Workspace({
     () => [
       ...ticketList.map((ticket) => ({
         id: `ticket:${ticket.id}`,
-        type: "deal" as const,
+        type: "ticket",
         title: ticket.subject,
         subtitle: lookups.customerById.get(ticket.customerId ?? "")?.name,
         href: `/tickets/${ticket.id}`,
       })),
       ...customerList.map((customer) => ({
         id: `customer:${customer.id}`,
-        type: "contact" as const,
+        type: "customer",
         title: customer.name,
         subtitle: customer.company ?? undefined,
         href: "/customers",
@@ -156,7 +163,10 @@ export function Workspace({
     [ticketList, customerList, lookups],
   );
 
-  const queue = counts(ticketList);
+  const navCounts = {
+    "/": inboxCount(ticketList, DEFAULT_INBOX_TAB),
+    "/customers": customerList.length,
+  };
 
   const data: WorkspaceData = {
     customers: customerList,
@@ -168,23 +178,22 @@ export function Workspace({
       const user = lookups.userById.get(id ?? "");
       return user?.displayName || user?.email || null;
     },
+    userId: userId ?? null,
+    navCounts,
     loading,
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar
-        workspace="Helpdesk"
-        email={signedInEmail}
-        pathname={pathname}
-        counts={{
-          "/": ticketList.filter(isOpen).length,
-          "/customers": customerList.length,
-        }}
-        onOpenCommand={() => setPaletteOpen(true)}
-        onSignOut={() => void signOut()}
-      />
-      <main className="flex min-w-0 flex-1 flex-col">{children(data)}</main>
+    <AppShell
+      sidebar={{
+        user: { name: me?.displayName ?? "", email: me?.email ?? "" },
+        pathname,
+        counts: navCounts,
+        onOpenCommand: () => setPaletteOpen(true),
+        onSignOut: () => void signOut(),
+      }}
+    >
+      {children(data)}
 
       <CommandPalette
         open={paletteOpen}
@@ -197,7 +206,7 @@ export function Workspace({
           },
           {
             id: "unassigned",
-            label: `Unassigned (${queue.unassigned})`,
+            label: `Unassigned open tickets (${inboxCount(ticketList, DEFAULT_INBOX_TAB, true)})`,
             run: () => router.push("/?filter=unassigned"),
           },
           {
@@ -206,9 +215,11 @@ export function Workspace({
             run: () => router.push("/customers"),
           },
         ]}
+        placeholder="Search tickets and customers…"
+        icons={{ ticket: <Inbox />, customer: <User /> }}
         onClose={() => setPaletteOpen(false)}
         onSelect={(item) => router.push(item.href)}
       />
-    </div>
+    </AppShell>
   );
 }

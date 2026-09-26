@@ -1,7 +1,7 @@
 import React from "react";
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/avatar";
-import { daysUntil, money, type Deal } from "@/lib/pipeline";
+import { closeDue, money, type Deal } from "@/lib/pipeline";
 
 /**
  * One deal on the board. Draggable, but never the source of truth for where it
@@ -25,10 +25,8 @@ export function DealCard({
   onDragEnd: () => void;
   dragging?: boolean;
 }) {
-  const days = daysUntil(deal.closeDate);
-  // Only surface a date when it's actionable: overdue, or inside a week.
-  const overdue = days !== null && days < 0;
-  const soon = days !== null && days >= 0 && days <= 7;
+  // Only surface a date when it's actionable, and never on a closed deal.
+  const due = closeDue(deal);
 
   return (
     <article
@@ -51,38 +49,36 @@ export function DealCard({
       tabIndex={0}
       aria-label={`${deal.title}${company ? `, ${company}` : ""}`}
       className={cn(
-        "group cursor-pointer rounded-lg border border-border bg-card p-2.5 transition-all",
-        "hover:border-ring/40 focus-visible:border-ring",
+        "group cursor-pointer rounded-lg border border-border/80 bg-card p-3 transition-[border-color,box-shadow,opacity]",
+        "shadow-[0_1px_2px_rgb(0_0_0/0.04)] hover:border-foreground/15 hover:shadow-[0_2px_6px_rgb(0_0_0/0.06)]",
+        "focus-visible:border-ring focus-visible:outline-none",
         dragging && "opacity-40",
       )}
     >
-      <div className="flex items-start justify-between gap-2">
-        <p className="line-clamp-2 flex-1 text-[13px] font-medium leading-snug">
-          {deal.title}
-        </p>
-        <span className="tabular shrink-0 text-[12px] font-medium text-muted-foreground">
-          {money(deal.value)}
-        </span>
-      </div>
-
+      <p className="line-clamp-2 text-[13px] font-medium leading-snug">{deal.title}</p>
       {company ? (
-        <p className="mt-1 truncate text-[12px] text-muted-foreground">{company}</p>
+        <p className="mt-0.5 truncate text-[12px] text-muted-foreground">{company}</p>
       ) : null}
 
-      <div className="mt-2.5 flex items-center justify-between gap-2">
-        {owner ? <Avatar name={owner} size="sm" /> : <span />}
-        {overdue || soon ? (
+      <div className="mt-3 flex items-center gap-2">
+        <span className="tabular text-[13px] font-semibold tracking-[-0.01em]">
+          {money(deal.value)}
+        </span>
+        {due ? (
           <span
             className={cn(
-              "tabular text-[11px]",
-              overdue ? "text-destructive" : "text-muted-foreground",
+              "tabular rounded px-1.5 py-px text-[11px] font-medium",
+              due.tone === "overdue"
+                ? "bg-destructive/10 text-destructive"
+                : "bg-foreground/[0.05] text-muted-foreground",
             )}
           >
-            {overdue
-              ? `${Math.abs(days as number)}d overdue`
-              : days === 0
-                ? "Today"
-                : `${days}d`}
+            {due.label}
+          </span>
+        ) : null}
+        {owner ? (
+          <span className="ml-auto" title={`Owner: ${owner}`}>
+            <Avatar name={owner} size="sm" />
           </span>
         ) : null}
       </div>

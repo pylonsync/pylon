@@ -18,12 +18,14 @@ export default function RootLayout({ children }: LayoutProps) {
     <html lang="en">
       <head>
         <meta charSet="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>__APP_NAME__</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+        {/* No <title> here: each page's `metadata` sets "<Page> · <Brand>".
+            A title in the layout renders first and wins over the page's. */}
         {/* Tailwind is compiled by Pylon from app/globals.css and the
-            stylesheet link is injected here automatically. Inter is declared in
-            app.ts (fonts: [...]) and self-hosted by the build — @font-face, the
-            preload link, and a size-adjusted fallback are injected too. */}
+            stylesheet link is injected here automatically. The typeface is
+            declared in app.ts (fonts: [...]) and self-hosted by the build;
+            @font-face, the preload link, and a size-adjusted fallback are
+            injected too. */}
       </head>
       <body className="h-full">{children}</body>
     </html>

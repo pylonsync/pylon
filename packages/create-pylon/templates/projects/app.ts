@@ -10,7 +10,7 @@ import {
 } from "@pylonsync/sdk";
 
 // ---------------------------------------------------------------------------
-// projects — client project delivery for a small team: projects, a task board,
+// Workbench (the projects template) — client project delivery for a small team: projects, a task board,
 // and time logged against the work.
 //
 // TIME IS A LEDGER. A task\'s logged hours are the sum of its TimeEntry rows,
@@ -176,7 +176,7 @@ const manifest = buildManifest({
   auth: auth(),
   fonts: [
     font({
-      family: "Inter",
+      family: "Manrope",
       variable: "--font-sans",
       weights: ["400", "500", "600", "700"],
       subsets: ["latin"],

@@ -134,10 +134,43 @@ export const SEED_TASKS: SeedTask[] = [
   { key: "rf-reports", project: "referrals", title: "Turnaround reports", status: "done", estimateHours: 8, loggedHours: [4, 5] },
 ];
 
+/**
+ * The demo delivery team. Each becomes a User row with no
+ * password (see lib/demo-team.ts); they exist so tasks and timesheets have realistic
+ * owners. The `.invalid` domain is reserved and can never receive mail.
+ */
+export interface SeedTeammate {
+  name: string;
+  email: string;
+}
+
+export const SEED_TEAM: SeedTeammate[] = [
+  { name: "Maya Castillo", email: "maya.castillo@demo.invalid" },
+  { name: "Jordan Ellis", email: "jordan.ellis@demo.invalid" },
+  { name: "Aisha Karim", email: "aisha.karim@demo.invalid" },
+  { name: "Noah Brandt", email: "noah.brandt@demo.invalid" },
+];
+
+/**
+ * Who the seeded task at `index` is assigned to, as a position in
+ * `[you, ...SEED_TEAM]`, or null. A task still to do whose index in SEED_TASKS
+ * is a multiple of 3 is unassigned, so the board has work to pick up; the rest spread across the team,
+ * including the person who signed up.
+ */
+export function seedAssignee(
+  index: number,
+  status: string,
+  teamSize: number = SEED_TEAM.length + 1,
+): number | null {
+  if (status === "todo" && index % 3 === 0) return null;
+  return (index * 3 + 1) % teamSize;
+}
+
 export interface ShapedSeed {
   clients: Array<{ key: string; row: Record<string, unknown> }>;
   projects: Array<{ key: string; client: string; row: Record<string, unknown> }>;
-  tasks: Array<{ key: string; project: string; row: Record<string, unknown> }>;
+  /** `assignee` is a position in `[you, ...SEED_TEAM]`, or null; see seedAssignee. */
+  tasks: Array<{ key: string; project: string; assignee: number | null; row: Record<string, unknown> }>;
   entries: Array<{ task: string; project: string; row: Record<string, unknown> }>;
 }
 
@@ -162,6 +195,7 @@ export function shapeSeed(now: number = Date.now()): ShapedSeed {
     tasks.push({
       key: task.key,
       project: task.project,
+      assignee: seedAssignee(index, task.status),
       row: {
         title: task.title,
         status: task.status,

@@ -3,7 +3,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { callFn, db, useRouter } from "@pylonsync/react";
 import { useAuth } from "@pylonsync/client";
-import { Sidebar } from "@/components/sidebar";
+import { FileText, User } from "lucide-react";
+import { AppShell } from "@/components/app-shell";
 import { CommandPalette } from "@/components/command-palette";
 import type { SearchItem } from "@/lib/search";
 import type { Invoice, LineItem, Payment } from "@/lib/billing";
@@ -31,6 +32,11 @@ export interface WorkspaceData {
   items: LineItemRow[];
   payments: PaymentRow[];
   clientName: (id: string | null | undefined) => string | null;
+  /**
+   * The number beside each nav link, keyed by href. Page headers read the
+   * same map, so the sidebar and the page can't disagree.
+   */
+  navCounts: Record<string, number>;
   loading: boolean;
 }
 
@@ -66,8 +72,7 @@ export function Workspace({
 
   // Whoever is signed in, named from the synced User row rather than an
   // SSR prop — see the note on useAuth above.
-  const signedInEmail =
-    (users ?? []).find((user) => user.id === userId)?.email ?? "";
+  const me = (users ?? []).find((user) => user.id === userId);
 
   const [paletteOpen, setPaletteOpen] = useState(false);
   const seeded = useRef(false);
@@ -119,14 +124,14 @@ export function Workspace({
     () => [
       ...invoiceList.map((invoice) => ({
         id: `invoice:${invoice.id}`,
-        type: "deal" as const,
+        type: "invoice",
         title: invoice.number,
         subtitle: clientById.get(invoice.clientId ?? "")?.name,
         href: `/invoices/${invoice.id}`,
       })),
       ...clientList.map((client) => ({
         id: `client:${client.id}`,
-        type: "company" as const,
+        type: "client",
         title: client.name,
         subtitle: client.email ?? undefined,
         href: "/clients",
@@ -135,26 +140,29 @@ export function Workspace({
     [invoiceList, clientList, clientById],
   );
 
+  const navCounts = { "/": invoiceList.length, "/clients": clientList.length };
+
   const data: WorkspaceData = {
     clients: clientList,
     invoices: invoiceList,
     items: items ?? [],
     payments: payments ?? [],
     clientName: (id) => clientById.get(id ?? "")?.name ?? null,
+    navCounts,
     loading,
   };
 
   return (
-    <div className="flex h-screen overflow-hidden">
-      <Sidebar
-        workspace="Invoices"
-        email={signedInEmail}
-        pathname={pathname}
-        counts={{ "/": invoiceList.length, "/clients": clientList.length }}
-        onOpenCommand={() => setPaletteOpen(true)}
-        onSignOut={() => void signOut()}
-      />
-      <main className="flex min-w-0 flex-1 flex-col">{children(data)}</main>
+    <AppShell
+      sidebar={{
+        user: { name: me?.displayName ?? "", email: me?.email ?? "" },
+        pathname,
+        counts: navCounts,
+        onOpenCommand: () => setPaletteOpen(true),
+        onSignOut: () => void signOut(),
+      }}
+    >
+      {children(data)}
 
       <CommandPalette
         open={paletteOpen}
@@ -171,9 +179,11 @@ export function Workspace({
             run: () => router.push("/clients"),
           },
         ]}
+        placeholder="Search invoices and clients…"
+        icons={{ invoice: <FileText />, client: <User /> }}
         onClose={() => setPaletteOpen(false)}
         onSelect={(item) => router.push(item.href)}
       />
-    </div>
+    </AppShell>
   );
 }

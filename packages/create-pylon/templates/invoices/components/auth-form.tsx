@@ -21,8 +21,16 @@ import { Label } from "@/components/ui/label";
  * SSR cookie, which browsers withhold inside the builder's cross-site preview
  * iframe — that's the sign-in loop this avoids.
  */
-export function AuthForm() {
-  const [mode, setMode] = useState<"login" | "signup">("login");
+export type AuthMode = "login" | "signup";
+
+export function AuthForm({
+  mode,
+  onModeChange,
+}: {
+  mode: AuthMode;
+  onModeChange: (mode: AuthMode) => void;
+}) {
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +44,11 @@ export function AuthForm() {
       const session =
         mode === "login"
           ? await passwordLogin({ email, password })
-          : await passwordRegister({ email, password });
+          : await passwordRegister({
+              email,
+              password,
+              ...(name.trim() ? { displayName: name.trim() } : {}),
+            });
       // No navigation: persistSession notifies the sync engine, RequireAuth
       // re-renders, and the app appears in place. A full page load here would
       // depend on the SSR session cookie, which a cross-site iframe withholds.
@@ -50,6 +62,18 @@ export function AuthForm() {
   return (
     <div className="space-y-5">
       <form onSubmit={onSubmit} className="space-y-3.5">
+        {mode === "signup" ? (
+          <div className="space-y-1.5">
+            <Label htmlFor="name">Name</Label>
+            <Input
+              id="name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              autoComplete="name"
+              placeholder="Jordan Lee"
+            />
+          </div>
+        ) : null}
         <div className="space-y-1.5">
           <Label htmlFor="email">Email</Label>
           <Input
@@ -80,7 +104,13 @@ export function AuthForm() {
           </p>
         ) : null}
         <Button type="submit" disabled={pending} className="w-full">
-          {pending ? "…" : mode === "login" ? "Sign in" : "Create account"}
+          {pending
+            ? mode === "login"
+              ? "Signing in…"
+              : "Creating account…"
+            : mode === "login"
+              ? "Sign in"
+              : "Create account"}
         </Button>
       </form>
 
@@ -89,7 +119,7 @@ export function AuthForm() {
         <button
           type="button"
           onClick={() => {
-            setMode(mode === "login" ? "signup" : "login");
+            onModeChange(mode === "login" ? "signup" : "login");
             setError(null);
           }}
           className="font-medium text-foreground underline underline-offset-2"

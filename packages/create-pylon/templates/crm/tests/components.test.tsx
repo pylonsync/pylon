@@ -31,7 +31,7 @@ describe("PipelineBoard", () => {
         onOpen={() => {}}
       />,
     );
-    for (const label of ["Lead", "Qualified", "Proposal", "Won"]) {
+    for (const label of ["Lead", "Qualified", "Proposal", "Negotiation", "Won"]) {
       expect(screen.getByLabelText(label)).toBeDefined();
     }
     // Lost is real in the model but deliberately not a column.
@@ -181,7 +181,7 @@ describe("CommandPalette", () => {
     render(
       <CommandPalette open items={items} onClose={() => {}} onSelect={() => {}} />,
     );
-    fireEvent.change(screen.getByLabelText(/search deals/i), {
+    fireEvent.change(screen.getByLabelText(/^search/i), {
       target: { value: "acme" },
     });
     expect(screen.getByText("Acme Inc")).toBeDefined();
@@ -201,7 +201,7 @@ describe("CommandPalette", () => {
         onSelect={(item) => selected.push(item.id)}
       />,
     );
-    const input = screen.getByLabelText(/search deals/i);
+    const input = screen.getByLabelText(/^search/i);
     fireEvent.change(input, { target: { value: "fleet" } });
     fireEvent.keyDown(input, { key: "Enter" });
     expect(selected).toEqual(["1"]);
@@ -221,7 +221,7 @@ describe("CommandPalette", () => {
         onSelect={(item) => selected.push(item.id)}
       />,
     );
-    fireEvent.keyDown(screen.getByLabelText(/search deals/i), { key: "Escape" });
+    fireEvent.keyDown(screen.getByLabelText(/^search/i), { key: "Escape" });
     expect(closed).toBe(true);
     expect(selected).toEqual([]);
   });
@@ -237,7 +237,7 @@ describe("CommandPalette", () => {
       />,
     );
     expect(screen.getByText("New deal")).toBeDefined();
-    fireEvent.change(screen.getByLabelText(/search deals/i), {
+    fireEvent.change(screen.getByLabelText(/^search/i), {
       target: { value: "acme" },
     });
     expect(screen.queryByText("New deal")).toBeNull();
