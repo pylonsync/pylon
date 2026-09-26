@@ -1973,7 +1973,7 @@ impl Runtime {
 
         let encrypted_fields = encryption_field_map(&entities);
         let encryption_key = encryption_key_early;
-        Ok(Self {
+        let rt = Self {
             backend: RuntimeBackend::Sqlite(SqliteBackend {
                 write_conn: Mutex::new(conn),
                 read_pool,
@@ -1988,7 +1988,106 @@ impl Runtime {
             encryption_key,
             encrypted_fields,
             connection_manager: std::sync::OnceLock::new(),
-        })
+        };
+        // Not fatal: the app runs with the docs as they are, and the next
+        // boot tries again.
+        if let Err(e) = rt.reconcile_crdt_docs_once() {
+            tracing::warn!("[crdt] could not bring CRDT docs in line with their rows: {e}");
+        }
+        Ok(rt)
+    }
+
+    /// Once per SQLite database: set each CRDT doc's fields to its row's
+    /// values where they differ. Server updates (`ctx.db.update`, a shard's
+    /// entity writes) changed the row but not the doc until
+    /// `update_with_conn` patched both, and a client's next push would
+    /// write the doc's older values over the row. The row is the newer
+    /// side: every doc change is written to the row in the same
+    /// transaction.
+    fn reconcile_crdt_docs_once(&self) -> Result<(), RuntimeError> {
+        let crdt_entities: Vec<&ManifestEntity> =
+            self.manifest.entities.iter().filter(|e| e.crdt).collect();
+        let conn = self.lock_write_conn()?;
+        let err = |what: &str, e: &dyn std::fmt::Display| RuntimeError {
+            code: "CRDT_RECONCILE_FAILED".into(),
+            message: format!("{what}: {e}"),
+        };
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _pylon_crdt_reconciled (version INTEGER PRIMARY KEY)",
+        )
+        .map_err(|e| err("create _pylon_crdt_reconciled", &e))?;
+        let done: bool = conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM _pylon_crdt_reconciled WHERE version = 1)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(|e| err("read _pylon_crdt_reconciled", &e))?;
+        if done {
+            return Ok(());
+        }
+        let mut fixed = 0usize;
+        with_write_tx(self, &conn, || -> Result<(), RuntimeError> {
+            for ent in &crdt_entities {
+                let fields = self.crdt_fields_for(ent)?;
+                let ids: Vec<String> = {
+                    let mut stmt = conn
+                        .prepare("SELECT row_id FROM _pylon_crdt_snapshots WHERE entity = ?1")
+                        .map_err(|e| err("list snapshots", &e))?;
+                    let rows = stmt
+                        .query_map([&ent.name], |r| r.get(0))
+                        .map_err(|e| err("list snapshots", &e))?;
+                    rows.collect::<Result<_, _>>()
+                        .map_err(|e| err("list snapshots", &e))?
+                };
+                let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(&ent.name));
+                for id in ids {
+                    // The row as stored (encrypted fields stay encrypted, as
+                    // the doc holds them).
+                    let row = match conn.query_row(&sql, [&id], |r| Ok(row_to_json(r, &ent.fields)))
+                    {
+                        Ok(row) => row,
+                        Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                        Err(e) => return Err(err(&format!("read {} {id}", ent.name), &e)),
+                    };
+                    let doc = self
+                        .crdt_store()
+                        .project(&conn, &ent.name, &id, &fields)
+                        .map_err(|e| err(&format!("read the doc of {} {id}", ent.name), &e))?;
+                    let mut patch = serde_json::Map::new();
+                    for f in &fields {
+                        let in_row = row.get(&f.name).unwrap_or(&serde_json::Value::Null);
+                        let in_doc = doc.get(&f.name).unwrap_or(&serde_json::Value::Null);
+                        if !same_json_value(in_row, in_doc) {
+                            patch.insert(f.name.clone(), in_row.clone());
+                        }
+                    }
+                    if patch.is_empty() {
+                        continue;
+                    }
+                    self.crdt_store()
+                        .apply_patch(
+                            &conn,
+                            &ent.name,
+                            &id,
+                            &fields,
+                            &serde_json::Value::Object(patch),
+                        )
+                        .map_err(|e| err(&format!("patch the doc of {} {id}", ent.name), &e))?;
+                    fixed += 1;
+                }
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO _pylon_crdt_reconciled (version) VALUES (1)",
+                [],
+            )
+            .map_err(|e| err("record the reconcile", &e))?;
+            Ok(())
+        })?;
+        if fixed > 0 {
+            tracing::info!("[crdt] set {fixed} CRDT doc(s) to their rows' values");
+        }
+        Ok(())
     }
 
     /// Create the search index tables (`_facet_bitmap`, per-entity
@@ -2278,13 +2377,6 @@ impl Runtime {
         Ok(out)
     }
 
-    /// Borrow the CRDT store. SQLite-only — Postgres mode does not yet
-    /// support per-row CRDT snapshots at the runtime layer (CRDT
-    /// broadcasts degrade to JSON change events).
-    ///
-    /// # Panics
-    /// Panics on Postgres backend. Call sites that may run under either
-    /// backend should branch on `is_postgres()` first.
     /// Roll back the write transaction on the SQLite write connection
     /// `conn`, and drop the CRDT docs it changed from the cache.
     pub(crate) fn rollback_write(&self, conn: &Connection) -> rusqlite::Result<()> {
@@ -2295,6 +2387,13 @@ impl Runtime {
         rolled_back
     }
 
+    /// Borrow the CRDT store. SQLite-only — Postgres mode does not yet
+    /// support per-row CRDT snapshots at the runtime layer (CRDT
+    /// broadcasts degrade to JSON change events).
+    ///
+    /// # Panics
+    /// Panics on Postgres backend. Call sites that may run under either
+    /// backend should branch on `is_postgres()` first.
     pub fn crdt_store(&self) -> &crate::loro_store::LoroStore {
         match &self.backend {
             RuntimeBackend::Sqlite(sb) => &sb.crdt,
@@ -4505,13 +4604,19 @@ where
         message: format!("BEGIN: {e}"),
     })?;
     match body() {
-        Ok(v) => {
-            conn.execute("COMMIT", []).map_err(|e| RuntimeError {
-                code: "TX_COMMIT_FAILED".into(),
-                message: format!("COMMIT: {e}"),
-            })?;
-            Ok(v)
-        }
+        Ok(v) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(v),
+            Err(e) => {
+                // SQLite may have rolled back already (a full disk, an I/O
+                // error) or kept the transaction open (busy): either way it
+                // ends here, and the CRDT docs it changed leave the cache.
+                let _ = rt.rollback_write(conn);
+                Err(RuntimeError {
+                    code: "TX_COMMIT_FAILED".into(),
+                    message: format!("COMMIT: {e}"),
+                })
+            }
+        },
         Err(e) => {
             // Best-effort rollback; if even ROLLBACK fails we surface
             // the *original* error since that's the more actionable one.
@@ -4871,6 +4976,15 @@ fn json_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
 /// stability with callers that compute it from the manifest) — the
 /// name set comes from the row itself now, which always matches the
 /// SELECT's actual column shape.
+/// JSON values equal as stored: numbers by value (a doc may hold 5 where the
+/// row reads 5.0).
+fn same_json_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    match (a, b) {
+        (serde_json::Value::Number(x), serde_json::Value::Number(y)) => x.as_f64() == y.as_f64(),
+        _ => a == b,
+    }
+}
+
 fn row_to_json(row: &rusqlite::Row<'_>, fields: &[ManifestField]) -> serde_json::Value {
     let mut obj = serde_json::Map::new();
 
@@ -5772,6 +5886,99 @@ mod tests {
             rt.get_by_id("User", &id).unwrap().unwrap()["displayName"],
             "After"
         );
+    }
+
+    /// A COMMIT that fails ends the transaction and drops the CRDT docs it
+    /// changed from the cache, as a rollback does.
+    #[test]
+    fn a_failed_commit_drops_the_crdt_docs_it_changed() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let conn = rt.lock_write_conn().unwrap();
+        let id = with_write_tx(&rt, &conn, || {
+            rt.insert_with_conn(
+                &conn,
+                "User",
+                &serde_json::json!({"email": "c@y.com", "displayName": "Kept"}),
+            )
+        })
+        .unwrap();
+        // A deferred foreign key fails at COMMIT, not at the insert.
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parent (id INTEGER PRIMARY KEY);
+             CREATE TABLE child (
+                 parent_id INTEGER REFERENCES parent (id) DEFERRABLE INITIALLY DEFERRED
+             );",
+        )
+        .unwrap();
+        let failed = with_write_tx(&rt, &conn, || {
+            rt.update_with_conn(
+                &conn,
+                "User",
+                &id,
+                &serde_json::json!({"displayName": "Lost"}),
+            )?;
+            conn.execute("INSERT INTO child (parent_id) VALUES (42)", [])
+                .map_err(|e| RuntimeError {
+                    code: "TEST".into(),
+                    message: e.to_string(),
+                })?;
+            Ok(())
+        });
+        assert_eq!(failed.unwrap_err().code, "TX_COMMIT_FAILED");
+        assert!(conn.is_autocommit(), "the transaction was left open");
+        assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Kept");
+        drop(conn);
+        assert_eq!(
+            rt.get_by_id("User", &id).unwrap().unwrap()["displayName"],
+            "Kept"
+        );
+    }
+
+    /// Opening a SQLite database brings each CRDT doc in line with its row
+    /// once: a row a server update changed while its doc did not.
+    #[test]
+    fn opening_a_database_sets_stale_crdt_docs_to_their_rows_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let path = path.to_str().unwrap();
+        let id = {
+            let rt = Runtime::open(path, test_manifest()).unwrap();
+            let id = rt
+                .insert(
+                    "User",
+                    &serde_json::json!({"email": "r@y.com", "displayName": "Doc"}),
+                )
+                .unwrap();
+            // The row changes and the doc does not, as a server update did
+            // before update_with_conn patched docs; and the database has not
+            // been reconciled yet.
+            let conn = rt.lock_write_conn().unwrap();
+            conn.execute(
+                "UPDATE \"User\" SET \"displayName\" = 'Row' WHERE \"id\" = ?1",
+                [&id],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM _pylon_crdt_reconciled", [])
+                .unwrap();
+            assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Doc");
+            id
+        };
+        let rt = Runtime::open(path, test_manifest()).unwrap();
+        {
+            let conn = rt.lock_write_conn().unwrap();
+            assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Row");
+            // Once: a later difference is left alone on the next open.
+            conn.execute(
+                "UPDATE \"User\" SET \"displayName\" = 'Later' WHERE \"id\" = ?1",
+                [&id],
+            )
+            .unwrap();
+        }
+        drop(rt);
+        let rt = Runtime::open(path, test_manifest()).unwrap();
+        let conn = rt.lock_write_conn().unwrap();
+        assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Row");
     }
 
     /// Regression: when the SQL INSERT step inside Runtime::insert fails

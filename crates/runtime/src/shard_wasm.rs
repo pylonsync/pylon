@@ -2162,10 +2162,6 @@ impl WasmShardHost {
             .lock()
             .unwrap()
             .insert(id.to_string(), serial);
-        self.failures
-            .lock()
-            .unwrap()
-            .insert(id.to_string(), failure);
         // Moves a crash left open: in place before any input reaches it.
         if let Some(plan) = resume {
             let at = transfer::Instance {
@@ -2179,7 +2175,13 @@ impl WasmShardHost {
             .unwrap()
             .insert(id.to_string(), kind.to_string());
         self.idle_since.lock().unwrap().remove(id);
-        self.registry.insert(shard);
+        {
+            // The run and its failure cell change together: info reads both
+            // under this lock.
+            let mut failures = self.failures.lock().unwrap();
+            failures.insert(id.to_string(), failure);
+            self.registry.insert(shard);
+        }
         tracing::info!(
             "[shard {id}] started ({kind}{})",
             if state.is_some() {
@@ -2388,11 +2390,15 @@ impl WasmShardHost {
 
     /// A shard running in this process.
     fn info_local(&self, id: &str) -> Option<ShardInfo> {
+        // The shard and its failure cell from the same run (a new run
+        // replaces both under this lock).
+        let failures = self.failures.lock().unwrap();
         let shard = self.registry.get(id)?;
         let kind = self.kind_of.read().unwrap().get(id).cloned()?;
         // Not under the state lock: a mutation holding the database's write
         // lock can ask while a move holds the state and waits on that lock.
-        let error = self.failures.lock().unwrap().get(id).and_then(Failure::get);
+        let error = failures.get(id).and_then(Failure::get);
+        drop(failures);
         Some(ShardInfo {
             id: id.to_string(),
             kind,

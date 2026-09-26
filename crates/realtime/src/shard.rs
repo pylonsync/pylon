@@ -1444,14 +1444,11 @@ impl<S: SimState> Shard<S> {
             .unwrap()
             .map(|prev| now.duration_since(prev))
             .unwrap_or_default();
-        *self.last_tick_at.lock().unwrap() = Some(now);
         let dt = self.fixed_dt().unwrap_or(measured);
 
-        let mut tick_no_guard = self.tick_no.lock().unwrap();
-        *tick_no_guard += 1;
-        let tick_number = *tick_no_guard;
-        drop(tick_no_guard);
-
+        // Counted once the tick runs (below, under the state lock): a tick
+        // that finds the shard stopped or paused is not a tick.
+        let tick_number: u64;
         let had_inputs: bool;
         // Clone the list so delivery below runs without the subscribers
         // lock: a transport can add or remove subscribers meanwhile.
@@ -1471,6 +1468,12 @@ impl<S: SimState> Shard<S> {
             if !self.is_running() || self.paused.load(Ordering::Acquire) {
                 return;
             }
+            *self.last_tick_at.lock().unwrap() = Some(now);
+            tick_number = {
+                let mut tick_no = self.tick_no.lock().unwrap();
+                *tick_no += 1;
+                *tick_no
+            };
             // Inputs are taken under the state lock: a hand-off (which drops
             // a subscriber's queued inputs, then takes its entity out under
             // this lock) never races an input this tick took before it.
@@ -1814,6 +1817,35 @@ mod tests {
             .join()
             .unwrap();
         shard.with_state(|roster| assert!(roster.players.lock().unwrap().is_empty()));
+    }
+
+    /// A tick that waited for the state while the shard stopped does not
+    /// run and is not counted: a replay runs as many ticks as the shard
+    /// reports, and a counted tick that never ran put it one tick ahead.
+    #[test]
+    fn a_tick_that_finds_the_shard_stopped_is_not_counted() {
+        let shard = Arc::new(Shard::new(
+            "west",
+            Counter {
+                value: 0,
+                finished: false,
+            },
+            ShardConfig::default(),
+        ));
+        let (reached, at_lock) = std::sync::mpsc::channel();
+        *shard.tick_at_state_lock.lock().unwrap() = Some(reached);
+        shard
+            .with_state(|_| {
+                let ticking = Arc::clone(&shard);
+                let tick = std::thread::spawn(move || ticking.run_tick());
+                at_lock.recv_timeout(Duration::from_secs(5)).unwrap();
+                std::thread::sleep(Duration::from_millis(50));
+                shard.stop();
+                tick
+            })
+            .join()
+            .unwrap();
+        assert_eq!(shard.tick_number(), 0);
     }
 
     #[test]

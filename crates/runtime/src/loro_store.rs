@@ -342,6 +342,19 @@ impl LoroStore {
         Ok(projected)
     }
 
+    /// The row's doc as JSON, for `fields`.
+    pub fn project(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+    ) -> Result<Value, LoroStoreError> {
+        let handle = self.get_or_hydrate(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        Ok(project_doc_to_json(&doc, fields))
+    }
+
     /// Get the full snapshot for a row. Sent to a fresh client when it
     /// subscribes. Returns an empty `Vec` for rows that don't exist yet.
     pub fn snapshot(
