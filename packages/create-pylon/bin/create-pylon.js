@@ -66,7 +66,9 @@ const PYLON_VERSION = JSON.parse(
 // Each template declares which platforms it supports. Unified templates
 // (the default and every archetype) are a single full-stack SSR app and
 // take no platforms at all. The few non-unified monorepo templates list
-// the platforms whose demo flow they actually ship.
+// the platforms whose demo flow they actually ship. A unified template can
+// also list `nativePlatforms`: passing --platforms with any of them scaffolds
+// the monorepo instead (backend/<t> as apps/api plus one app per platform).
 // ---------------------------------------------------------------------------
 
 // `web` and `vite` both render into apps/web — they're mutually
@@ -106,9 +108,10 @@ const TEMPLATE_REGISTRY = {
 	},
 	consumer: {
 		blurb:
-			"Photo sharing — feed, explore, post pages, profiles, follows, likes, comments, and saves. One SSR app.",
+			"Photo sharing — feed, explore, post pages, profiles, follows, likes, comments, and saves. One SSR app. --platforms ios,expo scaffolds native apps on a shared backend instead.",
 		platforms: [],
 		unified: true,
+		nativePlatforms: ["ios", "expo"],
 	},
 	chat: {
 		blurb:
@@ -196,7 +199,13 @@ const TEMPLATE_REGISTRY = {
 	},
 	"ai-chat": {
 		blurb:
-			"Streaming AI chat — token streaming via the built-in /api/ai/stream (your key stays server-side), multi-conversation history that's owner-scoped + synced across tabs in realtime, guest or signed-in. Set PYLON_AI_API_KEY to enable. One SSR app.",
+			"AI chat — guests start chatting right away, replies stream through a server function (your key stays server-side), and history syncs across tabs and moves to the account on sign-in. Set ANTHROPIC_API_KEY or OPENAI_API_KEY to enable. One SSR app.",
+		platforms: [],
+		unified: true,
+	},
+	imessage: {
+		blurb:
+			"AI assistant people text over iMessage. Sendblue or a relay on your own Mac, an allowlist of who it answers, per-contact rate limits, notes and reminder tools on Pylon's agent(), and a live owner dashboard with iMessage-style threads. One SSR app.",
 		platforms: [],
 		unified: true,
 	},
@@ -288,7 +297,8 @@ Usage: npm create @pylonsync/pylon [name] [options]
 ${tmplLines.join("\n")}
 
   --platforms <list>     comma list: ${PLATFORMS_AVAILABLE.join(",")}  (default: web)
-                         ignored for unified templates — they're a single full-stack app
+                         ignored for unified templates — they're a single full-stack app —
+                         except consumer, where ios,expo scaffolds native apps on a shared backend
   --bun|--pnpm|--yarn|--npm
   --skip-install         scaffold only, don't run install
 
@@ -296,6 +306,7 @@ Examples:
   npm create @pylonsync/pylon my-app                        # default — the smallest SSR app that runs
   npm create @pylonsync/pylon my-app --template saas        # building a product? start here: landing + orgs + billing
   npm create @pylonsync/pylon my-app --template mobile      # App Store-ready Expo app + backend: onboarding, sign-in, paywall
+  npm create @pylonsync/pylon my-app --template consumer --platforms ios,expo   # photo app: SwiftUI + Expo on one backend
   npm create @pylonsync/pylon my-app --template todo        # live, optimistic todo (SSR, one port)
   npm create @pylonsync/pylon my-app --template chat         # realtime live chat room
   npm create @pylonsync/pylon my-app --template waitlist     # coming-soon landing + live signup counter
@@ -375,8 +386,12 @@ if (!flags.template) {
 }
 flags.template = resolveTemplate(flags.template);
 // `unified` templates (default) are a single app, not a monorepo — they take
-// no platforms. Skip the platform prompt + validation for them entirely.
-const isUnified = TEMPLATE_REGISTRY[flags.template]?.unified === true;
+// no platforms. Skip the platform prompt + validation for them entirely,
+// unless the template has native apps and --platforms asked for them.
+const templateEntry = TEMPLATE_REGISTRY[flags.template];
+const wantsNative =
+	Boolean(flags.platforms) && (templateEntry?.nativePlatforms?.length ?? 0) > 0;
+const isUnified = templateEntry?.unified === true && !wantsNative;
 if (!isUnified && !flags.platforms) {
 	const supported = TEMPLATE_REGISTRY[flags.template].platforms.join(", ");
 	const ans = isInteractive
@@ -461,7 +476,9 @@ if (!TEMPLATES_AVAILABLE.includes(flags.template)) {
 // Reject combos a template doesn't yet support — better to fail loud
 // than to scaffold an incomplete tree (e.g. a web-only template + expo
 // would skip frontend entirely and leave a half-empty workspace).
-const supportedPlatforms = TEMPLATE_REGISTRY[flags.template].platforms;
+const supportedPlatforms = wantsNative
+	? TEMPLATE_REGISTRY[flags.template].nativePlatforms
+	: TEMPLATE_REGISTRY[flags.template].platforms;
 const invalidForTemplate = platforms.filter(
 	(p) => !supportedPlatforms.includes(p),
 );

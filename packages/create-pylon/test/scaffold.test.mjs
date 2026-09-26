@@ -25,7 +25,7 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = resolve(HERE, "..", "bin", "create-pylon.js");
 
-function runScaffold({ name, template, cwd, templatesDir }) {
+function runScaffold({ name, template, cwd, templatesDir, platforms }) {
 	// Pass EVERY flag the scaffolder would otherwise prompt for (name positional,
 	// --template, --bun for the package manager, --no-skill) so the run is fully
 	// non-interactive; --skip-install keeps it offline. input:"" is a belt-and-
@@ -42,6 +42,7 @@ function runScaffold({ name, template, cwd, templatesDir }) {
 			"--bun",
 			"--skip-install",
 			"--no-skill",
+			...(platforms ? ["--platforms", platforms] : []),
 		],
 		{ cwd, env, encoding: "utf8", input: "" },
 	);
@@ -154,4 +155,103 @@ test("the mobile template scaffolds a backend + an Expo app with the store flow"
 	const cfg = readFileSync(join(root, "apps/expo/app.config.ts"), "utf8");
 	assert.ok(!cfg.includes("__APP_NAME"), "placeholder left in app.config.ts");
 	assert.match(cfg, /com\.example\.myapp/, "bundle id not derived from the app name");
+});
+
+test("consumer stays a single SSR app when no platforms are passed", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-consumer-web-"));
+	const res = runScaffold({ name: "myapp", template: "consumer", cwd: dir });
+	assert.equal(res.status, 0, `expected exit 0, got ${res.status}\n${res.stderr}`);
+	const root = join(dir, "myapp");
+	assert.ok(existsSync(join(root, "app.ts")), "app.ts missing");
+	assert.ok(!existsSync(join(root, "apps")), "unified scaffold must not create apps/");
+});
+
+test("consumer --platforms ios,expo scaffolds the native apps on the shared backend", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-consumer-native-"));
+	const res = runScaffold({ name: "myapp", template: "consumer", cwd: dir, platforms: "ios,expo" });
+	assert.equal(res.status, 0, `expected exit 0, got ${res.status}\n${res.stderr}`);
+	const root = join(dir, "myapp");
+	for (const f of [
+		"package.json",
+		"apps/api/app.ts",
+		"apps/api/functions/createPost.ts",
+		"apps/api/functions/seedDemo.ts",
+		"apps/api/lib/seed.ts",
+		"apps/ios/project.yml",
+		"apps/ios/Package.swift",
+		"apps/ios/Sources/Myapp",
+		"apps/expo/App.tsx",
+		"apps/expo/package.json",
+	]) {
+		assert.ok(existsSync(join(root, f)), `${f} missing`);
+	}
+	assert.ok(!existsSync(join(root, "app.ts")), "native scaffold must not also land the unified app");
+	for (const f of ["apps/ios/project.yml", "apps/expo/app.json", "apps/api/package.json"]) {
+		const body = readFileSync(join(root, f), "utf8");
+		assert.ok(!body.includes("__APP_NAME"), `placeholder left in ${f}`);
+		assert.ok(!body.includes("__PYLON_VERSION"), `version placeholder left in ${f}`);
+	}
+});
+
+test("consumer rejects a platform it has no native app for", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-consumer-bad-"));
+	const res = runScaffold({ name: "myapp", template: "consumer", cwd: dir, platforms: "web" });
+	assert.notEqual(res.status, 0, "expected a non-zero exit");
+	assert.match(res.stderr, /doesn't support platform\(s\): web/);
+});
+
+test("the imessage template scaffolds the app, both transports, and the relay", () => {
+	const dir = mkdtempSync(join(tmpdir(), "cp-imessage-"));
+	const res = runScaffold({ name: "textbot", template: "imessage", cwd: dir });
+	assert.equal(res.status, 0, `expected exit 0, got ${res.status}\n${res.stderr}`);
+	const root = join(dir, "textbot");
+	for (const f of [
+		"package.json",
+		"app.ts",
+		".gitignore",
+		"bunfig.toml",
+		".env.example",
+		"app/page.tsx",
+		"app/login/page.tsx",
+		"app/setup/page.tsx",
+		"app/contacts/page.tsx",
+		"functions/assistant.ts",
+		"functions/sendblueWebhook.ts",
+		"functions/relaySync.ts",
+		"functions/processTurn.ts",
+		"lib/transport.ts",
+		"lib/sendblue.ts",
+		"lib/relay-protocol.ts",
+		"lib/gate.ts",
+		"relay/main.ts",
+		"relay/chatdb.ts",
+		"relay/applescript.ts",
+		"relay/.env.example",
+		"tests/applescript.test.ts",
+		"tests/chatdb.test.ts",
+	]) {
+		assert.ok(existsSync(join(root, f)), `${f} missing`);
+	}
+	const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+	assert.equal(pkg.name, "textbot");
+	assert.equal(pkg.scripts.relay, "bun relay/main.ts");
+	for (const f of ["package.json", "app.ts"]) {
+		const body = readFileSync(join(root, f), "utf8");
+		assert.ok(!body.includes("__APP_NAME"), `placeholder left in ${f}`);
+		assert.ok(!body.includes("__PYLON_VERSION"), `version placeholder left in ${f}`);
+	}
+	// No secrets ship in the template: every secret in the env examples is blank.
+	for (const f of [".env.example", "relay/.env.example"]) {
+		const env = readFileSync(join(root, f), "utf8");
+		for (const key of ["SENDBLUE_API_SECRET", "SENDBLUE_WEBHOOK_SECRET", "RELAY_TOKEN", "PYLON_ADMIN_TOKEN"]) {
+			const line = env.split("\n").find((l) => l.replace(/^#\s*/, "").startsWith(`${key}=`));
+			if (line) assert.match(line, new RegExp(`${key}=$`), `${f} ships a value for ${key}`);
+		}
+	}
+});
+
+test("the imessage template is listed in --help", () => {
+	const res = spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" });
+	assert.equal(res.status, 0);
+	assert.match(res.stdout, /imessage/);
 });
