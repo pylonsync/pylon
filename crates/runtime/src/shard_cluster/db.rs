@@ -508,8 +508,25 @@ impl Db {
             }
             Db::Sqlite(s) => {
                 let conn = s.write.lock().unwrap_or_else(|e| e.into_inner());
+                // A transaction a panic left open (the guard below normally
+                // ends it) is rolled back before this one begins.
+                if !conn.is_autocommit() {
+                    let _ = conn.execute_batch("ROLLBACK");
+                }
                 conn.execute_batch("BEGIN IMMEDIATE")
                     .map_err(|e| format!("shard directory: {e}"))?;
+                // A panic in the body rolls back at once: the transaction
+                // holds the database's write lock, which every app write
+                // waits for.
+                struct RollbackOnPanic<'c>(&'c rusqlite::Connection);
+                impl Drop for RollbackOnPanic<'_> {
+                    fn drop(&mut self) {
+                        if std::thread::panicking() && !self.0.is_autocommit() {
+                            let _ = self.0.execute_batch("ROLLBACK");
+                        }
+                    }
+                }
+                let _guard = RollbackOnPanic(&conn);
                 match body(&mut Tx::Sqlite(&conn)) {
                     Ok(value) => match conn.execute_batch("COMMIT") {
                         Ok(()) => Ok(value),
@@ -560,5 +577,48 @@ fn pg_error(e: DbError) -> postgres::Error {
     match e {
         DbError::Pg(e) => e,
         DbError::Sqlite(e) => unreachable!("a SQLite error on a Postgres connection: {e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A panic inside a SQLite directory transaction ends it: the database's
+    /// write lock is free for the app's writes and for the next directory
+    /// transaction.
+    #[test]
+    fn a_panic_in_a_sqlite_transaction_releases_the_write_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let path = path.to_str().unwrap();
+        let db = Db::Sqlite(Box::new(
+            SqliteDb::open_waiting(path, Duration::ZERO).unwrap(),
+        ));
+        db.tx(Retry::Once, |t| {
+            t.execute("CREATE TABLE t (x INTEGER)", &[])?;
+            Ok(())
+        })
+        .unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = db.tx(Retry::Once, |t| -> Result<(), DbError> {
+                t.execute("INSERT INTO t VALUES (1)", &[])?;
+                panic!("a row of the wrong type");
+            });
+        }));
+        assert!(panicked.is_err());
+        let app = rusqlite::Connection::open(path).unwrap();
+        app.busy_timeout(Duration::from_millis(100)).unwrap();
+        app.execute("INSERT INTO t VALUES (2)", [])
+            .expect("the write lock is still held");
+        db.tx(Retry::Once, |t| {
+            t.execute("INSERT INTO t VALUES (3)", &[])?;
+            Ok(())
+        })
+        .unwrap();
+        let rows: i64 = app
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "the panicked insert was rolled back");
     }
 }

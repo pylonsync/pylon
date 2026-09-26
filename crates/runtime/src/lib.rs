@@ -525,6 +525,7 @@ pub(crate) fn sqlite_write_code(e: &rusqlite::Error, default: &'static str) -> &
 /// write; when another connection committed in between, that write fails
 /// with `SQLITE_BUSY_SNAPSHOT` at once, with no wait.
 pub(crate) fn begin_write(conn: &Connection) -> rusqlite::Result<()> {
+    crate::loro_store::write_tx_began();
     conn.execute_batch("BEGIN IMMEDIATE")
 }
 
@@ -2284,6 +2285,16 @@ impl Runtime {
     /// # Panics
     /// Panics on Postgres backend. Call sites that may run under either
     /// backend should branch on `is_postgres()` first.
+    /// Roll back the write transaction on the SQLite write connection
+    /// `conn`, and drop the CRDT docs it changed from the cache.
+    pub(crate) fn rollback_write(&self, conn: &Connection) -> rusqlite::Result<()> {
+        let rolled_back = conn.execute_batch("ROLLBACK");
+        if let RuntimeBackend::Sqlite(sb) = &self.backend {
+            sb.crdt.rolled_back();
+        }
+        rolled_back
+    }
+
     pub fn crdt_store(&self) -> &crate::loro_store::LoroStore {
         match &self.backend {
             RuntimeBackend::Sqlite(sb) => &sb.crdt,
@@ -2419,7 +2430,7 @@ impl Runtime {
         // Atomic block — CRDT sidecar snapshot + materialized SQL row +
         // search-index maintenance all land together or none does. SQLite's
         // rollback journal makes this crash-safe end-to-end.
-        with_write_tx(&conn, || {
+        with_write_tx(self, &conn, || {
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
                 sb.crdt
@@ -2815,7 +2826,7 @@ impl Runtime {
 
         // Atomic block — same shape as insert. CRDT snapshot, SQL UPDATE,
         // and FTS maintenance all commit together.
-        let affected = with_write_tx(&conn, || -> Result<i64, RuntimeError> {
+        let affected = with_write_tx(self, &conn, || -> Result<i64, RuntimeError> {
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
                 sb.crdt
@@ -3669,6 +3680,18 @@ impl Runtime {
                 message: format!("Update {entity}/{id} failed: {e}"),
             })?;
 
+        // The row's CRDT doc takes the same fields in the same transaction
+        // (as in `update`), or the next projection from the doc undoes them.
+        if affected > 0 && ent.crdt {
+            let crdt_fields = self.crdt_fields_for(ent)?;
+            self.crdt_store()
+                .apply_patch(conn, entity, id, &crdt_fields, data)
+                .map_err(|e| RuntimeError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("crdt write {entity}/{id}: {e}"),
+                })?;
+        }
+
         if affected > 0 && searchable {
             if let (Some(cfg), Some(old)) = (ent.search.as_ref(), old_row) {
                 pylon_storage::search_maintenance::apply_update(conn, entity, id, &old, data, cfg)
@@ -4469,15 +4492,18 @@ impl Runtime {
 /// reserved lock on entry instead of escalating later — matches the
 /// pattern in `datastore.rs::transact` and avoids a SQLITE_BUSY race
 /// where a concurrent reader prevents the lock upgrade mid-write.
-fn with_write_tx<T, F>(conn: &rusqlite::Connection, body: F) -> Result<T, RuntimeError>
+fn with_write_tx<T, F>(
+    rt: &Runtime,
+    conn: &rusqlite::Connection,
+    body: F,
+) -> Result<T, RuntimeError>
 where
     F: FnOnce() -> Result<T, RuntimeError>,
 {
-    conn.execute("BEGIN IMMEDIATE", [])
-        .map_err(|e| RuntimeError {
-            code: "TX_BEGIN_FAILED".into(),
-            message: format!("BEGIN: {e}"),
-        })?;
+    begin_write(conn).map_err(|e| RuntimeError {
+        code: "TX_BEGIN_FAILED".into(),
+        message: format!("BEGIN: {e}"),
+    })?;
     match body() {
         Ok(v) => {
             conn.execute("COMMIT", []).map_err(|e| RuntimeError {
@@ -4489,7 +4515,7 @@ where
         Err(e) => {
             // Best-effort rollback; if even ROLLBACK fails we surface
             // the *original* error since that's the more actionable one.
-            let _ = conn.execute("ROLLBACK", []);
+            let _ = rt.rollback_write(conn);
             Err(e)
         }
     }
@@ -5658,7 +5684,7 @@ mod tests {
         let rt = Runtime::in_memory(test_manifest()).unwrap();
         let id = {
             let conn = rt.lock_write_conn().unwrap();
-            with_write_tx(&conn, || {
+            with_write_tx(&rt, &conn, || {
                 rt.insert_with_conn(
                     &conn,
                     "User",
@@ -5689,6 +5715,63 @@ mod tests {
         let row = rt.get_by_id("User", &id).unwrap().unwrap();
         assert_eq!(row["email"], "tx@y.com");
         assert_eq!(row["displayName"], "Tx");
+    }
+
+    /// The User row's CRDT doc as JSON: the cached doc when there is one.
+    fn user_doc(rt: &Runtime, conn: &rusqlite::Connection, id: &str) -> serde_json::Value {
+        let ent = rt.require_entity("User").unwrap();
+        let fields = rt.crdt_fields_for(ent).unwrap();
+        let bytes = rt.crdt_store().snapshot(conn, "User", id).unwrap();
+        let doc = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_update(&doc, &bytes).unwrap();
+        pylon_crdt::project_doc_to_json(&doc, &fields)
+    }
+
+    /// A write through `update_with_conn` (a mutation's `ctx.db.update`, a
+    /// shard's buffered write) changes the row's CRDT doc in the same
+    /// transaction; a rollback leaves neither, in the database or in the
+    /// doc cache.
+    #[test]
+    fn update_with_conn_changes_the_crdt_doc_and_a_rollback_undoes_it() {
+        let rt = Runtime::in_memory(test_manifest()).unwrap();
+        let conn = rt.lock_write_conn().unwrap();
+        let id = with_write_tx(&rt, &conn, || {
+            rt.insert_with_conn(
+                &conn,
+                "User",
+                &serde_json::json!({"email": "u@y.com", "displayName": "Before"}),
+            )
+        })
+        .unwrap();
+
+        with_write_tx(&rt, &conn, || {
+            rt.update_with_conn(
+                &conn,
+                "User",
+                &id,
+                &serde_json::json!({"displayName": "After"}),
+            )
+        })
+        .unwrap();
+        assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "After");
+
+        // Rolled back: the cached doc goes with it.
+        begin_write(&conn).unwrap();
+        rt.update_with_conn(
+            &conn,
+            "User",
+            &id,
+            &serde_json::json!({"displayName": "Gone"}),
+        )
+        .unwrap();
+        assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Gone");
+        rt.rollback_write(&conn).unwrap();
+        assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "After");
+        drop(conn);
+        assert_eq!(
+            rt.get_by_id("User", &id).unwrap().unwrap()["displayName"],
+            "After"
+        );
     }
 
     /// Regression: when the SQL INSERT step inside Runtime::insert fails

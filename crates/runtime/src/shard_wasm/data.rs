@@ -1653,7 +1653,10 @@ mod tests {
         // It stops as a guest call refused after the lease lapsed does.
         let shard = host.registry.get(&zone).unwrap();
         shard.with_state(|sim| {
-            sim.inner.borrow_mut().failed = Some(crate::shard_wasm::LEASE_LAPSED.to_string())
+            sim.inner
+                .borrow()
+                .failed
+                .set(crate::shard_wasm::LEASE_LAPSED)
         });
         shard.stop();
         host.stop_all();
@@ -1693,7 +1696,10 @@ mod tests {
         );
         let shard = host.registry.get(&zone).unwrap();
         shard.with_state(|sim| {
-            sim.inner.borrow_mut().failed = Some(crate::shard_wasm::LEASE_LAPSED.to_string())
+            sim.inner
+                .borrow()
+                .failed
+                .set(crate::shard_wasm::LEASE_LAPSED)
         });
         shard.stop();
         host.sweep();
@@ -2216,6 +2222,36 @@ mod tests {
             (row["x"].clone(), row["nextGrant"].clone()),
             (0.into(), 9.into())
         );
+    }
+
+    /// Shard info does not wait for the shard's state lock: a mutation
+    /// holding the database's write lock can ask for it while a move holds
+    /// the state and waits on that write lock.
+    #[test]
+    fn shard_info_does_not_wait_for_the_state_lock() {
+        let (rt, fns) = runtime();
+        let host = joined(&fns, &rt, "w1");
+        let shard = host.registry.get("w1").unwrap();
+        let (held_tx, held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            shard.with_state(|_| {
+                held_tx.send(()).unwrap();
+                released.recv().unwrap();
+            })
+        });
+        held.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let host = Arc::clone(&host);
+            std::thread::spawn(move || {
+                let _ = tx.send(host.info_local("w1").map(|i| i.error));
+            });
+        }
+        let info = rx.recv_timeout(Duration::from_secs(2));
+        release.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(info.expect("waited for the state lock"), Some(None));
     }
 
     /// A row keeps the latest value whichever shard wrote it, belongs to

@@ -144,11 +144,11 @@ impl EntityWriter {
             Ok(())
         })();
         if let Err(e) = written {
-            let _ = conn.execute_batch("ROLLBACK");
+            let _ = self.runtime.rollback_write(&conn);
             return Err(e);
         }
         if let Err(e) = conn.execute_batch("COMMIT") {
-            let _ = conn.execute_batch("ROLLBACK");
+            let _ = self.runtime.rollback_write(&conn);
             return Err(WriteError::from(pylon_http::DataError {
                 code: crate::sqlite_write_code(&e, "COMMIT_FAILED").into(),
                 message: format!("Failed to commit: {e}"),
@@ -503,13 +503,13 @@ mod tests {
                 &serde_json::json!({ "userId": "u", "x": 0, "nextGrant": 0 }),
             )
             .unwrap();
-        let writer = EntityWriter::new(
+        let writer = Arc::new(EntityWriter::new(
             Arc::clone(&rt),
             Arc::new(ChangeLog::new()),
             Arc::new(pylon_router::NoopNotifier),
             Arc::new(PolicyEngine::from_manifest(rt.manifest())),
             Arc::new(pylon_plugin::PluginRegistry::new(rt.manifest().clone())),
-        );
+        ));
         fn fence(machine: &str, epoch: i64) -> Fence<'_> {
             Fence {
                 shard: "fence",
@@ -570,5 +570,39 @@ mod tests {
             dir.placement("fence").unwrap().unwrap().machine_id,
             "a".to_string()
         );
+
+        // The reverse: a move holds the database's write lock when a's
+        // write starts. The write waits for it from its BEGIN, then finds
+        // the shard moved (a write that read the fence before the move's
+        // commit would fail with a stale snapshot instead).
+        let mover = rusqlite::Connection::open(&path).unwrap();
+        mover
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 UPDATE _pylon_shard_placements SET machine_id = 'c', epoch = 41
+                  WHERE shard_id = 'fence';",
+            )
+            .unwrap();
+        let write = {
+            let writer = Arc::clone(&writer);
+            let id = id.clone();
+            std::thread::spawn(move || {
+                writer.update_fenced(
+                    "Character",
+                    &id,
+                    &serde_json::json!({ "x": 9 }),
+                    Some(Fence {
+                        shard: "fence",
+                        machine: "a",
+                        epoch: 31,
+                    }),
+                )
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!write.is_finished(), "the write waits for the move");
+        mover.execute_batch("COMMIT").unwrap();
+        assert!(matches!(write.join().unwrap(), Err(WriteError::Refused(_))));
+        assert_eq!(rt.get_by_id("Character", &id).unwrap().unwrap()["x"], 8);
     }
 }

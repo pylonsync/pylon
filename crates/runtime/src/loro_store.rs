@@ -188,6 +188,32 @@ impl From<pylon_http::DataError> for LoroStoreError {
 // Store
 // ---------------------------------------------------------------------------
 
+thread_local! {
+    /// Rows whose cached doc this thread changed since its write
+    /// transaction began. The cache holds the change before the commit, so
+    /// a rollback evicts them ([`LoroStore::rolled_back`]).
+    static CHANGED_IN_TX: std::cell::RefCell<Vec<(String, String)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Rows noted per write transaction; past this, a rollback clears the whole
+/// cache instead.
+const MAX_CHANGED_IN_TX: usize = 4096;
+
+/// A write transaction began on this thread (see [`crate::begin_write`]).
+pub(crate) fn write_tx_began() {
+    CHANGED_IN_TX.with(|c| c.borrow_mut().clear());
+}
+
+fn note_changed(entity: &str, row_id: &str) {
+    CHANGED_IN_TX.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() <= MAX_CHANGED_IN_TX {
+            c.push((entity.to_string(), row_id.to_string()));
+        }
+    });
+}
+
 /// Server-side per-row LoroDoc cache + persistence layer.
 ///
 /// One instance per Runtime. Holds a bounded cache of doc handles
@@ -285,6 +311,7 @@ impl LoroStore {
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let projected = {
             let doc = handle.lock().unwrap();
+            note_changed(entity, row_id);
             apply_patch(&doc, fields, patch).map_err(LoroStoreError::Apply)?;
             self.persist_snapshot(conn, entity, row_id, &doc)?;
             project_doc_to_json(&doc, fields)
@@ -307,6 +334,7 @@ impl LoroStore {
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let projected = {
             let doc = handle.lock().unwrap();
+            note_changed(entity, row_id);
             crdt_apply_update(&doc, update).map_err(LoroStoreError::Decode)?;
             self.persist_snapshot(conn, entity, row_id, &doc)?;
             project_doc_to_json(&doc, fields)
@@ -371,6 +399,20 @@ impl LoroStore {
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         Ok(Some(encode_update_since(&doc, &parsed)))
+    }
+
+    /// This thread's write transaction rolled back: drop the docs it
+    /// changed from the cache, so the next read loads the committed
+    /// snapshot.
+    pub fn rolled_back(&self) {
+        let changed = CHANGED_IN_TX.with(|c| std::mem::take(&mut *c.borrow_mut()));
+        if changed.len() > MAX_CHANGED_IN_TX {
+            self.clear_cache();
+            return;
+        }
+        for (entity, row_id) in changed {
+            self.evict(&entity, &row_id);
+        }
     }
 
     /// Drop a row's doc from the in-memory cache. Doesn't touch the

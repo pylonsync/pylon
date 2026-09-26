@@ -520,7 +520,7 @@ impl WasmShardKind {
             format: self.config.snapshot_format,
             broadcast: None,
             last_good: None,
-            failed: None,
+            failed: Failure::default(),
             interest_shared: false,
         };
 
@@ -751,9 +751,27 @@ struct Inner {
     /// the module failed to produce.
     last_good: Option<RawSnapshot>,
     /// Why the module stopped. Once set, no call reaches the module again.
-    failed: Option<String>,
+    failed: Failure,
     /// The module's last answer: its snapshot depends only on the visible set.
     interest_shared: bool,
+}
+
+/// Why a module stopped, shared between its run and the host.
+#[derive(Clone, Default)]
+pub(crate) struct Failure(Arc<Mutex<Option<String>>>);
+
+impl Failure {
+    pub(crate) fn get(&self) -> Option<String> {
+        self.0.lock().unwrap().clone()
+    }
+
+    /// Record why the module stopped; the first reason stays.
+    pub(crate) fn set(&self, why: &str) {
+        self.0
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| why.to_string());
+    }
 }
 
 impl Inner {
@@ -762,12 +780,12 @@ impl Inner {
         f: &TypedFunc<P, R>,
         params: P,
     ) -> Result<R, String> {
-        if let Some(why) = &self.failed {
+        if let Some(why) = self.failed.get() {
             return Err(format!("shard stopped: {why}"));
         }
         if self.store.data().lease_lapsed() {
             let why = LEASE_LAPSED.to_string();
-            self.failed = Some(why.clone());
+            self.failed.set(&why);
             return Err(why);
         }
         f.call(&mut self.store, params).map_err(|e| {
@@ -777,7 +795,7 @@ impl Inner {
                 describe_error(&self.store, &e, self.budget)
             };
             tracing::error!("[shard {}] stopped: {why}", self.store.data().shard_id);
-            self.failed = Some(why.clone());
+            self.failed.set(&why);
             why
         })
     }
@@ -847,7 +865,7 @@ impl Inner {
     /// Stop the module for a broken ABI contract.
     fn fail(&mut self, why: &str) -> String {
         tracing::error!("[shard {}] stopped: {why}", self.store.data().shard_id);
-        self.failed = Some(why.to_string());
+        self.failed.set(why);
         why.to_string()
     }
 
@@ -934,6 +952,13 @@ pub struct WasmSim {
 impl WasmSim {
     /// Why the module stopped, if it did.
     pub fn failure(&self) -> Option<String> {
+        self.inner.borrow().failed.get()
+    }
+
+    /// The cell holding why the module stopped: readable without the
+    /// shard's state lock, which a tick or a move can hold while it waits
+    /// on the database.
+    pub(crate) fn failure_cell(&self) -> Failure {
         self.inner.borrow().failed.clone()
     }
 
@@ -1223,7 +1248,7 @@ impl SimState for WasmSim {
         // The shard calls this last in a tick: the next call starts a new
         // budget.
         let in_tick = std::mem::take(&mut inner.in_tick);
-        if inner.failed.is_some() {
+        if inner.failed.get().is_some() {
             return true;
         }
         if !in_tick {
@@ -1419,7 +1444,7 @@ impl SimState for WasmSim {
     fn replicated(&self) -> Option<ReplicatedRef<'_>> {
         let mut inner = self.inner.borrow_mut();
         let f = inner.exports.replication.clone()?;
-        if inner.failed.is_some() {
+        if inner.failed.get().is_some() {
             // No more changes; keep sending what the mirror holds.
             drop(inner);
             return self
@@ -1577,6 +1602,9 @@ pub struct WasmShardHost {
     live: Mutex<std::collections::HashSet<String>>,
     /// Each running shard's run number (see `transfer::Instance`).
     instances: Mutex<HashMap<String, u64>>,
+    /// Why each running shard's module stopped, if it did: read without
+    /// the shard's state lock (see `WasmSim::failure_cell`).
+    failures: Mutex<HashMap<String, Failure>>,
     /// Rows from stopped sources a target refused, by id: when to offer
     /// them again.
     ownerless_retry: Mutex<HashMap<String, (Instant, String)>>,
@@ -1790,6 +1818,7 @@ impl WasmShardHost {
             waiting: Mutex::new(HashMap::new()),
             live: Mutex::new(std::collections::HashSet::new()),
             instances: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
             ownerless_retry: Mutex::new(HashMap::new()),
             waiting_retry: Mutex::new(HashMap::new()),
             last_prune: Mutex::new(None),
@@ -2039,6 +2068,7 @@ impl WasmShardHost {
                 CreateError::Init(why)
             }
         })?;
+        let failure = sim.failure_cell();
         let shard = Shard::new(id, sim, spec.config.clone());
         if spec.transfers() || spec.messages() || spec.calls() || spec.writes() {
             // After each tick: the players the module wants moved go to the
@@ -2132,6 +2162,10 @@ impl WasmShardHost {
             .lock()
             .unwrap()
             .insert(id.to_string(), serial);
+        self.failures
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), failure);
         // Moves a crash left open: in place before any input reaches it.
         if let Some(plan) = resume {
             let at = transfer::Instance {
@@ -2288,6 +2322,7 @@ impl WasmShardHost {
             shard.stop_and_wait();
         }
         self.instances.lock().unwrap().remove(id);
+        self.failures.lock().unwrap().remove(id);
         self.forget_groups(id);
         let removed = self.registry.remove(id);
         self.kind_of.write().unwrap().remove(id);
@@ -2355,7 +2390,9 @@ impl WasmShardHost {
     fn info_local(&self, id: &str) -> Option<ShardInfo> {
         let shard = self.registry.get(id)?;
         let kind = self.kind_of.read().unwrap().get(id).cloned()?;
-        let error = shard.with_state(|s| s.failure());
+        // Not under the state lock: a mutation holding the database's write
+        // lock can ask while a move holds the state and waits on that lock.
+        let error = self.failures.lock().unwrap().get(id).and_then(Failure::get);
         Some(ShardInfo {
             id: id.to_string(),
             kind,
@@ -3142,6 +3179,7 @@ impl WasmShardHost {
             kind_of.remove(id);
             idle.remove(id);
             self.instances.lock().unwrap().remove(id);
+            self.failures.lock().unwrap().remove(id);
             self.forget_groups(id);
             tracing::info!("[shard {id}] removed after it stopped");
             // It ended (finished, idle, or failed): forget its placement,
@@ -3263,7 +3301,7 @@ impl pylon_realtime::DynShardRegistry for WasmShardHost {
     }
 
     fn failure(&self, id: &str) -> Option<String> {
-        self.registry.get(id)?.with_state(|s| s.failure())
+        self.failures.lock().unwrap().get(id).and_then(Failure::get)
     }
 
     fn stop(&self, id: &str) -> bool {

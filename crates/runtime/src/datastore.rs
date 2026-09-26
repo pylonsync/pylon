@@ -651,7 +651,7 @@ impl DataStore for Runtime {
         // `FnCallError` handling around line 3717 of this file
         // (SQLite mutation tx) — same error class, same response.
         if rollback {
-            if let Err(e) = conn.execute("ROLLBACK", []) {
+            if let Err(e) = self.rollback_write(&conn) {
                 return Err(DataError {
                     code: "SQLITE_ROLLBACK_FAILED".into(),
                     message: format!(
@@ -664,7 +664,7 @@ impl DataStore for Runtime {
             // doesn't bleed into the next request on this connection.
             // If ROLLBACK also fails the connection is hosed —
             // surface a louder error so the operator sees it.
-            if let Err(rollback_err) = conn.execute("ROLLBACK", []) {
+            if let Err(rollback_err) = self.rollback_write(&conn) {
                 tracing::warn!(
                     "[transact] ROLLBACK after COMMIT failure also failed: {rollback_err}"
                 );
@@ -1130,7 +1130,7 @@ impl DataStore for Runtime {
         let crdt_fields = self.crdt_fields_for(&ent).map_err(into_data_error)?;
 
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
-        crate::with_write_tx(&conn, || -> Result<Vec<u8>, crate::RuntimeError> {
+        crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
             // Apply the update to the LoroDoc + persist the new snapshot
             // to the sidecar. Returns the projected JSON shape for the
             // post-merge state.
@@ -4658,12 +4658,12 @@ impl FnOpsImpl {
                 let stored = match stored {
                     Ok(stored) => stored,
                     Err(e) => {
-                        let _ = conn_guard.execute("ROLLBACK", []);
+                        let _ = self.runtime.rollback_write(&conn_guard);
                         return Err(e);
                     }
                 };
                 if let (Some((key, hash)), Some(stored)) = (&once, stored) {
-                    if let Err(e) = conn_guard.execute("ROLLBACK", []) {
+                    if let Err(e) = self.runtime.rollback_write(&conn_guard) {
                         return Err(FnCallError {
                             code: "ROLLBACK_FAILED".into(),
                             message: format!("Failed to end transaction: {e}"),
@@ -4733,7 +4733,7 @@ impl FnOpsImpl {
                             // Best-effort cleanup. If ROLLBACK also fails the
                             // connection is in a bad state — at minimum the
                             // operator sees both failures in the log.
-                            if let Err(rollback_err) = conn_guard.execute("ROLLBACK", []) {
+                            if let Err(rollback_err) = self.runtime.rollback_write(&conn_guard) {
                                 tracing::warn!(
                                     "[functions] ROLLBACK after COMMIT failure also failed: {rollback_err}"
                                 );
@@ -4747,7 +4747,7 @@ impl FnOpsImpl {
                         }
                     },
                     Err(handler_err) => {
-                        if let Err(rollback_err) = conn_guard.execute("ROLLBACK", []) {
+                        if let Err(rollback_err) = self.runtime.rollback_write(&conn_guard) {
                             // Don't shadow the handler error — log the
                             // rollback failure separately.
                             tracing::warn!(
@@ -7014,12 +7014,12 @@ fn install_nested_call_hook(ops: &Arc<FnOpsImpl>, runner: &Arc<FnRunner>) {
                         Ok((value, _trace)) => match conn_guard.execute("COMMIT", []) {
                             Ok(_) => Ok((value, tx_store.take_pending())),
                             Err(e) => {
-                                let _ = conn_guard.execute("ROLLBACK", []);
+                                let _ = ops.runtime.rollback_write(&conn_guard);
                                 Err(("COMMIT_FAILED".into(), e.to_string()))
                             }
                         },
                         Err(e) => {
-                            let _ = conn_guard.execute("ROLLBACK", []);
+                            let _ = ops.runtime.rollback_write(&conn_guard);
                             Err((e.code, e.message))
                         }
                     };
