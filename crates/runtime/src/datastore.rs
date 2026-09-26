@@ -1157,12 +1157,12 @@ impl DataStore for Runtime {
             // Apply the update to the LoroDoc + persist the new snapshot
             // to the sidecar. Returns the projected JSON shape for the
             // post-merge state.
-            let mut projected = self
+            let (mut projected, touched) = self
                 .crdt_store()
-                .apply_remote_update(&conn, entity, row_id, &crdt_fields, update)
+                .apply_client_update(&conn, entity, row_id, &crdt_fields, update, !has_doc)
                 .map_err(|e| crate::RuntimeError {
                     code: "CRDT_APPLY_FAILED".into(),
-                    message: format!("apply_remote_update {entity}/{row_id}: {e}"),
+                    message: format!("apply the update to {entity}/{row_id}: {e}"),
                 })?;
             // A row the one-time reconcile has not reached: the fields this
             // update left alone take the row's values (a server write the
@@ -1175,7 +1175,7 @@ impl DataStore for Runtime {
             // stand; the fields it did not set take the row's values, or
             // the projection below would null them in the row.
             if !has_doc {
-                self.fill_crdt_doc_from_row(&conn, &ent, row_id, &crdt_fields)?;
+                self.fill_crdt_doc_from_row(&conn, &ent, row_id, &crdt_fields, touched.as_deref())?;
             }
             if before.is_some() || !has_doc {
                 projected = self

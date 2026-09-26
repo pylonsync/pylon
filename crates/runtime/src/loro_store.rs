@@ -188,6 +188,151 @@ impl From<pylon_http::DataError> for LoroStoreError {
 // Store
 // ---------------------------------------------------------------------------
 
+/// The Loro peer of synthetic ops: a doc created or brought in line from
+/// its row. No client uses it (client peers are random 64-bit ids).
+pub const SEED_PEER: u64 = 0x5059_4C4F_4E53_4544;
+
+/// A random peer for the server's own ops, never [`SEED_PEER`].
+fn fresh_peer() -> u64 {
+    loop {
+        let peer: u64 = rand::random();
+        if peer != SEED_PEER {
+            return peer;
+        }
+    }
+}
+
+/// Whether `doc` holds synthetic ops the update's author had not seen
+/// (only then can the update have lost to one).
+fn unseen_seed_ops(doc: &LoroDoc, update: &[u8]) -> bool {
+    let Some(seeded) = doc.oplog_vv().get(&SEED_PEER).copied() else {
+        return false;
+    };
+    let Ok(meta) = LoroDoc::decode_import_blob_meta(update, false) else {
+        return true;
+    };
+    match doc.frontiers_to_vv(&meta.start_frontiers) {
+        Some(seen) => seen.get(&SEED_PEER).copied().unwrap_or(0) < seeded,
+        None => true,
+    }
+}
+
+/// What a client's update set: the fields it changed, their values before
+/// and after it, and the containers it left under each key, read from a
+/// copy of the doc at the update's start.
+struct ClientIntent {
+    touched: Vec<String>,
+    before: Value,
+    after: Value,
+    containers: std::collections::HashMap<String, pylon_crdt::loro::ContainerID>,
+}
+
+fn field_containers(
+    doc: &LoroDoc,
+    fields: &[CrdtField],
+) -> std::collections::HashMap<String, pylon_crdt::loro::ContainerID> {
+    use pylon_crdt::loro::{ContainerTrait, ValueOrContainer};
+    let map = pylon_crdt::root_map(doc);
+    fields
+        .iter()
+        .filter_map(|f| match map.get(&f.name) {
+            Some(ValueOrContainer::Container(c)) => Some((f.name.clone(), c.id())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn client_intent(doc: &LoroDoc, fields: &[CrdtField], update: &[u8]) -> Option<ClientIntent> {
+    let meta = LoroDoc::decode_import_blob_meta(update, false).ok()?;
+    let scratch = doc.fork_at(&meta.start_frontiers).ok()?;
+    let before = project_doc_to_json(&scratch, fields);
+    let before_containers = field_containers(&scratch, fields);
+    let editors = |doc: &LoroDoc| -> Vec<Option<u64>> {
+        let map = pylon_crdt::root_map(doc);
+        fields
+            .iter()
+            .map(|f| map.get_last_editor(&f.name))
+            .collect()
+    };
+    let before_editors = editors(&scratch);
+    let status = scratch.import(update).ok()?;
+    // Ops the copy could not place (the update depends on others): what
+    // it set cannot be read.
+    if status.pending.is_some() {
+        return None;
+    }
+    let after = project_doc_to_json(&scratch, fields);
+    let containers = field_containers(&scratch, fields);
+    let after_editors = editors(&scratch);
+    let null = Value::Null;
+    // A field the update wrote, deleted (the value may not change: a key
+    // an empty doc never held), or moved to a new container.
+    let touched = fields
+        .iter()
+        .enumerate()
+        .filter(|(i, f)| {
+            before.get(&f.name).unwrap_or(&null) != after.get(&f.name).unwrap_or(&null)
+                || before_containers.get(&f.name) != containers.get(&f.name)
+                || before_editors[*i] != after_editors[*i]
+        })
+        .map(|(_, f)| f.name.clone())
+        .collect();
+    Some(ClientIntent {
+        touched,
+        before,
+        after,
+        containers,
+    })
+}
+
+/// Apply again each value the client set that lost to a synthetic op.
+fn reassert_client_values(
+    doc: &LoroDoc,
+    fields: &[CrdtField],
+    intent: &ClientIntent,
+) -> Result<(), String> {
+    use pylon_crdt::CrdtFieldKind as K;
+    let map = pylon_crdt::root_map(doc);
+    let merged = project_doc_to_json(doc, fields);
+    let now = field_containers(doc, fields);
+    let null = Value::Null;
+    let mut patch = serde_json::Map::new();
+    for f in fields.iter().filter(|f| intent.touched.contains(&f.name)) {
+        let wanted = intent.after.get(&f.name).unwrap_or(&null);
+        match f.kind {
+            K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson => {
+                if merged.get(&f.name).unwrap_or(&null) != wanted
+                    && map.get_last_editor(&f.name) == Some(SEED_PEER)
+                {
+                    patch.insert(f.name.clone(), wanted.clone());
+                }
+            }
+            K::Text | K::List | K::MovableList | K::Tree => {
+                if intent.containers.get(&f.name).is_some()
+                    && now.get(&f.name) != intent.containers.get(&f.name)
+                {
+                    patch.insert(f.name.clone(), wanted.clone());
+                }
+            }
+            K::Counter => {
+                if intent.containers.get(&f.name).is_some()
+                    && now.get(&f.name) != intent.containers.get(&f.name)
+                {
+                    let n = |v: Option<&Value>| v.and_then(Value::as_f64).unwrap_or(0.0);
+                    let delta = n(Some(wanted)) - n(intent.before.get(&f.name));
+                    if delta != 0.0 {
+                        patch.insert(f.name.clone(), serde_json::json!(delta));
+                    }
+                }
+            }
+        }
+    }
+    if patch.is_empty() {
+        return Ok(());
+    }
+    apply_patch(doc, fields, &Value::Object(patch))
+}
+
 thread_local! {
     /// Rows whose cached doc this thread changed since its write
     /// transaction began. The cache holds the change before the commit, so
@@ -317,6 +462,65 @@ impl LoroStore {
             project_doc_to_json(&doc, fields)
         };
         Ok(projected)
+    }
+
+    /// Apply a patch as a synthetic op: a doc created or brought in line
+    /// from its row (seed, reconcile, fill). The ops carry [`SEED_PEER`],
+    /// so a client's update that loses to one is found and applied again
+    /// ([`LoroStore::apply_client_update`]). One process writes a SQLite
+    /// file's docs, so the reserved peer's op ids never collide.
+    pub fn apply_seed_patch(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+        patch: &Value,
+    ) -> Result<Value, LoroStoreError> {
+        let handle = self.get_or_hydrate(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        note_changed(entity, row_id);
+        doc.set_peer_id(SEED_PEER)
+            .map_err(|e| LoroStoreError::Apply(format!("set the seed peer: {e}")))?;
+        let applied = apply_patch(&doc, fields, patch).map_err(LoroStoreError::Apply);
+        // Later ops are the server's own writes, under a fresh peer.
+        let reset = doc.set_peer_id(fresh_peer());
+        applied?;
+        reset.map_err(|e| LoroStoreError::Apply(format!("reset the peer: {e}")))?;
+        self.persist_snapshot(conn, entity, row_id, &doc)?;
+        Ok(project_doc_to_json(&doc, fields))
+    }
+
+    /// Import a client's update into the row's doc and persist it. Where the
+    /// client's value for a field lost to a synthetic op it had not seen (a
+    /// register whose winning op is [`SEED_PEER`]'s, or a text, list, tree,
+    /// or counter the client created under a key a seed's container took),
+    /// the client's value is applied again. Returns the projection and the
+    /// fields the update set (deletes included) when they could be read
+    /// from it.
+    pub fn apply_client_update(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+        update: &[u8],
+        always_read_intent: bool,
+    ) -> Result<(Value, Option<Vec<String>>), LoroStoreError> {
+        let handle = self.get_or_hydrate(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        note_changed(entity, row_id);
+        let intent = if always_read_intent || unseen_seed_ops(&doc, update) {
+            client_intent(&doc, fields, update)
+        } else {
+            None
+        };
+        crdt_apply_update(&doc, update).map_err(LoroStoreError::Decode)?;
+        if let Some(intent) = &intent {
+            reassert_client_values(&doc, fields, intent).map_err(LoroStoreError::Apply)?;
+        }
+        self.persist_snapshot(conn, entity, row_id, &doc)?;
+        Ok((project_doc_to_json(&doc, fields), intent.map(|i| i.touched)))
     }
 
     /// Apply a binary update from a peer (typed-protocol client push or

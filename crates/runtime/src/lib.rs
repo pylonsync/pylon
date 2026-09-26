@@ -2266,28 +2266,34 @@ impl Runtime {
     }
 
     /// After a client's update was imported into a row that had no doc:
-    /// the fields the update did not set take the row's values (the
-    /// update's own fields are kept).
+    /// the fields the update did not set take the row's values, and a
+    /// counter adds the row's total (the client counted from an empty
+    /// doc). `touched` is what the update set, when it could be read;
+    /// otherwise a field the doc holds counts as set.
     pub(crate) fn fill_crdt_doc_from_row(
         &self,
         conn: &Connection,
         ent: &ManifestEntity,
         id: &str,
         fields: &[pylon_crdt::CrdtField],
+        touched: Option<&[String]>,
     ) -> Result<(), RuntimeError> {
         let Some(row) = self.crdt_row_for_doc(conn, ent, id, fields)? else {
             return Ok(());
         };
-        let held = self
-            .crdt_store()
-            .held_fields(conn, &ent.name, id, fields)
-            .map_err(|e| RuntimeError {
-                code: "CRDT_APPLY_FAILED".into(),
-                message: format!("read the doc of {} {id}: {e}", ent.name),
-            })?;
+        let set: Vec<String> = match touched {
+            Some(touched) => touched.to_vec(),
+            None => self
+                .crdt_store()
+                .held_fields(conn, &ent.name, id, fields)
+                .map_err(|e| RuntimeError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("read the doc of {} {id}: {e}", ent.name),
+                })?,
+        };
         let values: Vec<(String, serde_json::Value)> = fields
             .iter()
-            .filter(|f| !held.contains(&f.name))
+            .filter(|f| f.kind == pylon_crdt::CrdtFieldKind::Counter || !set.contains(&f.name))
             .filter_map(|f| {
                 row.get(&f.name)
                     .filter(|v| !v.is_null())
@@ -2520,7 +2526,7 @@ impl Runtime {
             let patch = serde_json::json!({ name.clone(): value });
             if let Err(e) = self
                 .crdt_store()
-                .apply_patch(conn, entity, id, fields, &patch)
+                .apply_seed_patch(conn, entity, id, fields, &patch)
             {
                 failed += 1;
                 self.crdt_store().evict(entity, id);
@@ -6909,6 +6915,124 @@ mod tests {
             let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
             assert_eq!(row["title"], "client");
         }
+    }
+
+    /// A row with no doc, and the manifest's CRDT fields, for the push
+    /// tests.
+    fn bare_doc_row(rt: &Runtime) -> (String, Vec<pylon_crdt::CrdtField>) {
+        let id = rt.insert("Doc", &fresh_doc()).unwrap();
+        rt.lock_write_conn()
+            .unwrap()
+            .execute(
+                "DELETE FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
+                [&id],
+            )
+            .unwrap();
+        rt.crdt_store().clear_cache();
+        let fields = rt
+            .crdt_fields_for(rt.require_entity("Doc").unwrap())
+            .unwrap();
+        (id, fields)
+    }
+
+    /// An update made on an empty doc (a client that cached one from an
+    /// older server), as the bytes the client pushes.
+    fn offline_edit(fields: &[pylon_crdt::CrdtField], patch: serde_json::Value) -> Vec<u8> {
+        let client = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_patch(&client, fields, &patch).unwrap();
+        client
+            .export(pylon_crdt::loro::ExportMode::all_updates())
+            .unwrap()
+    }
+
+    /// A client that edited an empty doc offline keeps its register value
+    /// and its typed text when another client's read seeded the doc first:
+    /// the seed's newer ops do not win over it.
+    #[test]
+    fn an_offline_edit_on_an_empty_doc_survives_a_seed() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        for _ in 0..6 {
+            let (id, fields) = bare_doc_row(&rt);
+            let update = offline_edit(&fields, serde_json::json!({"done": true, "body": "typed"}));
+            // Another client's read seeds the doc from the row.
+            rt.crdt_snapshot("Doc", &id).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+            assert_eq!(row["done"], true);
+            assert_eq!(row["body"], "typed");
+            assert_eq!(row["title"], "a");
+        }
+    }
+
+    /// Two clients' concurrent edits of one field merge as Loro merges them,
+    /// even when one client had not seen the seed: a value is applied again
+    /// only when it lost to a synthetic op.
+    #[test]
+    fn concurrent_client_edits_merge_as_loro_merges_them() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        for _ in 0..6 {
+            let (id, fields) = bare_doc_row(&rt);
+            let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
+            let edit = |title: &str| {
+                let client = pylon_crdt::loro::LoroDoc::new();
+                pylon_crdt::apply_update(&client, &seeded).unwrap();
+                let before = client.oplog_vv();
+                pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"title": title}))
+                    .unwrap();
+                client
+                    .export(pylon_crdt::loro::ExportMode::updates(&before))
+                    .unwrap()
+            };
+            // A edited an empty doc offline (it never saw the seed); B edited
+            // the seeded doc. B's op wins in Loro, and not because of a seed.
+            let b = edit("b");
+            let a = offline_edit(&fields, serde_json::json!({"title": "a"}));
+            let expected = pylon_crdt::loro::LoroDoc::new();
+            for update in [&seeded, &b, &a] {
+                pylon_crdt::apply_update(&expected, update).unwrap();
+            }
+            rt.crdt_apply_update("Doc", &id, &b).unwrap();
+            rt.crdt_apply_update("Doc", &id, &a).unwrap();
+            let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+            assert_eq!(
+                row["title"],
+                pylon_crdt::project_doc_to_json(&expected, &fields)["title"]
+            );
+        }
+    }
+
+    /// A first push to a row with no doc: a counter the client counted from
+    /// an empty doc adds the row's total, and a field it deleted stays
+    /// deleted.
+    #[test]
+    fn a_first_push_adds_a_counter_to_the_row_and_keeps_a_delete() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        let client = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"likes": 1})).unwrap();
+        pylon_crdt::root_map(&client).delete("body").unwrap();
+        client.commit();
+        let update = client
+            .export(pylon_crdt::loro::ExportMode::all_updates())
+            .unwrap();
+        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["likes"].as_i64(), Some(4));
+        assert!(
+            row["body"].is_null() || row["body"] == "",
+            "{}",
+            row["body"]
+        );
+        assert_eq!(row["title"], "a");
     }
 
     /// A client's first read of a row with no doc creates the doc from the
