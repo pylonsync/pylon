@@ -342,6 +342,24 @@ impl LoroStore {
         Ok(projected)
     }
 
+    /// Which of `fields` the row's doc holds (a key in its root map).
+    pub fn held_fields(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+    ) -> Result<Vec<String>, LoroStoreError> {
+        let handle = self.get_or_hydrate(conn, entity, row_id)?;
+        let doc = handle.lock().unwrap();
+        let map = pylon_crdt::root_map(&doc);
+        Ok(fields
+            .iter()
+            .filter(|f| map.get(&f.name).is_some())
+            .map(|f| f.name.clone())
+            .collect())
+    }
+
     /// Whether the row has a stored snapshot (a doc cached for a read of a
     /// row with none does not count).
     pub fn has_snapshot(

@@ -879,7 +879,10 @@ impl DataStore for Runtime {
         if !ent.crdt {
             return Ok(None);
         }
+        let ent = ent.clone();
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        self.prepare_crdt_doc_for_read(&conn, &ent, row_id)
+            .map_err(into_data_error)?;
         let snap = self
             .crdt_store()
             .snapshot(&conn, entity, row_id)
@@ -918,7 +921,10 @@ impl DataStore for Runtime {
                     })
             });
         }
+        let ent = ent.clone();
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        self.prepare_crdt_doc_for_read(&conn, &ent, row_id)
+            .map_err(into_data_error)?;
         self.crdt_store()
             .current_vv_bytes(&conn, entity, row_id)
             .map_err(|e| DataError {
@@ -967,7 +973,10 @@ impl DataStore for Runtime {
                 })
             });
         }
+        let ent = ent.clone();
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
+        self.prepare_crdt_doc_for_read(&conn, &ent, row_id)
+            .map_err(into_data_error)?;
         match self
             .crdt_store()
             .update_since_bytes(&conn, entity, row_id, since)
@@ -1131,32 +1140,31 @@ impl DataStore for Runtime {
 
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
-            // A row with no doc (written before inserts seeded one) gets one
-            // from its values first: the projection below rewrites every
-            // CRDT field of the row, and an empty doc would null the ones
-            // this update does not set.
-            let has_doc = self
-                .crdt_store()
-                .has_snapshot(&conn, entity, row_id)
-                .map_err(|e| crate::RuntimeError {
-                    code: "CRDT_APPLY_FAILED".into(),
-                    message: format!("read the snapshot of {entity}/{row_id}: {e}"),
-                })?;
-            if !has_doc {
-                if let Some(row) = self.crdt_row_for_doc(&conn, &ent, row_id, &crdt_fields)? {
-                    self.seed_crdt_doc(&conn, entity, row_id, &crdt_fields, &row);
-                }
-            }
+            let has_doc = self.prepare_crdt_doc_for_push(&conn, &ent, row_id, &crdt_fields)?;
             // Apply the update to the LoroDoc + persist the new snapshot
             // to the sidecar. Returns the projected JSON shape for the
             // post-merge state.
-            let projected = self
+            let mut projected = self
                 .crdt_store()
                 .apply_remote_update(&conn, entity, row_id, &crdt_fields, update)
                 .map_err(|e| crate::RuntimeError {
                     code: "CRDT_APPLY_FAILED".into(),
                     message: format!("apply_remote_update {entity}/{row_id}: {e}"),
                 })?;
+            // A row with no doc (from before inserts seeded one, and never
+            // read by a client since): the update came first, so its fields
+            // stand; the fields it did not set take the row's values, or
+            // the projection below would null them in the row.
+            if !has_doc {
+                self.fill_crdt_doc_from_row(&conn, &ent, row_id, &crdt_fields)?;
+                projected = self
+                    .crdt_store()
+                    .project(&conn, entity, row_id, &crdt_fields)
+                    .map_err(|e| crate::RuntimeError {
+                        code: "CRDT_APPLY_FAILED".into(),
+                        message: format!("read the doc of {entity}/{row_id}: {e}"),
+                    })?;
+            }
 
             // Re-project into the materialized SQLite row so SELECT
             // queries see the merged content. Build SET clauses from
