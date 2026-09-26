@@ -141,7 +141,21 @@ fn quote_sqlite_ident(name: &str) -> String {
 pub fn ensure_sidecar(conn: &Connection) -> Result<(), LoroStoreError> {
     conn.execute(CREATE_SIDECAR_SQL, [])
         .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("create sidecar: {e}")))
+        .map_err(|e| LoroStoreError::Storage(format!("create sidecar: {e}")))?;
+    // The peers of each row's synthetic ops (see `as_synthetic`), kept
+    // beside the snapshot: server-side state, which a client's update
+    // cannot change.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS _pylon_crdt_synthetic (
+            entity TEXT NOT NULL,
+            row_id TEXT NOT NULL,
+            peer INTEGER NOT NULL,
+            PRIMARY KEY (entity, row_id, peer)
+        )",
+        [],
+    )
+    .map(|_| ())
+    .map_err(|e| LoroStoreError::Storage(format!("create the synthetic peer table: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -188,14 +202,6 @@ impl From<pylon_http::DataError> for LoroStoreError {
 // Store
 // ---------------------------------------------------------------------------
 
-/// The doc map that records the peers of synthetic ops: a doc created or
-/// brought in line from its row (seed, reconcile, fill), and a client's
-/// value applied again. Each synthetic write takes a fresh random peer, so
-/// op ids stay unique even after a database is restored from a backup, and
-/// the doc itself carries which peers are synthetic. Projections read only
-/// the row map, so this map never reaches a row.
-const SYNTHETIC_PEERS: &str = "_pylon_synthetic";
-
 /// A random peer id (Loro reserves `u64::MAX`).
 fn fresh_peer() -> u64 {
     loop {
@@ -206,29 +212,21 @@ fn fresh_peer() -> u64 {
     }
 }
 
-/// The peers of the doc's synthetic ops.
-fn synthetic_peers(doc: &LoroDoc) -> std::collections::HashSet<u64> {
-    doc.get_map(SYNTHETIC_PEERS)
-        .keys()
-        .filter_map(|k| k.parse().ok())
-        .collect()
-}
-
-/// Run `write` as a synthetic write: under a fresh peer recorded in the
-/// doc, then back to another fresh peer for the server's own writes.
-fn as_synthetic(doc: &LoroDoc, write: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+/// Run `write` as a synthetic write (a doc created or brought in line from
+/// its row, or a client's value applied again): under a fresh random peer,
+/// so op ids stay unique even after a database is restored from a backup,
+/// then back to another fresh peer for the server's own writes. Returns
+/// the peer, for the caller to record in `_pylon_crdt_synthetic`.
+fn as_synthetic(doc: &LoroDoc, write: impl FnOnce() -> Result<(), String>) -> Result<u64, String> {
     let peer = fresh_peer();
     doc.set_peer_id(peer)
         .map_err(|e| format!("set a synthetic peer: {e}"))?;
-    let written = doc
-        .get_map(SYNTHETIC_PEERS)
-        .insert(&peer.to_string(), true)
-        .map_err(|e| format!("record the synthetic peer: {e}"))
-        .and_then(|_| write());
+    let written = write();
     doc.commit();
     let reset = doc.set_peer_id(fresh_peer());
     written?;
-    reset.map_err(|e| format!("reset the peer: {e}"))
+    reset.map_err(|e| format!("reset the peer: {e}"))?;
+    Ok(peer)
 }
 
 /// The start of an update, limited to ops the doc holds: an update of
@@ -245,10 +243,13 @@ fn update_base(doc: &LoroDoc, update: &[u8]) -> Option<pylon_crdt::loro::Frontie
     )
 }
 
-/// Whether `doc` holds synthetic ops the update's author had not seen
-/// (only then can the update have lost to one).
-fn unseen_synthetic_ops(doc: &LoroDoc, update: &[u8]) -> bool {
-    let peers = synthetic_peers(doc);
+/// Whether `doc` holds synthetic ops (by `peers`) the update's author had
+/// not seen: only then can the update have lost to one.
+fn unseen_synthetic_ops(
+    doc: &LoroDoc,
+    peers: &std::collections::HashSet<u64>,
+    update: &[u8],
+) -> bool {
     if peers.is_empty() {
         return false;
     }
@@ -264,13 +265,16 @@ fn unseen_synthetic_ops(doc: &LoroDoc, update: &[u8]) -> bool {
         .any(|p| held.get(p).copied().unwrap_or(0) > seen.get(p).copied().unwrap_or(0))
 }
 
-/// What a client's update set: the fields it changed, their values after
-/// it, and the containers it left under each key, read from a copy of the
-/// doc at the update's start.
+/// What a client's update set, read from a copy of the doc at the
+/// update's start: the fields it changed, their values after it, the
+/// container it left under each key, and for a counter what it added.
 struct ClientIntent {
     touched: Vec<String>,
     after: Value,
     containers: std::collections::HashMap<String, pylon_crdt::loro::ContainerID>,
+    /// Per counter field: the container the update's increments are in,
+    /// and their sum.
+    counted: std::collections::HashMap<String, (pylon_crdt::loro::ContainerID, f64)>,
 }
 
 fn field_containers(
@@ -289,6 +293,7 @@ fn field_containers(
 }
 
 fn client_intent(doc: &LoroDoc, fields: &[CrdtField], update: &[u8]) -> Option<ClientIntent> {
+    use pylon_crdt::CrdtFieldKind as K;
     let base = update_base(doc, update)?;
     let scratch = doc.fork_at(&base).ok()?;
     let before = project_doc_to_json(&scratch, fields);
@@ -313,7 +318,7 @@ fn client_intent(doc: &LoroDoc, fields: &[CrdtField], update: &[u8]) -> Option<C
     let null = Value::Null;
     // A field the update wrote, deleted (the value may not change: a key
     // an empty doc never held), or moved to a new container.
-    let touched = fields
+    let touched: Vec<String> = fields
         .iter()
         .enumerate()
         .filter(|(i, f)| {
@@ -323,10 +328,27 @@ fn client_intent(doc: &LoroDoc, fields: &[CrdtField], update: &[u8]) -> Option<C
         })
         .map(|(_, f)| f.name.clone())
         .collect();
+    // A counter's increments in this update: its container's value after
+    // the update less its value before (none before: a new container).
+    let counted = fields
+        .iter()
+        .filter(|f| f.kind == K::Counter && touched.contains(&f.name))
+        .filter_map(|f| {
+            let id = containers.get(&f.name)?;
+            let was = if before_containers.get(&f.name) == Some(id) {
+                before.get(&f.name).and_then(Value::as_f64).unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let now = after.get(&f.name).and_then(Value::as_f64).unwrap_or(0.0);
+            Some((f.name.clone(), (id.clone(), now - was)))
+        })
+        .collect();
     Some(ClientIntent {
         touched,
         after,
         containers,
+        counted,
     })
 }
 
@@ -338,18 +360,34 @@ fn is_synthetic_container(
     matches!(id, pylon_crdt::loro::ContainerID::Normal { peer, .. } if peers.contains(peer))
 }
 
+/// Whether every op in container `id` is synthetic (no client has edited
+/// it).
+fn only_synthetic_edits(
+    doc: &LoroDoc,
+    id: &pylon_crdt::loro::ContainerID,
+    peers: &std::collections::HashSet<u64>,
+) -> bool {
+    doc.oplog_vv().iter().all(|(peer, &len)| {
+        peers.contains(peer)
+            || len == 0
+            || !doc
+                .get_changed_containers_in(pylon_crdt::loro::ID::new(*peer, 0), len as usize)
+                .contains(id)
+    })
+}
+
 /// After a client's update was imported (`prior` are the containers under
 /// each key before the import): apply again each value the client set that
-/// lost to a synthetic op, and keep a synthetic counter's total the
-/// client's counter displaced.
-fn reconcile_with_synthetic(
+/// lost to a synthetic op, and keep counts a displaced counter held.
+/// Returns the patch to apply as a synthetic write, if any.
+fn values_to_apply_again(
     doc: &LoroDoc,
     fields: &[CrdtField],
     intent: &ClientIntent,
     prior: &std::collections::HashMap<String, pylon_crdt::loro::ContainerID>,
-) -> Result<(), String> {
+    peers: &std::collections::HashSet<u64>,
+) -> serde_json::Map<String, Value> {
     use pylon_crdt::CrdtFieldKind as K;
-    let peers = synthetic_peers(doc);
     let map = pylon_crdt::root_map(doc);
     let merged = project_doc_to_json(doc, fields);
     let now = field_containers(doc, fields);
@@ -358,7 +396,8 @@ fn reconcile_with_synthetic(
     for f in fields.iter().filter(|f| intent.touched.contains(&f.name)) {
         let wanted = intent.after.get(&f.name).unwrap_or(&null);
         let client_container = intent.containers.get(&f.name);
-        let displaced = client_container.is_some() && now.get(&f.name) != client_container;
+        let winner = now.get(&f.name);
+        let displaced = client_container.is_some() && winner != client_container;
         match f.kind {
             K::LwwString | K::LwwNumber | K::LwwBool | K::LwwJson => {
                 if merged.get(&f.name).unwrap_or(&null) != wanted
@@ -369,49 +408,67 @@ fn reconcile_with_synthetic(
                     patch.insert(f.name.clone(), wanted.clone());
                 }
             }
-            K::Text | K::List | K::MovableList | K::Tree => {
-                if displaced
-                    && now
-                        .get(&f.name)
-                        .is_some_and(|c| is_synthetic_container(c, &peers))
-                {
+            K::Text | K::List | K::MovableList => {
+                let Some(winner) = winner.filter(|w| displaced && is_synthetic_container(w, peers))
+                else {
+                    continue;
+                };
+                if only_synthetic_edits(doc, winner, peers) {
+                    // Nobody has edited the row's value since it was seeded:
+                    // the client's value replaces it.
                     patch.insert(f.name.clone(), wanted.clone());
+                } else {
+                    // Clients have edited it: both sets of edits stay, the
+                    // client's appended.
+                    let have = merged.get(&f.name).unwrap_or(&null);
+                    let joined = match (f.kind, have, wanted) {
+                        (K::Text, Value::String(a), Value::String(b)) => {
+                            Some(Value::String(format!("{a}{b}")))
+                        }
+                        (_, Value::Array(a), Value::Array(b)) => {
+                            Some(Value::Array(a.iter().chain(b).cloned().collect()))
+                        }
+                        _ => None,
+                    };
+                    if let Some(joined) = joined {
+                        patch.insert(f.name.clone(), joined);
+                    }
+                }
+            }
+            K::Tree => {
+                // A tree has no sum of two versions: the client's replaces
+                // one only nobody else has edited.
+                if let Some(winner) =
+                    winner.filter(|w| displaced && is_synthetic_container(w, peers))
+                {
+                    if only_synthetic_edits(doc, winner, peers) {
+                        patch.insert(f.name.clone(), wanted.clone());
+                    }
                 }
             }
             K::Counter => {
-                let Some(client_container) = client_container else {
-                    continue;
-                };
-                if displaced {
-                    // The client's increments sit in its own container: add
-                    // them to the winner.
-                    if now
-                        .get(&f.name)
-                        .is_some_and(|c| is_synthetic_container(c, &peers))
-                    {
-                        let delta = doc.get_counter(client_container.clone()).get_value();
-                        if delta != 0.0 {
-                            patch.insert(f.name.clone(), serde_json::json!(delta));
-                        }
+                let mut add = 0.0;
+                // The client's increments landed in a container that does
+                // not hold the key: they count on the one that does.
+                if let Some((id, sum)) = intent.counted.get(&f.name) {
+                    if winner != Some(id) {
+                        add += sum;
                     }
-                } else if let Some(old) = prior
-                    .get(&f.name)
-                    .filter(|old| *old != client_container && is_synthetic_container(old, &peers))
-                {
-                    // The client's counter took the key from a synthetic one:
-                    // its total still counts.
-                    let total = doc.get_counter(old.clone()).get_value();
-                    if total != 0.0 {
-                        patch.insert(f.name.clone(), serde_json::json!(total));
+                }
+                // The client's counter took the key from another: that
+                // one's total still counts.
+                if let (Some(old), Some(winner)) = (prior.get(&f.name), winner) {
+                    if old != winner && Some(winner) == client_container {
+                        add += doc.get_counter(old.clone()).get_value();
                     }
+                }
+                if add != 0.0 {
+                    patch.insert(f.name.clone(), serde_json::json!(add));
                 }
             }
         }
     }
-    if patch.is_empty() {
-        return Ok(());
-    }
-    as_synthetic(doc, || apply_patch(doc, fields, &Value::Object(patch)))
+    patch
 }
 
 thread_local! {
@@ -545,30 +602,83 @@ impl LoroStore {
         Ok(projected)
     }
 
-    /// Apply a patch as a synthetic write: a doc created or brought in line
-    /// from its row (seed, reconcile, fill). See [`SYNTHETIC_PEERS`].
-    pub fn apply_seed_patch(
+    /// The peers of the row's synthetic ops.
+    pub fn synthetic_peers(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<std::collections::HashSet<u64>, LoroStoreError> {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT peer FROM _pylon_crdt_synthetic WHERE entity = ?1 AND row_id = ?2",
+            )
+            .map_err(|e| LoroStoreError::Storage(format!("read synthetic peers: {e}")))?;
+        let peers = stmt
+            .query_map(params![entity, row_id], |r| r.get::<_, i64>(0))
+            .map_err(|e| LoroStoreError::Storage(format!("read synthetic peers: {e}")))?
+            .filter_map(Result::ok)
+            .map(|p| p as u64)
+            .collect();
+        Ok(peers)
+    }
+
+    fn record_synthetic(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        row_id: &str,
+        peer: u64,
+    ) -> Result<(), LoroStoreError> {
+        conn.execute(
+            "INSERT OR IGNORE INTO _pylon_crdt_synthetic (entity, row_id, peer)
+             VALUES (?1, ?2, ?3)",
+            params![entity, row_id, peer as i64],
+        )
+        .map(|_| ())
+        .map_err(|e| LoroStoreError::Storage(format!("record a synthetic peer: {e}")))
+    }
+
+    /// Apply `values` as one synthetic write (a doc created or brought in
+    /// line from its row: seed, reconcile, fill), one field at a time under
+    /// one peer. Returns the fields the doc could not take, with why.
+    pub fn apply_seed_fields(
         &self,
         conn: &Connection,
         entity: &str,
         row_id: &str,
         fields: &[CrdtField],
-        patch: &Value,
-    ) -> Result<Value, LoroStoreError> {
+        values: Vec<(String, Value)>,
+    ) -> Result<Vec<(String, String)>, LoroStoreError> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         note_changed(entity, row_id);
-        as_synthetic(&doc, || apply_patch(&doc, fields, patch)).map_err(LoroStoreError::Apply)?;
+        let mut failed = Vec::new();
+        let peer = as_synthetic(&doc, || {
+            for (name, value) in values {
+                let patch = serde_json::json!({ name.clone(): value });
+                if let Err(e) = apply_patch(&doc, fields, &patch) {
+                    failed.push((name, e));
+                }
+            }
+            Ok(())
+        })
+        .map_err(LoroStoreError::Apply)?;
+        self.record_synthetic(conn, entity, row_id, peer)?;
         self.persist_snapshot(conn, entity, row_id, &doc)?;
-        Ok(project_doc_to_json(&doc, fields))
+        Ok(failed)
     }
 
     /// Import a client's update into the row's doc and persist it. Where the
     /// client's value for a field lost to a synthetic op it had not seen (a
-    /// register whose winning op is synthetic, or a text, list, tree, or
-    /// counter the client created under a key a synthetic container holds),
-    /// the client's value is applied again; a synthetic counter the client's
-    /// counter displaced keeps its total. An update that adds no ops (a
+    /// register whose winning op is synthetic, or a text, list, or tree the
+    /// client created under a key a synthetic container holds), the
+    /// client's value is applied again (appended, when clients have edited
+    /// the synthetic container); counts in a counter that does not hold its
+    /// key are added to the one that does. An update that adds no ops (a
     /// push sent again) changes nothing. Returns the projection before the
     /// import and the fields the update set (deletes included) when they
     /// could be read from it.
@@ -581,13 +691,14 @@ impl LoroStore {
         update: &[u8],
         always_read_intent: bool,
     ) -> Result<(Value, Option<Vec<String>>), LoroStoreError> {
+        let peers = self.synthetic_peers(conn, entity, row_id)?;
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         note_changed(entity, row_id);
         let before = project_doc_to_json(&doc, fields);
         let held_before = doc.oplog_vv();
         let prior = field_containers(&doc, fields);
-        let intent = if always_read_intent || unseen_synthetic_ops(&doc, update) {
+        let intent = if always_read_intent || unseen_synthetic_ops(&doc, &peers, update) {
             client_intent(&doc, fields, update)
         } else {
             None
@@ -597,8 +708,12 @@ impl LoroStore {
             return Ok((before, None));
         }
         if let Some(intent) = &intent {
-            reconcile_with_synthetic(&doc, fields, intent, &prior)
-                .map_err(LoroStoreError::Apply)?;
+            let patch = values_to_apply_again(&doc, fields, intent, &prior, &peers);
+            if !patch.is_empty() {
+                let peer = as_synthetic(&doc, || apply_patch(&doc, fields, &Value::Object(patch)))
+                    .map_err(LoroStoreError::Apply)?;
+                self.record_synthetic(conn, entity, row_id, peer)?;
+            }
         }
         self.persist_snapshot(conn, entity, row_id, &doc)?;
         Ok((before, intent.map(|i| i.touched)))
@@ -771,6 +886,11 @@ impl LoroStore {
             params![entity, row_id],
         )
         .map_err(|e| LoroStoreError::Storage(format!("delete snapshot: {e}")))?;
+        conn.execute(
+            "DELETE FROM _pylon_crdt_synthetic WHERE entity = ?1 AND row_id = ?2",
+            params![entity, row_id],
+        )
+        .map_err(|e| LoroStoreError::Storage(format!("delete synthetic peers: {e}")))?;
         self.evict(entity, row_id);
         Ok(())
     }
