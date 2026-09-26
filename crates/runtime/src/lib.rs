@@ -2198,17 +2198,16 @@ impl Runtime {
         })
     }
 
-    /// Before a client's update is imported into a row's doc: a row the
-    /// one-time reconcile has not reached has its register and text fields
-    /// brought in line with the row (in the caller's transaction). Returns
-    /// whether the row has a doc.
+    /// Before a client's update is imported into a row's doc: whether the
+    /// row has a doc, and, when the one-time reconcile has not reached the
+    /// row, the doc's values now (see `reconcile_crdt_push`).
     pub(crate) fn prepare_crdt_doc_for_push(
         &self,
         conn: &Connection,
         ent: &ManifestEntity,
         id: &str,
         fields: &[pylon_crdt::CrdtField],
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<(bool, Option<serde_json::Value>), RuntimeError> {
         let has_doc = self
             .crdt_store()
             .has_snapshot(conn, &ent.name, id)
@@ -2216,12 +2215,54 @@ impl Runtime {
                 code: "CRDT_APPLY_FAILED".into(),
                 message: format!("read the snapshot of {} {id}: {e}", ent.name),
             })?;
-        if has_doc && self.crdt_reconcile_pending(conn, &ent.name, id) {
-            if let Some(row) = self.crdt_row_for_doc(conn, ent, id, fields)? {
-                self.reconcile_crdt_doc(conn, &ent.name, id, fields, &row)?;
-            }
+        if !has_doc || !self.crdt_reconcile_pending(conn, &ent.name, id) {
+            return Ok((has_doc, None));
         }
-        Ok(has_doc)
+        let before = self
+            .crdt_store()
+            .project(conn, &ent.name, id, fields)
+            .map_err(|e| RuntimeError {
+                code: "CRDT_APPLY_FAILED".into(),
+                message: format!("read the doc of {} {id}: {e}", ent.name),
+            })?;
+        Ok((has_doc, Some(before)))
+    }
+
+    /// After a client's update was imported into a row the one-time
+    /// reconcile has not reached: the register and text fields the update
+    /// left as they were (`before`) take the row's values where they
+    /// differ. A field the client changed keeps the client's value.
+    pub(crate) fn reconcile_crdt_push(
+        &self,
+        conn: &Connection,
+        ent: &ManifestEntity,
+        id: &str,
+        fields: &[pylon_crdt::CrdtField],
+        before: &serde_json::Value,
+    ) -> Result<(), RuntimeError> {
+        let Some(row) = self.crdt_row_for_doc(conn, ent, id, fields)? else {
+            return Ok(());
+        };
+        let after = self
+            .crdt_store()
+            .project(conn, &ent.name, id, fields)
+            .map_err(|e| RuntimeError {
+                code: "CRDT_APPLY_FAILED".into(),
+                message: format!("read the doc of {} {id}: {e}", ent.name),
+            })?;
+        let null = serde_json::Value::Null;
+        let values: Vec<(String, serde_json::Value)> = self
+            .crdt_doc_differences(conn, &ent.name, id, fields, &row)?
+            .into_iter()
+            .filter(|(name, _)| {
+                same_json_value(
+                    before.get(name).unwrap_or(&null),
+                    after.get(name).unwrap_or(&null),
+                )
+            })
+            .collect();
+        self.apply_fields(conn, &ent.name, id, fields, values);
+        Ok(())
     }
 
     /// After a client's update was imported into a row that had no doc:
@@ -2254,6 +2295,33 @@ impl Runtime {
             })
             .collect();
         self.apply_fields(conn, &ent.name, id, fields, values);
+        Ok(())
+    }
+
+    /// Before a server write patches a row's CRDT doc: a row with no doc
+    /// (from before inserts seeded one) gets one from its current values
+    /// first, or the patch would make a doc holding only the written fields,
+    /// and a client's next push would project the rest (a counter as 0, a
+    /// list as empty) into the row.
+    fn seed_missing_crdt_doc(
+        &self,
+        conn: &Connection,
+        ent: &ManifestEntity,
+        id: &str,
+        fields: &[pylon_crdt::CrdtField],
+    ) -> Result<(), RuntimeError> {
+        let has_doc = self
+            .crdt_store()
+            .has_snapshot(conn, &ent.name, id)
+            .map_err(|e| RuntimeError {
+                code: "CRDT_APPLY_FAILED".into(),
+                message: format!("read the snapshot of {} {id}: {e}", ent.name),
+            })?;
+        if !has_doc {
+            if let Some(row) = self.crdt_row_for_doc(conn, ent, id, fields)? {
+                self.seed_crdt_doc(conn, &ent.name, id, fields, &row);
+            }
+        }
         Ok(())
     }
 
@@ -3222,6 +3290,7 @@ impl Runtime {
         let affected = with_write_tx(self, &conn, || -> Result<i64, RuntimeError> {
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
+                self.seed_missing_crdt_doc(&conn, ent, id, &crdt_fields)?;
                 sb.crdt
                     .apply_patch(&conn, entity, id, &crdt_fields, data)
                     .map_err(|e| RuntimeError {
@@ -4027,6 +4096,14 @@ impl Runtime {
             data
         };
         validate_vector_fields(ent, data)?;
+        // The doc from the row as it is now, before the UPDATE changes it.
+        let crdt_fields = if ent.crdt {
+            let fields = self.crdt_fields_for(ent)?;
+            self.seed_missing_crdt_doc(conn, ent, id, &fields)?;
+            Some(fields)
+        } else {
+            None
+        };
         let obj = data.as_object().ok_or_else(|| RuntimeError {
             code: "INVALID_DATA".into(),
             message: "Update data must be a JSON object".into(),
@@ -4075,10 +4152,9 @@ impl Runtime {
 
         // The row's CRDT doc takes the same fields in the same transaction
         // (as in `update`), or the next projection from the doc undoes them.
-        if affected > 0 && ent.crdt {
-            let crdt_fields = self.crdt_fields_for(ent)?;
+        if let (true, Some(crdt_fields)) = (affected > 0, &crdt_fields) {
             self.crdt_store()
-                .apply_patch(conn, entity, id, &crdt_fields, data)
+                .apply_patch(conn, entity, id, crdt_fields, data)
                 .map_err(|e| RuntimeError {
                     code: "CRDT_APPLY_FAILED".into(),
                     message: format!("crdt write {entity}/{id}: {e}"),
@@ -6582,6 +6658,70 @@ mod tests {
         assert_eq!(row["meta"], serde_json::json!({"k": 1}));
         assert_eq!(row["body"], "hello");
         assert_eq!(row["done"], false);
+    }
+
+    /// A server update to a row with no doc keeps the row's other fields in
+    /// the doc it creates: a counter and a list are not projected as 0 and
+    /// empty by the next push.
+    #[test]
+    fn a_server_update_to_a_row_with_no_doc_keeps_its_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let id = rt.insert("Doc", &fresh_doc()).unwrap();
+        rt.lock_write_conn()
+            .unwrap()
+            .execute(
+                "DELETE FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
+                [&id],
+            )
+            .unwrap();
+        rt.crdt_store().clear_cache();
+        rt.update("Doc", &id, &serde_json::json!({"title": "b"}))
+            .unwrap();
+        let doc = doc_values(&rt, &id);
+        assert_eq!(doc["title"], "b");
+        assert_eq!(doc["likes"].as_f64(), Some(3.0));
+        assert_eq!(doc["tags"], serde_json::json!(["x"]));
+        assert_eq!(doc["body"], "hello");
+    }
+
+    /// A push to a row the one-time reconcile has not reached keeps the
+    /// client's edit to a field a server write also changed: the client's
+    /// value is the newer one.
+    #[test]
+    fn a_push_before_the_reconcile_keeps_the_clients_own_edit() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let ent = rt.require_entity("Doc").unwrap();
+        let fields = rt.crdt_fields_for(ent).unwrap();
+        for _ in 0..8 {
+            let id = rt.insert("Doc", &fresh_doc()).unwrap();
+            rt.lock_write_conn()
+                .unwrap()
+                .execute(
+                    "UPDATE \"Doc\" SET \"title\" = 'server' WHERE \"id\" = ?1",
+                    [&id],
+                )
+                .unwrap();
+            let stored = {
+                let conn = rt.lock_write_conn().unwrap();
+                rt.crdt_store().snapshot(&conn, "Doc", &id).unwrap()
+            };
+            let client = pylon_crdt::loro::LoroDoc::new();
+            pylon_crdt::apply_update(&client, &stored).unwrap();
+            let before = client.oplog_vv();
+            pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"title": "client"}))
+                .unwrap();
+            let update = client
+                .export(pylon_crdt::loro::ExportMode::updates(&before))
+                .unwrap();
+            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+            assert_eq!(row["title"], "client");
+        }
     }
 
     /// A client's first read of a row with no doc creates the doc from the

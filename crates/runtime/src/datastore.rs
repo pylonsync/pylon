@@ -1140,7 +1140,8 @@ impl DataStore for Runtime {
 
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
         crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
-            let has_doc = self.prepare_crdt_doc_for_push(&conn, &ent, row_id, &crdt_fields)?;
+            let (has_doc, before) =
+                self.prepare_crdt_doc_for_push(&conn, &ent, row_id, &crdt_fields)?;
             // Apply the update to the LoroDoc + persist the new snapshot
             // to the sidecar. Returns the projected JSON shape for the
             // post-merge state.
@@ -1151,12 +1152,20 @@ impl DataStore for Runtime {
                     code: "CRDT_APPLY_FAILED".into(),
                     message: format!("apply_remote_update {entity}/{row_id}: {e}"),
                 })?;
+            // A row the one-time reconcile has not reached: the fields this
+            // update left alone take the row's values (a server write the
+            // doc missed), the ones it changed keep the client's.
+            if let Some(before) = &before {
+                self.reconcile_crdt_push(&conn, &ent, row_id, &crdt_fields, before)?;
+            }
             // A row with no doc (from before inserts seeded one, and never
             // read by a client since): the update came first, so its fields
             // stand; the fields it did not set take the row's values, or
             // the projection below would null them in the row.
             if !has_doc {
                 self.fill_crdt_doc_from_row(&conn, &ent, row_id, &crdt_fields)?;
+            }
+            if before.is_some() || !has_doc {
                 projected = self
                     .crdt_store()
                     .project(&conn, entity, row_id, &crdt_fields)
