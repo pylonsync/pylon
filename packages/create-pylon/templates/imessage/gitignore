@@ -1,0 +1,11 @@
+node_modules/
+.pylon/
+pylon.manifest.json
+pylon.client.ts
+web/dist/
+dist/
+*.db
+*.db-*
+.env
+.env.local
+.DS_Store

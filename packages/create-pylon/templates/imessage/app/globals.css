@@ -1,0 +1,183 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@source "../app/**/*.{tsx,ts,jsx,js}";
+@source "../components/**/*.{tsx,ts,jsx,js}";
+@source "../lib/**/*.{tsx,ts,jsx,js}";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Messages-style palette. Neutral canvas, one accent: the iMessage blue for
+   the assistant's side of each thread. */
+:root {
+  --radius: 0.75rem;
+  --canvas: oklch(0.975 0.002 260);
+  --rail: oklch(0.955 0.003 260);
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.2 0.01 260);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.2 0.01 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.2 0.01 260);
+  --primary: oklch(0.2 0.01 260);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.955 0.003 260);
+  --secondary-foreground: oklch(0.25 0.01 260);
+  --muted: oklch(0.955 0.003 260);
+  --muted-foreground: oklch(0.52 0.012 260);
+  --accent: oklch(0.945 0.004 260);
+  --accent-foreground: oklch(0.2 0.01 260);
+  --destructive: oklch(0.58 0.21 27);
+  --border: oklch(0.2 0.01 260 / 8%);
+  --input: oklch(0.2 0.01 260 / 12%);
+  --ring: oklch(0.62 0.19 255);
+  --bubble-out: #0a84ff;
+  --bubble-out-text: #ffffff;
+  --bubble-in: #e9e9eb;
+  --bubble-in-text: #0b0b0c;
+  --warn: oklch(0.62 0.14 65);
+  --ok: oklch(0.62 0.15 150);
+}
+
+.dark {
+  --canvas: oklch(0.16 0.004 260);
+  --rail: oklch(0.19 0.004 260);
+  --background: oklch(0.21 0.004 260);
+  --foreground: oklch(0.96 0.003 260);
+  --card: oklch(0.23 0.004 260);
+  --card-foreground: oklch(0.96 0.003 260);
+  --popover: oklch(0.23 0.004 260);
+  --popover-foreground: oklch(0.96 0.003 260);
+  --primary: oklch(0.96 0.003 260);
+  --primary-foreground: oklch(0.2 0.01 260);
+  --secondary: oklch(0.27 0.005 260);
+  --secondary-foreground: oklch(0.96 0.003 260);
+  --muted: oklch(0.27 0.005 260);
+  --muted-foreground: oklch(0.7 0.01 260);
+  --accent: oklch(0.29 0.005 260);
+  --accent-foreground: oklch(0.96 0.003 260);
+  --destructive: oklch(0.68 0.19 25);
+  --border: oklch(1 0 0 / 9%);
+  --input: oklch(1 0 0 / 14%);
+  --bubble-in: #3b3b3d;
+  --bubble-in-text: #f5f5f7;
+}
+
+@theme inline {
+  --font-sans: var(--font-ui, ui-sans-serif), system-ui, sans-serif;
+  --font-mono: var(--font-code, ui-monospace), "SF Mono", monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-canvas: var(--canvas);
+  --color-rail: var(--rail);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-bubble-out: var(--bubble-out);
+  --color-bubble-out-text: var(--bubble-out-text);
+  --color-bubble-in: var(--bubble-in);
+  --color-bubble-in-text: var(--bubble-in-text);
+  --color-warn: var(--warn);
+  --color-ok: var(--ok);
+  --ease-spring: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html,
+  body {
+    @apply bg-canvas font-sans text-foreground antialiased;
+    font-feature-settings: "ss01", "cv11";
+  }
+  button {
+    cursor: pointer;
+  }
+}
+
+/* iMessage bubble tails: a curved notch on the bottom corner of the last
+   bubble in a run, drawn with two pseudo-elements. */
+.bubble {
+  position: relative;
+  border-radius: 1.15rem;
+  padding: 0.45rem 0.8rem 0.5rem;
+  line-height: 1.32;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.bubble-tail.bubble-out::before,
+.bubble-tail.bubble-in::before {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  height: 1.1rem;
+  width: 1.1rem;
+}
+.bubble-tail.bubble-out::before {
+  right: -0.4rem;
+  background: var(--bubble-out);
+  border-bottom-left-radius: 0.9rem 0.75rem;
+}
+.bubble-tail.bubble-in::before {
+  left: -0.4rem;
+  background: var(--bubble-in);
+  border-bottom-right-radius: 0.9rem 0.75rem;
+}
+.bubble-tail.bubble-out::after,
+.bubble-tail.bubble-in::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  height: 1.1rem;
+  width: 0.6rem;
+  background: var(--background);
+}
+.bubble-tail.bubble-out::after {
+  right: -0.6rem;
+  border-bottom-left-radius: 0.6rem;
+}
+.bubble-tail.bubble-in::after {
+  left: -0.6rem;
+  border-bottom-right-radius: 0.6rem;
+}
+
+@keyframes typing-dot {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-2px); }
+}
+.typing-dot {
+  animation: typing-dot 1.2s var(--ease-spring) infinite;
+}
+
+@keyframes bubble-in {
+  from { opacity: 0; transform: translateY(6px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.bubble-enter {
+  animation: bubble-in 320ms cubic-bezier(0.32, 0.72, 0, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot,
+  .bubble-enter {
+    animation: none;
+  }
+}
