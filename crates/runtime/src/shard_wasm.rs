@@ -2392,9 +2392,10 @@ impl WasmShardHost {
     fn info_local(&self, id: &str) -> Option<ShardInfo> {
         // The shard and its failure cell from the same run (a new run
         // replaces both under this lock).
+        // `kind_of` first: the sweep takes it before `failures`.
+        let kind = self.kind_of.read().unwrap().get(id).cloned()?;
         let failures = self.failures.lock().unwrap();
         let shard = self.registry.get(id)?;
-        let kind = self.kind_of.read().unwrap().get(id).cloned()?;
         // Not under the state lock: a mutation holding the database's write
         // lock can ask while a move holds the state and waits on that lock.
         let error = failures.get(id).and_then(Failure::get);

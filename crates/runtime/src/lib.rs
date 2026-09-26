@@ -2026,68 +2026,124 @@ impl Runtime {
         if done {
             return Ok(());
         }
-        let mut fixed = 0usize;
-        with_write_tx(self, &conn, || -> Result<(), RuntimeError> {
-            for ent in &crdt_entities {
-                let fields = self.crdt_fields_for(ent)?;
-                let ids: Vec<String> = {
+        let (mut fixed, mut skipped) = (0usize, 0usize);
+        for ent in &crdt_entities {
+            let fields = self.crdt_fields_for(ent)?;
+            let ids: Vec<String> = {
+                let mut stmt = conn
+                    .prepare("SELECT row_id FROM _pylon_crdt_snapshots WHERE entity = ?1")
+                    .map_err(|e| err("list snapshots", &e))?;
+                let rows = stmt
+                    .query_map([&ent.name], |r| r.get(0))
+                    .map_err(|e| err("list snapshots", &e))?;
+                rows.collect::<Result<_, _>>()
+                    .map_err(|e| err("list snapshots", &e))?
+            };
+            let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(&ent.name));
+            // Batches of rows per transaction, so a large table commits as
+            // it goes.
+            for batch in ids.chunks(RECONCILE_BATCH) {
+                with_write_tx(self, &conn, || -> Result<(), RuntimeError> {
                     let mut stmt = conn
-                        .prepare("SELECT row_id FROM _pylon_crdt_snapshots WHERE entity = ?1")
-                        .map_err(|e| err("list snapshots", &e))?;
-                    let rows = stmt
-                        .query_map([&ent.name], |r| r.get(0))
-                        .map_err(|e| err("list snapshots", &e))?;
-                    rows.collect::<Result<_, _>>()
-                        .map_err(|e| err("list snapshots", &e))?
-                };
-                let sql = format!("SELECT * FROM {} WHERE \"id\" = ?1", quote_ident(&ent.name));
-                for id in ids {
-                    // The row as stored (encrypted fields stay encrypted, as
-                    // the doc holds them).
-                    let row = match conn.query_row(&sql, [&id], |r| Ok(row_to_json(r, &ent.fields)))
-                    {
-                        Ok(row) => row,
-                        Err(rusqlite::Error::QueryReturnedNoRows) => continue,
-                        Err(e) => return Err(err(&format!("read {} {id}", ent.name), &e)),
-                    };
-                    let doc = self
-                        .crdt_store()
-                        .project(&conn, &ent.name, &id, &fields)
-                        .map_err(|e| err(&format!("read the doc of {} {id}", ent.name), &e))?;
-                    let mut patch = serde_json::Map::new();
-                    for f in &fields {
-                        let in_row = row.get(&f.name).unwrap_or(&serde_json::Value::Null);
-                        let in_doc = doc.get(&f.name).unwrap_or(&serde_json::Value::Null);
-                        if !same_json_value(in_row, in_doc) {
-                            patch.insert(f.name.clone(), in_row.clone());
+                        .prepare_cached(&sql)
+                        .map_err(|e| err(&format!("read {}", ent.name), &e))?;
+                    for id in batch {
+                        // The row as the doc holds it: JSON fields parsed,
+                        // encrypted fields still encrypted.
+                        let mut row =
+                            match stmt.query_row([id], |r| Ok(row_to_json(r, &ent.fields))) {
+                                Ok(row) => row,
+                                Err(rusqlite::Error::QueryReturnedNoRows) => continue,
+                                Err(e) => return Err(err(&format!("read {} {id}", ent.name), &e)),
+                            };
+                        parse_json_fields_in_row(ent, &mut row);
+                        match self.reconcile_crdt_doc(&conn, &ent.name, id, &fields, &row) {
+                            Ok(true) => fixed += 1,
+                            Ok(false) => {}
+                            Err(e) => {
+                                // One row that cannot take its values does
+                                // not stop the others; its doc is reloaded
+                                // from the stored snapshot.
+                                self.crdt_store().evict(&ent.name, id);
+                                skipped += 1;
+                                tracing::warn!(
+                                    "[crdt] {} {id}: doc not brought in line with its row: {e}",
+                                    ent.name
+                                );
+                            }
                         }
                     }
-                    if patch.is_empty() {
-                        continue;
-                    }
-                    self.crdt_store()
-                        .apply_patch(
-                            &conn,
-                            &ent.name,
-                            &id,
-                            &fields,
-                            &serde_json::Value::Object(patch),
-                        )
-                        .map_err(|e| err(&format!("patch the doc of {} {id}", ent.name), &e))?;
-                    fixed += 1;
-                }
+                    Ok(())
+                })?;
             }
-            conn.execute(
-                "INSERT OR IGNORE INTO _pylon_crdt_reconciled (version) VALUES (1)",
-                [],
-            )
-            .map_err(|e| err("record the reconcile", &e))?;
-            Ok(())
-        })?;
-        if fixed > 0 {
-            tracing::info!("[crdt] set {fixed} CRDT doc(s) to their rows' values");
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO _pylon_crdt_reconciled (version) VALUES (1)",
+            [],
+        )
+        .map_err(|e| err("record the reconcile", &e))?;
+        if fixed > 0 || skipped > 0 {
+            tracing::info!(
+                "[crdt] set {fixed} CRDT doc(s) to their rows' values; {skipped} could not be"
+            );
         }
         Ok(())
+    }
+
+    /// Set one row's CRDT doc to the row's values where they differ. True
+    /// when the doc changed. A counter takes the difference (its patch
+    /// value is an increment); a null row value is the kind's empty value.
+    fn reconcile_crdt_doc(
+        &self,
+        conn: &Connection,
+        entity: &str,
+        id: &str,
+        fields: &[pylon_crdt::CrdtField],
+        row: &serde_json::Value,
+    ) -> Result<bool, String> {
+        use pylon_crdt::CrdtFieldKind as K;
+        let store = self.crdt_store();
+        let doc = store
+            .project(conn, entity, id, fields)
+            .map_err(|e| e.to_string())?;
+        let null = serde_json::Value::Null;
+        let mut patch = serde_json::Map::new();
+        for f in fields {
+            let in_row = row.get(&f.name).unwrap_or(&null);
+            let in_doc = doc.get(&f.name).unwrap_or(&null);
+            let empty = match f.kind {
+                K::Text => Some(serde_json::json!("")),
+                K::List | K::MovableList | K::Tree => Some(serde_json::json!([])),
+                K::Counter => Some(serde_json::json!(0)),
+                _ => None,
+            };
+            let (want, have) = match &empty {
+                Some(e) => (
+                    if in_row.is_null() { e } else { in_row },
+                    if in_doc.is_null() { e } else { in_doc },
+                ),
+                None => (in_row, in_doc),
+            };
+            if same_json_value(want, have) {
+                continue;
+            }
+            let value = if f.kind == K::Counter {
+                let (Some(w), Some(h)) = (want.as_f64(), have.as_f64()) else {
+                    return Err(format!("{}: counter values {want} and {have}", f.name));
+                };
+                serde_json::json!(w - h)
+            } else {
+                want.clone()
+            };
+            patch.insert(f.name.clone(), value);
+        }
+        if patch.is_empty() {
+            return Ok(false);
+        }
+        store
+            .apply_patch(conn, entity, id, fields, &serde_json::Value::Object(patch))
+            .map_err(|e| e.to_string())?;
+        Ok(true)
     }
 
     /// Create the search index tables (`_facet_bitmap`, per-entity
@@ -4976,6 +5032,9 @@ fn json_to_sql(val: &serde_json::Value) -> Box<dyn rusqlite::types::ToSql> {
 /// stability with callers that compute it from the manifest) — the
 /// name set comes from the row itself now, which always matches the
 /// SELECT's actual column shape.
+/// Rows per transaction in the one-time CRDT reconcile.
+const RECONCILE_BATCH: usize = 500;
+
 /// JSON values equal as stored: numbers by value (a doc may hold 5 where the
 /// row reads 5.0).
 fn same_json_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
@@ -5979,6 +6038,102 @@ mod tests {
         let rt = Runtime::open(path, test_manifest()).unwrap();
         let conn = rt.lock_write_conn().unwrap();
         assert_eq!(user_doc(&rt, &conn, &id)["displayName"], "Row");
+    }
+
+    /// The reconcile compares every field kind as the doc holds it (JSON
+    /// parsed, a counter's total, a null as the kind's empty value), sets
+    /// only rows that differ, and a counter lands on the row's total.
+    #[test]
+    fn the_crdt_reconcile_handles_every_field_kind() {
+        let mut manifest = serde_json::to_value(test_manifest()).unwrap();
+        let base = manifest["entities"][0]["fields"][1].clone();
+        let field = |name: &str, ty: &str, crdt: Option<&str>, optional: bool| {
+            let mut f = base.clone();
+            let obj = f.as_object_mut().unwrap();
+            obj.insert("name".into(), serde_json::json!(name));
+            let type_key = obj
+                .iter()
+                .find(|(_, v)| v.as_str() == Some("string"))
+                .map(|(k, _)| k.clone())
+                .unwrap();
+            obj.insert(type_key, serde_json::json!(ty));
+            obj.insert("crdt".into(), serde_json::json!(crdt));
+            obj.insert("optional".into(), serde_json::json!(optional));
+            f
+        };
+        let mut doc_entity = manifest["entities"][0].clone();
+        doc_entity["name"] = serde_json::json!("Doc");
+        doc_entity["fields"] = serde_json::json!([
+            field("title", "string", None, false),
+            field("meta", "json", None, false),
+            field("tags", "json", Some("list"), false),
+            field("likes", "int", Some("counter"), false),
+            field("done", "bool", None, false),
+            field("body", "richtext", None, true),
+        ]);
+        manifest["entities"]
+            .as_array_mut()
+            .unwrap()
+            .push(doc_entity);
+        let manifest: AppManifest = serde_json::from_value(manifest).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let path = path.to_str().unwrap();
+        let fresh = serde_json::json!({
+            "title": "a", "meta": {"k": 1}, "tags": ["x"], "likes": 3,
+            "done": false, "body": "hello",
+        });
+        let snapshot = |rt: &Runtime, id: &str| -> Vec<u8> {
+            rt.lock_write_conn()
+                .unwrap()
+                .query_row(
+                    "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = 'Doc' AND row_id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let (stale, in_line, before) = {
+            let rt = Runtime::open(path, manifest.clone()).unwrap();
+            let stale = rt.insert("Doc", &fresh).unwrap();
+            let in_line = rt.insert("Doc", &fresh).unwrap();
+            let conn = rt.lock_write_conn().unwrap();
+            conn.execute(
+                "UPDATE \"Doc\" SET \"title\" = 'b', \"meta\" = '{\"k\":2}',
+                        \"tags\" = '[\"x\",\"y\"]', \"likes\" = 10, \"done\" = 1,
+                        \"body\" = NULL
+                  WHERE \"id\" = ?1",
+                [&stale],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM _pylon_crdt_reconciled", [])
+                .unwrap();
+            drop(conn);
+            let before = snapshot(&rt, &in_line);
+            (stale, in_line, before)
+        };
+        let rt = Runtime::open(path, manifest).unwrap();
+        let ent = rt.require_entity("Doc").unwrap();
+        let fields = rt.crdt_fields_for(ent).unwrap();
+        let conn = rt.lock_write_conn().unwrap();
+        let doc = rt
+            .crdt_store()
+            .project(&conn, "Doc", &stale, &fields)
+            .unwrap();
+        drop(conn);
+        assert_eq!(doc["title"], "b");
+        assert_eq!(doc["meta"], serde_json::json!({"k": 2}));
+        assert_eq!(doc["tags"], serde_json::json!(["x", "y"]));
+        assert_eq!(doc["likes"].as_f64(), Some(10.0));
+        assert_eq!(doc["done"], true);
+        assert!(
+            doc["body"].is_null() || doc["body"] == "",
+            "{}",
+            doc["body"]
+        );
+        // A row already in line keeps its doc as it was.
+        assert_eq!(snapshot(&rt, &in_line), before);
     }
 
     /// Regression: when the SQL INSERT step inside Runtime::insert fails
