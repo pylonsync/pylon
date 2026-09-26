@@ -2,6 +2,7 @@
 
 import React, { useEffect, useState } from "react";
 import { Link } from "@pylonsync/react";
+import { Lock, Mail, UserRound } from "lucide-react";
 import {
   passwordLogin,
   passwordRegister,
@@ -19,6 +20,7 @@ import {
 // engine's calls). Sign-up then lands on /onboarding, which creates the
 // workspace; sign-in lands on /dashboard.
 export function AuthForm({ mode }: { mode: "login" | "signup" }) {
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
@@ -72,7 +74,11 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
       const session =
         mode === "login"
           ? await passwordLogin({ email, password })
-          : await passwordRegister({ email, password });
+          : await passwordRegister({
+              email,
+              password,
+              ...(name.trim() ? { displayName: name.trim() } : {}),
+            });
       persistSession(session);
       window.location.assign(destination);
     } catch (err) {
@@ -84,10 +90,23 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
   return (
     <div className="space-y-5">
       <form onSubmit={onSubmit} className="space-y-4">
+        {mode === "signup" && method === "password" ? (
+          <IconField
+            label="Full name"
+            type="text"
+            icon={<UserRound className="size-[15px]" strokeWidth={1.75} />}
+            value={name}
+            onChange={setName}
+            required
+            autoComplete="name"
+            maxLength={60}
+            placeholder="Dana Reyes"
+          />
+        ) : null}
         <IconField
           label="Email"
           type="email"
-          icon={<MailIcon />}
+          icon={<Mail className="size-[15px]" strokeWidth={1.75} />}
           value={email}
           onChange={setEmail}
           required
@@ -99,7 +118,7 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
           <IconField
             label="Password"
             type="password"
-            icon={<LockIcon />}
+            icon={<Lock className="size-[15px]" strokeWidth={1.75} />}
             value={password}
             onChange={setPassword}
             required
@@ -120,7 +139,7 @@ export function AuthForm({ mode }: { mode: "login" | "signup" }) {
           <IconField
             label="6-digit code"
             type="text"
-            icon={<LockIcon />}
+            icon={<Lock className="size-[15px]" strokeWidth={1.75} />}
             value={code}
             onChange={(v) => setCode(v.replace(/\D/g, "").slice(0, 6))}
             required
@@ -258,30 +277,12 @@ function IconField({
         <input
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="h-10 w-full rounded-lg border border-zinc-300 bg-white pl-9 pr-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10 disabled:bg-zinc-50 disabled:text-zinc-500"
+          className="h-10 w-full rounded-lg border border-zinc-200 bg-white pl-9 pr-3 text-sm text-zinc-900 shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/5 disabled:bg-zinc-50 disabled:text-zinc-500"
           {...rest}
         />
       </span>
       {hint ? <span className="mt-1.5 block text-[12px] text-zinc-500">{hint}</span> : null}
     </label>
-  );
-}
-
-function MailIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="3" y="5" width="18" height="14" rx="2" />
-      <path d="m3 7 9 6 9-6" />
-    </svg>
-  );
-}
-
-function LockIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="4" y="11" width="16" height="10" rx="2" />
-      <path d="M8 11V7a4 4 0 0 1 8 0v4" />
-    </svg>
   );
 }
 
@@ -310,6 +311,7 @@ function messageFor(err: unknown): string {
       case "INVALID_CREDENTIALS":
         return "Wrong email or password.";
       case "USER_EXISTS":
+      case "EMAIL_TAKEN":
         return "That email is already in use — sign in instead.";
       case "WEAK_PASSWORD":
         return "Pick a longer password — at least 10 characters.";

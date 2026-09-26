@@ -1,420 +1,181 @@
 import React from "react";
 import { Link, type Metadata, type PageProps } from "@pylonsync/react";
+import { ArrowRight } from "lucide-react";
 import {
   WRAP,
-  Badge,
-  Divider,
-  Eyebrow,
-  SectionHead,
-  FeatureGrid,
+  FeatureList,
   PrimaryButton,
-  GhostLink,
-  Shot,
-  Portrait,
-  Terminal,
+  ProductShot,
+  SecondaryButton,
 } from "@/components/marketing";
-import { siteConfig, productBySlug, type Product } from "@/lib/site.config";
 import { PricingTable } from "@/components/pricing-table";
+import { siteConfig } from "@/lib/site.config";
 
-// SEO metadata. Exported `metadata` is rendered into <head> on the server, so
-// this marketing page is fully indexable — view source and the copy is in the
-// HTML. All copy lives in lib/site.config.ts; edit it there.
+// SEO metadata, rendered into <head> on the server. All copy lives in
+// lib/site.config.ts; edit it there.
 export const metadata: Metadata = {
   title: siteConfig.seo.title,
   description: siteConfig.seo.description,
 };
 
-// The products the homepage features inline. Each links to its own
-// /products/[slug] page for the full story. (Defined once in lib/site.config.ts.)
-const projects = productBySlug("projects")!;
-const tasks = productBySlug("tasks")!;
-const docs = productBySlug("docs")!;
-const automations = productBySlug("automations")!;
-
-// `app/page.tsx` → `/`. A server-rendered marketing landing page. It reads
-// `auth` (resolved from the session cookie during the render) so the call to
-// action is right on the first byte — "Get started" for visitors, "Open
-// dashboard" once you're signed in. No client fetch, no flash. Every string is
-// sourced from `siteConfig` so the whole page rebrands from one file.
+// `(marketing)/page.tsx` → `/`. The landing page: hero with a product shot,
+// one section per product, a customer quote, pricing, FAQ, and a closing
+// call to action. It reads `auth` during the server render, so the buttons
+// say "Get started" to visitors and "Open dashboard" to signed-in people on
+// the first byte. The screenshots are captures of this app's own dashboard
+// (public/screenshots, made by scripts/capture-screenshots.mjs).
 export default function LandingPage({ auth }: PageProps) {
   const signedIn = Boolean(auth.user_id);
   const primaryHref = signedIn ? "/dashboard" : "/signup";
   const primaryLabel = signedIn ? "Open dashboard" : "Get started";
-
-  const {
-    hero,
-    logoCloud,
-    outcomes,
-    featuredTestimonial,
-    entryPoints,
-    engagement,
-    customers,
-    gettingStarted,
-    pricing,
-    team,
-    finalCta,
-    faq,
-    brand,
-  } = siteConfig;
+  const { hero, products, quote, pricing, faq, finalCta } = siteConfig;
 
   return (
-    <div className="bg-white text-zinc-900">
+    <div className="overflow-x-clip bg-white text-zinc-900">
       {/* ============================ HERO ============================ */}
-      <section className={`${WRAP} pt-20 pb-16 sm:pt-28`}>
-        <Badge>{hero.badge}</Badge>
-        <h1 className="mt-6 max-w-2xl text-balance text-[2.75rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[3.5rem]">
-          {hero.headline}
-        </h1>
-        <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-zinc-500">
-          {hero.subcopy}
-        </p>
-        <div className="mt-8 flex flex-wrap items-center gap-4">
-          <PrimaryButton href={primaryHref}>{primaryLabel}</PrimaryButton>
-          <GhostLink href="/#product">Take the tour →</GhostLink>
-        </div>
-
-        <div className="mt-16">
-          <Shot url={`${brand.domain}/dashboard`} label={hero.mockupLabel} />
-        </div>
-      </section>
-
-      {/* ========================= LOGO CLOUD ========================= */}
-      <section className={`${WRAP} pb-16`}>
-        <p className="font-mono text-[11px] uppercase tracking-[0.14em] text-zinc-400">
-          {logoCloud.label}
-        </p>
-        <div className="mt-6 flex flex-wrap items-center gap-x-10 gap-y-4">
-          {logoCloud.companies.map((name) => (
-            <div
-              key={name}
-              className="flex items-center gap-2 text-zinc-400"
-              title={name}
-            >
-              <span className="size-5 rounded bg-zinc-200" />
-              <span className="text-[13px] font-semibold uppercase tracking-wide">
-                {name}
-              </span>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* ===================== OUTCOMES (2-col) ====================== */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <div className="grid gap-12 lg:grid-cols-[0.9fr_1.1fr]">
-          <div>
-            <Eyebrow>{outcomes.eyebrow}</Eyebrow>
-            <h2 className="mt-4 text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-              {outcomes.headline}
-            </h2>
-            <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-              {outcomes.body}
+      <section className="relative">
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-[720px] bg-[radial-gradient(60%_55%_at_50%_0%,var(--brand-soft),transparent_70%)]"
+        />
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0 h-[720px] bg-[linear-gradient(to_right,rgba(24,24,27,0.045)_1px,transparent_1px),linear-gradient(to_bottom,rgba(24,24,27,0.045)_1px,transparent_1px)] bg-[size:56px_56px] [mask-image:radial-gradient(70%_60%_at_50%_0%,black,transparent_75%)]"
+        />
+        <div className={`${WRAP} relative pb-10 pt-14 sm:pt-20`}>
+          <div className="mx-auto max-w-4xl text-center">
+            <h1 className="text-balance text-[2.3rem] font-semibold leading-[1.04] tracking-[-0.04em] text-zinc-950 sm:text-[3.6rem]">
+              {hero.headline}
+            </h1>
+            <p className="mx-auto mt-5 max-w-xl text-balance text-[17px] leading-relaxed text-zinc-500 sm:text-[18px]">
+              {hero.subcopy}
             </p>
+            <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+              <PrimaryButton href={primaryHref}>{primaryLabel}</PrimaryButton>
+              <SecondaryButton href="/pricing">See pricing</SecondaryButton>
+            </div>
+            <p className="mt-4 text-[13px] text-zinc-400">{hero.note}</p>
           </div>
-          <FeatureGrid columns={2} items={outcomes.items} />
+          <div className="relative mx-auto mt-12 max-w-[1120px] sm:mt-14">
+            <ProductShot src={hero.screenshot} alt={hero.screenshotAlt} priority />
+          </div>
         </div>
       </section>
 
-      {/* ======================= TESTIMONIAL ========================= */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <div className="grid items-center gap-12 lg:grid-cols-[0.8fr_1.2fr]">
-          <Portrait name={featuredTestimonial.name} />
-          <figure>
-            <div className="font-serif text-4xl leading-none text-brand">
-              &ldquo;
+      {/* ========================== PRODUCTS ========================== */}
+      <section id="features" className="scroll-mt-20">
+        {products.filter((p) => p.onLanding).map((p, i) => (
+          <div key={p.slug} className={`${WRAP} py-16 sm:py-20`}>
+            <div
+              className={`grid items-center gap-10 lg:gap-14 ${
+                i % 2 === 1
+                  ? "lg:grid-cols-[minmax(0,1.3fr)_minmax(0,0.9fr)]"
+                  : "lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.3fr)]"
+              }`}
+            >
+              <div className={i % 2 === 1 ? "lg:order-2" : ""}>
+                <span className="flex size-9 items-center justify-center rounded-xl bg-white text-zinc-700 shadow-[0_0_0_1px_rgba(0,0,0,0.07),0_2px_4px_-1px_rgba(0,0,0,0.06)]">
+                  <p.icon className="size-[18px]" strokeWidth={1.75} />
+                </span>
+                <h2 className="mt-5 text-balance text-[1.9rem] font-semibold leading-[1.1] tracking-[-0.03em] text-zinc-950 sm:text-[2.4rem]">
+                  {p.headline}
+                </h2>
+                <p className="mt-4 max-w-md text-[15.5px] leading-relaxed text-zinc-500">{p.summary}</p>
+                <div className="mt-8">
+                  <FeatureList items={p.features} />
+                </div>
+                <Link
+                  href={`/products/${p.slug}`}
+                  className="group mt-8 inline-flex items-center gap-1.5 text-[14px] font-medium text-zinc-900"
+                >
+                  More about {p.title.toLowerCase()}
+                  <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+                </Link>
+              </div>
+              <ProductShot
+                src={p.screenshot}
+                alt={p.screenshotAlt}
+                crop={p.crop}
+                className={i % 2 === 1 ? "lg:order-1" : ""}
+              />
             </div>
-            <blockquote className="mt-4 text-balance text-2xl font-medium leading-[1.35] tracking-[-0.01em] sm:text-[1.75rem]">
-              {featuredTestimonial.quote}
+          </div>
+        ))}
+      </section>
+
+      {/* ============================ QUOTE =========================== */}
+      {quote.quote ? (
+        <section className="border-y border-zinc-200/70 bg-zinc-50/70">
+          <figure className={`${WRAP} py-20 sm:py-28`}>
+            <blockquote className="mx-auto max-w-3xl text-balance text-center text-[1.6rem] font-medium leading-[1.3] tracking-[-0.02em] text-zinc-900 sm:text-[2.1rem]">
+              &ldquo;{quote.quote}&rdquo;
             </blockquote>
-            <figcaption className="mt-8 border-t border-zinc-200/70 pt-6">
-              <div className="text-sm font-semibold">
-                {featuredTestimonial.name}
-              </div>
-              <div className="text-sm text-zinc-500">
-                {featuredTestimonial.role}
-              </div>
+            <figcaption className="mt-8 text-center text-[14px]">
+              <span className="font-semibold text-zinc-900">{quote.name}</span>
+              <span className="text-zinc-500"> · {quote.role}</span>
             </figcaption>
           </figure>
+        </section>
+      ) : null}
+
+      {/* =========================== PRICING ========================== */}
+      <section id="pricing" className={`${WRAP} scroll-mt-20 py-20 sm:py-28`}>
+        <div className="mx-auto max-w-2xl text-center">
+          <h2 className="text-[2rem] font-semibold tracking-[-0.03em] text-zinc-950 sm:text-[2.6rem]">
+            {pricing.headline}
+          </h2>
+          <p className="mt-4 text-[15.5px] leading-relaxed text-zinc-500">{pricing.body}</p>
         </div>
-      </section>
-
-      {/* =================== FEATURE: PROJECTS ======================= */}
-      <Divider />
-      <ProductSection id="product" product={projects} primaryHref={primaryHref} />
-
-      {/* ===================== ENTRY POINTS ========================= */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <SectionHead
-          eyebrow={entryPoints.eyebrow}
-          title={entryPoints.title}
-          body={entryPoints.body}
-        />
-        <div className="mt-12 grid gap-5 sm:grid-cols-2">
-          {entryPoints.items.map((c, i) => (
-            <div
-              key={c.title}
-              className="rounded-2xl border border-zinc-200 bg-paper p-7"
-            >
-              <div className="flex items-start justify-between">
-                <span className="flex size-9 items-center justify-center rounded-lg bg-brand-soft text-brand">
-                  {c.icon}
-                </span>
-                <span className="font-mono text-[11px] text-zinc-300">
-                  0{i + 1}
-                </span>
-              </div>
-              <h3 className="mt-5 text-base font-semibold">{c.title}</h3>
-              <p className="mt-2 text-[14px] leading-relaxed text-zinc-500">
-                {c.body}
-              </p>
-            </div>
-          ))}
-        </div>
-      </section>
-
-      {/* ====================== FEATURE: TASKS ===================== */}
-      <Divider />
-      <ProductSection product={tasks} primaryHref={primaryHref} />
-
-      {/* ====================== FEATURE: DOCS ====================== */}
-      <Divider />
-      <ProductSection product={docs} primaryHref={primaryHref} />
-
-      {/* ============== ENGAGEMENT (prose + numbered) ============== */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <Eyebrow>{engagement.eyebrow}</Eyebrow>
-        <h2 className="mt-4 max-w-2xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          {engagement.headline}
-        </h2>
-        <div className="mt-12 grid gap-12 lg:grid-cols-2">
-          <div className="space-y-5 text-[15px] leading-relaxed text-zinc-500">
-            {engagement.paragraphs.map((p) => (
-              <p key={p}>{p}</p>
-            ))}
-          </div>
-          <ol className="space-y-7">
-            {engagement.items.map((e, i) => (
-              <li key={e.title} className="flex gap-4">
-                <span className="mt-0.5 font-mono text-[11px] text-zinc-300">
-                  0{i + 1}
-                </span>
-                <div>
-                  <span className="text-[15px] font-medium text-brand">
-                    {e.title}.
-                  </span>{" "}
-                  <span className="text-[15px] leading-relaxed text-zinc-500">
-                    {e.body}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ol>
-        </div>
-      </section>
-
-      {/* ======================= AUTOMATIONS ======================= */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <SectionHead
-          eyebrow={automations.eyebrow}
-          arrow
-          title={automations.headline}
-          body={automations.summary}
-        />
-        <FeatureGrid className="mt-14" items={automations.features} />
-        <div className="mt-8">
-          <GhostLink href="/products/automations">
-            Explore {automations.title} →
-          </GhostLink>
-        </div>
-        <div className="mt-12">
-          <Terminal />
-        </div>
-      </section>
-
-      {/* =================== TESTIMONIAL CARDS ===================== */}
-      <Divider />
-      <section id="customers" className={`${WRAP} py-20`}>
-        <SectionHead
-          eyebrow={customers.eyebrow}
-          title={customers.title}
-          body={customers.body}
-        />
-        <div className="mt-12 grid gap-5 sm:grid-cols-3">
-          {customers.quotes.map((q) => (
-            <figure
-              key={q.name + q.role}
-              className="flex flex-col rounded-2xl border border-zinc-200 bg-paper p-6"
-            >
-              <blockquote className="text-[14px] leading-relaxed text-zinc-600">
-                &ldquo;{q.quote}&rdquo;
-              </blockquote>
-              <figcaption className="mt-6 flex items-center gap-3">
-                <span className="flex size-8 items-center justify-center rounded-full bg-zinc-200 text-[11px] font-semibold text-zinc-500">
-                  {initials(q.name)}
-                </span>
-                <div className="leading-tight">
-                  <div className="text-[13px] font-semibold">{q.name}</div>
-                  <div className="text-[12px] text-zinc-500">{q.role}</div>
-                </div>
-              </figcaption>
-            </figure>
-          ))}
-        </div>
-      </section>
-
-      {/* ===================== GETTING STARTED ==================== */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <Eyebrow>{gettingStarted.eyebrow}</Eyebrow>
-        <h2 className="mt-4 max-w-xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          {gettingStarted.headline}
-        </h2>
-        <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-          {gettingStarted.body}
-        </p>
-        <div className="mt-8">
-          <PrimaryButton href={primaryHref}>{primaryLabel}</PrimaryButton>
-        </div>
-        <ol className="mt-14 max-w-xl space-y-8">
-          {gettingStarted.steps.map((s, i) => (
-            <li key={s.title} className="flex gap-5">
-              <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-brand-soft font-mono text-[11px] text-brand">
-                0{i + 1}
-              </span>
-              <div>
-                <h3 className="text-[15px] font-semibold">{s.title}</h3>
-                <p className="mt-1.5 text-[14px] leading-relaxed text-zinc-500">
-                  {s.body}
-                </p>
-              </div>
-            </li>
-          ))}
-        </ol>
-      </section>
-
-      {/* ========================= PRICING ======================== */}
-      <Divider />
-      <section id="pricing" className={`${WRAP} py-20`}>
-        <Eyebrow>{pricing.eyebrow}</Eyebrow>
-        <h2 className="mt-4 max-w-xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          {pricing.headline}
-        </h2>
-        <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-          {pricing.body}
-        </p>
-        <div className="mt-12">
+        <div className="mx-auto mt-12 max-w-4xl">
           <PricingTable signedIn={signedIn} />
         </div>
       </section>
 
-      {/* ====================== THE TEAM (2-col) ================== */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <div className="grid gap-12 lg:grid-cols-[0.9fr_1.1fr]">
-          <div>
-            <Eyebrow>{team.eyebrow}</Eyebrow>
-            <h2 className="mt-4 text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-              {team.headline}
-            </h2>
-            <p className="mt-5 max-w-md text-[15px] leading-relaxed text-zinc-500">
-              {team.body}
-            </p>
+      {/* ============================= FAQ ============================ */}
+      <section id="faq" className={`${WRAP} scroll-mt-20 pb-20 sm:pb-28`}>
+        <div className="grid gap-10 lg:grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)]">
+          <h2 className="text-[2rem] font-semibold tracking-[-0.03em] text-zinc-950 sm:text-[2.6rem]">{faq.headline}</h2>
+          <div className="divide-y divide-zinc-200/80 border-y border-zinc-200/80">
+            {faq.items.map((f) => (
+              <details key={f.q} className="group py-5">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-6 text-[15.5px] font-medium text-zinc-900 marker:hidden [&::-webkit-details-marker]:hidden">
+                  {f.q}
+                  <span className="relative size-4 shrink-0 text-zinc-400" aria-hidden>
+                    <span className="absolute left-0 top-1/2 h-px w-4 bg-current" />
+                    <span className="absolute left-1/2 top-0 h-4 w-px bg-current transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] group-open:rotate-90" />
+                  </span>
+                </summary>
+                <p className="mt-3 max-w-2xl text-[14.5px] leading-relaxed text-zinc-500">{f.a}</p>
+              </details>
+            ))}
           </div>
-          <FeatureGrid columns={2} items={team.items} />
         </div>
       </section>
 
-      {/* ======================= FINAL CTA ======================== */}
-      <Divider />
-      <section className={`${WRAP} py-24`}>
-        <Eyebrow>{finalCta.eyebrow}</Eyebrow>
-        <h2 className="mt-4 max-w-xl text-balance text-[2.5rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[3rem]">
-          {finalCta.headline}
-        </h2>
-        <p className="mt-6 max-w-lg text-[16px] leading-relaxed text-zinc-500">
-          {finalCta.bodyLead}
-          <span className="rounded bg-brand-soft px-1.5 py-0.5 font-medium text-brand">
-            {finalCta.highlight}
-          </span>
-          {finalCta.bodyTail}
-        </p>
-        <div className="mt-8">
-          <PrimaryButton href={primaryHref}>{finalCta.cta}</PrimaryButton>
-        </div>
-        <p className="mt-4 text-[12px] text-zinc-400">{finalCta.footnote}</p>
-      </section>
-
-      {/* ========================== FAQ =========================== */}
-      <Divider />
-      <section id="faq" className={`${WRAP} py-20`}>
-        <Eyebrow>{faq.eyebrow}</Eyebrow>
-        <h2 className="mt-4 text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          {faq.headline}
-        </h2>
-        <div className="mt-10 divide-y divide-zinc-200/70 border-y border-zinc-200/70">
-          {faq.items.map((f) => (
-            <details key={f.q} className="group py-5">
-              <summary className="flex cursor-pointer items-center justify-between text-[15px] font-medium text-zinc-900 marker:hidden [&::-webkit-details-marker]:hidden">
-                {f.q}
-                <span className="text-brand transition-transform group-open:rotate-45">
-                  +
-                </span>
-              </summary>
-              <p className="mt-3 max-w-2xl text-[14px] leading-relaxed text-zinc-500">
-                {f.a}
-              </p>
-            </details>
-          ))}
+      {/* ========================= FINAL CTA ========================== */}
+      <section className={`${WRAP} pb-20 sm:pb-28`}>
+        <div className="relative overflow-hidden rounded-[28px] bg-zinc-950 px-6 py-16 text-center sm:px-12 sm:py-20">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 bg-[radial-gradient(50%_80%_at_50%_0%,color-mix(in_srgb,var(--brand)_40%,transparent),transparent_70%)]"
+          />
+          <div className="relative">
+            <h2 className="text-balance text-[2rem] font-semibold tracking-[-0.03em] text-white sm:text-[2.6rem]">
+              {finalCta.headline}
+            </h2>
+            <p className="mx-auto mt-4 max-w-lg text-[15.5px] leading-relaxed text-zinc-400">{finalCta.body}</p>
+            <div className="mt-8 flex justify-center">
+              <Link
+                href={primaryHref}
+                className="group inline-flex h-10 items-center gap-2 rounded-full bg-white pl-5 pr-4 text-[14px] font-medium text-zinc-950 transition-[background-color,transform] duration-200 hover:bg-zinc-100 active:scale-[0.98]"
+              >
+                {signedIn ? "Open dashboard" : finalCta.cta}
+                <ArrowRight className="size-4 transition-transform group-hover:translate-x-0.5" />
+              </Link>
+            </div>
+          </div>
         </div>
       </section>
     </div>
   );
-}
-
-// A homepage feature section for one product: eyebrow + headline + grid +
-// "Explore →" link to its /products/[slug] page + a product mockup.
-function ProductSection({
-  product,
-  primaryHref,
-  id,
-}: {
-  product: Product;
-  primaryHref: string;
-  id?: string;
-}) {
-  return (
-    <section id={id} className={`${WRAP} py-20`}>
-      <SectionHead
-        eyebrow={product.eyebrow}
-        arrow
-        title={product.headline}
-        body={product.summary}
-      />
-      <FeatureGrid className="mt-14" items={product.features.slice(0, 6)} />
-      <div className="mt-8">
-        <GhostLink href={`/products/${product.slug}`}>
-          Explore {product.title} →
-        </GhostLink>
-      </div>
-      <div className="mt-12">
-        <Shot url={product.mockupUrl} label={product.mockupLabel} />
-      </div>
-    </section>
-  );
-}
-
-// Initials for the testimonial avatars, so the cards look finished without a
-// real photo. Drop in an <img> when you have one.
-function initials(name: string) {
-  return name
-    .split(/\s+/)
-    .map((w) => w[0])
-    .join("")
-    .slice(0, 2)
-    .toUpperCase();
 }

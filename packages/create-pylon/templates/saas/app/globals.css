@@ -19,10 +19,10 @@
    on <html>. */
 :root {
   --radius: 0.625rem;
-  /* Brand accent (blue) + surfaces used by the marketing pages. Re-theme the
-     whole landing page by editing these three. */
-  --brand: #2563eb;
-  --brand-soft: #e8f0fe;
+  /* Brand accent + surfaces. app/layout.tsx overrides these from
+     lib/site.config.ts, so re-theme there. */
+  --brand: #4353ff;
+  --brand-soft: #eef0ff;
   --paper: #fafafa;
   --background: oklch(1 0 0);
   --foreground: oklch(0.141 0.005 285.823);
@@ -92,6 +92,7 @@
 }
 
 @theme inline {
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);

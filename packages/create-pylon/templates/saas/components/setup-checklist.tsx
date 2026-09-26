@@ -1,8 +1,8 @@
 "use client";
 
 import React, { useState } from "react";
-import { callFn } from "@pylonsync/react";
-import { Check, X } from "lucide-react";
+import { callFn, Link } from "@pylonsync/react";
+import { Check, ChevronRight, X } from "lucide-react";
 
 export interface SetupState {
   orgId: string;
@@ -13,9 +13,9 @@ export interface SetupState {
 }
 
 /**
- * "Getting started" on the Overview. Items are derived from real data (a
+ * "Get started" steps on the Overview. Each step is derived from real data (a
  * project exists, a teammate or pending invite exists, Pro is active), so the
- * list ticks itself off; it disappears when all three are done or an
+ * list ticks itself off. It disappears when all three are done or an
  * owner/admin dismisses it for the workspace.
  */
 export function SetupChecklist({ state }: { state: SetupState }) {
@@ -23,10 +23,10 @@ export function SetupChecklist({ state }: { state: SetupState }) {
   const items = [
     { done: state.hasProject, label: "Create a project", href: "/dashboard/projects" },
     { done: state.hasTeammate, label: "Invite a teammate", href: "/dashboard/members" },
-    { done: state.hasBilling, label: "Start your Pro trial", href: "/dashboard/billing" },
+    { done: state.hasBilling, label: "Start the Pro trial", href: "/dashboard/billing" },
   ];
-  const remaining = items.filter((i) => !i.done).length;
-  if (hidden || remaining === 0) return null;
+  const doneCount = items.filter((i) => i.done).length;
+  if (hidden || doneCount === items.length) return null;
 
   async function dismiss() {
     setHidden(true);
@@ -38,42 +38,44 @@ export function SetupChecklist({ state }: { state: SetupState }) {
   }
 
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-zinc-900">Getting started</h2>
-          <p className="mt-0.5 text-xs text-zinc-500">
-            {items.length - remaining} of {items.length} done
-          </p>
+    <div className="rounded-xl border border-zinc-200/80 bg-white">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-100 px-4 py-3">
+        <div className="flex items-center gap-3">
+          <h2 className="text-[13px] font-semibold text-zinc-900">Get started</h2>
+          <span className="font-mono text-[11.5px] tabular-nums text-zinc-400">
+            {doneCount}/{items.length}
+          </span>
         </div>
         {state.canDismiss && (
           <button
             type="button"
             onClick={() => void dismiss()}
-            aria-label="Dismiss checklist"
+            aria-label="Hide the setup steps"
             className="flex size-7 items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
           >
             <X className="size-4" />
           </button>
         )}
       </div>
-      <ul className="mt-3 divide-y divide-zinc-100">
+      <ul className="grid divide-y divide-zinc-100 sm:grid-cols-3 sm:divide-x sm:divide-y-0">
         {items.map((it) => (
-          <li key={it.label} className="flex items-center gap-3 py-2.5">
-            <span
-              className={
-                "flex size-5 shrink-0 items-center justify-center rounded-full border " +
-                (it.done ? "border-emerald-500 bg-emerald-500 text-white" : "border-zinc-300")
-              }
-            >
-              {it.done && <Check className="size-3" />}
-            </span>
+          <li key={it.label}>
             {it.done ? (
-              <span className="text-sm text-zinc-400 line-through">{it.label}</span>
+              <div className="flex items-center gap-2.5 px-4 py-3 text-[13px] text-zinc-400">
+                <span className="flex size-[18px] items-center justify-center rounded-full bg-brand text-white">
+                  <Check className="size-3" strokeWidth={2.5} />
+                </span>
+                <span className="line-through">{it.label}</span>
+              </div>
             ) : (
-              <a href={it.href} className="text-sm font-medium text-zinc-900 hover:underline">
-                {it.label} →
-              </a>
+              <Link
+                href={it.href}
+                className="group flex items-center gap-2.5 px-4 py-3 text-[13px] font-medium text-zinc-800 transition-colors hover:bg-zinc-50"
+              >
+                <span className="size-[18px] rounded-full border-[1.5px] border-dashed border-zinc-300" />
+                {it.label}
+                <ChevronRight className="ml-auto size-3.5 text-zinc-300 transition-transform group-hover:translate-x-0.5 group-hover:text-zinc-500" />
+              </Link>
             )}
           </li>
         ))}

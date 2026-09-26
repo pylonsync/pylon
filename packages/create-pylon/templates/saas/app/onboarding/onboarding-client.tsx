@@ -3,21 +3,26 @@
 import React, { useState } from "react";
 import { callFn, db } from "@pylonsync/react";
 import { createInvite, createOrg, renameOrg } from "@pylonsync/client";
+import { Check, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { nameFromEmail } from "@/lib/names";
 import { TRIAL_DAYS, planById } from "@/lib/plans";
+import { siteConfig } from "@/lib/site.config";
 
 type Step = "workspace" | "team" | "project" | "plan";
 const ORDER: Step[] = ["workspace", "team", "project", "plan"];
 
 const inputCls =
-  "h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10";
+  "h-10 w-full rounded-lg border border-zinc-200 bg-white px-3 text-sm text-zinc-900 shadow-[0_1px_1px_rgba(0,0,0,0.03)] outline-none transition placeholder:text-zinc-400 focus:border-zinc-400 focus:ring-4 focus:ring-zinc-900/5";
 
 /**
  * Four short steps, each one decision, each skippable after the first:
  *
- *   1. Workspace name  → creates the org and makes it the active tenant
+ *   1. Workspace name  → creates the org and makes it the active tenant; also
+ *                        asks for the person's name when the account has none
  *   2. Invite the team → up to three emails, or skip
- *   3. First project   → so the dashboard is not empty on arrival
+ *   3. First project   → a named project, or the sample projects from
+ *                        lib/sample-workspace.ts, so the dashboard is not empty
  *   4. Plan            → start the Pro trial (Stripe Checkout) or stay free
  *
  * The workspace is created at step 1, so a closed tab still leaves the user
@@ -27,10 +32,14 @@ const inputCls =
 export function OnboardingWizard({
   org,
   email,
+  displayName,
 }: {
   org: { id: string; name: string } | null;
   email: string;
+  displayName: string;
 }) {
+  const askName = !displayName.trim();
+  const [person, setPerson] = useState(askName ? nameFromEmail(email) : displayName);
   const [orgId, setOrgId] = useState<string | null>(org?.id ?? null);
   const [step, setStep] = useState<Step>("workspace");
   const [name, setName] = useState(org?.name ?? suggestName(email));
@@ -55,8 +64,9 @@ export function OnboardingWizard({
   function saveWorkspace(e: React.FormEvent) {
     e.preventDefault();
     const value = name.trim();
-    if (!value) return;
+    if (!value || (askName && !person.trim())) return;
     void run(async () => {
+      if (askName) await callFn("updateProfile", { displayName: person.trim() });
       if (orgId) {
         await renameOrg(orgId, value);
       } else {
@@ -88,6 +98,17 @@ export function OnboardingWizard({
     });
   }
 
+  function addSampleProjects() {
+    if (!orgId) return;
+    void run(async () => {
+      const res = await callFn<{ seeded: boolean }>("seedWorkspace", { orgId });
+      if (!res.seeded) {
+        throw new Error("This workspace already has projects, so the samples were not added.");
+      }
+      setStep("plan");
+    });
+  }
+
   async function finish(startTrial: boolean) {
     if (!orgId) return;
     await run(async () => {
@@ -113,6 +134,12 @@ export function OnboardingWizard({
   return (
     <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-6 py-12">
       <div className="w-full max-w-md">
+        <div className="mb-8 flex items-center justify-center gap-2">
+          <span className="flex size-7 items-center justify-center rounded-lg bg-zinc-900 text-[13px] font-bold text-white">
+            {siteConfig.brand.letter}
+          </span>
+          <span className="text-[15px] font-semibold tracking-tight text-zinc-900">{siteConfig.brand.name}</span>
+        </div>
         <div className="mb-6 flex items-center gap-2">
           {ORDER.map((s, i) => (
             <span
@@ -121,22 +148,38 @@ export function OnboardingWizard({
             />
           ))}
         </div>
-        <div className="rounded-2xl border border-zinc-200 bg-white p-8">
+        <div className="rounded-2xl bg-white p-8 shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_12px_40px_-12px_rgba(0,0,0,0.12)]">
           {step === "workspace" && (
             <form onSubmit={saveWorkspace} className="space-y-5">
               <div>
-                <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Name your workspace</h1>
+                <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Set up your workspace</h1>
                 <p className="mt-1 text-sm text-zinc-500">Usually your company or team name. You can change it later.</p>
               </div>
-              <input
-                autoFocus
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Acme Inc"
-                aria-label="Workspace name"
-                className={inputCls}
-              />
-              <Button type="submit" className="w-full" disabled={busy || !name.trim()}>
+              {askName ? (
+                <label className="block">
+                  <span className="mb-1.5 block text-[13px] font-medium text-zinc-700">Your name</span>
+                  <input
+                    autoFocus
+                    value={person}
+                    onChange={(e) => setPerson(e.target.value)}
+                    placeholder="Dana Reyes"
+                    autoComplete="name"
+                    maxLength={60}
+                    className={inputCls}
+                  />
+                </label>
+              ) : null}
+              <label className="block">
+                <span className="mb-1.5 block text-[13px] font-medium text-zinc-700">Workspace name</span>
+                <input
+                  autoFocus={!askName}
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Northwind"
+                  className={inputCls}
+                />
+              </label>
+              <Button type="submit" className="w-full" disabled={busy || !name.trim() || (askName && !person.trim())}>
                 {busy ? "…" : "Continue"}
               </Button>
             </form>
@@ -176,7 +219,7 @@ export function OnboardingWizard({
             <form onSubmit={createFirstProject} className="space-y-5">
               <div>
                 <h1 className="text-xl font-semibold tracking-tight text-zinc-900">Create your first project</h1>
-                <p className="mt-1 text-sm text-zinc-500">Something you are working on this week. It shows up on your dashboard.</p>
+                <p className="mt-1 text-sm text-zinc-500">Something your team is working on this week.</p>
               </div>
               <input
                 autoFocus
@@ -186,14 +229,38 @@ export function OnboardingWizard({
                 aria-label="Project name"
                 className={inputCls}
               />
-              <div className="flex gap-2">
-                <Button type="button" variant="outline" className="flex-1" onClick={() => setStep("plan")} disabled={busy}>
-                  Skip
-                </Button>
-                <Button type="submit" className="flex-1" disabled={busy || !project.trim()}>
-                  {busy ? "…" : "Create project"}
-                </Button>
+              <Button type="submit" className="w-full" disabled={busy || !project.trim()}>
+                {busy ? "…" : "Create project"}
+              </Button>
+              <div className="flex items-center gap-3 text-[12px] text-zinc-400">
+                <span className="h-px flex-1 bg-zinc-200" />
+                or
+                <span className="h-px flex-1 bg-zinc-200" />
               </div>
+              <button
+                type="button"
+                onClick={addSampleProjects}
+                disabled={busy}
+                className="flex w-full items-start gap-3 rounded-xl border border-zinc-200 p-3.5 text-left transition-colors hover:border-zinc-300 hover:bg-zinc-50 disabled:opacity-60"
+              >
+                <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-brand-soft text-brand">
+                  <Sparkles className="size-4" strokeWidth={1.75} />
+                </span>
+                <span>
+                  <span className="block text-[14px] font-medium text-zinc-900">Start with sample projects</span>
+                  <span className="mt-0.5 block text-[12.5px] leading-snug text-zinc-500">
+                    Two projects with 16 tasks, and one archived project. Delete them any time.
+                  </span>
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setStep("plan")}
+                disabled={busy}
+                className="w-full text-center text-[13px] text-zinc-500 underline underline-offset-2 hover:text-zinc-900"
+              >
+                Skip for now
+              </button>
             </form>
           )}
 
@@ -207,8 +274,8 @@ export function OnboardingWizard({
               </div>
               <ul className="space-y-2 rounded-xl border border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-700">
                 {pro.features.map((f) => (
-                  <li key={f} className="flex gap-2">
-                    <span className="text-zinc-900">✓</span> {f}
+                  <li key={f} className="flex items-center gap-2">
+                    <Check className="size-3.5 text-brand" /> {f}
                   </li>
                 ))}
               </ul>
@@ -243,7 +310,7 @@ export function OnboardingWizard({
 /** "jane@northwind.com" → "Northwind". A starting point the user can edit. */
 function suggestName(email: string): string {
   const domain = email.split("@")[1]?.split(".")[0] ?? "";
-  if (!domain || ["gmail", "yahoo", "outlook", "hotmail", "icloud", "proton", "me"].includes(domain)) {
+  if (!domain || ["gmail", "yahoo", "outlook", "hotmail", "icloud", "proton", "me", "example"].includes(domain)) {
     return "";
   }
   return domain.charAt(0).toUpperCase() + domain.slice(1);

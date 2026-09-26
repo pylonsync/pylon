@@ -3,8 +3,8 @@ import { normalizeProjectName } from "../lib/projects";
 
 // updateProject — the reference example for a first-party server function, and
 // the core authoring loop end to end: entity → policy → FUNCTION → call it from
-// the client. The Projects tab's edit form (app/dashboard/dashboard-client.tsx)
-// saves through this via `callFn("updateProject", …)`.
+// the client. The project dialog (app/dashboard/projects-client.tsx) saves
+// through this via `callFn("updateProject", …)`.
 //
 // Why a server function and not a direct client `db.update`? Two reasons the
 // pattern exists:
@@ -17,9 +17,8 @@ import { normalizeProjectName } from "../lib/projects";
 //      FORBIDDEN otherwise). Pass `{ role: ["owner", "admin"] }` to make edits
 //      admin-only.
 //
-// Quick archive/delete stay as direct client `db` writes — the Project row
-// policy (`auth.tenantId == data.orgId`) already covers "edit a row you own".
-// Reach for a function when you need more than that.
+// Archive/restore (setProjectStatus) and delete (deleteProject) are server
+// functions too: the Project policy denies every direct client write.
 export default mutation<
   { projectId: string; name: string; description?: string },
   { id: string; name: string }

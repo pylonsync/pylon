@@ -111,7 +111,8 @@ const OrgInvite = entity(
 const Project = entity(
   "Project",
   {
-    orgId: field.id("Org"),
+    // `.readonly()`: set on insert, rejected on any client update.
+    orgId: field.id("Org").readonly(),
     name: field.string(),
     description: field.string().optional(),
     // "active" | "archived" — archived projects stay in the workspace but drop
@@ -120,6 +121,38 @@ const Project = entity(
     createdAt: field.datetime().defaultNow(),
   },
   { indexes: [{ name: "by_org", fields: ["orgId"], unique: false }] },
+);
+
+// A unit of work inside a project. `orgId` is copied from the project when
+// the task is created, so the same one-line tenant policy scopes it.
+// Statuses and priorities are listed in lib/tasks.ts. `assigneeName` is a
+// copy of the assignee's display name, so the board renders names on the
+// first server paint (the User policy only lets people read their own row);
+// updateProfile refreshes it when a person renames themselves.
+const Task = entity(
+  "Task",
+  {
+    orgId: field.id("Org").readonly(),
+    projectId: field.id("Project").readonly(),
+    title: field.string(),
+    status: field.string().default("todo"),
+    priority: field.string().default("none"),
+    assigneeId: field.id("User").optional(),
+    assigneeName: field.string().optional(),
+    // Calendar day, `YYYY-MM-DD`.
+    dueDate: field.string().optional(),
+    // Stamped by updateTask when the status moves to done; cleared when it
+    // moves back.
+    completedAt: field.datetime().optional(),
+    createdAt: field.datetime().defaultNow(),
+  },
+  {
+    indexes: [
+      { name: "by_org", fields: ["orgId"], unique: false },
+      { name: "by_project", fields: ["projectId"], unique: false },
+      { name: "by_assignee", fields: ["assigneeId"], unique: false },
+    ],
+  },
 );
 
 // User rows: read your own; the auth subsystem owns writes.
@@ -161,17 +194,31 @@ const orgInvitePolicy = policy({
   allowDelete: "false",
 });
 
-// Projects are scoped to your ACTIVE tenant. `auth.tenantId == data.orgId`
-// gates reads, edits, and deletes. Inserts go through the `createProject`
-// function instead, which enforces the free plan's project cap on the server
-// (lib/plans.ts) — a client cannot skip the paywall by writing the row itself.
+// Projects and tasks are readable in your ACTIVE tenant only. Every write
+// goes through a server function (functions/*Project.ts, *Task.ts):
+//   - createProject and setProjectStatus enforce the free plan's project cap
+//     (lib/plans.ts), so a client cannot skip the paywall.
+//   - An update policy is checked against the row as it is BEFORE the write,
+//     so `auth.tenantId == data.orgId` alone would let a client PATCH `orgId`
+//     and move a row into another workspace. `orgId` is `.readonly()`, and
+//     the functions never take `orgId` from the caller; they re-check
+//     membership against the row's own workspace.
+//   - deleteProject removes the project's tasks with it.
 const projectPolicy = policy({
   name: "project_tenant",
   entity: "Project",
   allowRead: "auth.tenantId == data.orgId",
   allowInsert: "false",
-  allowUpdate: "auth.tenantId == data.orgId",
-  allowDelete: "auth.tenantId == data.orgId",
+  allowUpdate: "false",
+  allowDelete: "false",
+});
+const taskPolicy = policy({
+  name: "task_tenant",
+  entity: "Task",
+  allowRead: "auth.tenantId == data.orgId",
+  allowInsert: "false",
+  allowUpdate: "false",
+  allowDelete: "false",
 });
 
 // Every non-internal function in functions/ becomes a manifest entry —
@@ -182,7 +229,7 @@ const fns = await discoverFunctions();
 const manifest = buildManifest({
   name: "__APP_NAME__",
   version: "0.1.0",
-  entities: [User, Org, OrgMember, OrgInvite, Project, ...billing.manifest.entities],
+  entities: [User, Org, OrgMember, OrgInvite, Project, Task, ...billing.manifest.entities],
   queries: fns.queries,
   // The billing actions (createCheckoutSession / createBillingPortalSession /
   // cancelSubscription / restoreSubscription / stripeWebhook) are re-exported
@@ -199,24 +246,32 @@ const manifest = buildManifest({
     orgMemberPolicy,
     orgInvitePolicy,
     projectPolicy,
+    taskPolicy,
     ...billing.manifest.policies,
   ],
   // Email/password is on by default against the User entity. The org entities
   // above are named with the framework defaults (Org / OrgMember / OrgInvite),
   // so `/api/auth/orgs/*` + `/api/auth/select-org` work with no extra config.
   auth: auth(),
-  // Self-hosted Inter (next/font parity): the build fetches the woff2, serves it
-  // same-origin (no third-party request, no FOUT), preloads it, and synthesizes a
-  // size-adjusted fallback face so there's no layout shift. globals.css reads it
-  // via `var(--font-sans, …)`; layout.tsx carries no font <link>.
+  // Self-hosted Geist + Geist Mono: the build fetches the woff2, serves it
+  // same-origin, preloads it, and synthesizes a size-adjusted fallback face so
+  // there's no layout shift. globals.css reads them via `var(--font-sans, …)`
+  // and `var(--font-geist-mono, …)`; layout.tsx carries no font <link>.
   fonts: [
     font({
-      family: "Inter",
+      family: "Geist",
       variable: "--font-sans",
       weights: ["400", "500", "600", "700"],
       subsets: ["latin"],
       display: "swap",
       preload: true,
+    }),
+    font({
+      family: "Geist Mono",
+      variable: "--font-geist-mono",
+      weights: ["400", "500"],
+      subsets: ["latin"],
+      display: "swap",
     }),
   ],
   routes: await discoverAppRoutes(),

@@ -14,7 +14,7 @@ export default function ResetPasswordPage({ searchParams }: PageProps) {
   const token = Array.isArray(raw) ? raw[0] ?? "" : raw ?? "";
   return (
     <>
-      <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">Choose a new password</h1>
+      <h1 className="mt-10 text-[26px] font-semibold tracking-[-0.025em] text-zinc-950">Choose a new password</h1>
       <p className="mt-1 text-[13px] text-zinc-500">You will be signed in on every device after this.</p>
       <div className="mt-6">
         <ResetPasswordForm token={token} />

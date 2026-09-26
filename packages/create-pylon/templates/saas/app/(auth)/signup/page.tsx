@@ -12,7 +12,7 @@ export const metadata: Metadata = {
 export default function SignupPage() {
   return (
     <>
-      <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">
+      <h1 className="mt-10 text-[26px] font-semibold tracking-[-0.025em] text-zinc-950">
         Create an account
       </h1>
       <p className="mt-1 text-[13px] text-zinc-500">

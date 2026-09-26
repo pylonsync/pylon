@@ -86,6 +86,17 @@ export function canCreateProject(plan: PlanId, activeProjects: number): boolean 
 /** A subscription counts as Pro while Stripe reports it usable. */
 export const ACTIVE_STATUSES = ["active", "trialing", "past_due"];
 
+/**
+ * The plan for one workspace given all of its subscription rows. A workspace
+ * can have several (an old canceled one and a new active one), so any usable
+ * Pro row wins over row order.
+ */
+export function planFromSubscriptions(
+  subs: Array<{ plan?: string; status?: string }>,
+): PlanId {
+  return subs.some((s) => planFromSubscription(s) === "pro") ? "pro" : "free";
+}
+
 export function planFromSubscription(
   sub: { plan?: string; status?: string } | null | undefined,
 ): PlanId {

@@ -1,11 +1,24 @@
-import { PLANS, formatPrice } from "./plans";
-// Business-specific copy and settings live here. The marketing components,
-// `create-pylon` scaffolder, and automated generators all read this file.
+import type { LucideIcon } from "lucide-react";
+import {
+  BookOpen,
+  Code2,
+  FolderKanban,
+  History,
+  KanbanSquare,
+  LayoutGrid,
+  LifeBuoy,
+  Users,
+} from "lucide-react";
+import { FREE_PROJECT_LIMIT, PLANS, TRIAL_DAYS, formatPrice } from "./plans";
+
+// Business-specific copy and settings. The landing page, the nav and footer,
+// the /products, /solutions, /resources, /company, and /compare pages, and the
+// sitemap all read this file, so the whole site rebrands from here.
 //
-// Colors live here (applied as CSS variables on <html> in app/layout.tsx), so
-// you don't touch globals.css to re-theme the marketing pages.
+// Colors are applied as CSS variables on <html> in app/layout.tsx.
 //
-// Fictional demo copy. Replace the values and keep the shape.
+// "Acme" and every name, quote, and competitor below are placeholders.
+// Replace them with your product's real copy before you launch.
 
 /* ----------------------------- types ----------------------------- */
 
@@ -13,15 +26,21 @@ export type ProductFeature = { title: string; body: string };
 
 export type Product = {
   slug: string;
-  icon: string;
-  title: string; // nav label + page <h1> subject
-  tagline: string; // one-line blurb for the nav dropdown
-  eyebrow: string; // section/page eyebrow
-  headline: string; // page hero headline
-  summary: string; // page hero paragraph
+  icon: LucideIcon;
+  title: string; // nav label and page subject
+  tagline: string; // one line for the nav menu
+  headline: string; // section and page heading
+  summary: string; // section and page paragraph
   features: ProductFeature[];
-  mockupUrl: string; // fake browser URL in the screenshot frame
-  mockupLabel: string; // placeholder label inside the frame
+  // A capture of this app's own dashboard (scripts/capture-screenshots.mjs).
+  screenshot: string;
+  screenshotAlt: string;
+  // The region of the screenshot the landing page shows, as fractions of
+  // its width and height (see ProductShot in components/marketing.tsx).
+  crop: { left: number; top: number; width: number; ratio: number };
+  // Shown as a section on the landing page. Every product gets its own
+  // /products/<slug> page either way.
+  onLanding: boolean;
 };
 
 export type ContentSection = { title: string; body: string };
@@ -29,8 +48,7 @@ export type ContentSection = { title: string; body: string };
 export type SitePage = {
   slug: string;
   navLabel: string; // label in nav/footer
-  eyebrow: string;
-  title: string; // hero headline
+  title: string; // page heading
   summary: string;
   sections: ContentSection[];
 };
@@ -45,8 +63,6 @@ export type Comparison = {
 };
 
 export type Social = { label: string; href: string; path: string };
-export type TextItem = { title: string; body: string };
-export type IconItem = { icon: string; title: string; body: string };
 export type Quote = { quote: string; name: string; role: string };
 export type Plan = {
   name: string;
@@ -58,51 +74,35 @@ export type Plan = {
   features: string[];
 };
 export type Faq = { q: string; a: string };
+export type ResourceLink = { icon: LucideIcon; title: string; desc: string; href: string };
 
 export type SiteConfig = {
   brand: {
     name: string;
     letter: string; // logo monogram
-    domain: string; // shown in mockup browser frames, e.g. "acme.app"
+    domain: string;
     email: string;
     footerBlurb: string;
     copyrightName: string;
     socials: Social[];
   };
-  // Marketing accent + surfaces. Applied as CSS vars on <html> in layout.tsx.
+  // Accent + surfaces. Applied as CSS vars on <html> in layout.tsx.
   colors: { brand: string; brandSoft: string; paper: string };
   seo: { title: string; description: string };
   hero: {
-    badge: string;
     headline: string;
     subcopy: string;
-    mockupLabel: string;
+    note: string;
+    screenshot: string;
+    screenshotAlt: string;
   };
-  logoCloud: { label: string; companies: string[] };
-  outcomes: { eyebrow: string; headline: string; body: string; items: TextItem[] };
-  featuredTestimonial: { quote: string; name: string; role: string };
-  entryPoints: { eyebrow: string; title: string; body: string; items: IconItem[] };
-  engagement: {
-    eyebrow: string;
-    headline: string;
-    paragraphs: string[];
-    items: TextItem[];
-  };
-  customers: { eyebrow: string; title: string; body: string; quotes: Quote[] };
-  gettingStarted: { eyebrow: string; headline: string; body: string; steps: TextItem[] };
-  pricing: { eyebrow: string; headline: string; body: string; plans: Plan[] };
-  team: { eyebrow: string; headline: string; body: string; items: TextItem[] };
-  finalCta: {
-    eyebrow: string;
-    headline: string;
-    bodyLead: string;
-    highlight: string;
-    bodyTail: string;
-    cta: string;
-    footnote: string;
-  };
-  faq: { eyebrow: string; headline: string; items: Faq[] };
+  // One customer quote. Leave `quote` empty to hide the section.
+  quote: Quote;
+  pricing: { headline: string; body: string; plans: Plan[] };
+  finalCta: { headline: string; body: string; cta: string };
+  faq: { headline: string; items: Faq[] };
   products: Product[];
+  resourcesMenu: ResourceLink[];
   solutions: SitePage[];
   resources: SitePage[];
   company: SitePage[];
@@ -115,10 +115,9 @@ export const siteConfig: SiteConfig = {
   brand: {
     name: "Acme",
     letter: "A",
-    domain: "acme.app",
+    domain: "acme.example",
     email: "hello@acme.example",
-    footerBlurb:
-      "Plan, build, and ship with projects, docs, and automation in one workspace.",
+    footerBlurb: "Projects, tasks, and the people doing them, in one shared workspace.",
     copyrightName: "Acme, Inc.",
     socials: [
       {
@@ -134,154 +133,33 @@ export const siteConfig: SiteConfig = {
     ],
   },
 
-  colors: { brand: "#2563eb", brandSoft: "#e8f0fe", paper: "#fafafa" },
+  colors: { brand: "#4353ff", brandSoft: "#eef0ff", paper: "#fafafa" },
 
   seo: {
-    title: "Acme — the workspace where work gets done",
+    title: "Acme: projects and tasks for small teams",
     description:
-      "Acme brings your projects, your people, and your updates into one fast, real-time workspace. Plan together, ship together, keep everyone in the loop.",
+      "Acme is a shared workspace for your team's projects and tasks. Assign work, set due dates, and see every change as it happens.",
   },
 
   hero: {
-    badge: "Acme for teams is here →",
-    headline: "The workspace where work gets done.",
+    headline: "Track every project and task your team is working on.",
     subcopy:
-      "Acme brings your projects, your people, and your updates into one fast, real-time workspace. Plan together, ship together, and keep everyone in the loop without the busywork.",
-    mockupLabel: "Dashboard preview",
+      "Acme keeps your projects, tasks, and owners in one shared workspace. A change made by one teammate shows up on everyone's screen within a second.",
+    note: `Free for up to ${FREE_PROJECT_LIMIT} projects. No card required.`,
+    screenshot: "/screenshots/overview.png",
+    screenshotAlt: "The Acme overview: open tasks by due date, project progress, and recently completed work",
   },
 
-  logoCloud: {
-    label: "Powering fast-moving teams",
-    companies: ["Northwind", "Globex", "Initech", "Umbrella", "Soylent", "Hooli"],
-  },
-
-  outcomes: {
-    eyebrow: "Why Acme",
-    headline: "Keep work moving from kickoff to launch.",
-    body: "Most teams lose work somewhere between the kickoff and the ship date. Acme keeps the whole path in one place, so every idea has a clear route from planned, to in progress, to done.",
-    items: [
-      {
-        title: "Work in one place",
-        body: "Plans, tasks, and docs live together, so nothing gets lost between tools.",
-      },
-      {
-        title: "Clear priorities",
-        body: "Everyone can see what is planned, in progress, and done — and why.",
-      },
-      {
-        title: "Real-time by default",
-        body: "Every change syncs instantly, so the workspace is the same on every screen.",
-      },
-      {
-        title: "Less busywork",
-        body: "Automations handle the routine, so your team focuses on the work that matters.",
-      },
-    ],
-  },
-
-  featuredTestimonial: {
+  quote: {
     quote:
-      "Acme gives our team one view of the work. We can see what is happening, decide what is next, and move in the same direction.",
-    name: "Maya Chen",
-    role: "Head of Product, Northwind",
-  },
-
-  entryPoints: {
-    eyebrow: "Anywhere",
-    title: "Meet your team where they already are.",
-    body: "Web, desktop, and a typed API all share the same workspace underneath, so nothing lives in two places.",
-    items: [
-      {
-        icon: "◇",
-        title: "Cloud workspace",
-        body: "Your whole team works in the browser. Nothing to install, always up to date, and secure by default.",
-      },
-      {
-        icon: "◆",
-        title: "Open API",
-        body: "A typed API and webhooks for everything in Acme, so you can wire it into the rest of your stack.",
-      },
-    ],
-  },
-
-  engagement: {
-    eyebrow: "Momentum",
-    headline: "Most tools go quiet after the kickoff.",
-    paragraphs: [
-      "Someone shares an idea, it lands in a list, and that is the last anyone hears of it. Acme treats every idea as the start of a loop, not the end of one.",
-      "When the status moves to planned, the people who care hear about it. When it ships, they hear about it first. And every week a digest pulls them back with the work worth weighing in on.",
-      "The loop starts running the same day, without a separate configuration step.",
-    ],
-    items: [
-      {
-        title: "The loop",
-        body: "Submission, acknowledgment, progress, launch. Four moments every person gets to feel heard.",
-      },
-      {
-        title: "Instant alerts",
-        body: "The moment someone votes or comments on their idea, social proof brings them back.",
-      },
-      {
-        title: "Launch alerts",
-        body: "The note that tells a person the thing they asked for just shipped. Nothing builds loyalty faster.",
-      },
-      {
-        title: "Weekly digest",
-        body: "The top ideas across your boards, delivered every week, with a one-click way to weigh in.",
-      },
-    ],
-  },
-
-  customers: {
-    eyebrow: "Customers",
-    title: "Teams that ship with Acme.",
-    body: "A few words from the people who run their work in Acme every day.",
-    quotes: [
-      {
-        quote:
-          "The whole team sees the same work, so we spend less time in status meetings.",
-        name: "Daniel Reyes",
-        role: "Founder, Globex",
-      },
-      {
-        quote:
-          "We replaced five disconnected tools with one place to plan the work.",
-        name: "Hannah Brooks",
-        role: "Founder, OpenLane",
-      },
-      {
-        quote:
-          "People can follow their ideas from submission to launch, which helps us keep them involved.",
-        name: "Marcus Bell",
-        role: "Cofounder, Initech",
-      },
-    ],
-  },
-
-  gettingStarted: {
-    eyebrow: "Get started",
-    headline: "Up and running in 60 seconds.",
-    body: "Start with an email and a workspace name. No credit card or sales call required.",
-    steps: [
-      {
-        title: "Create a workspace",
-        body: "Enter an email and choose a workspace name.",
-      },
-      {
-        title: "Invite your team",
-        body: "Add teammates, share the board URL, or link it from your site. Work starts flowing in.",
-      },
-      {
-        title: "Watch the loop start",
-        body: "People add ideas, votes pile up, you ship, and everyone hears about it and comes back with more.",
-      },
-    ],
+      "We dropped our Monday status meeting. Everyone opens the overview, sees what is due this week, and gets to work.",
+    name: "Priya Raman",
+    role: "Engineering lead, Fieldnote",
   },
 
   pricing: {
-    eyebrow: "Pricing",
-    headline: "Simple pricing. Every plan.",
-    body: "Start free. Try Pro free for two weeks, and pay yearly to save.",
+    headline: "Pricing",
+    body: `Start free. Pro removes the project limit and starts with a ${TRIAL_DAYS}-day free trial.`,
     // Derived from lib/plans.ts, the catalog the Billing tab and the server
     // cap read, so marketing and billing can't disagree on a price.
     plans: PLANS.map((p) => ({
@@ -295,213 +173,145 @@ export const siteConfig: SiteConfig = {
     })),
   },
 
-  team: {
-    eyebrow: "The team",
-    headline: "Built by people who use it every day.",
-    body: "Acme is built by a small team that got tired of clunky, overpriced tools. Every feature earns its place by being something worth using every day.",
-    items: [
-      {
-        title: "A small team",
-        body: "A small team decides what is worth building and ships it.",
-      },
-      {
-        title: "Design first",
-        body: "Beautiful software makes people want to use it. Every screen is built with that in mind.",
-      },
-      {
-        title: "Ships every week",
-        body: "Updates go out weekly, often based on work posted directly to our own board.",
-      },
-      {
-        title: "Customer funded",
-        body: "We optimize for your renewal, not an exit. If Acme works for you, it works for us.",
-      },
-    ],
-  },
-
   finalCta: {
-    eyebrow: "Start building",
-    headline: "Stop losing momentum to busywork.",
-    bodyLead: "Plan, decide, and ship in ",
-    highlight: "one shared workspace",
-    bodyTail: ".",
-    cta: "Start building with Acme",
-    footnote: "Free to start · No credit card · Cancel anytime",
+    headline: "Set up your workspace",
+    body: "Create an account, name your workspace, and add your first project. Sample projects are one click away if you want to look around first.",
+    cta: "Create a free account",
   },
 
   faq: {
-    eyebrow: "Questions",
-    headline: "Frequently asked.",
+    headline: "Questions",
     items: [
       {
-        q: "Is Acme a fit for my team?",
-        a: "Acme works for any team that plans and ships work together — product, design, engineering, or ops.",
+        q: "What counts toward the free plan's limit?",
+        a: `Active projects. A free workspace can have ${FREE_PROJECT_LIMIT} at a time. Archived projects don't count, and tasks and members are unlimited on every plan.`,
       },
       {
-        q: "What about migrating from another tool?",
-        a: "Import your existing projects and pick up where you left off.",
+        q: "How does the Pro trial work?",
+        a: `Pro starts with ${TRIAL_DAYS} days free. Checkout asks for a card, and you are charged when the trial ends unless you cancel from Billing first.`,
       },
       {
-        q: "Is there an API or a way to script this?",
-        a: "Yes — every action in Acme is available over a typed API and an MCP server.",
+        q: "Who can see a workspace's projects?",
+        a: "Only its members. Each workspace's projects and tasks are stored separately, and people outside it can't read or change them.",
       },
       {
-        q: "Do you offer SSO?",
-        a: "SSO and audit logging are included on the Business plan.",
+        q: "What can each role do?",
+        a: "Owners and admins invite people, change roles, and manage billing. Members create and edit projects and tasks.",
+      },
+      {
+        q: "Can I belong to more than one workspace?",
+        a: "Yes. Switch between them from the menu at the top of the sidebar.",
       },
     ],
   },
 
   products: [
     {
+      slug: "boards",
+      icon: KanbanSquare,
+      title: "Task boards",
+      tagline: "A board with four columns for every project.",
+      headline: "A board for every project",
+      summary:
+        "Tasks sit in four columns: To do, In progress, In review, and Done. Give each one a priority, an owner, and a due date, and change its status right from the card.",
+      screenshot: "/screenshots/board.png",
+      screenshotAlt: "A project board with tasks in To do, In progress, In review, and Done",
+      crop: { left: 0.17, top: 0.07, width: 0.82, ratio: 2 },
+      onLanding: true,
+      features: [
+        { title: "Four statuses", body: "To do, In progress, In review, and Done, in that order on every board." },
+        { title: "Priorities", body: "Urgent, high, medium, or low. Urgent work sorts to the top of its column." },
+        { title: "Owners and due dates", body: "Assign a teammate and a date. Overdue tasks turn red." },
+        { title: "Live changes", body: "When a teammate moves a card, it moves on your screen too." },
+      ],
+    },
+    {
+      slug: "overview",
+      icon: LayoutGrid,
+      title: "Overview",
+      tagline: "What is due, and how each project is going.",
+      headline: "See what is due this week",
+      summary:
+        "The overview lists open tasks by due date, shows progress for each project, and lists what the team finished recently. Filter to the tasks assigned to you.",
+      screenshot: "/screenshots/overview.png",
+      screenshotAlt: "The overview with open tasks by due date and project progress",
+      crop: { left: 0.195, top: 0.3, width: 0.77, ratio: 16 / 9 },
+      onLanding: true,
+      features: [
+        { title: "Up next", body: "Open tasks across every project, earliest due date first." },
+        { title: "Assigned to me", body: "One click narrows the list to your own work." },
+        { title: "Project progress", body: "Done and total tasks for each active project." },
+        { title: "Weekly count", body: "Tasks completed in the last seven days." },
+      ],
+    },
+    {
       slug: "projects",
-      icon: "▤",
+      icon: FolderKanban,
       title: "Projects",
-      tagline: "Plan and track every initiative.",
-      eyebrow: "Projects",
-      headline: "Plan every project in one place.",
+      tagline: "Every project with its progress.",
+      headline: "Progress for every project",
       summary:
-        "Give your team one place to plan the work, see what is in flight, and keep every project moving toward done.",
-      mockupUrl: "acme.app/projects",
-      mockupLabel: "Projects board",
+        "Each project shows its open tasks and a progress bar. Archive a finished project to keep the list short, and restore it when you need it again.",
+      screenshot: "/screenshots/projects.png",
+      screenshotAlt: "The projects list with progress bars and open task counts",
+      crop: { left: 0.27, top: 0.1, width: 0.7, ratio: 16 / 7 },
+      onLanding: false,
       features: [
-        { title: "Flexible views", body: "See the work as a board, a list, or a timeline — whatever fits the team." },
-        { title: "Milestones", body: "Group work into milestones so everyone knows what ships next." },
-        { title: "Dependencies", body: "Link related work so blockers surface before they bite." },
-        { title: "Custom fields", body: "Track the details that matter to your team, your way." },
-        { title: "Templates", body: "Start new projects from a template instead of a blank page." },
-        { title: "Saved filters", body: "Slice the work by owner, status, or label in a single click." },
+        { title: "Progress bars", body: "The share of each project's tasks that are done." },
+        { title: "Archive and restore", body: "Archived projects keep their tasks and leave the active list." },
+        { title: "Descriptions", body: "A line under each name that says what the project delivers." },
+        { title: "Delete with tasks", body: "Deleting a project removes its tasks with it." },
       ],
     },
     {
-      slug: "tasks",
-      icon: "✓",
-      title: "Tasks",
-      tagline: "Assign, prioritize, and finish work.",
-      eyebrow: "Tasks",
-      headline: "Turn plans into finished work.",
+      slug: "members",
+      icon: Users,
+      title: "Members and roles",
+      tagline: "Invite your team and set who can do what.",
+      headline: "Workspaces, members, and roles",
       summary:
-        "Break projects into tasks, assign owners, and watch progress update in real time across every screen.",
-      mockupUrl: "acme.app/tasks",
-      mockupLabel: "Task list",
+        "Invite people by email. Owners and admins manage members and billing, and members work on projects and tasks. A workspace's data is visible only to its members.",
+      screenshot: "/screenshots/members.png",
+      screenshotAlt: "The members page with four members and two pending invitations",
+      crop: { left: 0.3, top: 0.07, width: 0.54, ratio: 16 / 10 },
+      onLanding: true,
       features: [
-        { title: "Assignees and due dates", body: "Every task has a clear owner and a clear deadline." },
-        { title: "Subtasks", body: "Break big tasks into small, checkable steps." },
-        { title: "Priorities", body: "Sort by what matters most so the right work happens first." },
-        { title: "Comments", body: "Discuss the work where it lives, with full context attached." },
-        { title: "My work", body: "A personal view of everything on your plate, across projects." },
-        { title: "Recurring tasks", body: "Set it once and the task comes back when it should." },
+        { title: "Email invites", body: "Invitees get a link that adds them to the workspace." },
+        { title: "Three roles", body: "Owner, admin, and member, changeable at any time." },
+        { title: "Many workspaces", body: "One account can belong to several workspaces." },
+        { title: "Private by default", body: "People outside a workspace can't read its projects or tasks." },
       ],
     },
-    {
-      slug: "docs",
-      icon: "≡",
-      title: "Docs",
-      tagline: "Write and share team knowledge.",
-      eyebrow: "Docs",
-      headline: "Keep what your team knows in one place.",
-      summary:
-        "Write docs, notes, and specs alongside the work, so the context never lives in just one person's head.",
-      mockupUrl: "acme.app/docs",
-      mockupLabel: "Doc editor",
-      features: [
-        { title: "Rich editor", body: "Headings, checklists, tables, and embeds in a clean editor." },
-        { title: "Linked to work", body: "Connect a doc to the project or task it describes." },
-        { title: "Real-time co-editing", body: "Write together, with changes syncing as you type." },
-        { title: "Version history", body: "Roll back to any earlier version in a click." },
-        { title: "Templates", body: "Spin up specs, briefs, and notes from reusable templates." },
-        { title: "Instant search", body: "Find any doc by title or content in milliseconds." },
-      ],
-    },
-    {
-      slug: "automations",
-      icon: "⟳",
-      title: "Automations",
-      tagline: "Automate the busywork.",
-      eyebrow: "Automations",
-      headline: "Let the routine work run itself.",
-      summary:
-        "Build simple rules that move work forward automatically, so your team spends its time on what actually matters.",
-      mockupUrl: "acme.app/automations",
-      mockupLabel: "Automation builder",
-      features: [
-        { title: "Rules", body: "When this happens, do that — no code required." },
-        { title: "Scheduled runs", body: "Kick off routine work on a schedule you set." },
-        { title: "Webhooks", body: "Trigger automations from anything that can send a request." },
-        { title: "Run history", body: "See exactly what ran, when, and why." },
-      ],
-    },
-    {
-      slug: "analytics",
-      icon: "◔",
-      title: "Analytics",
-      tagline: "Measure what actually matters.",
-      eyebrow: "Analytics",
-      headline: "See how the work is really going.",
-      summary:
-        "Track throughput, cycle time, and progress across projects, so you can spot what is stuck before it slips.",
-      mockupUrl: "acme.app/analytics",
-      mockupLabel: "Analytics dashboard",
-      features: [
-        { title: "Dashboards", body: "Build views that answer the questions your team asks most." },
-        { title: "Cycle time", body: "See how long work takes from start to done." },
-        { title: "Throughput", body: "Track how much ships each week, by team or project." },
-        { title: "Exports", body: "Send any view to CSV or your warehouse." },
-      ],
-    },
+  ],
+
+  resourcesMenu: [
+    { icon: BookOpen, title: "Docs", desc: "Set up and use Acme.", href: "/resources/docs" },
+    { icon: History, title: "Changelog", desc: "What changed, week by week.", href: "/resources/changelog" },
+    { icon: Code2, title: "API reference", desc: "Read and write your workspace from code.", href: "/resources/api" },
+    { icon: LifeBuoy, title: "Contact", desc: "Talk to the team behind Acme.", href: "/company/contact" },
   ],
 
   solutions: [
     {
       slug: "startups",
       navLabel: "For startups",
-      eyebrow: "Solutions",
-      title: "Move fast without losing the thread.",
-      summary:
-        "Keep a small team aligned as everything changes weekly. Acme gives you one place to plan, build, and ship before the next pivot.",
+      title: "Keep a small team on the same page",
+      summary: "One workspace for every project, with the owner and due date of each task in plain view.",
       sections: [
-        { title: "One workspace", body: "Keep projects, tasks, and docs together instead of stitching together separate apps." },
-        { title: "Set up in minutes", body: "Invite the team and start working the same day." },
-        { title: "Grows with you", body: "The same workspace works at five people and at fifty." },
+        { title: "Set up in minutes", body: "Name the workspace, invite the team, and add a project." },
+        { title: "Free to start", body: `Up to ${FREE_PROJECT_LIMIT} active projects on the free plan.` },
+        { title: "Room to grow", body: "Pro removes the project limit when you need more." },
       ],
     },
     {
       slug: "agencies",
       navLabel: "For agencies",
-      eyebrow: "Solutions",
-      title: "Run every client like clockwork.",
-      summary:
-        "Give each client their own space, keep the work organized, and show progress without a status meeting.",
+      title: "One workspace per client",
+      summary: "Keep each client's projects in a separate workspace and switch between them from the sidebar.",
       sections: [
-        { title: "A space per client", body: "Separate workspaces keep every engagement tidy and private." },
-        { title: "Shareable views", body: "Send clients a read-only view of exactly what is in flight." },
-        { title: "Reusable templates", body: "Start every new engagement from a proven playbook." },
-      ],
-    },
-    {
-      slug: "enterprise",
-      navLabel: "For enterprise",
-      eyebrow: "Solutions",
-      title: "Scale without the chaos.",
-      summary:
-        "Bring hundreds of people into one system of record, with the controls and visibility a larger org needs.",
-      sections: [
-        { title: "SSO and roles", body: "Single sign-on and granular roles keep access where it belongs." },
-        { title: "Audit log", body: "A complete record of who changed what, and when." },
-        { title: "Rollups", body: "See progress across teams and departments in one view." },
-      ],
-    },
-    {
-      slug: "teams",
-      navLabel: "For teams",
-      eyebrow: "Solutions",
-      title: "Match Acme to your workflow.",
-      summary:
-        "Custom fields and statuses adapt Acme to product, design, marketing, and support workflows.",
-      sections: [
-        { title: "Your workflow", body: "Custom statuses and fields match the way your team already works." },
-        { title: "Cross-team work", body: "Hand work between teams without it falling through a crack." },
-        { title: "Less status-chasing", body: "Everyone sees the same live picture, so updates write themselves." },
+        { title: "Separate data", body: "A client's workspace is visible only to the people you invite to it." },
+        { title: "Invite the client", body: "Add client contacts as members so they can follow the board." },
+        { title: "Archive finished work", body: "Archived projects keep their history out of the active list." },
       ],
     },
   ],
@@ -510,61 +320,34 @@ export const siteConfig: SiteConfig = {
     {
       slug: "docs",
       navLabel: "Docs",
-      eyebrow: "Resources",
-      title: "Documentation.",
-      summary: "Set up Acme, invite your team, and configure projects, automations, and integrations.",
+      title: "Documentation",
+      summary: "How to set up a workspace, invite your team, and run projects in Acme.",
       sections: [
-        { title: "Getting started", body: "Create a workspace, invite your team, and ship your first project." },
-        { title: "Guides", body: "Deep dives on projects, tasks, docs, automations, and analytics." },
-        { title: "API", body: "Build on the typed Acme API and webhooks." },
-      ],
-    },
-    {
-      slug: "guides",
-      navLabel: "Guides",
-      eyebrow: "Resources",
-      title: "Guides and playbooks.",
-      summary: "Practical walkthroughs for getting the most out of Acme.",
-      sections: [
-        { title: "Run a sprint", body: "Plan, track, and review a two-week cycle in Acme." },
-        { title: "Automate intake", body: "Route incoming work to the right team automatically." },
-        { title: "Report to leadership", body: "Build a dashboard that answers the questions you get asked." },
+        { title: "Getting started", body: "Create a workspace, invite your team, and add your first project." },
+        { title: "Boards", body: "Statuses, priorities, owners, and due dates." },
+        { title: "Billing", body: "Plans, the Pro trial, and invoices." },
       ],
     },
     {
       slug: "changelog",
       navLabel: "Changelog",
-      eyebrow: "Resources",
-      title: "What's new.",
-      summary: "Every improvement we ship, in one place.",
+      title: "Changelog",
+      summary: "What we shipped, newest first.",
       sections: [
-        { title: "This week", body: "Faster search, a redesigned task list, and new automation triggers." },
-        { title: "Last week", body: "Timeline view for projects and CSV export for analytics." },
-        { title: "Earlier", body: "Webhooks, custom fields, and version history for docs." },
+        { title: "This week", body: "An Up next list on the overview, sorted by due date." },
+        { title: "Last week", body: "Archive and restore for projects." },
+        { title: "Earlier", body: "Task boards with priorities and due dates." },
       ],
     },
     {
       slug: "api",
       navLabel: "API reference",
-      eyebrow: "Resources",
-      title: "API reference.",
-      summary: "A typed REST API and webhooks for everything in Acme.",
+      title: "API reference",
+      summary: "Read and write your workspace's projects and tasks over HTTP.",
       sections: [
-        { title: "Authentication", body: "API keys scoped to a workspace, revocable at any time." },
-        { title: "Resources", body: "Projects, tasks, docs, and automations, all over the same API." },
-        { title: "Webhooks", body: "Subscribe to events and react to changes in real time." },
-      ],
-    },
-    {
-      slug: "status",
-      navLabel: "Status",
-      eyebrow: "Resources",
-      title: "System status.",
-      summary: "Live status for every Acme service.",
-      sections: [
-        { title: "API", body: "Operational — 99.99% over the last 90 days." },
-        { title: "Web app", body: "Operational — no incidents this week." },
-        { title: "Webhooks", body: "Operational — delivering within seconds." },
+        { title: "Authentication", body: "Requests carry a session token scoped to one workspace." },
+        { title: "Projects and tasks", body: "List, create, and update them with the same checks the app uses." },
+        { title: "Live updates", body: "Subscribe to changes over a WebSocket." },
       ],
     },
   ],
@@ -573,92 +356,63 @@ export const siteConfig: SiteConfig = {
     {
       slug: "about",
       navLabel: "About",
-      eyebrow: "Company",
-      title: "About Acme.",
-      summary: "We build the workspace we always wanted: fast, focused, and a pleasure to use.",
+      title: "About Acme",
+      summary: "A small team building a fast, focused place to track work.",
       sections: [
-        { title: "Our mission", body: "Help teams do their best work without fighting their tools." },
-        { title: "How we work", body: "Small team, weekly releases, every decision close to the user." },
-        { title: "Where we are", body: "Remote-first, with people across a dozen time zones." },
-      ],
-    },
-    {
-      slug: "blog",
-      navLabel: "Blog",
-      eyebrow: "Company",
-      title: "The Acme blog.",
-      summary: "Notes on building Acme, and on building product in general.",
-      sections: [
-        { title: "Why one tool beats ten", body: "The hidden cost of stitching your stack together." },
-        { title: "Shipping weekly", body: "How a small team keeps a steady release cadence." },
-        { title: "Designing for focus", body: "The principles behind the Acme interface." },
-      ],
-    },
-    {
-      slug: "careers",
-      navLabel: "Careers",
-      eyebrow: "Company",
-      title: "Work at Acme.",
-      summary: "We are a small team that ships a lot. If that sounds good, come build with us.",
-      sections: [
-        { title: "Engineering", body: "Full-stack engineers who care about craft and speed." },
-        { title: "Design", body: "Product designers who sweat the details." },
-        { title: "Support", body: "People who love helping customers succeed." },
+        { title: "What we build", body: "Project and task tracking for teams of two to fifty." },
+        { title: "How we work", body: "Small team, weekly releases." },
+        { title: "Where we are", body: "Remote, across several time zones." },
       ],
     },
     {
       slug: "contact",
       navLabel: "Contact",
-      eyebrow: "Company",
-      title: "Get in touch.",
-      summary: "Contact the Acme team about sales, support, or press.",
+      title: "Contact",
+      summary: "Reach the Acme team about sales, support, or press.",
       sections: [
-        { title: "Sales", body: "Talk through whether Acme is a fit for your team." },
-        { title: "Support", body: "Get help from a human, usually within a few hours." },
-        { title: "Press", body: "Logos, screenshots, and company facts for the press." },
+        { title: "Sales", body: "hello@acme.example" },
+        { title: "Support", body: "support@acme.example, answered within one business day." },
+        { title: "Press", body: "press@acme.example" },
       ],
     },
     {
       slug: "privacy",
       navLabel: "Privacy",
-      eyebrow: "Company",
-      title: "Privacy.",
-      summary: "How Acme handles your data, in plain language.",
+      title: "Privacy",
+      summary: "How Acme handles your data.",
       sections: [
-        { title: "What we collect", body: "Only what we need to run the product and support you." },
-        { title: "How we use it", body: "To operate Acme — never sold, never rented." },
-        { title: "Your control", body: "Export or delete your data at any time." },
+        { title: "What we collect", body: "Your account details and the content you add to your workspaces." },
+        { title: "How we use it", body: "To run Acme for you. We don't sell it." },
+        { title: "Your control", body: "Delete your account or a workspace at any time from Settings." },
       ],
     },
     {
       slug: "terms",
       navLabel: "Terms",
-      eyebrow: "Company",
-      title: "Terms of Service.",
-      summary: "The rules for using Acme, in plain language.",
+      title: "Terms of Service",
+      summary: "The rules for using Acme.",
       sections: [
-        { title: "Using Acme", body: "Use it for lawful work; don't abuse the service or other customers." },
-        { title: "Your content", body: "You own your data — you grant us only what's needed to run the product for you." },
-        { title: "Changes & cancellation", body: "Cancel anytime; we give notice before any material change to these terms." },
+        { title: "Using Acme", body: "Use it for lawful work, and don't abuse the service or other customers." },
+        { title: "Your content", body: "You own your data. You grant us only what we need to run the product for you." },
+        { title: "Changes and cancellation", body: "Cancel any time. We give notice before any material change to these terms." },
       ],
     },
   ],
 
-  // Generic, made-up competitors so the template ships no real brand names.
+  // Made-up competitors, so the template ships no real brand names. Replace
+  // them with real comparisons, or delete the entries to drop the pages.
   comparisons: [
     {
       slug: "beacon",
       navLabel: "Acme vs Beacon",
       competitor: "Beacon",
       title: "Acme vs Beacon",
-      summary:
-        "Beacon separates projects, docs, and automation across products. Acme keeps them in one workspace.",
+      summary: "Beacon is built for large programs. Acme is built for small teams that want to start the same day.",
       rows: [
-        { dim: "Projects, tasks, and docs", acme: "In one workspace", them: "Separate products" },
-        { dim: "Real-time sync", acme: "Built in", them: "Add-on" },
-        { dim: "Automations", acme: "Included", them: "Higher tier" },
-        { dim: "Typed API", acme: "Yes", them: "Partial" },
-        { dim: "Setup time", acme: "Minutes", them: "Hours" },
+        { dim: "Setup", acme: "One form and you're in", them: "Guided onboarding call" },
+        { dim: "Live updates", acme: "Every screen, within a second", them: "On refresh" },
+        { dim: "Free plan", acme: `${FREE_PROJECT_LIMIT} active projects`, them: "14-day trial only" },
+        { dim: "Members", acme: "Unlimited on every plan", them: "Priced per seat" },
       ],
     },
     {
@@ -666,36 +420,19 @@ export const siteConfig: SiteConfig = {
       navLabel: "Acme vs Orbit",
       competitor: "Orbit",
       title: "Acme vs Orbit",
-      summary:
-        "Orbit requires more setup and administration. Acme focuses on same-day setup and a smaller operational footprint.",
+      summary: "Orbit is a spreadsheet with task features. Acme is a task board with the essentials and nothing else.",
       rows: [
-        { dim: "Time to first project", acme: "Same day", them: "Onboarding required" },
-        { dim: "Speed", acme: "Instant, real-time", them: "Page reloads" },
-        { dim: "Per-seat pricing", acme: "No surprises", them: "Adds up fast" },
-        { dim: "Analytics", acme: "Built in", them: "Separate tool" },
-        { dim: "Learning curve", acme: "Gentle", them: "Steep" },
-      ],
-    },
-    {
-      slug: "tempo",
-      navLabel: "Acme vs Tempo",
-      competitor: "Tempo",
-      title: "Acme vs Tempo",
-      summary:
-        "Tempo centers management reporting. Acme gives the whole team a shared view of daily work.",
-      rows: [
-        { dim: "Designed for", acme: "The whole team", them: "Managers" },
-        { dim: "Daily driver", acme: "Yes", them: "Reporting layer" },
-        { dim: "Docs included", acme: "Yes", them: "No" },
-        { dim: "Automations", acme: "Included", them: "Limited" },
-        { dim: "Self-serve", acme: "Yes", them: "Sales-led" },
+        { dim: "Main view", acme: "Board per project", them: "Grid" },
+        { dim: "Priorities", acme: "Built in", them: "Custom column" },
+        { dim: "Due-date warnings", acme: "Built in", them: "Formula" },
+        { dim: "Members", acme: "Unlimited on every plan", them: "Priced per seat" },
       ],
     },
   ],
 };
 
-/* ------------------- back-compat exports + helpers ---------------- */
-// Existing imports (`@/lib/products`, `@/lib/site`) keep working via these.
+/* ------------------------- lookups + helpers ---------------------- */
+// `@/lib/products` and `@/lib/site` re-export these.
 
 export const PRODUCTS = siteConfig.products;
 export function productBySlug(slug: string): Product | undefined {

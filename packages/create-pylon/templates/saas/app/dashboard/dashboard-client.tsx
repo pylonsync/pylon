@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { db, callFn } from "@pylonsync/react";
+import { callFn } from "@pylonsync/react";
 import {
   createInvite,
   deleteOrg,
@@ -15,16 +15,10 @@ import {
   type OrgMember,
   type PendingInvite,
 } from "@pylonsync/client";
+import { Mail } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import { SetupChecklist, type SetupState } from "@/components/setup-checklist";
+import { Avatar } from "@/components/task-ui";
+import { personName } from "@/lib/names";
 import {
   FREE_PROJECT_LIMIT,
   TRIAL_DAYS,
@@ -32,28 +26,7 @@ import {
   formatPrice,
   planById,
 } from "@/lib/plans";
-import {
-  FolderKanban,
-  Users2,
-  CreditCard,
-  ArrowRight,
-  FolderPlus,
-  Plus,
-  Pencil,
-  Archive,
-  ArchiveRestore,
-  Trash2,
-  Check,
-} from "lucide-react";
-
-export interface Project {
-  id: string;
-  orgId: string;
-  name: string;
-  description?: string;
-  status?: string;
-  createdAt: string;
-}
+import { inputCls } from "./projects-client";
 
 // OrgMember rows as returned by `serverData.list("OrgMember")` (the entity
 // shape — camelCase fields). The read policy returns the caller's memberships
@@ -101,566 +74,13 @@ function Card({
   children: React.ReactNode;
 }) {
   return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-5">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-900">{title}</h2>
+    <section className="rounded-xl border border-zinc-200/80 bg-white">
+      <header className="flex items-center justify-between gap-3 border-b border-zinc-100 px-5 py-3">
+        <h2 className="text-[13.5px] font-semibold text-zinc-900">{title}</h2>
         {action}
-      </div>
-      <div className="mt-3">{children}</div>
-    </div>
-  );
-}
-
-// A stat tile: icon + label, a big value, and a small context line.
-function StatCard({
-  icon,
-  label,
-  value,
-  hint,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: React.ReactNode;
-  hint?: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-4">
-      <div className="flex items-center gap-2 text-zinc-400">
-        {icon}
-        <span className="text-[11px] font-medium uppercase tracking-wide">
-          {label}
-        </span>
-      </div>
-      <div className="mt-2 text-2xl font-semibold text-zinc-900">{value}</div>
-      {hint != null && <div className="mt-0.5 text-xs text-zinc-400">{hint}</div>}
-    </div>
-  );
-}
-
-// Deterministic, timezone-independent date (UTC parts) so the SSR render and
-// client hydration always agree — a locale/tz-dependent format would mismatch
-// and throw a React #418 hydration error.
-const MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-function fmtDate(iso: string) {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`;
-}
-
-// A stable accent per project (hashed from its id) so each card/monogram gets a
-// consistent color without persisting one.
-const ACCENTS = [
-  "bg-blue-50 text-blue-600",
-  "bg-violet-50 text-violet-600",
-  "bg-emerald-50 text-emerald-600",
-  "bg-amber-50 text-amber-600",
-  "bg-rose-50 text-rose-600",
-  "bg-cyan-50 text-cyan-600",
-];
-function accentFor(id: string) {
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return ACCENTS[h % ACCENTS.length];
-}
-function monogram(name: string) {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  const s =
-    parts.length >= 2 ? parts[0][0] + parts[1][0] : name.trim()[0] ?? "?";
-  return s.toUpperCase();
-}
-
-function StatusPill({ status }: { status: string }) {
-  const archived = status === "archived";
-  return (
-    <span
-      className={
-        "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium " +
-        (archived
-          ? "bg-zinc-100 text-zinc-500"
-          : "bg-emerald-50 text-emerald-600")
-      }
-    >
-      <span
-        className={
-          "size-1.5 rounded-full " +
-          (archived ? "bg-zinc-400" : "bg-emerald-500")
-        }
-      />
-      {archived ? "Archived" : "Active"}
-    </span>
-  );
-}
-
-const inputCls =
-  "h-9 w-full rounded-md border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-zinc-900 focus:ring-2 focus:ring-zinc-900/10";
-
-/* ============================ Overview ============================ */
-
-export function Overview({
-  tenantId,
-  orgName,
-  userEmail,
-  projects,
-  memberCount,
-  plan,
-  setup,
-}: {
-  tenantId: string | null;
-  orgName?: string;
-  userEmail?: string;
-  projects: Project[];
-  memberCount: number;
-  plan: string;
-  /** Getting-started state; null once the checklist is dismissed. */
-  setup?: SetupState | null;
-}) {
-  if (!tenantId) return <NoOrg />;
-  const activeCount = projects.filter(
-    (p) => (p.status ?? "active") !== "archived",
-  ).length;
-  const archivedCount = projects.length - activeCount;
-  const recent = [...projects]
-    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
-    .slice(0, 5);
-  const firstName = (userEmail ?? "").split("@")[0];
-
-  return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-xl font-semibold tracking-tight text-zinc-900">
-          {orgName ? `${orgName} overview` : "Overview"}
-        </h1>
-        <p className="mt-1 text-sm text-zinc-500">
-          {firstName ? `Welcome back, ${firstName}. ` : ""}Here&apos;s what&apos;s
-          happening in your workspace.
-        </p>
-      </div>
-
-      {setup ? <SetupChecklist state={setup} /> : null}
-
-      <div className="grid gap-4 sm:grid-cols-3">
-        <StatCard
-          icon={<FolderKanban className="size-4" />}
-          label="Projects"
-          value={activeCount}
-          hint={archivedCount > 0 ? `${archivedCount} archived` : "active"}
-        />
-        <StatCard
-          icon={<Users2 className="size-4" />}
-          label="Members"
-          value={memberCount}
-          hint={memberCount === 1 ? "just you" : "in this workspace"}
-        />
-        <StatCard
-          icon={<CreditCard className="size-4" />}
-          label="Plan"
-          value={<span className="capitalize">{plan}</span>}
-          hint={
-            plan === "free" ? (
-              <a
-                href="/dashboard/billing"
-                className="text-brand hover:underline"
-              >
-                Upgrade to Pro →
-              </a>
-            ) : (
-              "thanks for the support"
-            )
-          }
-        />
-      </div>
-
-      <Card
-        title="Recent projects"
-        action={
-          <a
-            href="/dashboard/projects"
-            className="inline-flex items-center gap-1 text-[13px] font-medium text-brand hover:underline"
-          >
-            View all <ArrowRight className="size-3.5" />
-          </a>
-        }
-      >
-        {recent.length === 0 ? (
-          <div className="flex flex-col items-center gap-2 py-8 text-center">
-            <span className="flex size-10 items-center justify-center rounded-xl bg-zinc-50 text-zinc-400">
-              <FolderPlus className="size-5" />
-            </span>
-            <p className="text-sm text-zinc-500">No projects yet.</p>
-            <a
-              href="/dashboard/projects"
-              className="text-[13px] font-medium text-brand hover:underline"
-            >
-              Create your first project →
-            </a>
-          </div>
-        ) : (
-          <ul className="-my-1 divide-y divide-zinc-100">
-            {recent.map((p) => (
-              <li key={p.id} className="flex items-center gap-3 py-2.5">
-                <span
-                  className={
-                    "flex size-8 shrink-0 items-center justify-center rounded-lg text-[12px] font-semibold " +
-                    accentFor(p.id)
-                  }
-                >
-                  {monogram(p.name)}
-                </span>
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium text-zinc-900">
-                    {p.name}
-                  </div>
-                  <div className="truncate text-xs text-zinc-400">
-                    Created {fmtDate(p.createdAt)}
-                  </div>
-                </div>
-                <StatusPill status={p.status ?? "active"} />
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
-    </div>
-  );
-}
-
-/* ============================ Projects ============================ */
-
-export function Projects({
-  tenantId,
-  initial,
-}: {
-  tenantId: string | null;
-  initial: Project[];
-}) {
-  if (!tenantId) return <NoOrg />;
-  return <ProjectsList orgId={tenantId} initial={initial} />;
-}
-
-// Live + optimistic, seeded from the server. `db.useQuery` is reactive
-// (db.insert/db.delete update it instantly across tabs), but until the first
-// server-confirmed sync settles we render the server-passed `initial` rows — so
-// there's no flash of an empty list on load. The policy gates reads on
-// `auth.tenantId == data.orgId`, so this is only ever this org's projects.
-function ProjectsList({
-  orgId,
-  initial,
-}: {
-  orgId: string;
-  initial: Project[];
-}) {
-  const [name, setName] = useState("");
-  const [desc, setDesc] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [limitHit, setLimitHit] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  // Render the server-seeded `initial` rows on the server AND the client's
-  // first paint, then swap to the live reactive query once mounted. Gating the
-  // swap on a post-mount flag (rather than `loading`, which is already settled
-  // during SSR) keeps the server HTML and the first client render identical —
-  // no hydration mismatch, and still no empty-state flash.
-  const [hydrated, setHydrated] = useState(false);
-  useEffect(() => setHydrated(true), []);
-  const { data, loading } = db.useQuery<Project>("Project");
-  const rows =
-    !hydrated || loading ? initial : data.filter((p) => p.orgId === orgId);
-  const projects = rows
-    .slice()
-    .sort((a, b) => {
-      // Active first, then newest first.
-      const aa = (a.status ?? "active") === "archived" ? 1 : 0;
-      const bb = (b.status ?? "active") === "archived" ? 1 : 0;
-      if (aa !== bb) return aa - bb;
-      return a.createdAt < b.createdAt ? 1 : -1;
-    });
-
-  // Creates go through the `createProject` function: it enforces the free
-  // plan's cap on the server and answers LIMIT_REACHED at the cap, which
-  // opens the upgrade dialog. The new row arrives through sync.
-  async function add(e: React.FormEvent) {
-    e.preventDefault();
-    const value = name.trim();
-    if (!value) return;
-    const description = desc.trim();
-    setCreating(true);
-    setCreateError(null);
-    try {
-      await callFn("createProject", {
-        orgId,
-        name: value,
-        ...(description ? { description } : {}),
-      });
-      setName("");
-      setDesc("");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (/LIMIT_REACHED/.test(msg) || (err as { code?: string })?.code === "LIMIT_REACHED") {
-        setLimitHit(true);
-      } else {
-        setCreateError(msg.replace(/^[A-Z_]+:\s*/, ""));
-      }
-    } finally {
-      setCreating(false);
-    }
-  }
-
-  return (
-    <div className="space-y-5">
-      <div className="rounded-xl border border-zinc-200 bg-white p-4">
-        <form
-          onSubmit={add}
-          className="flex flex-col gap-2 sm:flex-row sm:items-center"
-        >
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Project name"
-            aria-label="Project name"
-            className={inputCls + " sm:flex-1"}
-          />
-          <input
-            value={desc}
-            onChange={(e) => setDesc(e.target.value)}
-            placeholder="Short description (optional)"
-            aria-label="Project description"
-            className={inputCls + " sm:flex-1"}
-          />
-          <Button type="submit" size="sm" className="shrink-0" disabled={creating}>
-            <Plus className="size-4" /> {creating ? "Creating…" : "New project"}
-          </Button>
-        </form>
-        {createError ? (
-          <p className="mt-2 text-xs text-red-600">{createError}</p>
-        ) : (
-          <p className="mt-2 text-xs text-zinc-400">
-            Tenant-scoped + live — only this workspace&apos;s projects (enforced by
-            policy), and every change syncs across tabs instantly.
-          </p>
-        )}
-      </div>
-
-      <UpgradeDialog open={limitHit} onClose={() => setLimitHit(false)} />
-
-      {projects.length === 0 ? (
-        <div className="flex flex-col items-center gap-2 rounded-xl border border-dashed border-zinc-300 py-14 text-center">
-          <span className="flex size-11 items-center justify-center rounded-xl bg-zinc-50 text-zinc-400">
-            <FolderPlus className="size-5" />
-          </span>
-          <p className="text-sm font-medium text-zinc-700">No projects yet</p>
-          <p className="text-xs text-zinc-400">
-            Create your first project above to get started.
-          </p>
-        </div>
-      ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {projects.map((p) => (
-            <ProjectCard key={p.id} p={p} />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Shown when `createProject` answers LIMIT_REACHED. One action: go to
-// Billing, where the trial starts.
-function UpgradeDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const pro = planById("pro")!;
-  return (
-    <Dialog open={open} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>You&apos;ve reached the free plan&apos;s limit</DialogTitle>
-          <DialogDescription>
-            Free workspaces can have {FREE_PROJECT_LIMIT} active projects. Archive one, or
-            upgrade to Pro for unlimited projects. Pro starts with a {TRIAL_DAYS}-day free
-            trial.
-          </DialogDescription>
-        </DialogHeader>
-        <ul className="space-y-1.5 text-sm text-zinc-700">
-          {pro.features.map((f) => (
-            <li key={f} className="flex gap-2">
-              <span className="text-zinc-900">✓</span> {f}
-            </li>
-          ))}
-        </ul>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onClose}>
-            Not now
-          </Button>
-          <a
-            href="/dashboard/billing?upgrade=pro&interval=annual"
-            className="inline-flex h-9 items-center rounded-lg bg-zinc-900 px-4 text-[13px] font-medium text-white transition-colors hover:bg-zinc-700"
-          >
-            {pro.cta}
-          </a>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function IconBtn({
-  label,
-  danger,
-  onClick,
-  children,
-}: {
-  label: string;
-  danger?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      onClick={onClick}
-      className={
-        "flex size-7 items-center justify-center rounded-md text-zinc-400 transition-colors hover:bg-zinc-100 " +
-        (danger ? "hover:text-red-600" : "hover:text-zinc-700")
-      }
-    >
-      {children}
-    </button>
-  );
-}
-
-// One project card. Archive + delete are optimistic client `db` writes (gated
-// by the tenant policy) that sync across tabs; editing details saves through the
-// updateProject server function. Editing swaps the card for an inline name +
-// description form.
-function ProjectCard({ p }: { p: Project }) {
-  const archived = (p.status ?? "active") === "archived";
-  const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(p.name);
-  const [desc, setDesc] = useState(p.description ?? "");
-
-  async function save(e: React.FormEvent) {
-    e.preventDefault();
-    const n = name.trim();
-    if (!n) return;
-    setEditing(false);
-    // Saving details goes through the updateProject server function (server-side
-    // validation + a workspace-membership re-check) rather than a bare
-    // db.update — see functions/updateProject.ts. The reactive `db` still
-    // re-renders this card the moment the write lands.
-    await callFn("updateProject", {
-      projectId: p.id,
-      name: n,
-      description: desc.trim() || undefined,
-    });
-  }
-  function cancel() {
-    setEditing(false);
-    setName(p.name);
-    setDesc(p.description ?? "");
-  }
-
-  if (editing) {
-    return (
-      <form
-        onSubmit={save}
-        className="flex flex-col gap-2 rounded-xl border border-zinc-300 bg-white p-4"
-      >
-        <input
-          autoFocus
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          aria-label="Project name"
-          className={inputCls}
-        />
-        <textarea
-          value={desc}
-          onChange={(e) => setDesc(e.target.value)}
-          rows={2}
-          placeholder="Add a description…"
-          aria-label="Project description"
-          className={inputCls + " h-auto resize-none py-2"}
-        />
-        <div className="flex items-center gap-2">
-          <Button type="submit" size="sm">
-            <Check className="size-3.5" /> Save
-          </Button>
-          <button
-            type="button"
-            onClick={cancel}
-            className="text-[13px] font-medium text-zinc-500 transition-colors hover:text-zinc-800"
-          >
-            Cancel
-          </button>
-        </div>
-      </form>
-    );
-  }
-
-  return (
-    <div
-      className={
-        "flex flex-col rounded-xl border border-zinc-200 bg-white p-4 transition-colors hover:border-zinc-300 " +
-        (archived ? "opacity-60" : "")
-      }
-    >
-      <div className="flex items-start gap-3">
-        <span
-          className={
-            "flex size-9 shrink-0 items-center justify-center rounded-lg text-sm font-semibold " +
-            accentFor(p.id)
-          }
-        >
-          {monogram(p.name)}
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-semibold text-zinc-900">
-            {p.name}
-          </div>
-          <p
-            className={
-              "mt-0.5 line-clamp-2 text-xs " +
-              (p.description ? "text-zinc-500" : "text-zinc-300")
-            }
-          >
-            {p.description || "No description"}
-          </p>
-        </div>
-        <div className="-mr-1 flex shrink-0 items-center">
-          <IconBtn label="Edit project" onClick={() => setEditing(true)}>
-            <Pencil className="size-3.5" />
-          </IconBtn>
-          <IconBtn
-            label={archived ? "Unarchive project" : "Archive project"}
-            onClick={() =>
-              db.update("Project", p.id, {
-                status: archived ? "active" : "archived",
-              })
-            }
-          >
-            {archived ? (
-              <ArchiveRestore className="size-3.5" />
-            ) : (
-              <Archive className="size-3.5" />
-            )}
-          </IconBtn>
-          <IconBtn
-            label="Delete project"
-            danger
-            onClick={() => db.delete("Project", p.id)}
-          >
-            <Trash2 className="size-3.5" />
-          </IconBtn>
-        </div>
-      </div>
-      <div className="mt-4 flex items-center justify-between">
-        <StatusPill status={p.status ?? "active"} />
-        <span className="text-[11px] text-zinc-400">
-          Created {fmtDate(p.createdAt)}
-        </span>
-      </div>
-    </div>
+      </header>
+      <div className="px-5 py-4">{children}</div>
+    </section>
   );
 }
 
@@ -730,10 +150,17 @@ function MembersList({
   const [inviting, setInviting] = useState(false);
 
   async function load() {
-    setMembers(await listOrgMembers(orgId));
+    const roster = await listOrgMembers(orgId);
+    setMembers(roster);
     // Pending invites are admin-gated server-side; only fetch when we'd be
-    // allowed to see them (avoids a guaranteed 403 for plain members).
-    if (canManage) setInvites(await listInvites(orgId));
+    // allowed to see them (avoids a guaranteed 403 for plain members). The
+    // invites endpoint also returns invites that were already accepted, so
+    // drop any whose email already belongs to a member.
+    if (canManage) {
+      const joined = new Set(roster.map((m) => (m.email ?? "").toLowerCase()));
+      const list = await listInvites(orgId);
+      setInvites(list.filter((i) => !joined.has(i.email.toLowerCase())));
+    }
   }
   useEffect(() => {
     void load();
@@ -793,7 +220,7 @@ function MembersList({
   }
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-3xl space-y-6">
     <Card title="Members" action={members ? <Count n={members.length} /> : null}>
       {canManage && (
         <form onSubmit={invite} className="flex items-center gap-2">
@@ -823,21 +250,18 @@ function MembersList({
               </li>
             ))
           : members.map((m) => {
-              const label = m.name || m.email || "Unknown member";
-              const initial = (label.trim()[0] || "?").toUpperCase();
+              const label = personName({ name: m.name, email: m.email }) || "Unknown member";
               const isMe = m.user_id === currentUserId;
               return (
                 <li
                   key={m.user_id}
                   className="flex items-center gap-3 py-2.5"
                 >
-                  <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-zinc-100 text-[12px] font-semibold text-zinc-600">
-                    {initial}
-                  </span>
+                  <Avatar id={m.user_id} name={label} size="md" />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-medium text-zinc-900">
-                        {m.name || m.email || "Unknown member"}
+                        {label}
                       </span>
                       {isMe && (
                         <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500">
@@ -845,7 +269,7 @@ function MembersList({
                         </span>
                       )}
                     </div>
-                    {m.name && m.email && m.name !== m.email && (
+                    {m.email && label !== m.email && (
                       <div className="truncate text-xs text-zinc-500">
                         {m.email}
                       </div>
@@ -897,7 +321,7 @@ function MembersList({
           {invites.map((inv) => (
             <li key={inv.id} className="flex items-center gap-3 py-2.5">
               <span className="flex size-8 shrink-0 items-center justify-center rounded-full border border-dashed border-zinc-300 text-zinc-400">
-                <MailIcon />
+                <Mail className="size-3.5" strokeWidth={1.75} />
               </span>
               <div className="min-w-0 flex-1">
                 <div className="truncate text-sm font-medium text-zinc-900">
@@ -921,15 +345,6 @@ function MembersList({
       </Card>
     )}
     </div>
-  );
-}
-
-function MailIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="3" y="5" width="18" height="14" rx="2" />
-      <path d="m3 7 9 6 9-6" />
-    </svg>
   );
 }
 
@@ -1040,7 +455,7 @@ function AccountSettings({ me }: { me: AccountInfo }) {
   }
 
   return (
-    <div className="mt-6 max-w-2xl space-y-6">
+    <div className="mx-auto mt-6 max-w-2xl space-y-6">
       <Card title="Your account">
         <form onSubmit={saveName} className="space-y-3">
           <label className="block">
@@ -1166,7 +581,7 @@ function SettingsView({
   }
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="mx-auto max-w-2xl space-y-6">
       <Card title="Workspace">
         <form onSubmit={rename} className="space-y-3">
           <label className="block">
@@ -1430,7 +845,7 @@ function BillingView({
   }
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="mx-auto max-w-2xl space-y-6">
       <Card title="Plan">
         <div className="flex items-center justify-between">
           <div>

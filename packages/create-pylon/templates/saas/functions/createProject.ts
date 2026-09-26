@@ -1,6 +1,6 @@
 import { mutation, v } from "@pylonsync/functions";
 import { normalizeProjectName } from "../lib/projects";
-import { canCreateProject, planFromSubscription } from "../lib/plans";
+import { canCreateProject, planFromSubscriptions } from "../lib/plans";
 
 // createProject — the free-tier cap lives here, on the server. The Project
 // policy denies client inserts, so a browser cannot skip the paywall by
@@ -23,21 +23,15 @@ export default mutation<
     // Any member of the workspace may create a project. Fails closed.
     await ctx.requireMember(args.orgId);
 
-    const subs = (await ctx.db.unsafe.list("StripeSubscription")) as Array<{
-      referenceId: string;
-      plan?: string;
-      status?: string;
-    }>;
-    const sub = subs.find((s) => s.referenceId === args.orgId) ?? null;
-    const plan = planFromSubscription(sub);
+    const subs = (await ctx.db.unsafe.query("StripeSubscription", {
+      referenceId: args.orgId,
+    })) as Array<{ plan?: string; status?: string }>;
+    const plan = planFromSubscriptions(subs);
 
-    const projects = (await ctx.db.unsafe.list("Project")) as Array<{
-      orgId: string;
+    const projects = (await ctx.db.unsafe.query("Project", { orgId: args.orgId })) as Array<{
       status?: string;
     }>;
-    const active = projects.filter(
-      (p) => p.orgId === args.orgId && (p.status ?? "active") !== "archived",
-    ).length;
+    const active = projects.filter((p) => (p.status ?? "active") !== "archived").length;
     if (!canCreateProject(plan, active)) {
       throw ctx.error(
         "LIMIT_REACHED",

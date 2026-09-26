@@ -6,6 +6,7 @@ import {
   canCreateProject,
   planById,
   planFromSubscription,
+  planFromSubscriptions,
 } from "../lib/plans";
 
 // Tier 1 (pure logic) — the cap and the plan derivation that
@@ -32,4 +33,15 @@ test("annual pricing derives its total and saving from the catalog", () => {
   expect(annualTotal(pro)).toBe(pro.annualPerMonth! * 12);
   expect(annualSavingsPercent(pro)).toBeGreaterThan(0);
   expect(annualSavingsPercent(planById("free")!)).toBe(0);
+});
+
+test("a usable Pro row wins over an older canceled row", () => {
+  expect(
+    planFromSubscriptions([
+      { plan: "pro", status: "canceled" },
+      { plan: "pro", status: "trialing" },
+    ]),
+  ).toBe("pro");
+  expect(planFromSubscriptions([{ plan: "pro", status: "canceled" }])).toBe("free");
+  expect(planFromSubscriptions([])).toBe("free");
 });

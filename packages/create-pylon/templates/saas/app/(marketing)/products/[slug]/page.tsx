@@ -1,133 +1,78 @@
 import React from "react";
 import { Link, type Metadata, type PageProps } from "@pylonsync/react";
-import {
-  WRAP,
-  Divider,
-  Eyebrow,
-  FeatureGrid,
-  PrimaryButton,
-  GhostLink,
-  Shot,
-} from "@/components/marketing";
+import { ArrowRight } from "lucide-react";
+import { WRAP, FeatureList, PrimaryButton, ProductShot, SecondaryButton } from "@/components/marketing";
 import { PRODUCTS, productBySlug } from "@/lib/products";
+import { siteConfig } from "@/lib/site.config";
 
 // Per-product SEO. `generateMetadata` runs on the server with the resolved
-// route params, so each /products/<slug> page gets its own <title>/<meta> in
-// the HTML — fully indexable, no client work.
+// route params, so each /products/<slug> page gets its own <title>/<meta>.
 export function generateMetadata({ params }: PageProps): Metadata {
   const product = productBySlug(params.slug);
-  if (!product) return { title: "Not found — Acme", robots: "noindex" };
+  if (!product) return { title: `Not found — ${siteConfig.brand.name}`, robots: "noindex" };
   return {
-    title: `${product.title} — Acme`,
+    title: `${product.title} — ${siteConfig.brand.name}`,
     description: product.summary,
   };
 }
 
-// `app/products/[slug]/page.tsx` → `/products/:slug`. One template, every
-// product. The slug is resolved from the URL during the server render; an
-// unknown slug becomes a real 404 (via `response.notFound`) before any HTML is
-// sent. Add a product in lib/products.ts and its page exists automatically.
+// `/products/:slug` — one template, every product. An unknown slug becomes a
+// real 404 (via `response.notFound`) before any HTML is sent. Add a product
+// in lib/site.config.ts and its page exists.
 export default function ProductPage({ params, auth, response }: PageProps) {
   const product = productBySlug(params.slug);
   if (!product) {
     response.notFound();
     return null;
   }
-
   const signedIn = Boolean(auth.user_id);
-  const primaryHref = signedIn ? "/dashboard" : "/signup";
   const others = PRODUCTS.filter((p) => p.slug !== product.slug);
 
   return (
     <div className="bg-white text-zinc-900">
-      {/* ============================ HERO ============================ */}
-      <section className={`${WRAP} pt-16 pb-16 sm:pt-20`}>
-        <Link
-          href="/#product"
-          className="text-[13px] text-zinc-500 transition-colors hover:text-zinc-900"
-        >
-          ← All products
-        </Link>
-        <div className="mt-6 flex items-center gap-3">
-          <span className="flex size-9 items-center justify-center rounded-lg bg-brand-soft text-brand">
-            {product.icon}
-          </span>
-          <Eyebrow>{product.eyebrow}</Eyebrow>
-        </div>
-        <h1 className="mt-5 max-w-2xl text-balance text-[2.5rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[3rem]">
+      <section className={`${WRAP} pb-16 pt-16 sm:pt-24`}>
+        <span className="flex size-10 items-center justify-center rounded-xl bg-white text-zinc-700 shadow-[0_0_0_1px_rgba(0,0,0,0.07),0_2px_4px_-1px_rgba(0,0,0,0.06)]">
+          <product.icon className="size-5" strokeWidth={1.75} />
+        </span>
+        <h1 className="mt-6 max-w-3xl text-balance text-[2.5rem] font-semibold leading-[1.05] tracking-[-0.035em] text-zinc-950 sm:text-[3.25rem]">
           {product.headline}
         </h1>
-        <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-zinc-500">
-          {product.summary}
-        </p>
-        <div className="mt-8 flex flex-wrap items-center gap-4">
-          <PrimaryButton href={primaryHref}>
+        <p className="mt-5 max-w-xl text-[17px] leading-relaxed text-zinc-500">{product.summary}</p>
+        <div className="mt-8 flex flex-wrap items-center gap-3">
+          <PrimaryButton href={signedIn ? "/dashboard" : "/signup"}>
             {signedIn ? "Open dashboard" : "Get started"}
           </PrimaryButton>
-          <GhostLink href="/#pricing">See pricing →</GhostLink>
+          <SecondaryButton href="/pricing">See pricing</SecondaryButton>
         </div>
-
-        <div className="mt-16">
-          <Shot url={product.mockupUrl} label={product.mockupLabel} />
-        </div>
-      </section>
-
-      {/* ========================= FEATURES ========================= */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <Eyebrow>What you get</Eyebrow>
-        <h2 className="mt-4 max-w-xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          {product.title}, end to end.
-        </h2>
-        <FeatureGrid className="mt-12" items={product.features} />
-      </section>
-
-      {/* ==================== EXPLORE OTHER ======================== */}
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <Eyebrow>More from Acme</Eyebrow>
-        <h2 className="mt-4 text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-          Explore the rest of the platform.
-        </h2>
-        <div className="mt-12 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-          {others.map((p) => (
-            <Link
-              key={p.slug}
-              href={`/products/${p.slug}`}
-              className="group rounded-2xl border border-zinc-200 bg-paper p-6 transition-colors hover:border-zinc-300 hover:bg-white"
-            >
-              <span className="flex size-9 items-center justify-center rounded-lg bg-brand-soft text-brand">
-                {p.icon}
-              </span>
-              <h3 className="mt-4 text-[15px] font-semibold">{p.title}</h3>
-              <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-500">
-                {p.tagline}
-              </p>
-              <span className="mt-3 inline-block text-[13px] font-medium text-brand">
-                Explore →
-              </span>
-            </Link>
-          ))}
+        <div className="mt-14">
+          <ProductShot src={product.screenshot} alt={product.screenshotAlt} priority />
         </div>
       </section>
 
-      {/* =========================== CTA ========================== */}
-      <Divider />
-      <section className={`${WRAP} py-24`}>
-        <h2 className="max-w-xl text-balance text-[2.25rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[2.75rem]">
-          Get your team on {product.title}.
-        </h2>
-        <p className="mt-6 max-w-lg text-[16px] leading-relaxed text-zinc-500">
-          Start free and have your first workspace running in under a minute.
-        </p>
-        <div className="mt-8">
-          <PrimaryButton href={primaryHref}>
-            {signedIn ? "Open dashboard" : "Start building with Acme"}
-          </PrimaryButton>
+      <section className={`${WRAP} pb-20`}>
+        <div className="max-w-3xl">
+          <FeatureList items={product.features} />
         </div>
-        <p className="mt-4 text-[12px] text-zinc-400">
-          Free to start · No credit card · Cancel anytime
-        </p>
+      </section>
+
+      <section className="border-t border-zinc-200/70 bg-zinc-50/70">
+        <div className={`${WRAP} py-16`}>
+          <h2 className="text-[1.5rem] font-semibold tracking-[-0.02em] text-zinc-950">More in {siteConfig.brand.name}</h2>
+          <div className="mt-8 grid gap-3 sm:grid-cols-3">
+            {others.map((p) => (
+              <Link
+                key={p.slug}
+                href={`/products/${p.slug}`}
+                className="group rounded-2xl bg-white p-5 shadow-[0_0_0_1px_rgba(0,0,0,0.06)] transition-shadow hover:shadow-[0_0_0_1px_rgba(0,0,0,0.1),0_8px_24px_-12px_rgba(0,0,0,0.15)]"
+              >
+                <p.icon className="size-5 text-zinc-600" strokeWidth={1.75} />
+                <h3 className="mt-4 text-[15px] font-semibold text-zinc-900">{p.title}</h3>
+                <p className="mt-1 text-[13.5px] leading-relaxed text-zinc-500">{p.tagline}</p>
+                <ArrowRight className="mt-4 size-4 text-zinc-400 transition-transform group-hover:translate-x-0.5 group-hover:text-zinc-900" />
+              </Link>
+            ))}
+          </div>
+        </div>
       </section>
     </div>
   );

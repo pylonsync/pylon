@@ -29,6 +29,10 @@ export default function OnboardingPage({ auth, response, serverData }: PageProps
       return null;
     }
   }
-  const me = use(serverData.get<{ email?: string }>("User", auth.user_id));
-  return <OnboardingWizard org={org} email={me?.email ?? ""} />;
+  const me = use(
+    serverData.get<{ email?: string; displayName?: string | null }>("User", auth.user_id),
+  );
+  return (
+    <OnboardingWizard org={org} email={me?.email ?? ""} displayName={me?.displayName ?? ""} />
+  );
 }

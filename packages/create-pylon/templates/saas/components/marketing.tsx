@@ -1,92 +1,14 @@
 import React from "react";
 import { Link } from "@pylonsync/react";
+import { ArrowRight, Check } from "lucide-react";
 import type { SitePage, Comparison } from "@/lib/site";
+import { siteConfig } from "@/lib/site.config";
 
-// Reusable presentational pieces for the marketing pages (homepage +
-// /products/[slug]). All server-rendered — no client JS. Restyle here and every
-// marketing page follows.
+// Presentational pieces for the marketing pages. All server-rendered, no
+// client JS. Restyle here and every marketing page follows.
 
-// Shared container: the whole marketing site is a contained, left-aligned column.
-export const WRAP = "mx-auto w-full max-w-5xl px-6";
-
-export function Divider() {
-  return (
-    <div className={WRAP}>
-      <div className="border-t border-zinc-200/70" />
-    </div>
-  );
-}
-
-export function Eyebrow({ children }: { children: React.ReactNode }) {
-  return (
-    <p className="font-mono text-[11px] font-semibold uppercase tracking-[0.14em] text-brand">
-      {children}
-    </p>
-  );
-}
-
-export function Badge({ children }: { children: React.ReactNode }) {
-  return (
-    <span className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white py-1 pl-1 pr-3 text-[13px] text-zinc-600">
-      <span className="rounded-full bg-brand-soft px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-brand">
-        New
-      </span>
-      {children}
-    </span>
-  );
-}
-
-export function SectionHead({
-  eyebrow,
-  title,
-  body,
-  arrow,
-}: {
-  eyebrow: string;
-  title: string;
-  body: string;
-  arrow?: boolean;
-}) {
-  return (
-    <div>
-      <Eyebrow>
-        {eyebrow}
-        {arrow ? " →" : ""}
-      </Eyebrow>
-      <h2 className="mt-4 max-w-2xl text-balance text-3xl font-semibold leading-[1.1] tracking-[-0.02em] sm:text-[2.5rem]">
-        {title}
-      </h2>
-      <p className="mt-5 max-w-xl text-[15px] leading-relaxed text-zinc-500">
-        {body}
-      </p>
-    </div>
-  );
-}
-
-export function FeatureGrid({
-  items,
-  columns = 3,
-  className = "",
-}: {
-  items: { title: string; body: string }[];
-  columns?: 2 | 3;
-  className?: string;
-}) {
-  const cols =
-    columns === 2 ? "sm:grid-cols-2" : "sm:grid-cols-2 lg:grid-cols-3";
-  return (
-    <div className={`grid gap-x-8 gap-y-10 ${cols} ${className}`}>
-      {items.map((f) => (
-        <div key={f.title}>
-          <h3 className="text-[15px] font-medium text-brand">{f.title}</h3>
-          <p className="mt-2 text-[14px] leading-relaxed text-zinc-500">
-            {f.body}
-          </p>
-        </div>
-      ))}
-    </div>
-  );
-}
+// Shared container for the marketing site.
+export const WRAP = "mx-auto w-full max-w-6xl px-4 sm:px-6";
 
 export function PrimaryButton({
   href,
@@ -100,122 +22,121 @@ export function PrimaryButton({
   return (
     <Link
       href={href}
-      className={`inline-flex items-center rounded-full bg-zinc-900 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 ${className}`}
+      className={`group inline-flex h-10 items-center gap-2 rounded-full bg-zinc-950 pl-5 pr-4 text-[14px] font-medium text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_1px_2px_rgba(0,0,0,0.2)] transition-[background-color,transform] duration-200 ease-[cubic-bezier(0.32,0.72,0,1)] hover:bg-zinc-800 active:scale-[0.98] ${className}`}
     >
       {children}
+      <ArrowRight className="size-4 transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] group-hover:translate-x-0.5" />
     </Link>
   );
 }
 
-export function GhostLink({
-  href,
-  children,
-}: {
-  href: string;
-  children: React.ReactNode;
-}) {
+export function SecondaryButton({ href, children }: { href: string; children: React.ReactNode }) {
   return (
     <Link
       href={href}
-      className="text-sm font-medium text-zinc-700 transition-colors hover:text-zinc-900"
+      className="inline-flex h-10 items-center rounded-full px-4 text-[14px] font-medium text-zinc-700 ring-1 ring-zinc-200 transition-colors hover:bg-zinc-50 hover:text-zinc-950"
     >
       {children}
     </Link>
   );
 }
 
-// Browser-chrome frame around an image placeholder. Drop a real screenshot in
-// place of the dashed box.
-export function Shot({ url, label }: { url: string; label: string }) {
+/** A region of a 1440x900 screenshot, as fractions of its width and height. */
+export type ShotCrop = {
+  left: number;
+  top: number;
+  width: number;
+  /** Width / height of the visible region. */
+  ratio: number;
+};
+
+/**
+ * A product screenshot in a two-layer frame: a tinted outer tray and the
+ * image inside it with its own hairline. `crop` shows one region of the
+ * full-screen capture, scaled to fill the frame.
+ */
+export function ProductShot({
+  src,
+  alt,
+  crop,
+  priority = false,
+  className = "",
+}: {
+  src: string;
+  alt: string;
+  crop?: ShotCrop;
+  priority?: boolean;
+  className?: string;
+}) {
+  // Screenshots are 1440x900 CSS pixels (captured at 2x).
+  const IMAGE_RATIO = 1440 / 900;
   return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-[0_30px_70px_-35px_rgba(0,0,0,0.3)]">
-      <div className="flex items-center gap-1.5 border-b border-zinc-100 px-4 py-3">
-        <span className="size-2.5 rounded-full bg-zinc-200" />
-        <span className="size-2.5 rounded-full bg-zinc-200" />
-        <span className="size-2.5 rounded-full bg-zinc-200" />
-        <span className="mx-auto rounded-md bg-zinc-100 px-10 py-1 text-[11px] text-zinc-400">
-          {url}
-        </span>
+    <div
+      className={`rounded-[18px] bg-zinc-950/[0.035] p-1.5 ring-1 ring-zinc-950/[0.06] sm:rounded-[22px] sm:p-2 ${className}`}
+    >
+      <div
+        className="overflow-hidden rounded-[13px] bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.06),0_24px_48px_-24px_rgba(24,24,60,0.25)] sm:rounded-[15px]"
+        style={{ aspectRatio: crop ? crop.ratio : IMAGE_RATIO }}
+      >
+        <img
+          src={src}
+          alt={alt}
+          loading={priority ? "eager" : "lazy"}
+          decoding="async"
+          width={1440}
+          height={900}
+          className="block h-auto max-w-none"
+          style={
+            crop
+              ? {
+                  width: `${100 / crop.width}%`,
+                  // Percentage margins resolve against the frame's WIDTH, so
+                  // the top offset is converted from image-height units.
+                  marginLeft: `-${(crop.left / crop.width) * 100}%`,
+                  marginTop: `-${(crop.top / crop.width / IMAGE_RATIO) * 100}%`,
+                }
+              : { width: "100%" }
+          }
+        />
       </div>
-      <div className="grid aspect-[16/9] place-items-center bg-zinc-50">
-        <div className="flex flex-col items-center gap-2.5 text-zinc-400">
-          <span className="flex size-11 items-center justify-center rounded-xl border-2 border-dashed border-zinc-300 text-lg">
-            ▦
+    </div>
+  );
+}
+
+export function FeatureList({ items }: { items: { title: string; body: string }[] }) {
+  return (
+    <ul className="grid gap-x-8 gap-y-5 sm:grid-cols-2">
+      {items.map((f) => (
+        <li key={f.title} className="flex gap-3">
+          <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-brand-soft text-brand">
+            <Check className="size-3" strokeWidth={2.5} />
           </span>
-          <p className="text-sm font-medium text-zinc-500">{label}</p>
-          <p className="text-xs text-zinc-400">Replace with a screenshot</p>
-        </div>
-      </div>
-    </div>
+          <span>
+            <span className="block text-[14px] font-medium text-zinc-900">{f.title}</span>
+            <span className="mt-0.5 block text-[13.5px] leading-relaxed text-zinc-500">{f.body}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
-// Square media slot for a testimonial portrait. Renders the person's initials
-// on a soft gradient so it looks intentional out of the box — drop in a real
-// photo (an <img> here) when you have one.
-export function Portrait({ name }: { name?: string }) {
-  const initials = name
-    ? name
-        .split(/\s+/)
-        .map((w) => w[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase()
-    : null;
+function PageHero({ title, summary, ctaHref }: { title: string; summary: string; ctaHref: string }) {
   return (
-    <div className="grid aspect-square w-full place-items-center overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-100 to-zinc-200/80">
-      {initials ? (
-        <span className="select-none text-5xl font-semibold tracking-tight text-zinc-400">
-          {initials}
-        </span>
-      ) : (
-        <span className="flex size-12 items-center justify-center rounded-full border-2 border-dashed border-zinc-300 text-xl text-zinc-400">
-          ◐
-        </span>
-      )}
-    </div>
+    <section className={`${WRAP} pb-16 pt-16 sm:pt-24`}>
+      <h1 className="max-w-3xl text-balance text-[2.5rem] font-semibold leading-[1.05] tracking-[-0.035em] text-zinc-950 sm:text-[3.25rem]">
+        {title}
+      </h1>
+      <p className="mt-5 max-w-xl text-[17px] leading-relaxed text-zinc-500">{summary}</p>
+      <div className="mt-8">
+        <PrimaryButton href={ctaHref}>Get started</PrimaryButton>
+      </div>
+    </section>
   );
 }
 
-export function Terminal() {
-  return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-[0_30px_70px_-35px_rgba(0,0,0,0.6)]">
-      <div className="flex items-center gap-1.5 border-b border-white/10 px-4 py-3">
-        <span className="size-2.5 rounded-full bg-white/20" />
-        <span className="size-2.5 rounded-full bg-white/20" />
-        <span className="size-2.5 rounded-full bg-white/20" />
-        <span className="ml-3 font-mono text-[11px] text-white/40">
-          acme · automation run
-        </span>
-      </div>
-      <div className="space-y-3 p-6 font-mono text-[12.5px] leading-relaxed text-zinc-300">
-        <p className="text-zinc-500">▸ Rule · when a task is moved to Done</p>
-        <p className="text-brand">
-          step 1{" "}
-          <span className="text-zinc-500">→ notify the project channel</span>
-        </p>
-        <p className="text-brand">
-          step 2{" "}
-          <span className="text-zinc-500">→ close the linked subtasks</span>
-        </p>
-        <div className="rounded-lg border-l-2 border-brand/60 bg-white/5 px-4 py-3 text-zinc-200">
-          <p className="font-semibold">Run complete</p>
-          <p className="mt-1 text-zinc-400">
-            2 steps ran in 240ms — 1 notification sent, 3 subtasks closed.
-          </p>
-        </div>
-        <p className="text-zinc-500">▸ Trigger · on every status change</p>
-        <p className="text-brand">
-          status{" "}
-          <span className="text-zinc-500">→ active · 128 runs this week</span>
-        </p>
-      </div>
-    </div>
-  );
-}
-
-// A generic content page (solutions / resources / company). Renders a hero, a
-// grid of sections, a CTA, and links to its siblings.
+// A generic content page (solutions / resources / company): heading, a grid
+// of sections, and links to its siblings.
 export function ContentPage({
   page,
   siblings,
@@ -230,57 +151,35 @@ export function ContentPage({
   const others = siblings.filter((s) => s.slug !== page.slug);
   return (
     <div className="bg-white text-zinc-900">
-      <section className={`${WRAP} pt-16 pb-16 sm:pt-20`}>
-        <Link
-          href="/"
-          className="text-[13px] text-zinc-500 transition-colors hover:text-zinc-900"
-        >
-          ← Home
-        </Link>
-        <div className="mt-6">
-          <Eyebrow>{page.eyebrow}</Eyebrow>
-        </div>
-        <h1 className="mt-4 max-w-2xl text-balance text-[2.25rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[3rem]">
-          {page.title}
-        </h1>
-        <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-zinc-500">
-          {page.summary}
-        </p>
-        <div className="mt-8">
-          <PrimaryButton href={ctaHref}>Get started</PrimaryButton>
-        </div>
-      </section>
-
-      <Divider />
-      <section className={`${WRAP} py-20`}>
-        <FeatureGrid items={page.sections} />
-      </section>
-
-      {others.length > 0 && (
-        <>
-          <Divider />
-          <section className={`${WRAP} py-16`}>
-            <Eyebrow>{page.eyebrow}</Eyebrow>
-            <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              {others.map((s) => (
-                <Link
-                  key={s.slug}
-                  href={`${basePath}/${s.slug}`}
-                  className="rounded-xl border border-zinc-200 bg-paper px-4 py-3 text-[14px] font-medium text-zinc-700 transition-colors hover:border-zinc-300 hover:bg-white hover:text-zinc-900"
-                >
-                  {s.navLabel} →
-                </Link>
-              ))}
+      <PageHero title={page.title} summary={page.summary} ctaHref={ctaHref} />
+      <section className={`${WRAP} pb-20`}>
+        <div className="grid gap-px overflow-hidden rounded-2xl bg-zinc-200/70 ring-1 ring-zinc-200/70 sm:grid-cols-3">
+          {page.sections.map((s) => (
+            <div key={s.title} className="bg-white p-6">
+              <h2 className="text-[15px] font-semibold text-zinc-900">{s.title}</h2>
+              <p className="mt-2 text-[14px] leading-relaxed text-zinc-500">{s.body}</p>
             </div>
-          </section>
-        </>
-      )}
+          ))}
+        </div>
+        {others.length > 0 ? (
+          <div className="mt-10 flex flex-wrap gap-2">
+            {others.map((s) => (
+              <Link
+                key={s.slug}
+                href={`${basePath}/${s.slug}`}
+                className="rounded-full px-3.5 py-1.5 text-[13px] font-medium text-zinc-600 ring-1 ring-zinc-200 transition-colors hover:bg-zinc-50 hover:text-zinc-950"
+              >
+                {s.navLabel}
+              </Link>
+            ))}
+          </div>
+        ) : null}
+      </section>
     </div>
   );
 }
 
-// A comparison page: hero + a feature-by-feature table + links to the other
-// comparisons.
+// A comparison page: heading, a row-by-row table, and links to the others.
 export function ComparePage({
   cmp,
   all,
@@ -293,78 +192,42 @@ export function ComparePage({
   const others = all.filter((c) => c.slug !== cmp.slug);
   return (
     <div className="bg-white text-zinc-900">
-      <section className={`${WRAP} pt-16 pb-16 sm:pt-20`}>
-        <Link
-          href="/"
-          className="text-[13px] text-zinc-500 transition-colors hover:text-zinc-900"
-        >
-          ← Home
-        </Link>
-        <div className="mt-6">
-          <Eyebrow>Compare</Eyebrow>
-        </div>
-        <h1 className="mt-4 max-w-2xl text-balance text-[2.25rem] font-semibold leading-[1.05] tracking-[-0.02em] sm:text-[3rem]">
-          {cmp.title}
-        </h1>
-        <p className="mt-6 max-w-xl text-[17px] leading-relaxed text-zinc-500">
-          {cmp.summary}
-        </p>
-        <div className="mt-8">
-          <PrimaryButton href={ctaHref}>Get started</PrimaryButton>
-        </div>
-      </section>
-
-      <Divider />
-      <section className={`${WRAP} py-16`}>
-        <div className="overflow-hidden rounded-2xl border border-zinc-200">
-          <table className="w-full text-[14px]">
+      <PageHero title={cmp.title} summary={cmp.summary} ctaHref={ctaHref} />
+      <section className={`${WRAP} pb-20`}>
+        <div className="overflow-x-auto rounded-2xl ring-1 ring-zinc-200">
+          <table className="w-full min-w-[520px] text-[14px]">
             <thead>
-              <tr className="border-b border-zinc-200 bg-paper text-left">
-                <th className="px-5 py-3 font-medium text-zinc-400"></th>
-                <th className="px-5 py-3 font-semibold text-zinc-900">Acme</th>
-                <th className="px-5 py-3 font-medium text-zinc-500">
-                  {cmp.competitor}
-                </th>
+              <tr className="border-b border-zinc-200 bg-zinc-50 text-left">
+                <th className="px-5 py-3 font-medium text-zinc-500" />
+                <th className="px-5 py-3 font-semibold text-zinc-900">{siteConfig.brand.name}</th>
+                <th className="px-5 py-3 font-medium text-zinc-500">{cmp.competitor}</th>
               </tr>
             </thead>
             <tbody>
               {cmp.rows.map((r) => (
-                <tr
-                  key={r.dim}
-                  className="border-b border-zinc-100 last:border-0"
-                >
+                <tr key={r.dim} className="border-b border-zinc-100 last:border-0">
                   <td className="px-5 py-3.5 text-zinc-600">{r.dim}</td>
-                  <td className="px-5 py-3.5 font-medium text-zinc-900">
-                    <span className="mr-2 text-brand">✓</span>
-                    {r.acme}
-                  </td>
+                  <td className="px-5 py-3.5 font-medium text-zinc-900">{r.acme}</td>
                   <td className="px-5 py-3.5 text-zinc-500">{r.them}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {others.length > 0 ? (
+          <div className="mt-10 flex flex-wrap gap-2">
+            {others.map((c) => (
+              <Link
+                key={c.slug}
+                href={`/compare/${c.slug}`}
+                className="rounded-full px-3.5 py-1.5 text-[13px] font-medium text-zinc-600 ring-1 ring-zinc-200 transition-colors hover:bg-zinc-50 hover:text-zinc-950"
+              >
+                {c.navLabel}
+              </Link>
+            ))}
+          </div>
+        ) : null}
       </section>
-
-      {others.length > 0 && (
-        <>
-          <Divider />
-          <section className={`${WRAP} py-16`}>
-            <Eyebrow>More comparisons</Eyebrow>
-            <div className="mt-6 grid gap-3 sm:grid-cols-3">
-              {others.map((c) => (
-                <Link
-                  key={c.slug}
-                  href={`/compare/${c.slug}`}
-                  className="rounded-xl border border-zinc-200 bg-paper px-4 py-3 text-[14px] font-medium text-zinc-700 transition-colors hover:border-zinc-300 hover:bg-white hover:text-zinc-900"
-                >
-                  {c.navLabel} →
-                </Link>
-              ))}
-            </div>
-          </section>
-        </>
-      )}
     </div>
   );
 }
