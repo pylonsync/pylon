@@ -10,6 +10,9 @@
 //!     external-id field) and the user joins it with the mapped role;
 //!   - an org in the claim with a local mirror: the user joins it, or
 //!     their role is updated to the mapped role;
+//!   - a local mirror whose name (or, with `slug_field`, slug) differs
+//!     from the claim is updated to match, so upstream renames land on
+//!     the next login;
 //!   - with `remove_missing`, a mirrored org the user belongs to locally
 //!     but that is absent from the claim loses the membership. The Org
 //!     row is never deleted — other members may still hold it.
@@ -32,8 +35,22 @@ pub struct MirrorReport {
     pub joined: usize,
     pub role_changed: usize,
     pub removed: usize,
-    /// Claim orgs that could not be created (store error). Logged, not fatal.
+    /// Mirrors whose name or slug was updated from the claim.
+    pub refreshed: usize,
+    /// Claim orgs that could not be created or refreshed (store error,
+    /// e.g. a slug another local org still holds). Logged, not fatal.
     pub failed: usize,
+}
+
+/// A local org row that mirrors an upstream org, whether or not the user
+/// is a member of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalOrg {
+    pub external_id: String,
+    pub org_id: String,
+    pub name: String,
+    /// The value of `slug_field`, when the config sets one.
+    pub slug: Option<String>,
 }
 
 /// One membership the relying app currently holds for the user, in a
@@ -51,6 +68,13 @@ pub enum MirrorStep {
     Create {
         external: ExternalOrg,
         role: OrgRole,
+    },
+    /// Bring a mirror's metadata in line with the claim. Only the fields
+    /// that changed are `Some`.
+    Refresh {
+        org_id: String,
+        name: Option<String>,
+        slug: Option<String>,
     },
     Join {
         org_id: String,
@@ -81,15 +105,14 @@ pub fn map_role(
     OrgRole::from_declared(mapped, declared_roles).unwrap_or(OrgRole::Member)
 }
 
-/// Decide the steps for one user. `existing` maps external id → the
-/// local org (id) when a mirror row exists, whether or not the user is
-/// a member; `memberships` are the user's current memberships in mirrored
-/// orgs.
+/// Decide the steps for one user. `existing` holds the local mirror row
+/// for each claim org that has one, whether or not the user is a member;
+/// `memberships` are the user's current memberships in mirrored orgs.
 pub fn plan_mirror(
     cfg: &ManifestAuthOrgFederation,
     declared_roles: &[String],
     claim: &[ExternalOrg],
-    existing: &[(String, String)], // (external_id, local org_id)
+    existing: &[LocalOrg],
     memberships: &[LocalMirror],
 ) -> Vec<MirrorStep> {
     let mut steps = Vec::new();
@@ -99,20 +122,21 @@ pub fn plan_mirror(
             continue; // duplicate entry in the claim
         }
         let role = map_role(cfg, &ext.role, declared_roles);
-        let local = existing
-            .iter()
-            .find(|(e, _)| e == &ext.id)
-            .map(|(_, id)| id.clone());
-        match local {
-            None => steps.push(MirrorStep::Create {
+        let Some(local) = existing.iter().find(|l| l.external_id == ext.id) else {
+            steps.push(MirrorStep::Create {
                 external: ext.clone(),
                 role,
-            }),
-            Some(org_id) => match memberships.iter().find(|m| m.org_id == org_id) {
-                None => steps.push(MirrorStep::Join { org_id, role }),
-                Some(m) if m.role != role => steps.push(MirrorStep::SetRole { org_id, role }),
-                Some(_) => {}
-            },
+            });
+            continue;
+        };
+        if let Some(step) = plan_refresh(cfg, ext, local) {
+            steps.push(step);
+        }
+        let org_id = local.org_id.clone();
+        match memberships.iter().find(|m| m.org_id == org_id) {
+            None => steps.push(MirrorStep::Join { org_id, role }),
+            Some(m) if m.role != role => steps.push(MirrorStep::SetRole { org_id, role }),
+            Some(_) => {}
         }
     }
     if cfg.remove_missing {
@@ -125,6 +149,36 @@ pub fn plan_mirror(
         }
     }
     steps
+}
+
+/// The metadata update a mirror needs to match the claim, if any.
+///
+/// The name is taken from the claim unless the claim sent none (the
+/// parser then falls back to the id, which is not a name worth writing).
+/// The slug is written only when the config names a `slug_field` and the
+/// claim carries a non-empty slug; a claim without one leaves the mirror
+/// as it is.
+fn plan_refresh(
+    cfg: &ManifestAuthOrgFederation,
+    ext: &ExternalOrg,
+    local: &LocalOrg,
+) -> Option<MirrorStep> {
+    let name = (ext.name != ext.id && !ext.name.is_empty() && ext.name != local.name)
+        .then(|| ext.name.clone());
+    let slug = cfg
+        .slug_field
+        .as_ref()
+        .and(ext.slug.as_deref())
+        .filter(|s| !s.is_empty() && local.slug.as_deref() != Some(*s))
+        .map(String::from);
+    if name.is_none() && slug.is_none() {
+        return None;
+    }
+    Some(MirrorStep::Refresh {
+        org_id: local.org_id.clone(),
+        name,
+        slug,
+    })
 }
 
 /// Reconcile the user's local memberships against the IdP's claim.
@@ -149,28 +203,39 @@ pub fn mirror_external_orgs(
             role,
         })
         .collect();
-    let mut existing: Vec<(String, String)> = memberships
+    let slug_field = cfg.slug_field.as_deref();
+    let existing: Vec<LocalOrg> = claim
         .iter()
-        .map(|m| (m.external_id.clone(), m.org_id.clone()))
+        .filter_map(|ext| {
+            let org = orgs.find_by_external_id(field, &ext.id)?;
+            let slug = slug_field.and_then(|f| orgs.field_of(&org.id, f));
+            Some(LocalOrg {
+                external_id: ext.id.clone(),
+                org_id: org.id,
+                name: org.name,
+                slug,
+            })
+        })
         .collect();
-    for ext in claim {
-        if existing.iter().any(|(e, _)| e == &ext.id) {
-            continue;
-        }
-        if let Some(org) = orgs.find_by_external_id(field, &ext.id) {
-            existing.push((ext.id.clone(), org.id));
-        }
-    }
     for step in plan_mirror(cfg, declared_roles, claim, &existing, &memberships) {
         match step {
             MirrorStep::Create { external, role } => {
-                match orgs.create_external(&external.name, field, &external.id, user_id) {
+                let slug = slug_field.zip(external.slug.as_deref().filter(|s| !s.is_empty()));
+                match orgs.create_external(&external.name, field, &external.id, slug, user_id) {
                     Some(org) => {
                         orgs.add_member(&org.id, user_id, role);
                         report.created += 1;
                         report.joined += 1;
                     }
                     None => report.failed += 1,
+                }
+            }
+            MirrorStep::Refresh { org_id, name, slug } => {
+                let slug = slug_field.zip(slug.as_deref());
+                if orgs.update_mirror(&org_id, name.as_deref(), slug) {
+                    report.refreshed += 1;
+                } else {
+                    report.failed += 1;
                 }
             }
             MirrorStep::Join { org_id, role } => {
@@ -191,8 +256,8 @@ pub fn mirror_external_orgs(
     }
     if report != MirrorReport::default() {
         tracing::info!(
-            "[org] federation mirror for user={user_id}: created={} joined={} role_changed={} removed={} failed={}",
-            report.created, report.joined, report.role_changed, report.removed, report.failed
+            "[org] federation mirror for user={user_id}: created={} joined={} role_changed={} removed={} refreshed={} failed={}",
+            report.created, report.joined, report.role_changed, report.removed, report.refreshed, report.failed
         );
     }
     report
@@ -211,6 +276,15 @@ mod tests {
                 .into_iter()
                 .collect(),
             disable_local_create: true,
+            slug_field: None,
+        }
+    }
+    fn local(ext: &str, org: &str) -> LocalOrg {
+        LocalOrg {
+            external_id: ext.into(),
+            org_id: org.into(),
+            name: format!("Org {ext}"),
+            slug: None,
         }
     }
     fn ext(id: &str, role: &str) -> ExternalOrg {
@@ -235,7 +309,7 @@ mod tests {
             &cfg(true),
             &[],
             &[ext("a", "member"), ext("b", "admin"), ext("c", "owner")],
-            &[("b".into(), "org-b".into()), ("c".into(), "org-c".into())],
+            &[local("b", "org-b"), local("c", "org-c")],
             &[mem("org-c", "c", OrgRole::Member)],
         );
         assert_eq!(
@@ -278,10 +352,90 @@ mod tests {
             &cfg(true),
             &[],
             &[ext("a", "member"), ext("a", "member")],
-            &[("a".into(), "org-a".into())],
+            &[local("a", "org-a")],
             &[mem("org-a", "a", OrgRole::Member)],
         );
         assert!(steps.is_empty());
+    }
+
+    #[test]
+    fn a_renamed_org_is_refreshed_before_the_membership_step() {
+        let mut claim = ext("a", "member");
+        claim.name = "Acme Inc".into();
+        let steps = plan_mirror(&cfg(true), &[], &[claim], &[local("a", "org-a")], &[]);
+        assert_eq!(
+            steps,
+            vec![
+                MirrorStep::Refresh {
+                    org_id: "org-a".into(),
+                    name: Some("Acme Inc".into()),
+                    slug: None,
+                },
+                MirrorStep::Join {
+                    org_id: "org-a".into(),
+                    role: OrgRole::Member
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn slugs_mirror_only_with_a_slug_field() {
+        let mut claim = ext("a", "member");
+        claim.slug = Some("acme".into());
+        let member = [mem("org-a", "a", OrgRole::Member)];
+
+        let off = plan_mirror(
+            &cfg(true),
+            &[],
+            &[claim.clone()],
+            &[local("a", "org-a")],
+            &member,
+        );
+        assert!(off.is_empty(), "no slug_field: slug ignored, {off:?}");
+
+        let mut with_slug = cfg(true);
+        with_slug.slug_field = Some("slug".into());
+        let on = plan_mirror(
+            &with_slug,
+            &[],
+            &[claim.clone()],
+            &[local("a", "org-a")],
+            &member,
+        );
+        assert_eq!(
+            on,
+            vec![MirrorStep::Refresh {
+                org_id: "org-a".into(),
+                name: None,
+                slug: Some("acme".into()),
+            }]
+        );
+
+        let mut current = local("a", "org-a");
+        current.slug = Some("acme".into());
+        assert!(plan_mirror(
+            &with_slug,
+            &[],
+            &[claim.clone()],
+            &[current.clone()],
+            &member
+        )
+        .is_empty());
+
+        // A claim without a slug leaves the stored one alone.
+        claim.slug = None;
+        assert!(plan_mirror(&with_slug, &[], &[claim], &[current], &member).is_empty());
+    }
+
+    #[test]
+    fn a_claim_without_a_name_does_not_rename() {
+        let claim = crate::parse_external_orgs(Some(&serde_json::json!([
+            { "id": "a", "role": "member" }
+        ])))
+        .unwrap();
+        let member = [mem("org-a", "a", OrgRole::Member)];
+        assert!(plan_mirror(&cfg(true), &[], &claim, &[local("a", "org-a")], &member).is_empty());
     }
 
     #[test]

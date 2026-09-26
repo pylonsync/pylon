@@ -289,6 +289,11 @@ impl OrgStore {
 
     /// The org's `slug` field, when the entity declares one.
     pub fn slug_of(&self, org_id: &str) -> Option<String> {
+        self.field_of(org_id, "slug")
+    }
+
+    /// A non-empty string field on the org row.
+    pub fn field_of(&self, org_id: &str, field: &str) -> Option<String> {
         if self.is_disabled() {
             return None;
         }
@@ -297,7 +302,7 @@ impl OrgStore {
             .get_by_id(&self.cfg.entity, org_id)
             .ok()
             .flatten()?;
-        row.get("slug")
+        row.get(field)
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(String::from)
@@ -326,23 +331,30 @@ impl OrgStore {
     /// creator is NOT seeded as owner: the membership comes from the
     /// claim, with the claim's role. `createdBy` records who triggered
     /// the mirror (the first federated user to log in).
+    ///
+    /// `slug` is `(slug_field, value)` when the federation config mirrors
+    /// slugs.
     pub fn create_external(
         &self,
         name: &str,
         field: &str,
         external_id: &str,
+        slug: Option<(&str, &str)>,
         creator_id: &str,
     ) -> Option<Org> {
         if self.is_disabled() {
             return None;
         }
         let now = now_secs();
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "name": name,
             field: external_id,
             "createdBy": creator_id,
             "createdAt": now_iso(),
         });
+        if let Some((slug_field, value)) = slug {
+            payload[slug_field] = serde_json::Value::String(value.to_string());
+        }
         let id = match self.store.insert(&self.cfg.entity, &payload) {
             Ok(id) => id,
             Err(e) => {
@@ -428,6 +440,44 @@ impl OrgStore {
                 &serde_json::json!({ "name": name }),
             )
             .unwrap_or(false)
+    }
+
+    /// Write claim metadata onto a federated mirror: its name and, as
+    /// `(slug_field, value)`, its slug. Returns true when the row was
+    /// updated. Fails when the slug is still held by another local org
+    /// (the field is unique); the next login retries.
+    pub fn update_mirror(
+        &self,
+        org_id: &str,
+        name: Option<&str>,
+        slug: Option<(&str, &str)>,
+    ) -> bool {
+        if self.is_disabled() {
+            return false;
+        }
+        let mut patch = serde_json::Map::new();
+        if let Some(name) = name {
+            patch.insert("name".into(), serde_json::Value::String(name.to_string()));
+        }
+        if let Some((slug_field, value)) = slug {
+            patch.insert(
+                slug_field.into(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+        if patch.is_empty() {
+            return false;
+        }
+        match self
+            .store
+            .update(&self.cfg.entity, org_id, &serde_json::Value::Object(patch))
+        {
+            Ok(updated) => updated,
+            Err(e) => {
+                tracing::warn!("[org] federated refresh failed: {} {}", e.code, e.message);
+                false
+            }
+        }
     }
 
     /// Delete an org (and its memberships + pending invites).
@@ -1311,6 +1361,33 @@ mod tests {
         s.add_member(&org.id, "u-bob", OrgRole::Member);
         assert!(s.remove_member(&org.id, "u-bob"));
         assert_eq!(s.role_of(&org.id, "u-bob"), None);
+    }
+
+    #[test]
+    fn a_federated_mirror_carries_and_refreshes_its_slug() {
+        let s = store();
+        let org = s
+            .create_external(
+                "Acme",
+                "externalId",
+                "ext-1",
+                Some(("slug", "acme")),
+                "u-alice",
+            )
+            .unwrap();
+        assert_eq!(s.field_of(&org.id, "slug").as_deref(), Some("acme"));
+        assert_eq!(s.slug_of(&org.id).as_deref(), Some("acme"));
+        // No owner seeded: the membership comes from the claim.
+        assert_eq!(s.role_of(&org.id, "u-alice"), None);
+
+        assert!(s.update_mirror(&org.id, Some("Acme Inc"), Some(("slug", "acme-inc"))));
+        assert_eq!(s.get(&org.id).unwrap().name, "Acme Inc");
+        assert_eq!(s.slug_of(&org.id).as_deref(), Some("acme-inc"));
+
+        assert!(
+            !s.update_mirror(&org.id, None, None),
+            "empty patch is not an update"
+        );
     }
 
     #[test]

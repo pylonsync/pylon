@@ -135,6 +135,7 @@ fn test_manifest() -> AppManifest {
                 // The test creates the IdP-side org through POST /api/auth/orgs,
                 // which the guard would refuse; leave local create enabled.
                 disable_local_create: false,
+                slug_field: None,
             });
             auth
         },
