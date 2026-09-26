@@ -77,11 +77,12 @@ impl EntityWriter {
     }
 
     /// Set `fields` (a JSON object) on row `id` of `entity`, when `fence`
-    /// still holds: on Postgres the check and the write are one
-    /// transaction, with the shard's placement row share-locked, so a
-    /// machine that lost the shard (its lease lapsed, or another machine
-    /// took it) never writes after the one that has it. With no fence (no
-    /// shard directory), or on SQLite (one machine), it is [`Self::update`].
+    /// still holds: the check and the write are one transaction (on
+    /// Postgres with the shard's placement row share-locked, on SQLite with
+    /// the database's write lock from the start), so a run that lost the
+    /// shard (its lease lapsed, or another machine or run took it) never
+    /// writes after the one that has it. With no fence (no shard
+    /// directory), it is [`Self::update`].
     pub fn update_fenced(
         &self,
         entity: &str,
@@ -91,7 +92,96 @@ impl EntityWriter {
     ) -> Result<(), WriteError> {
         match (fence, self.runtime.pg_backend()) {
             (Some(fence), Some(pg)) => self.update_in_fence(pg, entity, id, fields, fence),
-            _ => self.update(entity, id, fields),
+            (Some(fence), None) => self.update_in_sqlite_fence(entity, id, fields, fence),
+            (None, _) => self.update(entity, id, fields),
+        }
+    }
+
+    fn update_in_sqlite_fence(
+        &self,
+        entity: &str,
+        id: &str,
+        fields: &serde_json::Value,
+        fence: Fence<'_>,
+    ) -> Result<(), WriteError> {
+        if self
+            .runtime
+            .manifest()
+            .entities
+            .iter()
+            .all(|e| e.name != entity)
+        {
+            return Err(WriteError::Refused(format!("no entity \"{entity}\"")));
+        }
+        let conn = self
+            .runtime
+            .lock_conn_pub()
+            .map_err(|e| WriteError::Store(format!("{}: {}", e.code, e.message)))?;
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+            WriteError::from(pylon_http::DataError {
+                code: crate::sqlite_write_code(&e, "BEGIN_FAILED").into(),
+                message: format!("Failed to start transaction: {e}"),
+            })
+        })?;
+        let tx_store = crate::datastore::TxStore::new(&self.runtime, &conn);
+        let written = (|| -> Result<(), WriteError> {
+            if !tx_store.check_shard_fence(fence.shard, fence.machine, fence.epoch)? {
+                return Err(WriteError::Refused(format!(
+                    "shard {} is no longer held here under lease {}",
+                    fence.shard, fence.epoch
+                )));
+            }
+            // Plugins run as on the entity API; change events are held
+            // until the commit.
+            let hooked = crate::datastore::HookEnforcingDataStore::new(
+                &tx_store,
+                Arc::clone(&self.plugins.0),
+                pylon_auth::AuthContext::admin(),
+            );
+            if !hooked.update(entity, id, fields)? {
+                return Err(WriteError::Refused("no such row".into()));
+            }
+            Ok(())
+        })();
+        if let Err(e) = written {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(e);
+        }
+        if let Err(e) = conn.execute_batch("COMMIT") {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(WriteError::from(pylon_http::DataError {
+                code: crate::sqlite_write_code(&e, "COMMIT_FAILED").into(),
+                message: format!("Failed to commit: {e}"),
+            }));
+        }
+        let pending = tx_store.take_pending();
+        // The change log and the broadcast take the write connection again.
+        drop(tx_store);
+        drop(conn);
+        self.publish(pending);
+        Ok(())
+    }
+
+    /// Append committed changes to the change log and broadcast them.
+    fn publish(&self, pending: Vec<pylon_sync::ChangeEvent>) {
+        for ev in pending {
+            let stored = self.change_log.append_with_prev(
+                &ev.entity,
+                &ev.row_id,
+                ev.kind.clone(),
+                ev.data.clone(),
+                ev.prev_data.clone(),
+            );
+            pylon_router::broadcast_change_with_crdt(
+                self.notifier.as_ref(),
+                self.runtime.as_ref(),
+                stored.seq,
+                &ev.entity,
+                &ev.row_id,
+                ev.kind.clone(),
+                ev.data.as_ref(),
+                ev.prev_data.as_ref(),
+            );
         }
     }
 
@@ -141,25 +231,7 @@ impl EntityWriter {
                 drop(hooked);
                 Ok(buffered.take_pending())
             })?;
-        for ev in pending {
-            let stored = self.change_log.append_with_prev(
-                &ev.entity,
-                &ev.row_id,
-                ev.kind.clone(),
-                ev.data.clone(),
-                ev.prev_data.clone(),
-            );
-            pylon_router::broadcast_change_with_crdt(
-                self.notifier.as_ref(),
-                self.runtime.as_ref(),
-                stored.seq,
-                &ev.entity,
-                &ev.row_id,
-                ev.kind.clone(),
-                ev.data.as_ref(),
-                ev.prev_data.as_ref(),
-            );
-        }
+        self.publish(pending);
         Ok(())
     }
 
@@ -213,7 +285,7 @@ impl EntityWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shard_cluster::{PgShardDirectory, Placement};
+    use crate::shard_cluster::{Placement, ShardDirectory};
 
     /// A shard's write lands while the shard is held under the fence's
     /// epoch, and is refused once another machine holds it.
@@ -234,7 +306,7 @@ mod tests {
         let plan = adapter.plan_from_live(&manifest).unwrap();
         adapter.apply_plan(&plan).unwrap();
         let rt = Arc::new(Runtime::open_postgres(&url, manifest).unwrap());
-        let dir = PgShardDirectory::open(rt.pg_backend().unwrap().store.shared_pool()).unwrap();
+        let dir = ShardDirectory::open_pg(rt.pg_backend().unwrap().store.shared_pool()).unwrap();
         let run = pylon_cluster::new_instance_id();
         let (shard, a, b) = (
             format!("fence-{run}"),
@@ -346,7 +418,7 @@ mod tests {
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let taker = {
             let (dir, shard, a, b) = (
-                PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+                ShardDirectory::open_pg(Arc::clone(&pool)).unwrap(),
                 shard.clone(),
                 a.clone(),
                 b.clone(),
@@ -396,5 +468,107 @@ mod tests {
         ] {
             assert!(matches!(err(code), WriteError::Refused(_)), "{code}");
         }
+    }
+
+    /// On SQLite: a shard's write lands while the shard is held under the
+    /// fence's epoch, is refused once another run holds it, and a takeover
+    /// waits for a fenced write in progress (the write holds the database's
+    /// write lock from its start).
+    #[test]
+    fn a_fenced_write_on_sqlite_is_refused_once_the_shard_moved() {
+        let file = tempfile::tempdir().unwrap();
+        let path = file.path().join("app.db").to_str().unwrap().to_string();
+        let manifest: pylon_kernel::AppManifest = serde_json::from_str(include_str!(
+            "../../../examples/shard-arena/pylon.manifest.json"
+        ))
+        .unwrap();
+        let rt = Arc::new(Runtime::open(&path, manifest).unwrap());
+        let dir = Arc::new(ShardDirectory::open_sqlite(&path).unwrap());
+        let placement = Placement {
+            shard_id: "fence".into(),
+            kind: "zone".into(),
+            params: serde_json::json!({}),
+            machine_id: "a".into(),
+            pinned: false,
+            failed: None,
+            epoch: 11,
+        };
+        assert_eq!(
+            dir.claim(&placement, 10).unwrap(),
+            crate::shard_cluster::Claim::Claimed
+        );
+        let id = rt
+            .insert(
+                "Character",
+                &serde_json::json!({ "userId": "u", "x": 0, "nextGrant": 0 }),
+            )
+            .unwrap();
+        let writer = EntityWriter::new(
+            Arc::clone(&rt),
+            Arc::new(ChangeLog::new()),
+            Arc::new(pylon_router::NoopNotifier),
+            Arc::new(PolicyEngine::from_manifest(rt.manifest())),
+            Arc::new(pylon_plugin::PluginRegistry::new(rt.manifest().clone())),
+        );
+        fn fence(machine: &str, epoch: i64) -> Fence<'_> {
+            Fence {
+                shard: "fence",
+                machine,
+                epoch,
+            }
+        }
+        let x = |n: i64| serde_json::json!({ "x": n });
+        writer
+            .update_fenced("Character", &id, &x(5), Some(fence("a", 11)))
+            .unwrap();
+        assert_eq!(rt.get_by_id("Character", &id).unwrap().unwrap()["x"], 5);
+        // Another epoch of the same machine: refused.
+        assert!(matches!(
+            writer.update_fenced("Character", &id, &x(6), Some(fence("a", 12))),
+            Err(WriteError::Refused(_))
+        ));
+        // Machine b takes it: a's write is refused, b's lands.
+        assert!(dir.hand_over("fence", "a", 11, "b", 21).unwrap());
+        assert!(matches!(
+            writer.update_fenced("Character", &id, &x(7), Some(fence("a", 11))),
+            Err(WriteError::Refused(_))
+        ));
+        assert_eq!(rt.get_by_id("Character", &id).unwrap().unwrap()["x"], 5);
+        writer
+            .update_fenced("Character", &id, &x(8), Some(fence("b", 21)))
+            .unwrap();
+        assert_eq!(rt.get_by_id("Character", &id).unwrap().unwrap()["x"], 8);
+
+        // b holds the fence in an open write, as update_fenced does; a
+        // hand-over back does not land until that write ends.
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (end_tx, end_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let rt = Arc::clone(&rt);
+            std::thread::spawn(move || {
+                let conn = rt.lock_conn_pub().unwrap();
+                conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+                let store = crate::datastore::TxStore::new(&rt, &conn);
+                assert!(store.check_shard_fence("fence", "b", 21).unwrap());
+                held_tx.send(()).unwrap();
+                end_rx.recv().unwrap();
+                drop(store);
+                conn.execute_batch("COMMIT").unwrap();
+            })
+        };
+        held_rx.recv().unwrap();
+        let taker = {
+            let dir = Arc::clone(&dir);
+            std::thread::spawn(move || dir.hand_over("fence", "b", 21, "a", 31).unwrap())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!taker.is_finished(), "the hand-over waits for the write");
+        end_tx.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(taker.join().unwrap());
+        assert_eq!(
+            dir.placement("fence").unwrap().unwrap().machine_id,
+            "a".to_string()
+        );
     }
 }

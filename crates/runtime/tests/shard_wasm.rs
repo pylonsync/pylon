@@ -1418,19 +1418,19 @@ fn a_transfer_needs_a_player_and_a_target() {
 #[test]
 fn transfers_on_a_cluster_save_both_shards_and_finish_a_row_left_open() {
     let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-    use pylon_runtime::shard_cluster::{MachineConfig, PgShardDirectory, Transfer};
+    use pylon_runtime::shard_cluster::{MachineConfig, ShardDirectory, Transfer};
     let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
         eprintln!("skipping: PYLON_TEST_PG_URL not set");
         return;
     };
     let pool = pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5))
         .expect("test Postgres pool");
-    let check = PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+    let check = ShardDirectory::open_pg(Arc::clone(&pool)).unwrap();
     let host = zone_host();
     let run = format!("{:x}", rand::random::<u32>());
     let machine = format!("tm-{run}");
     host.attach_cluster(
-        PgShardDirectory::open(pool).unwrap(),
+        ShardDirectory::open_pg(pool).unwrap(),
         MachineConfig {
             id: machine.clone(),
             address: None,
@@ -1616,20 +1616,20 @@ fn a_player_arriving_keeps_an_empty_target_from_stopping_as_idle() {
 #[test]
 fn a_move_left_open_by_a_crash_is_finished_when_the_source_starts_elsewhere() {
     let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
-    use pylon_runtime::shard_cluster::{MachineConfig, PgShardDirectory, Transfer};
+    use pylon_runtime::shard_cluster::{MachineConfig, ShardDirectory, Transfer};
     let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
         eprintln!("skipping: PYLON_TEST_PG_URL not set");
         return;
     };
     let pool = pylon_storage::pg_datastore::PgPool::connect(&url, 6, Duration::from_secs(5))
         .expect("test Postgres pool");
-    let check = PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+    let check = ShardDirectory::open_pg(Arc::clone(&pool)).unwrap();
     let run = format!("{:x}", rand::random::<u32>());
     let (m1, m2) = (format!("m1-{run}"), format!("m2-{run}"));
     let (h1, h2) = (zone_host(), zone_host());
     for (host, id) in [(&h1, &m1), (&h2, &m2)] {
         host.attach_cluster(
-            PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+            ShardDirectory::open_pg(Arc::clone(&pool)).unwrap(),
             MachineConfig {
                 id: id.clone(),
                 address: None,
@@ -1924,7 +1924,7 @@ fn read_signed_op(mut conn: std::net::TcpStream, me: &str) -> Option<String> {
 /// (the signed Deliver call) reaches the shard it names.
 #[test]
 fn a_dead_machine_does_not_hold_up_messages_and_deliver_reaches_a_shard() {
-    use pylon_runtime::shard_cluster::{MachineConfig, PgShardDirectory, RemoteOp, RemoteReply};
+    use pylon_runtime::shard_cluster::{MachineConfig, RemoteOp, RemoteReply, ShardDirectory};
     let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
     let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
         eprintln!("skipping: PYLON_TEST_PG_URL not set");
@@ -1936,7 +1936,7 @@ fn a_dead_machine_does_not_hold_up_messages_and_deliver_reaches_a_shard() {
     let machine = format!("mm-{run}");
     let host = zone_host();
     host.attach_cluster(
-        PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+        ShardDirectory::open_pg(Arc::clone(&pool)).unwrap(),
         MachineConfig {
             id: machine.clone(),
             address: None,

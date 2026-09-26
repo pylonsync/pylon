@@ -36,8 +36,8 @@ use pylon_realtime::{
 use serde::{Deserialize, Serialize};
 
 use crate::shard_cluster::{
-    self, choose, home, Claim, Machine, MachineConfig, PgShardDirectory, Placement, RemoteOp,
-    RemoteReply,
+    self, choose, home, Claim, Machine, MachineConfig, Placement, RemoteOp, RemoteReply,
+    ShardDirectory,
 };
 
 mod data;
@@ -1648,7 +1648,7 @@ pub struct WasmShardHost {
 type FlushHook = Box<dyn Fn(usize) + Send>;
 
 struct ClusterState {
-    dir: PgShardDirectory,
+    dir: ShardDirectory,
     me: MachineConfig,
     save_every: Duration,
     /// This machine's lease on the directory.
@@ -1686,6 +1686,9 @@ struct Lease {
     until: Option<Instant>,
     /// Shutting down: no shard starts here again.
     closed: bool,
+    /// How long a lease runs after the heartbeat that renewed it was sent
+    /// (the directory's [`shard_cluster::Timing::fence_after`]).
+    fence_after: Duration,
 }
 
 /// A shard starts only when the lease has at least this long left.
@@ -1730,7 +1733,7 @@ impl Lease {
     /// run out. Only the fence moves past an expired lease (a new epoch), so
     /// a shard stopped by the lapse is never taken for one that ended.
     fn renew(&mut self, epoch: i64, sent: Instant, now: Instant) -> Option<Instant> {
-        let until = LeaseClock::floor(sent + shard_cluster::FENCE_AFTER);
+        let until = LeaseClock::floor(sent + self.fence_after);
         let expired = self.until.is_some_and(|u| u <= now);
         if self.epoch != epoch || until <= now || expired {
             return None;
@@ -2497,13 +2500,15 @@ impl WasmShardHost {
 
     // -- Several machines ------------------------------------------------
 
-    /// Run shards on several machines through the directory in Postgres.
-    /// Starts three threads: one renews this machine's lease, one stops
+    /// Run shards through the shard directory: on several machines in
+    /// Postgres, or on this one in the app's SQLite file. Starts three
+    /// threads: one renews this machine's lease, one stops
     /// every shard when the lease lapses, and one saves shard state, stops
     /// shards no longer placed here, and starts orphaned shards (their
     /// machine died, left, restarted, or lost its lease) whose new home is
     /// this machine.
-    pub fn attach_cluster(self: &Arc<Self>, dir: PgShardDirectory, me: MachineConfig) {
+    pub fn attach_cluster(self: &Arc<Self>, dir: ShardDirectory, me: MachineConfig) {
+        let timing = dir.timing();
         let save_every = std::env::var("PYLON_SHARD_SAVE_SECS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
@@ -2530,6 +2535,7 @@ impl WasmShardHost {
                     epoch: shard_cluster::new_epoch(),
                     until: None,
                     closed: false,
+                    fence_after: timing.fence_after,
                 }),
                 clock: Arc::clone(&clock),
                 save_lock: Mutex::new(()),
@@ -2560,7 +2566,7 @@ impl WasmShardHost {
                     }
                     _ => return,
                 }
-                std::thread::sleep(shard_cluster::HEARTBEAT);
+                std::thread::sleep(timing.heartbeat);
             });
         let fence: Weak<Self> = Arc::downgrade(self);
         let _ = std::thread::Builder::new()
@@ -2628,7 +2634,7 @@ impl WasmShardHost {
                         "[shards] machine id {} is held by another live process; waiting until it \
                          leaves or is silent for {:?}",
                         c.me.id,
-                        shard_cluster::DEAD_AFTER
+                        c.dir.timing().dead_after
                     );
                 }
             }
@@ -3482,8 +3488,8 @@ mod lease_tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let pool = PgPool::connect(&url, 4, Duration::from_secs(5)).expect("test Postgres pool");
-        let dir = PgShardDirectory::open(Arc::clone(&pool)).expect("directory");
-        let check = PgShardDirectory::open(pool).expect("directory");
+        let dir = ShardDirectory::open_pg(Arc::clone(&pool)).expect("directory");
+        let check = ShardDirectory::open_pg(pool).expect("directory");
         let kind = WasmShardKind::compile(
             "arena",
             include_bytes!("../../../examples/shard-arena/shards/arena.wasm"),
@@ -3581,6 +3587,7 @@ mod lease_tests {
             epoch: 7,
             until,
             closed: false,
+            fence_after: shard_cluster::FENCE_AFTER,
         }
     }
 

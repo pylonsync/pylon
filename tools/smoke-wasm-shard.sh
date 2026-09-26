@@ -56,8 +56,8 @@ serve() {
 	local dir="$1" target="$2" log="$3"
 	(cd "$dir" && PYLON_DB_PATH="$TMP/$log.db" PYLON_CORS_ORIGIN="http://localhost:$PORT" \
 		PYLON_ADMIN_TOKEN="$ADMIN_TOKEN" \
-		PYLON_SHARD_WS_MAX_PER_IP=0 \
-		exec "$PYLON" start "$target" --port "$PORT") >"$TMP/$log.log" 2>&1 &
+		PYLON_SHARD_WS_MAX_PER_IP=0 PYLON_SHARD_SAVE_SECS=1 \
+		exec "$PYLON" start "$target" --port "$PORT") >>"$TMP/$log.log" 2>&1 &
 	SERVER_PID=$!
 	for _ in $(seq 1 120); do
 		if curl -sf "http://localhost:$PORT/health" >/dev/null; then
@@ -120,6 +120,26 @@ if (r.decode_errors !== 0) fail(`${r.decode_errors} frames did not decode`);
 if (!(r.tick_rate_hz.p50 > 15)) fail(`bots saw ${r.tick_rate_hz.p50} Hz`);
 console.log(`  50 bots: ${r.tick_rate_hz.p50} Hz, ack p99 ${r.ack_latency_ms.p99} ms`);
 ' "$TMP/bench.json"
+
+echo "→ restart on SQLite: a zone's state survives a graceful stop and a crash"
+restart_e2e() {
+	(cd "$ROOT/packages/realtime" && PYLON_SHARD_RESTART_E2E="localhost:$PORT" \
+		PYLON_SHARD_ADMIN_TOKEN="$ADMIN_TOKEN" PYLON_SHARD_RESTART_FILE="$TMP/restart.json" \
+		PYLON_SHARD_RESTART_STEP="$1" PYLON_SHARD_RESTART_HP="$2" \
+		bun test src/shard-restart.e2e.test.ts)
+}
+restart_e2e heal 107
+# SIGTERM: the server saves its shards as it stops.
+stop
+serve "$APP" app.ts source
+restart_e2e check 107
+restart_e2e heal 114
+# A periodic save (every second here), then a crash: no save at the end.
+sleep 3
+kill -9 "$SERVER_PID"
+wait "$SERVER_PID" 2>/dev/null || true
+serve "$APP" app.ts source
+restart_e2e check 114
 stop
 
 echo "→ pylon build"

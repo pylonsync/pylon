@@ -2243,14 +2243,27 @@ fn start_server(
         jobs_in_memory,
         cluster_required,
     )?;
-    // Shards across machines: on Postgres, the WebAssembly shard host joins
-    // the shard directory (see shard_cluster). PYLON_SHARD_DIRECTORY=off
-    // keeps every shard on the machine that created it.
-    if let (Some(host), Some(pg)) = (&wasm_shards, runtime.pg_data_store_pub()) {
+    // The WebAssembly shard host joins the shard directory (see
+    // shard_cluster): on Postgres, shared by every machine; on a SQLite
+    // file, this process's own, so shard state survives a restart. An
+    // in-memory database keeps nothing across a restart, shards included,
+    // and has no directory. PYLON_SHARD_DIRECTORY=off runs shards with no
+    // directory.
+    if let Some(host) = &wasm_shards {
         let off = std::env::var("PYLON_SHARD_DIRECTORY").is_ok_and(|v| v.trim() == "off");
-        if !off {
-            let dir = crate::shard_cluster::PgShardDirectory::open(pg.shared_pool())
-                .map_err(|e| format!("Failed to open the shard directory: {e}"))?;
+        let dir = if off {
+            None
+        } else if let Some(pg) = runtime.pg_data_store_pub() {
+            Some(crate::shard_cluster::ShardDirectory::open_pg(
+                pg.shared_pool(),
+            ))
+        } else {
+            runtime
+                .db_path()
+                .map(|path| crate::shard_cluster::ShardDirectory::open_sqlite(&path))
+        };
+        if let Some(dir) = dir {
+            let dir = dir.map_err(|e| format!("Failed to open the shard directory: {e}"))?;
             host.attach_cluster(dir, crate::shard_cluster::MachineConfig::from_env(port));
         }
     }

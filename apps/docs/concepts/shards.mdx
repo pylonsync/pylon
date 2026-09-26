@@ -647,11 +647,11 @@ After each tick the host takes the module's `writes`. It keeps the latest
 value of each field of each row, whichever shard wrote it, and writes them
 every 2 s (`PYLON_SHARD_WRITE_EVERY_MS`, at least 100) and when the shard
 stops. Each field keeps the shard that wrote it and the lease that shard
-ran under. On Postgres a flush checks, in the write's own transaction and
-with the shard's place in the directory locked, that this machine still
-holds the shard under that lease: a copy that lost its place (its
-machine's lease lapsed, or another machine runs it now) writes nothing
-more, even a write already on its way. A write goes
+ran under. A flush checks, in the write's own transaction and with the
+shard's place in the directory locked (on SQLite, with the database's write
+lock held), that this machine still holds the shard under that lease: a
+copy that lost its place (its machine's lease lapsed, or another machine
+runs it now) writes nothing more, even a write already on its way. A write goes
 through the same path as `PATCH /api/entities/<entity>/<id>` with admin
 rights: plugins run, and synced clients see the change.
 
@@ -790,8 +790,14 @@ subscriber, or stop the shard. The same actions are HTTP routes, admin-only:
 
 ## Shards across machines
 
-An app on Postgres can run on several machines. Each machine joins a shard
-directory in the database, and shards spread across them:
+Every app with a database file or Postgres has a shard directory in its
+database: where each shard runs, its saved state, and players moving
+between shards. On SQLite the app runs on one machine; the directory makes
+shard state survive a restart and a deploy (see
+[Limits and failures](#limits-and-failures)).
+
+An app on Postgres can run on several machines. Each machine joins the
+directory, and shards spread across them:
 
 - **Placement.** `ctx.shards.create` runs the shard on the live machine with
   the most free capacity (`PYLON_SHARD_CAPACITY` shards a machine, default
@@ -861,7 +867,13 @@ The machines sign their calls to each other, and shard tickets, with a key
 kept in the directory: there is no secret to share. A
 `PYLON_SHARD_TICKET_SECRET` you set still signs tickets.
 
-An app on SQLite runs on one machine, and the directory is off.
+An app on SQLite runs on one machine. One process at a time runs a SQLite
+file's shards: it holds the lock file `<database>.shards.lock` while it
+runs, and a second `pylon start` on the same file waits 10 seconds for it,
+then does not start. When the process exits or crashes, the next one takes
+the lock and starts the shards from their saved state at once. An app on an
+in-memory database keeps no state across a restart, shards included, and
+has no directory.
 
 ### Deploys
 
@@ -887,7 +899,8 @@ starts from `init` on the other machine, and its clients reconnect to it.
 
 A shard the machine cannot hand over within `PYLON_SHARD_DRAIN_SECS` (no
 other live machine, or none takes it) is saved and starts on another machine
-once this one leaves. Give the platform time to wait: Fly kills a machine
+once this one leaves. On one machine (every SQLite app), the next process
+starts it from that save; its clients reconnect after the gap. Give the platform time to wait: Fly kills a machine
 5 seconds after SIGTERM unless `kill_timeout` (fly.toml) or the machine's
 `stop_config` says otherwise. Stack0 Cloud sets 45 seconds.
 
@@ -901,8 +914,12 @@ once this one leaves. Give the platform time to wait: Fly kills a machine
 - A module may import only `pylon.log`. The server refuses a module built for
   WASI or with any other import, and the boot fails.
 - A shard's state is in memory. A module that implements `save` and
-  `restore`, on an app with the directory (Postgres), starts again from its
-  last save after a restart or a deploy. Otherwise a restart ends the shard.
+  `restore` starts again from its last save after a restart, a deploy, or a
+  crash (saves run every 5 seconds, `PYLON_SHARD_SAVE_SECS`, and when a
+  machine stops), on SQLite and on Postgres. A player moving between shards
+  when the machine crashed ends up in exactly one of them. A module with no
+  `save`, or an app with no directory (an in-memory database, or
+  `PYLON_SHARD_DIRECTORY=off`), loses the shard at a restart.
 
 ## Hosted on Stack0 Cloud
 
@@ -913,4 +930,5 @@ once this one leaves. Give the platform time to wait: Fly kills a machine
 - A machine with autostop on can stop when no client is connected. Its
   shards end, like on any restart.
 - A machine gets 45 seconds to stop, so a deploy saves its shards (and, on
-  an app with several machines, hands them over) before it exits.
+  an app with several machines, hands them over) before it exits. On one
+  machine, the new one starts them from that save.

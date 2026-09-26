@@ -3207,6 +3207,7 @@ name = "pylon-runtime"
 version = "0.18.0"
 dependencies = [
  "base64",
+ "bytes",
  "fast_image_resize",
  "futures-util",
  "hmac 0.12.1",

@@ -1340,52 +1340,14 @@ mod tests {
     /// write is lost between the shard leaving `owned` and its pause).
     #[test]
     fn shutdown_writes_every_tick_of_every_zone() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
+        let (rt, fns) = (Arc::clone(&app.rt), Arc::clone(&app.fns));
         let run = pylon_cluster::new_instance_id();
         // A kind of its own (the cluster-wide limit counts only this run),
         // and its placements gone when the test ends.
         let kind = format!("zone-{run}");
-        let host = WasmShardHost::new(vec![WasmShardKind::compile(
-            &kind,
-            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
-            ShardConfig::default(),
-            WasmLimits::default(),
-        )
-        .unwrap()]);
-        struct Forget(Arc<pylon_storage::pg_datastore::PgPool>, String);
-        impl Drop for Forget {
-            fn drop(&mut self) {
-                let _ = self.0.with_client(|c| {
-                    c.execute(
-                        "DELETE FROM _pylon_shard_placements WHERE kind = $1",
-                        &[&self.1],
-                    )
-                });
-            }
-        }
-        let _forget = Forget(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
-        host.attach_cluster(
-            crate::shard_cluster::PgShardDirectory::open(pool).unwrap(),
-            crate::shard_cluster::MachineConfig {
-                id: me.clone(),
-                address: None,
-                capacity: 10,
-                fly_instance: None,
-            },
-        );
-        let weak: Weak<dyn pylon_router::FnOps> =
-            Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
-        host.attach_data(Some(weak), writer(&rt));
+        let host = cluster_host(&app, &kind, &me);
         let zones: Vec<(String, String, String)> = (0..12)
             .map(|i| {
                 let user = format!("u{i}");
@@ -1467,50 +1429,12 @@ mod tests {
     /// first 2 s, before the periodic flush.
     #[test]
     fn a_shard_the_sweep_ends_writes_its_last_fields() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
+        let (rt, fns) = (Arc::clone(&app.rt), Arc::clone(&app.fns));
         let run = pylon_cluster::new_instance_id();
         let kind = format!("idle-{run}");
-        struct Forget(Arc<pylon_storage::pg_datastore::PgPool>, String);
-        impl Drop for Forget {
-            fn drop(&mut self) {
-                let _ = self.0.with_client(|c| {
-                    c.execute(
-                        "DELETE FROM _pylon_shard_placements WHERE kind = $1",
-                        &[&self.1],
-                    )
-                });
-            }
-        }
-        let _forget = Forget(Arc::clone(&pool), kind.clone());
-        let host = WasmShardHost::new(vec![WasmShardKind::compile(
-            &kind,
-            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
-            ShardConfig::default(),
-            WasmLimits::default(),
-        )
-        .unwrap()]);
         let me = format!("m-{run}");
-        host.attach_cluster(
-            crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
-            crate::shard_cluster::MachineConfig {
-                id: me.clone(),
-                address: None,
-                capacity: 10,
-                fly_instance: None,
-            },
-        );
-        let weak: Weak<dyn pylon_router::FnOps> =
-            Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
-        host.attach_data(Some(weak), writer(&rt));
+        let host = cluster_host(&app, &kind, &me);
         let zone = format!("idle-{run}");
         let deadline = Instant::now() + Duration::from_secs(10);
         while host
@@ -1534,7 +1458,7 @@ mod tests {
         // An adoption while the id is reserved fails without marking the
         // placement failed (a lease lapse can send one there).
         {
-            let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+            let dir = dir(&host);
             let placed = dir.placement(&zone).unwrap().unwrap();
             host.ending.lock().unwrap().insert(zone.clone());
             assert!(host.adopt(&placed, placed.epoch).is_err());
@@ -1546,8 +1470,10 @@ mod tests {
         // it go after.
         assert!(host.ending.lock().unwrap().is_empty());
         assert!(host.registry.get(&zone).is_none());
-        let dir = crate::shard_cluster::PgShardDirectory::open(pool).unwrap();
-        assert!(dir.placement(&zone).unwrap().is_none(), "not released");
+        assert!(
+            dir(&host).placement(&zone).unwrap().is_none(),
+            "not released"
+        );
         assert_eq!(
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             33
@@ -1568,38 +1494,12 @@ mod tests {
     /// is released.
     #[test]
     fn shutdown_releases_a_shard_that_ended() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
+        let (rt, fns) = (Arc::clone(&app.rt), Arc::clone(&app.fns));
         let run = pylon_cluster::new_instance_id();
         let kind = format!("ended-{run}");
-        let host = WasmShardHost::new(vec![WasmShardKind::compile(
-            &kind,
-            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
-            ShardConfig::default(),
-            WasmLimits::default(),
-        )
-        .unwrap()]);
         let me = format!("m-{run}");
-        host.attach_cluster(
-            crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
-            crate::shard_cluster::MachineConfig {
-                id: me.clone(),
-                address: None,
-                capacity: 10,
-                fly_instance: None,
-            },
-        );
-        let weak: Weak<dyn pylon_router::FnOps> =
-            Arc::downgrade(&(Arc::clone(&fns) as Arc<dyn pylon_router::FnOps>));
-        host.attach_data(Some(weak), writer(&rt));
+        let host = cluster_host(&app, &kind, &me);
         host.manual_flush();
         let zone = format!("ended-{run}");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1621,8 +1521,7 @@ mod tests {
         // It ends (as an idle stop does); shutdown comes before the sweep.
         host.registry.get(&zone).unwrap().stop();
         // The first two tries fail; the last writes still go out, all while
-        // the placement is ours (the in-memory store does not check the
-        // fence, so the test does): each flush that takes the field notes
+        // the placement is ours: each flush that takes the field notes
         // whether the placement was there.
         host.flush_failures
             .store(2, std::sync::atomic::Ordering::Release);
@@ -1650,36 +1549,57 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Acquire),
             0
         );
-        let dir = crate::shard_cluster::PgShardDirectory::open(pool).unwrap();
-        assert_eq!(dir.placement(&zone).unwrap(), None);
+        assert_eq!(dir(&host).placement(&zone).unwrap(), None);
         assert_eq!(
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             44
         );
     }
 
-    /// Deletes a test kind's placements when the test ends.
-    struct ForgetKind(Arc<pylon_storage::pg_datastore::PgPool>, String);
+    /// The example app in a SQLite file, with user p1's character: the
+    /// shard directory is in the same file, as a server on SQLite has it.
+    struct App {
+        path: String,
+        rt: Arc<crate::Runtime>,
+        fns: Arc<Fns>,
+        _file: tempfile::TempDir,
+    }
 
-    impl Drop for ForgetKind {
-        fn drop(&mut self) {
-            let _ = self.0.with_client(|c| {
-                c.execute(
-                    "DELETE FROM _pylon_shard_placements WHERE kind = $1",
-                    &[&self.1],
+    impl App {
+        fn new() -> Self {
+            let file = tempfile::tempdir().expect("temp dir");
+            let path = file.path().join("app.db").to_str().unwrap().to_string();
+            let manifest: pylon_kernel::AppManifest = serde_json::from_str(include_str!(
+                "../../../../examples/shard-arena/pylon.manifest.json"
+            ))
+            .unwrap();
+            let rt = Arc::new(crate::Runtime::open(&path, manifest).unwrap());
+            let character = rt
+                .insert(
+                    "Character",
+                    &serde_json::json!({ "userId": "p1", "x": 0, "nextGrant": 3 }),
                 )
+                .unwrap();
+            let fns = Arc::new(Fns {
+                character,
+                ..Default::default()
             });
+            Self {
+                path,
+                rt,
+                fns,
+                _file: file,
+            }
         }
     }
 
-    /// A zone host in a cluster of one machine, `me`, with its lease.
-    fn cluster_host(
-        pool: &Arc<pylon_storage::pg_datastore::PgPool>,
-        rt: &Arc<crate::Runtime>,
-        fns: &Arc<Fns>,
-        kind: &str,
-        me: &str,
-    ) -> Arc<WasmShardHost> {
+    /// The host's shard directory.
+    fn dir(host: &WasmShardHost) -> &crate::shard_cluster::ShardDirectory {
+        &host.cluster.get().expect("in the directory").dir
+    }
+
+    /// A zone host in the app's directory as machine `me`, with its lease.
+    fn cluster_host(app: &App, kind: &str, me: &str) -> Arc<WasmShardHost> {
         let host = WasmShardHost::new(vec![WasmShardKind::compile(
             kind,
             include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
@@ -1688,7 +1608,7 @@ mod tests {
         )
         .unwrap()]);
         host.attach_cluster(
-            crate::shard_cluster::PgShardDirectory::open(Arc::clone(pool)).unwrap(),
+            crate::shard_cluster::ShardDirectory::open_sqlite(&app.path).unwrap(),
             crate::shard_cluster::MachineConfig {
                 id: me.to_string(),
                 address: None,
@@ -1697,8 +1617,8 @@ mod tests {
             },
         );
         let weak: Weak<dyn pylon_router::FnOps> =
-            Arc::downgrade(&(Arc::clone(fns) as Arc<dyn pylon_router::FnOps>));
-        host.attach_data(Some(weak), writer(rt));
+            Arc::downgrade(&(Arc::clone(&app.fns) as Arc<dyn pylon_router::FnOps>));
+        host.attach_data(Some(weak), writer(&app.rt));
         let deadline = Instant::now() + Duration::from_secs(10);
         while host.cluster.get().unwrap().current_epoch().is_none() {
             assert!(Instant::now() < deadline, "no lease");
@@ -1712,21 +1632,12 @@ mod tests {
     /// that takes it over, and its buffered writes are dropped.
     #[test]
     fn shutdown_keeps_a_shard_whose_lease_lapsed() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
+        let (rt, fns) = (Arc::clone(&app.rt), Arc::clone(&app.fns));
         let run = pylon_cluster::new_instance_id();
         let kind = format!("lapsed-{run}");
-        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
-        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        let host = cluster_host(&app, &kind, &me);
         host.manual_flush();
         let zone = format!("lapsed-{run}");
         host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
@@ -1746,8 +1657,10 @@ mod tests {
         });
         shard.stop();
         host.stop_all();
-        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
-        let placed = dir.placement(&zone).unwrap().expect("the placement stays");
+        let placed = dir(&host)
+            .placement(&zone)
+            .unwrap()
+            .expect("the placement stays");
         assert_eq!(placed.machine_id, me);
         assert_eq!(
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
@@ -1760,21 +1673,12 @@ mod tests {
     /// finds it, and a later flush must not write them.
     #[test]
     fn the_sweep_drops_the_writes_of_a_shard_whose_lease_lapsed() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
+        let (rt, fns) = (Arc::clone(&app.rt), Arc::clone(&app.fns));
         let run = pylon_cluster::new_instance_id();
         let kind = format!("swept-{run}");
-        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
-        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        let host = cluster_host(&app, &kind, &me);
         host.manual_flush();
         let zone = format!("swept-{run}");
         host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
@@ -1796,8 +1700,7 @@ mod tests {
         assert!(host.registry.get(&zone).is_none());
         assert_eq!(host.dirty_rows(&zone), 0);
         host.stop_all();
-        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
-        assert_eq!(dir.placement(&zone).unwrap().unwrap().machine_id, me);
+        assert_eq!(dir(&host).placement(&zone).unwrap().unwrap().machine_id, me);
         assert_eq!(
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             0
@@ -1809,21 +1712,12 @@ mod tests {
     /// flush takes what is left.
     #[test]
     fn a_stop_retries_the_last_writes() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
+        let (rt, fns) = (Arc::clone(&app.rt), Arc::clone(&app.fns));
         let run = pylon_cluster::new_instance_id();
         let kind = format!("stopped-{run}");
-        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
-        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        let host = cluster_host(&app, &kind, &me);
         host.manual_flush();
         let zone = format!("stopped-{run}");
         host.create_on(&kind, &zone, &serde_json::json!({}), Some(&me))
@@ -1885,8 +1779,7 @@ mod tests {
             rt.get_by_id("Character", &fns.character).unwrap().unwrap()["x"],
             99
         );
-        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
-        assert_eq!(dir.placement(&zone).unwrap(), None);
+        assert_eq!(dir(&host).placement(&zone).unwrap(), None);
         host.stop_all();
     }
 
@@ -1896,23 +1789,13 @@ mod tests {
     /// machine it cannot reach.
     #[test]
     fn stop_acts_only_where_it_may() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
         let run = pylon_cluster::new_instance_id();
         let kind = format!("stops-{run}");
-        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
-        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        let host = cluster_host(&app, &kind, &me);
         host.manual_flush();
-        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+        let dir = dir(&host);
         let placed = |id: &str| dir.placement(id).unwrap().map(|p| p.machine_id);
 
         // The sweep's gap: the shard is out of the registry and its id not
@@ -1994,13 +1877,13 @@ mod tests {
             fly_instance: None,
         };
         assert!(dir.heartbeat(&unreachable, 5).unwrap());
-        struct Leave<'a>(&'a crate::shard_cluster::PgShardDirectory, String);
+        struct Leave<'a>(&'a crate::shard_cluster::ShardDirectory, String);
         impl Drop for Leave<'_> {
             fn drop(&mut self) {
                 let _ = self.0.leave(&self.1, 5);
             }
         }
-        let _leave = Leave(&dir, unreachable.id.clone());
+        let _leave = Leave(dir, unreachable.id.clone());
         let there = format!("there-{run}");
         place(&there, &unreachable.id, 5);
         assert!(!host.stop(&there));
@@ -2013,31 +1896,21 @@ mod tests {
     /// placement of the id here.
     #[test]
     fn an_ending_id_is_not_placed_here() {
-        let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
-            eprintln!("skipping: PYLON_TEST_PG_URL not set");
-            return;
-        };
-        let _serial = crate::shard_cluster::tests::DIRECTORY_TESTS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let (rt, fns) = runtime();
-        let pool =
-            pylon_storage::pg_datastore::PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
+        let app = App::new();
         let run = pylon_cluster::new_instance_id();
         let kind = format!("reserved-{run}");
-        let _forget = ForgetKind(Arc::clone(&pool), kind.clone());
         let me = format!("m-{run}");
         let other = format!("gone-{run}");
         let handed = format!("handed-{run}");
         let orphan = format!("orphan-{run}");
-        let host = cluster_host(&pool, &rt, &fns, &kind, &me);
+        let host = cluster_host(&app, &kind, &me);
         // Reserved before the placements exist, so the background round
         // never sees them unreserved.
         host.ending
             .lock()
             .unwrap()
             .extend([handed.clone(), orphan.clone()]);
-        let dir = crate::shard_cluster::PgShardDirectory::open(Arc::clone(&pool)).unwrap();
+        let dir = dir(&host);
         for id in [&handed, &orphan] {
             let p = crate::shard_cluster::Placement {
                 shard_id: id.clone(),

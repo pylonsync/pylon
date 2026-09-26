@@ -27,7 +27,7 @@
 //! map entry a step removes must name the same run, so a slow call never
 //! touches the run that replaced its shard.
 //!
-//! After a step fails, the row is read with [`PgShardDirectory::confirm_status`],
+//! After a step fails, the row is read with [`ShardDirectory::confirm_status`],
 //! which waits out a transaction still in flight, so a commit whose reply
 //! was lost is counted. When the directory cannot answer, the step is
 //! "unsettled": the shard keeps what it has, and each round settles it from
@@ -37,14 +37,14 @@
 //! `out` in its first round, with the hand-offs in place before it starts;
 //! a row whose source was stopped is finished by the target's machine.
 //!
-//! [`PgShardDirectory::confirm_status`]: crate::shard_cluster::PgShardDirectory::confirm_status
+//! [`ShardDirectory::confirm_status`]: crate::shard_cluster::ShardDirectory::confirm_status
 
 use std::sync::Arc;
 
 use pylon_realtime::{Shard, ShardAuth, SubscriberId};
 
 use super::{validate_shard_id, WasmShardHost, WasmSim};
-use crate::shard_cluster::{self, PgShardDirectory, RemoteOp, RemoteReply, Settle, Transfer};
+use crate::shard_cluster::{self, RemoteOp, RemoteReply, Settle, ShardDirectory, Transfer};
 
 /// A `out` row this old is finished by the source's (or, when the source
 /// was stopped, the target's) machine.
@@ -124,7 +124,7 @@ pub(super) struct ResumePlan {
 
 /// What the row says once nothing is in flight on it: its status, `None`
 /// when it has none, or `Err` when the directory cannot say.
-fn confirm(dir: &PgShardDirectory, id: &str) -> Result<Option<String>, String> {
+fn confirm(dir: &ShardDirectory, id: &str) -> Result<Option<String>, String> {
     let mut last = String::new();
     for attempt in 0..3 {
         if attempt > 0 {
@@ -1442,7 +1442,7 @@ fn back_auth(t: &Transfer) -> ShardAuth {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shard_cluster::{MachineConfig, PgShardDirectory};
+    use crate::shard_cluster::{MachineConfig, ShardDirectory};
     use crate::shard_wasm::{WasmLimits, WasmShardKind};
     use pylon_realtime::{
         FrameKind, OutboundQueue, RawInput, ShardConfig, ShardError, SnapshotFormat,
@@ -1517,7 +1517,7 @@ mod tests {
         let run = pylon_cluster::new_instance_id();
         let me = format!("u-{run}");
         host.attach_cluster(
-            PgShardDirectory::open(Arc::clone(&pool)).unwrap(),
+            ShardDirectory::open_pg(Arc::clone(&pool)).unwrap(),
             MachineConfig {
                 id: me.clone(),
                 address: None,
@@ -1874,7 +1874,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let pool = PgPool::connect(&url, 4, Duration::from_secs(5)).unwrap();
-        let dir = Arc::new(PgShardDirectory::open(Arc::clone(&pool)).unwrap());
+        let dir = Arc::new(ShardDirectory::open_pg(Arc::clone(&pool)).unwrap());
         let run = pylon_cluster::new_instance_id();
         let id = format!("c-{run}");
 
@@ -1974,7 +1974,7 @@ mod tests {
         // Rows out of `a`, 20 s old and 31 minutes old.
         let row = |id: &str, sid: &str, to: &str, age_ms: i64, hp: i64| {
             c.dir
-                .pool_for_tests()
+                .db_for_tests().pg_pool().unwrap()
                 .with_client_once(|cl| {
                     cl.execute(
                         "INSERT INTO _pylon_shard_transfers
@@ -2015,7 +2015,7 @@ mod tests {
 
         // Refused for 30 minutes: abandoned, with its state.
         c.dir
-            .pool_for_tests()
+            .db_for_tests().pg_pool().unwrap()
             .with_client_once(|cl| {
                 cl.execute(
                     "UPDATE _pylon_shard_transfers
@@ -2035,7 +2035,7 @@ mod tests {
         // five-minute pass abandons it.
         let lost = format!("lost-{run}");
         c.dir
-            .pool_for_tests()
+            .db_for_tests().pg_pool().unwrap()
             .with_client_once(|cl| {
                 cl.execute(
                     "INSERT INTO _pylon_shard_transfers
@@ -2096,7 +2096,7 @@ mod tests {
         // the arena refuses its own player back.
         let id = format!("both-{run}");
         c.dir
-            .pool_for_tests()
+            .db_for_tests().pg_pool().unwrap()
             .with_client_once(|cl| {
                 cl.execute(
                     "INSERT INTO _pylon_shard_transfers
@@ -2179,7 +2179,7 @@ mod tests {
         host.stranded.lock().unwrap().clear();
         let refused = format!("refused-{run}");
         c.dir
-            .pool_for_tests()
+            .db_for_tests().pg_pool().unwrap()
             .with_client_once(|cl| {
                 cl.execute(
                     "INSERT INTO _pylon_shard_transfers
@@ -2207,5 +2207,141 @@ mod tests {
         assert!(!has(&host, &a, "p2"));
 
         host.stop_all();
+    }
+
+    /// A zone host whose directory is in the SQLite file at `path`, as
+    /// machine `me`, with its lease.
+    fn sqlite_host(path: &str, me: &str) -> Arc<WasmShardHost> {
+        let kind = WasmShardKind::compile(
+            "zone",
+            include_bytes!("../../../../examples/shard-arena/shards/zone.wasm"),
+            ShardConfig::default(),
+            WasmLimits::default(),
+        )
+        .unwrap();
+        let host = WasmShardHost::new(vec![kind]);
+        host.attach_cluster(
+            ShardDirectory::open_sqlite(path).unwrap(),
+            MachineConfig {
+                id: me.into(),
+                address: None,
+                capacity: 10,
+                fly_instance: None,
+            },
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while host.cluster.get().unwrap().current_epoch().is_none() {
+            assert!(Instant::now() < deadline, "no lease");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        host
+    }
+
+    /// The example app's database in a SQLite file.
+    fn sqlite_app(file: &tempfile::TempDir) -> (String, crate::Runtime) {
+        let path = file.path().join("app.db").to_str().unwrap().to_string();
+        let manifest: pylon_kernel::AppManifest = serde_json::from_str(include_str!(
+            "../../../../examples/shard-arena/pylon.manifest.json"
+        ))
+        .unwrap();
+        let rt = crate::Runtime::open(&path, manifest).unwrap();
+        (path, rt)
+    }
+
+    /// Wait until `host` runs every shard in `ids`.
+    fn wait_running(host: &WasmShardHost, ids: &[&str]) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !ids.iter().all(|id| host.instance(id).is_some()) {
+            assert!(Instant::now() < deadline, "the shards did not start");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// On SQLite, a zone's state survives a graceful restart: the next
+    /// process starts it from the save the last one made when it stopped.
+    #[test]
+    fn a_zone_on_sqlite_comes_back_after_a_restart() {
+        let file = tempfile::tempdir().unwrap();
+        let (path, _rt) = sqlite_app(&file);
+        let first = sqlite_host(&path, "first");
+        first
+            .create_on("zone", "za", &serde_json::json!({}), Some("first"))
+            .unwrap();
+        let zone = first.registry.get("za").unwrap();
+        zone.with_state(|sim| sim.transfer_in("p1", &state(40), &user("p1"), false))
+            .unwrap();
+        first.stop_all();
+        let before = zone.with_state(|sim| sim.save()).unwrap().unwrap();
+        let before: serde_json::Value = serde_json::from_slice(&before).unwrap();
+        assert_eq!(before["players"]["p1"]["hp"], 40);
+        drop(zone);
+        drop(first);
+
+        let second = sqlite_host(&path, "second");
+        wait_running(&second, &["za"]);
+        assert_eq!(saved(&second, "za")["players"], before["players"]);
+        second.stop_all();
+    }
+
+    /// On SQLite, a move that a crash cut off after its first step (the
+    /// player out of the source, its row `out`) ends with the player in
+    /// exactly one zone once the next process starts both zones from their
+    /// saved state.
+    #[test]
+    fn a_move_cut_off_by_a_crash_ends_in_one_zone_on_sqlite() {
+        let file = tempfile::tempdir().unwrap();
+        let (path, _rt) = sqlite_app(&file);
+        let first = sqlite_host(&path, "first");
+        for id in ["za", "zb"] {
+            first
+                .create_on("zone", id, &serde_json::json!({}), Some("first"))
+                .unwrap();
+        }
+        let c = first.cluster.get().unwrap();
+        let at = first.instance("za").unwrap();
+        let source = first.registry.get("za").unwrap();
+        source
+            .with_state(|sim| sim.transfer_in("p1", &state(40), &user("p1"), false))
+            .unwrap();
+        for id in ["za", "zb"] {
+            first.save_one(c, id, at.epoch);
+        }
+        // Step 1 only, as a move makes it.
+        let t = Transfer {
+            id: new_transfer_id(),
+            subscriber: "p1".into(),
+            from_shard: "za".into(),
+            to_shard: "zb".into(),
+            state: Vec::new(),
+            auth: serde_json::json!({ "user_id": "p1" }),
+            status: "out".into(),
+        };
+        let t = first
+            .begin(&source, at, &SubscriberId::new("p1"), t)
+            .unwrap();
+        assert_eq!(c.dir.transfer(&t.id).unwrap().unwrap().status, "out");
+        // The process dies: no further save, no hand-over, no leave.
+        first
+            .stopped
+            .store(true, std::sync::atomic::Ordering::Release);
+        drop(source);
+        drop(first);
+
+        let second = sqlite_host(&path, "second");
+        wait_running(&second, &["za", "zb"]);
+        let c = second.cluster.get().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let status = loop {
+            let status = c.dir.transfer(&t.id).unwrap().unwrap().status;
+            if status != "out" {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "the move was not finished");
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let (in_a, in_b) = (has(&second, "za", "p1"), has(&second, "zb", "p1"));
+        assert!(in_a != in_b, "p1 in za: {in_a}, in zb: {in_b}");
+        assert_eq!(status == "in", in_b, "the row says {status}");
+        second.stop_all();
     }
 }

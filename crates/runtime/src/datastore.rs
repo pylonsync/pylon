@@ -2654,6 +2654,18 @@ impl<'a> DataStore for TxStore<'a> {
         crate::fn_calls::sqlite_record(self.conn, fn_name, key, call)
     }
 
+    /// Read in this transaction, which the caller opened with
+    /// `BEGIN IMMEDIATE`: no directory write lands between this check and
+    /// the transaction's commit.
+    fn check_shard_fence(&self, shard: &str, machine: &str, epoch: i64) -> Result<bool, DataError> {
+        crate::shard_cluster::sqlite_fence(self.conn, shard, machine, epoch).map_err(|e| {
+            DataError {
+                code: crate::sqlite_write_code(&e, "SHARD_FENCE_FAILED").into(),
+                message: format!("shard fence: {e}"),
+            }
+        })
+    }
+
     fn manifest(&self) -> &pylon_kernel::AppManifest {
         self.runtime.manifest()
     }
