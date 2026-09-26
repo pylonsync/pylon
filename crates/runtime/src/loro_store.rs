@@ -495,9 +495,9 @@ impl LoroStore {
     /// client's value for a field lost to a synthetic op it had not seen (a
     /// register whose winning op is [`SEED_PEER`]'s, or a text, list, tree,
     /// or counter the client created under a key a seed's container took),
-    /// the client's value is applied again. Returns the projection and the
-    /// fields the update set (deletes included) when they could be read
-    /// from it.
+    /// the client's value is applied again. Returns the projection before
+    /// the import and the fields the update set (deletes included) when
+    /// they could be read from it.
     pub fn apply_client_update(
         &self,
         conn: &Connection,
@@ -510,6 +510,7 @@ impl LoroStore {
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         note_changed(entity, row_id);
+        let before = project_doc_to_json(&doc, fields);
         let intent = if always_read_intent || unseen_seed_ops(&doc, update) {
             client_intent(&doc, fields, update)
         } else {
@@ -520,7 +521,7 @@ impl LoroStore {
             reassert_client_values(&doc, fields, intent).map_err(LoroStoreError::Apply)?;
         }
         self.persist_snapshot(conn, entity, row_id, &doc)?;
-        Ok((project_doc_to_json(&doc, fields), intent.map(|i| i.touched)))
+        Ok((before, intent.map(|i| i.touched)))
     }
 
     /// Apply a binary update from a peer (typed-protocol client push or

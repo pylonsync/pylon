@@ -1157,7 +1157,7 @@ impl DataStore for Runtime {
             // Apply the update to the LoroDoc + persist the new snapshot
             // to the sidecar. Returns the projected JSON shape for the
             // post-merge state.
-            let (mut projected, touched) = self
+            let (before_push, touched) = self
                 .crdt_store()
                 .apply_client_update(&conn, entity, row_id, &crdt_fields, update, !has_doc)
                 .map_err(|e| crate::RuntimeError {
@@ -1177,15 +1177,13 @@ impl DataStore for Runtime {
             if !has_doc {
                 self.fill_crdt_doc_from_row(&conn, &ent, row_id, &crdt_fields, touched.as_deref())?;
             }
-            if before.is_some() || !has_doc {
-                projected = self
-                    .crdt_store()
-                    .project(&conn, entity, row_id, &crdt_fields)
-                    .map_err(|e| crate::RuntimeError {
-                        code: "CRDT_APPLY_FAILED".into(),
-                        message: format!("read the doc of {entity}/{row_id}: {e}"),
-                    })?;
-            }
+            let projected = self
+                .crdt_store()
+                .project(&conn, entity, row_id, &crdt_fields)
+                .map_err(|e| crate::RuntimeError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("read the doc of {entity}/{row_id}: {e}"),
+                })?;
 
             // Re-project into the materialized SQLite row so SELECT
             // queries see the merged content. Build SET clauses from
@@ -1198,8 +1196,19 @@ impl DataStore for Runtime {
             let mut set_clauses = Vec::with_capacity(projection.len());
             let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
             let mut idx = 1;
+            let null = serde_json::Value::Null;
             for (key, val) in projection {
                 if key == "id" {
+                    continue;
+                }
+                // Only the fields this push changed or set (a delete the doc
+                // shows as no change, on a row that had no doc): a column the
+                // doc does not hold a value for (one it could not take) keeps
+                // its value.
+                let set_by_push = touched.as_ref().is_some_and(|t| t.contains(key));
+                if !set_by_push
+                    && crate::same_json_value(before_push.get(key).unwrap_or(&null), val)
+                {
                     continue;
                 }
                 set_clauses.push(format!("{} = ?{idx}", crate::quote_ident(key.as_str())));

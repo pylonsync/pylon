@@ -5524,7 +5524,7 @@ const RECONCILE_BATCH: usize = 500;
 
 /// JSON values equal as stored: numbers by value at any depth (a doc may
 /// hold 5 where the row reads 5.0).
-fn same_json_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+pub(crate) fn same_json_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
     use serde_json::Value as V;
     match (a, b) {
         (V::Number(x), V::Number(y)) => x.as_f64() == y.as_f64(),
@@ -7005,6 +7005,46 @@ mod tests {
                 pylon_crdt::project_doc_to_json(&expected, &fields)["title"]
             );
         }
+    }
+
+    /// A push writes only the fields it changed: a JSON value too deep for
+    /// the doc keeps its value in the row when a client edits another field.
+    #[test]
+    fn a_push_keeps_a_value_the_doc_cannot_hold() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let id = rt.insert("Doc", &fresh_doc()).unwrap();
+        let mut deep = serde_json::json!("leaf");
+        for _ in 0..40 {
+            deep = serde_json::json!({ "n": deep });
+        }
+        rt.lock_write_conn()
+            .unwrap()
+            .execute(
+                "UPDATE \"Doc\" SET \"meta\" = ?1 WHERE \"id\" = ?2",
+                rusqlite::params![deep.to_string(), id],
+            )
+            .unwrap();
+        let fields = rt
+            .crdt_fields_for(rt.require_entity("Doc").unwrap())
+            .unwrap();
+        let stored = {
+            let conn = rt.lock_write_conn().unwrap();
+            rt.crdt_store().snapshot(&conn, "Doc", &id).unwrap()
+        };
+        let client = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_update(&client, &stored).unwrap();
+        let before = client.oplog_vv();
+        pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"title": "edited"})).unwrap();
+        let update = client
+            .export(pylon_crdt::loro::ExportMode::updates(&before))
+            .unwrap();
+        rt.crdt_apply_update("Doc", &id, &update).unwrap();
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["title"], "edited");
+        assert_eq!(row["meta"], deep);
     }
 
     /// A first push to a row with no doc: a counter the client counted from
