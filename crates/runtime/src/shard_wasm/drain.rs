@@ -244,6 +244,14 @@ impl WasmShardHost {
         let Some(my_epoch) = c.current_epoch() else {
             return Err(not_taking());
         };
+        // Ending here: its release deletes any placement of the id on this
+        // machine, so it is not placed here until then.
+        if self.ending.lock().unwrap().contains(id) {
+            return Err(refuse(
+                "SHARD_UNAVAILABLE",
+                format!("shard {id} is ending on this machine; try again shortly"),
+            ));
+        }
         let p = match c.dir.placement(id) {
             Ok(Some(p)) if p.machine_id == from && p.epoch == epoch => p,
             Ok(_) => {

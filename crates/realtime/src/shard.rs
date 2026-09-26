@@ -465,6 +465,9 @@ pub struct Shard<S: SimState> {
     /// Test hook: told when a tick is about to take the state lock.
     #[cfg(test)]
     tick_at_state_lock: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+    /// Test hook: told when [`Shard::wait_for_tick`] finds a tick running.
+    #[cfg(test)]
+    pub(crate) waits_on_tick: Mutex<Option<std::sync::mpsc::Sender<()>>>,
     /// Monotonically increasing tick number. Used for reconciliation and
     /// lockstep protocols.
     tick_no: Mutex<u64>,
@@ -534,6 +537,8 @@ impl<S: SimState> Shard<S> {
             paused: AtomicBool::new(false),
             #[cfg(test)]
             tick_at_state_lock: Mutex::new(None),
+            #[cfg(test)]
+            waits_on_tick: Mutex::new(None),
             tick_no: Mutex::new(0),
             input_seq: Mutex::new(0),
             acks: Mutex::new(HashMap::new()),
@@ -633,6 +638,23 @@ impl<S: SimState> Shard<S> {
 
     pub fn is_paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
+    }
+
+    /// Wait for a tick in progress, with its `on_tick` hook, to finish.
+    pub fn wait_for_tick(&self) {
+        #[cfg(test)]
+        {
+            let busy = matches!(
+                self.state.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            );
+            if busy {
+                if let Some(tx) = self.waits_on_tick.lock().unwrap().as_ref() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        drop(self.state.lock().unwrap());
     }
 
     pub fn stop_and_wait(&self) {

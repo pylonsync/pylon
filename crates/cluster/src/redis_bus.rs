@@ -29,8 +29,8 @@ use tracing::{debug, error, info, warn};
 /// cross-talk and ship each other's mutations.
 pub const DEFAULT_CHANNEL: &str = "pylon:cluster:bus";
 
-/// How long the subscriber waits for a message before it PINGs Redis (and
-/// then for the answer before it reconnects).
+/// How long the subscriber waits for a message before it subscribes again
+/// as a heartbeat (and then for the answer before it reconnects).
 #[cfg(not(test))]
 const SUBSCRIBER_IDLE: Duration = Duration::from_secs(15);
 #[cfg(test)]
@@ -274,27 +274,24 @@ fn run_one_subscription(
     handlers: &Arc<Mutex<Vec<SubscriberHandler>>>,
 ) -> Result<(), RedisError> {
     // In SUBSCRIBE mode for the connection's lifetime. A read that waits
-    // SUBSCRIBER_IDLE sends a PING; a PING with no answer by the next
-    // wait means the connection is gone (a failover, a NAT drop), and the
-    // outer loop reconnects.
-    conn.send_packed_command(&redis::cmd("SUBSCRIBE").arg(channel).get_packed_command())?;
-    conn.set_read_timeout(Some(SUBSCRIBER_IDLE))?;
+    // SUBSCRIBER_IDLE subscribes again as a heartbeat (a no-op for Redis,
+    // which answers with a confirmation; a message that arrives first is
+    // kept by redis-rs). A heartbeat with no answer, or a refused
+    // subscription, ends the connection and the outer loop reconnects.
+    // (PubSub reads do not skip a reply after a timeout, as raw
+    // `recv_response` reads do.)
+    let mut pubsub = conn.as_pubsub();
+    pubsub.subscribe(channel)?;
+    pubsub.set_read_timeout(Some(SUBSCRIBER_IDLE))?;
     info!("[cluster] redis subscriber listening on channel \"{channel}\"");
-    let mut pinged = false;
     loop {
-        let value = match conn.recv_response() {
-            Ok(value) => value,
-            Err(e) if e.is_timeout() && !pinged => {
-                conn.send_packed_command(&redis::cmd("PING").get_packed_command())?;
-                pinged = true;
+        let msg = match pubsub.get_message() {
+            Ok(msg) => msg,
+            Err(e) if e.is_timeout() => {
+                pubsub.subscribe(channel)?;
                 continue;
             }
             Err(e) => return Err(e),
-        };
-        pinged = false;
-        // Subscribe confirmations and PING answers are not messages.
-        let Some(msg) = redis::Msg::from_owned_value(value) else {
-            continue;
         };
         let payload: String = match msg.get_payload() {
             Ok(s) => s,
@@ -514,74 +511,149 @@ mod tests {
         );
     }
 
-    /// The subscriber PINGs an idle connection, takes messages after the
-    /// answer, and ends (to reconnect) when a PING goes unanswered.
-    #[test]
-    fn an_idle_subscriber_pings_and_a_silent_one_ends() {
+    /// A fake Redis for the subscriber: answers each SUBSCRIBE with a
+    /// confirmation (or refuses it), counts them, sends a message after
+    /// the third, and closes after the fourth. With `silent`, it confirms
+    /// the first and then answers nothing.
+    fn fake_pubsub(refuse: bool, silent: bool) -> (u16, Arc<Mutex<usize>>) {
         use std::io::{BufRead, BufReader, Write};
         let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
+        let subscribes: Arc<Mutex<usize>> = Arc::default();
         let envelope = serde_json::to_string(&Envelope {
             instance_id: "other".into(),
             kind: "change".into(),
             payload: serde_json::json!({ "n": 1 }),
         })
         .unwrap();
-        thread::spawn(move || {
-            let (conn, _) = server.accept().unwrap();
-            let mut out = conn.try_clone().unwrap();
-            let mut reader = BufReader::new(conn);
-            let mut read_cmd = || -> Option<Vec<String>> {
-                let mut line = String::new();
-                reader.read_line(&mut line).ok()?;
-                let n: usize = line.trim().strip_prefix('*')?.parse().ok()?;
-                let mut args = Vec::new();
-                for _ in 0..n {
-                    line.clear();
+        {
+            let subscribes = Arc::clone(&subscribes);
+            thread::spawn(move || {
+                let (conn, _) = server.accept().unwrap();
+                let mut out = conn.try_clone().unwrap();
+                let mut reader = BufReader::new(conn);
+                let mut read_cmd = || -> Option<Vec<String>> {
+                    let mut line = String::new();
                     reader.read_line(&mut line).ok()?;
-                    line.clear();
-                    reader.read_line(&mut line).ok()?;
-                    args.push(line.trim_end().to_string());
+                    let n: usize = line.trim().strip_prefix('*')?.parse().ok()?;
+                    let mut args = Vec::new();
+                    for _ in 0..n {
+                        line.clear();
+                        reader.read_line(&mut line).ok()?;
+                        line.clear();
+                        reader.read_line(&mut line).ok()?;
+                        args.push(line.trim_end().to_string());
+                    }
+                    Some(args)
+                };
+                let bulk = |s: &str| format!("${}\r\n{s}\r\n", s.len());
+                while let Some(cmd) = read_cmd() {
+                    // redis-rs unsubscribes when its PubSub is dropped, and
+                    // waits for the answer.
+                    if cmd[0] == "UNSUBSCRIBE" || cmd[0] == "PUNSUBSCRIBE" {
+                        let kind = cmd[0].to_ascii_lowercase();
+                        write!(out, "*3\r\n{}$-1\r\n:0\r\n", bulk(&kind)).unwrap();
+                        continue;
+                    }
+                    assert_eq!(cmd[0], "SUBSCRIBE");
+                    if refuse {
+                        write!(
+                            out,
+                            "-NOPERM this user has no permissions to access the channel\r\n"
+                        )
+                        .unwrap();
+                        continue;
+                    }
+                    let n = {
+                        let mut n = subscribes.lock().unwrap();
+                        *n += 1;
+                        *n
+                    };
+                    if silent && n > 1 {
+                        thread::sleep(Duration::from_secs(10));
+                        return;
+                    }
+                    write!(out, "*3\r\n{}{}:1\r\n", bulk("subscribe"), bulk("ch")).unwrap();
+                    if n == 3 {
+                        write!(
+                            out,
+                            "*3\r\n{}{}{}",
+                            bulk("message"),
+                            bulk("ch"),
+                            bulk(&envelope)
+                        )
+                        .unwrap();
+                    }
+                    if n == 4 {
+                        return;
+                    }
                 }
-                Some(args)
-            };
-            let bulk = |s: &str| format!("${}\r\n{s}\r\n", s.len());
-            assert_eq!(read_cmd().unwrap()[0], "SUBSCRIBE");
-            write!(out, "*3\r\n{}{}:1\r\n", bulk("subscribe"), bulk("ch")).unwrap();
-            // Idle: the client PINGs; answer, then send a message.
-            assert_eq!(read_cmd().unwrap()[0], "PING");
-            write!(out, "*2\r\n{}{}", bulk("pong"), bulk("")).unwrap();
-            write!(
-                out,
-                "*3\r\n{}{}{}",
-                bulk("message"),
-                bulk("ch"),
-                bulk(&envelope)
-            )
-            .unwrap();
-            // Then silent: the next PING gets no answer.
-            let _ = read_cmd();
-            thread::sleep(Duration::from_secs(5));
-        });
+            });
+        }
+        (port, subscribes)
+    }
+
+    type Got = Arc<Mutex<Vec<Envelope>>>;
+
+    fn subscriber_handlers() -> (Arc<Mutex<Vec<SubscriberHandler>>>, Got) {
+        let got: Got = Arc::default();
+        let handlers: Arc<Mutex<Vec<SubscriberHandler>>> = Arc::default();
+        let sink = Arc::clone(&got);
+        handlers
+            .lock()
+            .unwrap()
+            .push(Arc::new(move |e: Envelope| sink.lock().unwrap().push(e)));
+        (handlers, got)
+    }
+
+    fn subscribe_to(port: u16) -> Result<(), RedisError> {
         let client = Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
         let conn = connect_with_timeouts(&client, Duration::from_secs(2)).unwrap();
-        let got: Arc<Mutex<Vec<Envelope>>> = Arc::default();
-        let handlers: Arc<Mutex<Vec<SubscriberHandler>>> = Arc::default();
-        {
-            let got = Arc::clone(&got);
-            handlers
-                .lock()
-                .unwrap()
-                .push(Arc::new(move |e: Envelope| got.lock().unwrap().push(e)));
-        }
+        run_one_subscription(conn, "ch", "me", &subscriber_handlers().0)
+    }
+
+    /// A healthy idle connection survives several idle periods (each ends
+    /// with a heartbeat the server answers), and a message after one is
+    /// delivered.
+    #[test]
+    fn an_idle_subscriber_stays_connected_and_receives() {
+        let (port, subscribes) = fake_pubsub(false, false);
+        let client = Client::open(format!("redis://127.0.0.1:{port}")).unwrap();
+        let conn = connect_with_timeouts(&client, Duration::from_secs(2)).unwrap();
+        let (handlers, got) = subscriber_handlers();
         let started = std::time::Instant::now();
-        let ended = run_one_subscription(conn, "ch", "me", &handlers);
-        assert!(ended.is_err());
+        // Ends only when the server closes, after its fourth subscribe.
+        let _ = run_one_subscription(conn, "ch", "me", &handlers);
         assert!(
-            started.elapsed() < Duration::from_secs(3),
+            started.elapsed() >= SUBSCRIBER_IDLE * 3,
             "{:?}",
             started.elapsed()
         );
+        assert_eq!(*subscribes.lock().unwrap(), 4);
         assert_eq!(got.lock().unwrap().len(), 1);
+    }
+
+    /// A refused subscription ends the connection (the loop reconnects and
+    /// logs it) instead of staying connected and deaf.
+    #[test]
+    fn a_refused_subscription_ends_the_connection() {
+        let (port, _) = fake_pubsub(true, false);
+        let started = std::time::Instant::now();
+        assert!(subscribe_to(port).is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A Redis that stops answering: the heartbeat gets no confirmation and
+    /// the connection ends, so the loop reconnects.
+    #[test]
+    fn a_silent_subscriber_connection_ends() {
+        let (port, _) = fake_pubsub(false, true);
+        let started = std::time::Instant::now();
+        assert!(subscribe_to(port).is_err());
+        assert!(
+            started.elapsed() < SUBSCRIBER_IDLE * 5,
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

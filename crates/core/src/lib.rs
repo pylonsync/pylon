@@ -580,6 +580,12 @@ pub struct ManifestAuthOrgFederation {
     /// are only ever created upstream. Default `true`.
     #[serde(default = "default_true")]
     pub disable_local_create: bool,
+    /// Field on the org entity that receives the upstream org's `slug`
+    /// from the claim. Unset: slugs are not mirrored. When set, every
+    /// login writes the claim's slug (and the claim's name) onto the
+    /// mirror, so a rename upstream reaches the app on the next sign-in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slug_field: Option<String>,
 }
 
 fn default_external_id_field() -> String {
@@ -587,8 +593,8 @@ fn default_external_id_field() -> String {
 }
 
 /// Check that an org-federation config has the entity shape it needs:
-/// the org entity declares `external_id_field` as an optional unique
-/// string. Kept in the kernel so every manifest consumer reports the
+/// the org entity declares `external_id_field` (and `slug_field`, when
+/// set) as an optional unique string. Kept in the kernel so every manifest consumer reports the
 /// same error. `Ok(())` when federation is not configured.
 pub fn validate_org_federation(manifest: &AppManifest) -> Result<(), String> {
     let org = &manifest.auth.org;
@@ -601,21 +607,45 @@ pub fn validate_org_federation(manifest: &AppManifest) -> Result<(), String> {
                 .into(),
         );
     }
-    let field_name = fed.external_id_field.as_str();
+    check_optional_unique_string(
+        manifest,
+        &org.entity,
+        &fed.external_id_field,
+        "locally created orgs have no upstream id",
+        "one local org per upstream org",
+    )?;
+    if let Some(slug_field) = fed.slug_field.as_deref() {
+        check_optional_unique_string(
+            manifest,
+            &org.entity,
+            slug_field,
+            "locally created orgs have no upstream slug",
+            "a slug names one org",
+        )?;
+    }
+    Ok(())
+}
+
+/// `auth.org.federation` needs `field_name` on `entity_name` declared as an
+/// optional unique string. `why_optional` / `why_unique` finish the error.
+fn check_optional_unique_string(
+    manifest: &AppManifest,
+    entity_name: &str,
+    field_name: &str,
+    why_optional: &str,
+    why_unique: &str,
+) -> Result<(), String> {
     let hint = format!(
-        "declare it as `{field_name}: field.string().optional().unique()` on the `{}` entity",
-        org.entity
+        "declare it as `{field_name}: field.string().optional().unique()` on the `{entity_name}` entity"
     );
-    let Some(entity) = manifest.entities.iter().find(|e| e.name == org.entity) else {
+    let Some(entity) = manifest.entities.iter().find(|e| e.name == entity_name) else {
         return Err(format!(
-            "auth.org.federation needs entity \"{}\" with field \"{field_name}\": the entity is not declared; {hint}",
-            org.entity
+            "auth.org.federation needs entity \"{entity_name}\" with field \"{field_name}\": the entity is not declared; {hint}"
         ));
     };
     let Some(field) = entity.fields.iter().find(|f| f.name == field_name) else {
         return Err(format!(
-            "auth.org.federation needs field \"{field_name}\" on entity \"{}\": the field is not declared; {hint}",
-            org.entity
+            "auth.org.federation needs field \"{field_name}\" on entity \"{entity_name}\": the field is not declared; {hint}"
         ));
     };
     let mut problems = Vec::new();
@@ -623,18 +653,16 @@ pub fn validate_org_federation(manifest: &AppManifest) -> Result<(), String> {
         problems.push(format!("type is `{}`, not `string`", field.field_type));
     }
     if !field.optional {
-        problems
-            .push("it is required, not optional (locally created orgs have no upstream id)".into());
+        problems.push(format!("it is required, not optional ({why_optional})"));
     }
     if !field.unique {
-        problems.push("it is not unique (one local org per upstream org)".into());
+        problems.push(format!("it is not unique ({why_unique})"));
     }
     if problems.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "auth.org.federation needs field \"{field_name}\" on entity \"{}\" to be an optional unique string: {}; {hint}",
-            org.entity,
+            "auth.org.federation needs field \"{field_name}\" on entity \"{entity_name}\" to be an optional unique string: {}; {hint}",
             problems.join(", ")
         ))
     }
@@ -1628,6 +1656,7 @@ mod tests {
             remove_missing: true,
             role_map: Default::default(),
             disable_local_create: true,
+            slug_field: None,
         });
         manifest
     }
@@ -1689,5 +1718,34 @@ mod tests {
         assert!(fed.remove_missing);
         assert!(fed.disable_local_create);
         assert!(fed.role_map.is_empty());
+        assert!(fed.slug_field.is_none());
+    }
+
+    #[test]
+    fn org_federation_slug_field_must_be_an_optional_unique_string() {
+        let external_id = ManifestField {
+            name: "externalId".into(),
+            optional: true,
+            unique: true,
+            ..Default::default()
+        };
+        let mut manifest = federated_manifest(Some(external_id));
+        manifest.auth.org.federation.as_mut().unwrap().slug_field = Some("slug".into());
+
+        let err = validate_org_federation(&manifest).unwrap_err();
+        assert!(err.contains("field \"slug\""), "{err}");
+        assert!(err.contains("not declared"), "{err}");
+
+        manifest.entities[0].fields.push(ManifestField {
+            name: "slug".into(),
+            optional: true,
+            unique: false,
+            ..Default::default()
+        });
+        let err = validate_org_federation(&manifest).unwrap_err();
+        assert!(err.contains("not unique"), "{err}");
+
+        manifest.entities[0].fields[1].unique = true;
+        assert!(validate_org_federation(&manifest).is_ok());
     }
 }

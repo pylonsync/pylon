@@ -97,10 +97,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Check every `every` ms until `check` gives a value. A check that calls
+ * the server uses [`HTTP_POLL_MS`]: at 50 ms, one client reaches the
+ * function rate limit, and every later check is refused.
+ */
 async function waitFor<T>(
   what: string,
   check: () => Promise<T | undefined> | T | undefined,
   ms: number,
+  every = 50,
 ): Promise<T> {
   const start = Date.now();
   for (;;) {
@@ -108,9 +114,11 @@ async function waitFor<T>(
     if (v !== undefined) return v;
     if (Date.now() - start > ms)
       throw new Error(`timed out waiting for ${what}`);
-    await sleep(50);
+    await sleep(every);
   }
 }
+
+const HTTP_POLL_MS = 500;
 
 /** Join zone `zone` through `host` as a new guest and wait for the character. */
 async function joinPlayer(host: string, zone: string, machine?: string, params?: object) {
@@ -180,6 +188,7 @@ test.skipIf(!oneMachine)(
           ? true
           : undefined,
       10_000,
+      HTTP_POLL_MS,
     );
 
     // A player cannot heal; the zone refuses a heal input from a player too.
@@ -244,6 +253,7 @@ test.skipIf(!killable)(
       "the crown's row",
       async () => ((await itemsOf(cg)).length > 0 ? true : undefined),
       10_000,
+      HTTP_POLL_MS,
     );
     // Saves every 1 s: at least one after the commit, with the grant.
     await sleep(2500);
@@ -261,11 +271,13 @@ test.skipIf(!killable)(
           return m && m !== "f" && m !== "g" ? m : undefined;
         },
         60_000,
+        HTTP_POLL_MS,
       );
       await waitFor(
         `the ${item}'s row`,
         async () => ((await itemsOf(character)).length > 0 ? true : undefined),
         20_000,
+        HTTP_POLL_MS,
       );
       // Time for any second grant to land.
       await sleep(3000);

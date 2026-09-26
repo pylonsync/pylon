@@ -1953,8 +1953,10 @@ export type AuthConfig = {
      * (`[{ id, name, slug?, role }]`) is reconciled against local Org
      * rows keyed by `externalIdField`: orgs are created and joined,
      * roles updated, and (with `removeMissing`) memberships absent from
-     * the claim removed. The org entity must declare `externalIdField`
-     * as `field.string().optional().unique()`.
+     * the claim removed. Each login also writes the claim's name (and,
+     * with `slugField`, its slug) onto the mirror. The org entity must
+     * declare `externalIdField` (and `slugField`) as
+     * `field.string().optional().unique()`.
      */
     federation?: {
       /** OAuth provider id whose `orgs` claim is trusted, e.g. `"stack0"`. */
@@ -1967,6 +1969,11 @@ export type AuthConfig = {
       roleMap?: Record<string, string>;
       /** Refuse `POST /api/auth/orgs` with `403 ORG_FEDERATED`. Default `true`. */
       disableLocalCreate?: boolean;
+      /**
+       * Field on the org entity that receives the claim's `slug`, for
+       * org-scoped URLs like `/dashboard/orgs/<slug>`. Unset: not mirrored.
+       */
+      slugField?: string;
     };
   };
   /**
@@ -2212,6 +2219,9 @@ export function auth(cfg: AuthConfig = {}): ManifestAuthConfig {
                 ? { role_map: cfg.org.federation.roleMap }
                 : {}),
               disable_local_create: cfg.org.federation.disableLocalCreate ?? true,
+              ...(cfg.org.federation.slugField
+                ? { slug_field: cfg.org.federation.slugField }
+                : {}),
             },
           }
         : {}),

@@ -1525,6 +1525,21 @@ mod tests {
                 fly_instance: None,
             },
         );
+        // Earlier runs' shutdowns keep their placements (for adoption), and
+        // these kinds are shared: without this, a local database reaches the
+        // kind limit after a few dozen runs. Only this setup's machines
+        // (`u-`), so another test's or a local app's placements stay.
+        pool.with_client(|c| {
+            c.execute(
+                "DELETE FROM _pylon_shard_placements p
+                 WHERE p.kind IN ('zone', 'arena') AND p.machine_id LIKE 'u-%' AND NOT EXISTS (
+                    SELECT 1 FROM _pylon_shard_machines m
+                    WHERE m.machine_id = p.machine_id
+                      AND m.heartbeat_at > (extract(epoch from clock_timestamp()) * 1000)::bigint - $1)",
+                &[&(crate::shard_cluster::DEAD_AFTER.as_millis() as i64)],
+            )
+        })
+        .unwrap();
         let (a, b) = (format!("a-{run}"), format!("b-{run}"));
         let deadline = Instant::now() + Duration::from_secs(10);
         while host

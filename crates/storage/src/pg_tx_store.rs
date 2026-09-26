@@ -205,43 +205,44 @@ pub fn pg_err_to_data(e: postgres::Error) -> DataError {
     }
 }
 
-/// `PG_TX_QUERY_FAILED` when the statement can pass if tried again: the
-/// connection closed or failed on I/O, or SQLSTATE class 08 (connection),
-/// 40 (serialization failure, deadlock), 53 (resources), 57 (operator
-/// intervention), 58 (system error), XX (internal error; poolers such as
-/// Supavisor send it when their pool runs out), 55P03 (lock not
-/// available), or 25P03 (idle in transaction timeout). Every other error (a
-/// constraint, a data error, an exception a trigger raised, a value that
-/// does not convert) is `PG_REJECTED`: the same statement meets it again.
+/// `PG_TX_QUERY_FAILED` when the statement can pass if tried again, else
+/// `PG_REJECTED` (see [`classify_pg_error`]).
 pub fn pg_error_code(e: &postgres::Error) -> &'static str {
-    use std::error::Error as _;
-    let Some(state) = e.code() else {
-        let mut source = e.source();
-        let io = std::iter::from_fn(|| {
-            let s = source?;
-            source = s.source();
-            Some(s)
-        })
-        // An I/O error, but not one about the statement itself (a NUL
-        // byte in the query, a value too large to send).
-        .any(|s| {
-            s.downcast_ref::<std::io::Error>().is_some_and(|io| {
-                !matches!(
-                    io.kind(),
-                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::InvalidData
-                )
-            })
-        });
-        return if e.is_closed() || io {
-            "PG_TX_QUERY_FAILED"
-        } else {
-            "PG_REJECTED"
-        };
+    classify_pg_error(e.code().map(|c| c.code()), e.is_closed(), &e.to_string())
+}
+
+/// The rule behind [`pg_error_code`], from an error's SQLSTATE, whether its
+/// connection closed, and its text.
+///
+/// With a SQLSTATE: transient for class 08 (connection), 40 (serialization
+/// failure, deadlock), 53 (resources), 57 (operator intervention), 58
+/// (system error), XX (internal error; poolers such as Supavisor send it
+/// when their pool runs out), 55P03 (lock not available), and 25P03 (idle
+/// in transaction timeout); every other answer (a constraint, a data
+/// error, an exception a trigger raised) is refused.
+///
+/// With none: transient when the connection closed, or the client failed
+/// talking to the server (I/O, TLS, a response it could not parse, an
+/// unexpected message, connecting, a timeout); refused when the statement
+/// itself could not be sent (encoding) or a value did not convert. The
+/// kinds are read from tokio-postgres's error text, which the tests pin.
+pub fn classify_pg_error(sqlstate: Option<&str>, closed: bool, text: &str) -> &'static str {
+    const TRANSIENT_KINDS: [&str; 6] = [
+        "error communicating with the server",
+        "error performing TLS handshake",
+        "error parsing response from server",
+        "unexpected message from server",
+        "error connecting to server",
+        "timeout waiting for server",
+    ];
+    let transient = match sqlstate {
+        Some(code) => {
+            matches!(code, "55P03" | "25P03")
+                || matches!(code.get(..2), Some("08" | "40" | "53" | "57" | "58" | "XX"))
+        }
+        None => closed || TRANSIENT_KINDS.iter().any(|k| text.starts_with(k)),
     };
-    let code = state.code();
-    if matches!(code, "55P03" | "25P03")
-        || matches!(&code[..2], "08" | "40" | "53" | "57" | "58" | "XX")
-    {
+    if transient {
         "PG_TX_QUERY_FAILED"
     } else {
         "PG_REJECTED"
@@ -1047,5 +1048,40 @@ mod advisory_lock_tests {
         // Defensive: callers shouldn't pass empty strings, but we
         // shouldn't crash on it either — produce a stable hash.
         let _ = pg_advisory_key_pair("");
+    }
+}
+
+#[cfg(test)]
+mod pg_error_tests {
+    use super::classify_pg_error;
+    /// The texts tokio-postgres 0.7 gives each kind of error (its
+    /// src/error/mod.rs); a version that changes them fails here.
+    #[test]
+    fn pg_errors_classify_by_state_and_kind() {
+        let t =
+            |state: Option<&str>, closed: bool, text: &str| classify_pg_error(state, closed, text);
+        assert_eq!(t(Some("23505"), false, "db error"), "PG_REJECTED");
+        assert_eq!(t(Some("P0001"), false, "db error"), "PG_REJECTED");
+        assert_eq!(t(Some("40001"), false, "db error"), "PG_TX_QUERY_FAILED");
+        assert_eq!(t(Some("25P03"), false, "db error"), "PG_TX_QUERY_FAILED");
+        assert_eq!(t(Some("XX000"), false, "db error"), "PG_TX_QUERY_FAILED");
+        assert_eq!(t(None, true, "connection closed"), "PG_TX_QUERY_FAILED");
+        for text in [
+            "error communicating with the server: invalid message length",
+            "error performing TLS handshake: bad record",
+            "error parsing response from server: unknown tag",
+            "unexpected message from server",
+            "error connecting to server: refused",
+            "timeout waiting for server",
+        ] {
+            assert_eq!(t(None, false, text), "PG_TX_QUERY_FAILED", "{text}");
+        }
+        for text in [
+            "error encoding message to server: nul byte",
+            "error serializing parameter 0: cannot convert",
+            "invalid column `x`",
+        ] {
+            assert_eq!(t(None, false, text), "PG_REJECTED", "{text}");
+        }
     }
 }

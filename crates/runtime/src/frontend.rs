@@ -3993,9 +3993,6 @@ fn build_ssr_response_headers(
         }
         out.push(Header::from_bytes("Cache-Control", cc.as_bytes()).unwrap());
     }
-    if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
-        out.push(h);
-    }
     // Baseline security headers on the user-facing SSR HTML. Previously only
     // Studio carried these, so app pages were clickjackable (no X-Frame-Options)
     // and MIME-sniffable. X-Frame-Options is SAMEORIGIN (not Studio's DENY) so
@@ -4010,6 +4007,16 @@ fn build_ssr_response_headers(
         out.iter()
             .any(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
     };
+    // The app's CORS origin is a default too. A route that answers every
+    // origin (a public JSON feed, a widget's config read from customer sites)
+    // sets its own `Access-Control-Allow-Origin: *`; appending ours as well
+    // gives the response two values, and browsers reject that as a CORS
+    // failure.
+    if !has(&out, "Access-Control-Allow-Origin") {
+        if let Ok(h) = Header::from_bytes("Access-Control-Allow-Origin", cors_origin.as_bytes()) {
+            out.push(h);
+        }
+    }
     // An operator can name specific origins allowed to frame this app
     // (PYLON_FRAME_ANCESTORS) — Pylon Cloud sets it on dev-mode envs so the
     // builder can show the running app in its live-preview iframe. That has to
@@ -6746,6 +6753,32 @@ mod tests {
             .collect();
         assert_eq!(xfo.len(), 1, "no duplicate X-Frame-Options");
         assert_eq!(xfo[0], "ALLOWALL");
+    }
+
+    #[test]
+    fn ssr_headers_route_cors_origin_replaces_the_default() {
+        let get_all = |page: &std::collections::HashMap<String, String>| {
+            header_pairs(&build_ssr_response_headers(
+                page,
+                "https://app.example",
+                true,
+                false,
+                VariantHeaders::default(),
+            ))
+            .into_iter()
+            .filter(|(n, _)| n == "access-control-allow-origin")
+            .map(|(_, v)| v)
+            .collect::<Vec<String>>()
+        };
+        // No page value: the app's origin.
+        assert_eq!(
+            get_all(&std::collections::HashMap::new()),
+            vec!["https://app.example"]
+        );
+        // A route's own value wins, once. Two values fail CORS in every browser.
+        let mut page = std::collections::HashMap::new();
+        page.insert("Access-Control-Allow-Origin".to_string(), "*".to_string());
+        assert_eq!(get_all(&page), vec!["*"]);
     }
 
     #[test]

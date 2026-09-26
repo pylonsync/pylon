@@ -40,11 +40,11 @@ dependencies = [
 
 [[package]]
 name = "pylon-replication"
-version = "0.16.0"
+version = "0.17.0"
 
 [[package]]
 name = "pylon-shard-guest"
-version = "0.16.0"
+version = "0.17.0"
 dependencies = [
  "pylon-replication",
  "rmp-serde",

@@ -1608,9 +1608,28 @@ pub struct WasmShardHost {
     dirty: Mutex<data::Dirty>,
     /// One flush of `dirty` at a time.
     flush_lock: Mutex<()>,
-    /// Shards the sweep ended whose last writes and placement release are
-    /// in progress: no shard starts under these ids meanwhile.
+    /// Shards discarded while a flush runs (None between flushes): the
+    /// flush does not put back their fields. Locked after `dirty`.
+    discarded_mid_flush: Mutex<Option<std::collections::HashSet<String>>>,
+    /// Shards that ended here (at a sweep or at shutdown) whose last writes
+    /// and placement release are in progress: no shard starts, and no
+    /// hand-over or take-over places one, under these ids meanwhile.
     ending: Mutex<std::collections::HashSet<String>>,
+    /// Entity writes to fail with a store error before any goes to the
+    /// writer, for tests.
+    #[cfg(test)]
+    flush_failures: std::sync::atomic::AtomicU32,
+    /// Stops the periodic flush, for tests that flush by hand.
+    #[cfg(test)]
+    periodic_flush_off: std::sync::atomic::AtomicBool,
+    /// Runs in a flush after it takes its fields (with the number of row
+    /// groups taken), before it writes them.
+    #[cfg(test)]
+    flush_hook: Mutex<Option<FlushHook>>,
+    /// Told when a stop starts ("entered", before the own lock) and when
+    /// it finds the create lock held ("create lock held"), for tests.
+    #[cfg(test)]
+    stop_steps: Mutex<Option<std::sync::mpsc::Sender<&'static str>>>,
     /// Transfers modules asked for after a tick: (source, subscriber, target).
     transfer_requests: std::sync::mpsc::SyncSender<(String, String, String)>,
     registry: ShardRegistry<WasmSim>,
@@ -1624,6 +1643,10 @@ pub struct WasmShardHost {
 }
 
 /// This machine's place in the shard directory.
+/// A test hook run inside a flush (see `WasmShardHost::flush_hook`).
+#[cfg(test)]
+type FlushHook = Box<dyn Fn(usize) + Send>;
+
 struct ClusterState {
     dir: PgShardDirectory,
     me: MachineConfig,
@@ -1685,9 +1708,11 @@ impl ClusterState {
     }
 
     /// `machine_id`, when it is live.
-    fn live(&self, machine_id: &str) -> Option<Machine> {
-        let live = self.dir.live_machines().ok()?;
-        live.into_iter().find(|m| m.id == machine_id)
+    /// Machine `machine_id` when it is live; an error when the directory
+    /// could not say.
+    fn live(&self, machine_id: &str) -> Result<Option<Machine>, String> {
+        let live = self.dir.live_machines()?;
+        Ok(live.into_iter().find(|m| m.id == machine_id))
     }
 
     /// The lease epoch, when the lease has at least [`LEASE_MARGIN`] left.
@@ -1742,7 +1767,16 @@ impl WasmShardHost {
             calls_in_flight: Mutex::new(HashMap::new()),
             dirty: Mutex::new(HashMap::new()),
             flush_lock: Mutex::new(()),
+            discarded_mid_flush: Mutex::new(None),
             ending: Mutex::new(std::collections::HashSet::new()),
+            #[cfg(test)]
+            flush_failures: std::sync::atomic::AtomicU32::new(0),
+            #[cfg(test)]
+            periodic_flush_off: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            flush_hook: Mutex::new(None),
+            #[cfg(test)]
+            stop_steps: Mutex::new(None),
             kinds: kinds
                 .into_iter()
                 .map(|k| (k.name.clone(), Arc::new(k)))
@@ -2123,18 +2157,56 @@ impl WasmShardHost {
     /// Stop and remove a shard. Its subscribers' connections close. On
     /// several machines, the machine that runs it stops it.
     pub fn stop(&self, id: &str) -> bool {
+        self.stop_where(id, true)
+    }
+
+    /// Stop `id`. With `forward`, a shard another live machine runs is
+    /// stopped there; a request from another machine passes false, and
+    /// acts only on this machine's shard and placement.
+    fn stop_where(&self, id: &str, forward: bool) -> bool {
         let Some(c) = self.cluster.get() else {
             return self.registry.get(id).is_some() && self.stop_local(id);
         };
+        #[cfg(test)]
+        let step = |name: &'static str| {
+            if let Some(tx) = self.stop_steps.lock().unwrap().as_ref() {
+                let _ = tx.send(name);
+            }
+        };
+        #[cfg(test)]
+        step("entered");
         let own = c.own_lock.lock().unwrap();
-        if self.registry.get(id).is_some() {
+        // Read under the create lock, which the sweep holds from removing a
+        // stopped shard until it reserves its id: an id with its last
+        // writes pending is either registered or ending here.
+        let running = {
+            #[cfg(test)]
+            if matches!(
+                self.create_lock.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ) {
+                step("create lock held");
+            }
+            let _guard = self.create_lock.lock().unwrap();
+            self.registry.get(id).is_some()
+        };
+        if running {
             let stopped = self.stop_local(id);
             c.saved_at.lock().unwrap().remove(id);
             let held = c.owned.lock().unwrap().remove(id);
             if let Some(epoch) = held {
+                // stop_local tried once; out of `owned`, a periodic flush
+                // no longer takes what is left. The retries run without the
+                // own lock (a database stall would hold up every placement
+                // change here), with the id reserved so no run of it starts.
+                self.ending.lock().unwrap().insert(id.to_string());
+                drop(own);
+                self.final_writes(id);
+                let _guard = self.create_lock.lock().unwrap();
                 if let Err(e) = c.dir.release(id, &c.me.id, epoch) {
                     tracing::warn!("[shard {id}] could not release its placement: {e}");
                 }
+                self.ending.lock().unwrap().remove(id);
                 return stopped;
             }
             // A copy the fence stopped: its placement is from an earlier
@@ -2148,34 +2220,53 @@ impl WasmShardHost {
                 return false;
             }
         };
-        let owner = (placement.machine_id != c.me.id)
-            .then(|| c.live(&placement.machine_id))
-            .flatten()
-            .filter(|m| m.epoch == placement.epoch);
+        if placement.machine_id == c.me.id {
+            // Ending here: the stop, sweep or shutdown writing its last
+            // fields releases the placement after them.
+            if self.ending.lock().unwrap().contains(id) {
+                return false;
+            }
+            // Placed here but not running (it failed to start, or it is
+            // from an earlier lease): remove exactly that placement, so no
+            // machine starts it again.
+            return c
+                .dir
+                .release(id, &placement.machine_id, placement.epoch)
+                .unwrap_or(false);
+        }
+        if !forward {
+            return false;
+        }
+        let owner = match c.live(&placement.machine_id) {
+            Ok(owner) => owner,
+            Err(e) => {
+                tracing::warn!("[shard {id}] stop: machine lookup failed: {e}");
+                return false;
+            }
+        };
         match owner {
             // Its machine runs it: that machine stops it.
-            Some(Machine {
-                id: machine,
-                address: Some(address),
-                ..
-            }) => {
+            Some(m) if m.epoch == placement.epoch => {
+                let Some(address) = m.address else {
+                    tracing::warn!(
+                        "[shard {id}] not stopped: machine {} runs it and has no address",
+                        m.id
+                    );
+                    return false;
+                };
                 drop(own);
                 let op = RemoteOp::Stop { id: id.to_string() };
-                match shard_cluster::call(&machine, &address, &op) {
+                match shard_cluster::call(&m.id, &address, &op) {
                     Ok(RemoteReply::Ok(v)) => v.as_bool().unwrap_or(false),
                     Ok(RemoteReply::Err { message, .. }) | Err(message) => {
-                        tracing::warn!(
-                            "[shard {id}] stop on {} failed: {message}",
-                            placement.machine_id
-                        );
+                        tracing::warn!("[shard {id}] stop on {} failed: {message}", m.id);
                         false
                     }
                 }
             }
-            // Placed here but not running (it failed to start, or it is from
-            // an earlier lease), on a dead machine, or on a machine with no
-            // address: remove exactly that placement, so no machine starts
-            // it again. A machine that took it over meanwhile keeps it.
+            // On a dead machine, or placed under an earlier lease of a live
+            // one: remove exactly that placement, so no machine starts it
+            // again. A machine that took it over meanwhile keeps it.
             _ => c
                 .dir
                 .release(id, &placement.machine_id, placement.epoch)
@@ -2233,7 +2324,10 @@ impl WasmShardHost {
             // next round.
             return Some(not_running("starting on this machine".into()));
         }
-        match c.live(&placement.machine_id) {
+        let Ok(owner) = c.live(&placement.machine_id) else {
+            return None;
+        };
+        match owner {
             Some(Machine {
                 id: machine,
                 address: Some(address),
@@ -2343,6 +2437,28 @@ impl WasmShardHost {
                 })
                 .collect()
         };
+        // A held shard that stopped before the sweep removed it is not
+        // handed over or saved to run again. One that ended here gets its
+        // last writes and its placement released, as the sweep does. One
+        // that stopped because the lease lapsed keeps its placement (and
+        // its saved state) for the machine that takes it over; its writes
+        // are not this machine's to make.
+        let (held, stopped): (Vec<_>, Vec<_>) = held
+            .into_iter()
+            .partition(|(_, _, shard, _)| shard.is_running());
+        let mut ended = Vec::new();
+        for (id, epoch, shard, _) in stopped {
+            if Self::ended_here(c, &shard, epoch) {
+                ended.push(id);
+            } else {
+                tracing::warn!("[shard {id}] stopped when its lease lapsed; its placement stays");
+                self.discard_writes(&id);
+            }
+        }
+        self.ending.lock().unwrap().extend(ended.iter().cloned());
+        for id in ended {
+            self.end_placement(c, &id);
+        }
         // Each held shard goes to another machine with its clients, while
         // the drain time lasts (see drain.rs).
         let held = self.drain(c, held);
@@ -2666,14 +2782,7 @@ impl WasmShardHost {
             if round_started.elapsed() >= Duration::from_secs(3) {
                 break;
             }
-            if home(&orphan.shard_id, &live).map(|m| m.id.as_str()) != Some(c.me.id.as_str()) {
-                continue;
-            }
-            // Ended here and about to be released by the sweep: not
-            // started again.
-            if orphan.machine_id == c.me.id
-                && self.ending.lock().unwrap().contains(&orphan.shard_id)
-            {
+            if !self.may_take_orphan(c, &orphan.shard_id, &live) {
                 continue;
             }
             let _own = c.own_lock.lock().unwrap();
@@ -2828,18 +2937,9 @@ impl WasmShardHost {
             // Stop what runs here, or forget a placement on this machine
             // with nothing running. Never passed on again.
             RemoteOp::Stop { id } => {
-                let placed_here = c
-                    .dir
-                    .placement(&id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|p| p.machine_id == c.me.id);
-                let stopped = if self.registry.get(&id).is_some() || placed_here {
-                    self.stop(&id)
-                } else {
-                    false
-                };
-                RemoteReply::Ok(serde_json::json!(stopped))
+                // Only this machine's shard and placement: never passed on
+                // again.
+                RemoteReply::Ok(serde_json::json!(self.stop_where(&id, false)))
             }
             RemoteOp::Get { id } => RemoteReply::Ok(
                 self.info_local(&id)
@@ -2940,7 +3040,12 @@ impl WasmShardHost {
         if p.machine_id == c.me.id {
             return ShardLocation::Unknown;
         }
-        match c.live(&p.machine_id).filter(|m| m.epoch == p.epoch) {
+        match c
+            .live(&p.machine_id)
+            .ok()
+            .flatten()
+            .filter(|m| m.epoch == p.epoch)
+        {
             Some(m) => ShardLocation::Remote {
                 machine_id: m.id,
                 address: m.address,
@@ -3041,18 +3146,15 @@ impl WasmShardHost {
             // its placement.
             if let Some(c) = self.cluster.get() {
                 c.saved_at.lock().unwrap().remove(id);
-                // A shard stops on its own when its lease lapses (its guest
-                // calls are refused) before the fence runs: that is not an
-                // ending, and it keeps its placement.
-                let lapsed = shard
-                    .with_state(|sim| sim.failure())
-                    .is_some_and(|why| why == LEASE_LAPSED);
-                let held = {
-                    let lease = c.lease.lock().unwrap();
-                    let in_force = lease.until.is_some_and(|until| Instant::now() < until);
-                    let held = c.owned.lock().unwrap().remove(id);
-                    held.filter(|&epoch| in_force && !lapsed && epoch == lease.epoch)
-                };
+                let held = c.owned.lock().unwrap().remove(id);
+                let ends = held.filter(|&epoch| Self::ended_here(c, shard, epoch));
+                if held.is_some() && ends.is_none() {
+                    // Stopped by a lapsed lease: the fence no longer finds
+                    // it in `owned`, so its writes are dropped here. No run
+                    // of the id starts meanwhile (the create lock is held).
+                    self.discard_writes(id);
+                }
+                let held = ends;
                 // It ended (finished, failed, or idle with no move out): a
                 // move out of it still open is finished by its target's
                 // machine once the placement is gone.
@@ -3073,28 +3175,66 @@ impl WasmShardHost {
         let Some(c) = self.cluster.get() else {
             return;
         };
-        for (id, epoch) in ended {
-            // Its last writes, while the placement still says it is ours
-            // (the flush's fence reads the placement), tried a few times.
-            for attempt in 0..data::FINAL_WRITE_ATTEMPTS {
-                if self.flush_writes(data::Flush::Shard(&id)) == 0 {
-                    break;
-                }
-                if attempt + 1 == data::FINAL_WRITE_ATTEMPTS {
-                    tracing::error!(
-                        "[shard {id}] its last entity writes failed; they are lost with its placement"
-                    );
-                    // Gone: a later run of the id must not write them.
-                    self.discard_writes(&id);
-                } else {
-                    std::thread::sleep(Duration::from_millis(200));
-                }
+        for (id, _) in ended {
+            self.end_placement(c, &id);
+        }
+    }
+
+    /// Whether this machine takes over orphan `id`: it is the id's home
+    /// among `live`, and the id is not ending here (its release deletes
+    /// any placement of the id on this machine, whichever machine the
+    /// orphan came from).
+    fn may_take_orphan(&self, c: &ClusterState, id: &str, live: &[Machine]) -> bool {
+        home(id, live).map(|m| m.id.as_str()) == Some(c.me.id.as_str())
+            && !self.ending.lock().unwrap().contains(id)
+    }
+
+    /// Whether a held shard that stopped ended here (finished, idle, or
+    /// failed) under `epoch`, so its placement is released. A shard stops
+    /// on its own when its lease lapses (its guest calls are refused)
+    /// before the fence runs: that is not an ending, and it keeps its
+    /// placement for the machine that takes it over.
+    fn ended_here(c: &ClusterState, shard: &Shard<WasmSim>, epoch: i64) -> bool {
+        let lapsed = shard
+            .with_state(|sim| sim.failure())
+            .is_some_and(|why| why == LEASE_LAPSED);
+        let lease = c.lease.lock().unwrap();
+        let in_force = lease.until.is_some_and(|until| Instant::now() < until);
+        !shard.is_running() && !lapsed && in_force && epoch == lease.epoch
+    }
+
+    /// Write an ended shard's last fields, then release its placement and
+    /// its reservation. The caller put `id` in `ending` first, so no run
+    /// of it starts, and no hand-over or take-over places it here, until
+    /// the release.
+    fn end_placement(&self, c: &ClusterState, id: &str) {
+        self.final_writes(id);
+        let _guard = self.create_lock.lock().unwrap();
+        // Any epoch of this machine: the lease can have lapsed and been
+        // renewed meanwhile.
+        if let Err(e) = c.dir.release_here(id, &c.me.id) {
+            tracing::warn!("[shard {id}] could not release its placement: {e}");
+        }
+        self.ending.lock().unwrap().remove(id);
+    }
+
+    /// Write a stopped shard's last fields before its placement goes,
+    /// while the placement still says it is ours (the flush's fence reads
+    /// the placement), tried a few times. Fields still unwritten are
+    /// dropped: a later run of the id must not write them.
+    fn final_writes(&self, id: &str) {
+        for attempt in 0..data::FINAL_WRITE_ATTEMPTS {
+            if self.flush_writes(data::Flush::Shard(id)) == 0 {
+                break;
             }
-            let _guard = self.create_lock.lock().unwrap();
-            if let Err(e) = c.dir.release(&id, &c.me.id, epoch) {
-                tracing::warn!("[shard {id}] could not release its placement: {e}");
+            if attempt + 1 == data::FINAL_WRITE_ATTEMPTS {
+                tracing::error!(
+                    "[shard {id}] its last entity writes failed; they are lost with its placement"
+                );
+                self.discard_writes(id);
+            } else {
+                std::thread::sleep(Duration::from_millis(200));
             }
-            self.ending.lock().unwrap().remove(&id);
         }
     }
 }
