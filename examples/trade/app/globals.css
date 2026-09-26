@@ -9,39 +9,83 @@
 @source "../client";
 @source "../../_shared/src";
 
+/* Trade is a dark-only dashboard. */
 @theme {
-  --font-sans: "Inter", -apple-system, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  --font-sans: "Geist", -apple-system, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", monospace;
 
-  --color-background: oklch(0.985 0 0);
-  --color-foreground: oklch(0.145 0 0);
-  --color-card: oklch(1 0 0);
-  --color-card-foreground: oklch(0.145 0 0);
-  --color-popover: oklch(1 0 0);
-  --color-popover-foreground: oklch(0.145 0 0);
-  --color-primary: oklch(0.205 0 0);
-  --color-primary-foreground: oklch(0.985 0 0);
-  --color-secondary: oklch(0.97 0 0);
-  --color-secondary-foreground: oklch(0.205 0 0);
-  --color-muted: oklch(0.97 0 0);
-  --color-muted-foreground: oklch(0.556 0 0);
-  --color-accent: oklch(0.97 0 0);
-  --color-accent-foreground: oklch(0.205 0 0);
-  --color-destructive: oklch(0.577 0.245 27.325);
-  --color-destructive-foreground: oklch(0.985 0 0);
-  --color-border: oklch(0.922 0 0);
-  --color-input: oklch(0.922 0 0);
-  --color-ring: oklch(0.708 0 0);
+  --color-background: #08090b;
+  --color-foreground: #e8eaed;
+  --color-card: #0d0f12;
+  --color-card-foreground: #e8eaed;
+  --color-popover: #111419;
+  --color-popover-foreground: #e8eaed;
+  --color-primary: #e8eaed;
+  --color-primary-foreground: #08090b;
+  --color-secondary: #181b21;
+  --color-secondary-foreground: #e8eaed;
+  --color-muted: #15181d;
+  --color-muted-foreground: #8b929c;
+  --color-accent: #161a20;
+  --color-accent-foreground: #e8eaed;
+  --color-destructive: #f26d6d;
+  --color-destructive-foreground: #08090b;
+  --color-border: #1c2026;
+  --color-input: #1c2026;
+  --color-ring: #3a404a;
 
-  --radius-lg: 0.625rem;
-  --radius-md: calc(0.625rem - 2px);
-  --radius-sm: calc(0.625rem - 4px);
+  --radius-lg: 0.5rem;
+  --radius-md: calc(0.5rem - 2px);
+  --radius-sm: calc(0.5rem - 4px);
 
-  /* Trade-specific semantic tokens */
-  --color-bull: oklch(0.627 0.194 142.5);
-  --color-bear: oklch(0.577 0.245 27.325);
+  /* Trade tokens */
+  --color-panel: #0d0f12;
+  --color-line: #1c2026;
+  --color-grid: #161a1f;
+  --color-dim: #5e6570;
+  --color-bull: #3ddc97;
+  --color-bear: #f26d6d;
+  --color-accent-warm: #f2b441;
+  --color-series: #4f93ec;
+  --color-heat-mid: #20242b;
+  --color-heat-up: #13824f;
+  --color-heat-down: #b3262d;
 }
 
-html, body {
+html,
+body {
   height: 100%;
+  color-scheme: dark;
 }
+
+body {
+  font-feature-settings: "tnum" 1, "cv11" 1;
+}
+
+/* A new fill on the tape fades in from the side color. */
+@keyframes fill-in-buy {
+  from { background-color: color-mix(in oklab, var(--color-bull) 12%, transparent); }
+  to { background-color: transparent; }
+}
+@keyframes fill-in-sell {
+  from { background-color: color-mix(in oklab, var(--color-bear) 12%, transparent); }
+  to { background-color: transparent; }
+}
+.fill-in-buy { animation: fill-in-buy 700ms ease-out; }
+.fill-in-sell { animation: fill-in-sell 700ms ease-out; }
+
+/* A price cell flashes the direction of its last change. */
+@keyframes tick-up {
+  from { color: var(--color-bull); }
+  to { color: var(--color-foreground); }
+}
+@keyframes tick-down {
+  from { color: var(--color-bear); }
+  to { color: var(--color-foreground); }
+}
+
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.live-pulse { animation: live-pulse 1.6s ease-in-out infinite; }

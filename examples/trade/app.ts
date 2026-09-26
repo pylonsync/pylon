@@ -1,22 +1,21 @@
 /**
- * Pylon Trade — mock market ticker at scale.
+ * Pylon Trade: a live market dashboard fed by a client-driven market maker.
  *
- * 500 symbols getting price updates driven by a client-side "market
- * maker" tab. Every subscriber sees their watchlist update in real
- * time. Demonstrates query fan-out, large-index performance, and the
- * ergonomics of building a trading dashboard without a separate
- * realtime layer.
+ * One tab runs the ticker and calls `recordTrades` with batches of fills
+ * (about 2,000 per second). Every other tab reads the results through
+ * live queries:
+ *   - Ticker: one row per symbol with last price, day range, volume and
+ *     the open one-second candle
+ *   - Bar: closed one-second OHLCV candles per symbol
+ *   - Fill: a fixed ring of the most recent fills for the trade tape
+ *   - Market: exchange-wide counters and the fill sequence number
  *
- * What you'll see:
- *   - Top movers (filtered query, live-ordered)
- *   - Per-symbol sparkline computed client-side from Trade rows
- *   - Throughput counter showing ticks/sec across the whole market
- *
- * The scaling story this demo tells:
- *   - ~500 rows in Ticker, 50k+ rows in Trade after a minute
- *   - Indexed query on (symbol, at) serves sparkline lookups at O(log n)
- *   - Live subscription to a watchlist of 10 symbols stays <1ms even
- *     while the market-maker tab is writing 200 trades/sec
+ * The raw Trade log is append-only and grows by thousands of rows per
+ * second, so it stays out of the client replica (`sync: false`). The
+ * charts read the one-second rollups instead: the open candle on each
+ * Ticker plus closed Bar rows, scoped to a rolling window so every
+ * replica stays bounded. Each batch changes about 27 rows however many
+ * trades it carries, plus one Bar insert per symbol per second.
  */
 import {
   entity,
@@ -38,6 +37,14 @@ const Ticker = entity(
     dayLow: field.float(),
     volume: field.int(),
     updatedAt: field.datetime(),
+    // The in-progress one-second candle. `recordTrades` moves it into a
+    // Bar row when the next second's first trade arrives.
+    barT: field.datetime().optional(),
+    barOpen: field.float().optional(),
+    barHigh: field.float().optional(),
+    barLow: field.float().optional(),
+    barVolume: field.int().optional(),
+    barTrades: field.int().optional(),
   },
   {
     indexes: [
@@ -46,9 +53,7 @@ const Ticker = entity(
   },
 );
 
-// Individual trade ticks. Written frequently by the market-maker, read
-// by sparkline views. Indexed on (symbol, at) for fast per-symbol
-// range scans.
+// Every fill. Append-only; read server-side through the (symbol, at) index.
 const Trade = entity(
   "Trade",
   {
@@ -62,8 +67,61 @@ const Trade = entity(
       { name: "by_symbol_at", fields: ["symbol", "at"], unique: false },
       { name: "by_at", fields: ["at"], unique: false },
     ],
+    sync: false,
   },
 );
+
+// Closed one-second OHLCV candle per symbol. Each row is inserted once,
+// when its second is over; the open second lives on the Ticker row. The
+// replica holds the last two minutes.
+const Bar = entity(
+  "Bar",
+  {
+    symbol: field.string(),
+    t: field.datetime(),
+    open: field.float(),
+    high: field.float(),
+    low: field.float(),
+    close: field.float(),
+    volume: field.int(),
+    trades: field.int(),
+  },
+  {
+    indexes: [
+      { name: "by_symbol_t", fields: ["symbol", "t"], unique: true },
+      { name: "by_t", fields: ["t"], unique: false },
+    ],
+    sync: { where: 'data.t >= ago("2m")', limit: 20_000 },
+  },
+);
+
+// The trade tape: a ring of FILL_SLOTS rows. Each batch overwrites the
+// oldest slots with its latest fills, so the table never grows.
+const Fill = entity(
+  "Fill",
+  {
+    slot: field.int().unique(),
+    seq: field.int(),
+    symbol: field.string(),
+    price: field.float(),
+    qty: field.int(),
+    side: field.string(),
+    at: field.datetime(),
+  },
+  {
+    indexes: [{ name: "by_seq", fields: ["seq"], unique: false }],
+  },
+);
+
+// Singleton row with exchange-wide counters.
+const Market = entity("Market", {
+  key: field.string().unique(),
+  seq: field.int(),
+  trades: field.int(),
+  volume: field.int(),
+  notional: field.float(),
+  updatedAt: field.datetime(),
+});
 
 // Per-user watchlist — rows the user has pinned to their dashboard.
 const Watch = entity(
@@ -89,11 +147,31 @@ const tickerPolicy = policy({
   allowUpdate: "auth.userId != null",
 });
 
+// The raw trade log is server-side only: `recordTrades` writes it and no
+// client reads it. Denying client reads also keeps its inserts off every
+// subscriber's socket.
 const tradePolicy = policy({
-  name: "trade_public",
+  name: "trade_server_only",
   entity: "Trade",
+  allowRead: "false",
+});
+
+const barPolicy = policy({
+  name: "bar_public",
+  entity: "Bar",
   allowRead: "true",
-  allowInsert: "auth.userId != null",
+});
+
+const fillPolicy = policy({
+  name: "fill_public",
+  entity: "Fill",
+  allowRead: "true",
+});
+
+const marketPolicy = policy({
+  name: "market_public",
+  entity: "Market",
+  allowRead: "true",
 });
 
 const watchPolicy = policy({
@@ -108,10 +186,10 @@ const watchPolicy = policy({
 const manifest = buildManifest({
   name: "trade",
   version: "0.1.0",
-  entities: [Ticker, Trade, Watch],
+  entities: [Ticker, Trade, Bar, Fill, Market, Watch],
   queries: [],
   actions: [],
-  policies: [tickerPolicy, tradePolicy, watchPolicy],
+  policies: [tickerPolicy, tradePolicy, barPolicy, fillPolicy, marketPolicy, watchPolicy],
   // File-based SSR routing: app/page.tsx → "/". The single binary serves the
   // frontend and the API on one port — no separate Next.js app.
   routes: await discoverAppRoutes(),

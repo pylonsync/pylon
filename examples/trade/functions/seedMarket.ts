@@ -1,6 +1,7 @@
-import { mutation, v } from "@pylonsync/functions";
+import { mutation } from "@pylonsync/functions";
+import { FILL_SLOTS, MARKET_KEY } from "../lib/market";
 
-// Fake symbol set — feel free to expand to 500+ for realism.
+// Fake symbol set. Expand it to 500+ to measure fan-out as rows grow.
 const SYMBOLS = [
   ["PYLO", "Pylonsync Inc", "Tech", 142.50],
   ["CVXD", "Convex Data", "Tech", 89.20],
@@ -25,8 +26,9 @@ const SYMBOLS = [
 ];
 
 /**
- * Populate the Ticker table. Idempotent — on re-run it just bumps the
- * openPrice to current price (simulating a market open).
+ * Populate the Ticker table, the Market counters row and the Fill ring.
+ * Idempotent: on re-run it sets each openPrice to the current price
+ * (a new market open) and leaves the counters and the tape alone.
  */
 export default mutation({
   // Public demo: anyone with a guest session (POST /api/auth/guest) can seed
@@ -59,6 +61,35 @@ export default mutation({
         inserted++;
       }
     }
+
+    const markets = await ctx.db.query("Market", { key: MARKET_KEY });
+    if (markets.length === 0) {
+      await ctx.db.insert("Market", {
+        key: MARKET_KEY,
+        seq: 0,
+        trades: 0,
+        volume: 0,
+        notional: 0,
+        updatedAt: now,
+      });
+    }
+
+    const fills = await ctx.db.query("Fill", { $limit: FILL_SLOTS });
+    const taken = new Set(fills.map((f) => f.slot as number));
+    for (let slot = 0; slot < FILL_SLOTS; slot++) {
+      if (taken.has(slot)) continue;
+      // seq 0 marks an empty slot; the tape hides it.
+      await ctx.db.insert("Fill", {
+        slot,
+        seq: 0,
+        symbol: "",
+        price: 0,
+        qty: 0,
+        side: "buy",
+        at: now,
+      });
+    }
+
     return { inserted, total: SYMBOLS.length };
   },
 });

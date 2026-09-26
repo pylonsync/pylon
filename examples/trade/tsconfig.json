@@ -10,5 +10,5 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": ["bun-types", "react", "react-dom"]
   },
-  "include": ["app.ts", "app/**/*", "client/**/*", "functions/**/*"]
+  "include": ["app.ts", "app/**/*", "client/**/*", "functions/**/*", "lib/**/*"]
 }

@@ -1,31 +1,47 @@
-# Trade — live market ticker
+# Trade: live market dashboard
 
-A mock equities dashboard with a seeded set of symbols and a client-
-driven ticker that writes trades in a tight loop. Open two tabs — one
-clicks "Start ticker", the rest watch prices move in realtime through
-subscribed live queries.
+A dark, data-dense equities dashboard over a seeded set of 20 symbols. One
+tab clicks "Start ticker" and runs a client-side market maker that writes
+about 2,000 trades per second. Every other tab updates through live
+queries.
+
+The dashboard shows:
+
+- A market table with last price, change from open, a 60-second sparkline
+  and volume per symbol
+- One-second candles with volume for the selected symbol (90 seconds)
+- Fills per second across the market
+- A sector treemap sized by dollar volume and colored by change from open
+- Market breadth: advancers and decliners, up and down volume, sector change
+- Top gainers and losers
+- A trade tape of the latest fills
+- Write latency (p50, p99) in the ticker tab and sync lag in every tab
 
 **What this example demonstrates:**
 
-- **Query fan-out under write load.** A single tab writing ~160
-  trades/sec is feeding every other tab's `Ticker` subscription. The
-  server de-duplicates the fanout; clients see only the rows they
-  actually read.
-- **Indexed range scans.** The per-symbol sparkline reads from `Trade`
-  filtered by `symbol` — the `by_symbol_at` index serves it at
-  O(log n) even after a minute of continuous writes.
-- **Aggregation from raw events.** Ticker rows accumulate `dayHigh` /
-  `dayLow` / `volume` via `recordTrade` updates; the dashboard sorts
-  by computed `pct` change in the client.
+- **Query fan-out under write load.** The ticker tab sends batches of 500
+  trades to `recordTrades` four times per second. Each batch changes about
+  27 synced rows (one Ticker per symbol, six tape slots, the Market row),
+  plus one Bar insert per symbol per second. Every subscribed tab gets
+  those changes over its socket and stays caught up.
+- **Rollups instead of raw rows.** The raw `Trade` log grows by 2,000 rows
+  per second. It is `sync: false` and its read policy denies clients, so it
+  never reaches a browser. Charts read one-second candles instead: the open
+  candle on each Ticker row and closed `Bar` rows.
+- **Rolling sync windows.** `Bar` uses `sync: { where: 'data.t >= ago("2m")' }`,
+  so each replica holds two minutes of candles however long the ticker runs.
+- **A bounded tape.** `Fill` is a ring of 48 rows. Each batch overwrites the
+  oldest slots, so the table never grows.
 - **Per-user state.** The watchlist (`Watch` rows) uses the ownership
-  policy to scope reads/writes to the calling user.
+  policy to scope reads and writes to the calling user. Watched symbols
+  sort to the top of the market table.
 
 ## Run
 
 ```bash
 cd examples/trade
 bun install
-bun run dev          # starts Pylon server on :4321, serving both UI + API
+bun run dev          # starts Pylon on :4321, serving both UI and API
 ```
 
 Open <http://localhost:4321>. Click **Start ticker** in one tab. Open
@@ -34,33 +50,38 @@ ticker button.
 
 ## Stress knobs
 
-- Change the `setTimeout(step, 120)` in `client/TradeApp.tsx` to 60, 30, 10
-  to dial up the write rate.
-- Change the inner batch size (currently 20) to 50 to emit more
-  writes per tick.
-- Expand the `SYMBOLS` list in `functions/seedMarket.ts` to 100, 500, 5000 to
-  measure fan-out costs as row count grows.
+In `client/marketMaker.ts`:
+
+- `TARGET_RATE`: trades per second (default 2,000)
+- `BATCH_SIZE`: trades per `recordTrades` call (default 500). Smaller
+  batches mean more synced row changes per second for every tab.
+- `MAX_IN_FLIGHT`: concurrent calls (default 2)
+
+In `functions/seedMarket.ts`, expand `SYMBOLS` to 100, 500 or 5,000 to
+measure fan-out cost as the row count grows.
 
 ## Files
 
-- `app.ts`: `Ticker`, `Trade`, `Watch` entities + policies
-- `functions/seedMarket.ts`: idempotent symbol setup
-- `functions/recordTrade.ts`: single-trade tick write (updates Ticker,
-  appends to Trade log)
+- `app.ts`: `Ticker`, `Trade`, `Bar`, `Fill`, `Market`, `Watch` entities and policies
+- `lib/market.ts`: constants shared by the functions
+- `functions/seedMarket.ts`: idempotent setup of symbols, the Market row and the tape ring
+- `functions/recordTrades.ts`: records a batch of trades (Trade log, Ticker,
+  closed Bars, Market counters, tape)
 - `functions/toggleWatch.ts`: watchlist toggle (uses `ctx.auth.userId`,
-  never trusts caller-supplied user ID)
-- `app/TradeIsland.tsx`: SSR shell that bootstraps the guest session before
+  never a caller-supplied user ID)
+- `app/TradeIsland.tsx`: SSR shell that creates the guest session before
   mounting the client island
-- `client/TradeApp.tsx`: dashboard UI (movers table, watchlist,
-  detail panel with sparkline)
+- `client/TradeApp.tsx`: dashboard layout and panels
+- `client/charts.tsx`: sparkline, candle chart, throughput chart, sector treemap
+- `client/marketMaker.ts`: the client-side market maker
 
 ## What to look for
 
-Open two tabs side by side and start the ticker in one. A single live-query subscription updates the sparklines in the other without an app-specific socket.
+Open two tabs side by side and start the ticker in one. The other tab's charts, tape and counters move with it through live queries, with no app-specific socket. Compare "Sync lag p50" in both tabs.
 
 Try these load dimensions:
 
-- **Inner batch size**: bump from 20 to 50 to 100 to drive higher writes/sec per tick
+- **Batch size**: lower `BATCH_SIZE` to raise the synced change rate at the same trade rate
 - **Symbol count**: expand `SYMBOLS` in `functions/seedMarket.ts` (20 → 100 → 500 → 5000) to see how live-query fan-out cost scales with subscribed-row count
 - **Subscriber count**: open more reader tabs (or use the bot driver) to put fan-out load on the server
 

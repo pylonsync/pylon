@@ -59,6 +59,42 @@
           "type": "datetime",
           "optional": false,
           "unique": false
+        },
+        {
+          "name": "barT",
+          "type": "datetime",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "barOpen",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "barHigh",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "barLow",
+          "type": "float",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "barVolume",
+          "type": "int",
+          "optional": true,
+          "unique": false
+        },
+        {
+          "name": "barTrades",
+          "type": "int",
+          "optional": true,
+          "unique": false
         }
       ],
       "indexes": [
@@ -115,7 +151,178 @@
           ],
           "unique": false
         }
+      ],
+      "sync": false
+    },
+    {
+      "name": "Bar",
+      "fields": [
+        {
+          "name": "symbol",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "t",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "open",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "high",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "low",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "close",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "volume",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "trades",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_symbol_t",
+          "fields": [
+            "symbol",
+            "t"
+          ],
+          "unique": true
+        },
+        {
+          "name": "by_t",
+          "fields": [
+            "t"
+          ],
+          "unique": false
+        }
+      ],
+      "sync_scope": "data.t >= ago(\"2m\")",
+      "sync_limit": 20000
+    },
+    {
+      "name": "Fill",
+      "fields": [
+        {
+          "name": "slot",
+          "type": "int",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "seq",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "symbol",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "price",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "qty",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "side",
+          "type": "string",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "at",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": [
+        {
+          "name": "by_seq",
+          "fields": [
+            "seq"
+          ],
+          "unique": false
+        }
       ]
+    },
+    {
+      "name": "Market",
+      "fields": [
+        {
+          "name": "key",
+          "type": "string",
+          "optional": false,
+          "unique": true
+        },
+        {
+          "name": "seq",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "trades",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "volume",
+          "type": "int",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "notional",
+          "type": "float",
+          "optional": false,
+          "unique": false
+        },
+        {
+          "name": "updatedAt",
+          "type": "datetime",
+          "optional": false,
+          "unique": false
+        }
+      ],
+      "indexes": []
     },
     {
       "name": "Watch",
@@ -179,10 +386,24 @@
       "entity": "Ticker"
     },
     {
-      "name": "trade_public",
-      "allowRead": "true",
-      "allowInsert": "auth.userId != null",
+      "name": "trade_server_only",
+      "allowRead": "false",
       "entity": "Trade"
+    },
+    {
+      "name": "bar_public",
+      "allowRead": "true",
+      "entity": "Bar"
+    },
+    {
+      "name": "fill_public",
+      "allowRead": "true",
+      "entity": "Fill"
+    },
+    {
+      "name": "market_public",
+      "allowRead": "true",
+      "entity": "Market"
     },
     {
       "name": "watch_ownership",
@@ -215,6 +436,7 @@
       "invite_entity": "OrgInvite",
       "disabled": false
     },
+    "org_roles": [],
     "trusted_origins": []
   }
 }
