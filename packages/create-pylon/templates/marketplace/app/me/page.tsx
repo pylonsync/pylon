@@ -3,13 +3,13 @@ import { type Metadata } from "@pylonsync/react";
 import { MyMarket } from "../../client/MyMarket";
 
 export const metadata: Metadata = {
-  title: "Dashboard | Reprise",
-  description: "Your listings, saved finds, and offers.",
+  title: "Your market | Reprise",
+  description: "Your listings, offers, and saved items.",
   robots: "noindex", // personal dashboard; keep it out of search
 };
 
-// Fully interactive dashboard (three live queries scoped to you), so the
-// whole page is the client island.
+// The dashboard is three live queries scoped to the signed-in user, so the
+// whole page is one client island.
 export default function MePage() {
   return <MyMarket />;
 }

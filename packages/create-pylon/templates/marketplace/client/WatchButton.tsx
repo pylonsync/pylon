@@ -3,15 +3,14 @@
 import React, { useEffect, useState } from "react";
 import { db } from "@pylonsync/react";
 import { Heart } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { bootClient, readIdentity, type Watch } from "./market";
 
 // Heart toggle that saves a listing to your private watchlist. Self-contained
 // (no provider needed): boots the client, reads identity, and toggles the
-// Watch row with optimistic db.insert / db.delete — the live query below flips
-// the fill instantly. Hidden for signed-out visitors (watchlists are a
-// logged-in feature). The mounted gate keeps db.useQuery off the SSR pass.
+// Watch row with optimistic db.insert / db.delete; the live query below flips
+// the fill instantly. Signed-out visitors are sent to the sign-in card on
+// /me. The mounted gate keeps db.useQuery off the SSR pass.
 export function WatchButton(props: {
   listingId: string;
   listingTitle: string;
@@ -57,43 +56,44 @@ function Inner({
     : undefined;
   const watched = !!mine;
 
-  // No heart for signed-out visitors.
-  if (!identity) return null;
-
   function toggle(e: React.MouseEvent) {
     // Stop the click from bubbling into the surrounding card link.
     e.preventDefault();
     e.stopPropagation();
+    if (!identity) {
+      // Watchlists belong to an account; the dashboard shows the sign-in card.
+      window.location.assign("/me");
+      return;
+    }
     if (mine) {
       void db.delete("Watch", mine.id);
     } else {
-      void db.insert("Watch", { userId: identity!.userId, listingId, listingTitle });
+      void db.insert("Watch", { userId: identity.userId, listingId, listingTitle });
     }
   }
 
   return (
-    <Button
+    <button
       type="button"
-      variant="outline"
-      size="icon"
       onClick={toggle}
       aria-pressed={watched}
       aria-label={watched ? "Remove from watchlist" : "Save to watchlist"}
       title={watched ? "Saved" : "Save to watchlist"}
       className={cn(
-        "rounded-full bg-background/85 backdrop-blur",
+        "grid size-9 place-items-center rounded-full bg-white/92 text-neutral-900 shadow-[var(--shadow-float)] backdrop-blur transition-[scale,background-color] duration-200 hover:bg-white active:scale-90",
         className,
       )}
     >
       <Heart
         aria-hidden="true"
+        strokeWidth={1.75}
         className={cn(
-          "transition-[color,fill,scale] duration-200",
+          "size-[17px] transition-[color,fill,scale] duration-300 ease-[var(--ease-out-soft)]",
           watched
-            ? "scale-100 fill-foreground text-foreground"
-            : "scale-95 fill-transparent text-foreground/70",
+            ? "scale-100 fill-signal text-signal"
+            : "scale-95 fill-transparent text-neutral-900",
         )}
       />
-    </Button>
+    </button>
   );
 }

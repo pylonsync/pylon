@@ -8,9 +8,10 @@
  *   - The browse grid (`/`) and each listing page (`/listing/:id`) are
  *     SERVER-RENDERED with real rows from the database (good for SEO + LCP) —
  *     view source and the products are in the HTML, not fetched later.
- *   - The interactive, realtime bits — the "just listed" ticker, the live
- *     offers on a listing, your inbox on `/me` — ride the sync engine: a
- *     single `useQuery` fans every write out to every open tab instantly.
+ *   - The realtime parts ride the sync engine: the browse grid (new
+ *     listings, offer counts, sold status), the activity feed, the offers on
+ *     a listing, and your dashboard on `/me`. One `useQuery` per view fans
+ *     every write out to every open tab.
  *   - One binary, one port. SSR + REST + WebSockets all from `pylon dev`.
  *     No Next.js app, no separate realtime service.
  */
@@ -21,6 +22,7 @@ import {
   buildManifest,
   discoverAppRoutes,
   discoverFunctions,
+  font,
 } from "@pylonsync/sdk";
 
 // Accounts. Email/password auth is built in: registering through
@@ -41,13 +43,13 @@ const User = entity(
   },
 );
 
-// A thing for sale. `imageUrl` is optional so listings created before the
-// photo field was added still render with a deterministic fallback.
+// A thing for sale. A listing without `imageUrl` renders a deterministic
+// gradient placeholder.
 // `status` flips active → sold when an offer is accepted.
 //
 // `sellerId: field.owner()` is what lets SellForm create a listing with a
-// plain, optimistic `db.insert` (it shows in the live ticker the instant
-// you post — no server round-trip) while the seller id stays unspoofable:
+// plain, optimistic `db.insert` (it shows in every open browse grid the
+// instant you post, before the server round-trip) while the seller id stays unspoofable:
 // the framework stamps it from the session and rejects any forged value.
 // No createListing function needed. `status` + `createdAt` default
 // server-side so the client doesn't have to send them.
@@ -56,6 +58,8 @@ const Listing = entity(
   {
     sellerId: field.string().owner(),
     sellerName: field.string(),
+    // Where the item is, as the seller wrote it ("Brooklyn, NY").
+    location: field.string().optional(),
     title: field.string(),
     // Human-readable URL key: "herman-miller-aeron-size-b-a1f3". Unique so it
     // addresses exactly one listing; the detail route resolves by it.
@@ -190,6 +194,27 @@ const manifest = buildManifest({
   // File-based SSR routing: app/**/page.tsx. One binary serves the frontend
   // and the API on one port.
   routes: await discoverAppRoutes(),
+  // Self-hosted web fonts. globals.css maps them onto Tailwind's font-sans
+  // and font-display.
+  fonts: [
+    font({
+      family: "Geist",
+      variable: "--font-geist",
+      weights: ["400", "500", "600"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
+    font({
+      family: "Instrument Serif",
+      variable: "--font-instrument",
+      weights: ["400"],
+      styles: ["normal", "italic"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
+  ],
 });
 
 // Not a debug leftover: the CLI runs `bun run app.ts` and parses stdout as

@@ -1,6 +1,7 @@
 import { action, v } from "@pylonsync/functions";
 import { stripeRequest, assertSafeRedirectUrl } from "@pylonsync/stripe";
-import type { CheckoutResult } from "../lib/shop";
+import { shippingCents, type CheckoutResult } from "../lib/shop";
+import { siteConfig } from "../lib/site.config";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const CURRENCY = "usd";
@@ -92,6 +93,11 @@ export default action<
     // If the session can't be created (bad key, network error, Stripe down) we
     // MUST release the held stock — there's no session that would ever expire to
     // do it for us, so without this the units would be stranded off the shelf.
+    // Shipping follows the same terms the cart shows: a flat rate, free at or
+    // above the threshold. Prices come from the held lines, not the client.
+    const subtotal = held.lines.reduce((s, l) => s + l.unitPriceCents * l.qty, 0);
+    const shipping = shippingCents(subtotal, siteConfig.checkout.shipping);
+
     let session: { id: string; url: string } | undefined;
     try {
       session = await stripeRequest<{ id: string; url: string }>(
@@ -114,6 +120,16 @@ export default action<
               product_data: { name: l.name },
             },
           })),
+          shipping_address_collection: { allowed_countries: ["US"] },
+          shipping_options: [
+            {
+              shipping_rate_data: {
+                type: "fixed_amount",
+                display_name: shipping === 0 ? "Free shipping" : "Standard shipping",
+                fixed_amount: { amount: shipping, currency: CURRENCY },
+              },
+            },
+          ],
         },
       );
     } catch {

@@ -8,52 +8,64 @@
 @source "./";
 @source "../client";
 @source "../components";
-@source "../../_shared/src";
+@source "../lib";
+
+/* Geist and Instrument Serif are declared in app.ts (`fonts: [font(...)]`);
+   the runtime defines --font-geist and --font-instrument. */
+@theme inline {
+  --font-sans: var(--font-geist, ui-sans-serif), ui-sans-serif, -apple-system,
+    BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-display: var(--font-instrument, "Iowan Old Style"), "Iowan Old Style",
+    Georgia, serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
 
 @theme {
-  --font-sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
-    sans-serif;
-  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-
-  --color-background: oklch(0.975 0.004 85);
-  --color-foreground: oklch(0.17 0.004 85);
-  --color-card: oklch(0.995 0.002 85);
-  --color-card-foreground: oklch(0.17 0.004 85);
-  --color-popover: oklch(0.995 0.002 85);
-  --color-popover-foreground: oklch(0.17 0.004 85);
-  --color-primary: oklch(0.19 0.004 85);
-  --color-primary-foreground: oklch(0.98 0.002 85);
-  --color-secondary: oklch(0.94 0.006 85);
-  --color-secondary-foreground: oklch(0.21 0.004 85);
-  --color-muted: oklch(0.945 0.006 85);
-  --color-muted-foreground: oklch(0.48 0.008 85);
-  --color-accent: oklch(0.93 0.009 85);
-  --color-accent-foreground: oklch(0.21 0.004 85);
-  --color-destructive: oklch(0.577 0.245 27.325);
+  --color-background: oklch(0.967 0.007 80);
+  --color-foreground: oklch(0.2 0.008 70);
+  --color-card: oklch(0.993 0.003 80);
+  --color-card-foreground: oklch(0.2 0.008 70);
+  --color-popover: oklch(0.993 0.003 80);
+  --color-popover-foreground: oklch(0.2 0.008 70);
+  --color-primary: oklch(0.2 0.008 70);
+  --color-primary-foreground: oklch(0.98 0.004 80);
+  --color-secondary: oklch(0.93 0.009 80);
+  --color-secondary-foreground: oklch(0.22 0.008 70);
+  --color-muted: oklch(0.935 0.009 80);
+  --color-muted-foreground: oklch(0.5 0.012 70);
+  --color-accent: oklch(0.925 0.011 80);
+  --color-accent-foreground: oklch(0.22 0.008 70);
+  --color-destructive: oklch(0.56 0.2 28);
   --color-destructive-foreground: oklch(0.985 0 0);
-  --color-success: oklch(0.62 0.14 153);
-  --color-success-foreground: oklch(0.38 0.1 153);
-  --color-warning: oklch(0.72 0.14 75);
-  --color-warning-foreground: oklch(0.42 0.1 65);
-  --color-border: oklch(0.89 0.007 85);
-  --color-input: oklch(0.86 0.008 85);
-  --color-ring: oklch(0.53 0.015 85);
+  --color-success: oklch(0.6 0.12 155);
+  --color-success-foreground: oklch(0.4 0.09 155);
+  --color-warning: oklch(0.74 0.14 70);
+  --color-warning-foreground: oklch(0.46 0.1 60);
+  /* Live signal: pending offers, the live dot, "just listed". */
+  --color-signal: oklch(0.63 0.19 38);
+  --color-signal-foreground: oklch(0.5 0.17 38);
+  --color-border: oklch(0.895 0.011 80);
+  --color-input: oklch(0.87 0.012 80);
+  --color-ring: oklch(0.55 0.02 70);
 
   --radius-lg: 1rem;
   --radius-md: 0.625rem;
   --radius-sm: 0.5rem;
+
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 :root {
   color-scheme: light;
   --shadow-border:
-    0 0 0 1px rgb(0 0 0 / 0.06),
-    0 1px 2px -1px rgb(0 0 0 / 0.06),
-    0 8px 24px -16px rgb(41 37 33 / 0.18);
+    0 0 0 1px rgb(40 33 24 / 0.07),
+    0 1px 2px -1px rgb(40 33 24 / 0.06),
+    0 10px 28px -18px rgb(40 33 24 / 0.2);
   --shadow-border-hover:
-    0 0 0 1px rgb(0 0 0 / 0.09),
-    0 2px 4px -2px rgb(0 0 0 / 0.08),
-    0 16px 32px -18px rgb(41 37 33 / 0.24);
+    0 0 0 1px rgb(40 33 24 / 0.1),
+    0 2px 4px -2px rgb(40 33 24 / 0.08),
+    0 18px 36px -20px rgb(40 33 24 / 0.28);
+  --shadow-float: 0 1px 2px rgb(40 33 24 / 0.08), 0 8px 20px -12px rgb(40 33 24 / 0.35);
 }
 
 :root[data-theme="light"] {
@@ -62,61 +74,102 @@
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --color-background: oklch(0.15 0.004 85);
-  --color-foreground: oklch(0.94 0.004 85);
-  --color-card: oklch(0.19 0.005 85);
-  --color-card-foreground: oklch(0.94 0.004 85);
-  --color-popover: oklch(0.19 0.005 85);
-  --color-popover-foreground: oklch(0.94 0.004 85);
-  --color-primary: oklch(0.93 0.004 85);
-  --color-primary-foreground: oklch(0.17 0.004 85);
-  --color-secondary: oklch(0.24 0.006 85);
-  --color-secondary-foreground: oklch(0.94 0.004 85);
-  --color-muted: oklch(0.23 0.006 85);
-  --color-muted-foreground: oklch(0.7 0.007 85);
-  --color-accent: oklch(0.25 0.008 85);
-  --color-accent-foreground: oklch(0.94 0.004 85);
-  --color-border: oklch(0.3 0.007 85);
-  --color-input: oklch(0.34 0.008 85);
-  --color-ring: oklch(0.68 0.01 85);
-  --color-success-foreground: oklch(0.82 0.12 153);
+  --color-background: oklch(0.165 0.006 70);
+  --color-foreground: oklch(0.94 0.006 80);
+  --color-card: oklch(0.2 0.007 70);
+  --color-card-foreground: oklch(0.94 0.006 80);
+  --color-popover: oklch(0.2 0.007 70);
+  --color-popover-foreground: oklch(0.94 0.006 80);
+  --color-primary: oklch(0.94 0.006 80);
+  --color-primary-foreground: oklch(0.18 0.006 70);
+  --color-secondary: oklch(0.25 0.008 70);
+  --color-secondary-foreground: oklch(0.94 0.006 80);
+  --color-muted: oklch(0.24 0.008 70);
+  --color-muted-foreground: oklch(0.7 0.01 75);
+  --color-accent: oklch(0.26 0.009 70);
+  --color-accent-foreground: oklch(0.94 0.006 80);
+  --color-border: oklch(0.3 0.008 70);
+  --color-input: oklch(0.34 0.009 70);
+  --color-ring: oklch(0.68 0.012 75);
+  --color-success-foreground: oklch(0.8 0.11 155);
   --color-warning-foreground: oklch(0.84 0.12 75);
+  --color-signal: oklch(0.7 0.17 42);
+  --color-signal-foreground: oklch(0.78 0.14 45);
   --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.08);
   --shadow-border-hover: 0 0 0 1px rgb(255 255 255 / 0.14);
+  --shadow-float: 0 0 0 1px rgb(255 255 255 / 0.08), 0 8px 20px -12px rgb(0 0 0 / 0.6);
 }
 
-html,
-body {
-  height: 100%;
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --color-background: oklch(0.165 0.006 70);
+    --color-foreground: oklch(0.94 0.006 80);
+    --color-card: oklch(0.2 0.007 70);
+    --color-card-foreground: oklch(0.94 0.006 80);
+    --color-popover: oklch(0.2 0.007 70);
+    --color-popover-foreground: oklch(0.94 0.006 80);
+    --color-primary: oklch(0.94 0.006 80);
+    --color-primary-foreground: oklch(0.18 0.006 70);
+    --color-secondary: oklch(0.25 0.008 70);
+    --color-secondary-foreground: oklch(0.94 0.006 80);
+    --color-muted: oklch(0.24 0.008 70);
+    --color-muted-foreground: oklch(0.7 0.01 75);
+    --color-accent: oklch(0.26 0.009 70);
+    --color-accent-foreground: oklch(0.94 0.006 80);
+    --color-border: oklch(0.3 0.008 70);
+    --color-input: oklch(0.34 0.009 70);
+    --color-ring: oklch(0.68 0.012 75);
+    --color-success-foreground: oklch(0.8 0.11 155);
+    --color-warning-foreground: oklch(0.84 0.12 75);
+    --color-signal: oklch(0.7 0.17 42);
+    --color-signal-foreground: oklch(0.78 0.14 45);
+    --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.08);
+    --shadow-border-hover: 0 0 0 1px rgb(255 255 255 / 0.14);
+    --shadow-float: 0 0 0 1px rgb(255 255 255 / 0.08), 0 8px 20px -12px rgb(0 0 0 / 0.6);
+  }
 }
 
-html {
-  -webkit-tap-highlight-color: rgb(23 23 23 / 0.08);
-}
+/* Base element rules sit in the base layer so utilities (text-nowrap,
+   truncate) override them. */
+@layer base {
+  html,
+  body {
+    height: 100%;
+  }
 
-h1,
-h2,
-h3 {
-  scroll-margin-top: 6rem;
-  text-wrap: balance;
-}
+  html {
+    -webkit-tap-highlight-color: rgb(23 23 23 / 0.08);
+  }
 
-button,
-a,
-input,
-select,
-textarea {
-  touch-action: manipulation;
-}
+  body {
+    font-feature-settings: "ss01", "cv11";
+  }
 
-:where(a, button, input, select, textarea):focus-visible {
-  outline: 2px solid var(--color-ring);
-  outline-offset: 2px;
-}
+  h1,
+  h2,
+  h3 {
+    scroll-margin-top: 6rem;
+    text-wrap: balance;
+  }
 
-p,
-li {
-  text-wrap: pretty;
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    touch-action: manipulation;
+  }
+
+  :where(a, button, input, select, textarea):focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  p,
+  li {
+    text-wrap: pretty;
+  }
 }
 
 .hide-scrollbar {
@@ -127,54 +180,59 @@ li {
   display: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme]) {
-    color-scheme: dark;
-    --color-background: oklch(0.15 0.004 85);
-    --color-foreground: oklch(0.94 0.004 85);
-    --color-card: oklch(0.19 0.005 85);
-    --color-card-foreground: oklch(0.94 0.004 85);
-    --color-popover: oklch(0.19 0.005 85);
-    --color-popover-foreground: oklch(0.94 0.004 85);
-    --color-primary: oklch(0.93 0.004 85);
-    --color-primary-foreground: oklch(0.17 0.004 85);
-    --color-secondary: oklch(0.24 0.006 85);
-    --color-secondary-foreground: oklch(0.94 0.004 85);
-    --color-muted: oklch(0.23 0.006 85);
-    --color-muted-foreground: oklch(0.7 0.007 85);
-    --color-accent: oklch(0.25 0.008 85);
-    --color-accent-foreground: oklch(0.94 0.004 85);
-    --color-border: oklch(0.3 0.007 85);
-    --color-input: oklch(0.34 0.008 85);
-    --color-ring: oklch(0.68 0.01 85);
-    --color-success-foreground: oklch(0.82 0.12 153);
-    --color-warning-foreground: oklch(0.84 0.12 75);
-    --shadow-border: 0 0 0 1px rgb(255 255 255 / 0.08);
-    --shadow-border-hover: 0 0 0 1px rgb(255 255 255 / 0.14);
-  }
-}
-
-/* Live "just listed" ticker. Items are doubled in the markup, so translating
-   the track by -50% loops seamlessly. */
-@keyframes market-marquee {
+/* A row that arrives over the sync connection rises into place. */
+@keyframes market-rise {
   from {
-    transform: translateX(0);
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
   }
   to {
-    transform: translateX(-50%);
+    opacity: 1;
+    transform: none;
   }
 }
-.market-marquee {
-  animation: market-marquee 28s linear infinite;
+.market-rise {
+  animation: market-rise 520ms var(--ease-out-soft) both;
 }
-.market-marquee:hover {
-  animation-play-state: paused;
+
+/* A new offer or event gets a short signal-colored wash. */
+@keyframes market-flash {
+  from {
+    background-color: color-mix(in oklch, var(--color-signal) 16%, transparent);
+  }
+  to {
+    background-color: transparent;
+  }
 }
+.market-flash {
+  animation: market-flash 2.4s var(--ease-out-soft) both;
+}
+
+.market-rise.market-flash {
+  animation:
+    market-rise 520ms var(--ease-out-soft) both,
+    market-flash 2.4s var(--ease-out-soft) both;
+}
+
+@keyframes market-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.7;
+  }
+  80%,
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+.market-ping {
+  animation: market-ping 1.8s var(--ease-out-soft) infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .market-marquee {
-    animation: none;
-  }
-  .animate-pulse {
+  .market-rise,
+  .market-flash,
+  .market-ping {
     animation: none;
   }
 }

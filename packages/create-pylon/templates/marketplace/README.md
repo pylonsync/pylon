@@ -1,6 +1,6 @@
 # __APP_NAME__
 
-A polished, two-sided resale marketplace built with
+A two-sided resale marketplace built with
 [Pylon](https://pylonsync.com), with server-rendered product discovery and
 realtime offers.
 
@@ -14,29 +14,34 @@ tab.
 __RUN_DEV__
 ```
 
-Open http://localhost:4321. The grid seeds itself on first load. Open a
-second tab, post something from `/sell` in one, and watch it hit the "just
-listed" ticker in the other with no refresh. Sign in (the `/sell` form prefills
-a demo account) to list, save finds, make offers, and watch your dashboard
-update live.
+Open http://localhost:4321. On first boot the app seeds 10 listings with
+photos, a few open offers, and one sale. Open a second tab, post something
+from `/sell` in one, and watch it rise into the grid and the activity feed in
+the other with no refresh. Sign in (the form prefills a demo account) to buy,
+make offers, save listings, and answer the offers waiting on your dashboard.
 
 ## How it works
 
 - **Server-rendered for SEO + LCP.** The browse grid (`/`) and every listing
   page (`/listing/:slug`) render on the server with real rows (`serverData` +
   React 19 `use()`). View source and the products are *in the HTML*.
-- **Realtime where it matters.** The "just listed" ticker, the live offers on a
-  listing, and your `/me` dashboard all ride the sync engine: one `db.useQuery` per
-  view, no polling. The public surface connects with an anonymous **guest
-  session** (read-only); writing (list/offer/buy) requires a real sign-in.
+- **Realtime where it matters.** The browse grid (new listings, offer counts,
+  sold status), the activity feed, the offers on a listing, and your `/me`
+  dashboard all ride the sync engine: one `db.useQuery` per view, no polling.
+  The public surface connects with an anonymous **guest session**
+  (read-only); writing (list/offer/buy) requires a real sign-in.
 - **Unspoofable ownership.** `sellerId`/`buyerId` use `field.owner()`, so the
   framework stamps them from the session and rejects forged values. Listings
   and offers can be created with a plain optimistic `db.insert` and still can't
   be spoofed. The heavier logic (accept = mark sold + auto-decline the rest)
   runs in `functions/respondToOffer.ts`, where it enforces "only the seller".
-- **Commerce-ready discovery.** Browse by category, search title, description,
-  seller, or category, and sort by recency or price. The logic is pure and
+- **Discovery.** Browse by category, search title, description, seller,
+  category, or location, and sort by recency or price. The logic is pure and
   covered by tests in `tests/example.test.ts`.
+- **Demo data.** `functions/seedMarket.ts` holds the listings and
+  `functions/seedOffers.ts` the offers. Photos live in
+  `public/images/listings/` (a 1120px and a 640px WebP each). Replace both
+  with your own catalog.
 
 ## Privacy and policies
 
@@ -68,7 +73,8 @@ and shipping or pickup workflow before accepting real transactions.
 ## Rebrand it
 
 The brand ("Reprise") lives in `app/layout.tsx`; the demo catalog +
-seed account are in `functions/seedMarket.ts`. The design tokens are in
+seed accounts are in `functions/seedMarket.ts`, `functions/seedOffers.ts`,
+and `client/market.ts`. The design tokens are in
 `ui/tokens.css` + `app/globals.css`.
 
 ## Layout
@@ -79,8 +85,10 @@ app/page.tsx                   SSR discovery, search, sort, category facets
 app/listing/[id]/page.tsx      SSR listing detail (+ generateMetadata)
 app/sell/page.tsx              list an item (sign-in gated)
 app/me/page.tsx                your listings, offers, watchlist (live)
-functions/buyNow.ts, makeOffer.ts, respondToOffer.ts, seedMarket.ts
-client/*                       the realtime islands (ticker, offers, sell form…)
+functions/buyNow.ts, makeOffer.ts, respondToOffer.ts, seedMarket.ts, seedOffers.ts
+lib/catalog.ts                 categories, filtering, offer math (pure, tested)
+client/*                       the realtime islands (grid, activity feed, offers, sell form)
+public/images/listings/        seeded listing photos
 ```
 
 ## Deploy

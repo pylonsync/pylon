@@ -1,23 +1,24 @@
 import React from "react";
 import { Link, type NotFoundProps } from "@pylonsync/react";
+import { WRAP, BUTTON_DARK } from "@/components/marketing";
 
 // `(marketing)/not-found.tsx` → rendered at HTTP 404 for any unmatched URL
 // (and when a page calls `response.notFound()`). It lives inside the
 // `(marketing)` group on purpose: a group segment adds no URL prefix, so this
-// is still the root 404 boundary, but it wraps in the marketing layout — a
-// missing URL gets the site nav + footer instead of a bare page. Hydrated, so
-// the link is a client nav.
+// is still the root 404 boundary, but it wraps in the marketing layout, so a
+// missing URL gets the site nav + footer. Hydrated, so the link is a client nav.
 export default function NotFound(_props: NotFoundProps) {
   return (
-    <div className="mx-auto flex min-h-[60vh] max-w-3xl flex-col items-center justify-center px-6 text-center">
-      <h1 className="text-3xl font-semibold tracking-tight">404</h1>
-      <p className="mt-2 text-zinc-500">We couldn&apos;t find that page.</p>
-      <Link
-        href="/"
-        className="mt-6 inline-flex h-10 items-center rounded-full bg-zinc-900 px-5 text-sm font-medium text-white transition-colors hover:bg-zinc-700"
-      >
-        Back home
+    <section className={`${WRAP} flex min-h-[64vh] flex-col items-start justify-center py-24`}>
+      <h1 className="font-display text-[3rem] font-light leading-none tracking-[-0.03em] text-ink sm:text-[4.25rem]">
+        Page not found.
+      </h1>
+      <p className="mt-5 max-w-[40ch] text-[17px] leading-relaxed text-ink-2">
+        The link may be old, or the product may be gone for good.
+      </p>
+      <Link href="/#shop" className={`${BUTTON_DARK} mt-9`}>
+        Back to the shop
       </Link>
-    </div>
+    </section>
   );
 }

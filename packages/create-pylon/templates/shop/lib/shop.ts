@@ -43,3 +43,30 @@ export type CheckoutResult =
 export function formatPrice(cents: number): string {
   return `$${(cents / 100).toFixed(cents % 100 === 0 ? 0 : 2)}`;
 }
+
+// How a product's stock reads on the storefront. "low" at 3 or fewer.
+export const LOW_STOCK_AT = 3;
+
+export type StockStatus =
+  | { kind: "sold_out"; label: string }
+  | { kind: "low"; label: string }
+  | { kind: "in_stock"; label: string };
+
+export function stockStatus(stock: number): StockStatus {
+  if (stock <= 0) return { kind: "sold_out", label: "Sold out" };
+  if (stock <= LOW_STOCK_AT) return { kind: "low", label: stock === 1 ? "Last one" : `Only ${stock} left` };
+  return { kind: "in_stock", label: `${stock} in stock` };
+}
+
+// Shipping terms: a flat rate, free at or above a subtotal threshold. The cart
+// shows these numbers and `checkout` charges them on the Stripe session.
+export type ShippingTerms = { flatCents: number; freeOverCents: number };
+
+// Cents still needed to reach free shipping; 0 once the subtotal qualifies.
+export function freeShippingRemaining(subtotalCents: number, terms: ShippingTerms): number {
+  return Math.max(0, terms.freeOverCents - subtotalCents);
+}
+
+export function shippingCents(subtotalCents: number, terms: ShippingTerms): number {
+  return freeShippingRemaining(subtotalCents, terms) === 0 ? 0 : terms.flatCents;
+}

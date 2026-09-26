@@ -22,8 +22,10 @@ out in one tab, then watch it change to "Sold out" in another.
 
 ## How the realtime works
 
-- `Product` is a public-read entity holding live stock; `app/shop-client.tsx`
-  reads it with `db.useQuery`, so every card's stock count is live.
+- `Product` is a public-read entity holding live stock;
+  `app/(marketing)/shop-client.tsx` reads it with `db.useQuery`, so every
+  card's stock count is live. The hero's shelf count reads the same totals
+  through `lib/shelf-store.ts`.
 - `functions/checkout.ts` is a public **action**. It calls
   `functions/reserveCart.ts` (an internal **mutation**) to re-check stock under a
   per-product advisory lock and HOLD it before the order is recorded — so two
@@ -57,21 +59,28 @@ Checkout is a single public `checkout` action that holds stock, then:
   (all cart lines priced inline from your catalog — no Stripe Products to set
   up) and redirects the shopper to it. The signed `stripeWebhook` action (at
   `/api/webhooks/stripeWebhook`) marks the order **paid** on success and
-  **returns held stock** if a checkout is abandoned. The webhook signature is
-  verified with `@pylonsync/stripe`'s constant-time verifier before any event is
-  trusted.
+  **returns held stock** if a checkout is abandoned. Stripe collects a US
+  shipping address and charges the shipping terms from `lib/site.config.ts`
+  (flat rate, free over a threshold), the same numbers the cart shows. The
+  webhook signature is verified with `@pylonsync/stripe`'s constant-time
+  verifier before any event is trusted.
 - **Without Stripe keys** → the order is held as **reserved** for you to follow
-  up on. The store still works end-to-end, so you can demo live inventory with
-  zero setup.
+  up on, and the shopper lands on `/success?order=reserved`. The store still
+  works end-to-end, so you can demo live inventory with zero setup.
 
 See `.env.example` for the two env vars and the Stripe dashboard / `stripe
 listen` setup.
 
 ## Rebrand it
 
-Brand, colors, products and starting stock, value props, reviews, and policies
-live in **`lib/site.config.ts`**. Editing that file updates the store, and a
-fresh database seeds products from it.
+Brand, colors, hero and studio copy, products and starting stock, shipping
+terms, reviews, and policies live in **`lib/site.config.ts`**. Editing that
+file updates the store, and a fresh database seeds products from it.
+
+Photos live in `public/images/`. Product photos are 4:5 portrait JPEGs
+(1200x1500 works well); the hero is a wide landscape photo with open space on
+the left for the headline. `tests/shop.test.ts` fails if the config points at
+an image that is not in `public/`.
 
 ## Layout
 
@@ -85,9 +94,12 @@ functions/stripeWebhook.ts public webhook: verify signature, settle the order
 functions/{markGroupPaid,releaseGroup}.ts  internal: settle/restore on webhook
 functions/ordersForOwner.ts  owner-only query: orders + customer PII
 functions/{fulfill,cancel}Order.ts, restockProduct.ts  owner-only mutations
-app/page.tsx               the storefront (server-rendered)
-app/shop-client.tsx        client island: live product grid + cart + checkout
-app/success/page.tsx       Stripe post-payment landing
+app/(marketing)/layout.tsx       announcement bar, nav, footer
+app/(marketing)/page.tsx         the storefront (server-rendered)
+app/(marketing)/shop-client.tsx  client island: live product grid + cart + checkout
+app/(marketing)/success/page.tsx order confirmation (Stripe or reserved)
+lib/cart-store.ts, lib/shelf-store.ts  state shared between client islands
+public/images/             hero and product photos
 app/dashboard/             owner dashboard (auth-gated, live)
 ```
 

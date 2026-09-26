@@ -46,7 +46,7 @@ const Product = entity(
     name: field.string(),
     priceCents: field.int(),
     description: field.string().optional(),
-    image: field.string().optional(), // emoji or image URL
+    image: field.string().optional(), // photo URL or /public path
     stock: field.int().default(0),
   },
   { indexes: [{ name: "by_slug", fields: ["slug"], unique: true }] },
@@ -133,15 +133,27 @@ const manifest = buildManifest({
   actions: fns.actions,
   policies: [productPolicy, orderPolicy, userPolicy],
   auth: auth(),
-  // Self-hosted Inter (next/font parity): the build fetches the woff2, serves it
+  // Self-hosted fonts (next/font parity): the build fetches the woff2, serves it
   // same-origin (no third-party request, no FOUT), preloads it, and synthesizes a
-  // size-adjusted fallback face so there's no layout shift. globals.css reads it
-  // via `var(--font-sans, …)`; layout.tsx carries no font <link>.
+  // size-adjusted fallback face so there's no layout shift. globals.css reads
+  // them via `var(--font-sans, …)` and `var(--font-display, …)`; layout.tsx
+  // carries no font <link>.
   fonts: [
+    // Body text, labels, buttons, prices.
     font({
-      family: "Inter",
+      family: "DM Sans",
       variable: "--font-sans",
-      weights: ["400", "500", "600", "700"],
+      weights: ["400", "500", "600"],
+      subsets: ["latin"],
+      display: "swap",
+      preload: true,
+    }),
+    // The serif for the brand name, headings and product names.
+    font({
+      family: "Newsreader",
+      variable: "--font-display",
+      weights: ["300", "400", "500"],
+      styles: ["normal", "italic"],
       subsets: ["latin"],
       display: "swap",
       preload: true,

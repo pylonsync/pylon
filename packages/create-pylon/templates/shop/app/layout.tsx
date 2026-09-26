@@ -31,10 +31,10 @@ export default function RootLayout({ children }: LayoutProps) {
         <meta charSet="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         {/* No <title> here — each page's exported `metadata` sets it. */}
-        {/* Inter is declared in app.ts (fonts: [...]) and self-hosted by the
-            build — the runtime injects @font-face + <link rel=preload> + a
-            size-adjusted fallback here automatically. No third-party request,
-            no layout shift; change the family in app.ts. */}
+        {/* DM Sans and Newsreader are declared in app.ts (fonts: [...]) and
+            self-hosted by the build. The runtime injects @font-face + <link
+            rel=preload> + a size-adjusted fallback here automatically. Change
+            the families in app.ts. */}
         {/* Tailwind is compiled by Pylon from app/globals.css and injected here. */}
       </head>
       <body className="flex min-h-screen flex-col bg-background text-foreground antialiased">

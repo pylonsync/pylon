@@ -18,14 +18,14 @@ export default function LoginPage({ auth, response }: PageProps) {
   if (auth.user_id && !auth.user_id.startsWith("guest_")) response.redirect("/dashboard");
   const { brand } = siteConfig;
   return (
-    <div className="flex min-h-screen items-center justify-center bg-white px-6 py-12">
-      <div className="w-full max-w-[400px] rounded-2xl border border-zinc-200/70 p-8">
+    <div className="flex min-h-screen items-center justify-center bg-warm-white px-6 py-12">
+      <div className="w-full max-w-[400px] rounded-2xl border border-ink/10 bg-white p-8">
         <Link href="/" className="inline-flex">
-          <span className="flex size-9 items-center justify-center rounded-xl bg-zinc-900 text-base font-bold text-white">
+          <span className="font-display flex size-9 items-center justify-center rounded-full bg-ink text-[18px] text-warm-white">
             {brand.letter}
           </span>
         </Link>
-        <h1 className="mt-5 text-[22px] font-semibold tracking-tight text-zinc-900">
+        <h1 className="font-display mt-5 text-[26px] font-normal tracking-[-0.01em] text-ink">
           {brand.name} dashboard
         </h1>
         <p className="mt-1 text-[13px] text-zinc-500">

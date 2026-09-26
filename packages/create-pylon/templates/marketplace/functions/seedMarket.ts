@@ -1,30 +1,141 @@
 import { mutation, v } from "@pylonsync/functions";
 
-// A handful of believable listings so the marketplace isn't empty on first
-// run. Idempotent: seeds only when the catalog is empty, so the browse page
-// can call it on load without worrying about duplicates.
+// Demo catalog for first boot. The client bootstrap calls this twice: once as
+// the "bazaar" account for DEMO[0..7] and once as the demo shopper for the
+// rest, so the shopper has other people's listings to buy and a few of its
+// own to receive offers on. Idempotent per caller: a seller that already has
+// listings is skipped.
 const DEMO: Array<{
   seller: string;
+  location: string;
   title: string;
   description: string;
   price: number;
   category: string;
   condition: string;
-  imageUrl: string;
+  photo: string;
   seed: string;
 }> = [
-  { seller: "maple-fox", title: "Herman Miller Aeron (size B)", description: "Fully loaded, posture-fit SL. Light desk use, no squeaks.", price: 540, category: "furniture", condition: "like-new", imageUrl: "https://images.unsplash.com/photo-1758607010203-d6b7f6ec9262?auto=format&fit=crop&w=1200&q=82", seed: "a1f3" },
-  { seller: "amber-lynx", title: "Kodak Retina IIa rangefinder", description: "1950s folding 35mm. Clean glass, accurate shutter, leather case.", price: 185, category: "cameras", condition: "good", imageUrl: "https://images.unsplash.com/photo-1516035069371-29a1b244cc32?auto=format&fit=crop&w=1200&q=82", seed: "b7c2" },
-  { seller: "swift-otter", title: "Specialized Allez road bike, 54cm", description: "Shimano Claris, fresh bar tape, recently tuned. Fast commuter.", price: 420, category: "bikes", condition: "good", imageUrl: "https://images.unsplash.com/photo-1532298229144-0ec0c57515c7?auto=format&fit=crop&w=1200&q=82", seed: "c4e9" },
-  { seller: "cosmic-wren", title: "Vintage Technics SL-1200 MK2", description: "Legendary direct-drive turntable. Spins true, new slipmat.", price: 650, category: "audio", condition: "good", imageUrl: "https://images.unsplash.com/photo-1599723895995-80e160d14fe4?auto=format&fit=crop&w=1200&q=82", seed: "d8a1" },
-  { seller: "ivory-sparrow", title: "Le Creuset 5.5qt Dutch oven", description: "Flame orange, enamel intact. The one everyone wants.", price: 120, category: "kitchen", condition: "like-new", imageUrl: "https://images.unsplash.com/photo-1559137703-44aeed6161b6?auto=format&fit=crop&w=1200&q=82", seed: "e2b6" },
-  { seller: "slate-heron", title: 'LG 27" 4K UltraFine monitor', description: "USB-C, 60Hz, color-accurate. Box + cables included.", price: 240, category: "electronics", condition: "good", imageUrl: "https://images.unsplash.com/photo-1527443224154-c4a3942d3acf?auto=format&fit=crop&w=1200&q=82", seed: "f5d0" },
-  { seller: "maple-fox", title: "Eames-style lounge + ottoman", description: "Walnut + tan leather replica. Sturdy, very comfortable.", price: 380, category: "furniture", condition: "good", imageUrl: "https://images.unsplash.com/photo-1567538096630-e0c55bd6374c?auto=format&fit=crop&w=1200&q=82", seed: "a9c4" },
-  { seller: "amber-lynx", title: "Patagonia Black Hole 55L duffel", description: "One trip old. Weatherproof, zips perfect. Forest green.", price: 75, category: "outdoor", condition: "like-new", imageUrl: "https://images.unsplash.com/photo-1699319656128-6e353d6b9c7c?auto=format&fit=crop&w=1200&q=82", seed: "b3f8" },
-  { seller: "cosmic-wren", title: "Fender Player Stratocaster, sunburst", description: "Maple neck, plays great. Small buckle rash on back.", price: 560, category: "instruments", condition: "good", imageUrl: "https://images.unsplash.com/photo-1525201548942-d8732f6617a0?auto=format&fit=crop&w=1200&q=82", seed: "d1e7" },
-  { seller: "slate-heron", title: "iPad Air (5th gen) 64GB", description: "Space gray, excellent battery health, screen flawless.", price: 330, category: "electronics", condition: "like-new", imageUrl: "https://images.unsplash.com/photo-1544244015-0df4b3ffc6b0?auto=format&fit=crop&w=1200&q=82", seed: "f0a2" },
-  { seller: "ivory-sparrow", title: "Mid-century teak sideboard", description: "Three drawers, two cabinets. Real teak, refinished top.", price: 295, category: "furniture", condition: "good", imageUrl: "https://images.unsplash.com/photo-1558997519-83ea9252edf8?auto=format&fit=crop&w=1200&q=82", seed: "e7c3" },
-  { seller: "swift-otter", title: "Brooks Brothers wool overcoat, 40R", description: "Charcoal herringbone, fully lined. Dry-cleaned, ready to wear.", price: 90, category: "apparel", condition: "good", imageUrl: "https://images.unsplash.com/photo-1551488831-00ddcb6c6bd3?auto=format&fit=crop&w=1200&q=82", seed: "c2b5" },
+  {
+    seller: "Nora Lind",
+    location: "Brooklyn, NY",
+    title: "Danish teak lounge chair, oatmeal wool",
+    description:
+      "Solid teak frame with the original joinery, oiled last spring. Cushions were reupholstered in a heavy oatmeal wool bouclé. No wobble, no cracks. Seat height 16 in, width 27 in. Pickup in Greenpoint or I can help arrange a courier.",
+    price: 680,
+    category: "furniture",
+    condition: "good",
+    photo: "lounge-chair",
+    seed: "a1f3",
+  },
+  {
+    seller: "Marcus Bell",
+    location: "Dallas, TX",
+    title: "1960s steel dress watch, cream dial",
+    description:
+      "34 mm stainless case, hand-wound movement serviced in March. Keeps about +6 s/day. Cream dial has light, even patina. Comes on a brown suede strap with a spare black leather strap.",
+    price: 890,
+    category: "watches",
+    condition: "good",
+    photo: "watch",
+    seed: "b7c2",
+  },
+  {
+    seller: "Theo Park",
+    location: "Portland, OR",
+    title: "Chrome 35mm SLR with 50mm f/1.7",
+    description:
+      "Fully mechanical body, shutter fires at every speed and sounds right. Light meter reads within a third of a stop. Lens is clean with no haze or fungus. Original leather strap. Tested with a roll of Portra; sample scans on request.",
+    price: 240,
+    category: "cameras",
+    condition: "good",
+    photo: "film-camera",
+    seed: "c4e9",
+  },
+  {
+    seller: "Ava Moreno",
+    location: "Austin, TX",
+    title: "Walnut direct-drive turntable",
+    description:
+      "Direct-drive deck in a solid walnut plinth. Speed is stable at 33 and 45, pitch control works. New belt-free motor service, new cartridge with about 40 hours on it. Dust cover not included.",
+    price: 410,
+    category: "audio",
+    condition: "like-new",
+    photo: "turntable",
+    seed: "d8a1",
+  },
+  {
+    seller: "Nora Lind",
+    location: "Brooklyn, NY",
+    title: "Cognac leather weekender",
+    description:
+      "Full-grain leather duffel with solid brass hardware and a detachable shoulder strap. Carried on about ten trips; the leather has softened and darkened evenly. Interior lining is clean. 20 x 11 x 10 in.",
+    price: 295,
+    category: "bags",
+    condition: "good",
+    photo: "weekender-bag",
+    seed: "a9c4",
+  },
+  {
+    seller: "Elise Carter",
+    location: "Asheville, NC",
+    title: "Speckled stoneware table lamp",
+    description:
+      "Hand-thrown stoneware base in a sand glaze, pleated linen shade. Rewired with a cloth cord and inline switch. 22 in tall with the shade. One tiny glaze pop near the foot, shown in photos.",
+    price: 165,
+    category: "lighting",
+    condition: "like-new",
+    photo: "ceramic-lamp",
+    seed: "b3f8",
+  },
+  {
+    seller: "Elise Carter",
+    location: "Asheville, NC",
+    title: "Tufted slipper chair, ivory",
+    description:
+      "Small button-tufted slipper chair in ivory cotton velvet on turned white legs. Frame is tight, fabric has no stains or pulls. Seat height 17 in, width 24 in. Works in a bedroom or reading corner.",
+    price: 240,
+    category: "furniture",
+    condition: "like-new",
+    photo: "slipper-chair",
+    seed: "m5t1",
+  },
+  {
+    seller: "Sam Rivera",
+    location: "Denver, CO",
+    title: "Two-door oak wardrobe",
+    description:
+      "Solid oak wardrobe with two doors over two deep drawers. Hanging rail and one shelf inside. Doors close flush, drawers run smoothly. 40 in wide, 22 in deep, 74 in tall. Comes apart at the top for moving.",
+    price: 450,
+    category: "furniture",
+    condition: "good",
+    photo: "wardrobe",
+    seed: "n8w3",
+  },
+  {
+    seller: "Sam Rivera",
+    location: "Denver, CO",
+    title: "Carbon road bike, 54 cm, matte black",
+    description:
+      "Carbon frame and fork, 54 cm, matte black. 2x11 drivetrain shifts cleanly, new chain and brake pads this season. No cracks or impact damage. About 8.4 kg as pictured.",
+    price: 1250,
+    category: "bikes",
+    condition: "good",
+    photo: "road-bike",
+    seed: "e2b6",
+  },
+  {
+    seller: "Sam Rivera",
+    location: "Denver, CO",
+    title: "Black travel duffel, 55 L",
+    description:
+      "Water-resistant nylon duffel with padded shoulder straps and a separate shoe pocket. Used on two trips. All zips and buckles work. Packs flat into its own pocket.",
+    price: 70,
+    category: "bags",
+    condition: "like-new",
+    photo: "duffel",
+    seed: "p2d6",
+  },
 ];
 
 interface SeedMarketArgs {
@@ -36,11 +147,17 @@ interface SeedMarketResult {
   seeded: number;
 }
 
+function slugify(s: string): string {
+  return s
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 60);
+}
+
 export default mutation<SeedMarketArgs, SeedMarketResult>({
-  // Defaults to auth: "user" — seeds a slice of the catalog owned by the
-  // caller. The bootstrap calls this twice: once as a "bazaar" seller for the
-  // bulk of the catalog (so the demo buyer can bid on it), and once as the
-  // demo account for a couple of its own listings.
+  // auth defaults to "user": every seeded listing is owned by the caller.
   args: {
     start: v.optional(v.number()),
     end: v.optional(v.number()),
@@ -48,32 +165,22 @@ export default mutation<SeedMarketArgs, SeedMarketResult>({
   async handler(ctx, args) {
     if (!ctx.auth.userId) throw ctx.error("UNAUTHENTICATED", "sign in first");
 
-    // Per-caller idempotency: skip if THIS seller already has listings, so the
-    // two seed calls (and any reloads) don't duplicate.
-    const all = await ctx.db.list("Listing") as Array<{ sellerId: string }>;
+    const all = (await ctx.db.list("Listing")) as Array<{ sellerId: string }>;
     if (all.some((l) => l.sellerId === ctx.auth.userId)) return { seeded: 0 };
 
     const start = args.start ?? 0;
     const end = args.end ?? DEMO.length;
     const slice = DEMO.slice(start, end);
 
-    // Stagger createdAt so the grid + ticker have a believable order. The
-    // seller id is the caller — `Listing.sellerId` is `field.owner()`, so the
-    // framework would reject any other value. `seller` stays a display name.
-    const slugify = (s: string) =>
-      s
-        .toLowerCase()
-        .trim()
-        .replace(/[^a-z0-9]+/g, "-")
-        .replace(/^-+|-+$/g, "")
-        .slice(0, 60);
-
+    // Stagger createdAt so "newest first" follows the array order. The
+    // seller id is the caller; `sellerName` is a display name only.
     const now = Date.now();
     let n = 0;
     for (const d of slice) {
       await ctx.db.insert("Listing", {
         sellerId: ctx.auth.userId,
         sellerName: d.seller,
+        location: d.location,
         title: d.title,
         slug: `${slugify(d.title) || "item"}-${d.seed}`,
         description: d.description,
@@ -81,9 +188,9 @@ export default mutation<SeedMarketArgs, SeedMarketResult>({
         category: d.category,
         condition: d.condition,
         status: "active",
-        imageUrl: d.imageUrl,
+        imageUrl: `/images/listings/${d.photo}.webp`,
         seed: d.seed,
-        createdAt: new Date(now - (start + n) * 7 * 60_000).toISOString(),
+        createdAt: new Date(now - ((start + n) * 23 + 4) * 60_000).toISOString(),
       });
       n++;
     }

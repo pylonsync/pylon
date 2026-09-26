@@ -1,6 +1,6 @@
 "use client";
 
-// Shared client-side glue for Pylon Market: types, display helpers, and the
+// Shared client-side glue for the marketplace: types, display helpers, and the
 // email/password auth bootstrap. Same-origin under native SSR, so no baseUrl —
 // init() resolves window.location.origin.
 import { init, configureClient, callFn, setSessionToken, storageKey } from "@pylonsync/react";
@@ -10,13 +10,13 @@ import { init, configureClient, callFn, setSessionToken, storageKey } from "@pyl
 // keyspace disagreement, no double token migration.
 export const APP_NAME = "__APP_NAME__";
 
-// Prefilled demo account — the shopper you sign in as. Owns a couple of its
-// own listings so "My Market" isn't empty, but NOT the bulk of the catalog,
-// so it can actually buy + bid on things.
+// Prefilled demo account: the shopper you sign in as. Owns three listings (so
+// the dashboard has offers to answer) but not the bulk of the catalog, so it
+// can buy and bid on everything else.
 export const DEMO = {
   email: "demo@pylon.market",
   password: "pylondemo123",
-  name: "Demo Shopper",
+  name: "Sam Rivera",
 } as const;
 
 // The seed seller that owns most of the catalog. Nobody logs in as this; it
@@ -27,13 +27,23 @@ const BAZAAR = {
   name: "Pylon Bazaar",
 } as const;
 
+// A seed buyer. Nobody logs in as this; it sends the demo offers (including
+// offers on the demo shopper's own listings) so every listing page and the
+// dashboard have live offer activity on first boot.
+const COLLECTOR = {
+  email: "collector@pylon.market",
+  password: "collectorseed123",
+  name: "Collector",
+} as const;
+
 // How many of the seeded listings the bazaar owns; the rest go to the demo.
-const BAZAAR_COUNT = 10;
+const BAZAAR_COUNT = 7;
 
 export interface Listing {
   id: string;
   sellerId: string;
   sellerName: string;
+  location?: string;
   title: string;
   slug: string;
   description: string;
@@ -85,12 +95,18 @@ function hash(s: string): number {
   return h >>> 0;
 }
 
-/** Deterministic visual fallback for listings whose remote image is unavailable. */
+/** Deterministic visual fallback for listings without a photo. */
 export function gradient(seed: string): string {
   const h = hash(seed);
-  const a = h % 360;
-  const b = (a + 40 + ((h >> 3) % 90)) % 360;
-  return `linear-gradient(135deg, hsl(${a} 68% 56%), hsl(${b} 72% 44%))`;
+  const a = 20 + (h % 60);
+  return `linear-gradient(160deg, hsl(${a} 22% 82%), hsl(${a + 12} 18% 64%))`;
+}
+
+/** A stable, muted avatar color for a person's name. */
+export function avatarColor(name: string): string {
+  const hues = [18, 32, 96, 152, 196, 262, 340];
+  const hue = hues[hash(name) % hues.length];
+  return `hsl(${hue} 32% 42%)`;
 }
 
 export function initials(title: string): string {
@@ -305,15 +321,29 @@ async function ensureAccount(
  * prefilled login is one click from a working session that can actually buy
  * and sell. Idempotent and best-effort: any failure is swallowed.
  *
- * Two accounts are seeded:
+ * Three accounts are seeded:
  *   - **bazaar** owns the bulk of the catalog, so the demo shopper has other
  *     people's listings to buy + bid on (you can't buy your own);
- *   - **demo** (the prefilled login) owns a couple of its own listings so
- *     "My Market" has something in it.
+ *   - **demo** (the prefilled login) owns three listings so the dashboard has
+ *     something in it;
+ *   - **collector** sends the demo offers and buys one item, so listings show
+ *     offer activity and the demo shopper has offers to accept.
  *
- * Both tokens are used transiently to seed and then discarded — the visitor
+ * All tokens are used transiently to seed and then discarded — the visitor
  * stays anonymous (read-only) until they choose to sign in.
  */
+/** True when the public entity API returns at least one row. */
+async function hasAnyRow(entity: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/entities/${entity}?limit=1`);
+    if (!res.ok) return false;
+    const body = (await res.json()) as { data?: unknown[] };
+    return (body.data?.length ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
+
 // Shared in-flight promise so the many islands that mount MarketProvider on
 // one page (ticker, header, SeedOnEmpty) all await the SAME seed run instead
 // of each firing their own — that flood was tripping the login rate limit,
@@ -329,6 +359,14 @@ export function ensureDemoSeed(options: { force?: boolean } = {}): Promise<void>
   if (seedPromise) return seedPromise;
 
   seedPromise = (async () => {
+    // The collector's offers are the last seed step, so any Offer row means
+    // the accounts and catalog already exist. Skipping here keeps a fresh
+    // browser from spending the login rate limit on seed accounts.
+    if (!options.force && (await hasAnyRow("Offer"))) {
+      localStorage.setItem("market:demo-seeded", "1");
+      return;
+    }
+
     const bazaarToken = await ensureAccount(
       BAZAAR.email,
       BAZAAR.password,
@@ -345,6 +383,15 @@ export function ensureDemoSeed(options: { force?: boolean } = {}): Promise<void>
     const demoToken = await ensureAccount(DEMO.email, DEMO.password, DEMO.name);
     if (demoToken) {
       await callFn("seedMarket", { start: BAZAAR_COUNT }, { token: demoToken });
+    }
+
+    const collectorToken = await ensureAccount(
+      COLLECTOR.email,
+      COLLECTOR.password,
+      COLLECTOR.name,
+    );
+    if (collectorToken) {
+      await callFn("seedOffers", {}, { token: collectorToken });
     }
 
     // Mark done only AFTER a successful pass, so a failed/partial run retries

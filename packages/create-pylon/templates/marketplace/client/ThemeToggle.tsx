@@ -48,6 +48,7 @@ export function ThemeToggle() {
       type="button"
       variant="ghost"
       size="icon"
+      className="rounded-full text-muted-foreground hover:text-foreground"
       aria-label={isDark ? "Use light theme" : "Use dark theme"}
       title={isDark ? "Use light theme" : "Use dark theme"}
       onClick={toggleTheme}

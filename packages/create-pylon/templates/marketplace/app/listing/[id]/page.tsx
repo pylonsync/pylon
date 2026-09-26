@@ -8,32 +8,27 @@ import {
   type ServerData,
   type SsrResponse,
 } from "@pylonsync/react";
-import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
-import {
-  Empty,
-  EmptyContent,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from "@/components/ui/empty";
-import { Separator } from "@/components/ui/separator";
-import { Skeleton } from "@/components/ui/skeleton";
+import { ChevronRight, MapPin } from "lucide-react";
 import { OfferPanel } from "../../../client/OfferPanel";
 import { CategoryIcon } from "../../_components/CategoryIcon";
 import { WatchButton } from "../../../client/WatchButton";
 import { LiveListingStatus } from "../../../client/LiveListingStatus";
+import { ListingCard } from "../../../client/ListingCard";
 import {
-  gradient,
-  money,
+  avatarColor,
   conditionLabel,
+  gradient,
+  initials,
+  money,
+  timeAgo,
   type Listing,
   type Offer,
 } from "../../../client/market";
+import { categoryLabel, listingSrcSet } from "../../../lib/catalog";
 
 // Resolve a listing from the URL segment, which is its slug
-// ("herman-miller-aeron-a1f3"). Falls back to a raw id lookup so older
-// id-shaped links keep working.
+// ("danish-teak-lounge-chair-oatmeal-wool-a1f3"). Falls back to a raw id
+// lookup so id-shaped links keep working.
 async function resolveListing(
   serverData: ServerData,
   key: string,
@@ -44,17 +39,13 @@ async function resolveListing(
   );
 }
 
-// The listing page is anonymous + public (the watch button + offer panel are
-// client islands with their own auth), so its SSR output is shared across
-// visitors — an ISR candidate. `revalidate` serves it from cache, emits
-// stale-while-revalidate, and makes <Link>'s prefetch reusable so a click hits
-// cache instead of a live render. Short TTL because a listing's sold status is
-// time-sensitive; the realtime offer panel keeps the live bits fresh regardless.
+// The listing page is anonymous + public (the watch button and offer panel
+// are client islands with their own auth), so its SSR output is shared across
+// visitors. `revalidate` serves it from cache with stale-while-revalidate.
+// The TTL is short because sold status is time-sensitive; the live islands
+// keep offers and status current regardless.
 export const revalidate = 60;
 
-// Data-driven SEO: the title + description come from the listing itself,
-// fetched on the server. `generateMetadata` is handed the same PageProps as
-// the page (params + serverData), so it reads the row directly.
 export const generateMetadata: GenerateMetadata = async ({
   params,
   serverData,
@@ -79,9 +70,8 @@ function Detail({
   id: string;
 }) {
   // Listing cards seed this route with the row they already rendered.
-  // useRouteData paints that real content immediately, resets scroll at the
-  // start of navigation, then upgrades it to the authoritative server row in
-  // place. Direct loads still suspend for SSR as normal.
+  // useRouteData paints that row immediately, then upgrades it to the
+  // server row in place. Direct loads suspend for SSR as normal.
   const listing = useRouteData<Listing | null>(
     () => resolveListing(serverData, id),
     [serverData, id],
@@ -90,108 +80,137 @@ function Detail({
   if (!listing) {
     response.setStatus(404);
     return (
-      <Empty className="mx-auto min-h-[60vh] max-w-xl border-0">
-        <EmptyHeader>
-          <p className="text-sm font-medium text-muted-foreground">Unavailable</p>
-          <EmptyTitle className="text-3xl tracking-[-0.03em]">
-            This listing is no longer available
-          </EmptyTitle>
-          <EmptyDescription className="max-w-md">
-            It may have sold or been removed by the seller. Browse the latest
-            finds to discover something similar.
-          </EmptyDescription>
-        </EmptyHeader>
-        <EmptyContent>
-          <Button asChild size="lg">
-            <Link href="/">Browse latest finds</Link>
-          </Button>
-        </EmptyContent>
-      </Empty>
+      <div className="mx-auto flex min-h-[60vh] max-w-xl flex-col items-center justify-center text-center">
+        <h1 className="font-display text-5xl">This listing is gone</h1>
+        <p className="mt-3 text-muted-foreground">
+          The seller removed it, or the link is wrong.
+        </p>
+        <Link
+          href="/"
+          className="mt-6 inline-flex min-h-11 items-center rounded-full bg-primary px-5 text-sm font-medium text-primary-foreground"
+        >
+          Browse listings
+        </Link>
+      </div>
     );
   }
 
-  return (
-    <div className="flex flex-col gap-6 pb-10">
-      <Link
-        href="/"
-        className="inline-flex min-h-10 items-center text-sm text-muted-foreground transition-colors hover:text-foreground"
-      >
-        ← Back to browse
-      </Link>
+  const facts: Array<[string, string]> = [
+    ["Condition", conditionLabel(listing.condition)],
+    ["Category", categoryLabel(listing.category)],
+    ["Location", listing.location || "Not given"],
+    ["Listed", timeAgo(listing.createdAt)],
+  ];
 
-      <div className="grid gap-8 lg:grid-cols-[minmax(0,1.16fr)_minmax(360px,.84fr)] lg:gap-12">
-        <div className="relative aspect-[4/5] overflow-hidden rounded-[24px] bg-muted shadow-[var(--shadow-border)] sm:aspect-[6/5] lg:aspect-[4/5]">
-          {listing.imageUrl ? (
-            <img
-              src={listing.imageUrl}
-              alt={listing.title}
-              width="1200"
-              height="1500"
-              fetchPriority="high"
-              decoding="async"
-              className="h-full w-full object-cover outline outline-1 -outline-offset-1 outline-border"
-            />
-          ) : (
-            <div
-              className="flex h-full w-full items-center justify-center text-white/90"
-              style={{ background: gradient(listing.seed || listing.id) }}
+  return (
+    <div className="pb-6">
+      <nav aria-label="Breadcrumb" className="py-4 text-[13px] text-muted-foreground">
+        <ol className="flex min-w-0 items-center gap-1.5 whitespace-nowrap">
+          <li>
+            <Link href="/" className="hover:text-foreground">
+              All listings
+            </Link>
+          </li>
+          <ChevronRight aria-hidden="true" className="size-3.5" />
+          <li>
+            <a
+              href={`/?category=${listing.category}`}
+              className="hover:text-foreground"
             >
-              <CategoryIcon category={listing.category} className="size-28" />
-            </div>
-          )}
-          <WatchButton
-            listingId={listing.id}
-            listingTitle={listing.title}
-            className="absolute right-4 top-4"
-          />
-          <LiveListingStatus
-            listingId={listing.id}
-            initialStatus={listing.status}
-            mode="overlay"
-          />
+              {categoryLabel(listing.category)}
+            </a>
+          </li>
+          <ChevronRight aria-hidden="true" className="size-3.5" />
+          <li className="min-w-0 truncate text-foreground" aria-current="page">
+            {listing.title}
+          </li>
+        </ol>
+      </nav>
+
+      <div className="grid gap-8 lg:grid-cols-[minmax(0,560px)_minmax(0,1fr)] lg:gap-12 xl:gap-16">
+        <div className="lg:sticky lg:top-20 lg:self-start">
+          <div className="relative aspect-[4/5] overflow-hidden rounded-2xl bg-muted">
+            {listing.imageUrl ? (
+              <img
+                src={listing.imageUrl}
+                srcSet={listingSrcSet(listing.imageUrl)}
+                sizes="(min-width: 1024px) 560px, 100vw"
+                alt={listing.title}
+                width="1120"
+                height="1400"
+                fetchPriority="high"
+                decoding="async"
+                className="size-full object-cover"
+              />
+            ) : (
+              <div
+                className="flex size-full items-center justify-center text-white/85"
+                style={{ background: gradient(listing.seed || listing.id) }}
+              >
+                <CategoryIcon category={listing.category} className="size-24" />
+              </div>
+            )}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 rounded-2xl ring-1 ring-inset ring-black/5"
+            />
+            <WatchButton
+              listingId={listing.id}
+              listingTitle={listing.title}
+              className="absolute right-4 top-4 size-10"
+            />
+            <LiveListingStatus
+              listingId={listing.id}
+              initialStatus={listing.status}
+              mode="overlay"
+            />
+          </div>
         </div>
 
-        <div className="flex min-w-0 flex-col">
-          <div>
-            <p className="text-sm capitalize text-muted-foreground">
-              {listing.category} / {conditionLabel(listing.condition)}
-            </p>
-            <h1 className="mt-2 text-balance text-3xl font-semibold leading-tight tracking-[-0.035em] sm:text-4xl">
-              {listing.title}
-            </h1>
-            <p className="mt-3 text-4xl font-semibold tracking-[-0.03em] tabular-nums">
+        <div className="flex min-w-0 max-w-[660px] flex-col">
+          <h1 className="font-display text-[38px] leading-[1.04] tracking-[-0.01em] sm:text-[46px]">
+            {listing.title}
+          </h1>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <p className="text-[30px] font-semibold leading-none tabular-nums tracking-[-0.02em]">
               {money(listing.price)}
             </p>
-            <p className="mt-2 text-sm text-muted-foreground">
-              Listed by{" "}
-              <span className="font-medium text-foreground">{listing.sellerName}</span>
-            </p>
+            <LiveListingStatus
+              listingId={listing.id}
+              initialStatus={listing.status}
+              mode="pill"
+            />
           </div>
+          <p className="mt-3 flex flex-wrap items-center gap-x-2 text-sm text-muted-foreground">
+            <span>{conditionLabel(listing.condition)}</span>
+            <span aria-hidden="true">·</span>
+            {listing.location ? (
+              <>
+                <span className="inline-flex items-center gap-1">
+                  <MapPin aria-hidden="true" className="size-3.5" strokeWidth={1.75} />
+                  {listing.location}
+                </span>
+                <span aria-hidden="true">·</span>
+              </>
+            ) : null}
+            <span suppressHydrationWarning>Listed {timeAgo(listing.createdAt)}</span>
+          </p>
 
-          <Separator className="my-6" />
-
-          <section>
-            <h2 className="text-sm font-medium">About this item</h2>
-            <p className="mt-2 whitespace-pre-wrap text-pretty text-sm leading-6 text-muted-foreground">
-              {listing.description || "The seller has not added a description yet."}
-            </p>
-          </section>
-
-          <Card className="my-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl bg-border">
-            <div className="bg-card p-4">
-              <p className="text-xs text-muted-foreground">Condition</p>
-              <p className="mt-1 text-sm font-medium">{conditionLabel(listing.condition)}</p>
-            </div>
-            <div className="bg-card p-4">
-              <p className="text-xs text-muted-foreground">Offer status</p>
-              <p className="mt-1 text-sm font-medium">
-                <LiveListingStatus
-                  listingId={listing.id}
-                  initialStatus={listing.status}
-                />
+          <div className="mt-6 flex items-center gap-3 rounded-2xl bg-card p-3 shadow-[var(--shadow-border)]">
+            <span
+              aria-hidden="true"
+              className="grid size-11 shrink-0 place-items-center rounded-full text-sm font-semibold text-white"
+              style={{ background: avatarColor(listing.sellerName) }}
+            >
+              {initials(listing.sellerName)}
+            </span>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">{listing.sellerName}</p>
+              <p className="truncate text-[13px] text-muted-foreground">
+                Seller{listing.location ? ` in ${listing.location}` : ""}
               </p>
             </div>
-          </Card>
+          </div>
 
           <div className="mt-6">
             <Suspense fallback={<ListingOffers listing={listing} />}>
@@ -199,12 +218,34 @@ function Detail({
             </Suspense>
           </div>
 
-          <p className="mt-4 text-pretty text-xs leading-5 text-muted-foreground">
-            Reprise keeps offers and listing status in sync. Confirm payment and
-            delivery details with the seller before completing a transaction.
+          <section className="mt-10">
+            <h2 className="text-base font-semibold">Description</h2>
+            <p className="mt-2 whitespace-pre-wrap text-[15px] leading-7 text-foreground/80">
+              {listing.description || "The seller has not added a description."}
+            </p>
+          </section>
+
+          <dl className="mt-6 grid grid-cols-2 gap-px overflow-hidden rounded-2xl bg-border shadow-[var(--shadow-border)]">
+            {facts.map(([label, value]) => (
+              <div key={label} className="bg-card px-4 py-3">
+                <dt className="text-xs text-muted-foreground">{label}</dt>
+                <dd className="mt-0.5 text-sm font-medium" suppressHydrationWarning>
+                  {value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+
+          <p className="mt-6 text-xs leading-5 text-muted-foreground">
+            Offers and sold status sync live. Arrange payment and pickup
+            directly with the seller.
           </p>
         </div>
       </div>
+
+      <Suspense fallback={null}>
+        <MoreListings serverData={serverData} listing={listing} />
+      </Suspense>
     </div>
   );
 }
@@ -242,6 +283,52 @@ function LoadedListingOffers({
   return <ListingOffers listing={listing} initialOffers={initialOffers} />;
 }
 
+// Four more active listings: same category first, then the newest others.
+function MoreListings({
+  serverData,
+  listing,
+}: {
+  serverData: ServerData;
+  listing: Listing;
+}) {
+  const active = use(
+    serverData.query<Listing>("Listing", { status: "active" }),
+  );
+  const others = active
+    .filter((l) => l.id !== listing.id)
+    .sort((a, b) => {
+      const sameA = a.category === listing.category ? 0 : 1;
+      const sameB = b.category === listing.category ? 0 : 1;
+      return sameA - sameB || b.createdAt.localeCompare(a.createdAt);
+    })
+    .slice(0, 5);
+  if (others.length === 0) return null;
+
+  return (
+    <section className="mt-16 border-t border-border/70 pt-8">
+      <div className="flex items-end justify-between gap-4">
+        <h2 className="font-display text-3xl">More to look at</h2>
+        <Link
+          href="/"
+          className="text-sm font-medium text-muted-foreground hover:text-foreground"
+        >
+          All listings
+        </Link>
+      </div>
+      <div className="mt-5 grid grid-cols-2 gap-x-3 gap-y-6 sm:gap-x-4 md:grid-cols-3 lg:grid-cols-5">
+        {others.map((l, index) => (
+          <ListingCard
+            key={l.id}
+            listing={l}
+            sizes="(min-width: 1024px) 18vw, 50vw"
+            className={index === 4 ? "hidden lg:block" : undefined}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export default function ListingPage({
   params,
   serverData,
@@ -250,12 +337,12 @@ export default function ListingPage({
   return (
     <Suspense
       fallback={
-        <div className="grid gap-8 md:grid-cols-2">
-          <Skeleton className="aspect-[4/5] rounded-[24px]" />
-          <div className="flex flex-col gap-3">
-            <Skeleton className="h-6 w-2/3" />
-            <Skeleton className="h-8 w-1/3" />
-            <Skeleton className="h-24" />
+        <div className="grid gap-10 pt-14 lg:grid-cols-[580px_1fr]">
+          <div className="aspect-[4/5] rounded-2xl bg-muted" />
+          <div className="flex flex-col gap-4">
+            <div className="h-12 w-3/4 rounded-lg bg-muted" />
+            <div className="h-8 w-1/4 rounded-lg bg-muted" />
+            <div className="h-40 rounded-2xl bg-muted" />
           </div>
         </div>
       }

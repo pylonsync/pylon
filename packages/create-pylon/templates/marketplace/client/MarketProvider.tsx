@@ -151,11 +151,9 @@ export function AuthGate({
   const { identity } = useAuth();
   if (!identity) {
     return (
-      <LoginCard
-        title={title}
-        blurb={blurb}
-        headingLevel={headingLevel}
-      />
+      <div className="py-6">
+        <LoginCard title={title} blurb={blurb} headingLevel={headingLevel} />
+      </div>
     );
   }
   return <>{children}</>;

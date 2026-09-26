@@ -4,6 +4,10 @@ import React, { useEffect, useState } from "react";
 import { db } from "@pylonsync/react";
 import { bootClient, type Listing } from "./market";
 
+type Mode = "text" | "pill" | "overlay";
+
+// A listing's sale status, live. Renders the server value first, then follows
+// the Listing row over sync, so a sale in another tab flips it in place.
 export function LiveListingStatus({
   listingId,
   initialStatus,
@@ -11,7 +15,7 @@ export function LiveListingStatus({
 }: {
   listingId: string;
   initialStatus: Listing["status"];
-  mode?: "text" | "overlay";
+  mode?: Mode;
 }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -19,20 +23,9 @@ export function LiveListingStatus({
     setMounted(true);
   }, []);
 
-  if (!mounted) {
-    return initialStatus === "sold" ? (
-      mode === "overlay" ? <SoldOverlay /> : <>Sold</>
-    ) : mode === "text" ? (
-      <>Open to offers</>
-    ) : null;
-  }
-
+  if (!mounted) return <Status sold={initialStatus === "sold"} mode={mode} />;
   return (
-    <LiveStatus
-      listingId={listingId}
-      initialStatus={initialStatus}
-      mode={mode}
-    />
+    <LiveStatus listingId={listingId} initialStatus={initialStatus} mode={mode} />
   );
 }
 
@@ -43,18 +36,33 @@ function LiveStatus({
 }: {
   listingId: string;
   initialStatus: Listing["status"];
-  mode: "text" | "overlay";
+  mode: Mode;
 }) {
   const { data } = db.useQueryOne<Listing>("Listing", listingId);
-  const sold = (data?.status ?? initialStatus) === "sold";
-  if (mode === "overlay") return sold ? <SoldOverlay /> : null;
-  return <>{sold ? "Sold" : "Open to offers"}</>;
+  return <Status sold={(data?.status ?? initialStatus) === "sold"} mode={mode} />;
 }
 
-function SoldOverlay() {
-  return (
-    <span className="absolute inset-0 grid place-items-center bg-black/55 text-2xl font-semibold text-white">
-      Sold
-    </span>
-  );
+function Status({ sold, mode }: { sold: boolean; mode: Mode }) {
+  if (mode === "overlay") {
+    return sold ? (
+      <span className="market-rise absolute inset-0 grid place-items-center bg-black/45">
+        <span className="rounded-full bg-white px-5 py-2 font-display text-2xl text-neutral-900">
+          Sold
+        </span>
+      </span>
+    ) : null;
+  }
+  if (mode === "pill") {
+    return sold ? (
+      <span className="inline-flex items-center rounded-full bg-foreground px-3 py-1 text-xs font-semibold text-background">
+        Sold
+      </span>
+    ) : (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-success/12 px-3 py-1 text-xs font-semibold text-success-foreground">
+        <span className="size-1.5 rounded-full bg-success" aria-hidden="true" />
+        Available
+      </span>
+    );
+  }
+  return <>{sold ? "Sold" : "Available"}</>;
 }
