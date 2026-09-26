@@ -2030,10 +2030,33 @@ impl Runtime {
                 "CREATE TABLE IF NOT EXISTS _pylon_crdt_reconcile (
                     entity TEXT PRIMARY KEY,
                     last_id TEXT NOT NULL,
-                    done INTEGER NOT NULL DEFAULT 0
+                    done INTEGER NOT NULL DEFAULT 0,
+                    version INTEGER NOT NULL DEFAULT 0
                 )",
             )
             .map_err(|e| err("create _pylon_crdt_reconcile", &e))?;
+            let has_version: bool = conn
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM pragma_table_info('_pylon_crdt_reconcile')
+                                     WHERE name = 'version')",
+                    [],
+                    |r| r.get(0),
+                )
+                .map_err(|e| err("read _pylon_crdt_reconcile", &e))?;
+            if !has_version {
+                conn.execute_batch(
+                    "ALTER TABLE _pylon_crdt_reconcile
+                       ADD COLUMN version INTEGER NOT NULL DEFAULT 0",
+                )
+                .map_err(|e| err("add the reconcile version", &e))?;
+            }
+            // Progress from an earlier version of these rules: that entity
+            // runs again from its first row.
+            conn.execute(
+                "DELETE FROM _pylon_crdt_reconcile WHERE version < ?1",
+                [RECONCILE_VERSION],
+            )
+            .map_err(|e| err("clear _pylon_crdt_reconcile", &e))?;
             let recorded: Vec<String> = {
                 let mut stmt = conn
                     .prepare("SELECT entity FROM _pylon_crdt_reconcile")
@@ -2119,11 +2142,12 @@ impl Runtime {
                     }
                     let done = no_rows_after(&last_id, &conn, &page)?;
                     conn.execute(
-                        "INSERT INTO _pylon_crdt_reconcile (entity, last_id, done)
-                         VALUES (?1, ?2, ?3)
+                        "INSERT INTO _pylon_crdt_reconcile (entity, last_id, done, version)
+                         VALUES (?1, ?2, ?3, ?4)
                          ON CONFLICT (entity) DO UPDATE SET
-                            last_id = excluded.last_id, done = excluded.done",
-                        rusqlite::params![ent.name, last_id, done as i64],
+                            last_id = excluded.last_id, done = excluded.done,
+                            version = excluded.version",
+                        rusqlite::params![ent.name, last_id, done as i64, RECONCILE_VERSION],
                     )
                     .map_err(|e| err("record the reconcile", &e))?;
                     Ok(())
@@ -2147,8 +2171,9 @@ impl Runtime {
             return false;
         }
         let progress = conn.query_row(
-            "SELECT last_id, done FROM _pylon_crdt_reconcile WHERE entity = ?1",
-            [entity],
+            "SELECT last_id, done FROM _pylon_crdt_reconcile
+              WHERE entity = ?1 AND version >= ?2",
+            rusqlite::params![entity, RECONCILE_VERSION],
             |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)? != 0)),
         );
         match progress {
@@ -5519,6 +5544,11 @@ fn seed_values(
         .collect()
 }
 
+/// The version of the CRDT reconcile's rules. Raise it when the rules
+/// change: progress recorded under an earlier version is discarded, and
+/// every entity runs again.
+const RECONCILE_VERSION: i64 = 1;
+
 /// Rows per transaction in the one-time CRDT reconcile.
 const RECONCILE_BATCH: usize = 500;
 
@@ -6718,6 +6748,29 @@ mod tests {
         assert_eq!(doc_values(&rt, &id)["title"], "later");
     }
 
+    /// Progress recorded under an earlier version of the reconcile's rules
+    /// is discarded: the entity runs again from its first row.
+    #[test]
+    fn the_crdt_reconcile_runs_again_under_new_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let id = rt.insert("Doc", &fresh_doc()).unwrap();
+        rt.reconcile_crdt_docs().unwrap();
+        {
+            let conn = rt.lock_write_conn().unwrap();
+            conn.execute(
+                "UPDATE \"Doc\" SET \"title\" = 'newer' WHERE \"id\" = ?1",
+                [&id],
+            )
+            .unwrap();
+            conn.execute("UPDATE _pylon_crdt_reconcile SET version = 0", [])
+                .unwrap();
+        }
+        rt.reconcile_crdt_docs().unwrap();
+        assert_eq!(doc_values(&rt, &id)["title"], "newer");
+    }
+
     /// The reconcile pages through the rows and resumes after the last row
     /// it recorded; rows before it are not read again.
     #[test]
@@ -6937,8 +6990,13 @@ mod tests {
 
     /// An update made on an empty doc (a client that cached one from an
     /// older server), as the bytes the client pushes.
-    fn offline_edit(fields: &[pylon_crdt::CrdtField], patch: serde_json::Value) -> Vec<u8> {
+    fn offline_edit(
+        fields: &[pylon_crdt::CrdtField],
+        patch: serde_json::Value,
+        peer: u64,
+    ) -> Vec<u8> {
         let client = pylon_crdt::loro::LoroDoc::new();
+        client.set_peer_id(peer).unwrap();
         pylon_crdt::apply_patch(&client, fields, &patch).unwrap();
         client
             .export(pylon_crdt::loro::ExportMode::all_updates())
@@ -6954,9 +7012,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.db");
         let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
-        for _ in 0..6 {
+        // Client peers below and above any server peer, for the ties.
+        for peer in [1, u64::MAX - 1] {
             let (id, fields) = bare_doc_row(&rt);
-            let update = offline_edit(&fields, serde_json::json!({"done": true, "body": "typed"}));
+            let update = offline_edit(
+                &fields,
+                serde_json::json!({"done": true, "body": "typed"}),
+                peer,
+            );
             // Another client's read seeds the doc from the row.
             rt.crdt_snapshot("Doc", &id).unwrap();
             rt.crdt_apply_update("Doc", &id, &update).unwrap();
@@ -6964,6 +7027,123 @@ mod tests {
             assert_eq!(row["done"], true);
             assert_eq!(row["body"], "typed");
             assert_eq!(row["title"], "a");
+        }
+    }
+
+    /// An offline update of several changes (the second depends on the
+    /// first) still has its values applied again after a seed.
+    #[test]
+    fn an_offline_update_of_several_changes_survives_a_seed() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        for peer in [1, u64::MAX - 1] {
+            let (id, fields) = bare_doc_row(&rt);
+            let client = pylon_crdt::loro::LoroDoc::new();
+            client.set_peer_id(peer).unwrap();
+            pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"done": true})).unwrap();
+            // Another peer's op in between starts a new change, which
+            // depends on the first.
+            let other = pylon_crdt::loro::LoroDoc::new();
+            other.set_peer_id(7).unwrap();
+            other.get_map("scratch").insert("k", 1).unwrap();
+            other.commit();
+            pylon_crdt::apply_update(
+                &client,
+                &other
+                    .export(pylon_crdt::loro::ExportMode::all_updates())
+                    .unwrap(),
+            )
+            .unwrap();
+            pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"body": "typed"}))
+                .unwrap();
+            let update = client
+                .export(pylon_crdt::loro::ExportMode::all_updates())
+                .unwrap();
+            assert!(
+                pylon_crdt::loro::LoroDoc::decode_import_blob_meta(&update, false)
+                    .unwrap()
+                    .change_num
+                    > 1,
+                "one change only"
+            );
+            rt.crdt_snapshot("Doc", &id).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+            assert_eq!(row["done"], true);
+            assert_eq!(row["body"], "typed");
+        }
+    }
+
+    /// A counter a client made offline: its count is added to the seeded
+    /// total whichever container takes the key, and the same push sent
+    /// again adds nothing.
+    #[test]
+    fn an_offline_counter_adds_to_the_seed_once() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        // With no earlier ops the seed's counter wins the key; with many,
+        // the client's counter does.
+        for (peer, earlier_ops) in [(1u64, 0), (u64::MAX - 1, 0), (1, 40), (u64::MAX - 1, 40)] {
+            let (id, fields) = bare_doc_row(&rt);
+            let client = pylon_crdt::loro::LoroDoc::new();
+            client.set_peer_id(peer).unwrap();
+            let other = client.get_map("scratch");
+            for i in 0..earlier_ops {
+                other.insert(&i.to_string(), i).unwrap();
+            }
+            client.commit();
+            pylon_crdt::apply_patch(&client, &fields, &serde_json::json!({"likes": 1})).unwrap();
+            let update = client
+                .export(pylon_crdt::loro::ExportMode::all_updates())
+                .unwrap();
+            rt.crdt_snapshot("Doc", &id).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            rt.crdt_apply_update("Doc", &id, &update).unwrap();
+            let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+            assert_eq!(
+                row["likes"].as_i64(),
+                Some(4),
+                "peer {peer}, {earlier_ops} ops"
+            );
+        }
+    }
+
+    /// Each synthetic write takes its own peer, recorded in the doc: a
+    /// database restored from a backup cannot make a second op under an id
+    /// clients already hold.
+    #[test]
+    fn synthetic_writes_take_their_own_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        let conn = rt.lock_write_conn().unwrap();
+        for title in ["one", "two"] {
+            rt.crdt_store()
+                .apply_seed_patch(
+                    &conn,
+                    "Doc",
+                    &id,
+                    &fields,
+                    &serde_json::json!({"title": title}),
+                )
+                .unwrap();
+        }
+        let bytes = rt.crdt_store().snapshot(&conn, "Doc", &id).unwrap();
+        let doc = pylon_crdt::loro::LoroDoc::new();
+        pylon_crdt::apply_update(&doc, &bytes).unwrap();
+        let peers: Vec<String> = doc
+            .get_map("_pylon_synthetic")
+            .keys()
+            .map(|k| k.to_string())
+            .collect();
+        assert_eq!(peers.len(), 2, "{peers:?}");
+        for peer in &peers {
+            assert!(doc.oplog_vv().get(&peer.parse::<u64>().unwrap()).is_some());
         }
     }
 
@@ -6976,7 +7156,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.db");
         let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
-        for _ in 0..6 {
+        for peer in [1, u64::MAX - 1] {
             let (id, fields) = bare_doc_row(&rt);
             let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
             let edit = |title: &str| {
@@ -6992,7 +7172,7 @@ mod tests {
             // A edited an empty doc offline (it never saw the seed); B edited
             // the seeded doc. B's op wins in Loro, and not because of a seed.
             let b = edit("b");
-            let a = offline_edit(&fields, serde_json::json!({"title": "a"}));
+            let a = offline_edit(&fields, serde_json::json!({"title": "a"}), peer);
             let expected = pylon_crdt::loro::LoroDoc::new();
             for update in [&seeded, &b, &a] {
                 pylon_crdt::apply_update(&expected, update).unwrap();

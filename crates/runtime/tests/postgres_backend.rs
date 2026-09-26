@@ -1303,6 +1303,7 @@ fn counter_runtime(url: &str) -> Runtime {
             fields: vec![
                 field("name", "string", None),
                 field("likes", "int", Some(CrdtAnnotation::Counter)),
+                field("tags", "json", Some(CrdtAnnotation::List)),
             ],
             indexes: vec![],
             relations: vec![],
@@ -1325,7 +1326,9 @@ fn counter_runtime(url: &str) -> Runtime {
 }
 
 /// A counter update's value is an increment; every Postgres update path
-/// stores the counter's total in the row, as the CRDT doc holds it.
+/// stores the counter's total in the row, as the CRDT doc holds it. CI runs
+/// this against Postgres (the Postgres job); without PYLON_TEST_PG_URL it
+/// does not run.
 #[test]
 fn pg_counter_updates_store_the_total() {
     let Some(url) = pg_url() else {
@@ -1334,7 +1337,10 @@ fn pg_counter_updates_store_the_total() {
     use pylon_http::DataStore;
     let rt = counter_runtime(&url);
     let id = rt
-        .insert("Tally", &serde_json::json!({"name": "t", "likes": 3}))
+        .insert(
+            "Tally",
+            &serde_json::json!({"name": "t", "likes": 3, "tags": ["a"]}),
+        )
         .unwrap();
     let likes = |rt: &Runtime| rt.get_by_id("Tally", &id).unwrap().unwrap()["likes"].as_i64();
 
@@ -1356,6 +1362,14 @@ fn pg_counter_updates_store_the_total() {
     })
     .unwrap();
     assert_eq!(likes(&rt), Some(10), "a mutation's ctx.db.update");
+
+    // A list is stored as the doc holds it, in the JSON form reads parse.
+    rt.update("Tally", &id, &serde_json::json!({"tags": ["a", "b"]}))
+        .unwrap();
+    assert_eq!(
+        rt.get_by_id("Tally", &id).unwrap().unwrap()["tags"],
+        serde_json::json!(["a", "b"])
+    );
 }
 
 #[test]
