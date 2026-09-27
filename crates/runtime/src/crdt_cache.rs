@@ -29,6 +29,9 @@ struct Entry {
     /// The doc holds every field its row has a value for (see
     /// [`DocCache::mark_complete`]).
     complete: bool,
+    /// The stored snapshot's version the doc was read from (Postgres:
+    /// its `updated_at`), so a read can tell another process wrote it.
+    stamp: Option<i64>,
 }
 
 struct Inner {
@@ -128,11 +131,64 @@ impl DocCache {
             doc,
             last_used: tick,
             complete: false,
+            stamp: None,
         });
         entry.last_used = tick;
         let out = Arc::clone(&entry.doc);
         self.trim(&mut inner);
         out
+    }
+
+    /// The cached doc for a row and the stored version it was read from,
+    /// marking it recently used.
+    pub fn get_stamped(&self, entity: &str, row_id: &str) -> Option<(DocHandle, Option<i64>)> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.tick += 1;
+        let tick = inner.tick;
+        inner.map.get_mut(&key(entity, row_id)).map(|e| {
+            e.last_used = tick;
+            (Arc::clone(&e.doc), e.stamp)
+        })
+    }
+
+    /// Cache a doc read from storage at version `stamp`, replacing a cached
+    /// doc of another version, and return the cached one. When the row was
+    /// inserted or removed since `token` was taken, the doc is returned
+    /// uncached: it may predate that write.
+    pub fn publish(
+        &self,
+        entity: &str,
+        row_id: &str,
+        doc: DocHandle,
+        stamp: Option<i64>,
+        token: Token,
+    ) -> DocHandle {
+        let mut inner = self.inner.lock().unwrap();
+        let k = key(entity, row_id);
+        let now = Token(inner.epoch, inner.generations.get(&k).copied().unwrap_or(0));
+        if now != token {
+            return doc;
+        }
+        inner.tick += 1;
+        let tick = inner.tick;
+        if let Some(e) = inner.map.get_mut(&k) {
+            if e.stamp == stamp {
+                e.last_used = tick;
+                return Arc::clone(&e.doc);
+            }
+        }
+        self.bump(&mut inner, &k);
+        inner.map.insert(
+            k,
+            Entry {
+                doc: Arc::clone(&doc),
+                last_used: tick,
+                complete: false,
+                stamp,
+            },
+        );
+        self.trim(&mut inner);
+        doc
     }
 
     /// Whether the row's cached doc is marked complete.
@@ -180,6 +236,7 @@ impl DocCache {
                 doc,
                 last_used: tick,
                 complete: false,
+                stamp: None,
             },
         );
         self.trim(&mut inner);
@@ -311,6 +368,24 @@ mod tests {
         cache.get_or_insert("E", "1", doc(), token);
         cache.insert("E", "1", doc()); // A write replaced the doc.
         cache.mark_complete("E", "1", token);
+        assert!(!cache.is_complete("E", "1"));
+    }
+
+    /// A doc read at another stored version (another process wrote the
+    /// row) replaces the cached one and its complete mark; the same version
+    /// keeps it.
+    #[test]
+    fn a_new_stored_version_replaces_the_cached_doc() {
+        let cache = DocCache::with_capacity(10);
+        let first = cache.publish("E", "1", doc(), Some(1), cache.token("E", "1"));
+        let token = cache.token("E", "1");
+        cache.mark_complete("E", "1", token);
+        let same = cache.publish("E", "1", doc(), Some(1), cache.token("E", "1"));
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(cache.is_complete("E", "1"));
+        let newer = cache.publish("E", "1", doc(), Some(2), cache.token("E", "1"));
+        assert!(!Arc::ptr_eq(&first, &newer));
+        assert_eq!(cache.get_stamped("E", "1").unwrap().1, Some(2));
         assert!(!cache.is_complete("E", "1"));
     }
 

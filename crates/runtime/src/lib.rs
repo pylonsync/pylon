@@ -2271,35 +2271,38 @@ impl Runtime {
                 code: e.code,
                 message: e.message,
             })?;
-        if pg.crdt.is_complete(&ent.name, id) {
-            return Ok(());
-        }
-        let token = pg.crdt.cache_token(&ent.name, id);
         let err = |e: loro_store::LoroStoreError| pylon_http::DataError {
             code: "CRDT_SNAPSHOT_FAILED".into(),
             message: format!("read the doc of {} {id}: {e}", ent.name),
         };
-        let needs_seed = pg
-            .store
-            .with_client(|c| -> Result<bool, pylon_http::DataError> {
-                let held = pg
-                    .crdt
-                    .held_fields(c, &ent.name, id, &fields)
-                    .map_err(err)?;
-                if held.as_ref().is_some_and(|h| h.len() == fields.len()) {
-                    return Ok(false);
-                }
-                let Some(mut row) = pylon_storage::pg_tx_store::tx_get_by_id(c, &ent.name, id)?
-                else {
-                    return Ok(false);
-                };
-                parse_json_fields_in_row(ent, &mut row);
-                parse_crdt_containers_in_row(&fields, &mut row);
-                Ok(match held {
-                    None => true,
-                    Some(held) => !missing_values(&fields, &held, &row).is_empty(),
-                })
-            })?;
+        // The cached doc is checked against the stored version first (another
+        // process may have written it), then its complete mark.
+        let (needs_seed, token) =
+            pg.store
+                .with_client(|c| -> Result<(bool, _), pylon_http::DataError> {
+                    let held = pg
+                        .crdt
+                        .held_fields(c, &ent.name, id, &fields)
+                        .map_err(err)?;
+                    let token = pg.crdt.cache_token(&ent.name, id);
+                    if held.is_some() && pg.crdt.is_complete(&ent.name, id) {
+                        return Ok((false, token));
+                    }
+                    if held.as_ref().is_some_and(|h| h.len() == fields.len()) {
+                        return Ok((false, token));
+                    }
+                    let Some(mut row) = pylon_storage::pg_tx_store::tx_get_by_id(c, &ent.name, id)?
+                    else {
+                        return Ok((false, token));
+                    };
+                    parse_json_fields_in_row(ent, &mut row);
+                    parse_crdt_containers_in_row(&fields, &mut row);
+                    let needs_seed = match held {
+                        None => true,
+                        Some(held) => !missing_values(&fields, &held, &row).is_empty(),
+                    };
+                    Ok((needs_seed, token))
+                })?;
         if !needs_seed {
             // Later reads skip the row until the doc leaves the cache.
             pg.crdt.mark_complete(&ent.name, id, token);

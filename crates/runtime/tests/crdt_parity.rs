@@ -667,7 +667,8 @@ impl Env {
                     .execute(
                         "INSERT INTO _pylon_crdt_snapshots (entity, row_id, snapshot)
                          VALUES ('Doc', $1, $2)
-                         ON CONFLICT (entity, row_id) DO UPDATE SET snapshot = EXCLUDED.snapshot",
+                         ON CONFLICT (entity, row_id) DO UPDATE SET snapshot = EXCLUDED.snapshot,
+                            updated_at = clock_timestamp()",
                         &[&id, &snapshot],
                     )
                     .unwrap();
@@ -866,4 +867,32 @@ fn a_mutation_update_of_a_row_with_no_doc_keeps_the_other_fields() {
     assert_eq!(row["title"], "b");
     assert_eq!(row["body"], "hello");
     assert_eq!(row["likes"], 3);
+}
+
+/// Postgres, two processes on one database: a doc one process cached (and
+/// found complete) shows the other process's later writes, a field that
+/// was null included.
+#[test]
+fn a_cached_doc_shows_another_processs_writes() {
+    let Ok(url) = std::env::var("PYLON_TEST_PG_URL") else {
+        return;
+    };
+    let a = postgres(&url);
+    let b = Runtime::open_postgres(&url, manifest()).expect("second runtime");
+    let mut data = fresh_doc();
+    data["body"] = Value::Null;
+    let id = a.rt.insert("Doc", &data).unwrap();
+    let project = |rt: &Runtime| {
+        let doc = LoroDoc::new();
+        pylon_crdt::apply_update(&doc, &rt.crdt_snapshot("Doc", &id).unwrap().unwrap()).unwrap();
+        pylon_crdt::project_doc_to_json(&doc, &fields())
+    };
+    // A caches the doc; its body is null, so A marks it complete.
+    assert_eq!(project(&a.rt)["body"], Value::Null);
+    assert_eq!(project(&a.rt)["body"], Value::Null);
+    b.update("Doc", &id, &json!({"title": "b", "body": "from b"}))
+        .unwrap();
+    let seen = project(&a.rt);
+    assert_eq!(seen["title"], "b");
+    assert_eq!(seen["body"], "from b");
 }

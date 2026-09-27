@@ -375,31 +375,49 @@ impl PgLoroStore {
         conn: &mut C,
         entity: &str,
         row_id: &str,
-    ) -> Result<Arc<Mutex<LoroDoc>>, LoroStoreError> {
-        // Fast path: already cached.
-        if let Some(doc) = self.docs.get(entity, row_id) {
-            return Ok(doc);
-        }
+    ) -> Result<(Arc<Mutex<LoroDoc>>, bool), LoroStoreError> {
+        // One round trip: the stored version, the snapshot only when it is
+        // not the cached one's, and the server's start time. A process
+        // other than this one may have written the row since it cached it.
         let token = self.docs.token(entity, row_id);
-        let row = conn
-            .query_opt(
-                "SELECT (SELECT snapshot FROM _pylon_crdt_snapshots \
-                         WHERE entity = $1 AND row_id = $2), \
-                        extract(epoch FROM pg_postmaster_start_time())::float8",
-                &[&entity, &row_id],
+        let cached = self.docs.get_stamped(entity, row_id);
+        let known: Option<i64> = cached.as_ref().and_then(|(_, stamp)| *stamp);
+        let read = |conn: &mut C, known: Option<i64>| {
+            conn.query_opt(
+                "SELECT s.stamp, CASE WHEN s.stamp IS DISTINCT FROM $3::bigint \
+                                      THEN s.snapshot END, \
+                        extract(epoch FROM pg_postmaster_start_time())::float8 \
+                 FROM (SELECT 1) AS one LEFT JOIN LATERAL ( \
+                     SELECT (extract(epoch FROM updated_at) * 1000000)::bigint AS stamp, \
+                            snapshot \
+                     FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2 \
+                 ) AS s ON true",
+                &[&entity, &row_id, &known],
             )
             .map_err(|e| pg_err("read pg snapshot", e))?
-            .ok_or_else(|| LoroStoreError::Storage("read pg snapshot: no row".into()))?;
-        let snapshot: Option<Vec<u8>> = row.get(0);
-        // A new server: the cache and the token are no longer valid.
-        let token = if self.note_server_start(row.get(1)) {
-            self.docs.token(entity, row_id)
-        } else {
-            token
+            .ok_or_else(|| LoroStoreError::Storage("read pg snapshot: no row".into()))
         };
+        let mut row = read(conn, known)?;
+        let mut stamp: Option<i64> = row.get(0);
+        let mut token = token;
+        if self.note_server_start(row.get(2)) {
+            // A new server: the cache was cleared, and the snapshot is read
+            // whole.
+            token = self.docs.token(entity, row_id);
+            row = read(conn, None)?;
+            stamp = row.get(0);
+        } else if let Some((handle, cached_stamp)) = cached {
+            if cached_stamp == stamp {
+                return Ok((handle, stamp.is_some()));
+            }
+        }
+        let snapshot: Option<Vec<u8>> = row.get(1);
         let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
         let handle = Arc::new(Mutex::new(doc));
-        Ok(self.docs.get_or_insert(entity, row_id, handle, token))
+        Ok((
+            self.docs.publish(entity, row_id, handle, stamp, token),
+            stamp.is_some(),
+        ))
     }
 
     /// The row's cache state, to pass to [`PgLoroStore::mark_complete`].
@@ -435,7 +453,7 @@ impl PgLoroStore {
         let snap = encode_snapshot(doc);
         conn.execute(
             "INSERT INTO _pylon_crdt_snapshots (entity, row_id, snapshot, updated_at) \
-             VALUES ($1, $2, $3, now()) \
+             VALUES ($1, $2, $3, clock_timestamp()) \
              ON CONFLICT (entity, row_id) DO UPDATE \
              SET snapshot = EXCLUDED.snapshot, updated_at = EXCLUDED.updated_at",
             &[&entity, &row_id, &snap],
@@ -617,10 +635,10 @@ impl PgLoroStore {
         row_id: &str,
         fields: &[CrdtField],
     ) -> Result<Option<Vec<String>>, LoroStoreError> {
-        if !Self::has_snapshot(conn, entity, row_id)? {
+        let (handle, exists) = self.get_or_hydrate_read(conn, entity, row_id)?;
+        if !exists {
             return Ok(None);
         }
-        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         Ok(Some(crate::loro_store::held_keys(&doc, fields)))
     }
@@ -634,7 +652,7 @@ impl PgLoroStore {
         entity: &str,
         row_id: &str,
     ) -> Result<Vec<u8>, LoroStoreError> {
-        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
+        let (handle, _) = self.get_or_hydrate_read(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         Ok(encode_snapshot(&doc))
     }
@@ -648,7 +666,7 @@ impl PgLoroStore {
         row_id: &str,
         since: &VersionVector,
     ) -> Result<Vec<u8>, LoroStoreError> {
-        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
+        let (handle, _) = self.get_or_hydrate_read(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         Ok(encode_update_since(&doc, since))
     }
@@ -664,7 +682,7 @@ impl PgLoroStore {
         entity: &str,
         row_id: &str,
     ) -> Result<Option<Vec<u8>>, LoroStoreError> {
-        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
+        let (handle, _) = self.get_or_hydrate_read(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         Ok(Some(doc.oplog_vv().encode()))
     }
@@ -683,7 +701,7 @@ impl PgLoroStore {
     ) -> Result<Option<Vec<u8>>, LoroStoreError> {
         let parsed = VersionVector::decode(since)
             .map_err(|e| LoroStoreError::Decode(format!("decode VV for {entity}/{row_id}: {e}")))?;
-        let handle = self.get_or_hydrate_read(conn, entity, row_id)?;
+        let (handle, _) = self.get_or_hydrate_read(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         Ok(Some(encode_update_since(&doc, &parsed)))
     }
