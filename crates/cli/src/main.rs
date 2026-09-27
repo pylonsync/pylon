@@ -254,7 +254,7 @@ fn print_command_help(cmd: &str) -> bool {
             println!("pylon dev — start the dev server with hot reload");
             println!();
             println!("Usage:");
-            println!("  pylon dev [app.ts] [--port <n>] [--json]");
+            println!("  pylon dev [app.ts] [--port <n>] [--host <addr>] [--json]");
             println!();
             println!("Serves your SSR frontend and API from one port. Regenerates the manifest");
             println!("and typed client on every save and reloads on change. Loads .env and");
@@ -265,6 +265,14 @@ fn print_command_help(cmd: &str) -> bool {
             println!();
             println!("Options:");
             println!("  -p, --port <n>    Port to listen on (default: 4321)");
+            println!(
+                "  --host <addr>     Interfaces to listen on (default: localhost, this machine"
+            );
+            println!("                    only). 0.0.0.0 listens on every interface so phones and");
+            println!(
+                "                    other devices on your network can connect; an IP address"
+            );
+            println!("                    listens on that address only.");
             println!("  --once            Build once and exit, no watcher (handy in CI)");
             println!("  --json            Emit machine-readable JSON build/watch events");
             println!("  -h, --help        Show this help");
@@ -272,7 +280,11 @@ fn print_command_help(cmd: &str) -> bool {
             println!("Environment:");
             println!("  PYLON_DB_PATH              SQLite dev database (default: .pylon/dev.db)");
             println!("  PYLON_FILES_DIR            Local file-storage directory");
-            println!("  PYLON_CORS_ORIGIN          Allowed CORS origin for the API");
+            println!("  PYLON_HOST                 Same as --host (the flag wins)");
+            println!(
+                "  PYLON_DEV_TRUST_REMOTE     1 = give dev shortcuts to callers on other machines"
+            );
+            println!("  PYLON_CORS_ORIGIN          Allowed CORS origins for the API (localhost is always allowed)");
             println!("  PYLON_FRONTEND_DEV_PROXY   Proxy non-API GETs to an external frontend dev server");
             println!("  PYLON_RATE_LIMIT_MAX       Per-IP request budget");
             println!("  PYLON_FN_RATE_LIMIT_MAX    Per-IP function-call budget");
@@ -280,7 +292,14 @@ fn print_command_help(cmd: &str) -> bool {
             println!("Examples:");
             println!("  pylon dev");
             println!("  pylon dev --port 3000");
+            println!("  pylon dev --host 0.0.0.0     # reach it from a phone on the same Wi-Fi");
             println!("  pylon dev app.ts --json");
+            println!();
+            println!("Dev shortcuts: dev_code in auth responses, POST /api/auth/session, open");
+            println!("/admin and /metrics, and the /_pylon/dev/files write API. They answer only");
+            println!("requests from this machine (loopback address and a localhost Host header),");
+            println!("even with --host 0.0.0.0. Other devices sign in the normal way; email codes");
+            println!("print to this terminal when no email provider is set.");
             true
         }
         "jobs" => {

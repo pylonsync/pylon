@@ -567,7 +567,7 @@ fn set_server_handle(srv: &Arc<Server>) {
 /// Build a `tiny_http::Server` bound dual-stack (`[::]:port`), falling back to
 /// v4-only (`0.0.0.0:port`) when IPv6 sockets aren't available. Shared by the
 /// initial boot and the recv-loop rebuild path so both bind identically.
-fn build_http_server(port: u16) -> Result<Arc<Server>, String> {
+fn build_http_server(port: u16, scope: &crate::listen::ListenScope) -> Result<Arc<Server>, String> {
     // Dual-stack bind. `[::]:port` accepts IPv6 AND IPv4-mapped connections on
     // the same socket. Without this, a v4-only `0.0.0.0:port` bind silently
     // breaks Fly.io — their fly-proxy reaches machines via the private IPv6
@@ -579,10 +579,19 @@ fn build_http_server(port: u16) -> Result<Arc<Server>, String> {
     // that yields a listener no IPv4 client can reach, 127.0.0.1 included.
     // `bind_dual_stack_tcp` clears the option explicitly and keeps the
     // v4-only fallback for environments without IPv6.
-    let listener =
-        crate::bind_dual_stack_tcp(port).map_err(|e| format!("Failed to start server: {e}"))?;
-    let server = Server::from_listener(listener, None)
+    //
+    // `scope` narrows that: `pylon dev` passes `Loopback`, which binds
+    // 127.0.0.1 and ::1 as two listeners feeding one server.
+    let listeners = crate::listen::bind_listeners(port, scope)
         .map_err(|e| format!("Failed to start server: {e}"))?;
+    let server = Server::from_listeners(
+        listeners
+            .into_iter()
+            .map(tiny_http::Listener::from)
+            .collect(),
+        None,
+    )
+    .map_err(|e| format!("Failed to start server: {e}"))?;
     Ok(Arc::new(server))
 }
 
@@ -593,13 +602,13 @@ fn build_http_server(port: u16) -> Result<Arc<Server>, String> {
 /// dev server. We re-bind the same port with bounded exponential backoff and
 /// return the new handle. Returns `None` only if a shutdown is requested while
 /// we're retrying.
-fn rebuild_with_retry(port: u16) -> Option<Arc<Server>> {
+fn rebuild_with_retry(port: u16, scope: &crate::listen::ListenScope) -> Option<Arc<Server>> {
     let mut delay_ms = 50u64;
     loop {
         if SHUTDOWN.load(Ordering::Relaxed) {
             return None;
         }
-        match build_http_server(port) {
+        match build_http_server(port, scope) {
             Ok(server) => {
                 tracing::warn!(
                     "HTTP listener rebuilt on port {port} after recv() give-up \
@@ -920,11 +929,24 @@ fn canonical_redirect_target(canonical: &str, host: &str, url: &str) -> Option<S
 /// (Authorization / `bearer.<token>` subprotocol), which is non-ambient and
 /// never reaches this check. So a missing Origin on a cookie-authed upgrade
 /// is a crafted client trying to dodge the gate, not a legitimate caller.
-fn ws_cookie_origin_trusted(origin: Option<&str>, allowlist: &[String]) -> bool {
+///
+/// A `*` allowlist entry does not trust anything here: the cookie is a
+/// credential, and `*` never carries credentials (see the CORS gate).
+///
+/// `same_host` (dev only) is the handshake's `Host` header. An Origin on the
+/// same host, any port, is the app's own page: the WS server listens on
+/// `port + 1`, so a page opened by LAN address is cross-port but not
+/// cross-site.
+fn ws_cookie_origin_trusted(
+    origin: Option<&str>,
+    allowlist: &[String],
+    same_host: Option<&str>,
+) -> bool {
     match origin {
         Some(o) => {
             pylon_auth::is_localhost_origin(o)
-                || allowlist.iter().any(|a| a == o || a == "*")
+                || allowlist.iter().any(|a| a == o)
+                || same_host.is_some_and(|h| origin_host_matches(o, h))
                 // Platform (tenant) custom domains — trusted dynamically from
                 // the control plane so a tenant's browser can open a
                 // cookie-authed sync WS without the host being in the boot
@@ -932,6 +954,32 @@ fn ws_cookie_origin_trusted(origin: Option<&str>, allowlist: &[String]) -> bool 
                 || crate::tenant_hosts::is_trusted_origin(o)
         }
         None => false,
+    }
+}
+
+/// True when `origin`'s host equals the host part of the `Host` header value
+/// `host`, ignoring ports.
+fn origin_host_matches(origin: &str, host: &str) -> bool {
+    let Some(authority) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let authority = authority.split('/').next().unwrap_or("");
+    let origin_host = strip_port(authority);
+    let host_name = strip_port(host.trim());
+    !host_name.is_empty() && origin_host.eq_ignore_ascii_case(host_name)
+}
+
+/// `host[:port]` or `[v6][:port]` → the host, without brackets.
+fn strip_port(authority: &str) -> &str {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return rest.split_once(']').map(|(h, _)| h).unwrap_or(rest);
+    }
+    match authority.rsplit_once(':') {
+        Some((h, port)) if port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => authority,
     }
 }
 
@@ -1318,40 +1366,85 @@ mod ws_origin_tests {
         // Same-origin (in the allowlist) → trusted.
         assert!(ws_cookie_origin_trusted(
             Some("https://app.example.com"),
-            &allow
+            &allow,
+            None
         ));
         // Localhost dev origins → trusted (mirrors CORS reflection).
         assert!(ws_cookie_origin_trusted(
             Some("http://localhost:3000"),
-            &allow
+            &allow,
+            None
         ));
         assert!(ws_cookie_origin_trusted(
             Some("http://127.0.0.1:5173"),
-            &allow
+            &allow,
+            None
         ));
 
         // The CSWSH case: an attacker page's Origin is NOT in the allowlist
         // → rejected, so its (browser-attached) cookie can't drive the socket.
         assert!(!ws_cookie_origin_trusted(
             Some("https://evil.example"),
-            &allow
+            &allow,
+            None
         ));
         // A near-miss sibling subdomain is still untrusted unless allowlisted.
         assert!(!ws_cookie_origin_trusted(
             Some("https://evil.app.example.com"),
-            &allow
+            &allow,
+            None
         ));
         // Absent Origin on a cookie-authed upgrade → fail closed.
-        assert!(!ws_cookie_origin_trusted(None, &allow));
+        assert!(!ws_cookie_origin_trusted(None, &allow, None));
+    }
 
-        // Wildcard allowlist (dev only — prod boot refuses `*`) → reflect any.
+    #[test]
+    fn wildcard_does_not_trust_cookie_authed_sockets() {
+        // `*` never carries credentials, and the session cookie is one.
         let star = vec!["*".to_string()];
-        assert!(ws_cookie_origin_trusted(
+        assert!(!ws_cookie_origin_trusted(
             Some("https://anything.test"),
-            &star
+            &star,
+            None
         ));
-        // …but absent Origin is still fail-closed even under wildcard.
-        assert!(!ws_cookie_origin_trusted(None, &star));
+        assert!(!ws_cookie_origin_trusted(None, &star, None));
+        // Loopback pages are still trusted.
+        assert!(ws_cookie_origin_trusted(
+            Some("http://localhost:4321"),
+            &star,
+            None
+        ));
+    }
+
+    #[test]
+    fn dev_same_host_origin_is_trusted() {
+        // A page opened by LAN address connecting to its own server.
+        assert!(ws_cookie_origin_trusted(
+            Some("http://192.168.1.20:4321"),
+            &[],
+            Some("192.168.1.20:4321")
+        ));
+        assert!(ws_cookie_origin_trusted(
+            Some("http://192.168.1.20:4321"),
+            &[],
+            Some("192.168.1.20:4322")
+        ));
+        assert!(ws_cookie_origin_trusted(
+            Some("http://[fe80::1]:4321"),
+            &[],
+            Some("[fe80::1]:4321")
+        ));
+        // Another host is still cross-site.
+        assert!(!ws_cookie_origin_trusted(
+            Some("https://evil.example"),
+            &[],
+            Some("192.168.1.20:4321")
+        ));
+        assert!(!ws_cookie_origin_trusted(
+            Some("http://192.168.1.200:4321"),
+            &[],
+            Some("192.168.1.20:4321")
+        ));
     }
 }
 
@@ -2034,7 +2127,11 @@ fn start_server(
     // Bind the HTTP listener (dual-stack `[::]`, v4-only fallback). `mut`
     // because the recv loop below rebuilds it in place if tiny_http gives up
     // its accept loop under a connection-reset storm (see `rebuild_with_retry`).
-    let mut server = build_http_server(port)?;
+    //
+    // `PYLON_HOST` narrows the interfaces for every port (HTTP, WS, SSE,
+    // shard WS). `pylon dev` sets it to loopback; unset means all.
+    let listen_scope = crate::listen::ListenScope::from_env()?;
+    let mut server = build_http_server(port, &listen_scope)?;
 
     // Stash a handle so `request_shutdown()` can unblock the loop.
     set_server_handle(&server);
@@ -2050,9 +2147,7 @@ fn start_server(
     // PYLON_SSO_ENCRYPTION_KEY is the legacy name — still honoured by
     // sso_encryption_key() in org_sso.rs but no longer the
     // recommended env to set.
-    let in_prod = std::env::var("PYLON_DEV_MODE")
-        .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
-        .unwrap_or(true);
+    let in_prod = !crate::dev_access::dev_mode_enabled();
     // Validate PYLON_SECRET (or its legacy PYLON_SSO_ENCRYPTION_KEY alias)
     // up front. Three outcomes:
     //   * Unset → at-rest encryption is disabled. Loud warning in prod so
@@ -2163,9 +2258,7 @@ fn start_server(
     //
     // Probe dev mode NOW — defined for real at line ~300 but plugin
     // registration below needs it. Same env-var, same logic.
-    let is_dev_early = std::env::var("PYLON_DEV_MODE")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(true);
+    let is_dev_early = crate::dev_access::dev_mode_enabled();
     let plugin_rl_max_authed: u32 = if is_dev_early {
         100_000
     } else {
@@ -2864,18 +2957,21 @@ fn start_server(
     // `*`, etc. Defaulting to `true` meant a prod deploy that simply
     // forgot the env var was trivially compromisable — flip to safe-
     // by-default and let the CLI's `pylon dev` opt in explicitly.
-    let is_dev = std::env::var("PYLON_DEV_MODE")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(false);
+    let is_dev = crate::dev_access::dev_mode_enabled();
 
     // CORS origin. Resolution order:
     //   1. PYLON_CORS_ORIGIN (comma-separated) — operator override.
     //   2. manifest.auth.trustedOrigins — unified declarative source
     //      that also feeds the CSRF + OAuth-redirect gates.
-    //   3. Dev-mode default: `*` (loopback is auto-trusted by every
-    //      gate anyway via `is_localhost_origin`, but `*` keeps
-    //      curl/Postman from custom hosts working).
+    //   3. Dev-mode default: empty. Loopback origins (`is_localhost_origin`)
+    //      are trusted by every gate without being listed, and nothing
+    //      else is. curl/Postman send no Origin and are unaffected.
     //   4. Prod with no manifest entries and no env: hard error.
+    //
+    // An explicit `*` (dev only) answers with a literal `*` and no
+    // credentials. The request's Origin is never echoed for `*`: echoing
+    // it with credentials would let any website read a signed-in
+    // developer's data from their dev server.
     //
     // Wildcard + credentials is a spec violation some browsers
     // tolerate; we refuse it in prod because the server also accepts
@@ -2894,7 +2990,7 @@ fn start_server(
     } else if !manifest_trusted_origins.is_empty() {
         manifest_trusted_origins.clone()
     } else if is_dev {
-        vec!["*".to_string()]
+        Vec::new()
     } else {
         return Err(
             "CORS gate has no trusted origins. Declare them in your manifest \
@@ -2909,7 +3005,7 @@ fn start_server(
             set PYLON_CORS_ORIGIN to a comma-separated list."
             .into());
     }
-    if cors_allowlist.is_empty() {
+    if cors_allowlist.is_empty() && cors_origin_env.is_some() {
         return Err("CORS gate parsed an empty allowlist from PYLON_CORS_ORIGIN".into());
     }
 
@@ -2977,9 +3073,10 @@ fn start_server(
     //   2. manifest.auth.trustedOrigins ∪ CORS allowlist (every
     //      origin allowed for fetch is also allowed to drive a
     //      cross-origin POST).
-    //   3. Dev: allow-any so localhost tooling on unusual ports
-    //      isn't blocked. Loopback is auto-trusted by the plugin
-    //      regardless of this list — see CsrfPlugin::is_allowed_origin.
+    //   3. Dev uses the same list. Loopback origins are trusted by the
+    //      plugin regardless of the list (see CsrfPlugin::is_allowed_origin),
+    //      and dev also accepts same-origin requests (Origin matches Host),
+    //      so a page opened by LAN address can post to its own server.
     let csrf_origins: Vec<String> = match std::env::var("PYLON_CSRF_ORIGINS") {
         Ok(v) => v
             .split(',')
@@ -2987,21 +3084,17 @@ fn start_server(
             .filter(|s| !s.is_empty())
             .collect(),
         Err(_) => {
-            if is_dev {
-                vec!["*".to_string()]
-            } else {
-                let mut merged: Vec<String> = cors_allowlist
-                    .iter()
-                    .filter(|o| o.as_str() != "*")
-                    .cloned()
-                    .collect();
-                for m in &manifest_trusted_origins {
-                    if !m.is_empty() && !merged.contains(m) {
-                        merged.push(m.clone());
-                    }
+            let mut merged: Vec<String> = cors_allowlist
+                .iter()
+                .filter(|o| o.as_str() != "*")
+                .cloned()
+                .collect();
+            for m in &manifest_trusted_origins {
+                if !m.is_empty() && !merged.contains(m) {
+                    merged.push(m.clone());
                 }
-                merged
             }
+            merged
         }
     };
     let csrf = Arc::new(pylon_plugin::builtin::csrf::CsrfPlugin::new(csrf_origins));
@@ -3169,6 +3262,7 @@ fn start_server(
         let fetcher = snapshot_fetcher.clone();
         let reactive = Arc::clone(&reactive_registry);
         let rooms_bridge: Arc<dyn crate::ws::RoomBridge> = Arc::clone(&room_mgr) as _;
+        let scope = listen_scope.clone();
         std::thread::spawn(move || {
             crate::ws::start_ws_server(
                 hub,
@@ -3177,6 +3271,7 @@ fn start_server(
                 Some(fetcher),
                 Some(reactive),
                 Some(rooms_bridge),
+                &scope,
             );
         });
     }
@@ -3203,9 +3298,7 @@ fn start_server(
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
     if !sse_disabled {
-        let in_prod_for_sse = std::env::var("PYLON_DEV_MODE")
-            .map(|v| v != "1" && !v.eq_ignore_ascii_case("true"))
-            .unwrap_or(true);
+        let in_prod_for_sse = !crate::dev_access::dev_mode_enabled();
         let acknowledged = std::env::var("PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
@@ -3227,8 +3320,9 @@ fn start_server(
         }
         let hub = Arc::clone(&sse_hub);
         let sessions = Arc::clone(&session_store);
+        let scope = listen_scope.clone();
         std::thread::spawn(move || {
-            crate::sse::start_sse_server(hub, sessions, sse_port);
+            crate::sse::start_sse_server(hub, sessions, sse_port, &scope);
         });
     } else {
         tracing::info!("[sse] Dedicated SSE port :{sse_port} disabled by PYLON_SSE_PORT_DISABLE=1");
@@ -3238,8 +3332,9 @@ fn start_server(
     let shard_ws_port = port + 3;
     if let Some(reg) = shard_registry.clone() {
         let sessions = Arc::clone(&session_store);
+        let scope = listen_scope.clone();
         std::thread::spawn(move || {
-            crate::shard_ws::start_shard_ws_server(reg, sessions, shard_ws_port);
+            crate::shard_ws::start_shard_ws_server(reg, sessions, shard_ws_port, &scope);
         });
     }
     // Shard connections over WebTransport (UDP), when configured.
@@ -3438,7 +3533,7 @@ fn start_server(
                 if SHUTDOWN.load(Ordering::Relaxed) {
                     break;
                 }
-                match rebuild_with_retry(port) {
+                match rebuild_with_retry(port, &listen_scope) {
                     Some(new_server) => {
                         set_server_handle(&new_server);
                         server = new_server;
@@ -3642,7 +3737,7 @@ fn start_server(
                 {
                     o.clone()
                 }
-                Some(o) if wildcard => o.clone(),
+                Some(_) if wildcard => "*".to_string(),
                 Some(o) => {
                     tracing::warn!(
                         "[cors] gate rejected origin {o:?} — add to \
@@ -3668,13 +3763,21 @@ fn start_server(
         // need to allow credentials whenever the per-request resolved
         // `cors_origin` isn't `*`.
         let allow_credentials = allow_credentials || cors_origin != "*";
-        let is_dev = is_dev;
+        // Dev shortcuts (session mint, dev codes, the OAuth email shortcut,
+        // open /admin) give full control of the app, so they go only to a
+        // caller on this machine: loopback TCP peer AND a loopback Host
+        // header. A request from the LAN, through a tunnel, or via DNS
+        // rebinding is served as production. See `crate::dev_access`.
+        let dev_shortcuts = is_dev && crate::dev_access::request_shortcuts_allowed(&request);
         // Dev mode keeps /admin/* + /metrics open for local convenience — but
         // ONLY when no operator token is configured (see
         // `dev_admin_endpoints_open`).
         let dev_metrics_token = std::env::var("PYLON_METRICS_TOKEN").ok();
-        let dev_admin_open =
-            dev_admin_endpoints_open(is_dev, admin_token.as_deref(), dev_metrics_token.as_deref());
+        let dev_admin_open = dev_admin_endpoints_open(
+            dev_shortcuts,
+            admin_token.as_deref(),
+            dev_metrics_token.as_deref(),
+        );
 
         let method = request.method().clone();
         let url = request.url().to_string();
@@ -4017,8 +4120,21 @@ fn start_server(
                 // open an authenticated socket as the victim (the HTTP API is
                 // already CORS/allowlist-gated; the WS upgrade was not).
                 // Explicit bearer/subprotocol auth is non-ambient and exempt.
+                let ws_host = if is_dev {
+                    request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Host"))
+                        .map(|h| h.value.as_str().to_string())
+                } else {
+                    None
+                };
                 if upgrade_req.cookie_auth
-                    && !ws_cookie_origin_trusted(req_origin_header.as_deref(), &cors_allowlist)
+                    && !ws_cookie_origin_trusted(
+                        req_origin_header.as_deref(),
+                        &cors_allowlist,
+                        ws_host.as_deref(),
+                    )
                 {
                     tracing::warn!(
                         "[ws] rejected cookie-authed upgrade from untrusted origin {:?} — \
@@ -5137,7 +5253,23 @@ fn start_server(
                     .iter()
                     .find(|h| h.field.as_str() == "Referer" || h.field.as_str() == "referer")
                     .map(|h| h.value.as_str().to_string());
-                if let Err(err) = csrf.check(method_str, origin.as_deref(), referer.as_deref()) {
+                // Dev accepts same-origin posts (Origin matches Host). See
+                // the CSRF allowlist comment at boot.
+                let host = if is_dev {
+                    request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Host"))
+                        .map(|h| h.value.as_str().to_string())
+                } else {
+                    None
+                };
+                if let Err(err) = csrf.check_with_host(
+                    method_str,
+                    origin.as_deref(),
+                    referer.as_deref(),
+                    host.as_deref(),
+                ) {
                     let body = json_error(&err.code, &err.message);
                     let response = with_security_headers(
                         Response::from_string(&body)
@@ -8621,7 +8753,7 @@ fn start_server(
                     plugin_hooks: &plugin_hooks,
                     auth_ctx: &auth_ctx,
                     trusted_origins: &trusted_origins_ref,
-                    is_dev,
+                    is_dev: dev_shortcuts,
                     request_headers: &request_headers,
                     peer_ip: peer_ip.as_str(),
                     cookie_config: cookie_config.as_ref(),
@@ -10171,7 +10303,7 @@ mod http_listener_rebuild_tests {
     fn rebuilt_listener_binds_same_port_and_serves() {
         // Bind an ephemeral port, learn it, then drop the server to free the
         // port — standing in for tiny_http dropping its listener on give-up.
-        let first = build_http_server(0).expect("initial bind");
+        let first = build_http_server(0, &crate::listen::ListenScope::All).expect("initial bind");
         let port = first.server_addr().to_ip().expect("ip addr").port();
         drop(first);
 
@@ -10180,7 +10312,7 @@ mod http_listener_rebuild_tests {
         // `rebuild_with_retry`, but bounded so the test can never hang.
         let mut rebuilt = None;
         for _ in 0..100 {
-            match build_http_server(port) {
+            match build_http_server(port, &crate::listen::ListenScope::All) {
                 Ok(s) => {
                     rebuilt = Some(s);
                     break;
@@ -10254,7 +10386,7 @@ mod http_listener_rebuild_tests {
     /// it's a survives-aborts smoke test (Linux accept never truncates).
     #[test]
     fn server_accept_survives_a_burst_of_aborted_connections() {
-        let server = build_http_server(0).expect("bind");
+        let server = build_http_server(0, &crate::listen::ListenScope::All).expect("bind");
         let bound = server.server_addr().to_ip().expect("addr");
         let port = bound.port();
         let connect_addr: SocketAddr = if bound.is_ipv6() {

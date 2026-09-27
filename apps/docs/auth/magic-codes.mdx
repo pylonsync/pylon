@@ -31,7 +31,7 @@ Response:
 { "sent": true, "email": "alice@example.com" }
 ```
 
-In dev mode (`PYLON_DEV_MODE=true`), the response also includes `dev_code`. You can sign in without an email provider configured:
+In dev mode (`PYLON_DEV_MODE=true`), a request from the same machine also gets `dev_code` in the response, so you can sign in without an email provider configured. Requests from other devices don't; the code prints to the `pylon dev` terminal instead.
 
 ```json
 { "sent": true, "email": "alice@example.com", "dev_code": "428193" }

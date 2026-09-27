@@ -449,11 +449,16 @@ impl SseHub {
 /// `PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1` is set), then registers the
 /// stream with the hub. The accept thread exits immediately after
 /// registration — no per-client thread is kept alive.
-pub fn start_sse_server(hub: Arc<SseHub>, sessions: Arc<SessionStore>, port: u16) {
-    // Dual-stack v6+v4 — without it, macOS clients connecting to
-    // `localhost:port` over IPv6 (::1) hit connection refused.
-    // See crate::bind_dual_stack_tcp.
-    let listener = match crate::bind_dual_stack_tcp(port) {
+pub fn start_sse_server(
+    hub: Arc<SseHub>,
+    sessions: Arc<SessionStore>,
+    port: u16,
+    scope: &crate::listen::ListenScope,
+) {
+    // Dual-stack v6+v4 for `ListenScope::All` — without it, macOS clients
+    // connecting to `localhost:port` over IPv6 (::1) hit connection refused.
+    // See crate::bind_dual_stack_tcp. `Loopback` binds 127.0.0.1 and ::1.
+    let listener = match crate::listen::Listeners::bind(port, scope) {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("[sse] Failed to bind on port {port}: {e}");
@@ -473,7 +478,7 @@ pub fn start_sse_server(hub: Arc<SseHub>, sessions: Arc<SessionStore>, port: u16
     loop {
         // Panic-proof accept: libstd's accept/peer_addr assert (panic) on a
         // truncated macOS dual-stack sockaddr. See crate::accept_tcp.
-        let (stream, peer_ip) = match crate::accept_tcp(&listener) {
+        let (stream, peer_ip) = match listener.accept() {
             Ok(v) => v,
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -583,9 +588,7 @@ fn handle_sse_connection(
     // PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH=1. This closes the unauth
     // half of the codex pass-3 P0 finding: previously any TCP client
     // got every change event from every tenant.
-    let in_dev = std::env::var("PYLON_DEV_MODE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let in_dev = crate::dev_access::dev_mode_enabled();
     let acknowledged_unauth = std::env::var("PYLON_SSE_PORT_ACKNOWLEDGE_UNAUTH")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);

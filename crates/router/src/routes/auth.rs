@@ -5053,11 +5053,27 @@ pub(crate) fn handle(
                 sent = true;
             }
         }
-        let mut response = serde_json::json!({"sent": sent, "phone": phone});
-        if ctx.is_dev || !sent {
+        // The code goes back in the response only to a dev caller on this
+        // machine (`ctx.is_dev`). Returning it because the SMS did not go
+        // out would hand any caller a sign-in code for any phone number.
+        if ctx.is_dev {
+            let mut response = serde_json::json!({"sent": sent, "phone": phone});
             response["dev_code"] = serde_json::Value::String(code);
+            return Some((200, response.to_string()));
         }
-        return Some((200, response.to_string()));
+        if !sent {
+            return Some((
+                503,
+                json_error(
+                    "SMS_NOT_SENT",
+                    "Could not send the sign-in code. Check the SMS provider (PYLON_TWILIO_*) configuration.",
+                ),
+            ));
+        }
+        return Some((
+            200,
+            serde_json::json!({"sent": true, "phone": phone}).to_string(),
+        ));
     }
 
     if url == "/api/auth/phone/verify" && method == HttpMethod::Post {

@@ -144,6 +144,10 @@ pub struct Server {
 
     // result of TcpListener::local_addr()
     listening_addr: ListenAddr,
+
+    // Pylon patch: every listener's address, so Drop can wake each accept
+    // thread.
+    listening_addrs: Vec<ListenAddr>,
 }
 
 enum Message {
@@ -247,16 +251,29 @@ impl Server {
         listener: L,
         ssl_config: Option<SslConfig>,
     ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
-        let listener = listener.into();
+        Self::from_listeners(vec![listener.into()], ssl_config)
+    }
+
+    /// Pylon patch: builds one server that accepts on several listeners, for
+    /// example `127.0.0.1:port` and `[::1]:port`. Each listener gets its own
+    /// accept thread; all of them feed the same request queue.
+    /// `server_addr()` reports the first listener's address.
+    pub fn from_listeners(
+        listeners: Vec<Listener>,
+        ssl_config: Option<SslConfig>,
+    ) -> Result<Server, Box<dyn Error + Send + Sync + 'static>> {
+        if listeners.is_empty() {
+            return Err("tiny_http: from_listeners needs at least one listener".into());
+        }
         // building the "close" variable
         let close_trigger = Arc::new(AtomicBool::new(false));
 
-        // building the TcpListener
-        let (server, local_addr) = {
+        let mut local_addrs = Vec::with_capacity(listeners.len());
+        for listener in &listeners {
             let local_addr = listener.local_addr()?;
             log::debug!("Server listening on {}", local_addr);
-            (listener, local_addr)
-        };
+            local_addrs.push(local_addr);
+        }
 
         // building the SSL capabilities
         #[cfg(all(feature = "ssl-openssl", feature = "ssl-rustls"))]
@@ -267,7 +284,7 @@ impl Server {
         type SslContext = ();
         #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
         type SslContext = crate::ssl::SslContextImpl;
-        let ssl: Option<SslContext> = {
+        let ssl: Arc<Option<SslContext>> = Arc::new({
             match ssl_config {
                 #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
                 Some(config) => Some(SslContext::from_pem(
@@ -281,106 +298,110 @@ impl Server {
                 ),
                 None => None,
             }
-        };
+        });
 
         // creating a task where server.accept() is continuously called
         // and ClientConnection objects are pushed in the messages queue
         let messages = MessagesQueue::with_capacity(8);
 
-        let inside_close_trigger = close_trigger.clone();
-        let inside_messages = messages.clone();
-        thread::spawn(move || {
-            // a tasks pool is used to dispatch the connections into threads
-            let tasks_pool = util::TaskPool::new();
+        for server in listeners {
+            let inside_close_trigger = close_trigger.clone();
+            let inside_messages = messages.clone();
+            let ssl = Arc::clone(&ssl);
+            thread::spawn(move || {
+                // a tasks pool is used to dispatch the connections into threads
+                let tasks_pool = util::TaskPool::new();
 
-            log::debug!("Running accept thread");
-            // Pylon patch: consecutive accept-failure counter. A single
-            // transient error (peer disconnects mid-handshake; macOS
-            // surfaces EINVAL/ECONNABORTED for these) must not kill the
-            // accept thread — upstream's unconditional `break` meant one
-            // flaky client took the whole server down. A run of failures
-            // with no successful accept in between still exits, so a
-            // genuinely dead listener doesn't busy-loop.
-            let mut consecutive_accept_failures: u32 = 0;
-            while !inside_close_trigger.load(Relaxed) {
-                let new_client = match server.accept() {
-                    Ok((sock, _)) => {
-                        use util::RefinedTcpStream;
-                        let (read_closable, write_closable) = match ssl {
-                            None => RefinedTcpStream::new(sock),
-                            #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
-                            Some(ref ssl) => {
-                                // trying to apply SSL over the connection
-                                // if an error occurs, we just close the socket and resume listening
-                                let sock = match ssl.accept(sock) {
-                                    Ok(s) => s,
-                                    Err(_) => continue,
-                                };
+                log::debug!("Running accept thread");
+                // Pylon patch: consecutive accept-failure counter. A single
+                // transient error (peer disconnects mid-handshake; macOS
+                // surfaces EINVAL/ECONNABORTED for these) must not kill the
+                // accept thread — upstream's unconditional `break` meant one
+                // flaky client took the whole server down. A run of failures
+                // with no successful accept in between still exits, so a
+                // genuinely dead listener doesn't busy-loop.
+                let mut consecutive_accept_failures: u32 = 0;
+                while !inside_close_trigger.load(Relaxed) {
+                    let new_client = match server.accept() {
+                        Ok((sock, _)) => {
+                            use util::RefinedTcpStream;
+                            let (read_closable, write_closable) = match ssl.as_ref() {
+                                None => RefinedTcpStream::new(sock),
+                                #[cfg(any(feature = "ssl-openssl", feature = "ssl-rustls"))]
+                                Some(ssl) => {
+                                    // trying to apply SSL over the connection
+                                    // if an error occurs, we just close the socket and resume listening
+                                    let sock = match ssl.accept(sock) {
+                                        Ok(s) => s,
+                                        Err(_) => continue,
+                                    };
 
-                                RefinedTcpStream::new(sock)
-                            }
-                            #[cfg(not(any(feature = "ssl-openssl", feature = "ssl-rustls")))]
-                            Some(ref _ssl) => unreachable!(),
-                        };
+                                    RefinedTcpStream::new(sock)
+                                }
+                                #[cfg(not(any(feature = "ssl-openssl", feature = "ssl-rustls")))]
+                                Some(_ssl) => unreachable!(),
+                            };
 
-                        Ok(ClientConnection::new(write_closable, read_closable))
-                    }
-                    Err(e) => Err(e),
-                };
+                            Ok(ClientConnection::new(write_closable, read_closable))
+                        }
+                        Err(e) => Err(e),
+                    };
 
-                match new_client {
-                    Ok(client) => {
-                        consecutive_accept_failures = 0;
-                        let messages = inside_messages.clone();
-                        let mut client = Some(client);
-                        tasks_pool.spawn(Box::new(move || {
-                            if let Some(client) = client.take() {
-                                // Synchronization is needed for HTTPS requests to avoid a deadlock
-                                if client.secure() {
-                                    let (sender, receiver) = mpsc::channel();
-                                    for rq in client {
-                                        messages.push(rq.with_notify_sender(sender.clone()).into());
-                                        receiver.recv().unwrap();
-                                    }
-                                } else {
-                                    for rq in client {
-                                        messages.push(rq.into());
+                    match new_client {
+                        Ok(client) => {
+                            consecutive_accept_failures = 0;
+                            let messages = inside_messages.clone();
+                            let mut client = Some(client);
+                            tasks_pool.spawn(Box::new(move || {
+                                if let Some(client) = client.take() {
+                                    // Synchronization is needed for HTTPS requests to avoid a deadlock
+                                    if client.secure() {
+                                        let (sender, receiver) = mpsc::channel();
+                                        for rq in client {
+                                            messages.push(rq.with_notify_sender(sender.clone()).into());
+                                            receiver.recv().unwrap();
+                                        }
+                                    } else {
+                                        for rq in client {
+                                            messages.push(rq.into());
+                                        }
                                     }
                                 }
-                            }
-                        }));
-                    }
+                            }));
+                        }
 
-                    Err(e) => {
-                        // Deliberate shutdown closes the listener, which
-                        // also errors accept() — exit quietly.
-                        if inside_close_trigger.load(Relaxed) {
+                        Err(e) => {
+                            // Deliberate shutdown closes the listener, which
+                            // also errors accept() — exit quietly.
+                            if inside_close_trigger.load(Relaxed) {
+                                break;
+                            }
+                            consecutive_accept_failures += 1;
+                            if consecutive_accept_failures < 64 {
+                                log::warn!(
+                                    "Transient error accepting new client (attempt {}): {}",
+                                    consecutive_accept_failures,
+                                    e
+                                );
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                                continue;
+                            }
+                            log::error!("Error accepting new client (giving up): {}", e);
+                            inside_messages.push(e.into());
                             break;
                         }
-                        consecutive_accept_failures += 1;
-                        if consecutive_accept_failures < 64 {
-                            log::warn!(
-                                "Transient error accepting new client (attempt {}): {}",
-                                consecutive_accept_failures,
-                                e
-                            );
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                            continue;
-                        }
-                        log::error!("Error accepting new client (giving up): {}", e);
-                        inside_messages.push(e.into());
-                        break;
                     }
                 }
-            }
-            log::debug!("Terminating accept thread");
-        });
+                log::debug!("Terminating accept thread");
+            });
+        }
 
         // result
         Ok(Server {
             messages,
             close: close_trigger,
-            listening_addr: local_addr,
+            listening_addr: local_addrs[0].clone(),
+            listening_addrs: local_addrs,
         })
     }
 
@@ -449,24 +470,26 @@ impl Iterator for IncomingRequests<'_> {
 impl Drop for Server {
     fn drop(&mut self) {
         self.close.store(true, Relaxed);
-        // Connect briefly to ourselves to unblock the accept thread
-        let maybe_stream = match &self.listening_addr {
-            ListenAddr::IP(addr) => TcpStream::connect(addr).map(Connection::from),
-            #[cfg(unix)]
-            ListenAddr::Unix(addr) => {
-                // TODO: use connect_addr when its stabilized.
-                let path = addr.as_pathname().unwrap();
-                std::os::unix::net::UnixStream::connect(path).map(Connection::from)
+        // Connect briefly to ourselves to unblock each accept thread
+        for addr in &self.listening_addrs {
+            let maybe_stream = match addr {
+                ListenAddr::IP(addr) => TcpStream::connect(addr).map(Connection::from),
+                #[cfg(unix)]
+                ListenAddr::Unix(addr) => {
+                    // TODO: use connect_addr when its stabilized.
+                    let path = addr.as_pathname().unwrap();
+                    std::os::unix::net::UnixStream::connect(path).map(Connection::from)
+                }
+            };
+            if let Ok(stream) = maybe_stream {
+                let _ = stream.shutdown(Shutdown::Both);
             }
-        };
-        if let Ok(stream) = maybe_stream {
-            let _ = stream.shutdown(Shutdown::Both);
-        }
 
-        #[cfg(unix)]
-        if let ListenAddr::Unix(addr) = &self.listening_addr {
-            if let Some(path) = addr.as_pathname() {
-                let _ = std::fs::remove_file(path);
+            #[cfg(unix)]
+            if let ListenAddr::Unix(addr) = addr {
+                if let Some(path) = addr.as_pathname() {
+                    let _ = std::fs::remove_file(path);
+                }
             }
         }
     }

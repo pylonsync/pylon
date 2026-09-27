@@ -159,7 +159,7 @@ In a policy:
 - **OAuth state** is CSRF-protected via single-use tokens (10-minute expiry).
 - **Failed password logins** run a dummy hash so timing doesn't leak whether the email exists.
 - **Sessions can be persisted** to SQLite so they survive restart (see [Sessions](/auth/sessions)).
-- **`/api/auth/session` POST is admin-gated** in production — clients can't forge sessions.
+- **`/api/auth/session` POST is admin-gated** in production — clients can't forge sessions. In dev it is open only to requests from the same machine.
 
 ## Configuration
 

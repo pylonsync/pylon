@@ -115,9 +115,43 @@ fn parse_port_arg(args: &[String]) -> Option<u16> {
     None
 }
 
+/// Value of `--host <addr>` / `--host=<addr>`, if given.
+pub fn parse_host_arg(args: &[String]) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--host" {
+            return args.get(i + 1).cloned();
+        }
+        if let Some(v) = a.strip_prefix("--host=") {
+            return Some(v.to_string());
+        }
+        i += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_flag_both_spellings() {
+        assert_eq!(
+            parse_host_arg(&s(&["dev", "--host", "0.0.0.0"])).as_deref(),
+            Some("0.0.0.0")
+        );
+        assert_eq!(
+            parse_host_arg(&s(&["dev", "--host=::"])).as_deref(),
+            Some("::")
+        );
+        assert_eq!(parse_host_arg(&s(&["dev", "app.ts"])), None);
+        // The value is not mistaken for the entry file.
+        assert_eq!(
+            collect_positional(&s(&["dev", "--host", "0.0.0.0", "app.ts"]), "dev"),
+            vec!["app.ts"]
+        );
+    }
 
     fn s(args: &[&str]) -> Vec<String> {
         args.iter().map(|a| a.to_string()).collect()

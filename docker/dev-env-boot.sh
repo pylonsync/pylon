@@ -250,5 +250,10 @@ JSON
 	(opencode serve --port "$OC_PORT" --hostname :: >/tmp/opencode.log 2>&1 &)
 fi
 
-echo "[dev-boot] exec pylon dev --port $PORT (workspace=$WORKSPACE)"
-exec "$PYLON_BIN" dev --port "$PORT"
+# `pylon dev` listens on localhost only by default. The control plane and the
+# Fly proxy reach this machine over its network interfaces, so listen on all
+# of them. Dev shortcuts (dev codes, session mint, open /admin) still answer
+# only loopback callers; the file-write API is gated by
+# PYLON_DEV_FILE_API_TOKEN.
+echo "[dev-boot] exec pylon dev --port $PORT --host :: (workspace=$WORKSPACE)"
+exec "$PYLON_BIN" dev --port "$PORT" --host ::

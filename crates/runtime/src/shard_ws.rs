@@ -61,19 +61,24 @@ pub fn start_shard_ws_server(
     registry: Arc<dyn DynShardRegistry>,
     sessions: Arc<SessionStore>,
     port: u16,
+    scope: &crate::listen::ListenScope,
 ) {
-    // Dual-stack v6+v4 bind — without this, macOS clients that
-    // resolve `localhost` to `::1` (IPv6) hit ECONNREFUSED on what
-    // looks like a working server. See crate::bind_dual_stack_tcp.
-    let listener = match crate::bind_dual_stack_tcp(port) {
+    // Dual-stack v6+v4 bind for `ListenScope::All` — without this, macOS
+    // clients that resolve `localhost` to `::1` (IPv6) hit ECONNREFUSED on
+    // what looks like a working server. See crate::bind_dual_stack_tcp.
+    // `Loopback` binds 127.0.0.1 and ::1.
+    let listener = match crate::listen::Listeners::bind(port, scope) {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("[shard-ws] failed to bind port {port}: {e}");
             return;
         }
     };
-    tracing::warn!("[shard-ws] listening on ws://[::]:{port} (dual-stack)");
-    serve(
+    tracing::warn!(
+        "[shard-ws] listening on ws://{}:{port}",
+        scope.display_host()
+    );
+    serve_listeners(
         listener,
         registry,
         sessions,
@@ -231,6 +236,16 @@ pub fn serve(
     sessions: Arc<SessionStore>,
     max_per_ip: u32,
 ) {
+    serve_listeners(listener.into(), registry, sessions, max_per_ip)
+}
+
+/// [`serve`] over one or more listeners (see [`crate::listen::Listeners`]).
+pub fn serve_listeners(
+    listener: crate::listen::Listeners,
+    registry: Arc<dyn DynShardRegistry>,
+    sessions: Arc<SessionStore>,
+    max_per_ip: u32,
+) {
     let Some(runtime) = runtime() else { return };
     // Per-IP cap so a single client can't open a swarm of shard WS
     // connections.
@@ -239,7 +254,7 @@ pub fn serve(
     loop {
         // Panic-proof accept: libstd's accept/peer_addr assert (panic) on a
         // truncated macOS dual-stack sockaddr. See crate::accept_tcp.
-        let (stream, peer_ip) = match crate::accept_tcp(&listener) {
+        let (stream, peer_ip) = match listener.accept() {
             Ok(v) => v,
             Err(_) => {
                 // Transient accept error — keep serving. A 1ms nap avoids a

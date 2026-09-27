@@ -43,6 +43,18 @@ impl CsrfPlugin {
         self.allowed_origins.iter().any(|o| o == origin || o == "*")
     }
 
+    /// True when `origin` (`scheme://host[:port]`) names the same
+    /// `host[:port]` as the `Host` header value `host`.
+    fn is_same_origin(origin: &str, host: &str) -> bool {
+        let Some(authority) = origin
+            .strip_prefix("http://")
+            .or_else(|| origin.strip_prefix("https://"))
+        else {
+            return false;
+        };
+        !authority.is_empty() && authority.eq_ignore_ascii_case(host.trim())
+    }
+
     /// Extract the origin portion (`scheme://host[:port]`) from a full URL
     /// such as a `Referer` header value.
     ///
@@ -95,6 +107,22 @@ impl CsrfPlugin {
         origin: Option<&str>,
         referer: Option<&str>,
     ) -> Result<(), PluginError> {
+        self.check_with_host(method, origin, referer, None)
+    }
+
+    /// [`Self::check`], also accepting a same-origin request: one whose
+    /// origin's `host[:port]` equals `host` (the request's `Host` header).
+    /// A browser only sends a matching pair when the page and the request
+    /// share an origin, which is never a forgery. `pylon dev` passes the
+    /// host so a page opened by LAN address (`http://192.168.1.20:4321`)
+    /// can post to its own server without listing that address.
+    pub fn check_with_host(
+        &self,
+        method: &str,
+        origin: Option<&str>,
+        referer: Option<&str>,
+        host: Option<&str>,
+    ) -> Result<(), PluginError> {
         if Self::is_safe_method(method) {
             return Ok(());
         }
@@ -105,6 +133,7 @@ impl CsrfPlugin {
 
         match effective_origin {
             Some(ref o) if self.is_allowed_origin(o) => Ok(()),
+            Some(ref o) if host.is_some_and(|h| Self::is_same_origin(o, h)) => Ok(()),
             Some(ref o) => Err(PluginError {
                 code: "CSRF_REJECTED".into(),
                 message: format!(
@@ -298,6 +327,29 @@ mod tests {
     }
 
     // -- Plugin trait --
+
+    #[test]
+    fn same_origin_passes_only_when_host_is_given() {
+        let p = CsrfPlugin::new(vec![]);
+        let lan = Some("http://192.168.1.20:4321");
+        assert!(p
+            .check_with_host("POST", lan, None, Some("192.168.1.20:4321"))
+            .is_ok());
+        // Different port or host is cross-origin.
+        assert!(p
+            .check_with_host("POST", lan, None, Some("192.168.1.20:4322"))
+            .is_err());
+        assert!(p
+            .check_with_host(
+                "POST",
+                Some("https://evil.example"),
+                None,
+                Some("192.168.1.20:4321")
+            )
+            .is_err());
+        // Without a host, same-origin is not assumed.
+        assert!(p.check("POST", lan, None).is_err());
+    }
 
     #[test]
     fn plugin_name() {

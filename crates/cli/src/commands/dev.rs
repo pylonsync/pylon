@@ -85,6 +85,40 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
 
     let port = parse_port(args, DEFAULT_PORT);
 
+    // Interfaces to listen on. `pylon dev` serves this machine only unless
+    // `--host` (or PYLON_HOST) says otherwise; the runtime reads PYLON_HOST
+    // for every port it opens, and a re-exec on reload inherits it.
+    let scope = match resolve_dev_host(
+        super::args::parse_host_arg(args),
+        std::env::var("PYLON_HOST").ok(),
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            print_diagnostics(
+                &[Diagnostic {
+                    severity: Severity::Error,
+                    code: "DEV_BAD_HOST".into(),
+                    message: e,
+                    span: None,
+                    hint: Some("pylon dev --host 0.0.0.0 listens on every interface".into()),
+                }],
+                json_mode,
+            );
+            return ExitCode::Usage;
+        }
+    };
+    // Safety: single-threaded here — server/runner threads spawn later.
+    std::env::set_var("PYLON_HOST", &scope.1);
+    if !json_mode && !scope.0.is_loopback_only() {
+        eprintln!(
+            "[pylon] listening on {host} — other devices on this network can reach the dev server.\n\
+             [pylon] Dev shortcuts (dev_code in auth responses, POST /api/auth/session, open /admin,\n\
+             [pylon] the file-write API) stay limited to this machine. PYLON_DEV_TRUST_REMOTE=1 gives\n\
+             [pylon] them to every device that can connect — only do that on a network you control.",
+            host = scope.0.display_host()
+        );
+    }
+
     let positional: Vec<&str> = collect_positional(args, "dev");
 
     let entry_file = match positional.first() {
@@ -142,6 +176,18 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     } else {
         run_watch(&entry_file, json_mode, port)
     }
+}
+
+/// Listen scope for `pylon dev`. `--host` beats `PYLON_HOST`; with neither,
+/// the server listens on this machine only (127.0.0.1 and ::1). Returns the
+/// parsed scope and the value to export as `PYLON_HOST`.
+fn resolve_dev_host(
+    flag: Option<String>,
+    env: Option<String>,
+) -> Result<(pylon_runtime::listen::ListenScope, String), String> {
+    let value = flag.or(env).unwrap_or_else(|| "localhost".to_string());
+    let scope = pylon_runtime::listen::ListenScope::parse(&value)?;
+    Ok((scope, value))
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +330,11 @@ fn run_watch(entry_file: &str, json_mode: bool, port: u16) -> ExitCode {
         println!("pylon dev");
         println!("  Watching: {} (*.ts, *.tsx, *.css)", watch_dir.display());
         println!("  Server:   http://localhost:{port}");
+        if let Ok(scope) = pylon_runtime::listen::ListenScope::from_env() {
+            if !scope.is_loopback_only() {
+                println!("  Listening on {}:{port}", scope.display_host());
+            }
+        }
         println!();
     }
 
@@ -1436,7 +1487,7 @@ fn run_poll_watch(
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_watch_dir;
+    use super::{resolve_dev_host, resolve_watch_dir};
     use std::path::PathBuf;
 
     #[test]
@@ -1593,6 +1644,23 @@ mod tests {
         assert_eq!(doomed, sorted, "fd list should be sorted");
 
         drop(listener);
+    }
+
+    #[test]
+    fn dev_listens_on_loopback_unless_told_otherwise() {
+        use pylon_runtime::listen::ListenScope;
+        let (scope, value) = resolve_dev_host(None, None).unwrap();
+        assert_eq!(scope, ListenScope::Loopback);
+        assert_eq!(value, "localhost");
+        // PYLON_HOST, then --host, widen it.
+        let (scope, _) = resolve_dev_host(None, Some("0.0.0.0".into())).unwrap();
+        assert_eq!(scope, ListenScope::All);
+        let (scope, _) = resolve_dev_host(Some("::".into()), Some("localhost".into())).unwrap();
+        assert_eq!(scope, ListenScope::All);
+        let (scope, _) =
+            resolve_dev_host(Some("localhost".into()), Some("0.0.0.0".into())).unwrap();
+        assert_eq!(scope, ListenScope::Loopback);
+        assert!(resolve_dev_host(Some("not an address".into()), None).is_err());
     }
 
     #[test]

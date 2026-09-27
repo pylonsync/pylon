@@ -80,7 +80,7 @@ impl ServerConfig {
             fn_rate_limit_window: Duration::from_secs(env_u64("PYLON_FN_RATE_LIMIT_WINDOW", 60)),
             functions_dir: env_str("PYLON_FUNCTIONS_DIR", "functions"),
             functions_runtime: std::env::var("PYLON_FUNCTIONS_RUNTIME").ok(),
-            is_dev: env_bool("PYLON_DEV_MODE", true),
+            is_dev: crate::dev_access::dev_mode_enabled(),
             drain_timeout: Duration::from_secs(env_u64("PYLON_DRAIN_SECS", 10)),
             ai_provider: env_str("PYLON_AI_PROVIDER", ""),
             ai_api_key: env_str("PYLON_AI_API_KEY", ""),
@@ -113,13 +113,6 @@ fn env_u64(key: &str, default: u64) -> u64 {
     std::env::var(key)
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_bool(key: &str, default: bool) -> bool {
-    std::env::var(key)
-        .ok()
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes"))
         .unwrap_or(default)
 }
 

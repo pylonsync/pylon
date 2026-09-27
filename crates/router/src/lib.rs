@@ -3625,6 +3625,38 @@ mod auth_gate_tests {
         });
     }
 
+    /// Prior vuln: `/api/auth/phone/send-code` returned the code as
+    /// `dev_code` whenever the SMS was not sent (no Twilio configured, or a
+    /// send failure), in production too. Any caller could sign in as any
+    /// phone number.
+    #[test]
+    fn phone_code_is_never_returned_in_prod() {
+        let anon = AuthContext::anonymous();
+        with_ctx(false, &anon, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/phone/send-code",
+                r#"{"phone":"+15551234567"}"#,
+                None,
+            );
+            assert!(!body.contains("dev_code"), "code leaked: {body}");
+            assert_eq!(status, 503, "{body}");
+        });
+        // A dev caller on this machine still gets it.
+        with_ctx(true, &anon, |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                "/api/auth/phone/send-code",
+                r#"{"phone":"+15551234568"}"#,
+                None,
+            );
+            assert_eq!(status, 200, "{body}");
+            assert!(body.contains("dev_code"), "{body}");
+        });
+    }
+
     #[test]
     fn auth_session_allowed_for_admin_in_prod() {
         let admin = AuthContext::admin();

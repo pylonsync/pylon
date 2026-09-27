@@ -626,9 +626,7 @@ fn serve_og_image(
 /// `PYLON_DEV_MODE=1`). Gates dev-only surfaces — currently the
 /// live-reload SSE endpoint — so they can never exist in production.
 pub(crate) fn is_dev_mode() -> bool {
-    std::env::var("PYLON_DEV_MODE")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    crate::dev_access::dev_mode_enabled()
 }
 
 /// Per-process boot id: stable for the life of this process, distinct on
@@ -786,8 +784,10 @@ fn resolve_safe_for_write(root: &Path, rel_path: &str) -> Option<PathBuf> {
 /// Dev-only remote file-write endpoint (`PUT`/`POST`/`DELETE
 /// /_pylon/dev/files/<path>`). Writes/removes a file in the live `pylon dev`
 /// workspace (`PYLON_DEV_WATCH_DIR`, else cwd); the fs-watcher hot-reloads the
-/// change. Optionally requires `Authorization: Bearer <PYLON_DEV_FILE_API_TOKEN>`
-/// when that env is set (the cloud sets a per-env token; unset = open locally).
+/// change. Writing a function file runs code on this machine, so access is
+/// decided by [`dev_workspace_access`]: the bearer token when
+/// `PYLON_DEV_FILE_API_TOKEN` is set (the cloud sets a per-env token), else
+/// a local caller only.
 fn serve_dev_file_write(
     mut request: Request,
     path_only: &str,
@@ -814,21 +814,14 @@ fn serve_dev_file_write(
         return Ok(());
     }
 
-    // Optional bearer-token gate (unset = open, and it's dev-mode only anyway).
-    if let Ok(token) = std::env::var("PYLON_DEV_FILE_API_TOKEN") {
-        if !token.is_empty() {
-            let want = format!("Bearer {token}");
-            let ok = request.headers().iter().any(|h| {
-                let field = h.field.as_str();
-                (field == "Authorization" || field == "authorization")
-                    && h.value.as_str() == want.as_str()
-            });
-            if !ok {
-                let _ =
-                    request.respond(Response::from_string("unauthorized").with_status_code(401u16));
-                return Ok(());
-            }
-        }
+    if let Err(status) = dev_workspace_access(&request) {
+        let msg = if status == 401 {
+            "unauthorized"
+        } else {
+            "forbidden"
+        };
+        let _ = request.respond(Response::from_string(msg).with_status_code(status));
+        return Ok(());
     }
 
     let root = std::env::var("PYLON_DEV_WATCH_DIR")
@@ -964,6 +957,36 @@ enum DevTokenCheck {
     Ok,
     /// Token configured and the request does not carry it.
     Missing,
+}
+
+/// Whether `request` may use the dev workspace endpoints
+/// (`/_pylon/dev/files/*`, `/_pylon/dev/render`), which write and run code in
+/// the workspace.
+///
+/// - `PYLON_DEV_FILE_API_TOKEN` set: the request must carry the bearer token.
+/// - Unset: the caller must be on this machine (see
+///   [`crate::dev_access::request_shortcuts_allowed`]), and if the request
+///   has an `Origin`, it must be a loopback page. The Origin check stops a
+///   website open in the developer's browser from posting a file to
+///   `localhost` (a `text/plain` POST needs no CORS preflight).
+///
+/// `Err(401)` when a token is configured and the request lacks it,
+/// `Err(403)` when no token is configured and the caller isn't local.
+fn dev_workspace_access(request: &Request) -> Result<(), u16> {
+    match check_dev_token(request) {
+        DevTokenCheck::Ok => Ok(()),
+        DevTokenCheck::Missing => Err(401),
+        DevTokenCheck::Unset => {
+            let local = crate::dev_access::request_shortcuts_allowed(request)
+                && header_value(request, "origin")
+                    .is_none_or(|o| pylon_auth::is_localhost_origin(&o));
+            if local {
+                Ok(())
+            } else {
+                Err(403)
+            }
+        }
+    }
 }
 
 fn check_dev_token(request: &Request) -> DevTokenCheck {
@@ -2187,8 +2210,13 @@ fn serve_dev_render(
         let _ = request.respond(plain_response(405, "method not allowed", cors_origin));
         return Ok(());
     }
-    if check_dev_token(&request) == DevTokenCheck::Missing {
-        let _ = request.respond(plain_response(401, "unauthorized", cors_origin));
+    if let Err(status) = dev_workspace_access(&request) {
+        let msg = if status == 401 {
+            "unauthorized"
+        } else {
+            "forbidden"
+        };
+        let _ = request.respond(plain_response(status, msg, cors_origin));
         return Ok(());
     }
     let viewer = match design_viewer_from_request(&request) {

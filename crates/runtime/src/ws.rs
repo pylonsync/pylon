@@ -1559,13 +1559,15 @@ pub fn start_ws_server(
     snapshot_fetcher: Option<SnapshotFetcher>,
     reactive: Option<Arc<crate::reactive::ReactiveRegistry>>,
     rooms: Option<Arc<dyn RoomBridge>>,
+    scope: &crate::listen::ListenScope,
 ) {
-    // Dual-stack v6+v4. The Yapless Mac app + any client that
-    // resolves `localhost` to `::1` first (the macOS default) would
-    // otherwise see "connection refused" on the WS port even though
+    // Dual-stack v6+v4 for `ListenScope::All`. The Yapless Mac app + any
+    // client that resolves `localhost` to `::1` first (the macOS default)
+    // would otherwise see "connection refused" on the WS port even though
     // the HTTP server on the next port up is reachable. See
-    // crate::bind_dual_stack_tcp for the rationale.
-    let listener = match crate::bind_dual_stack_tcp(port) {
+    // crate::bind_dual_stack_tcp for the rationale. `Loopback` binds
+    // 127.0.0.1 and ::1 for the same reason.
+    let listener = match crate::listen::Listeners::bind(port, scope) {
         Ok(l) => l,
         Err(e) => {
             tracing::warn!("[ws] Failed to bind on port {port}: {e}");
@@ -1585,7 +1587,7 @@ pub fn start_ws_server(
         // address — observed on macOS dual-stack `[::]` when the peer
         // disconnects mid-accept. crate::accept_tcp accepts with a null addr
         // (nothing to parse) and decodes the peer IP defensively.
-        let (stream, peer_ip) = match crate::accept_tcp(&listener) {
+        let (stream, peer_ip) = match listener.accept() {
             Ok(v) => v,
             Err(_) => {
                 std::thread::sleep(std::time::Duration::from_millis(1));
