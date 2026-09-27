@@ -262,6 +262,47 @@ impl ReactiveRegistry {
     /// back-pressure) keeps flowing. Without this discipline a slow
     /// handler would hold the per-client socket mutex for the
     /// duration of the call.
+    /// Whether `auth` may subscribe to `fn_name`. The same checks as
+    /// `POST /api/fn/<name>`: the function exists and isn't internal
+    /// (unless admin), and the caller passes its declared `auth` mode.
+    /// Reactive subscriptions re-run on every change, so only `query`
+    /// functions qualify. `Err((code, message))` on refusal. With no
+    /// function runtime wired yet, the check passes and the first run
+    /// reports REACTIVE_UNAVAILABLE as before.
+    pub fn check_subscribe(
+        &self,
+        fn_name: &str,
+        auth: &pylon_auth::AuthContext,
+    ) -> Result<(), (String, String)> {
+        let fn_ops = self.fn_ops.lock().unwrap().as_ref().map(Arc::clone);
+        let Some(fn_ops) = fn_ops else {
+            return Ok(());
+        };
+        let not_found = || {
+            (
+                "FN_NOT_FOUND".to_string(),
+                format!("Function \"{fn_name}\" is not registered"),
+            )
+        };
+        let def = match fn_ops.get_fn(fn_name) {
+            Some(d) if d.internal && !auth.is_admin => return Err(not_found()),
+            Some(d) => d,
+            None => return Err(not_found()),
+        };
+        if let Some((_status, code, message)) =
+            pylon_router::fn_auth_error(fn_name, pylon_router::check_fn_auth(def.auth, auth))
+        {
+            return Err((code.to_string(), message));
+        }
+        if def.fn_type != pylon_functions::protocol::FnType::Query {
+            return Err((
+                "NOT_A_QUERY".to_string(),
+                format!("\"{fn_name}\" is not a query — only queries can be subscribed to"),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn register_pending(
         &self,
         sub_id: String,
@@ -779,6 +820,89 @@ mod tests {
         };
         index_locked(&mut inner, &sub);
         inner.subs.insert(sub.key(), sub);
+    }
+
+    /// FnOps with fixed definitions; never called by these tests.
+    struct DefsOnly(Vec<pylon_functions::registry::FnDef>);
+
+    impl pylon_router::FnOps for DefsOnly {
+        fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef> {
+            self.0.iter().find(|d| d.name == name).cloned()
+        }
+        fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
+            self.0.clone()
+        }
+        fn call(
+            &self,
+            _fn_name: &str,
+            _args: serde_json::Value,
+            _auth: AuthInfo,
+            _on_stream: Option<pylon_functions::runner::StreamCallback>,
+            _request: Option<pylon_functions::protocol::RequestInfo>,
+            _stream_id: Option<String>,
+        ) -> Result<
+            (serde_json::Value, pylon_functions::trace::FnTrace),
+            pylon_functions::runner::FnCallError,
+        > {
+            unreachable!("check_subscribe never runs the function")
+        }
+        fn recent_traces(&self, _limit: usize) -> Vec<pylon_functions::trace::FnTrace> {
+            vec![]
+        }
+    }
+
+    fn def(
+        name: &str,
+        fn_type: pylon_functions::protocol::FnType,
+        auth: pylon_functions::registry::FnAuthMode,
+        internal: bool,
+    ) -> pylon_functions::registry::FnDef {
+        pylon_functions::registry::FnDef {
+            name: name.into(),
+            fn_type,
+            args_schema: None,
+            internal,
+            auth,
+            timeout_secs: None,
+        }
+    }
+
+    /// Prior vuln: `reactive-subscribe` over the WebSocket ran any function
+    /// by name for any connection, anonymous included: no `auth` mode
+    /// check, internal functions reachable, and mutations/actions run on
+    /// subscribe and again on every change.
+    #[test]
+    fn subscribe_applies_the_function_gate() {
+        use pylon_auth::AuthContext;
+        use pylon_functions::protocol::FnType;
+        use pylon_functions::registry::FnAuthMode;
+        let reg = ReactiveRegistry::new(make_hub());
+        reg.set_fn_ops(Arc::new(DefsOnly(vec![
+            def("publicFeed", FnType::Query, FnAuthMode::Public, false),
+            def("myInbox", FnType::Query, FnAuthMode::User, false),
+            def("adminStats", FnType::Query, FnAuthMode::Admin, false),
+            def("internalQuery", FnType::Query, FnAuthMode::Public, true),
+            def("deleteAll", FnType::Mutation, FnAuthMode::Public, false),
+            def("sendEmail", FnType::Action, FnAuthMode::Public, false),
+        ])));
+        let anon = AuthContext::anonymous();
+        let user = AuthContext::authenticated("u1".into());
+        let admin = AuthContext::admin();
+        let code =
+            |name: &str, auth: &AuthContext| reg.check_subscribe(name, auth).err().map(|(c, _)| c);
+
+        assert_eq!(code("publicFeed", &anon), None);
+        assert_eq!(code("myInbox", &anon).as_deref(), Some("AUTH_REQUIRED"));
+        assert_eq!(code("myInbox", &user), None);
+        assert_eq!(code("adminStats", &user).as_deref(), Some("FORBIDDEN"));
+        assert_eq!(code("adminStats", &admin), None);
+        assert_eq!(
+            code("internalQuery", &anon).as_deref(),
+            Some("FN_NOT_FOUND")
+        );
+        assert_eq!(code("missing", &anon).as_deref(), Some("FN_NOT_FOUND"));
+        assert_eq!(code("deleteAll", &anon).as_deref(), Some("NOT_A_QUERY"));
+        assert_eq!(code("sendEmail", &admin).as_deref(), Some("NOT_A_QUERY"));
     }
 
     #[test]

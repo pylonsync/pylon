@@ -7118,33 +7118,10 @@ fn start_server(
                 // anonymous caller invoke any non-internal function.
                 // Response shapes match the router exactly.
                 if let Some(def) = fn_def.as_ref() {
-                    let gate = pylon_router::check_fn_auth(def.auth, &auth_ctx);
-                    let denial = match gate {
-                        pylon_router::FnAuthGate::Allowed => None,
-                        pylon_router::FnAuthGate::NeedsAuth => Some((
-                            401u16,
-                            json_error(
-                                "AUTH_REQUIRED",
-                                &format!("Function \"{fn_name}\" requires a signed-in user"),
-                            ),
-                        )),
-                        pylon_router::FnAuthGate::NeedsGuest => Some((
-                            401u16,
-                            json_error(
-                                "AUTH_REQUIRED",
-                                &format!(
-                                    "Function \"{fn_name}\" requires a session — sign in or POST /api/auth/guest first"
-                                ),
-                            ),
-                        )),
-                        pylon_router::FnAuthGate::NeedsAdmin => Some((
-                            403u16,
-                            json_error(
-                                "FORBIDDEN",
-                                &format!("Function \"{fn_name}\" requires admin authentication"),
-                            ),
-                        )),
-                    };
+                    let denial = pylon_router::fn_auth_denial(
+                        &fn_name,
+                        pylon_router::check_fn_auth(def.auth, &auth_ctx),
+                    );
                     if let Some((status, err)) = denial {
                         let response = with_security_headers(
                             Response::from_string(&err)

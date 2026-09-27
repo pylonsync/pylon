@@ -171,6 +171,39 @@ pub fn check_fn_auth(mode: FnAuthMode, auth_ctx: &AuthContext) -> FnAuthGate {
     }
 }
 
+/// Status, error code, and message for a denied [`check_fn_auth`] outcome;
+/// `None` when the call is allowed. Every entry point that invokes a
+/// function by name (`/api/fn/<name>`, `/api/webhooks/<name>`, the
+/// streaming `/api/fn` path, reactive subscriptions) uses it, so the gate
+/// and its responses can't drift apart.
+pub fn fn_auth_error(fn_name: &str, gate: FnAuthGate) -> Option<(u16, &'static str, String)> {
+    match gate {
+        FnAuthGate::Allowed => None,
+        FnAuthGate::NeedsAuth => Some((
+            401,
+            "AUTH_REQUIRED",
+            format!("Function \"{fn_name}\" requires a signed-in user"),
+        )),
+        FnAuthGate::NeedsGuest => Some((
+            401,
+            "AUTH_REQUIRED",
+            format!(
+                "Function \"{fn_name}\" requires a session — sign in or POST /api/auth/guest first"
+            ),
+        )),
+        FnAuthGate::NeedsAdmin => Some((
+            403,
+            "FORBIDDEN",
+            format!("Function \"{fn_name}\" requires admin authentication"),
+        )),
+    }
+}
+
+/// [`fn_auth_error`] as an HTTP status and JSON error body.
+pub fn fn_auth_denial(fn_name: &str, gate: FnAuthGate) -> Option<(u16, String)> {
+    fn_auth_error(fn_name, gate).map(|(status, code, message)| (status, json_error(code, &message)))
+}
+
 pub(crate) fn handle(
     ctx: &RouterContext,
     method: HttpMethod,
@@ -245,6 +278,15 @@ pub(crate) fn handle(
                     ));
                 }
             };
+            // The function's declared `auth` mode applies here exactly as on
+            // `/api/fn/<name>`. A webhook receiver (Stripe, Sendblue, ...)
+            // declares `auth: "public"` and checks the provider's signature
+            // itself; anything else (the default is "user") is refused to a
+            // caller without the matching session.
+            if let Some(denial) = fn_auth_denial(action_name, check_fn_auth(def.auth, ctx.auth_ctx))
+            {
+                return Some(denial);
+            }
             // Only actions can be webhook targets — mutations run under
             // a write tx, queries are read-only. Action = "external I/O,
             // non-transactional".
@@ -373,37 +415,9 @@ pub(crate) fn handle(
             // Admin sessions bypass every mode (see `check_fn_auth`)
             // so ops scripts and Studio can invoke functions without
             // wildcard "admin can call this" checks on every def.
-            match check_fn_auth(fn_def.auth, ctx.auth_ctx) {
-                FnAuthGate::Allowed => {}
-                FnAuthGate::NeedsAuth => {
-                    return Some((
-                        401,
-                        json_error(
-                            "AUTH_REQUIRED",
-                            &format!("Function \"{fn_name}\" requires a signed-in user"),
-                        ),
-                    ));
-                }
-                FnAuthGate::NeedsGuest => {
-                    return Some((
-                        401,
-                        json_error(
-                            "AUTH_REQUIRED",
-                            &format!(
-                                "Function \"{fn_name}\" requires a session — sign in or POST /api/auth/guest first"
-                            ),
-                        ),
-                    ));
-                }
-                FnAuthGate::NeedsAdmin => {
-                    return Some((
-                        403,
-                        json_error(
-                            "FORBIDDEN",
-                            &format!("Function \"{fn_name}\" requires admin authentication"),
-                        ),
-                    ));
-                }
+            if let Some(denial) = fn_auth_denial(fn_name, check_fn_auth(fn_def.auth, ctx.auth_ctx))
+            {
+                return Some(denial);
             }
 
             let args: serde_json::Value = if body.trim().is_empty() {

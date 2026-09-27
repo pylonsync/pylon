@@ -25,7 +25,7 @@ pub use routes::sync::{
 /// The declarative function auth gate, re-exported for the runtime's SSE
 /// fast path — `/api/fn/:name` with `Accept: text/event-stream` bypasses
 /// the router dispatch, so it must run the exact same gate itself.
-pub use routes::functions::{check_fn_auth, FnAuthGate};
+pub use routes::functions::{check_fn_auth, fn_auth_denial, fn_auth_error, FnAuthGate};
 
 // ---------------------------------------------------------------------------
 // ChangeNotifier — abstraction over WS/SSE broadcast
@@ -4566,6 +4566,16 @@ mod auth_gate_tests {
         registered: Vec<String>,
         calls: std::sync::Mutex<Vec<(String, serde_json::Value, Option<String>)>>,
         fail: bool,
+        /// Per-function (type, auth mode, internal). Unlisted functions are
+        /// non-internal `auth: "user"` mutations.
+        defs: std::collections::HashMap<
+            String,
+            (
+                pylon_functions::protocol::FnType,
+                pylon_functions::registry::FnAuthMode,
+                bool,
+            ),
+        >,
     }
 
     impl RecordingFnOps {
@@ -4574,23 +4584,45 @@ mod auth_gate_tests {
                 registered: registered.iter().map(|s| s.to_string()).collect(),
                 calls: std::sync::Mutex::new(Vec::new()),
                 fail,
+                defs: std::collections::HashMap::new(),
             }
+        }
+
+        fn define(
+            mut self,
+            name: &str,
+            fn_type: pylon_functions::protocol::FnType,
+            auth: pylon_functions::registry::FnAuthMode,
+            internal: bool,
+        ) -> Self {
+            self.registered.push(name.to_string());
+            self.defs
+                .insert(name.to_string(), (fn_type, auth, internal));
+            self
+        }
+
+        fn called(&self, name: &str) -> bool {
+            self.calls.lock().unwrap().iter().any(|(n, _, _)| n == name)
         }
     }
 
     impl FnOps for RecordingFnOps {
         fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef> {
-            self.registered
-                .iter()
-                .any(|n| n == name)
-                .then(|| pylon_functions::registry::FnDef {
+            self.registered.iter().any(|n| n == name).then(|| {
+                let (fn_type, auth, internal) = self.defs.get(name).cloned().unwrap_or((
+                    pylon_functions::protocol::FnType::Mutation,
+                    pylon_functions::registry::FnAuthMode::User,
+                    false,
+                ));
+                pylon_functions::registry::FnDef {
                     name: name.to_string(),
-                    fn_type: pylon_functions::protocol::FnType::Mutation,
+                    fn_type,
                     args_schema: None,
-                    internal: false,
-                    auth: pylon_functions::registry::FnAuthMode::User,
+                    internal,
+                    auth,
                     timeout_secs: None,
-                })
+                }
+            })
         }
         fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
             self.registered
@@ -4634,6 +4666,84 @@ mod auth_gate_tests {
         fn recent_traces(&self, _limit: usize) -> Vec<pylon_functions::trace::FnTrace> {
             vec![]
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // /api/webhooks/<fn> enforces the function's declared `auth` mode
+    // -----------------------------------------------------------------------
+
+    fn webhook_fns() -> RecordingFnOps {
+        use pylon_functions::protocol::FnType;
+        use pylon_functions::registry::FnAuthMode;
+        RecordingFnOps::new(&[], false)
+            .define("stripeWebhook", FnType::Action, FnAuthMode::Public, false)
+            .define("chargeCard", FnType::Action, FnAuthMode::User, false)
+            .define("guestThing", FnType::Action, FnAuthMode::Guest, false)
+            .define("wipeTenant", FnType::Action, FnAuthMode::Admin, false)
+            .define("helper", FnType::Action, FnAuthMode::Public, true)
+    }
+
+    fn webhook(auth: &AuthContext, fns: &RecordingFnOps, name: &str) -> (u16, String) {
+        let mut out = (0, String::new());
+        with_ctx_functions(auth, empty_manifest(), Some(fns), |ctx| {
+            let (status, body, _ct) = route(
+                ctx,
+                HttpMethod::Post,
+                &format!("/api/webhooks/{name}"),
+                r#"{"type":"charge.succeeded"}"#,
+                None,
+            );
+            out = (status, body);
+        });
+        out
+    }
+
+    /// Prior vuln: `/api/webhooks/<fn>` skipped the function auth gate, so
+    /// an `auth: "user"` or `"admin"` action ran for an anonymous caller.
+    #[test]
+    fn webhook_refuses_callers_the_function_auth_mode_rejects() {
+        let anon = AuthContext::anonymous();
+        let guest = AuthContext::guest("g1".into());
+        let user = AuthContext::authenticated("u1".into());
+        let cases: [(&AuthContext, &str, u16); 7] = [
+            (&anon, "chargeCard", 401),
+            (&guest, "chargeCard", 401),
+            (&anon, "guestThing", 401),
+            (&anon, "wipeTenant", 403),
+            (&user, "wipeTenant", 403),
+            // Internal functions stay hidden from everyone but admins.
+            (&anon, "helper", 404),
+            (&user, "helper", 404),
+        ];
+        for (auth, name, want) in cases {
+            let fns = webhook_fns();
+            let (status, body) = webhook(auth, &fns, name);
+            assert_eq!(status, want, "{name} as {:?}: {body}", auth.user_id);
+            assert!(!fns.called(name), "{name} must not run: {body}");
+        }
+    }
+
+    #[test]
+    fn webhook_runs_public_receivers_and_authorized_callers() {
+        let anon = AuthContext::anonymous();
+        let fns = webhook_fns();
+        let (status, body) = webhook(&anon, &fns, "stripeWebhook");
+        assert_eq!(status, 200, "public webhook receiver: {body}");
+        assert!(fns.called("stripeWebhook"));
+
+        let user = AuthContext::authenticated("u1".into());
+        let fns = webhook_fns();
+        let (status, body) = webhook(&user, &fns, "chargeCard");
+        assert_eq!(status, 200, "{body}");
+        assert!(fns.called("chargeCard"));
+
+        let guest = AuthContext::guest("g1".into());
+        let fns = webhook_fns();
+        assert_eq!(webhook(&guest, &fns, "guestThing").0, 200);
+
+        let admin = AuthContext::admin();
+        let fns = webhook_fns();
+        assert_eq!(webhook(&admin, &fns, "wipeTenant").0, 200);
     }
 
     fn manifest_with_delete_hook(name: &str) -> AppManifest {

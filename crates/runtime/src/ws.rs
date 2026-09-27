@@ -2439,6 +2439,17 @@ fn handle_reactive_control(
                 hub.send_text_to(client_id, &frame);
                 return;
             }
+            if let Err((code, message)) = reg.check_subscribe(&fn_name, auth_ctx) {
+                let frame = serde_json::json!({
+                    "type": "reactive-error",
+                    "sub_id": sub_id,
+                    "code": code,
+                    "message": message,
+                })
+                .to_string();
+                hub.send_text_to(client_id, &frame);
+                return;
+            }
             let args = parsed.get("args").cloned().unwrap_or(serde_json::json!({}));
             // Map AuthContext → AuthInfo. Carries the FULL identity
             // (roles included) so RBAC-style policies see the same
@@ -3216,6 +3227,76 @@ mod tests {
             Arc::new(m),
             auth_user,
         )
+    }
+
+    /// FnOps that only answers `get_fn`; the reactive runner isn't started.
+    struct GateOnlyFns;
+
+    impl pylon_router::FnOps for GateOnlyFns {
+        fn get_fn(&self, name: &str) -> Option<pylon_functions::registry::FnDef> {
+            use pylon_functions::protocol::FnType;
+            let fn_type = match name {
+                "feed" => FnType::Query,
+                "deleteAll" => FnType::Mutation,
+                _ => return None,
+            };
+            Some(pylon_functions::registry::FnDef {
+                name: name.into(),
+                fn_type,
+                args_schema: None,
+                internal: false,
+                auth: pylon_functions::registry::FnAuthMode::Public,
+                timeout_secs: None,
+            })
+        }
+        fn list_fns(&self) -> Vec<pylon_functions::registry::FnDef> {
+            vec![]
+        }
+        fn call(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+            _: pylon_functions::protocol::AuthInfo,
+            _: Option<pylon_functions::runner::StreamCallback>,
+            _: Option<pylon_functions::protocol::RequestInfo>,
+            _: Option<String>,
+        ) -> Result<
+            (serde_json::Value, pylon_functions::trace::FnTrace),
+            pylon_functions::runner::FnCallError,
+        > {
+            unreachable!("runner not started")
+        }
+        fn recent_traces(&self, _: usize) -> Vec<pylon_functions::trace::FnTrace> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn reactive_subscribe_is_gated_before_registration() {
+        let hub = make_test_hub();
+        let reg = crate::reactive::ReactiveRegistry::new(Arc::clone(&hub));
+        reg.set_fn_ops(Arc::new(GateOnlyFns));
+        let anon = pylon_auth::AuthContext::anonymous();
+        for name in ["deleteAll", "missing"] {
+            handle_reactive_control(
+                &reg,
+                &hub,
+                7,
+                &anon,
+                "reactive-subscribe",
+                &serde_json::json!({ "sub_id": name, "fn_name": name }),
+            );
+        }
+        assert_eq!(reg.len(), 0, "refused subscriptions must not register");
+        handle_reactive_control(
+            &reg,
+            &hub,
+            7,
+            &anon,
+            "reactive-subscribe",
+            &serde_json::json!({ "sub_id": "s1", "fn_name": "feed" }),
+        );
+        assert_eq!(reg.len(), 1);
     }
 
     /// Stub RoomBridge for handle_room_control tests.
