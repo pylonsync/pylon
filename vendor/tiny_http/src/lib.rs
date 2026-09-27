@@ -304,7 +304,14 @@ impl Server {
         // and ClientConnection objects are pushed in the messages queue
         let messages = MessagesQueue::with_capacity(8);
 
+        // Accept threads still running. `recv()` reports a dead listener
+        // only when the LAST one gives up: while any listener still
+        // accepts, the server is serving, and a caller that rebuilds on
+        // that error would fail to re-bind the sockets the others hold.
+        let live_accept_threads = Arc::new(std::sync::atomic::AtomicUsize::new(listeners.len()));
+
         for server in listeners {
+            let live_accept_threads = Arc::clone(&live_accept_threads);
             let inside_close_trigger = close_trigger.clone();
             let inside_messages = messages.clone();
             let ssl = Arc::clone(&ssl);
@@ -387,7 +394,9 @@ impl Server {
                                 continue;
                             }
                             log::error!("Error accepting new client (giving up): {}", e);
-                            inside_messages.push(e.into());
+                            if live_accept_threads.fetch_sub(1, Relaxed) == 1 {
+                                inside_messages.push(e.into());
+                            }
                             break;
                         }
                     }

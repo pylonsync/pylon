@@ -5503,7 +5503,9 @@ fn start_server(
                 || peer_ip == "::1"
                 || peer_ip.starts_with("127.")
                 || peer_ip == "localhost";
-            if !is_dev || !rt.is_in_memory() || !is_loopback {
+            // `dev_shortcuts` also requires a loopback Host and a localhost
+            // (or absent) Origin, so a DNS-rebinding page can't reset it.
+            if !dev_shortcuts || !rt.is_in_memory() || !is_loopback {
                 let body = json_error(
                     "RESET_REFUSED",
                     "reset endpoint is only available in dev mode + in-memory DB + from loopback",

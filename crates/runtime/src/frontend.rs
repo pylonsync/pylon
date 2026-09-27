@@ -795,6 +795,9 @@ fn serve_dev_file_write(
 ) -> Result<(), Request> {
     use std::io::Read as _;
 
+    let cors_owned = dev_api_cors_origin(&request, cors_origin);
+    let cors_origin = cors_owned.as_str();
+
     // CORS preflight — build.pylonsync.com calls this cross-origin.
     if matches!(request.method(), Method::Options) {
         let mut resp = Response::empty(204u16);
@@ -964,10 +967,9 @@ enum DevTokenCheck {
 /// the workspace.
 ///
 /// - `PYLON_DEV_FILE_API_TOKEN` set: the request must carry the bearer token.
-/// - Unset: the caller must be on this machine (see
-///   [`crate::dev_access::request_shortcuts_allowed`]), and if the request
-///   has an `Origin`, it must be a loopback page. The Origin check stops a
-///   website open in the developer's browser from posting a file to
+/// - Unset: the caller must be on this machine, and its page (if any) on
+///   localhost (see [`crate::dev_access::request_shortcuts_allowed`]). That
+///   stops a website open in the developer's browser from posting a file to
 ///   `localhost` (a `text/plain` POST needs no CORS preflight).
 ///
 /// `Err(401)` when a token is configured and the request lacks it,
@@ -977,15 +979,36 @@ fn dev_workspace_access(request: &Request) -> Result<(), u16> {
         DevTokenCheck::Ok => Ok(()),
         DevTokenCheck::Missing => Err(401),
         DevTokenCheck::Unset => {
-            let local = crate::dev_access::request_shortcuts_allowed(request)
-                && header_value(request, "origin")
-                    .is_none_or(|o| pylon_auth::is_localhost_origin(&o));
-            if local {
+            if crate::dev_access::request_shortcuts_allowed(request) {
                 Ok(())
             } else {
                 Err(403)
             }
         }
+    }
+}
+
+/// `Access-Control-Allow-Origin` for the dev workspace endpoints. With
+/// `PYLON_DEV_FILE_API_TOKEN` set, the request's Origin is echoed: the
+/// bearer token is the credential, a browser never attaches it on its own,
+/// and no `Allow-Credentials` is sent, so any page may call the endpoint
+/// only if it holds the token (build.pylonsync.com does). Without a token
+/// the endpoints serve local callers only and the app's CORS origin
+/// applies.
+fn dev_api_cors_origin(request: &Request, cors_origin: &str) -> String {
+    let token_set = std::env::var("PYLON_DEV_FILE_API_TOKEN").is_ok_and(|t| !t.is_empty());
+    dev_api_cors_origin_for(token_set, header_value(request, "origin"), cors_origin)
+}
+
+fn dev_api_cors_origin_for(token_set: bool, origin: Option<String>, cors_origin: &str) -> String {
+    match origin {
+        Some(o)
+            if token_set
+                && Header::from_bytes("Access-Control-Allow-Origin", o.as_bytes()).is_ok() =>
+        {
+            o
+        }
+        _ => cors_origin.to_string(),
     }
 }
 
@@ -1313,7 +1336,9 @@ pub fn try_handle(
     // route) as JSON so a coding agent — or `pylon diagnostics` — can read why a
     // page is/isn't caching without a browser. Dev-only (404 in prod).
     if path_only == "/_pylon/dev/diagnostics" {
-        if is_dev_mode() {
+        // Route timings and render reasons: local callers only, like the
+        // other dev shortcuts.
+        if is_dev_mode() && crate::dev_access::request_shortcuts_allowed(&request) {
             let body = crate::dev_diagnostics::snapshot_json();
             let mut resp = Response::from_data(body.into_bytes());
             if let Ok(h) = Header::from_bytes("Content-Type", "application/json") {
@@ -2206,6 +2231,8 @@ fn serve_dev_render(
     url: &str,
     cors_origin: &str,
 ) -> Result<(), Request> {
+    let cors_owned = dev_api_cors_origin(&request, cors_origin);
+    let cors_origin = cors_owned.as_str();
     if !matches!(request.method(), Method::Get) {
         let _ = request.respond(plain_response(405, "method not allowed", cors_origin));
         return Ok(());
@@ -4991,6 +5018,21 @@ fn hex_nibble(b: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn dev_api_echoes_origin_only_when_a_token_guards_it() {
+        let builder = Some("https://build.pylonsync.com".to_string());
+        assert_eq!(
+            super::dev_api_cors_origin_for(true, builder.clone(), "null"),
+            "https://build.pylonsync.com"
+        );
+        assert_eq!(
+            super::dev_api_cors_origin_for(false, builder, "null"),
+            "null"
+        );
+        assert_eq!(super::dev_api_cors_origin_for(true, None, "null"), "null");
+    }
+
     use super::*;
     use std::fs;
     use tempfile::TempDir;

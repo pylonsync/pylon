@@ -14,11 +14,23 @@
 //!   `/_pylon/dev/render` renders workspace modules.
 //!
 //! These are for the developer at the keyboard. A request gets them only
-//! when it comes from this machine: the TCP peer is a loopback address and
-//! the `Host` header names a loopback host. The `Host` check stops DNS
-//! rebinding (a page on `evil.example` re-pointed at 127.0.0.1 connects from
-//! loopback but sends `Host: evil.example`) and tunnels such as ngrok, which
-//! connect from loopback on behalf of the internet.
+//! when it comes from this machine: the TCP peer is a loopback address, the
+//! `Host` header names a loopback host, and an `Origin` header, if present,
+//! is a loopback page.
+//!
+//! - The `Host` check stops DNS rebinding (a page on `evil.example`
+//!   re-pointed at 127.0.0.1 connects from loopback but sends
+//!   `Host: evil.example`) and tunnels such as ngrok, which connect from
+//!   loopback on behalf of the internet.
+//! - The `Origin` check stops a website open in the developer's browser.
+//!   Its `fetch("http://localhost:4321/admin/...", {mode: "no-cors"})`
+//!   comes from loopback with `Host: localhost`, but carries its own
+//!   Origin. Some of these routes run before the CSRF gate.
+//!
+//! A local proxy that rewrites `Host` to localhost (ngrok
+//! `--host-header=rewrite`, a Vite proxy with `changeOrigin`, editor port
+//! forwarding) makes remote callers look local. Don't point one at a dev
+//! server on an untrusted network.
 //!
 //! `PYLON_DEV_TRUST_REMOTE=1` gives the shortcuts to every caller. Use it
 //! only on a network you control.
@@ -85,16 +97,19 @@ pub fn is_loopback_host(host: &str) -> bool {
     name.parse::<IpAddr>().is_ok_and(is_loopback_ip)
 }
 
-/// Whether a request from `peer` carrying `host` gets dev shortcuts.
+/// Whether a request from `peer` carrying `host` and `origin` gets dev
+/// shortcuts.
 ///
 /// `peer` must be the TCP peer address, never a forwarded-for header. A
-/// missing `Host` header is accepted: browsers always send one, so only a
-/// local non-browser client omits it.
+/// missing `Host` or `Origin` header is accepted: browsers always send Host,
+/// and send Origin on every cross-origin request, so only a local
+/// non-browser client (curl, the CLI, a test) omits them.
 pub fn shortcuts_allowed(
     is_dev: bool,
     trust_remote: bool,
     peer: Option<IpAddr>,
     host: Option<&str>,
+    origin: Option<&str>,
 ) -> bool {
     if !is_dev {
         return false;
@@ -102,22 +117,27 @@ pub fn shortcuts_allowed(
     if trust_remote {
         return true;
     }
-    peer.is_some_and(is_loopback_ip) && host.is_none_or(is_loopback_host)
+    peer.is_some_and(is_loopback_ip)
+        && host.is_none_or(is_loopback_host)
+        && origin.is_none_or(pylon_auth::is_localhost_origin)
 }
 
 /// [`shortcuts_allowed`] for a live request, reading dev mode and
 /// `PYLON_DEV_TRUST_REMOTE` from the environment.
 pub fn request_shortcuts_allowed(request: &tiny_http::Request) -> bool {
-    let host = request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("Host"))
-        .map(|h| h.value.as_str());
+    fn header<'a>(request: &'a tiny_http::Request, name: &'static str) -> Option<&'a str> {
+        request
+            .headers()
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str())
+    }
     shortcuts_allowed(
         dev_mode_enabled(),
         trust_remote_enabled(),
         request.remote_addr().map(|a| a.ip()),
-        host,
+        header(request, "Host"),
+        header(request, "Origin"),
     )
 }
 
@@ -135,39 +155,45 @@ mod tests {
             true,
             false,
             ip("127.0.0.1"),
-            Some("localhost:4321")
+            Some("localhost:4321"),
+            None
         ));
         assert!(shortcuts_allowed(
             true,
             false,
             ip("::1"),
-            Some("[::1]:4321")
+            Some("[::1]:4321"),
+            None
         ));
         assert!(shortcuts_allowed(
             true,
             false,
             ip("::ffff:127.0.0.1"),
-            Some("127.0.0.1:4321")
+            Some("127.0.0.1:4321"),
+            None
         ));
         assert!(shortcuts_allowed(
             true,
             false,
             ip("127.0.0.1"),
-            Some("app.localhost:4321")
+            Some("app.localhost:4321"),
+            None
         ));
-        assert!(shortcuts_allowed(true, false, ip("127.0.0.1"), None));
+        assert!(shortcuts_allowed(true, false, ip("127.0.0.1"), None, None));
         // Production never gets them, whoever calls.
         assert!(!shortcuts_allowed(
             false,
             false,
             ip("127.0.0.1"),
-            Some("localhost")
+            Some("localhost"),
+            None
         ));
         assert!(!shortcuts_allowed(
             false,
             true,
             ip("127.0.0.1"),
-            Some("localhost")
+            Some("localhost"),
+            None
         ));
     }
 
@@ -181,12 +207,18 @@ mod tests {
             "::ffff:192.168.1.40",
         ] {
             assert!(
-                !shortcuts_allowed(true, false, ip(peer), Some("192.168.1.10:4321")),
+                !shortcuts_allowed(true, false, ip(peer), Some("192.168.1.10:4321"), None),
                 "{peer}"
             );
         }
         // Unknown peer (truncated sockaddr) fails closed.
-        assert!(!shortcuts_allowed(true, false, None, Some("localhost")));
+        assert!(!shortcuts_allowed(
+            true,
+            false,
+            None,
+            Some("localhost"),
+            None
+        ));
     }
 
     #[test]
@@ -196,25 +228,55 @@ mod tests {
             true,
             false,
             ip("127.0.0.1"),
-            Some("evil.example:4321")
+            Some("evil.example:4321"),
+            None
         ));
         assert!(!shortcuts_allowed(
             true,
             false,
             ip("127.0.0.1"),
-            Some("abc.ngrok.io")
+            Some("abc.ngrok.io"),
+            None
         ));
         assert!(!shortcuts_allowed(
             true,
             false,
             ip("127.0.0.1"),
-            Some("localhost.evil.example")
+            Some("localhost.evil.example"),
+            None
         ));
         assert!(!shortcuts_allowed(
             true,
             false,
             ip("127.0.0.1"),
-            Some("192.168.1.10:4321")
+            Some("192.168.1.10:4321"),
+            None
+        ));
+    }
+
+    #[test]
+    fn a_foreign_page_in_the_local_browser_does_not_get_shortcuts() {
+        let local = ip("127.0.0.1");
+        assert!(!shortcuts_allowed(
+            true,
+            false,
+            local,
+            Some("localhost:4321"),
+            Some("https://evil.example")
+        ));
+        assert!(!shortcuts_allowed(
+            true,
+            false,
+            local,
+            Some("localhost:4321"),
+            Some("null")
+        ));
+        assert!(shortcuts_allowed(
+            true,
+            false,
+            local,
+            Some("localhost:4321"),
+            Some("http://localhost:5173")
         ));
     }
 
@@ -224,7 +286,8 @@ mod tests {
             true,
             true,
             ip("192.168.1.40"),
-            Some("192.168.1.10:4321")
+            Some("192.168.1.10:4321"),
+            None
         ));
     }
 

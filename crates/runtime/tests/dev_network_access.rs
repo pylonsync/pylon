@@ -236,13 +236,15 @@ fn cors_never_reflects_a_foreign_origin() {
         .header("Access-Control-Allow-Origin")
         .unwrap_or_default();
     assert_ne!(acao, "https://evil.example", "foreign origin reflected");
-    assert_ne!(
-        foreign
-            .header("Access-Control-Allow-Credentials")
-            .as_deref(),
-        Some("true").filter(|_| acao == "*"),
-        "wildcard with credentials"
-    );
+    if acao == "*" {
+        assert_ne!(
+            foreign
+                .header("Access-Control-Allow-Credentials")
+                .as_deref(),
+            Some("true"),
+            "wildcard with credentials"
+        );
+    }
 
     let dev_page = send(
         local(port),
@@ -307,4 +309,52 @@ fn file_api_refuses_foreign_pages_and_hosts() {
         std::fs::read_to_string(watch_dir().join("notes.txt")).unwrap(),
         "hello"
     );
+}
+
+/// A website open in the developer's browser sends `no-cors` requests to
+/// localhost: loopback peer, `Host: localhost`, but its own Origin. It must
+/// not reach the open-in-dev /admin routes, which run before the CSRF gate.
+#[test]
+fn a_foreign_page_cannot_use_dev_admin_routes() {
+    let port = start();
+    let host = format!("localhost:{port}");
+    let forged = send(
+        local(port),
+        "POST",
+        "/admin/operators",
+        &[("Host", &host), ("Origin", "https://evil.example")],
+        r#"{"username":"pwned","password":"correct horse battery staple"}"#,
+    );
+    assert!(
+        forged.status == 401 || forged.status == 403,
+        "operator created from a foreign page: {} {}",
+        forged.status,
+        forged.body
+    );
+
+    let local_tool = send(
+        local(port),
+        "GET",
+        "/admin/operators",
+        &[("Host", &host)],
+        "",
+    );
+    assert_eq!(local_tool.status, 200, "{}", local_tool.body);
+    assert!(!local_tool.body.contains("pwned"), "{}", local_tool.body);
+}
+
+/// DNS rebinding: same-origin to the attacker's own name, so the dev CSRF
+/// rule lets it through, but it must not reset the dev database.
+#[test]
+fn rebinding_cannot_reset_the_dev_database() {
+    let port = start();
+    let host = format!("evil.example:{port}");
+    let r = send(
+        local(port),
+        "POST",
+        "/api/__test__/reset",
+        &[("Host", &host), ("Origin", &format!("http://{host}"))],
+        "",
+    );
+    assert_eq!(r.status, 403, "{}", r.body);
 }
