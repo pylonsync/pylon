@@ -398,6 +398,16 @@ The client connects to `/shard` on the app's own origin, so it needs no
 extra port or proxy rule. See [React client](/clients/react#multiplayer-shards)
 for acks, rejections, and custom decoders.
 
+A ticket expires, and a new signing key (a deploy that changes
+`PYLON_SHARD_TICKET_SECRET` or `PYLON_JWT_SECRET`) makes it invalid. A
+client with a fixed ticket that the shard refuses stops reconnecting and
+reports the error, because the same ticket fails every time. Pass a ticket
+function to get a new ticket on each attempt:
+
+```tsx
+ticket: async () => (await callFn<{ ticket: string }>("joinArena", {})).ticket,
+```
+
 ## Move a player to another shard
 
 A player crosses a zone line, enters a dungeon, or joins a match that runs

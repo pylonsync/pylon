@@ -57,9 +57,16 @@ export default function ArenaIsland() {
 }
 
 function ArenaView({ session }: { session: Join }) {
+  // The first connection uses the ticket from joining. A reconnect asks for
+  // a new one: a ticket expires, and a deploy can change the key that signs it.
+  const firstTicket = useRef<string | null>(session.ticket);
   const { snapshot, connected, send, lastRejection } = useShard<Arena, Input>(session.shardId, {
     subscriberId: session.subscriberId,
-    ticket: session.ticket,
+    ticket: async () => {
+      const first = firstTicket.current;
+      firstTicket.current = null;
+      return first ?? (await callFn<Join>("joinArena", {})).ticket;
+    },
   });
   const canvas = useRef<HTMLCanvasElement | null>(null);
 

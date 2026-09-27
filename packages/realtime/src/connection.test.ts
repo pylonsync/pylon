@@ -10,7 +10,7 @@ class FakeWebSocket {
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: ArrayBuffer }) => void) | null = null;
   onerror: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e?: { code: number; reason: string }) => void) | null = null;
   constructor(
     readonly url: string,
     readonly protocols?: string[],
@@ -20,6 +20,11 @@ class FakeWebSocket {
   close() {
     this.readyState = 3;
     this.onclose?.();
+  }
+  /** The server closes the socket with a code and reason. */
+  closeFromServer(code: number, reason: string) {
+    this.readyState = 3;
+    this.onclose?.({ code, reason });
   }
   send() {}
 }
@@ -290,5 +295,47 @@ test("the same shard on another machine: reconnect at once, no transfer reported
   expect(delays[delays.length - 1]).toBe(0);
   expect(moves).toEqual([]);
   expect(client.shardId).toBe("west");
+  client.close();
+});
+
+test("a refused fixed ticket stops reconnecting with an error", async () => {
+  const errors: string[] = [];
+  const before = sockets.length;
+  const client = connectShard("zone", { subscriberId: "p1", baseUrl: "h", ticket: "stale" });
+  client.onError((e) => errors.push(e.message));
+  sockets[before].closeFromServer(1008, "unauthorized: shard ticket signature does not verify");
+  await settle();
+  await settle();
+  expect(sockets.length).toBe(before + 1);
+  expect(errors).toEqual([
+    "shard zone refused the connection (unauthorized: shard ticket signature does not verify); pass a ticket function to get new tickets",
+  ]);
+  client.close();
+});
+
+test("a refused ticket from a ticket function reconnects with a new ticket", async () => {
+  let n = 0;
+  const before = sockets.length;
+  const client = connectShard("zone", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: () => `t${++n}`,
+  });
+  await settle();
+  sockets[before].closeFromServer(1008, "unauthorized: shard ticket expired");
+  await settle();
+  await settle();
+  expect(sockets.length).toBe(before + 2);
+  expect(sockets[before + 1].protocols).toEqual(["ticket.t2"]);
+  client.close();
+});
+
+test("a shard that is not found yet keeps retrying with a fixed ticket", async () => {
+  const before = sockets.length;
+  const client = connectShard("zone", { subscriberId: "p1", baseUrl: "h", ticket: "fixed" });
+  sockets[before].closeFromServer(1008, 'shard "zone" not found');
+  await settle();
+  await settle();
+  expect(sockets.length).toBe(before + 2);
   client.close();
 });

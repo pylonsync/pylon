@@ -24,6 +24,26 @@ final class ShardTicketTests: XCTestCase {
         return d
     }
 
+    func testARefusedTicketStopsOnlyWhenRetryingCannotHelp() {
+        typealias C = ShardClient<Nothing, Nothing>
+        let refused = "unauthorized: shard ticket signature does not verify"
+        // A fixed ticket, or a transfer's: the same credentials fail again.
+        XCTAssertTrue(
+            C.refusedForGood(closeCode: 1008, reason: refused, hasTicketProvider: false, hasTransferTicket: false))
+        XCTAssertTrue(
+            C.refusedForGood(closeCode: 1008, reason: refused, hasTicketProvider: true, hasTransferTicket: true))
+        // A provider gives a new ticket.
+        XCTAssertFalse(
+            C.refusedForGood(closeCode: 1008, reason: refused, hasTicketProvider: true, hasTransferTicket: false))
+        // A shard not found yet, or any other close, is worth retrying.
+        XCTAssertFalse(
+            C.refusedForGood(
+                closeCode: 1008, reason: "shard \"zone\" not found", hasTicketProvider: false,
+                hasTransferTicket: false))
+        XCTAssertFalse(
+            C.refusedForGood(closeCode: 1013, reason: "client too slow", hasTicketProvider: false, hasTransferTicket: false))
+    }
+
     func testTicketExpiredReadsExp() {
         let now = Date(timeIntervalSince1970: 1_000_000_000)
         XCTAssertFalse(ShardClient<Nothing, Nothing>.ticketExpired(Self.ticket(exp: 1_000_000_600), now: now))
