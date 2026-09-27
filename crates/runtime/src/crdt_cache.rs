@@ -26,12 +26,25 @@ pub type DocHandle = Arc<Mutex<LoroDoc>>;
 struct Entry {
     doc: DocHandle,
     last_used: u64,
+    /// The doc holds every field its row has a value for (see
+    /// [`DocCache::mark_complete`]).
+    complete: bool,
 }
 
 struct Inner {
     map: HashMap<Key, Entry>,
     tick: u64,
+    /// Per row, raised by every insert and remove: a read that hydrated
+    /// from storage caches its doc only if no write replaced or evicted the
+    /// row's doc since it started ([`DocCache::token`]).
+    generations: HashMap<Key, u64>,
+    /// Raised when `generations` is cleared to bound it.
+    epoch: u64,
 }
+
+/// A row's cache state when a read started; see [`DocCache::token`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Token(u64, u64);
 
 pub struct DocCache {
     inner: Mutex<Inner>,
@@ -64,6 +77,8 @@ impl DocCache {
             inner: Mutex::new(Inner {
                 map: HashMap::new(),
                 tick: 0,
+                generations: HashMap::new(),
+                epoch: 0,
             }),
             capacity: capacity.max(1),
         }
@@ -80,16 +95,39 @@ impl DocCache {
         })
     }
 
+    /// The row's cache state now. Take it before reading the row's doc
+    /// from storage and pass it to [`DocCache::get_or_insert`]: a write that
+    /// committed and evicted the row in between makes the read's doc stale.
+    pub fn token(&self, entity: &str, row_id: &str) -> Token {
+        let inner = self.inner.lock().unwrap();
+        let generation = inner.generations.get(&key(entity, row_id)).copied();
+        Token(inner.epoch, generation.unwrap_or(0))
+    }
+
     /// Publish a freshly hydrated doc unless another caller already did, and
     /// return whichever is cached. Two concurrent first reads may both
-    /// hydrate; the loser's copy is dropped.
-    pub fn get_or_insert(&self, entity: &str, row_id: &str, doc: DocHandle) -> DocHandle {
+    /// hydrate; the loser's copy is dropped. When the row was inserted or
+    /// removed since `token` was taken, the doc is returned uncached: it may
+    /// predate that write.
+    pub fn get_or_insert(
+        &self,
+        entity: &str,
+        row_id: &str,
+        doc: DocHandle,
+        token: Token,
+    ) -> DocHandle {
         let mut inner = self.inner.lock().unwrap();
+        let k = key(entity, row_id);
+        let now = Token(inner.epoch, inner.generations.get(&k).copied().unwrap_or(0));
+        if now != token {
+            return inner.map.get(&k).map(|e| Arc::clone(&e.doc)).unwrap_or(doc);
+        }
         inner.tick += 1;
         let tick = inner.tick;
-        let entry = inner.map.entry(key(entity, row_id)).or_insert(Entry {
+        let entry = inner.map.entry(k).or_insert(Entry {
             doc,
             last_used: tick,
+            complete: false,
         });
         entry.last_used = tick;
         let out = Arc::clone(&entry.doc);
@@ -97,27 +135,68 @@ impl DocCache {
         out
     }
 
+    /// Whether the row's cached doc is marked complete.
+    pub fn is_complete(&self, entity: &str, row_id: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .map
+            .get(&key(entity, row_id))
+            .is_some_and(|e| e.complete)
+    }
+
+    /// Mark the row's cached doc as holding every field its row has a value
+    /// for, when nothing inserted or removed it since `token`: reads then
+    /// skip the row. Cleared when the doc leaves the cache.
+    pub fn mark_complete(&self, entity: &str, row_id: &str, token: Token) {
+        let mut inner = self.inner.lock().unwrap();
+        let k = key(entity, row_id);
+        let now = Token(inner.epoch, inner.generations.get(&k).copied().unwrap_or(0));
+        if now == token {
+            if let Some(e) = inner.map.get_mut(&k) {
+                e.complete = true;
+            }
+        }
+    }
+
+    fn bump(&self, inner: &mut Inner, k: &Key) {
+        if inner.generations.len() >= self.capacity.saturating_mul(4) {
+            inner.generations.clear();
+            inner.epoch += 1;
+        }
+        *inner.generations.entry(k.clone()).or_insert(0) += 1;
+    }
+
     /// Replace a row's cached doc.
     pub fn insert(&self, entity: &str, row_id: &str, doc: DocHandle) {
         let mut inner = self.inner.lock().unwrap();
         inner.tick += 1;
         let tick = inner.tick;
+        let k = key(entity, row_id);
+        self.bump(&mut inner, &k);
         inner.map.insert(
-            key(entity, row_id),
+            k,
             Entry {
                 doc,
                 last_used: tick,
+                complete: false,
             },
         );
         self.trim(&mut inner);
     }
 
     pub fn remove(&self, entity: &str, row_id: &str) {
-        self.inner.lock().unwrap().map.remove(&key(entity, row_id));
+        let mut inner = self.inner.lock().unwrap();
+        let k = key(entity, row_id);
+        self.bump(&mut inner, &k);
+        inner.map.remove(&k);
     }
 
     pub fn clear(&self) {
-        self.inner.lock().unwrap().map.clear();
+        let mut inner = self.inner.lock().unwrap();
+        inner.map.clear();
+        inner.generations.clear();
+        inner.epoch += 1;
     }
 
     pub fn len(&self) -> usize {
@@ -192,9 +271,47 @@ mod tests {
     #[test]
     fn get_or_insert_keeps_the_first_doc() {
         let cache = DocCache::with_capacity(10);
-        let first = cache.get_or_insert("E", "1", doc());
-        let second = cache.get_or_insert("E", "1", doc());
+        let first = cache.get_or_insert("E", "1", doc(), cache.token("E", "1"));
+        let second = cache.get_or_insert("E", "1", doc(), cache.token("E", "1"));
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// A read that hydrated before a write evicted the row does not cache
+    /// its doc (it may predate the write); a read after it does.
+    #[test]
+    fn a_read_from_before_an_eviction_is_not_cached() {
+        let cache = DocCache::with_capacity(10);
+        let before = cache.token("E", "1");
+        cache.remove("E", "1"); // A write committed and evicted the row.
+        let stale = doc();
+        let got = cache.get_or_insert("E", "1", Arc::clone(&stale), before);
+        assert!(Arc::ptr_eq(&got, &stale));
+        assert!(cache.get("E", "1").is_none(), "the stale doc was cached");
+        let fresh = cache.get_or_insert("E", "1", doc(), cache.token("E", "1"));
+        assert!(Arc::ptr_eq(&cache.get("E", "1").unwrap(), &fresh));
+        // A clear (new peers, a restored database) invalidates tokens too.
+        let before = cache.token("E", "2");
+        cache.clear();
+        cache.get_or_insert("E", "2", doc(), before);
+        assert!(cache.get("E", "2").is_none());
+    }
+
+    /// The complete mark holds until the doc leaves the cache, and is not
+    /// set from a read that a write overtook.
+    #[test]
+    fn the_complete_mark_ends_with_the_cached_doc() {
+        let cache = DocCache::with_capacity(10);
+        let token = cache.token("E", "1");
+        cache.get_or_insert("E", "1", doc(), token);
+        cache.mark_complete("E", "1", token);
+        assert!(cache.is_complete("E", "1"));
+        cache.remove("E", "1");
+        assert!(!cache.is_complete("E", "1"));
+        let token = cache.token("E", "1");
+        cache.get_or_insert("E", "1", doc(), token);
+        cache.insert("E", "1", doc()); // A write replaced the doc.
+        cache.mark_complete("E", "1", token);
+        assert!(!cache.is_complete("E", "1"));
     }
 
     #[test]

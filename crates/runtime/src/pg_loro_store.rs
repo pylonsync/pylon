@@ -299,8 +299,8 @@ impl PgLoroStore {
         let changed = known.is_some_and(|k| k != started);
         if changed {
             tracing::warn!(
-                "[crdt-pg] the Postgres server changed (failover, restart, or restore): \
-                 new CRDT peers for this process"
+                "[crdt-pg] the Postgres server restarted or changed (a failover or a \
+                 restore): new CRDT peers for this process"
             );
             self.peers.renew();
             self.docs.clear();
@@ -380,18 +380,48 @@ impl PgLoroStore {
         if let Some(doc) = self.docs.get(entity, row_id) {
             return Ok(doc);
         }
-
-        let snapshot: Option<Vec<u8>> = conn
+        let token = self.docs.token(entity, row_id);
+        let row = conn
             .query_opt(
-                "SELECT snapshot FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
+                "SELECT (SELECT snapshot FROM _pylon_crdt_snapshots \
+                         WHERE entity = $1 AND row_id = $2), \
+                        extract(epoch FROM pg_postmaster_start_time())::float8",
                 &[&entity, &row_id],
             )
             .map_err(|e| pg_err("read pg snapshot", e))?
-            .map(|r| r.get::<_, Vec<u8>>(0));
-
+            .ok_or_else(|| LoroStoreError::Storage("read pg snapshot: no row".into()))?;
+        let snapshot: Option<Vec<u8>> = row.get(0);
+        // A new server: the cache and the token are no longer valid.
+        let token = if self.note_server_start(row.get(1)) {
+            self.docs.token(entity, row_id)
+        } else {
+            token
+        };
         let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
         let handle = Arc::new(Mutex::new(doc));
-        Ok(self.docs.get_or_insert(entity, row_id, handle))
+        Ok(self.docs.get_or_insert(entity, row_id, handle, token))
+    }
+
+    /// The row's cache state, to pass to [`PgLoroStore::mark_complete`].
+    pub(crate) fn cache_token(&self, entity: &str, row_id: &str) -> crate::crdt_cache::Token {
+        self.docs.token(entity, row_id)
+    }
+
+    /// Whether the row's cached doc is known to hold every field its row
+    /// has a value for.
+    pub(crate) fn is_complete(&self, entity: &str, row_id: &str) -> bool {
+        self.docs.is_complete(entity, row_id)
+    }
+
+    /// Record that the row's cached doc holds every field its row has a
+    /// value for, when nothing replaced it since `token`.
+    pub(crate) fn mark_complete(
+        &self,
+        entity: &str,
+        row_id: &str,
+        token: crate::crdt_cache::Token,
+    ) {
+        self.docs.mark_complete(entity, row_id, token);
     }
 
     /// Persist the current snapshot via UPSERT. Called after every

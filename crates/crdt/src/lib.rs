@@ -286,6 +286,16 @@ pub fn apply_patch(doc: &LoroDoc, fields: &[CrdtField], patch: &Value) -> Result
             continue; // Field absent from patch — leave existing value.
         };
         match field.kind {
+            // A null text, list, or tree has no container: the key goes, as
+            // a null register's does, and the field projects as null.
+            CrdtFieldKind::Text
+            | CrdtFieldKind::List
+            | CrdtFieldKind::MovableList
+            | CrdtFieldKind::Tree
+                if value.is_null() =>
+            {
+                map.delete(&field.name).ok();
+            }
             CrdtFieldKind::Text => {
                 let s = value
                     .as_str()

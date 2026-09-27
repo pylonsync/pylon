@@ -2004,11 +2004,10 @@ impl Runtime {
     /// from before inserts seeded a doc have none.
     ///
     /// - A row with no doc gets one from its values.
-    /// - A row with a doc: its register (LWW) and text fields take the
-    ///   row's values where they differ. Counters, lists, and trees are
-    ///   left as they are: a server write stores its patch in the row, and
-    ///   for those kinds the patch is not the value (a counter's is an
-    ///   increment).
+    /// - A row with a doc: a field the doc does not hold takes the row's
+    ///   value; register, text, list, and tree fields take the row's values
+    ///   where they differ; a counter the doc held writes its total into
+    ///   the row (a server write stored its increment there).
     ///
     /// Each field applies on its own: one the doc cannot take is logged and
     /// skipped. Progress is recorded per entity after each page of rows, so
@@ -2223,7 +2222,24 @@ impl Runtime {
             return Ok(());
         };
         let values = if has_doc {
-            self.crdt_doc_differences(conn, &ent.name, id, &fields, &row, false)?
+            // The fields the doc lacks, then the register and text fields
+            // that differ from the row.
+            let held = self
+                .crdt_store()
+                .held_fields(conn, &ent.name, id, &fields)
+                .map_err(|e| RuntimeError {
+                    code: "CRDT_SNAPSHOT_FAILED".into(),
+                    message: format!("read the doc of {} {id}: {e}", ent.name),
+                })?;
+            let mut values = missing_values(&fields, &held, &row);
+            for (name, value) in
+                self.crdt_doc_differences(conn, &ent.name, id, &fields, &row, false)?
+            {
+                if !values.iter().any(|(n, _)| *n == name) {
+                    values.push((name, value));
+                }
+            }
+            values
         } else {
             seed_values(&fields, &row)
         };
@@ -2255,6 +2271,10 @@ impl Runtime {
                 code: e.code,
                 message: e.message,
             })?;
+        if pg.crdt.is_complete(&ent.name, id) {
+            return Ok(());
+        }
+        let token = pg.crdt.cache_token(&ent.name, id);
         let err = |e: loro_store::LoroStoreError| pylon_http::DataError {
             code: "CRDT_SNAPSHOT_FAILED".into(),
             message: format!("read the doc of {} {id}: {e}", ent.name),
@@ -2281,6 +2301,8 @@ impl Runtime {
                 })
             })?;
         if !needs_seed {
+            // Later reads skip the row until the doc leaves the cache.
+            pg.crdt.mark_complete(&ent.name, id, token);
             return Ok(());
         }
         pg.store
@@ -2478,20 +2500,30 @@ impl Runtime {
         id: &str,
         fields: &[pylon_crdt::CrdtField],
     ) -> Result<Vec<(String, serde_json::Value)>, RuntimeError> {
-        let held = self
-            .crdt_store()
+        let store = self.crdt_store();
+        if store.is_complete(&ent.name, id) {
+            return Ok(Vec::new());
+        }
+        let token = store.cache_token(&ent.name, id);
+        let held = store
             .held_fields(conn, &ent.name, id, fields)
             .map_err(|e| RuntimeError {
                 code: "CRDT_SNAPSHOT_FAILED".into(),
                 message: format!("read the doc of {} {id}: {e}", ent.name),
             })?;
-        if held.len() == fields.len() {
-            return Ok(Vec::new());
+        let values = if held.len() == fields.len() {
+            Vec::new()
+        } else {
+            self.crdt_row_for_doc(conn, ent, id, fields)?
+                .map(|row| missing_values(fields, &held, &row))
+                .unwrap_or_default()
+        };
+        // Nothing to take: later reads skip the row until the doc leaves
+        // the cache.
+        if values.is_empty() {
+            store.mark_complete(&ent.name, id, token);
         }
-        Ok(self
-            .crdt_row_for_doc(conn, ent, id, fields)?
-            .map(|row| missing_values(fields, &held, &row))
-            .unwrap_or_default())
+        Ok(values)
     }
 
     /// A CRDT row as its doc holds it: JSON and list fields parsed,
@@ -2552,7 +2584,23 @@ impl Runtime {
         row: &serde_json::Value,
     ) -> Result<(bool, usize), RuntimeError> {
         use pylon_crdt::CrdtFieldKind as K;
-        let values = self.crdt_doc_differences(conn, &ent.name, id, fields, row, true)?;
+        // A field the doc does not hold (a doc an older build left partial)
+        // takes the row's value; a counter's total is compared only for the
+        // counters the doc held (one it lacks is 0 in the doc, not in the
+        // row).
+        let held = self
+            .crdt_store()
+            .held_fields(conn, &ent.name, id, fields)
+            .map_err(|e| RuntimeError {
+                code: "CRDT_RECONCILE_FAILED".into(),
+                message: format!("read the doc of {} {id}: {e}", ent.name),
+            })?;
+        let mut values = missing_values(fields, &held, row);
+        for (name, value) in self.crdt_doc_differences(conn, &ent.name, id, fields, row, true)? {
+            if !values.iter().any(|(n, _)| *n == name) {
+                values.push((name, value));
+            }
+        }
         let wanted = values.len();
         let failed = self.apply_fields(conn, &ent.name, id, fields, values);
         let doc = self
@@ -2565,7 +2613,7 @@ impl Runtime {
         let zero = serde_json::json!(0);
         let totals: serde_json::Map<String, serde_json::Value> = fields
             .iter()
-            .filter(|f| f.kind == K::Counter)
+            .filter(|f| f.kind == K::Counter && held.contains(&f.name))
             .filter_map(|f| {
                 let in_row = row.get(&f.name).filter(|v| !v.is_null()).unwrap_or(&zero);
                 let in_doc = doc.get(&f.name).filter(|v| !v.is_null()).unwrap_or(&zero);
@@ -5667,7 +5715,7 @@ pub(crate) fn pg_row_for_doc<C: pylon_storage::pg_exec::PgConn>(
             ),
             &[&id],
         )
-        .map_err(|e| loro_store::LoroStoreError::Storage(format!("lock {} {id}: {e}", ent.name)))?;
+        .map_err(|e| pg_loro_store::pg_err(&format!("lock {} {id}", ent.name), e))?;
     if locked.is_none() {
         return Ok(None);
     }

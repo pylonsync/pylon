@@ -770,6 +770,7 @@ impl LoroStore {
         if let Some(doc) = self.docs.get(entity, row_id) {
             return Ok(doc);
         }
+        let token = self.docs.token(entity, row_id);
 
         // Slow path: hydrate (or create fresh) outside the cache lock.
         // Two concurrent first-accesses can both do this; the loser's
@@ -796,7 +797,29 @@ impl LoroStore {
 
         // Publish, but defer to whatever's already there if we lost the
         // race.
-        Ok(self.docs.get_or_insert(entity, row_id, handle))
+        Ok(self.docs.get_or_insert(entity, row_id, handle, token))
+    }
+
+    /// The row's cache state, to pass to [`LoroStore::mark_complete`].
+    pub(crate) fn cache_token(&self, entity: &str, row_id: &str) -> crate::crdt_cache::Token {
+        self.docs.token(entity, row_id)
+    }
+
+    /// Whether the row's cached doc is known to hold every field its row
+    /// has a value for.
+    pub(crate) fn is_complete(&self, entity: &str, row_id: &str) -> bool {
+        self.docs.is_complete(entity, row_id)
+    }
+
+    /// Record that the row's cached doc holds every field its row has a
+    /// value for, when nothing replaced it since `token`.
+    pub(crate) fn mark_complete(
+        &self,
+        entity: &str,
+        row_id: &str,
+        token: crate::crdt_cache::Token,
+    ) {
+        self.docs.mark_complete(entity, row_id, token);
     }
 
     /// Persist the current snapshot for a row to the sidecar. Called

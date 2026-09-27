@@ -677,27 +677,78 @@ impl Env {
 }
 
 /// A doc an older build left holding only the fields a server update wrote:
-/// a client's read gets the row's other values, so its edit to one of them
-/// keeps what the row held.
+/// a client's read gets the row's other values (text, list, tree, counter),
+/// so its edit to one of them keeps what the row held. SQLite runs it with
+/// its one-time reconcile pending and done.
 #[test]
 fn a_partial_doc_takes_the_row_values_it_lacks() {
+    on_both(|env| {
+        for reconciled in [false, true] {
+            if reconciled {
+                env.rt.reconcile_crdt_docs().unwrap();
+            }
+            let id = env.bare_row();
+            let partial = LoroDoc::new();
+            pylon_crdt::root_map(&partial).insert("title", "a").unwrap();
+            partial.commit();
+            env.store_snapshot(&id, &pylon_crdt::encode_snapshot(&partial));
+            let client = online_client(env, &id);
+            let seen = pylon_crdt::project_doc_to_json(&client, &fields());
+            let at = format!("{} reconciled={reconciled}", env.name());
+            assert_eq!(seen["body"], "hello", "{at}");
+            assert_eq!(seen["tags"], json!(["x"]), "{at}");
+            assert_eq!(seen["likes"], json!(3.0), "{at}");
+            assert_eq!(seen["outline"][0]["id"], "root", "{at}");
+            let before = client.oplog_vv();
+            let body = text_in(&client, "body");
+            body.insert(body.len_unicode(), " x").unwrap();
+            client.commit();
+            env.push(&id, &client, &before);
+            let row = env.row(&id);
+            assert_eq!(row["body"], "hello x", "{at}");
+            assert_eq!(row["likes"], 3, "{at}");
+            assert_eq!(row["tags"], json!(["x"]), "{at}");
+        }
+    });
+}
+
+/// The one-time reconcile on a doc an older build left without its counter:
+/// the row keeps its total, and the doc takes it.
+#[test]
+fn the_reconcile_keeps_a_counter_a_partial_doc_lacks() {
     on_both(|env| {
         let id = env.bare_row();
         let partial = LoroDoc::new();
         pylon_crdt::root_map(&partial).insert("title", "a").unwrap();
         partial.commit();
         env.store_snapshot(&id, &pylon_crdt::encode_snapshot(&partial));
-        let client = online_client(env, &id);
-        let before = client.oplog_vv();
-        let body = text_in(&client, "body");
-        assert_eq!(body.to_string(), "hello", "{}", env.name());
-        body.insert(body.len_unicode(), " x").unwrap();
-        client.commit();
-        env.push(&id, &client, &before);
+        env.rt.reconcile_crdt_docs().unwrap();
+        assert_eq!(env.row(&id)["likes"], 3, "{}", env.name());
+        let doc = LoroDoc::new();
+        pylon_crdt::apply_update(&doc, &env.snapshot(&id)).unwrap();
+        assert_eq!(
+            pylon_crdt::project_doc_to_json(&doc, &fields())["likes"],
+            json!(3.0),
+            "{}",
+            env.name()
+        );
+    });
+}
+
+/// An insert may set an optional text, list, or tree field to null.
+#[test]
+fn an_insert_may_set_optional_containers_to_null() {
+    on_both(|env| {
+        let mut data = fresh_doc();
+        data["body"] = Value::Null;
+        data["order"] = Value::Null;
+        data["outline"] = Value::Null;
+        let id = env.rt.insert("Doc", &data).unwrap();
         let row = env.row(&id);
-        assert_eq!(row["body"], "hello x", "{}", env.name());
-        assert_eq!(row["likes"], 3, "{}", env.name());
-        assert_eq!(row["tags"], json!(["x"]), "{}", env.name());
+        assert_eq!(row["body"], Value::Null, "{}", env.name());
+        assert_eq!(row["order"], Value::Null, "{}", env.name());
+        assert_eq!(row["outline"], Value::Null, "{}", env.name());
+        assert_eq!(row["title"], "a", "{}", env.name());
     });
 }
 
