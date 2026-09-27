@@ -298,7 +298,11 @@ fn run(seed: u64, budget: usize, with_area: bool) {
         let config = ReplicationConfig {
             precision,
             max_bytes_per_tick: budget,
-            plane: if seed % 2 == 0 { Plane::XY } else { Plane::XZ },
+            plane: if seed.is_multiple_of(2) {
+                Plane::XY
+            } else {
+                Plane::XZ
+            },
         };
         fast.begin_tick(&store);
         slow.begin_tick(&store);
