@@ -1170,7 +1170,7 @@ impl DataStore for Runtime {
                             .project_stored(tx, entity, row_id, &crdt_fields)
                             .map_err(crdt_err)?;
                         // The update policy must hold for the merged row.
-                        authorize(&projected)?;
+                        authorize(&self.projection_as_read(entity, &projected))?;
                         // Only the fields this push changed or set: a column
                         // the doc does not hold a value for (one it could not
                         // take) keeps its value.
@@ -1289,9 +1289,11 @@ impl DataStore for Runtime {
                     code: "CRDT_APPLY_FAILED".into(),
                     message: format!("read the doc of {entity}/{row_id}: {e}"),
                 })?;
-            authorize(&projected).map_err(|e| crate::RuntimeError {
-                code: e.code,
-                message: e.message,
+            authorize(&self.projection_as_read(entity, &projected)).map_err(|e| {
+                crate::RuntimeError {
+                    code: e.code,
+                    message: e.message,
+                }
             })?;
 
             // Re-project into the materialized SQLite row so SELECT
@@ -1368,6 +1370,18 @@ impl DataStore for Runtime {
             self.crdt_store().evict(entity, row_id);
         }
         result
+    }
+}
+
+impl Runtime {
+    /// A CRDT projection in the shape `get_by_id` returns: encrypted fields
+    /// decrypted, JSON fields parsed. The doc holds values as stored, so
+    /// without this every encrypted column would look changed next to the
+    /// row the router compares it with.
+    fn projection_as_read(&self, entity: &str, projected: &serde_json::Value) -> serde_json::Value {
+        let mut row = projected.clone();
+        self.normalize_row_on_read(entity, &mut row);
+        row
     }
 }
 

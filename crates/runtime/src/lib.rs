@@ -103,6 +103,41 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+/// Refuse a CRDT insert whose id is already taken, BEFORE the LoroDoc is
+/// touched. The doc for that id belongs to the existing row; seeding it
+/// with the insert payload would change that row's CRDT state (in the
+/// cache at least, even when the SQL INSERT then fails), without any
+/// policy check against it. Same error code as the SQL PK collision.
+fn reject_taken_crdt_id(
+    conn: &rusqlite::Connection,
+    entity: &str,
+    id: &str,
+) -> Result<(), RuntimeError> {
+    let sql = format!("SELECT 1 FROM {} WHERE \"id\" = ?1", quote_ident(entity));
+    let taken = conn
+        .query_row(&sql, [id], |_| Ok(()))
+        .map(|_| true)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            other => Err(other),
+        })
+        .map_err(|e| RuntimeError {
+            code: "INSERT_FAILED".into(),
+            message: format!("Insert into {entity} failed: {e}"),
+        })?;
+    if taken {
+        return Err(RuntimeError {
+            code: "OPTIMISTIC_ID_CONFLICT".into(),
+            message: format!("Insert into {entity} failed: id {id} is already taken"),
+        });
+    }
+    Ok(())
+}
+
+/// Internal error code: a CRDT update found no row and rolled back. Never
+/// leaves `Runtime::update`.
+const NO_ROW_ROLLBACK: &str = "_PYLON_NO_ROW_ROLLBACK";
+
 /// Bind a TCP listener that accepts BOTH IPv4 and IPv6 connections.
 ///
 /// macOS resolves `localhost` to `::1` first (IPv6). A v4-only listener
@@ -3159,8 +3194,9 @@ impl Runtime {
         // Atomic block — CRDT sidecar snapshot + materialized SQL row +
         // search-index maintenance all land together or none does. SQLite's
         // rollback journal makes this crash-safe end-to-end.
-        with_write_tx(self, &conn, || {
+        let result = with_write_tx(self, &conn, || {
             if ent.crdt {
+                reject_taken_crdt_id(&conn, entity, &id)?;
                 let crdt_fields = self.crdt_fields_for(ent)?;
                 sb.crdt
                     .apply_patch(&conn, entity, &id, &crdt_fields, data)
@@ -3228,7 +3264,17 @@ impl Runtime {
                 }
             }
             Ok(())
-        })?;
+        });
+        if result.is_err() && ent.crdt {
+            // The rollback drops the persisted snapshot, but apply_patch
+            // changed the cached LoroDoc in place. Evict it, or the cache
+            // keeps the rejected values: an insert that reuses another
+            // row's id (OPTIMISTIC_ID_CONFLICT) would otherwise leave its
+            // payload in that row's doc, to be broadcast and persisted by
+            // the next write.
+            sb.crdt.evict(entity, &id);
+        }
+        result?;
 
         Ok(id)
     }
@@ -3566,7 +3612,7 @@ impl Runtime {
 
         // Atomic block — same shape as insert. CRDT snapshot, SQL UPDATE,
         // and FTS maintenance all commit together.
-        let affected = with_write_tx(self, &conn, || -> Result<i64, RuntimeError> {
+        let result = with_write_tx(self, &conn, || -> Result<i64, RuntimeError> {
             let mut corrections = None;
             if ent.crdt {
                 let crdt_fields = self.crdt_fields_for(ent)?;
@@ -3630,8 +3676,25 @@ impl Runtime {
                     })?;
                 }
             }
+            if affected == 0 && ent.crdt {
+                // No such row: roll back so no orphan snapshot is persisted
+                // for an id a later insert could reuse.
+                return Err(RuntimeError {
+                    code: NO_ROW_ROLLBACK.into(),
+                    message: String::new(),
+                });
+            }
             Ok(affected)
-        })?;
+        });
+        if ent.crdt && (result.is_err()) {
+            // Same cache hygiene as `insert`: the cached doc absorbed the
+            // patch before the rollback.
+            sb.crdt.evict(entity, id);
+        }
+        let affected = match result {
+            Err(e) if e.code == NO_ROW_ROLLBACK => 0,
+            other => other?,
+        };
 
         Ok(affected > 0)
     }
@@ -4296,6 +4359,7 @@ impl Runtime {
         // identical to client-sync inserts. SQLite-only path (rusqlite
         // Connection), so `crdt_store()` never hits its Postgres panic.
         if ent.crdt {
+            reject_taken_crdt_id(conn, entity, &id)?;
             let crdt_fields = self.crdt_fields_for(ent)?;
             self.crdt_store()
                 .apply_patch(conn, entity, &id, &crdt_fields, data)

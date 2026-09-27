@@ -2477,12 +2477,25 @@ impl TraceBuilder {
 /// the gate. Returns `None` for ops the gate doesn't (yet) cover:
 ///   - QueryGraph: spans multiple entities, can't be checked with
 ///     a single-entity policy. Future work.
-///   - Link/Unlink: relation writes — the underlying row update
-///     gets checked when the relation field is touched via
-///     `ctx.db.update`. Skipping here avoids double-checks.
+///   - Link/Unlink are updates of one foreign-key column, so they map
+///     to Update; the gate sees the stored row and `{<fk>: target}`.
 ///   - Search/Paginate/List/Query/Lookup: all read-shaped, all
 ///     map to PolicyOp::Read.
 ///   - AdvisoryLock: not a data op, no policy meaning.
+/// FK column that `relation` on `entity` sets, from the store's manifest.
+fn relation_fk(store: &dyn DataStore, entity: &str, relation: Option<&str>) -> Option<String> {
+    let relation = relation?;
+    store
+        .manifest()
+        .entities
+        .iter()
+        .find(|e| e.name == entity)?
+        .relations
+        .iter()
+        .find(|r| r.name == relation)
+        .map(|r| r.field.clone())
+}
+
 fn policy_op_for(op: DbOp) -> Option<PolicyOp> {
     match op {
         DbOp::Get
@@ -2493,9 +2506,9 @@ fn policy_op_for(op: DbOp) -> Option<PolicyOp> {
         | DbOp::Search
         | DbOp::VectorSearch => Some(PolicyOp::Read),
         DbOp::Insert => Some(PolicyOp::Insert),
-        DbOp::Update => Some(PolicyOp::Update),
+        DbOp::Update | DbOp::Link | DbOp::Unlink => Some(PolicyOp::Update),
         DbOp::Delete => Some(PolicyOp::Delete),
-        DbOp::QueryGraph | DbOp::Link | DbOp::Unlink | DbOp::AdvisoryLock => None,
+        DbOp::QueryGraph | DbOp::AdvisoryLock => None,
     }
 }
 
@@ -2524,21 +2537,41 @@ fn execute_db_op(
     if let Some(gate) = policy_gate {
         if strict_policies && !msg.unsafe_op && !auth.is_admin {
             if let Some(op) = policy_op_for(msg.op) {
+                // Link/Unlink write the relation's FK column: `{fk: target}`
+                // or `{fk: null}`. An unknown relation yields no patch; the
+                // store call then fails with RELATION_NOT_FOUND.
+                let link_patch = match msg.op {
+                    DbOp::Link | DbOp::Unlink => {
+                        relation_fk(store, &msg.entity, msg.relation.as_deref()).map(|fk| {
+                            let target = match msg.op {
+                                DbOp::Link => serde_json::Value::String(
+                                    msg.target_id.clone().unwrap_or_default(),
+                                ),
+                                _ => serde_json::Value::Null,
+                            };
+                            serde_json::json!({ fk: target })
+                        })
+                    }
+                    _ => None,
+                };
                 let data_for_check = match msg.op {
                     DbOp::Insert | DbOp::Update => msg.data.as_ref(),
+                    DbOp::Link | DbOp::Unlink => link_patch.as_ref(),
                     _ => None,
                 };
                 // Update and Delete rules are row rules: they need the
                 // stored row, and Update also checks the row after the
                 // patch (see `PolicyEngine::check_entity_update`).
                 let existing = match msg.op {
-                    DbOp::Update | DbOp::Delete => match msg.id.as_deref() {
-                        Some(id) => match store.get_by_id(&msg.entity, id) {
-                            Ok(row) => row,
-                            Err(e) => return (Err(e), None),
-                        },
-                        None => None,
-                    },
+                    DbOp::Update | DbOp::Delete | DbOp::Link | DbOp::Unlink => {
+                        match msg.id.as_deref() {
+                            Some(id) => match store.get_by_id(&msg.entity, id) {
+                                Ok(row) => row,
+                                Err(e) => return (Err(e), None),
+                            },
+                            None => None,
+                        }
+                    }
                     _ => None,
                 };
                 if let Err((code, reason)) =
@@ -3029,11 +3062,22 @@ mod tests {
     struct AlwaysOkStore;
     impl pylon_http::DataStore for AlwaysOkStore {
         fn manifest(&self) -> &pylon_kernel::AppManifest {
-            // The gate is store-agnostic; we never reach the manifest
-            // from execute_db_op. Returning a leaked default keeps
-            // the impl trivial.
+            // `Project.org` → `orgId`, so the link gate test can resolve
+            // the FK column.
             static M: std::sync::OnceLock<pylon_kernel::AppManifest> = std::sync::OnceLock::new();
-            M.get_or_init(pylon_kernel::AppManifest::default)
+            M.get_or_init(|| pylon_kernel::AppManifest {
+                entities: vec![pylon_kernel::ManifestEntity {
+                    name: "Project".into(),
+                    relations: vec![pylon_kernel::ManifestRelation {
+                        name: "org".into(),
+                        target: "Org".into(),
+                        field: "orgId".into(),
+                        many: false,
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
         }
         fn insert(&self, _: &str, _: &serde_json::Value) -> Result<String, DataError> {
             Ok("stub-id".into())
@@ -3252,7 +3296,35 @@ mod tests {
         delete.id = Some("stored-1".into());
         let _ = execute_db_op(&store, &delete, Some(&gate), &user_auth(), true);
 
+        let mut link = db_msg(DbOp::Link, "Project", false);
+        link.id = Some("stored-1".into());
+        link.relation = Some("org".into());
+        link.target_id = Some("org-b".into());
+        let _ = execute_db_op(&store, &link, Some(&gate), &user_auth(), true);
+
+        let mut unlink = db_msg(DbOp::Unlink, "Project", false);
+        unlink.id = Some("stored-1".into());
+        unlink.relation = Some("org".into());
+        let _ = execute_db_op(&store, &unlink, Some(&gate), &user_auth(), true);
+
         let seen = gate.seen.lock().unwrap();
+        // Link/Unlink are updates of the FK column.
+        assert_eq!(
+            seen[2],
+            (
+                PolicyOp::Update,
+                Some(stored.clone()),
+                Some(serde_json::json!({"orgId": "org-b"}))
+            )
+        );
+        assert_eq!(
+            seen[3],
+            (
+                PolicyOp::Update,
+                Some(stored.clone()),
+                Some(serde_json::json!({"orgId": null}))
+            )
+        );
         assert_eq!(
             seen[0],
             (PolicyOp::Update, Some(stored.clone()), Some(patch))
@@ -3530,8 +3602,8 @@ mod tests {
         // Unmapped ops — relations + advisory locks fall through
         // to the existing store call without a gate check.
         assert_eq!(policy_op_for(DbOp::QueryGraph), None);
-        assert_eq!(policy_op_for(DbOp::Link), None);
-        assert_eq!(policy_op_for(DbOp::Unlink), None);
+        assert_eq!(policy_op_for(DbOp::Link), Some(PolicyOp::Update));
+        assert_eq!(policy_op_for(DbOp::Unlink), Some(PolicyOp::Update));
         assert_eq!(policy_op_for(DbOp::AdvisoryLock), None);
     }
 

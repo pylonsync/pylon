@@ -84,8 +84,23 @@ fn manifest() -> AppManifest {
                 crdt: true,
                 ..Default::default()
             },
+            // An encrypted readonly column on a CRDT entity.
+            ManifestEntity {
+                name: "Note".into(),
+                fields: vec![
+                    field("orgId", false),
+                    field("name", false),
+                    ManifestField {
+                        encrypted: true,
+                        server_only: true,
+                        ..field("secret", true)
+                    },
+                ],
+                crdt: true,
+                ..Default::default()
+            },
         ],
-        policies: ["Project", "Doc"]
+        policies: ["Project", "Doc", "Note"]
             .iter()
             .map(|e| ManifestPolicy {
                 name: format!("{e}_tenant"),
@@ -156,6 +171,10 @@ fn start() -> App {
         unsafe {
             std::env::set_var("PYLON_ADMIN_TOKEN", ADMIN_TOKEN);
             std::env::set_var("PYLON_DEV_MODE", "1");
+            std::env::set_var(
+                "PYLON_ENCRYPTION_KEY",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            );
         }
     });
     let port = free_port();
@@ -401,4 +420,58 @@ fn foreign_rows_cannot_be_updated_or_deleted() {
     let own = app.insert("Project", ORG_A);
     let (s, body) = app.call("DELETE", &format!("/api/entities/Project/{own}"), json!({}));
     assert_eq!(s, 200, "deleting your own row: {body}");
+}
+
+/// An insert that reuses another tenant's row id must fail without touching
+/// that row's CRDT doc. Before the fix, the SQLite path seeded the victim's
+/// cached doc with the insert payload, then rolled back only the SQL.
+#[test]
+fn insert_with_a_taken_id_leaves_the_other_rows_doc_alone() {
+    let app = start();
+    let foreign = app
+        .runtime
+        .insert("Project", &json!({"orgId": ORG_B, "name": "theirs"}))
+        .unwrap();
+
+    let (s, body) = app.call(
+        "POST",
+        "/api/entities/Project",
+        json!({"id": foreign, "orgId": ORG_A, "name": "poison"}),
+    );
+    assert!(s >= 400, "insert over a foreign id: {s} {body}");
+
+    use pylon_http::DataStore;
+    let snap = DataStore::crdt_snapshot(app.runtime.as_ref(), "Project", &foreign)
+        .unwrap()
+        .unwrap();
+    let doc = pylon_crdt::loro::LoroDoc::new();
+    pylon_crdt::apply_update(&doc, &snap).unwrap();
+    let state = format!("{:?}", pylon_crdt::root_map(&doc).get_deep_value());
+    assert!(
+        !state.contains("poison"),
+        "doc was seeded by the insert: {state}"
+    );
+    assert!(state.contains(ORG_B), "{state}");
+}
+
+/// The CRDT merge check compares the merged doc with the stored row. The
+/// doc holds encrypted columns as ciphertext and the row read back holds
+/// plaintext; the check must not see that as a change.
+#[test]
+fn crdt_push_ignores_encryption_of_untouched_columns() {
+    let app = start();
+    let (s, body) = app.call(
+        "POST",
+        "/api/entities/Note",
+        json!({"orgId": ORG_A, "name": "n", "secret": "s3cret"}),
+    );
+    assert_eq!(s, 201, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+    assert_eq!(app.stored("Note", &id)["secret"], "s3cret");
+
+    let (s, body) = app.crdt_push("Note", &id, &[("name", "renamed")]);
+    assert_eq!(s, 200, "edit next to an encrypted readonly column: {body}");
+    let row = app.stored("Note", &id);
+    assert_eq!(row["name"], "renamed");
+    assert_eq!(row["secret"], "s3cret");
 }
