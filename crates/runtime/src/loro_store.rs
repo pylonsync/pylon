@@ -175,6 +175,12 @@ pub fn ensure_sidecar(conn: &Connection) -> Result<(), LoroStoreError> {
     )
     .map(|_| ())
     .map_err(|e| LoroStoreError::Storage(format!("create the synthetic peer table: {e}")))?;
+    // Tables an earlier build of the container merge used; no release
+    // shipped them.
+    for table in ["_pylon_crdt_written", "_pylon_crdt_merged"] {
+        conn.execute(&format!("DROP TABLE IF EXISTS {table}"), [])
+            .map_err(|e| LoroStoreError::Storage(format!("drop {table}: {e}")))?;
+    }
     // Per text, list, or tree field: the server's last whole write of it
     // (`pylon_crdt::merge::BaseWrite`, JSON).
     conn.execute(
@@ -913,6 +919,26 @@ mod tests {
     fn sidecar_is_idempotent() {
         let conn = open_test_db();
         ensure_sidecar(&conn).unwrap(); // Re-create OK.
+    }
+
+    #[test]
+    fn sidecar_drops_the_earlier_merge_tables() {
+        let conn = open_test_db();
+        conn.execute_batch(
+            "CREATE TABLE _pylon_crdt_written (x TEXT);
+             CREATE TABLE _pylon_crdt_merged (x TEXT);",
+        )
+        .unwrap();
+        ensure_sidecar(&conn).unwrap();
+        let left: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE name IN ('_pylon_crdt_written', '_pylon_crdt_merged')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
     }
 
     #[test]

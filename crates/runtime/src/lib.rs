@@ -7552,6 +7552,58 @@ mod tests {
         assert_eq!(ids(), ["d", "root", "x"]);
     }
 
+    /// An offline client's empty text and list (a create with no ops in it)
+    /// replace a seed nobody edited.
+    #[test]
+    fn an_empty_client_value_replaces_the_seed() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        rt.crdt_snapshot("Doc", &id).unwrap();
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(
+            &offline,
+            &fields,
+            &serde_json::json!({"body": "", "tags": []}),
+        )
+        .unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["body"], "");
+        assert_eq!(row["tags"], serde_json::json!([]));
+    }
+
+    /// A seed movable list whose item another client set is not the server's
+    /// write any more: an offline client's list is added to it, not put in
+    /// its place.
+    #[test]
+    fn a_set_in_the_seed_movable_list_keeps_it() {
+        use pylon_http::DataStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.db");
+        let rt = Runtime::open(path.to_str().unwrap(), doc_manifest(true)).unwrap();
+        let (id, fields) = bare_doc_row(&rt);
+        let seeded = rt.crdt_snapshot("Doc", &id).unwrap().unwrap();
+        let online = client_doc(9, 0);
+        pylon_crdt::apply_update(&online, &seeded).unwrap();
+        let before = online.oplog_vv();
+        match pylon_crdt::root_map(&online).get("order") {
+            Some(pylon_crdt::loro::ValueOrContainer::Container(
+                pylon_crdt::loro::Container::MovableList(l),
+            )) => l.set(0, "M").unwrap(),
+            other => panic!("{other:?}"),
+        }
+        online.commit();
+        push_since(&rt, &id, &online, &before);
+        let offline = client_doc(1, 0);
+        pylon_crdt::apply_patch(&offline, &fields, &serde_json::json!({"order": ["p"]})).unwrap();
+        push_since(&rt, &id, &offline, &Default::default());
+        let row = rt.get_by_id("Doc", &id).unwrap().unwrap();
+        assert_eq!(row["order"], serde_json::json!(["M", "n", "p"]));
+    }
+
     /// Pruning a row's snapshot removes its server-side records, and only
     /// its own.
     #[test]

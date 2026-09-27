@@ -63,7 +63,8 @@ const MAX_CHAIN: usize = 32;
 /// The server's last whole write of a text, list, or tree field: the
 /// container it wrote, the op span of the write, and how many elements (or
 /// tree nodes) it wrote. The elements the write inserted there have ids in
-/// that span. For a tree, the nodes it wrote.
+/// that span. For a movable list, the items it wrote (a `set` changes an
+/// item and keeps its id). For a tree, the nodes it wrote.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BaseWrite {
     pub container: String,
@@ -71,6 +72,8 @@ pub struct BaseWrite {
     pub start: i32,
     pub end: i32,
     pub len: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub values: Option<Vec<Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nodes: Option<Value>,
 }
@@ -95,11 +98,19 @@ pub fn base_write(
         return None;
     }
     let container = holders(doc, std::slice::from_ref(field)).remove(&field.name)?;
-    let (len, nodes) = if field.kind == K::Tree {
-        let nodes = project_tree(&doc.get_tree(container.clone()));
-        (nodes.as_array().map_or(0, Vec::len), Some(nodes))
-    } else {
-        (Seq::of(doc, &container)?.len(), None)
+    let (len, values, nodes) = match field.kind {
+        K::Tree => {
+            let nodes = project_tree(&doc.get_tree(container.clone()));
+            (nodes.as_array().map_or(0, Vec::len), None, Some(nodes))
+        }
+        K::MovableList => {
+            let values: Vec<Value> = read_elements(doc, &container)
+                .into_iter()
+                .map(|e| e.value)
+                .collect();
+            (values.len(), Some(values), None)
+        }
+        _ => (Seq::of(doc, &container)?.len(), None, None),
     };
     Some(BaseWrite {
         container: container.to_string(),
@@ -107,6 +118,7 @@ pub fn base_write(
         start,
         end,
         len,
+        values,
         nodes,
     })
 }
@@ -265,6 +277,13 @@ pub fn read_import(doc: &LoroDoc, fields: &[CrdtField], before: &VersionVector) 
             }
         }
     }
+    // A container the ops created holds the value they wrote, even an empty
+    // one (no ops of its own).
+    for cid in created.keys() {
+        if seen.insert(cid.clone()) {
+            containers.push(cid.clone());
+        }
+    }
     let mut changed: HashMap<String, Vec<ContainerID>> = HashMap::new();
     for cid in containers {
         let Some((field, top)) = field_of(doc, &cid, &created, &kinds) else {
@@ -414,7 +433,7 @@ pub fn merge_after_import(
                             source,
                             holder,
                             earlier,
-                            base.map(|b| b.len),
+                            base,
                             &base_in_source,
                             &base_in_holder,
                         )
@@ -689,10 +708,19 @@ fn align(a: &[Elem], b: &[Elem], min_run: usize) -> Vec<(usize, usize)> {
     .collect()
 }
 
-/// Whether `elems` are exactly the base write's elements: `len` of them,
-/// all from the write.
-fn is_base(elems: &[Elem], base_len: Option<usize>, base: &HashSet<ID>) -> bool {
-    base_len == Some(elems.len()) && elems.iter().all(|e| base.contains(&e.id))
+/// Whether `elems` are exactly the base write's elements: as many as it
+/// wrote, all from it (`ids`), and for a movable list with the values it
+/// wrote.
+fn is_base(elems: &[Elem], base: Option<&BaseWrite>, ids: &HashSet<ID>) -> bool {
+    let Some(base) = base else {
+        return false;
+    };
+    base.len == elems.len()
+        && elems.iter().all(|e| ids.contains(&e.id))
+        && base
+            .values
+            .as_ref()
+            .is_none_or(|values| elems.iter().map(|e| &e.value).eq(values.iter()))
 }
 
 /// Merge the text or list `source` into `holder` (see the module docs).
@@ -702,7 +730,7 @@ fn merge_seq(
     source: &ContainerID,
     holder: &ContainerID,
     earlier: Option<Links>,
-    base_len: Option<usize>,
+    base: Option<&BaseWrite>,
     base_in_source: &HashSet<ID>,
     base_in_holder: &HashSet<ID>,
 ) -> Result<Links, String> {
@@ -741,14 +769,14 @@ fn merge_seq(
                 }
             }
         }
-        None if is_base(&src, base_len, base_in_source) => {
+        None if is_base(&src, base, base_in_source) => {
             for e in &src {
                 link.insert(e.id, None);
             }
         }
         None => {
             let dst = read_elements(doc, holder);
-            let replace = is_base(&dst, base_len, base_in_holder);
+            let replace = is_base(&dst, base, base_in_holder);
             let min_run = if replace || !matches!(seq, Seq::Text(_)) {
                 1
             } else {
