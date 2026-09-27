@@ -287,8 +287,10 @@ mod tests {
                 std::thread::sleep(interval - took);
             }
         }
+        // A tick that waited for the writer would take 500 ms. The bound is
+        // far below that and far above a tick on a busy CI runner.
         assert!(
-            worst < Duration::from_millis(5),
+            worst < Duration::from_millis(100),
             "a tick took {worst:?} while the writer slept 500 ms per record"
         );
         // The writer fell behind, so waiting records were replaced by newer
