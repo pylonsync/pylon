@@ -214,7 +214,10 @@ async fn a_session_converges_through_dropped_datagrams() {
         tokio::select! {
             Some(frame) = frames.recv() => {
                 assert_eq!(frame[0], kind::REPLICATION, "a stream frame");
-                table.apply(&frame[wire::HEADER_LEN..]).expect("a stream frame applies");
+                let tick = u64::from_be_bytes(frame[2..10].try_into().unwrap());
+                table
+                    .apply_stream(&frame[wire::HEADER_LEN..], tick)
+                    .expect("a stream frame applies");
                 stream_frames += 1;
             }
             d = conn.receive_datagram() => {
@@ -224,19 +227,20 @@ async fn a_session_converges_through_dropped_datagrams() {
                 skip ^= skip << 13;
                 skip ^= skip >> 7;
                 skip ^= skip << 17;
-                if lossy && skip % 5 == 0 {
+                if lossy && skip.is_multiple_of(5) {
                     dropped += 1;
                     continue;
                 }
                 let s = table.apply_datagram(&d).expect("a datagram decodes");
-                conn.send_datagram(wire::encode_datagram_acks(&[(s.frame, table.frames_applied)]))
+                conn.send_datagram(wire::encode_datagram_acks(&[(s.frame, table.stream_tick)]))
                     .unwrap();
             }
             _ = tokio::time::sleep(Duration::from_millis(50)) => {}
         }
     }
     assert!(stream_frames >= 1);
-    // About one datagram per tick: 40 units' updates fit in one.
+    // About one datagram per tick: 40 units' updates fit in one, and a
+    // quiet tick sends an empty one.
     assert!(datagrams > 40, "{datagrams} datagrams");
     assert!(dropped > 3, "{dropped} dropped");
 

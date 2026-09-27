@@ -104,7 +104,7 @@ pub struct OutboundQueue {
     /// The largest datagram the transport carries; 0 when it carries none.
     datagram_max: AtomicUsize,
     /// Datagram acks from the client, for the shard to take on its next
-    /// tick: (datagram number, frames the client had applied then).
+    /// tick: (datagram number, the client's stream tick then).
     datagram_acks: Mutex<Vec<(u64, u64)>>,
     state: Mutex<State>,
     ready: Condvar,

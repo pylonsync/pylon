@@ -213,7 +213,7 @@ function pushVarint(out: number[], v: number): void {
 
 /**
  * Datagram acks: the type byte `ShardClientMessage.Acks`, a varint count,
- * then per ack the datagram's frame number and `EntityTable.framesApplied`
+ * then per ack the datagram's frame number and `EntityTable.streamTick`
  * when the client applied it, both varints. Sent as a datagram, or on the
  * stream.
  */

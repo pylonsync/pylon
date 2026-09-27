@@ -16,15 +16,22 @@
 //! varint  input ack: the highest client_seq the shard has processed
 //! f32 LE  precision
 //! varint  update count, then per entity (ids ascend, delta-coded):
-//!           id, u8 generation, u8 mask (1 x, 2 y, 4 z, 8 components),
+//!           id, u16 LE spawn tick, u8 mask (1 x, 2 y, 4 z, 8 components),
 //!           the axes in the mask (zigzag, absolute quantized),
 //!           components when bit 8 is set (as in a frame)
 //! ```
 //!
-//! **Generation.** Both sides count the spawns of each id (mod 256) on the
-//! stream. An update names the generation it is for, so a late datagram for
-//! an entity that has since been despawned and spawned again under the same
-//! id changes nothing.
+//! **Spawn tick.** An update names the tick of the stream frame that
+//! spawned the entity (its low 16 bits), and the client applies it only to
+//! the entity spawned then. A late datagram for an entity that has since
+//! been despawned and spawned again under the same id, or one built before
+//! a full frame, changes nothing. Ticks travel in every frame header, so
+//! the two sides agree even when the server dropped frames the client never
+//! got, which counting spawns could not survive.
+//!
+//! **Acks.** The client acks a datagram with its number and the tick of
+//! the last stream frame it had applied (`ReplicaTable::stream_tick`). An
+//! ack covers an entity only when that tick is at or after its spawn.
 //!
 //! **Order.** The client keeps, per entity, the number of the last datagram
 //! it applied, and skips an update from an older one.
@@ -39,15 +46,20 @@ pub const VERSION: u8 = 2;
 /// precision, and the update count.
 pub const MAX_HEADER_LEN: usize = 1 + 10 + 10 + 10 + 4 + 3;
 
-/// Encode one update body (everything after the id): generation, mask,
-/// the axes given, and the component changes.
+/// The part of a spawn tick an update carries.
+pub fn spawn_tag(spawn_tick: u64) -> u16 {
+    spawn_tick as u16
+}
+
+/// Encode one update body (everything after the id): the spawn tick's tag,
+/// mask, the axes given, and the component changes.
 pub fn encode_entry_into(
     out: &mut Vec<u8>,
-    generation: u8,
+    spawn_tick: u64,
     axes: [Option<i64>; 3],
     components: &[ComponentChange<'_>],
 ) {
-    out.push(generation);
+    out.extend_from_slice(&spawn_tag(spawn_tick).to_le_bytes());
     let mut m = 0u8;
     for (i, bit) in [mask::X, mask::Y, mask::Z].into_iter().enumerate() {
         if axes[i].is_some() {
@@ -143,7 +155,7 @@ pub struct DatagramSummary {
     pub ack: u64,
     /// Entities it updated.
     pub updated: Vec<EntityId>,
-    /// Updates it skipped: an unknown entity, another generation, an older
+    /// Updates it skipped: an unknown entity, another spawn, an older
     /// datagram than the entity's last, or a precision the table is not in.
     pub skipped: usize,
 }
@@ -195,11 +207,12 @@ impl ReplicaTable {
                 None => v,
             };
             last = Some(id);
-            let (&generation, rest) = b.split_first().ok_or_else(|| err("datagram ends early"))?;
-            let (&m, rest) = rest
-                .split_first()
-                .ok_or_else(|| err("datagram ends early"))?;
-            b = rest;
+            if b.len() < 3 {
+                return Err(err("datagram ends early"));
+            }
+            let tag = u16::from_le_bytes([b[0], b[1]]);
+            let m = b[2];
+            b = &b[3..];
             let mut axes = [None; 3];
             for (i, bit) in [mask::X, mask::Y, mask::Z].into_iter().enumerate() {
                 if m & bit != 0 {
@@ -231,7 +244,7 @@ impl ReplicaTable {
                 }
             }
             let current = usable
-                && self.generations.get(&id) == Some(&generation)
+                && self.spawn_ticks.get(&id).map(|&t| spawn_tag(t)) == Some(tag)
                 && self.datagram_frames.get(&id).is_none_or(|&f| frame > f);
             let Some(entity) = self.entities.get_mut(&id).filter(|_| current) else {
                 summary.skipped += 1;
@@ -267,25 +280,26 @@ mod tests {
     use super::*;
     use crate::frame::FrameBuilder;
 
-    /// A table holding entities 1 and 2 (generation 1), precision 0.5.
+    /// A table holding entities 1 and 2, spawned at tick 1, precision 0.5.
     fn table() -> ReplicaTable {
         let mut t = ReplicaTable::new();
         let mut f = FrameBuilder::new(true, 0.5);
         f.spawn(1, [0, 0, 0], std::iter::empty());
         f.spawn(2, [10, 10, 0], [(7u8, &b"a"[..])].into_iter());
-        t.apply(&f.finish()).unwrap();
+        t.apply_stream(&f.finish(), 1).unwrap();
         t
     }
 
+    /// Updates are (id, spawn tick, axes).
     fn datagram(
         frame: u64,
         precision: f32,
-        updates: &[(EntityId, u8, [Option<i64>; 3])],
+        updates: &[(EntityId, u64, [Option<i64>; 3])],
     ) -> Vec<u8> {
         let mut d = DatagramBuilder::new(frame, 40 + frame, 3, precision);
-        for (id, generation, axes) in updates {
+        for (id, spawn_tick, axes) in updates {
             let mut e = Vec::new();
-            encode_entry_into(&mut e, *generation, *axes, &[]);
+            encode_entry_into(&mut e, *spawn_tick, *axes, &[]);
             d.update(*id, &e);
         }
         d.finish()
@@ -294,7 +308,8 @@ mod tests {
     #[test]
     fn an_update_sets_absolute_axes_and_components() {
         let mut t = table();
-        assert_eq!(t.generations.get(&2), Some(&1));
+        assert_eq!(t.spawn_ticks.get(&2), Some(&1));
+        assert_eq!(t.stream_tick, 1);
         let mut d = DatagramBuilder::new(1, 41, 9, 0.5);
         let mut e = Vec::new();
         encode_entry_into(
@@ -337,14 +352,14 @@ mod tests {
     }
 
     #[test]
-    fn another_generation_unknown_entity_and_other_precision_are_skipped() {
+    fn another_spawn_unknown_entity_and_other_precision_are_skipped() {
         let mut t = table();
-        // Entity 1 despawns and spawns again: generation 2.
+        // Entity 1 despawns and spawns again at tick 2.
         let mut f = FrameBuilder::new(false, 0.5);
         f.despawn(1);
         f.spawn(1, [3, 3, 0], std::iter::empty());
-        t.apply(&f.finish()).unwrap();
-        assert_eq!(t.generations.get(&1), Some(&2));
+        t.apply_stream(&f.finish(), 2).unwrap();
+        assert_eq!(t.spawn_ticks.get(&1), Some(&2));
         let s = t
             .apply_datagram(&datagram(
                 1,
@@ -373,10 +388,45 @@ mod tests {
         let mut f = FrameBuilder::new(false, 0.5);
         f.despawn(1);
         f.spawn(1, [0, 0, 0], std::iter::empty());
-        t.apply(&f.finish()).unwrap();
-        // A datagram numbered below 9 but for the new generation applies.
+        t.apply_stream(&f.finish(), 2).unwrap();
+        // A datagram numbered below 9 but for the new spawn applies.
         let s = t
-            .apply_datagram(&datagram(10, 0.5, &[(1, 2, [Some(4), None, None])]))
+            .apply_datagram(&datagram(5, 0.5, &[(1, 2, [Some(4), None, None])]))
+            .unwrap();
+        assert_eq!(s.updated, vec![1]);
+    }
+
+    #[test]
+    fn a_full_frame_starts_over_whatever_the_client_missed() {
+        let mut t = table();
+        // The server dropped frames the client never got, then sent a full
+        // frame at tick 30: every entity counts as spawned then.
+        let mut f = FrameBuilder::new(true, 0.5);
+        f.spawn(1, [5, 5, 0], std::iter::empty());
+        t.apply_stream(&f.finish(), 30).unwrap();
+        assert_eq!(t.stream_tick, 30);
+        assert_eq!(t.spawn_ticks.get(&1), Some(&30));
+        assert_eq!(t.spawn_ticks.get(&2), None);
+        // A datagram built before it names the old spawn: skipped.
+        let s = t
+            .apply_datagram(&datagram(7, 0.5, &[(1, 1, [Some(99), None, None])]))
+            .unwrap();
+        assert_eq!(s.skipped, 1);
+        let s = t
+            .apply_datagram(&datagram(8, 0.5, &[(1, 30, [Some(6), None, None])]))
+            .unwrap();
+        assert_eq!(s.updated, vec![1]);
+        assert_eq!(t.entities[&1].q[0], 6);
+    }
+
+    #[test]
+    fn spawn_ticks_wrap_at_16_bits() {
+        let mut t = ReplicaTable::new();
+        let mut f = FrameBuilder::new(true, 0.5);
+        f.spawn(1, [0, 0, 0], std::iter::empty());
+        t.apply_stream(&f.finish(), 70_000).unwrap();
+        let s = t
+            .apply_datagram(&datagram(1, 0.5, &[(1, 70_000, [Some(1), None, None])]))
             .unwrap();
         assert_eq!(s.updated, vec![1]);
     }

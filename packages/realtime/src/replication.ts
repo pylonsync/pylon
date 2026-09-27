@@ -27,17 +27,19 @@
  * **Datagrams** (`pylon_replication::datagram`): on WebTransport, spawns,
  * despawns, and full frames come as frames on the stream, and updates as
  * datagrams that may be lost, duplicated, or reordered. A datagram update
- * carries the entity's absolute position and the generation (spawn count
- * of its id) it is for. {@link EntityTable.applyDatagram} applies an update
- * only to the entity's current generation and only when it is newer than
- * the entity's last datagram, and skips it otherwise.
+ * carries the entity's absolute position and the tick of the stream frame
+ * that spawned it (low 16 bits). {@link EntityTable.applyDatagram} applies
+ * an update only to the entity spawned at that tick and only when it is
+ * newer than the entity's last datagram, and skips it otherwise. Stream
+ * frames must go through `apply(frame, tick)` so the table knows the
+ * ticks; a full frame starts them over.
  *
  * ```text
  * u8      version (2)
  * varint  frame number, tick, input ack
  * f32 LE  precision
  * varint  update count, per entity (ids ascending, delta-coded): id,
- *         u8 generation, u8 mask, the masked axes (zigzag, absolute),
+ *         u16 LE spawn tick, u8 mask, the masked axes (zigzag, absolute),
  *         components if bit 8
  * ```
  */
@@ -83,7 +85,7 @@ export interface DatagramSummary {
   /** Entities it updated. */
   updated: number[];
   /**
-   * Updates it skipped: an unknown entity, another generation, an older
+   * Updates it skipped: an unknown entity, another spawn, an older
    * datagram than the entity's last, or another precision.
    */
   skipped: number;
@@ -110,6 +112,11 @@ export function readDatagramHeader(datagram: Uint8Array): { frame: number; tick:
     tick: toSafe(r.varint(), "tick"),
     ack: toSafe(r.varint(), "ack"),
   };
+}
+
+/** The low 16 bits of a spawn tick, as a datagram update carries them. */
+function spawnTag(tick: number | undefined): number | undefined {
+  return tick === undefined ? undefined : tick % 0x10000;
 }
 
 class Reader {
@@ -208,15 +215,18 @@ export class EntityTable {
   readonly entities = new Map<number, ReplicatedEntity>();
   /** World units per quantization step, from the last frame. */
   precision = 0.01;
-  /** Spawns of each id so far, mod 256: the generation a datagram names. */
-  readonly generations = new Map<number, number>();
+  /**
+   * The tick of the stream frame that spawned each entity, when frames are
+   * applied with their tick. Datagram updates name it.
+   */
+  readonly spawnTicks = new Map<number, number>();
   /** The last datagram applied to each entity. */
   readonly datagramFrames = new Map<number, number>();
   /**
-   * Frames applied so far. A client acks each datagram with this count,
-   * so the server knows which spawns it had.
+   * The tick of the last frame applied with its tick. A client acks each
+   * datagram with it, so the server knows which spawns it had.
    */
-  framesApplied = 0;
+  streamTick = 0;
 
   get size(): number {
     return this.entities.size;
@@ -226,18 +236,21 @@ export class EntityTable {
     return this.entities.get(id);
   }
 
-  /**
-   * Forget everything: a new connection starts over, and its server counts
-   * generations and frames from zero.
-   */
+  /** Forget everything. */
   clear(): void {
     this.entities.clear();
-    this.generations.clear();
+    this.spawnTicks.clear();
     this.datagramFrames.clear();
-    this.framesApplied = 0;
+    this.streamTick = 0;
   }
 
-  apply(frame: Uint8Array): ReplicationSummary {
+  /**
+   * Apply a replication frame. On a connection that also gets datagrams,
+   * pass the tick from the frame's header: the table records the tick each
+   * entity spawned at and the tick of the last frame, which datagrams and
+   * their acks name. A full frame starts that record over.
+   */
+  apply(frame: Uint8Array, tick?: number): ReplicationSummary {
     const r = new Reader(frame);
     const version = r.u8();
     if (version !== REPLICATION_VERSION) throw new ReplicationError(`version ${version}`);
@@ -247,6 +260,7 @@ export class EntityTable {
     if (full) {
       this.entities.clear();
       this.datagramFrames.clear();
+      this.spawnTicks.clear();
     }
     this.precision = precision;
     const summary: ReplicationSummary = { full, spawned: [], updated: [], despawned: [] };
@@ -257,6 +271,7 @@ export class EntityTable {
       last = nextId(r, last);
       this.entities.delete(last);
       this.datagramFrames.delete(last);
+      this.spawnTicks.delete(last);
       summary.despawned.push(last);
     }
 
@@ -280,7 +295,8 @@ export class EntityTable {
         components,
       });
       this.datagramFrames.delete(last);
-      this.generations.set(last, ((this.generations.get(last) ?? 0) + 1) & 0xff);
+      if (tick === undefined) this.spawnTicks.delete(last);
+      else this.spawnTicks.set(last, tick);
       summary.spawned.push(last);
     }
 
@@ -305,7 +321,7 @@ export class EntityTable {
       e.y = e.qy * precision;
       e.z = e.qz * precision;
     }
-    this.framesApplied += 1;
+    if (tick !== undefined) this.streamTick = tick;
     return summary;
   }
 
@@ -331,7 +347,7 @@ export class EntityTable {
     let last: number | null = null;
     for (let i = 0; i < Number(n); i++) {
       last = nextId(r, last);
-      const generation = r.u8();
+      const tag = r.u8() | (r.u8() << 8);
       const mask = r.u8();
       const qx = mask & MASK_X ? toSafe(r.zigzag(), "position") : null;
       const qy = mask & MASK_Y ? toSafe(r.zigzag(), "position") : null;
@@ -357,7 +373,7 @@ export class EntityTable {
       const current =
         usable &&
         e !== undefined &&
-        this.generations.get(last) === generation &&
+        spawnTag(this.spawnTicks.get(last)) === tag &&
         (lastFrame === undefined || frame > lastFrame);
       if (!current || !e) {
         summary.skipped += 1;

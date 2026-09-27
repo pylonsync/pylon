@@ -125,7 +125,8 @@ fn run(seed: u64, budget: usize, max_size: usize) {
     }
     let mut rep = Replicator::new();
     let mut table = ReplicaTable::new();
-    let mut stream: Wire<Vec<u8>> = Wire::new();
+    // Stream frames with the tick their header names.
+    let mut stream: Wire<(u64, Vec<u8>)> = Wire::new();
     let mut datagrams: Wire<Vec<u8>> = Wire::new();
     let mut acks: Wire<(u64, u64)> = Wire::new();
     let bad = Network {
@@ -187,8 +188,10 @@ fn run(seed: u64, budget: usize, max_size: usize) {
                     .filter(|_| rng.chance(80))
                     .collect();
             }
-            // Now and then the outbound queue drops a frame: a full frame.
+            // Now and then the outbound queue drops the frames it holds
+            // (the client never gets them), and the next frame is full.
             if rng.chance(1) {
+                stream.items.clear();
                 dropped += 1;
             }
         }
@@ -226,7 +229,7 @@ fn run(seed: u64, budget: usize, max_size: usize) {
         };
         if !out.bytes.is_empty() {
             stream_due = stream_due.max(tick + delay(&mut rng));
-            stream.send(stream_due, out.bytes);
+            stream.send(stream_due, (tick, out.bytes));
         }
         for d in out.datagrams {
             if rng.chance(net.loss) {
@@ -240,13 +243,13 @@ fn run(seed: u64, budget: usize, max_size: usize) {
         }
 
         // The client: the stream first, then datagrams.
-        for f in stream.take(tick) {
-            table.apply(&f).expect("a stream frame applies");
+        for (t, f) in stream.take(tick) {
+            table.apply_stream(&f, t).expect("a stream frame applies");
         }
         let mut applied = Vec::new();
         for d in datagrams.take(tick) {
             let s = table.apply_datagram(&d).expect("a datagram decodes");
-            applied.push((s.frame, table.frames_applied));
+            applied.push((s.frame, table.stream_tick));
         }
         for a in applied {
             if rng.chance(net.loss) {
@@ -314,7 +317,7 @@ fn an_ack_of_an_older_datagram_does_not_hide_a_newer_state() {
         )
     };
     let spawn = frame(&mut rep, &store, 1);
-    table.apply(&spawn.bytes).unwrap();
+    table.apply_stream(&spawn.bytes, 1).unwrap();
 
     store.set_pos(1, [5.0, 0.0, 0.0]);
     let a = frame(&mut rep, &store, 2).datagrams.remove(0);
@@ -324,7 +327,7 @@ fn an_ack_of_an_older_datagram_does_not_hide_a_newer_state() {
     let sb = table.apply_datagram(&b).unwrap();
     let sa = table.apply_datagram(&a).unwrap();
     assert_eq!(table.entities[&1].q[0], 9);
-    rep.ack_datagrams(KEY, &[(sa.frame, table.frames_applied)]);
+    rep.ack_datagrams(KEY, &[(sa.frame, table.stream_tick)]);
     let _ = sb;
 
     // Back to A's position: the client is at 9, so this must go out.
@@ -370,7 +373,7 @@ fn an_entity_with_too_many_unacked_updates_spawns_again() {
             },
         );
         if !out.bytes.is_empty() {
-            let s = table.apply(&out.bytes).unwrap();
+            let s = table.apply_stream(&out.bytes, tick).unwrap();
             if !s.full && s.spawned == vec![1] {
                 respawns += 1;
             }
@@ -385,7 +388,7 @@ fn an_entity_with_too_many_unacked_updates_spawns_again() {
 
 /// A datagram that arrives before the stream frame with its entity's spawn
 /// changes nothing, and its ack must not count: the client acks it with the
-/// number of stream frames it had then.
+/// tick of the last stream frame it had then.
 #[test]
 fn an_update_that_beat_its_spawn_is_sent_again() {
     let config = ReplicationConfig {
@@ -416,19 +419,19 @@ fn an_update_that_beat_its_spawn_is_sent_again() {
         )
     };
     let empty = frame(&mut rep, &store, 1);
-    table.apply(&empty.bytes).unwrap();
+    table.apply_stream(&empty.bytes, 1).unwrap();
 
     store.spawn(1, [0.0, 0.0, 0.0]);
     let spawn = frame(&mut rep, &store, 2);
     store.set_pos(1, [0.0, 7.0, 0.0]);
     let update = frame(&mut rep, &store, 3).datagrams.remove(0);
 
-    // The update arrives first: skipped, and acked with the frames the
+    // The update arrives first: skipped, and acked with the stream tick the
     // client had then.
     let s = table.apply_datagram(&update).unwrap();
     assert_eq!(s.skipped, 1);
-    rep.ack_datagrams(KEY, &[(s.frame, table.frames_applied)]);
-    table.apply(&spawn.bytes).unwrap();
+    rep.ack_datagrams(KEY, &[(s.frame, table.stream_tick)]);
+    table.apply_stream(&spawn.bytes, 2).unwrap();
     assert_eq!(table.entities[&1].q[1], 0);
 
     // Nothing changes now, but the client is not where the store is.
@@ -436,4 +439,118 @@ fn an_update_that_beat_its_spawn_is_sent_again() {
     assert_eq!(next.datagrams.len(), 1, "the skipped update goes out again");
     table.apply_datagram(&next.datagrams[0]).unwrap();
     assert_eq!(table.entities[&1].q[1], 7);
+}
+
+fn datagram_frame(
+    rep: &mut Replicator,
+    store: &Replicated,
+    tick: u64,
+    dropped: u64,
+    input_ack: u64,
+) -> pylon_realtime::replication::FrameOutput {
+    let config = ReplicationConfig {
+        precision: 1.0,
+        max_bytes_per_tick: 0,
+        plane: Plane::XY,
+    };
+    rep.begin_tick(store);
+    rep.frame(
+        store,
+        &config,
+        tick,
+        FrameInput {
+            key: KEY,
+            visible: None,
+            area: None,
+            dropped,
+            queue_full: false,
+            datagram: Some(DatagramInput {
+                max_size: 1200,
+                input_ack,
+            }),
+        },
+    )
+}
+
+/// The outbound queue drops frames the replicator already built (a spawn
+/// among them) before the client gets them. The next frame is full, and
+/// the client's datagram updates apply after it: nothing the client missed
+/// is left counted on one side only.
+#[test]
+fn updates_apply_after_the_queue_dropped_a_spawn() {
+    let mut store = Replicated::new();
+    store.spawn(1, [0.0, 0.0, 0.0]);
+    let mut rep = Replicator::new();
+    let mut table = ReplicaTable::new();
+    let first = datagram_frame(&mut rep, &store, 1, 0, 0);
+    table.apply_stream(&first.bytes, 1).unwrap();
+
+    // Entity 2 spawns, and entity 1 respawns on the stream; the queue drops
+    // that frame.
+    store.spawn(2, [5.0, 0.0, 0.0]);
+    let lost = datagram_frame(&mut rep, &store, 2, 0, 0);
+    assert!(!lost.bytes.is_empty());
+
+    let full = datagram_frame(&mut rep, &store, 3, 1, 0);
+    let s = table.apply_stream(&full.bytes, 3).unwrap();
+    assert!(s.full);
+
+    for tick in 4..8 {
+        store.set_pos(1, [tick as f32, 0.0, 0.0]);
+        store.set_pos(2, [tick as f32 * 2.0, 0.0, 0.0]);
+        let out = datagram_frame(&mut rep, &store, tick, 1, 0);
+        assert!(out.bytes.is_empty());
+        for d in &out.datagrams {
+            let s = table.apply_datagram(d).unwrap();
+            assert_eq!(s.skipped, 0, "tick {tick}");
+            rep.ack_datagrams(KEY, &[(s.frame, table.stream_tick)]);
+        }
+        assert_eq!(table.entities[&1].q[0], tick as i64);
+        assert_eq!(table.entities[&2].q[0], tick as i64 * 2);
+    }
+}
+
+/// A client on a new connection keeps nothing from the old one: its first
+/// frame is full, and updates apply after it even though the new
+/// subscription numbers its datagrams from 1 again.
+#[test]
+fn a_new_connection_starts_over() {
+    let mut store = Replicated::new();
+    store.spawn(1, [0.0, 0.0, 0.0]);
+    let mut table = ReplicaTable::new();
+    let mut old = Replicator::new();
+    let f = datagram_frame(&mut old, &store, 1, 0, 0);
+    table.apply_stream(&f.bytes, 1).unwrap();
+    for tick in 2..40 {
+        store.set_pos(1, [tick as f32, 0.0, 0.0]);
+        for d in datagram_frame(&mut old, &store, tick, 0, 0).datagrams {
+            table.apply_datagram(&d).unwrap();
+        }
+    }
+
+    let mut new = Replicator::new();
+    let f = datagram_frame(&mut new, &store, 40, 0, 0);
+    table.apply_stream(&f.bytes, 40).unwrap();
+    store.set_pos(1, [100.0, 0.0, 0.0]);
+    let out = datagram_frame(&mut new, &store, 41, 0, 0);
+    let s = table.apply_datagram(&out.datagrams[0]).unwrap();
+    assert_eq!(s.updated, vec![1]);
+    assert_eq!(table.entities[&1].q[0], 100);
+}
+
+/// A tick with no change for the client still sends a datagram with the
+/// tick and the input ack, so an input that changed nothing is acked.
+#[test]
+fn a_quiet_tick_sends_the_input_ack() {
+    let mut store = Replicated::new();
+    store.spawn(1, [0.0, 0.0, 0.0]);
+    let mut rep = Replicator::new();
+    let mut table = ReplicaTable::new();
+    let f = datagram_frame(&mut rep, &store, 1, 0, 0);
+    table.apply_stream(&f.bytes, 1).unwrap();
+    let out = datagram_frame(&mut rep, &store, 2, 0, 9);
+    assert!(out.bytes.is_empty());
+    assert_eq!(out.datagrams.len(), 1);
+    let s = table.apply_datagram(&out.datagrams[0]).unwrap();
+    assert_eq!((s.tick, s.ack, s.updated.len()), (2, 9, 0));
 }

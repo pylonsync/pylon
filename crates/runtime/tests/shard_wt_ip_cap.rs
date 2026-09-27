@@ -50,7 +50,7 @@ async fn sessions_over_the_per_ip_cap_are_refused() {
 
     let first = connect(&url, &hashes).await.expect("the first session");
     let second = connect(&url, &hashes).await;
-    let err = second.err().expect("the second session is refused");
+    let err = second.expect_err("the second session is refused");
     // wtransport reports the 429 as a rejected session request.
     assert!(err.contains("rejected"), "{err}");
 

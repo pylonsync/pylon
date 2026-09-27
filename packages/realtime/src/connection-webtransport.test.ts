@@ -128,15 +128,26 @@ class FakeWebSocket {
 
 const HASH = new Uint8Array(32).fill(7);
 let infoStatus = 200;
+// "hang": the endpoint request never answers (until it is aborted).
+let infoMode: "answer" | "hang" = "answer";
 const fetched: string[] = [];
+const aborted: string[] = [];
 
 const realWebSocket = globalThis.WebSocket;
 const realFetch = globalThis.fetch;
 const g = globalThis as { WebTransport?: unknown };
 beforeAll(() => {
   globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-  globalThis.fetch = (async (url: string) => {
+  globalThis.fetch = (async (url: string, init?: { signal?: AbortSignal }) => {
     fetched.push(String(url));
+    if (infoMode === "hang") {
+      return new Promise((_, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted.push(String(url));
+          reject(new Error("aborted"));
+        });
+      });
+    }
     if (infoStatus !== 200) return new Response("{}", { status: infoStatus });
     return new Response(
       JSON.stringify({ url: "https://wt.example:443/shard", certHashes: [btoa(String.fromCharCode(...HASH))] }),
@@ -153,7 +164,9 @@ beforeEach(() => {
   FakeWebTransport.sessions.length = 0;
   sockets.length = 0;
   fetched.length = 0;
+  aborted.length = 0;
   infoStatus = 200;
+  infoMode = "answer";
 });
 
 async function until(what: string, cond: () => boolean) {
@@ -349,4 +362,61 @@ test("a forced WebTransport stops with an error when the app does not serve it",
   expect(fetched.length).toBe(1);
   expect(sockets.length).toBe(0);
   client.close();
+});
+
+test("a reconnect over WebTransport starts the table over, so updates apply", async () => {
+  const client = connectShard("field", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    ticket: "t1",
+    transport: "webtransport",
+    reconnectBackoffMs: 1,
+  });
+  let fulls = 0;
+  client.onReplication((_, summary) => {
+    if (summary.full) fulls += 1;
+  });
+  await until("the session", () => client.connected);
+  const first = FakeWebTransport.sessions[0];
+  first.sendFrames([frame(3, 4, 1, 0, fullFrame)]);
+  await until("the full frame", () => fulls === 1);
+  first.sendDatagram(bytes(datagram2.datagram));
+  await until("the update", () => client.entities.get(1)?.qx === 175);
+
+  // The server drops the client; the new subscription starts from scratch
+  // and sends the same frames (its ticks and datagram numbers restart).
+  first.serverClose(3, "client too slow");
+  await until("the second session", () => FakeWebTransport.sessions.length === 2 && client.connected);
+  const second = FakeWebTransport.sessions[1];
+  second.sendFrames([frame(3, 4, 1, 0, fullFrame)]);
+  await until("the full frame", () => fulls === 2);
+  expect(client.entities.get(1)?.qx).toBe(100);
+  second.sendDatagram(bytes(datagram2.datagram));
+  await until("the update", () => client.entities.get(1)?.qx === 175);
+  client.close();
+});
+
+test("auto falls back to a WebSocket when the endpoint request stalls", async () => {
+  infoMode = "hang";
+  const client = connectShard("field", {
+    subscriberId: "p1",
+    baseUrl: "h",
+    transport: "auto",
+    webTransportTimeoutMs: 20,
+  });
+  await until("the socket", () => sockets.length === 1);
+  expect(aborted.length).toBe(1);
+  expect(FakeWebTransport.sessions.length).toBe(0);
+  client.close();
+});
+
+test("closing the client stops the endpoint request", async () => {
+  infoMode = "hang";
+  const client = connectShard("field", { subscriberId: "p1", baseUrl: "h", transport: "webtransport" });
+  await until("the request", () => fetched.length === 1);
+  client.close();
+  await until("the abort", () => aborted.length === 1);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(sockets.length).toBe(0);
+  expect(FakeWebTransport.sessions.length).toBe(0);
 });

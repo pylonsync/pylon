@@ -134,7 +134,7 @@ fn version_3_converges_through_dropped_datagrams() {
             // An input: type byte 0, then the envelope in the shard's codec.
             let mut msg = vec![wire::client::INPUT];
             msg.extend(serde_json::to_vec(&serde_json::json!({ "input": [7, 42] })).unwrap());
-            ws.send(Message::Binary(msg.into())).unwrap();
+            ws.send(Message::Binary(msg)).unwrap();
             sent_input = true;
         }
         if frozen_at.is_none() && elapsed > Duration::from_secs(3) {
@@ -152,7 +152,10 @@ fn version_3_converges_through_dropped_datagrams() {
                 let (k, payload) = (bytes[0], &bytes[wire::HEADER_LEN..]);
                 match k {
                     kind::REPLICATION => {
-                        table.apply(payload).expect("a stream frame applies");
+                        let tick = u64::from_be_bytes(bytes[2..10].try_into().unwrap());
+                        table
+                            .apply_stream(payload, tick)
+                            .expect("a stream frame applies");
                         stream_frames += 1;
                     }
                     kind::DATAGRAM => {
@@ -167,7 +170,7 @@ fn version_3_converges_through_dropped_datagrams() {
                             continue;
                         }
                         let s = table.apply_datagram(payload).expect("a datagram decodes");
-                        pending_acks.push((s.frame, table.frames_applied));
+                        pending_acks.push((s.frame, table.stream_tick));
                     }
                     other => panic!("unexpected frame kind {other}"),
                 }
@@ -182,7 +185,7 @@ fn version_3_converges_through_dropped_datagrams() {
         }
         if pending_acks.len() >= 8 || (!pending_acks.is_empty() && !lossy) {
             let msg = wire::encode_datagram_acks(&pending_acks);
-            ws.send(Message::Binary(msg.into())).unwrap();
+            ws.send(Message::Binary(msg)).unwrap();
             pending_acks.clear();
         }
     }

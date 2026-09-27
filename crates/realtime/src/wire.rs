@@ -94,8 +94,9 @@ pub mod client {
 pub const MAX_ACKS_PER_MESSAGE: usize = 512;
 
 /// Encode datagram acks: the type byte [`client::ACKS`], a varint count,
-/// then per ack the datagram number and the frames the client had applied
-/// when it took it, both varints.
+/// then per ack the datagram number and the tick of the last stream frame
+/// the client had applied when it took it (`ReplicaTable::stream_tick`),
+/// both varints.
 pub fn encode_datagram_acks(acks: &[(u64, u64)]) -> Vec<u8> {
     let mut out = Vec::with_capacity(2 + acks.len() * 4);
     out.push(client::ACKS);

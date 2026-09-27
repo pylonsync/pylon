@@ -50,7 +50,7 @@ describe("the Rust encoder's datagrams (replication.fixtures.json)", () => {
         }));
     for (const [i, event] of fixtures.datagrams.entries()) {
       if ("stream" in event && event.stream) {
-        table.apply(bytes(event.stream));
+        table.apply(bytes(event.stream), event.tick as number);
       } else if ("datagram" in event && event.datagram) {
         const s = table.applyDatagram(bytes(event.datagram));
         expect(s.frame, `event ${i}`).toBe(event.frame);
@@ -58,7 +58,7 @@ describe("the Rust encoder's datagrams (replication.fixtures.json)", () => {
         expect(s.ack).toBe(event.ack);
         expect(s.updated, `event ${i}`).toEqual(event.updated);
         expect(s.skipped, `event ${i}`).toBe(event.skipped);
-        expect(table.framesApplied).toBe(event.framesApplied);
+        expect(table.streamTick).toBe(event.streamTick);
       }
       expect(tableJson(), `after event ${i}`).toEqual(event.table as unknown as ReturnType<typeof tableJson>);
     }

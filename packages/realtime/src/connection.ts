@@ -13,6 +13,7 @@ import {
   WEBTRANSPORT_CLOSE,
   StreamFrames,
   decodeWebTransportInfo,
+  type WebTransportInfo,
   encodeDatagramAcks,
   encodeWebTransportHello,
   encodeWebTransportInput,
@@ -251,6 +252,8 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   let attempts = 0;
   // `"auto"` after WebTransport failed to open: WebSockets from now on.
   let webSocketOnly = false;
+  // Stops the WebTransport attempt in progress (its endpoint request).
+  let opening: AbortController | null = null;
   // The newest tick and ack this link has seen. Over WebTransport, stream
   // frames and datagrams can arrive out of order.
   let linkTick = -1;
@@ -445,7 +448,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       if (frame.kind === ShardFrameKind.Replication) {
         let summary: ReplicationSummary;
         try {
-          summary = entities.apply(frame.payload);
+          summary = entities.apply(frame.payload, frame.tick);
         } catch (e) {
           // Out of sync with the server. Reconnecting gets a full baseline.
           dispatchError(e instanceof Error ? e : new Error(String(e)));
@@ -493,7 +496,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       backoff = options.reconnectBackoffMs ?? 500;
       const summary: ReplicationSummary = { full: false, spawned: [], updated: s.updated, despawned: [] };
       for (const h of replicationHandlers) h(entities, summary, lastTick, lastAck);
-      return encodeDatagramAcks([[s.frame, entities.framesApplied]]);
+      return encodeDatagramAcks([[s.frame, entities.streamTick]]);
     } catch (e) {
       // Not a datagram this client can read: start over with a baseline.
       dispatchError(e instanceof Error ? e : new Error(String(e)));
@@ -581,45 +584,58 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     if (typeof WT !== "function") {
       throw new WebTransportUnavailable("unsupported", "this browser has no WebTransport");
     }
-    let response: Response;
-    try {
-      response = await fetch(webTransportInfoUrl());
-    } catch (e) {
-      throw new WebTransportUnavailable("transient", `fetching the endpoint: ${errorMessage(e)}`);
-    }
-    if (response.status === 404) {
-      throw new WebTransportUnavailable("unsupported", "the app does not serve WebTransport");
-    }
-    if (!response.ok) {
-      throw new WebTransportUnavailable("transient", `fetching the endpoint: HTTP ${response.status}`);
-    }
-    const info = decodeWebTransportInfo(await response.json());
-    if (closed || attempt !== attempts) return;
-
-    const wt = new WT(info.url, {
-      // Pins the server's self-signed certificate; none for a CA-signed one.
-      ...(info.certHashes.length > 0
-        ? { serverCertificateHashes: info.certHashes.map((value) => ({ algorithm: "sha-256" as const, value })) }
-        : {}),
-      requireUnreliable: true,
-    });
-    // `closed` rejects when the session never opens; that is handled below.
-    wt.closed.catch(() => {});
+    // One deadline for the whole open: the endpoint request, its body,
+    // the session, and its stream. The request stops at the deadline, or
+    // when the client closes.
     const timeoutMs = options.webTransportTimeoutMs ?? 3000;
+    const abort = new AbortController();
+    opening = abort;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new WebTransportUnavailable("failed", `the session did not open in ${timeoutMs} ms`)),
-        timeoutMs,
-      );
+      timer = setTimeout(() => {
+        abort.abort();
+        reject(new WebTransportUnavailable("failed", `the session did not open in ${timeoutMs} ms`));
+      }, timeoutMs);
     });
+    timeout.catch(() => {});
+    let wt: WebTransportSession | null = null;
     let stream: Awaited<ReturnType<WebTransportSession["createBidirectionalStream"]>>;
     try {
+      let info: WebTransportInfo;
+      try {
+        const response = await Promise.race([
+          fetch(webTransportInfoUrl(), { signal: abort.signal }),
+          timeout,
+        ]);
+        if (response.status === 404) {
+          throw new WebTransportUnavailable("unsupported", "the app does not serve WebTransport");
+        }
+        if (!response.ok) {
+          throw new WebTransportUnavailable("transient", `fetching the endpoint: HTTP ${response.status}`);
+        }
+        info = decodeWebTransportInfo(await Promise.race([response.json(), timeout]));
+      } catch (e) {
+        if (e instanceof WebTransportUnavailable) throw e;
+        // The app did not answer: the WebSocket may still work, and a later
+        // attempt may reach the endpoint.
+        throw new WebTransportUnavailable("transient", `fetching the endpoint: ${errorMessage(e)}`);
+      }
+      if (closed || attempt !== attempts) return;
+
+      wt = new WT(info.url, {
+        // Pins the server's self-signed certificate; none for a CA-signed one.
+        ...(info.certHashes.length > 0
+          ? { serverCertificateHashes: info.certHashes.map((value) => ({ algorithm: "sha-256" as const, value })) }
+          : {}),
+        requireUnreliable: true,
+      });
+      // `closed` rejects when the session never opens; that is handled below.
+      wt.closed.catch(() => {});
       await Promise.race([wt.ready, timeout]);
       stream = await Promise.race([wt.createBidirectionalStream(), timeout]);
     } catch (e) {
       try {
-        wt.close();
+        wt?.close();
       } catch {
         // Already closed.
       }
@@ -628,6 +644,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
         : new WebTransportUnavailable("failed", `the session did not open: ${errorMessage(e)}`);
     } finally {
       clearTimeout(timer);
+      if (opening === abort) opening = null;
     }
     if (closed || attempt !== attempts) {
       wt.close();
@@ -832,6 +849,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       attempts += 1;
+      opening?.abort();
       link?.close();
     },
   };

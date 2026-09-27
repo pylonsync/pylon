@@ -242,14 +242,16 @@ pub struct FrameSummary {
 pub struct ReplicaTable {
     pub entities: BTreeMap<EntityId, ReplicaEntity>,
     pub precision: f32,
-    /// Spawns of each id so far, mod 256: the generation a datagram update
-    /// names (see [`crate::datagram`]). Kept across despawns and full frames.
-    pub generations: BTreeMap<EntityId, u8>,
+    /// The tick of the stream frame that spawned each entity: a datagram
+    /// update names it (see [`crate::datagram`]). Set only by
+    /// [`ReplicaTable::apply_stream`].
+    pub spawn_ticks: BTreeMap<EntityId, u64>,
     /// The last datagram applied to each entity (see [`crate::datagram`]).
     pub datagram_frames: BTreeMap<EntityId, u64>,
-    /// Frames applied so far. A client on an unreliable transport acks each
-    /// datagram with this count, so the server knows which spawns it had.
-    pub frames_applied: u64,
+    /// The tick of the last stream frame applied with
+    /// [`ReplicaTable::apply_stream`]. A client on an unreliable transport
+    /// acks each datagram with it, so the server knows which spawns it had.
+    pub stream_tick: u64,
 }
 
 /// Longest id list a frame may declare, so a hostile count cannot make a
@@ -268,6 +270,24 @@ impl ReplicaTable {
     /// Apply one frame. On an error the table may hold part of the frame;
     /// the caller should treat the connection as broken.
     pub fn apply(&mut self, frame: &[u8]) -> Result<FrameSummary, DecodeError> {
+        self.apply_inner(frame, None)
+    }
+
+    /// Apply one frame from the stream of a subscription that also gets
+    /// datagrams, with the tick its header carries. The table records the
+    /// tick each entity spawned at and the tick of the last stream frame,
+    /// which datagrams and their acks name. A full frame starts that record
+    /// over, so frames the server dropped before the client got them, or an
+    /// earlier connection, leave nothing behind.
+    pub fn apply_stream(&mut self, frame: &[u8], tick: u64) -> Result<FrameSummary, DecodeError> {
+        self.apply_inner(frame, Some(tick))
+    }
+
+    fn apply_inner(
+        &mut self,
+        frame: &[u8],
+        tick: Option<u64>,
+    ) -> Result<FrameSummary, DecodeError> {
         let err = |m: &str| DecodeError(m.to_string());
         let mut b = frame;
         let take = |b: &mut &[u8], n: usize| -> Result<Vec<u8>, DecodeError> {
@@ -290,6 +310,7 @@ impl ReplicaTable {
         if full {
             self.entities.clear();
             self.datagram_frames.clear();
+            self.spawn_ticks.clear();
         }
         self.precision = precision;
         let mut summary = FrameSummary {
@@ -323,6 +344,7 @@ impl ReplicaTable {
             let id = next_id(&mut b, &mut last)?;
             self.entities.remove(&id);
             self.datagram_frames.remove(&id);
+            self.spawn_ticks.remove(&id);
             summary.despawned.push(id);
         }
 
@@ -341,8 +363,10 @@ impl ReplicaTable {
             read_components(&mut b, &mut entity.components)?;
             self.entities.insert(id, entity);
             self.datagram_frames.remove(&id);
-            let generation = self.generations.entry(id).or_insert(0);
-            *generation = generation.wrapping_add(1);
+            match tick {
+                Some(t) => self.spawn_ticks.insert(id, t),
+                None => self.spawn_ticks.remove(&id),
+            };
             summary.spawned.push(id);
         }
 
@@ -370,7 +394,9 @@ impl ReplicaTable {
         if !b.is_empty() {
             return Err(err("trailing bytes"));
         }
-        self.frames_applied += 1;
+        if let Some(t) = tick {
+            self.stream_tick = t;
+        }
         Ok(summary)
     }
 }

@@ -193,12 +193,10 @@ const MAX_UNACKED_PER_ENTITY: usize = 32;
 #[derive(Debug)]
 struct DatagramSent {
     spawn_seq: u64,
-    /// The spawn counter the subscriber has for this id (see
-    /// `pylon_replication::datagram`).
-    generation: u8,
-    /// The number of the stream frame that carried the spawn. A datagram
-    /// the client took before that frame changed nothing.
-    spawn_frame: u64,
+    /// The tick of the stream frame that carried the spawn. Updates name
+    /// it (see `pylon_replication::datagram`), and a datagram the client
+    /// took before it had that frame changed nothing.
+    spawn_tick: u64,
     /// The newest state the client is known to have: the store's change
     /// counter and the quantized position.
     acked_seq: u64,
@@ -211,8 +209,8 @@ struct DatagramSent {
 }
 
 /// A datagram being filled: the builder, its frame number, and the
-/// (entity, generation) pairs it carries.
-type OpenDatagram = (DatagramBuilder, u64, Vec<(EntityId, u8)>);
+/// (entity, spawn tick) pairs it carries.
+type OpenDatagram = (DatagramBuilder, u64, Vec<(EntityId, u64)>);
 
 /// A subscription on an unreliable transport.
 #[derive(Debug, Default)]
@@ -221,14 +219,10 @@ struct DatagramBaseline {
     precision: f32,
     dropped: u64,
     started: bool,
-    /// Spawns sent per id, mod 256; the client counts the same.
-    generations: HashMap<EntityId, u8>,
-    /// Stream frames sent so far.
-    stream_frames: u64,
     /// The last datagram number used.
     last_datagram: u64,
-    /// Recent datagrams and the entities (and generations) each held.
-    sent: VecDeque<(u64, Vec<(EntityId, u8)>)>,
+    /// Recent datagrams and the entities (and their spawn ticks) each held.
+    sent: VecDeque<(u64, Vec<(EntityId, u64)>)>,
 }
 
 #[derive(Debug)]
@@ -629,8 +623,6 @@ impl Replicator {
         base.dropped = input.dropped;
         base.precision = precision;
         let mut frame = FrameBuilder::new(full, precision);
-        // The number this tick's stream frame gets, if it is sent.
-        let stream_frame = base.stream_frames + 1;
         let mut stream_has_changes = full;
         let old = std::mem::take(&mut base.entities);
         let old = if full {
@@ -655,10 +647,9 @@ impl Replicator {
         let mut cursor = 0usize;
         let mut had = old.into_iter().peekable();
         let mut vis = visible.iter().copied().peekable();
-        let spawn = |frame: &mut FrameBuilder,
-                     generations: &mut HashMap<EntityId, u8>,
-                     t: &TickEntity|
-         -> DatagramSent {
+        // A spawn goes out in this tick's stream frame, whose header names
+        // the tick; the client records it as the entity's spawn tick.
+        let spawn = |frame: &mut FrameBuilder, t: &TickEntity| -> DatagramSent {
             let e = store.get(t.id).expect("the tick table matches the store");
             frame.spawn(
                 t.id,
@@ -669,12 +660,9 @@ impl Replicator {
                     .collect::<Vec<_>>()
                     .into_iter(),
             );
-            let g = generations.entry(t.id).or_insert(0);
-            *g = g.wrapping_add(1);
             DatagramSent {
                 spawn_seq: t.spawn_seq,
-                generation: *g,
-                spawn_frame: stream_frame,
+                spawn_tick: tick,
                 // The spawn carries the whole state, reliably.
                 acked_seq: seq,
                 acked_q: t.q,
@@ -729,7 +717,7 @@ impl Replicator {
                 other => other,
             };
             let Some(mut sent) = sent else {
-                let s = spawn(&mut frame, &mut base.generations, &t);
+                let s = spawn(&mut frame, &t);
                 stream_has_changes = true;
                 entities.push((id, s));
                 continue;
@@ -760,13 +748,13 @@ impl Replicator {
                     sent.unacked.clear();
                 } else {
                     let start = bodies.len();
-                    encode_entry_into(bodies, sent.generation, axes, &changes);
+                    encode_entry_into(bodies, sent.spawn_tick, axes, &changes);
                     if bodies.len() - start > max_body {
                         // Too big for any datagram: send the whole entity
                         // again on the stream.
                         bodies.truncate(start);
                         frame.despawn(id);
-                        let s = spawn(&mut frame, &mut base.generations, &t);
+                        let s = spawn(&mut frame, &t);
                         stream_has_changes = true;
                         entities.push((id, s));
                         continue;
@@ -838,7 +826,7 @@ impl Replicator {
             });
             b.update(c.id, body);
             let sent = &mut entities[c.slot].1;
-            held.push((c.id, sent.generation));
+            held.push((c.id, sent.spawn_tick));
             sent.unacked.push((*number, c.seq, c.delta));
             sent.sent_tick = tick;
         }
@@ -851,11 +839,20 @@ impl Replicator {
         }
         base.entities = entities;
         let bytes = if stream_has_changes {
-            base.stream_frames += 1;
             frame.finish()
         } else {
             Vec::new()
         };
+        if bytes.is_empty() && datagrams.is_empty() {
+            // Nothing changed for this client: an empty datagram still
+            // carries the tick and the input ack each tick, as an empty
+            // frame does on a reliable transport. A lost one is followed
+            // by the next.
+            base.last_datagram += 1;
+            datagrams.push(
+                DatagramBuilder::new(base.last_datagram, tick, dg.input_ack, precision).finish(),
+            );
+        }
         FrameOutput {
             bytes,
             delta_of: (!full).then_some(input.dropped),
@@ -863,27 +860,27 @@ impl Replicator {
         }
     }
 
-    /// Record a subscription's datagram acks: (datagram number, frames the
-    /// client had applied when it took that datagram; see
-    /// `ReplicaTable::frames_applied`).
+    /// Record a subscription's datagram acks: (datagram number, the tick of
+    /// the last stream frame the client had applied when it took that
+    /// datagram; see `ReplicaTable::stream_tick`).
     pub fn ack_datagrams(&mut self, key: u64, acks: &[(u64, u64)]) {
         let Some(Subscription::Datagram(base)) = self.baselines.get_mut(&key) else {
             return;
         };
-        for &(number, frames_applied) in acks {
+        for &(number, stream_tick) in acks {
             let Ok(i) = base.sent.binary_search_by_key(&number, |(n, _)| *n) else {
                 // Unknown, forgotten, or already acked.
                 continue;
             };
             let (_, held) = base.sent.remove(i).expect("found above");
-            for (id, generation) in held {
+            for (id, spawn_tick) in held {
                 let Ok(at) = base.entities.binary_search_by_key(&id, |(id, _)| *id) else {
                     continue;
                 };
                 let sent = &mut base.entities[at].1;
                 // The client skipped updates for an entity whose spawn it
-                // did not have yet, or for another generation.
-                if sent.generation != generation || frames_applied < sent.spawn_frame {
+                // did not have yet, or for another spawn of the id.
+                if sent.spawn_tick != spawn_tick || stream_tick < sent.spawn_tick {
                     continue;
                 }
                 let Some(pos) = sent.unacked.iter().position(|u| u.0 == number) else {

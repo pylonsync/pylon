@@ -1026,7 +1026,7 @@ async fn run_bot(
                     stats.bytes += bytes.len() as u64;
                     match replica.apply_datagram(&bytes) {
                         Ok(summary) => {
-                            link.send_acks(&[(summary.frame, replica.frames_applied)]);
+                            link.send_acks(&[(summary.frame, replica.stream_tick)]);
                             stats.frames += 1;
                             (summary.tick, summary.ack)
                         }
@@ -1053,7 +1053,7 @@ async fn run_bot(
                             let decoded = if frame.kind == wire::kind::REPLICATION {
                                 // Apply it like a client: a frame that does not
                                 // apply to this bot's table is a decode error.
-                                replica.apply(frame.payload).is_ok()
+                                replica.apply_stream(frame.payload, frame.tick).is_ok()
                             } else {
                                 decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload)
                                     .is_some()
@@ -1295,8 +1295,8 @@ impl Link {
                     .then(|| rmp_serde::to_vec_named(envelope).ok())
                     .flatten()
                 {
-                    Some(b) => Message::Binary(b.into()),
-                    None => Message::Text(envelope.to_string().into()),
+                    Some(b) => Message::Binary(b),
+                    None => Message::Text(envelope.to_string()),
                 };
                 sink.send(msg).await.map_err(|e| e.to_string())
             }

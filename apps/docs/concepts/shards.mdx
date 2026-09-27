@@ -344,9 +344,12 @@ hello, a 4-byte big-endian length and JSON
 4-byte length and a message: from the server, a version 2 frame; from
 the client, a type byte (`0` input in the shard's codec, `1` datagram
 acks, `2` input as JSON) and the body. The server sends updates as bare
-datagrams (`EntityTable.applyDatagram` reads them), and the client acks
-each one with a datagram: type byte `1`, a varint count, then per ack the
-datagram's frame number and `EntityTable.framesApplied`.
+datagrams (`EntityTable.applyDatagram` reads them; apply stream frames
+with `apply(payload, tick)` so the table knows their ticks), and the
+client acks each one with a datagram: type byte `1`, a varint count, then
+per ack the datagram's frame number and `EntityTable.streamTick`. A tick
+with nothing new for the client still sends an empty datagram with the
+tick and the input ack.
 
 ## Declare the shard kind
 

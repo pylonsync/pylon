@@ -372,6 +372,42 @@ async fn read_message(recv: &mut RecvStream, max: usize) -> Result<Option<Vec<u8
     Ok(Some(buf))
 }
 
+/// The client's stream messages, read on their own task. A read that a
+/// `select!` drops halfway loses the bytes it already took and leaves the
+/// stream in the middle of a message, so a session's loop waits on this
+/// channel, which loses nothing, instead of on the stream.
+struct StreamReader {
+    rx: tokio::sync::mpsc::Receiver<Result<Option<Vec<u8>>, String>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl StreamReader {
+    fn spawn(mut recv: RecvStream) -> Self {
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let task = tokio::spawn(async move {
+            loop {
+                let message = read_message(&mut recv, MAX_CLIENT_MESSAGE).await;
+                let last = !matches!(message, Ok(Some(_)));
+                if tx.send(message).await.is_err() || last {
+                    return;
+                }
+            }
+        });
+        Self { rx, task }
+    }
+
+    /// The next message; `Ok(None)` at the end of the stream.
+    async fn next(&mut self) -> Result<Option<Vec<u8>>, String> {
+        self.rx.recv().await.unwrap_or(Ok(None))
+    }
+}
+
+impl Drop for StreamReader {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 async fn write_message(send: &mut SendStream, bytes: &[u8]) -> Result<(), String> {
     let len = u32::try_from(bytes.len()).map_err(|_| "a frame over 4 GiB".to_string())?;
     send.write_all(&len.to_be_bytes())
@@ -433,7 +469,7 @@ async fn run_session(
         Ok::<_, String>((send, recv, hello))
     })
     .await;
-    let (mut send, mut recv, hello) = match opened {
+    let (mut send, recv, hello) = match opened {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => return close(conn, close_code::PROTOCOL, &e),
         Err(_) => return close(conn, close_code::PROTOCOL, "no hello in time"),
@@ -565,10 +601,11 @@ async fn run_session(
     };
     let mut writer = tokio::spawn(writer);
 
+    let mut messages = StreamReader::spawn(recv);
     let reader = async {
         loop {
             tokio::select! {
-                message = read_message(&mut recv, MAX_CLIENT_MESSAGE) => {
+                message = messages.next() => {
                     let bytes = match message {
                         Ok(Some(b)) => b,
                         Ok(None) => return ConnectionEnd::ClientClosed,
@@ -625,7 +662,7 @@ async fn run_session(
 async fn relay(
     conn: &Connection,
     mut send: SendStream,
-    mut recv: RecvStream,
+    recv: RecvStream,
     hello: &Hello,
     datagram_max: usize,
     machine_id: &str,
@@ -701,6 +738,7 @@ async fn relay(
         }
     };
     let (mut up_tx, mut up_rx) = ws.split();
+    let mut messages = StreamReader::spawn(recv);
     loop {
         tokio::select! {
             from_owner = up_rx.next() => match from_owner {
@@ -735,7 +773,7 @@ async fn relay(
                 }
                 None => return close(conn, close_code::AGAIN, "the shard's machine closed"),
             },
-            message = read_message(&mut recv, MAX_CLIENT_MESSAGE) => match message {
+            message = messages.next() => match message {
                 Ok(Some(bytes)) => {
                     if up_tx.send(Message::Binary(bytes)).await.is_err() {
                         return close(conn, close_code::AGAIN, "the shard's machine closed");
