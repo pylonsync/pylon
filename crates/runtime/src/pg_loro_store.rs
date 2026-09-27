@@ -18,14 +18,17 @@ use std::sync::{Arc, Mutex};
 
 use postgres::Client;
 use pylon_crdt::{
-    apply_patch, apply_update as crdt_apply_update, encode_snapshot, encode_update_since,
+    apply_update as crdt_apply_update, encode_snapshot, encode_update_since,
     loro::{LoroDoc, VersionVector},
     project_doc_to_json, CrdtField,
 };
 use pylon_storage::pg_exec::PgConn;
 use serde_json::Value;
 
-use crate::loro_store::LoroStoreError;
+use crate::loro_store::{
+    doc_from_snapshot, merge_client_update, patch_doc, seed_doc, LoroStoreError, Peers,
+    SideRecords, SideTable, ROW_SIDE_TABLES,
+};
 
 /// SQL to create the PG sidecar table. Idempotent — called every time
 /// the runtime opens a Postgres backend so a fresh database gets the
@@ -39,40 +42,92 @@ CREATE TABLE IF NOT EXISTS _pylon_crdt_snapshots (\
     PRIMARY KEY (entity, row_id)\
 )";
 
+/// The server-side records kept per CRDT row beside its snapshot (see
+/// [`SideRecords`]); the same tables as the SQLite sidecar.
+const CREATE_PG_SIDE_TABLES_SQL: &str = "
+CREATE TABLE IF NOT EXISTS _pylon_crdt_synthetic (
+    entity text NOT NULL,
+    row_id text NOT NULL,
+    peer   bigint NOT NULL,
+    PRIMARY KEY (entity, row_id, peer)
+);
+CREATE TABLE IF NOT EXISTS _pylon_crdt_base (
+    entity text NOT NULL,
+    row_id text NOT NULL,
+    field  text NOT NULL,
+    base   text NOT NULL,
+    PRIMARY KEY (entity, row_id, field)
+);
+CREATE TABLE IF NOT EXISTS _pylon_crdt_links (
+    entity text NOT NULL,
+    row_id text NOT NULL,
+    source text NOT NULL,
+    links  text NOT NULL,
+    PRIMARY KEY (entity, row_id, source)
+);";
+
 pub fn ensure_sidecar(client: &mut Client) -> Result<(), LoroStoreError> {
     client
         .execute(CREATE_PG_SIDECAR_SQL, &[])
         .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("create pg sidecar: {e}")))
+        .map_err(|e| LoroStoreError::Storage(format!("create pg sidecar: {e}")))?;
+    client
+        .batch_execute(CREATE_PG_SIDE_TABLES_SQL)
+        .map_err(|e| LoroStoreError::Storage(format!("create pg side tables: {e}")))
 }
 
-/// Postgres counterpart of [`crate::loro_store::prune_batch`].
+/// Delete a row's snapshot and side records, in the caller's transaction.
+pub fn delete_row_records<C: PgConn>(
+    conn: &mut C,
+    entity: &str,
+    row_id: &str,
+) -> Result<(), LoroStoreError> {
+    for table in std::iter::once("_pylon_crdt_snapshots").chain(ROW_SIDE_TABLES) {
+        conn.execute(
+            &format!("DELETE FROM {table} WHERE entity = $1 AND row_id = $2"),
+            &[&entity, &row_id],
+        )
+        .map_err(|e| LoroStoreError::Storage(format!("delete from {table}: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Postgres counterpart of [`crate::loro_store::prune_batch`]: up to
+/// `batch` snapshots of `entity` in `scope`, with the rows' side records,
+/// in one transaction.
 pub fn prune_batch(
     client: &mut Client,
     entity: &str,
     scope: crate::loro_store::PruneScope,
     batch: i64,
 ) -> Result<u64, LoroStoreError> {
-    let result = match scope {
-        crate::loro_store::PruneScope::Orphans => client.execute(
-            format!(
-                "DELETE FROM _pylon_crdt_snapshots WHERE (entity, row_id) IN (
-                    SELECT s.entity, s.row_id FROM _pylon_crdt_snapshots s
-                    WHERE s.entity = $1
-                      AND NOT EXISTS (SELECT 1 FROM {} t WHERE t.id = s.row_id)
-                    LIMIT $2)",
-                format!("\"{}\"", entity.replace('"', "\"\""))
-            )
-            .as_str(),
-            &[&entity, &batch],
+    let sql = match scope {
+        crate::loro_store::PruneScope::Orphans => format!(
+            "SELECT s.row_id FROM _pylon_crdt_snapshots s
+             WHERE s.entity = $1
+               AND NOT EXISTS (SELECT 1 FROM \"{}\" t WHERE t.id = s.row_id)
+             LIMIT $2",
+            entity.replace('"', "\"\"")
         ),
-        crate::loro_store::PruneScope::All => client.execute(
-            "DELETE FROM _pylon_crdt_snapshots WHERE (entity, row_id) IN (
-                SELECT entity, row_id FROM _pylon_crdt_snapshots WHERE entity = $1 LIMIT $2)",
-            &[&entity, &batch],
-        ),
+        crate::loro_store::PruneScope::All => {
+            "SELECT row_id FROM _pylon_crdt_snapshots WHERE entity = $1 LIMIT $2".to_string()
+        }
     };
-    result.map_err(|e| LoroStoreError::Storage(format!("prune pg snapshots of {entity}: {e}")))
+    let err = |e: postgres::Error| {
+        LoroStoreError::Storage(format!("prune pg snapshots of {entity}: {e}"))
+    };
+    let mut tx = client.transaction().map_err(err)?;
+    let row_ids: Vec<String> = tx
+        .query(sql.as_str(), &[&entity, &batch])
+        .map_err(err)?
+        .into_iter()
+        .map(|r| r.get(0))
+        .collect();
+    for row_id in &row_ids {
+        delete_row_records(&mut tx, entity, row_id)?;
+    }
+    tx.commit().map_err(err)?;
+    Ok(row_ids.len() as u64)
 }
 
 /// Entities that have at least one snapshot.
@@ -83,18 +138,124 @@ pub fn snapshot_entities(client: &mut Client) -> Result<Vec<String>, LoroStoreEr
         .map_err(|e| LoroStoreError::Storage(format!("list pg snapshot entities: {e}")))
 }
 
+/// The side records in a Postgres database, on the caller's connection
+/// (normally the write's transaction).
+pub(crate) struct PgSide<'a, C: PgConn>(pub &'a mut C);
+
+impl<C: PgConn> SideRecords for PgSide<'_, C> {
+    fn synthetic_peers(
+        &mut self,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<std::collections::HashSet<u64>, LoroStoreError> {
+        let rows = self
+            .0
+            .query(
+                "SELECT peer FROM _pylon_crdt_synthetic WHERE entity = $1 AND row_id = $2",
+                &[&entity, &row_id],
+            )
+            .map_err(|e| LoroStoreError::Storage(format!("read synthetic peers: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<_, i64>(0) as u64)
+            .collect())
+    }
+
+    fn record_synthetic(
+        &mut self,
+        entity: &str,
+        row_id: &str,
+        peer: u64,
+    ) -> Result<(), LoroStoreError> {
+        self.0
+            .execute(
+                "INSERT INTO _pylon_crdt_synthetic (entity, row_id, peer) VALUES ($1, $2, $3)
+                 ON CONFLICT DO NOTHING",
+                &[&entity, &row_id, &(peer as i64)],
+            )
+            .map(|_| ())
+            .map_err(|e| LoroStoreError::Storage(format!("record a synthetic peer: {e}")))
+    }
+
+    fn read_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<Vec<(String, String)>, LoroStoreError> {
+        let (name, key, value) = table.columns();
+        let rows = self
+            .0
+            .query(
+                &format!("SELECT {key}, {value} FROM {name} WHERE entity = $1 AND row_id = $2"),
+                &[&entity, &row_id],
+            )
+            .map_err(|e| LoroStoreError::Storage(format!("read {name}: {e}")))?;
+        Ok(rows.into_iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    fn write_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+        key: &str,
+        json: &str,
+    ) -> Result<(), LoroStoreError> {
+        let (name, key_col, value_col) = table.columns();
+        self.0
+            .execute(
+                &format!(
+                    "INSERT INTO {name} (entity, row_id, {key_col}, {value_col})
+                     VALUES ($1, $2, $3, $4)
+                     ON CONFLICT (entity, row_id, {key_col}) DO UPDATE SET
+                        {value_col} = EXCLUDED.{value_col}"
+                ),
+                &[&entity, &row_id, &key, &json],
+            )
+            .map(|_| ())
+            .map_err(|e| LoroStoreError::Storage(format!("write {name}: {e}")))
+    }
+
+    fn delete_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+        key: &str,
+    ) -> Result<(), LoroStoreError> {
+        let (name, key_col, _) = table.columns();
+        self.0
+            .execute(
+                &format!("DELETE FROM {name} WHERE entity = $1 AND row_id = $2 AND {key_col} = $3"),
+                &[&entity, &row_id, &key],
+            )
+            .map(|_| ())
+            .map_err(|e| LoroStoreError::Storage(format!("delete from {name}: {e}")))
+    }
+}
+
 /// PG analogue of `LoroStore`. Lives on the Postgres-backed runtime;
 /// holds the per-row LoroDoc cache (mutated only behind the inner
 /// per-row Mutex) and persists snapshots to the PG sidecar table.
-#[derive(Default)]
 pub struct PgLoroStore {
     /// Bounded; see [`crate::crdt_cache`].
     docs: crate::crdt_cache::DocCache,
+    peers: Peers,
+}
+
+impl Default for PgLoroStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PgLoroStore {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            docs: Default::default(),
+            peers: Peers::new(),
+        }
     }
 
     /// Hydrate a doc for a CRDT write, taking a transaction-scoped
@@ -114,10 +275,11 @@ impl PgLoroStore {
     /// Re-decoding the snapshot per write is cheap (a few hundred µs
     /// for a typical row) compared to the round-trip we already pay.
     fn hydrate_for_write<C: PgConn>(
+        &self,
         conn: &mut C,
         entity: &str,
         row_id: &str,
-    ) -> Result<LoroDoc, LoroStoreError> {
+    ) -> Result<(LoroDoc, bool), LoroStoreError> {
         // pg_advisory_xact_lock(key1, key2) — two-key form fits the
         // (entity, row_id) tuple naturally. We hash each side into an
         // i32 so the same logical row maps to the same lock across
@@ -139,11 +301,8 @@ impl PgLoroStore {
             .map_err(|e| LoroStoreError::Storage(format!("read pg snapshot: {e}")))?
             .map(|r| r.get::<_, Vec<u8>>(0));
 
-        let doc = LoroDoc::new();
-        if let Some(bytes) = snapshot {
-            crdt_apply_update(&doc, &bytes).map_err(LoroStoreError::Decode)?;
-        }
-        Ok(doc)
+        let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
+        Ok((doc, snapshot.is_some()))
     }
 }
 
@@ -187,10 +346,7 @@ impl PgLoroStore {
             .map_err(|e| LoroStoreError::Storage(format!("read pg snapshot: {e}")))?
             .map(|r| r.get::<_, Vec<u8>>(0));
 
-        let doc = LoroDoc::new();
-        if let Some(bytes) = snapshot {
-            crdt_apply_update(&doc, &bytes).map_err(LoroStoreError::Decode)?;
-        }
+        let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
         let handle = Arc::new(Mutex::new(doc));
         Ok(self.docs.get_or_insert(entity, row_id, handle))
     }
@@ -234,8 +390,8 @@ impl PgLoroStore {
         fields: &[CrdtField],
         patch: &Value,
     ) -> Result<Value, LoroStoreError> {
-        let doc = Self::hydrate_for_write(conn, entity, row_id)?;
-        apply_patch(&doc, fields, patch).map_err(LoroStoreError::Apply)?;
+        let (doc, _) = self.hydrate_for_write(conn, entity, row_id)?;
+        patch_doc(&mut PgSide(conn), &doc, entity, row_id, fields, patch)?;
         Self::persist_snapshot(conn, entity, row_id, &doc)?;
         let projected = project_doc_to_json(&doc, fields);
         // Cache update happens through `cache_after_commit` from the
@@ -256,11 +412,126 @@ impl PgLoroStore {
         fields: &[CrdtField],
         update: &[u8],
     ) -> Result<Value, LoroStoreError> {
-        let doc = Self::hydrate_for_write(conn, entity, row_id)?;
+        let (doc, _) = self.hydrate_for_write(conn, entity, row_id)?;
         crdt_apply_update(&doc, update).map_err(LoroStoreError::Decode)?;
         Self::persist_snapshot(conn, entity, row_id, &doc)?;
         let projected = project_doc_to_json(&doc, fields);
         Ok(projected)
+    }
+
+    /// Apply `values` to the row's doc as one synthetic write (see
+    /// [`seed_doc`]) and persist it. Returns the fields the doc could not
+    /// take, with why.
+    pub fn apply_seed_fields<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+        values: Vec<(String, Value)>,
+    ) -> Result<Vec<(String, String)>, LoroStoreError> {
+        if values.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (doc, _) = self.hydrate_for_write(conn, entity, row_id)?;
+        let failed = seed_doc(
+            &mut PgSide(conn),
+            &doc,
+            &self.peers,
+            entity,
+            row_id,
+            fields,
+            values,
+        )?;
+        Self::persist_snapshot(conn, entity, row_id, &doc)?;
+        Ok(failed)
+    }
+
+    /// Import a client's update into the row's doc (see
+    /// [`merge_client_update`]) and persist it. Also returns whether the
+    /// row had a doc before.
+    pub fn apply_client_update<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+        update: &[u8],
+    ) -> Result<(Value, Option<Vec<String>>, bool), LoroStoreError> {
+        let (doc, had_doc) = self.hydrate_for_write(conn, entity, row_id)?;
+        let (before, touched) = merge_client_update(
+            &mut PgSide(conn),
+            &doc,
+            &self.peers,
+            entity,
+            row_id,
+            fields,
+            update,
+        )?;
+        if touched.is_some() {
+            Self::persist_snapshot(conn, entity, row_id, &doc)?;
+        }
+        Ok((before, touched, had_doc))
+    }
+
+    /// Whether the row has a stored snapshot.
+    pub fn has_snapshot<C: PgConn>(
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<bool, LoroStoreError> {
+        conn.query_opt(
+            "SELECT 1 FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
+            &[&entity, &row_id],
+        )
+        .map(|r| r.is_some())
+        .map_err(|e| LoroStoreError::Storage(format!("read pg snapshot: {e}")))
+    }
+
+    /// The row's doc as stored, as JSON for `fields`.
+    pub fn project_stored<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+    ) -> Result<Value, LoroStoreError> {
+        let snapshot = Self::read_snapshot_via_conn(conn, entity, row_id)?;
+        let doc = doc_from_snapshot(Some(&snapshot), &self.peers)?;
+        Ok(project_doc_to_json(&doc, fields))
+    }
+
+    /// Give a row with no doc one from its values (a row from before its
+    /// entity was CRDT, or written around the runtime), under the row's
+    /// advisory lock. Returns whether it did. `row` is the row as the doc
+    /// holds it (see `Runtime::crdt_row_for_doc`).
+    pub fn seed_missing_doc<C: PgConn>(
+        &self,
+        conn: &mut C,
+        entity: &str,
+        row_id: &str,
+        fields: &[CrdtField],
+        row: impl FnOnce(&mut C) -> Result<Option<Value>, LoroStoreError>,
+    ) -> Result<bool, LoroStoreError> {
+        let (_, had_doc) = self.hydrate_for_write(conn, entity, row_id)?;
+        if had_doc {
+            return Ok(false);
+        }
+        let Some(row) = row(conn)? else {
+            return Ok(false);
+        };
+        let failed = self.apply_seed_fields(
+            conn,
+            entity,
+            row_id,
+            fields,
+            crate::seed_values(fields, &row),
+        )?;
+        for (field, why) in failed {
+            tracing::warn!(entity, row_id, field = %field, "seed a CRDT doc from its row: {why}");
+        }
+        self.evict(entity, row_id);
+        Ok(true)
     }
 
     /// Full snapshot for the row. Returns the encoded LoroDoc bytes
@@ -374,11 +645,10 @@ impl PgLoroStore {
                 return;
             }
         };
-        let doc = LoroDoc::new();
-        if crdt_apply_update(&doc, &bytes).is_err() {
+        let Ok(doc) = doc_from_snapshot(Some(&bytes), &self.peers) else {
             self.evict(entity, row_id);
             return;
-        }
+        };
         self.docs.insert(entity, row_id, Arc::new(Mutex::new(doc)));
     }
 
@@ -475,12 +745,12 @@ impl PgCrdtHook for PgCrdtHookImpl {
                 message: format!("Unknown entity: {entity}"),
             })?;
         let crdt_fields = crdt_fields_for(ent)?;
-        let projected = self
-            .crdt
-            .apply_patch(tx, entity, id, &crdt_fields, data)
-            .map_err(|e| pylon_http::DataError {
-                code: "CRDT_APPLY_FAILED".into(),
-                message: format!("crdt update {entity}/{id}: {e}"),
+        let projected =
+            crate::pg_crdt_patch(&self.crdt, tx, ent, &crdt_fields, id, data).map_err(|e| {
+                pylon_http::DataError {
+                    code: "CRDT_APPLY_FAILED".into(),
+                    message: format!("crdt update {entity}/{id}: {e}"),
+                }
             })?;
         Ok(
             crate::crdt_container_corrections(&crdt_fields, data, &projected)
@@ -496,12 +766,7 @@ impl PgCrdtHook for PgCrdtHookImpl {
     ) -> Result<(), pylon_http::DataError> {
         // Drop the sidecar row inside the same tx; runtime evicts
         // cache entry on commit via after_commit/on_rollback.
-        tx.execute(
-            "DELETE FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
-            &[&entity, &id],
-        )
-        .map(|_| ())
-        .map_err(|e| pylon_http::DataError {
+        delete_row_records(tx, entity, id).map_err(|e| pylon_http::DataError {
             code: "CRDT_SIDECAR_DELETE_FAILED".into(),
             message: format!("delete pg crdt snapshot {entity}/{id}: {e}"),
         })

@@ -534,6 +534,7 @@ jobs:
         run: |
           # One thread: these tests share one database and recreate tables.
           cargo test -p pylon-runtime --test postgres_backend -- --test-threads=1
+          cargo test -p pylon-runtime --test crdt_parity -- --test-threads=1
           cargo test -p pylon-runtime --lib shard_cluster
           cargo test -p pylon-runtime --lib shard_wasm::lease_tests
           cargo test -p pylon-runtime --lib shard_wasm::transfer::tests

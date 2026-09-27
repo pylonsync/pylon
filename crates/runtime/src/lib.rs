@@ -2227,6 +2227,51 @@ impl Runtime {
         })
     }
 
+    /// Before a client reads a Postgres CRDT row's doc: a row with no doc
+    /// gets one from its values, so the client starts from them and its own
+    /// edits come after (as on SQLite, `prepare_crdt_doc_for_read`). A write
+    /// transaction only when the row has no doc.
+    pub(crate) fn pg_prepare_crdt_doc_for_read(
+        &self,
+        ent: &ManifestEntity,
+        id: &str,
+    ) -> Result<(), pylon_http::DataError> {
+        let Some(pg) = self.pg_backend() else {
+            return Ok(());
+        };
+        let has_doc = pg.store.with_client(|c| {
+            pg_loro_store::PgLoroStore::has_snapshot(c, &ent.name, id).map_err(|e| {
+                pylon_http::DataError {
+                    code: "CRDT_SNAPSHOT_FAILED".into(),
+                    message: format!("read the snapshot of {} {id}: {e}", ent.name),
+                }
+            })
+        })?;
+        if has_doc {
+            return Ok(());
+        }
+        let fields = self
+            .crdt_fields_for(ent)
+            .map_err(|e| pylon_http::DataError {
+                code: e.code,
+                message: e.message,
+            })?;
+        pg.store
+            .with_transaction_raw(|tx| -> Result<bool, pylon_http::DataError> {
+                pg.crdt
+                    .seed_missing_doc(tx, &ent.name, id, &fields, |c| {
+                        pg_row_for_doc(c, ent, &fields, id)
+                    })
+                    .map_err(|e| pylon_http::DataError {
+                        code: "CRDT_APPLY_FAILED".into(),
+                        message: format!("seed the doc of {} {id}: {e}", ent.name),
+                    })
+            })?;
+        // A read before the seed cached the empty doc.
+        pg.crdt.evict(&ent.name, id);
+        Ok(())
+    }
+
     /// Before a client's update is imported into a row's doc: whether the
     /// row has a doc, and, when the one-time reconcile has not reached the
     /// row, the doc's values now (see `reconcile_crdt_push`).
@@ -2320,15 +2365,7 @@ impl Runtime {
                     message: format!("read the doc of {} {id}: {e}", ent.name),
                 })?,
         };
-        let values: Vec<(String, serde_json::Value)> = fields
-            .iter()
-            .filter(|f| f.kind == pylon_crdt::CrdtFieldKind::Counter || !set.contains(&f.name))
-            .filter_map(|f| {
-                row.get(&f.name)
-                    .filter(|v| !v.is_null())
-                    .map(|v| (f.name.clone(), v.clone()))
-            })
-            .collect();
+        let values = fill_values(fields, &row, &set);
         self.apply_fields(conn, &ent.name, id, fields, values);
         Ok(())
     }
@@ -3335,9 +3372,7 @@ impl Runtime {
                 let result = pg
                     .store
                     .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                        let projected = pg
-                            .crdt
-                            .apply_patch(tx, entity, id, &crdt_fields, data)
+                        let projected = pg_crdt_patch(&pg.crdt, tx, ent, &crdt_fields, id, data)
                             .map_err(|e| RuntimeError {
                                 code: "CRDT_APPLY_FAILED".into(),
                                 message: format!("crdt update {entity}/{id}: {e}"),
@@ -3506,13 +3541,11 @@ impl Runtime {
                 let result = pg
                     .store
                     .with_transaction_raw(|tx| -> Result<bool, RuntimeError> {
-                        tx.execute(
-                            "DELETE FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
-                            &[&entity, &id],
-                        )
-                        .map_err(|e| RuntimeError {
-                            code: "CRDT_SIDECAR_DELETE_FAILED".into(),
-                            message: format!("delete pg crdt snapshot {entity}/{id}: {e}"),
+                        pg_loro_store::delete_row_records(tx, entity, id).map_err(|e| {
+                            RuntimeError {
+                                code: "CRDT_SIDECAR_DELETE_FAILED".into(),
+                                message: format!("delete pg crdt snapshot {entity}/{id}: {e}"),
+                            }
                         })?;
                         pylon_storage::pg_tx_store::tx_delete(tx, &self.manifest, entity, id)
                             .map_err(data_err_to_runtime)
@@ -5542,7 +5575,63 @@ fn tree_for_compare(value: &serde_json::Value) -> serde_json::Value {
 }
 
 /// A row's non-null CRDT field values, to create its doc from.
-fn seed_values(
+/// After a client's update made the doc of a row that had none: the values
+/// that fill it from the row. A field the update did not set (`set`) takes
+/// the row's value, and a counter adds the row's total (the client counted
+/// from an empty doc).
+pub(crate) fn fill_values(
+    fields: &[pylon_crdt::CrdtField],
+    row: &serde_json::Value,
+    set: &[String],
+) -> Vec<(String, serde_json::Value)> {
+    fields
+        .iter()
+        .filter(|f| f.kind == pylon_crdt::CrdtFieldKind::Counter || !set.contains(&f.name))
+        .filter_map(|f| {
+            row.get(&f.name)
+                .filter(|v| !v.is_null())
+                .map(|v| (f.name.clone(), v.clone()))
+        })
+        .collect()
+}
+
+/// A Postgres row as its CRDT doc holds it (JSON and list fields parsed,
+/// encrypted fields still encrypted), read in the caller's transaction.
+pub(crate) fn pg_row_for_doc<C: pylon_storage::pg_exec::PgConn>(
+    conn: &mut C,
+    ent: &ManifestEntity,
+    fields: &[pylon_crdt::CrdtField],
+    id: &str,
+) -> Result<Option<serde_json::Value>, loro_store::LoroStoreError> {
+    let Some(mut row) = pylon_storage::pg_tx_store::tx_get_by_id(conn, &ent.name, id)
+        .map_err(|e| loro_store::LoroStoreError::Storage(format!("[{}] {}", e.code, e.message)))?
+    else {
+        return Ok(None);
+    };
+    parse_json_fields_in_row(ent, &mut row);
+    parse_crdt_containers_in_row(fields, &mut row);
+    Ok(Some(row))
+}
+
+/// A server write of a Postgres CRDT row: a row with no doc gets one from
+/// its values first (or the patch would make a doc holding only the
+/// written fields, and a client's next push would project the rest into
+/// the row), then the patch. Returns the projection.
+pub(crate) fn pg_crdt_patch<C: pylon_storage::pg_exec::PgConn>(
+    crdt: &pg_loro_store::PgLoroStore,
+    conn: &mut C,
+    ent: &ManifestEntity,
+    fields: &[pylon_crdt::CrdtField],
+    id: &str,
+    data: &serde_json::Value,
+) -> Result<serde_json::Value, loro_store::LoroStoreError> {
+    crdt.seed_missing_doc(conn, &ent.name, id, fields, |c| {
+        pg_row_for_doc(c, ent, fields, id)
+    })?;
+    crdt.apply_patch(conn, &ent.name, id, fields, data)
+}
+
+pub(crate) fn seed_values(
     fields: &[pylon_crdt::CrdtField],
     row: &serde_json::Value,
 ) -> Vec<(String, serde_json::Value)> {
@@ -5584,7 +5673,10 @@ pub(crate) fn same_json_value(a: &serde_json::Value, b: &serde_json::Value) -> b
 
 /// Parse the stored text of list and tree CRDT fields, whatever the field's
 /// declared type (a `string` field can carry `.crdt("list")`).
-fn parse_crdt_containers_in_row(fields: &[pylon_crdt::CrdtField], row: &mut serde_json::Value) {
+pub(crate) fn parse_crdt_containers_in_row(
+    fields: &[pylon_crdt::CrdtField],
+    row: &mut serde_json::Value,
+) {
     use pylon_crdt::CrdtFieldKind as K;
     let Some(obj) = row.as_object_mut() else {
         return;

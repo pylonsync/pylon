@@ -260,122 +260,154 @@ impl Runtime {
         let mut crdt_touched: Vec<(String, String)> = Vec::new();
 
         let manifest = self.manifest.clone();
-        let result = pg.store.with_transaction_raw(|tx| -> Result<Vec<serde_json::Value>, DataError> {
-            let mut json_results: Vec<serde_json::Value> = Vec::with_capacity(typed.len());
-            for op in &typed {
-                let result = match op {
-                    Op::Insert { entity, data } => {
-                        let ent = manifest.entities.iter().find(|e| e.name == *entity);
-                        if let Some(e) = ent {
-                            crate::validate_vector_fields(e, data)
-                                .map_err(|e| DataError { code: e.code, message: e.message })?;
-                        }
-                        // json fields: serialized for the SQL row, parsed
-                        // for the CRDT patch — same split as Runtime::insert.
-                        let ser = ent
-                            .and_then(|e| crate::serialize_json_fields_for_storage(e, data));
-                        let sql_data: &serde_json::Value = ser.as_ref().unwrap_or(data);
-                        let id = if ent.map(|e| e.crdt).unwrap_or(false) {
-                            let crdt_fields = self.crdt_fields_for(ent.unwrap()).map_err(|e| {
-                                DataError { code: e.code, message: e.message }
-                            })?;
-                            let id = crate::generate_id();
-                            pg.crdt
-                                .apply_patch(tx, entity, &id, &crdt_fields, data)
-                                .map_err(|e| DataError {
-                                    code: "CRDT_APPLY_FAILED".into(),
-                                    message: format!("crdt write {entity}/{id}: {e}"),
-                                })?;
-                            let mut row = sql_data.clone();
-                            if let Some(obj) = row.as_object_mut() {
-                                obj.insert("id".into(), serde_json::Value::String(id.clone()));
+        let result =
+            pg.store
+                .with_transaction_raw(|tx| -> Result<Vec<serde_json::Value>, DataError> {
+                    let mut json_results: Vec<serde_json::Value> = Vec::with_capacity(typed.len());
+                    for op in &typed {
+                        let result = match op {
+                            Op::Insert { entity, data } => {
+                                let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                                if let Some(e) = ent {
+                                    crate::validate_vector_fields(e, data).map_err(|e| {
+                                        DataError {
+                                            code: e.code,
+                                            message: e.message,
+                                        }
+                                    })?;
+                                }
+                                // json fields: serialized for the SQL row, parsed
+                                // for the CRDT patch — same split as Runtime::insert.
+                                let ser = ent.and_then(|e| {
+                                    crate::serialize_json_fields_for_storage(e, data)
+                                });
+                                let sql_data: &serde_json::Value = ser.as_ref().unwrap_or(data);
+                                let id = if ent.map(|e| e.crdt).unwrap_or(false) {
+                                    let crdt_fields =
+                                        self.crdt_fields_for(ent.unwrap()).map_err(|e| {
+                                            DataError {
+                                                code: e.code,
+                                                message: e.message,
+                                            }
+                                        })?;
+                                    let id = crate::generate_id();
+                                    pg.crdt
+                                        .apply_patch(tx, entity, &id, &crdt_fields, data)
+                                        .map_err(|e| DataError {
+                                            code: "CRDT_APPLY_FAILED".into(),
+                                            message: format!("crdt write {entity}/{id}: {e}"),
+                                        })?;
+                                    let mut row = sql_data.clone();
+                                    if let Some(obj) = row.as_object_mut() {
+                                        obj.insert(
+                                            "id".into(),
+                                            serde_json::Value::String(id.clone()),
+                                        );
+                                    }
+                                    tx_insert(tx, &manifest, entity, &row)?;
+                                    crdt_touched.push((entity.to_string(), id.clone()));
+                                    id
+                                } else {
+                                    tx_insert(tx, &manifest, entity, sql_data)?
+                                };
+                                serde_json::json!({ "op": "insert", "id": id })
                             }
-                            tx_insert(tx, &manifest, entity, &row)?;
-                            crdt_touched.push((entity.to_string(), id.clone()));
-                            id
-                        } else {
-                            tx_insert(tx, &manifest, entity, sql_data)?
-                        };
-                        serde_json::json!({ "op": "insert", "id": id })
-                    }
-                    Op::Update { entity, id, data } => {
-                        let ent = manifest.entities.iter().find(|e| e.name == *entity);
-                        if let Some(e) = ent {
-                            crate::validate_vector_fields(e, data)
-                                .map_err(|e| DataError { code: e.code, message: e.message })?;
-                        }
-                        let ser = ent
-                            .and_then(|e| crate::serialize_json_fields_for_storage(e, data));
-                        let sql_data: &serde_json::Value = ser.as_ref().unwrap_or(data);
-                        let updated = if ent.map(|e| e.crdt).unwrap_or(false) {
-                            let crdt_fields = self.crdt_fields_for(ent.unwrap()).map_err(|e| {
-                                DataError { code: e.code, message: e.message }
-                            })?;
-                            let projected = pg
-                                .crdt
-                                .apply_patch(tx, entity, id, &crdt_fields, data)
-                                .map_err(|e| DataError {
-                                    code: "CRDT_APPLY_FAILED".into(),
-                                    message: format!("crdt update {entity}/{id}: {e}"),
-                                })?;
-                            let updated = tx_update(tx, &manifest, entity, id, sql_data)?;
-                            if let (true, Some(corrections)) = (
-                                updated,
-                                crate::crdt_container_corrections(&crdt_fields, data, &projected),
-                            ) {
-                                let stored = ent
-                                    .and_then(|e| {
-                                        crate::serialize_json_fields_for_storage(e, &corrections)
-                                    })
-                                    .unwrap_or(corrections);
-                                tx_update(tx, &manifest, entity, id, &stored)?;
-                            }
-                            if !updated {
-                                return Err(DataError {
-                                    code: "ENTITY_NOT_FOUND".into(),
-                                    message: format!(
+                            Op::Update { entity, id, data } => {
+                                let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                                if let Some(e) = ent {
+                                    crate::validate_vector_fields(e, data).map_err(|e| {
+                                        DataError {
+                                            code: e.code,
+                                            message: e.message,
+                                        }
+                                    })?;
+                                }
+                                let ser = ent.and_then(|e| {
+                                    crate::serialize_json_fields_for_storage(e, data)
+                                });
+                                let sql_data: &serde_json::Value = ser.as_ref().unwrap_or(data);
+                                let updated = if ent.map(|e| e.crdt).unwrap_or(false) {
+                                    let crdt_fields =
+                                        self.crdt_fields_for(ent.unwrap()).map_err(|e| {
+                                            DataError {
+                                                code: e.code,
+                                                message: e.message,
+                                            }
+                                        })?;
+                                    let projected = crate::pg_crdt_patch(
+                                        &pg.crdt,
+                                        tx,
+                                        ent.unwrap(),
+                                        &crdt_fields,
+                                        id,
+                                        data,
+                                    )
+                                    .map_err(|e| DataError {
+                                        code: "CRDT_APPLY_FAILED".into(),
+                                        message: format!("crdt update {entity}/{id}: {e}"),
+                                    })?;
+                                    let updated = tx_update(tx, &manifest, entity, id, sql_data)?;
+                                    if let (true, Some(corrections)) = (
+                                        updated,
+                                        crate::crdt_container_corrections(
+                                            &crdt_fields,
+                                            data,
+                                            &projected,
+                                        ),
+                                    ) {
+                                        let stored = ent
+                                            .and_then(|e| {
+                                                crate::serialize_json_fields_for_storage(
+                                                    e,
+                                                    &corrections,
+                                                )
+                                            })
+                                            .unwrap_or(corrections);
+                                        tx_update(tx, &manifest, entity, id, &stored)?;
+                                    }
+                                    if !updated {
+                                        return Err(DataError {
+                                            code: "ENTITY_NOT_FOUND".into(),
+                                            message: format!(
                                         "Update on {entity}/{id} found no row — refusing to commit \
                                          a CRDT snapshot that would orphan."
                                     ),
-                                });
+                                        });
+                                    }
+                                    crdt_touched.push((entity.to_string(), id.to_string()));
+                                    updated
+                                } else {
+                                    tx_update(tx, &manifest, entity, id, sql_data)?
+                                };
+                                serde_json::json!({ "op": "update", "id": id, "updated": updated })
                             }
-                            crdt_touched.push((entity.to_string(), id.to_string()));
-                            updated
-                        } else {
-                            tx_update(tx, &manifest, entity, id, sql_data)?
+                            Op::Delete { entity, id } => {
+                                let ent = manifest.entities.iter().find(|e| e.name == *entity);
+                                let deleted = if ent.map(|e| e.crdt).unwrap_or(false) {
+                                    crate::pg_loro_store::delete_row_records(tx, entity, id)
+                                        .map_err(|e| DataError {
+                                            code: "CRDT_SIDECAR_DELETE_FAILED".into(),
+                                            message: format!(
+                                                "delete pg crdt snapshot {entity}/{id}: {e}"
+                                            ),
+                                        })?;
+                                    let deleted = tx_delete(tx, &manifest, entity, id)?;
+                                    crdt_touched.push((entity.to_string(), id.to_string()));
+                                    deleted
+                                } else {
+                                    tx_delete(tx, &manifest, entity, id)?
+                                };
+                                serde_json::json!({ "op": "delete", "id": id, "deleted": deleted })
+                            }
                         };
-                        serde_json::json!({ "op": "update", "id": id, "updated": updated })
+                        json_results.push(result);
                     }
-                    Op::Delete { entity, id } => {
-                        let ent = manifest.entities.iter().find(|e| e.name == *entity);
-                        let deleted = if ent.map(|e| e.crdt).unwrap_or(false) {
-                            tx.execute(
-                                "DELETE FROM _pylon_crdt_snapshots WHERE entity = $1 AND row_id = $2",
-                                &[entity, id],
-                            )
-                            .map_err(|e| DataError {
-                                code: "CRDT_SIDECAR_DELETE_FAILED".into(),
-                                message: format!(
-                                    "delete pg crdt snapshot {entity}/{id}: {e}"
-                                ),
-                            })?;
-                            let deleted = tx_delete(tx, &manifest, entity, id)?;
-                            crdt_touched.push((entity.to_string(), id.to_string()));
-                            deleted
-                        } else {
-                            tx_delete(tx, &manifest, entity, id)?
-                        };
-                        serde_json::json!({ "op": "delete", "id": id, "deleted": deleted })
+                    // Refresh cache for CRDT rows we touched.
+                    for (entity, id) in &crdt_touched {
+                        pg.crdt.cache_after_commit(tx, entity, id);
                     }
-                };
-                json_results.push(result);
-            }
-            // Refresh cache for CRDT rows we touched.
-            for (entity, id) in &crdt_touched {
-                pg.crdt.cache_after_commit(tx, entity, id);
-            }
-            Ok(json_results)
-        });
+                    Ok(json_results)
+                });
 
         match result {
             Ok(json_results) => Ok((true, json_results)),
@@ -863,6 +895,8 @@ impl DataStore for Runtime {
                 Some(pg) => pg,
                 None => return Ok(None),
             };
+            let ent = ent.clone();
+            self.pg_prepare_crdt_doc_for_read(&ent, row_id)?;
             // Single-read; with_client is fine here. PgLoroStore's
             // hydrate-on-miss + per-row Mutex ensures consistent
             // bytes even under concurrent applies on other threads.
@@ -924,6 +958,8 @@ impl DataStore for Runtime {
             return Ok(None);
         }
         if let Some(pg) = self.pg_backend() {
+            let ent = ent.clone();
+            self.pg_prepare_crdt_doc_for_read(&ent, row_id)?;
             return pg.store.with_client(|client| {
                 pg.crdt
                     .current_vv_bytes(client, entity, row_id)
@@ -968,6 +1004,8 @@ impl DataStore for Runtime {
             return Ok(None);
         }
         if let Some(pg) = self.pg_backend() {
+            let ent = ent.clone();
+            self.pg_prepare_crdt_doc_for_read(&ent, row_id)?;
             // Closure returns `Ok(Option<Vec<u8>>)`; a per-row
             // update_since_bytes decode error gets logged + folded
             // into Ok(None) so the caller falls back to snapshot
@@ -1062,40 +1100,26 @@ impl DataStore for Runtime {
                 pg_backend
                     .store
                     .with_transaction_raw(|tx| -> Result<Vec<u8>, DataError> {
-                        let projected = pg_backend
-                            .crdt
-                            .apply_remote_update(tx, entity, row_id, &crdt_fields, update)
-                            .map_err(|e| {
-                                // Distinguish decode errors (malformed client
-                                // bytes — caller's fault, 400) from apply
-                                // errors (schema mismatch, also caller's
-                                // fault but a different shape). The CRDT
-                                // route maps CRDT_DECODE_FAILED → 400, so
-                                // unmapped errors land as 500 — codex
-                                // flagged the asymmetry vs the SQLite path.
-                                let code = match &e {
-                                    crate::loro_store::LoroStoreError::Decode(_) => {
-                                        "CRDT_DECODE_FAILED"
-                                    }
-                                    _ => "CRDT_APPLY_FAILED",
-                                };
-                                DataError {
-                                    code: code.into(),
-                                    message: format!("crdt apply update {entity}/{row_id}: {e}"),
+                        // Distinguish decode errors (malformed client bytes,
+                        // 400) from apply errors.
+                        let crdt_err = |e: crate::loro_store::LoroStoreError| {
+                            let code = match &e {
+                                crate::loro_store::LoroStoreError::Decode(_) => {
+                                    "CRDT_DECODE_FAILED"
                                 }
-                            })?;
-                        let updated = pylon_storage::pg_tx_store::tx_update(
-                            tx,
-                            self.manifest(),
-                            entity,
-                            row_id,
-                            &projected,
-                        )?;
-                        if !updated {
-                            // Same orphan guard as Runtime::update — refuse
-                            // to commit a snapshot for a row that doesn't
-                            // exist. Peer pushed an update for a row this
-                            // replica's never seen.
+                                _ => "CRDT_APPLY_FAILED",
+                            };
+                            DataError {
+                                code: code.into(),
+                                message: format!("crdt apply update {entity}/{row_id}: {e}"),
+                            }
+                        };
+                        // Refuse to commit a snapshot for a row that does not
+                        // exist (a peer pushed an update for a row this
+                        // replica has never seen).
+                        let Some(row) = crate::pg_row_for_doc(tx, &ent, &crdt_fields, row_id)
+                            .map_err(crdt_err)?
+                        else {
                             return Err(DataError {
                                 code: "ENTITY_NOT_FOUND".into(),
                                 message: format!(
@@ -1103,6 +1127,69 @@ impl DataStore for Runtime {
                              no materialized row — refusing to commit an orphan snapshot."
                                 ),
                             });
+                        };
+                        let (before_push, touched, had_doc) = pg_backend
+                            .crdt
+                            .apply_client_update(tx, entity, row_id, &crdt_fields, update)
+                            .map_err(crdt_err)?;
+                        // A row with no doc: the update came first, so its
+                        // fields stand; the fields it did not set take the
+                        // row's values, or the projection below would null
+                        // them in the row.
+                        if !had_doc {
+                            let set = touched.clone().unwrap_or_default();
+                            let failed = pg_backend
+                                .crdt
+                                .apply_seed_fields(
+                                    tx,
+                                    entity,
+                                    row_id,
+                                    &crdt_fields,
+                                    crate::fill_values(&crdt_fields, &row, &set),
+                                )
+                                .map_err(crdt_err)?;
+                            for (field, why) in failed {
+                                tracing::warn!(
+                                    entity,
+                                    row_id,
+                                    field = %field,
+                                    "fill a CRDT doc from its row: {why}"
+                                );
+                            }
+                        }
+                        let projected = pg_backend
+                            .crdt
+                            .project_stored(tx, entity, row_id, &crdt_fields)
+                            .map_err(crdt_err)?;
+                        // Only the fields this push changed or set: a column
+                        // the doc does not hold a value for (one it could not
+                        // take) keeps its value.
+                        let null = serde_json::Value::Null;
+                        let changes: serde_json::Map<String, serde_json::Value> = projected
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .filter(|(key, val)| {
+                                key.as_str() != "id"
+                                    && (touched.as_ref().is_some_and(|t| t.contains(key))
+                                        || !crate::same_json_value(
+                                            before_push.get(key.as_str()).unwrap_or(&null),
+                                            val,
+                                        ))
+                            })
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        if !changes.is_empty() {
+                            let changes = serde_json::Value::Object(changes);
+                            let stored = crate::serialize_json_fields_for_storage(&ent, &changes)
+                                .unwrap_or(changes);
+                            pylon_storage::pg_tx_store::tx_update(
+                                tx,
+                                self.manifest(),
+                                entity,
+                                row_id,
+                                &stored,
+                            )?;
                         }
                         // Read the snapshot back from the tx, bypassing the
                         // cache — a prior `crdt_snapshot()` call could have

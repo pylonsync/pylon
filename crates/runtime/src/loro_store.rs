@@ -291,6 +291,410 @@ fn as_synthetic(
     reset.map_err(|e| format!("reset the peer: {e}"))
 }
 
+/// A process's CRDT peers: one for the server's own writes, one for its
+/// synthetic writes (see [`as_synthetic`]). Random per process (and per
+/// cache clear), so op ids stay unique after a database is restored from a
+/// backup; one per process, so a row's version vector does not grow with
+/// every write.
+pub(crate) struct Peers {
+    server: std::sync::atomic::AtomicU64,
+    synthetic: std::sync::atomic::AtomicU64,
+}
+
+impl Peers {
+    pub(crate) fn new() -> Self {
+        Self {
+            server: std::sync::atomic::AtomicU64::new(fresh_peer()),
+            synthetic: std::sync::atomic::AtomicU64::new(fresh_peer()),
+        }
+    }
+
+    pub(crate) fn server(&self) -> u64 {
+        self.server.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn synthetic(&self) -> u64 {
+        self.synthetic.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// New peers, as a new process takes.
+    pub(crate) fn renew(&self) {
+        self.server
+            .store(fresh_peer(), std::sync::atomic::Ordering::Relaxed);
+        self.synthetic
+            .store(fresh_peer(), std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A doc decoded from a stored snapshot (or empty), writing as the
+/// process's server peer.
+pub(crate) fn doc_from_snapshot(
+    snapshot: Option<&[u8]>,
+    peers: &Peers,
+) -> Result<LoroDoc, LoroStoreError> {
+    let doc = LoroDoc::new();
+    if let Some(bytes) = snapshot {
+        crdt_apply_update(&doc, bytes).map_err(LoroStoreError::Decode)?;
+    }
+    doc.set_peer_id(peers.server())
+        .map_err(|e| LoroStoreError::Apply(format!("set the server peer: {e}")))?;
+    Ok(doc)
+}
+
+/// Where a backend keeps each CRDT row's server-side records, beside its
+/// snapshot and in the same transaction: the peers of its synthetic ops
+/// (`_pylon_crdt_synthetic`), the server's last whole write of each text,
+/// list, or tree field (`_pylon_crdt_base`), and the links of containers
+/// merged into the one holding their key (`_pylon_crdt_links`). A client's
+/// update cannot change them.
+pub(crate) trait SideRecords {
+    fn synthetic_peers(
+        &mut self,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<std::collections::HashSet<u64>, LoroStoreError>;
+    fn record_synthetic(
+        &mut self,
+        entity: &str,
+        row_id: &str,
+        peer: u64,
+    ) -> Result<(), LoroStoreError>;
+    /// A row's records in a (key, JSON) table: `_pylon_crdt_base` by field,
+    /// `_pylon_crdt_links` by source.
+    fn read_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<Vec<(String, String)>, LoroStoreError>;
+    fn write_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+        key: &str,
+        json: &str,
+    ) -> Result<(), LoroStoreError>;
+    fn delete_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+        key: &str,
+    ) -> Result<(), LoroStoreError>;
+}
+
+/// The side tables keyed by a string and holding JSON.
+#[derive(Clone, Copy)]
+pub(crate) enum SideTable {
+    /// `_pylon_crdt_base`: field → `pylon_crdt::merge::BaseWrite`.
+    Base,
+    /// `_pylon_crdt_links`: source → `pylon_crdt::merge::Links`.
+    Links,
+}
+
+impl SideTable {
+    /// Table, key column, value column.
+    pub(crate) fn columns(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            SideTable::Base => ("_pylon_crdt_base", "field", "base"),
+            SideTable::Links => ("_pylon_crdt_links", "source", "links"),
+        }
+    }
+}
+
+/// A row's decoded records in `table`. One that no longer decodes is
+/// skipped: the merge then starts over for it.
+fn read_side<T: serde::de::DeserializeOwned>(
+    side: &mut dyn SideRecords,
+    table: SideTable,
+    entity: &str,
+    row_id: &str,
+) -> Result<std::collections::HashMap<String, T>, LoroStoreError> {
+    Ok(side
+        .read_json(table, entity, row_id)?
+        .into_iter()
+        .filter_map(|(key, json)| Some((key, serde_json::from_str(&json).ok()?)))
+        .collect())
+}
+
+/// Record the server's whole write of `written` (text, list, and tree
+/// fields): `peer`'s ops from `start` to now.
+#[allow(clippy::too_many_arguments)]
+fn record_bases(
+    side: &mut dyn SideRecords,
+    doc: &LoroDoc,
+    entity: &str,
+    row_id: &str,
+    fields: &[CrdtField],
+    written: &[&str],
+    peer: u64,
+    start: i32,
+) -> Result<(), LoroStoreError> {
+    let end = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+    for f in fields.iter().filter(|f| written.contains(&f.name.as_str())) {
+        let Some(base) = pylon_crdt::merge::base_write(doc, f, peer, start, end) else {
+            continue;
+        };
+        let base = serde_json::to_string(&base)
+            .map_err(|e| LoroStoreError::Storage(format!("encode a base write: {e}")))?;
+        side.write_json(SideTable::Base, entity, row_id, &f.name, &base)?;
+    }
+    Ok(())
+}
+
+/// A server write: apply `patch` to `doc` and record it as the server's
+/// whole write of the text, list, and tree fields it sets.
+pub(crate) fn patch_doc(
+    side: &mut dyn SideRecords,
+    doc: &LoroDoc,
+    entity: &str,
+    row_id: &str,
+    fields: &[CrdtField],
+    patch: &Value,
+) -> Result<(), LoroStoreError> {
+    let peer = doc.peer_id();
+    let start = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+    apply_patch(doc, fields, patch).map_err(LoroStoreError::Apply)?;
+    let written: Vec<&str> = patch
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, v)| !v.is_null())
+        .map(|(k, _)| k.as_str())
+        .collect();
+    record_bases(side, doc, entity, row_id, fields, &written, peer, start)
+}
+
+/// Apply `values` to `doc` as one synthetic write (a doc created or brought
+/// in line from its row: seed, reconcile, fill), one field at a time, and
+/// record it as the server's write of those fields. Returns the fields the
+/// doc could not take, with why.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn seed_doc(
+    side: &mut dyn SideRecords,
+    doc: &LoroDoc,
+    peers: &Peers,
+    entity: &str,
+    row_id: &str,
+    fields: &[CrdtField],
+    values: Vec<(String, Value)>,
+) -> Result<Vec<(String, String)>, LoroStoreError> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tried = values.len();
+    let mut failed = Vec::new();
+    let mut written = Vec::new();
+    let peer = peers.synthetic();
+    let start = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
+    as_synthetic(doc, peer, || {
+        for (name, value) in values {
+            let patch = serde_json::json!({ name.clone(): value });
+            match apply_patch(doc, fields, &patch) {
+                Ok(()) => written.push(name),
+                Err(e) => failed.push((name, e)),
+            }
+        }
+        Ok(())
+    })
+    .map_err(LoroStoreError::Apply)?;
+    if failed.len() < tried {
+        side.record_synthetic(entity, row_id, peer)?;
+    }
+    let written: Vec<&str> = written.iter().map(String::as_str).collect();
+    record_bases(side, doc, entity, row_id, fields, &written, peer, start)?;
+    Ok(failed)
+}
+
+/// Import a client's update into `doc`. Then, as one synthetic write:
+///
+/// - A register the update wrote whose winning op is synthetic takes the
+///   update's value again: the client had not seen that op.
+/// - Per text, list, tree, or counter field, the other containers the
+///   update changed, and the one the key moved from, are merged into the
+///   one holding the key (`pylon_crdt::merge`).
+///
+/// An update that adds no ops (a push sent again) changes nothing. Returns
+/// the projection before the import and the fields the update changed
+/// (deletes included), none when it added no ops.
+pub(crate) fn merge_client_update(
+    side: &mut dyn SideRecords,
+    doc: &LoroDoc,
+    peers: &Peers,
+    entity: &str,
+    row_id: &str,
+    fields: &[CrdtField],
+    update: &[u8],
+) -> Result<(Value, Option<Vec<String>>), LoroStoreError> {
+    let synthetic = side.synthetic_peers(entity, row_id)?;
+    let before = project_doc_to_json(doc, fields);
+    let held_before = doc.oplog_vv();
+    let prior = pylon_crdt::merge::holders(doc, fields);
+    crdt_apply_update(doc, update).map_err(LoroStoreError::Decode)?;
+    if doc.oplog_vv() == held_before {
+        return Ok((before, None));
+    }
+    let imported = pylon_crdt::merge::read_import(doc, fields, &held_before);
+    let projected = project_doc_to_json(doc, fields);
+    let map = pylon_crdt::root_map(doc);
+    let null = Value::Null;
+    let registers: Vec<(&String, &Value)> = imported
+        .registers
+        .iter()
+        .filter(|(name, wanted)| {
+            !crate::same_json_value(projected.get(name.as_str()).unwrap_or(&null), wanted)
+                && map
+                    .get_last_editor(name)
+                    .is_some_and(|p| synthetic.contains(&p))
+        })
+        .collect();
+    let merging = pylon_crdt::merge::has_sources(doc, fields, &imported, &prior);
+    let (bases, mut links) = if merging {
+        (
+            read_side(side, SideTable::Base, entity, row_id)?,
+            read_side(side, SideTable::Links, entity, row_id)?,
+        )
+    } else {
+        Default::default()
+    };
+    let held = doc.oplog_vv();
+    let mut linked = Vec::new();
+    let peer = peers.synthetic();
+    as_synthetic(doc, peer, || {
+        // A value the field cannot take (a client can write any) is left
+        // as Loro merged it.
+        for (name, value) in &registers {
+            if let Err(e) = apply_patch(doc, fields, &serde_json::json!({ *name: value })) {
+                tracing::warn!(entity, row_id, field = %name, "apply a client's value again: {e}");
+            }
+        }
+        if merging {
+            linked = pylon_crdt::merge::merge_after_import(
+                doc, fields, &imported, &prior, &bases, &mut links,
+            )?;
+        }
+        Ok(())
+    })
+    .map_err(LoroStoreError::Apply)?;
+    if doc.oplog_vv() != held {
+        side.record_synthetic(entity, row_id, peer)?;
+    }
+    for source in linked {
+        match links.get(&source) {
+            Some(l) => {
+                let json = serde_json::to_string(l)
+                    .map_err(|e| LoroStoreError::Storage(format!("encode links: {e}")))?;
+                side.write_json(SideTable::Links, entity, row_id, &source, &json)?
+            }
+            None => side.delete_json(SideTable::Links, entity, row_id, &source)?,
+        }
+    }
+    Ok((before, Some(imported.touched)))
+}
+
+/// The side records in a SQLite database, on the caller's connection.
+pub(crate) struct SqliteSide<'a>(pub &'a Connection);
+
+impl SideRecords for SqliteSide<'_> {
+    fn synthetic_peers(
+        &mut self,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<std::collections::HashSet<u64>, LoroStoreError> {
+        let err =
+            |e: rusqlite::Error| LoroStoreError::Storage(format!("read synthetic peers: {e}"));
+        let mut stmt = self
+            .0
+            .prepare_cached(
+                "SELECT peer FROM _pylon_crdt_synthetic WHERE entity = ?1 AND row_id = ?2",
+            )
+            .map_err(err)?;
+        let peers = stmt
+            .query_map(params![entity, row_id], |r| r.get::<_, i64>(0))
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        Ok(peers.into_iter().map(|p| p as u64).collect())
+    }
+
+    fn record_synthetic(
+        &mut self,
+        entity: &str,
+        row_id: &str,
+        peer: u64,
+    ) -> Result<(), LoroStoreError> {
+        self.0
+            .prepare_cached(
+                "INSERT OR IGNORE INTO _pylon_crdt_synthetic (entity, row_id, peer)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id, peer as i64]))
+            .map(|_| ())
+            .map_err(|e| LoroStoreError::Storage(format!("record a synthetic peer: {e}")))
+    }
+
+    fn read_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+    ) -> Result<Vec<(String, String)>, LoroStoreError> {
+        let (name, key, value) = table.columns();
+        let err = |e: rusqlite::Error| LoroStoreError::Storage(format!("read {name}: {e}"));
+        let mut stmt = self
+            .0
+            .prepare_cached(&format!(
+                "SELECT {key}, {value} FROM {name} WHERE entity = ?1 AND row_id = ?2"
+            ))
+            .map_err(err)?;
+        let rows = stmt
+            .query_map(params![entity, row_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .map_err(err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(err)?;
+        Ok(rows)
+    }
+
+    fn write_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+        key: &str,
+        json: &str,
+    ) -> Result<(), LoroStoreError> {
+        let (name, key_col, value_col) = table.columns();
+        self.0
+            .prepare_cached(&format!(
+                "INSERT INTO {name} (entity, row_id, {key_col}, {value_col})
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (entity, row_id, {key_col}) DO UPDATE SET
+                    {value_col} = excluded.{value_col}"
+            ))
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id, key, json]))
+            .map(|_| ())
+            .map_err(|e| LoroStoreError::Storage(format!("write {name}: {e}")))
+    }
+
+    fn delete_json(
+        &mut self,
+        table: SideTable,
+        entity: &str,
+        row_id: &str,
+        key: &str,
+    ) -> Result<(), LoroStoreError> {
+        let (name, key_col, _) = table.columns();
+        self.0
+            .prepare_cached(&format!(
+                "DELETE FROM {name} WHERE entity = ?1 AND row_id = ?2 AND {key_col} = ?3"
+            ))
+            .and_then(|mut stmt| stmt.execute(params![entity, row_id, key]))
+            .map(|_| ())
+            .map_err(|e| LoroStoreError::Storage(format!("delete from {name}: {e}")))
+    }
+}
+
 thread_local! {
     /// Rows whose cached doc this thread changed since its write
     /// transaction began. The cache holds the change before the commit, so
@@ -327,11 +731,7 @@ pub struct LoroStore {
     /// Loro work happens under the per-doc Mutex, so two requests
     /// targeting different rows never block each other.
     docs: crate::crdt_cache::DocCache,
-    /// The peer of this process's synthetic ops: random per process (and
-    /// per cache clear), so op ids stay unique after a database is
-    /// restored from a backup, and one per process, so a row's version
-    /// vector does not grow with every synthetic write.
-    synthetic_peer: std::sync::atomic::AtomicU64,
+    peers: Peers,
 }
 
 impl Default for LoroStore {
@@ -344,13 +744,8 @@ impl LoroStore {
     pub fn new() -> Self {
         Self {
             docs: Default::default(),
-            synthetic_peer: std::sync::atomic::AtomicU64::new(fresh_peer()),
+            peers: Peers::new(),
         }
-    }
-
-    fn synthetic_peer(&self) -> u64 {
-        self.synthetic_peer
-            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Get the cached doc for a row, hydrating from the sidecar if absent.
@@ -386,10 +781,7 @@ impl LoroStore {
                 }
             })?;
 
-        let doc = LoroDoc::new();
-        if let Some(bytes) = snapshot {
-            crdt_apply_update(&doc, &bytes).map_err(LoroStoreError::Decode)?;
-        }
+        let doc = doc_from_snapshot(snapshot.as_deref(), &self.peers)?;
         let handle = Arc::new(Mutex::new(doc));
 
         // Publish, but defer to whatever's already there if we lost the
@@ -432,17 +824,7 @@ impl LoroStore {
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         note_changed(entity, row_id);
-        let peer = doc.peer_id();
-        let start = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
-        apply_patch(&doc, fields, patch).map_err(LoroStoreError::Apply)?;
-        let written: Vec<&str> = patch
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter(|(_, v)| !v.is_null())
-            .map(|(k, _)| k.as_str())
-            .collect();
-        self.record_bases(conn, entity, row_id, &doc, fields, &written, peer, start)?;
+        patch_doc(&mut SqliteSide(conn), &doc, entity, row_id, fields, patch)?;
         self.persist_snapshot(conn, entity, row_id, &doc)?;
         Ok(project_doc_to_json(&doc, fields))
     }
@@ -454,160 +836,12 @@ impl LoroStore {
         entity: &str,
         row_id: &str,
     ) -> Result<std::collections::HashSet<u64>, LoroStoreError> {
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT peer FROM _pylon_crdt_synthetic WHERE entity = ?1 AND row_id = ?2",
-            )
-            .map_err(|e| LoroStoreError::Storage(format!("read synthetic peers: {e}")))?;
-        let peers = stmt
-            .query_map(params![entity, row_id], |r| r.get::<_, i64>(0))
-            .map_err(|e| LoroStoreError::Storage(format!("read synthetic peers: {e}")))?
-            .filter_map(Result::ok)
-            .map(|p| p as u64)
-            .collect();
-        Ok(peers)
+        SqliteSide(conn).synthetic_peers(entity, row_id)
     }
 
-    fn record_synthetic(
-        &self,
-        conn: &Connection,
-        entity: &str,
-        row_id: &str,
-        peer: u64,
-    ) -> Result<(), LoroStoreError> {
-        conn.execute(
-            "INSERT OR IGNORE INTO _pylon_crdt_synthetic (entity, row_id, peer)
-             VALUES (?1, ?2, ?3)",
-            params![entity, row_id, peer as i64],
-        )
-        .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("record a synthetic peer: {e}")))
-    }
-
-    /// Record the server's whole write of `written` (text, list, and tree
-    /// fields): `peer`'s ops from `start` to now.
-    #[allow(clippy::too_many_arguments)]
-    fn record_bases(
-        &self,
-        conn: &Connection,
-        entity: &str,
-        row_id: &str,
-        doc: &LoroDoc,
-        fields: &[CrdtField],
-        written: &[&str],
-        peer: u64,
-        start: i32,
-    ) -> Result<(), LoroStoreError> {
-        let end = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
-        for f in fields.iter().filter(|f| written.contains(&f.name.as_str())) {
-            let Some(base) = pylon_crdt::merge::base_write(doc, f, peer, start, end) else {
-                continue;
-            };
-            let base = serde_json::to_string(&base)
-                .map_err(|e| LoroStoreError::Storage(format!("encode a base write: {e}")))?;
-            conn.prepare_cached(
-                "INSERT INTO _pylon_crdt_base (entity, row_id, field, base)
-                 VALUES (?1, ?2, ?3, ?4)
-                 ON CONFLICT (entity, row_id, field) DO UPDATE SET base = excluded.base",
-            )
-            .and_then(|mut stmt| stmt.execute(params![entity, row_id, f.name, base]))
-            .map_err(|e| LoroStoreError::Storage(format!("record a base write: {e}")))?;
-        }
-        Ok(())
-    }
-
-    fn bases(
-        &self,
-        conn: &Connection,
-        entity: &str,
-        row_id: &str,
-    ) -> Result<std::collections::HashMap<String, pylon_crdt::merge::BaseWrite>, LoroStoreError>
-    {
-        self.read_json_side(
-            conn,
-            "SELECT field, base FROM _pylon_crdt_base WHERE entity = ?1 AND row_id = ?2",
-            entity,
-            row_id,
-        )
-    }
-
-    fn links(
-        &self,
-        conn: &Connection,
-        entity: &str,
-        row_id: &str,
-    ) -> Result<std::collections::HashMap<String, pylon_crdt::merge::Links>, LoroStoreError> {
-        self.read_json_side(
-            conn,
-            "SELECT source, links FROM _pylon_crdt_links WHERE entity = ?1 AND row_id = ?2",
-            entity,
-            row_id,
-        )
-    }
-
-    /// A row's (key, JSON value) side records, decoded. A record that no
-    /// longer decodes is skipped: the merge then starts over for it.
-    fn read_json_side<T: serde::de::DeserializeOwned>(
-        &self,
-        conn: &Connection,
-        sql: &str,
-        entity: &str,
-        row_id: &str,
-    ) -> Result<std::collections::HashMap<String, T>, LoroStoreError> {
-        let err = |e: rusqlite::Error| LoroStoreError::Storage(format!("read {sql}: {e}"));
-        let mut stmt = conn.prepare_cached(sql).map_err(err)?;
-        let rows = stmt
-            .query_map(params![entity, row_id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })
-            .map_err(err)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(err)?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|(key, json)| Some((key, serde_json::from_str(&json).ok()?)))
-            .collect())
-    }
-
-    fn drop_links(
-        &self,
-        conn: &Connection,
-        entity: &str,
-        row_id: &str,
-        source: &str,
-    ) -> Result<(), LoroStoreError> {
-        conn.prepare_cached(
-            "DELETE FROM _pylon_crdt_links WHERE entity = ?1 AND row_id = ?2 AND source = ?3",
-        )
-        .and_then(|mut stmt| stmt.execute(params![entity, row_id, source]))
-        .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("drop links: {e}")))
-    }
-
-    fn record_links(
-        &self,
-        conn: &Connection,
-        entity: &str,
-        row_id: &str,
-        source: &str,
-        links: &pylon_crdt::merge::Links,
-    ) -> Result<(), LoroStoreError> {
-        let links = serde_json::to_string(links)
-            .map_err(|e| LoroStoreError::Storage(format!("encode links: {e}")))?;
-        conn.prepare_cached(
-            "INSERT INTO _pylon_crdt_links (entity, row_id, source, links)
-             VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (entity, row_id, source) DO UPDATE SET links = excluded.links",
-        )
-        .and_then(|mut stmt| stmt.execute(params![entity, row_id, source, links]))
-        .map(|_| ())
-        .map_err(|e| LoroStoreError::Storage(format!("record links: {e}")))
-    }
-
-    /// Apply `values` as one synthetic write (a doc created or brought in
-    /// line from its row: seed, reconcile, fill), one field at a time under
-    /// one peer, and record it as the server's write of those fields.
-    /// Returns the fields the doc could not take, with why.
+    /// Apply `values` to the row's doc as one synthetic write (see
+    /// [`seed_doc`]) and persist it. Returns the fields the doc could not
+    /// take, with why.
     pub fn apply_seed_fields(
         &self,
         conn: &Connection,
@@ -622,43 +856,21 @@ impl LoroStore {
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         note_changed(entity, row_id);
-        let tried = values.len();
-        let mut failed = Vec::new();
-        let mut written = Vec::new();
-        let peer = self.synthetic_peer();
-        let start = doc.oplog_vv().get(&peer).copied().unwrap_or(0);
-        as_synthetic(&doc, peer, || {
-            for (name, value) in values {
-                let patch = serde_json::json!({ name.clone(): value });
-                match apply_patch(&doc, fields, &patch) {
-                    Ok(()) => written.push(name),
-                    Err(e) => failed.push((name, e)),
-                }
-            }
-            Ok(())
-        })
-        .map_err(LoroStoreError::Apply)?;
-        if failed.len() < tried {
-            self.record_synthetic(conn, entity, row_id, peer)?;
-        }
-        let written: Vec<&str> = written.iter().map(String::as_str).collect();
-        self.record_bases(conn, entity, row_id, &doc, fields, &written, peer, start)?;
+        let failed = seed_doc(
+            &mut SqliteSide(conn),
+            &doc,
+            &self.peers,
+            entity,
+            row_id,
+            fields,
+            values,
+        )?;
         self.persist_snapshot(conn, entity, row_id, &doc)?;
         Ok(failed)
     }
 
-    /// Import a client's update into the row's doc and persist it. Then, as
-    /// one synthetic write:
-    ///
-    /// - A register the update wrote whose winning op is synthetic takes
-    ///   the update's value again: the client had not seen that op.
-    /// - Per text, list, tree, or counter field, the other containers the
-    ///   update changed, and the one the key moved from, are merged into
-    ///   the one holding the key (`pylon_crdt::merge`).
-    ///
-    /// An update that adds no ops (a push sent again) changes nothing.
-    /// Returns the projection before the import and the fields the update
-    /// changed (deletes included), none when it added no ops.
+    /// Import a client's update into the row's doc (see
+    /// [`merge_client_update`]) and persist it.
     pub fn apply_client_update(
         &self,
         conn: &Connection,
@@ -667,70 +879,22 @@ impl LoroStore {
         fields: &[CrdtField],
         update: &[u8],
     ) -> Result<(Value, Option<Vec<String>>), LoroStoreError> {
-        let peers = self.synthetic_peers(conn, entity, row_id)?;
         let handle = self.get_or_hydrate(conn, entity, row_id)?;
         let doc = handle.lock().unwrap();
         note_changed(entity, row_id);
-        let before = project_doc_to_json(&doc, fields);
-        let held_before = doc.oplog_vv();
-        let prior = pylon_crdt::merge::holders(&doc, fields);
-        crdt_apply_update(&doc, update).map_err(LoroStoreError::Decode)?;
-        if doc.oplog_vv() == held_before {
-            return Ok((before, None));
+        let merged = merge_client_update(
+            &mut SqliteSide(conn),
+            &doc,
+            &self.peers,
+            entity,
+            row_id,
+            fields,
+            update,
+        )?;
+        if merged.1.is_some() {
+            self.persist_snapshot(conn, entity, row_id, &doc)?;
         }
-        let imported = pylon_crdt::merge::read_import(&doc, fields, &held_before);
-        let projected = project_doc_to_json(&doc, fields);
-        let map = pylon_crdt::root_map(&doc);
-        let null = Value::Null;
-        let registers: Vec<(&String, &Value)> = imported
-            .registers
-            .iter()
-            .filter(|(name, wanted)| {
-                !crate::same_json_value(projected.get(name.as_str()).unwrap_or(&null), wanted)
-                    && map
-                        .get_last_editor(name)
-                        .is_some_and(|p| peers.contains(&p))
-            })
-            .collect();
-        let merging = pylon_crdt::merge::has_sources(&doc, fields, &imported, &prior);
-        let (bases, mut links) = if merging {
-            (
-                self.bases(conn, entity, row_id)?,
-                self.links(conn, entity, row_id)?,
-            )
-        } else {
-            Default::default()
-        };
-        let held = doc.oplog_vv();
-        let mut linked = Vec::new();
-        let peer = self.synthetic_peer();
-        as_synthetic(&doc, peer, || {
-            // A value the field cannot take (a client can write any) is
-            // left as Loro merged it.
-            for (name, value) in &registers {
-                if let Err(e) = apply_patch(&doc, fields, &serde_json::json!({ *name: value })) {
-                    tracing::warn!(entity, row_id, field = %name, "apply a client's value again: {e}");
-                }
-            }
-            if merging {
-                linked = pylon_crdt::merge::merge_after_import(
-                    &doc, fields, &imported, &prior, &bases, &mut links,
-                )?;
-            }
-            Ok(())
-        })
-        .map_err(LoroStoreError::Apply)?;
-        if doc.oplog_vv() != held {
-            self.record_synthetic(conn, entity, row_id, peer)?;
-        }
-        for source in linked {
-            match links.get(&source) {
-                Some(l) => self.record_links(conn, entity, row_id, &source, l)?,
-                None => self.drop_links(conn, entity, row_id, &source)?,
-            }
-        }
-        self.persist_snapshot(conn, entity, row_id, &doc)?;
-        Ok((before, Some(imported.touched)))
+        Ok(merged)
     }
 
     /// Apply a binary update from a peer (typed-protocol client push or
@@ -914,8 +1078,7 @@ impl LoroStore {
     /// Drop every cached doc. Tests only (`reset_for_tests`).
     pub fn clear_cache(&self) {
         self.docs.clear();
-        self.synthetic_peer
-            .store(fresh_peer(), std::sync::atomic::Ordering::Relaxed);
+        self.peers.renew();
     }
 
     /// Number of rows currently held in memory. Diagnostic.
