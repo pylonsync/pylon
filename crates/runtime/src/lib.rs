@@ -5701,12 +5701,15 @@ pub(crate) fn pg_crdt_patch<C: pylon_storage::pg_exec::PgConn>(
 
 /// The row's values for the fields a doc does not hold (`held`): what a doc
 /// left partial by an older build takes from its row. A null is not a
-/// value the doc lacks.
+/// value the doc lacks, and a value the doc cannot take (JSON nested past
+/// its depth limit, a wrong shape) is left out: it would fail again on
+/// every read.
 pub(crate) fn missing_values(
     fields: &[pylon_crdt::CrdtField],
     held: &[String],
     row: &serde_json::Value,
 ) -> Vec<(String, serde_json::Value)> {
+    let scratch = pylon_crdt::loro::LoroDoc::new();
     fields
         .iter()
         .filter(|f| !held.contains(&f.name))
@@ -5714,6 +5717,9 @@ pub(crate) fn missing_values(
             row.get(&f.name)
                 .filter(|v| !v.is_null())
                 .map(|v| (f.name.clone(), v.clone()))
+        })
+        .filter(|(name, value)| {
+            pylon_crdt::apply_patch(&scratch, fields, &serde_json::json!({ name: value })).is_ok()
         })
         .collect()
 }
@@ -7979,6 +7985,35 @@ mod tests {
         let limit = holder.chars().count() + 4 + 2000 * 6 + 16;
         assert!(body.chars().count() <= limit, "{}", body.chars().count());
         assert!(body.contains("line 8 of the document edited"));
+    }
+
+    /// A row value the doc cannot take is not a value the doc lacks: it is
+    /// left out, so a read does not try it (and open a write) every time.
+    #[test]
+    fn missing_values_leaves_out_what_the_doc_cannot_take() {
+        let fields = vec![
+            pylon_crdt::CrdtField {
+                name: "meta".into(),
+                kind: pylon_crdt::CrdtFieldKind::LwwJson,
+            },
+            pylon_crdt::CrdtField {
+                name: "title".into(),
+                kind: pylon_crdt::CrdtFieldKind::LwwString,
+            },
+            pylon_crdt::CrdtField {
+                name: "done".into(),
+                kind: pylon_crdt::CrdtFieldKind::LwwBool,
+            },
+        ];
+        let mut deep = serde_json::json!(1);
+        for _ in 0..40 {
+            deep = serde_json::json!({ "k": deep });
+        }
+        let row = serde_json::json!({"meta": deep, "title": "a", "done": null});
+        assert_eq!(
+            missing_values(&fields, &[], &row),
+            vec![("title".to_string(), serde_json::json!("a"))]
+        );
     }
 
     /// Pruning a row's snapshot removes its server-side records, and only
