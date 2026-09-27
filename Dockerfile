@@ -102,6 +102,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # customer's /data/pylon.db. Without this, the dashboard's
     # Database tab silently shows 0 tables / 0 rows.
     sqlite3 \
+    # setcap, for the pylon binary's port-binding capability below.
+    libcap2-bin \
     && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://bun.sh/install | BUN_INSTALL=/usr/local bash \
     && ln -s /usr/local/bin/bun /usr/bin/bun
@@ -117,6 +119,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN BUN_INSTALL=/usr/local bun install -g opencode-ai@1.18.5
 
 COPY --from=rust-builder /usr/local/bin/pylon /usr/local/bin/pylon
+# The server runs as the non-root `pylon` user. Shard WebTransport listens on
+# UDP 443 where it can (PYLON_WEBTRANSPORT_PORT): networks that block other
+# UDP ports usually allow 443 for HTTP/3, and Fly requires the same UDP port
+# outside and inside. A port below 1024 needs this capability. A container
+# run with no-new-privileges drops it; use a port of 1024 or more there.
+RUN setcap cap_net_bind_service=+ep /usr/local/bin/pylon
 # Cloud dev-mode env bootstrap. Not used by the default `pylon start` CMD —
 # Pylon Cloud's provisionDevEnvironment sets this as a machine's init.cmd to
 # turn it into a live, mutable `pylon dev` workspace (seed → bun install →
