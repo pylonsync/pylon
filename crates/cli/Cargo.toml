@@ -53,6 +53,7 @@ flate2 = "1.0"
 # tokio and tungstenite; rustls with webpki roots reaches wss:// apps.
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true, features = ["connect", "rustls-tls-webpki-roots"] }
+wtransport = { workspace = true }
 futures-util = { workspace = true }
 rustls = { workspace = true }
 rmp-serde = "1.3"

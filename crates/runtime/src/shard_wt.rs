@@ -132,16 +132,66 @@ pub struct WebTransport {
 
 static RUNNING: OnceLock<Arc<WebTransport>> = OnceLock::new();
 
-/// The URL and certificate hashes clients need, when WebTransport runs
-/// here.
-pub fn endpoint_info() -> Option<(String, Vec<[u8; 32]>)> {
+/// The other machines' certificate hashes, from the shard directory (see
+/// `set_cluster_hashes`).
+static CLUSTER_HASHES: Mutex<Vec<[u8; 32]>> = Mutex::new(Vec::new());
+
+pub fn is_running() -> bool {
+    RUNNING.get().is_some()
+}
+
+/// This machine's current and next certificate hashes.
+fn own_hashes() -> Option<Vec<[u8; 32]>> {
     let wt = RUNNING.get()?;
     let certs = wt.certs.lock().unwrap();
     let hash = |id: &Identity| *id.certificate_chain().as_slice()[0].hash().as_ref();
-    Some((
-        wt.config.url.clone(),
-        vec![hash(&certs.current), hash(&certs.next)],
-    ))
+    Some(vec![hash(&certs.current), hash(&certs.next)])
+}
+
+/// This machine's hashes as the shard directory stores them: base64,
+/// comma-separated. None when WebTransport does not run here.
+pub fn own_hashes_text() -> Option<String> {
+    use base64::Engine;
+    let hashes = own_hashes()?;
+    Some(
+        hashes
+            .iter()
+            .map(|h| base64::engine::general_purpose::STANDARD.encode(h))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
+}
+
+/// Record every live machine's hashes (their `own_hashes_text`). On Fly a
+/// client's UDP may reach any machine of the app, so a client must accept
+/// all their certificates.
+pub fn set_cluster_hashes<'a>(texts: impl Iterator<Item = &'a str>) {
+    use base64::Engine;
+    let mut all: Vec<[u8; 32]> = texts
+        .flat_map(|t| t.split(','))
+        .filter_map(|h| {
+            base64::engine::general_purpose::STANDARD
+                .decode(h.trim())
+                .ok()
+        })
+        .filter_map(|b| <[u8; 32]>::try_from(b).ok())
+        .collect();
+    all.sort_unstable();
+    all.dedup();
+    *CLUSTER_HASHES.lock().unwrap() = all;
+}
+
+/// The URL and certificate hashes clients need, when WebTransport runs
+/// here: this machine's, then the other live machines'.
+pub fn endpoint_info() -> Option<(String, Vec<[u8; 32]>)> {
+    let wt = RUNNING.get()?;
+    let mut hashes = own_hashes()?;
+    for h in CLUSTER_HASHES.lock().unwrap().iter() {
+        if !hashes.contains(h) {
+            hashes.push(*h);
+        }
+    }
+    Some((wt.config.url.clone(), hashes))
 }
 
 /// The body of `GET /_pylon/shard/webtransport`: `{"url", "certHashes"}`,
@@ -363,13 +413,6 @@ async fn run_session(
             Ok(a) => a,
             Err(e) => return close(conn, close_code::POLICY, &format!("unauthorized: {e}")),
         };
-    let Some(shard) = registry.get(&hello.shard) else {
-        return close(
-            conn,
-            close_code::POLICY,
-            &format!("shard \"{}\" not found", hello.shard),
-        );
-    };
     let datagram_max = conn.max_datagram_size().unwrap_or(0);
     if datagram_max < MIN_DATAGRAM {
         return close(
@@ -378,6 +421,32 @@ async fn run_session(
             "the connection carries no datagrams",
         );
     }
+    let Some(shard) = registry.get(&hello.shard) else {
+        // Another machine may run it: QUIC cannot be handed over, so this
+        // machine relays the session there (see `relay`).
+        if let pylon_realtime::ShardLocation::Remote {
+            machine_id,
+            address: Some(address),
+            ..
+        } = registry.locate(&hello.shard)
+        {
+            return relay(
+                conn,
+                send,
+                recv,
+                &hello,
+                datagram_max,
+                &machine_id,
+                &address,
+            )
+            .await;
+        }
+        return close(
+            conn,
+            close_code::POLICY,
+            &format!("shard \"{}\" not found", hello.shard),
+        );
+    };
 
     let subscriber_id = SubscriberId::new(hello.sid);
     let joined = {
@@ -498,6 +567,171 @@ async fn run_session(
     shard.remove_queued_subscriber(&queue);
     writer.abort();
     end
+}
+
+/// Carry a session to the machine that runs its shard: a wire version 3
+/// WebSocket to that machine's `/shard`, signed as a forwarded request (the
+/// owner serves it and checks the client's credentials itself). Stream
+/// frames go on to the session's stream, datagram frames go out as QUIC
+/// datagrams without their header, and the client's stream messages and
+/// datagrams (acks) go up as version 3 binary messages, which use the same
+/// type bytes.
+async fn relay(
+    conn: &Connection,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    hello: &Hello,
+    datagram_max: usize,
+    machine_id: &str,
+    address: &str,
+) -> ConnectionEnd {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let Some(host) = crate::shard_route::authority(address) else {
+        return close(
+            conn,
+            close_code::AGAIN,
+            "the shard's machine has no address",
+        );
+    };
+    let target = format!(
+        "/shard?shard={}&sid={}&v=3&dmax={datagram_max}",
+        encode(&hello.shard),
+        encode(&hello.sid)
+    );
+    let client_ip = conn.remote_address().ip().to_string();
+    let Some(forwarded) =
+        crate::shard_route::forwarded_value(&client_ip, "GET", &target, machine_id)
+    else {
+        return close(
+            conn,
+            close_code::AGAIN,
+            "this machine is not in the shard directory",
+        );
+    };
+    let mut request = match format!("ws://{host}{target}").into_client_request() {
+        Ok(r) => r,
+        Err(e) => return close(conn, close_code::AGAIN, &format!("relay request: {e}")),
+    };
+    let headers = request.headers_mut();
+    let mut header = |name: &'static str, value: &str| {
+        if let Ok(v) = value.parse() {
+            headers.insert(name, v);
+        }
+    };
+    header(crate::shard_cluster::FORWARDED_HEADER, &forwarded);
+    if let Some(token) = &hello.token {
+        header("authorization", &format!("Bearer {token}"));
+    }
+    if let Some(ticket) = &hello.ticket {
+        header("x-pylon-shard-ticket", ticket);
+    }
+    let upstream = tokio::time::timeout(Duration::from_secs(5), async {
+        let tcp = tokio::net::TcpStream::connect(host).await?;
+        let _ = tcp.set_nodelay(true);
+        tokio_tungstenite::client_async(request, tcp)
+            .await
+            .map_err(std::io::Error::other)
+    })
+    .await;
+    let (ws, _) = match upstream {
+        Ok(Ok(ws)) => ws,
+        Ok(Err(e)) => {
+            tracing::warn!("[shard-wt] relay to machine {machine_id} at {address}: {e}");
+            return close(
+                conn,
+                close_code::AGAIN,
+                "could not reach the shard's machine",
+            );
+        }
+        Err(_) => {
+            return close(
+                conn,
+                close_code::AGAIN,
+                "the shard's machine did not answer",
+            )
+        }
+    };
+    let (mut up_tx, mut up_rx) = ws.split();
+    loop {
+        tokio::select! {
+            from_owner = up_rx.next() => match from_owner {
+                Some(Ok(Message::Binary(frame))) => {
+                    if frame.len() >= wire::HEADER_LEN && frame[0] == wire::kind::DATAGRAM {
+                        // Lost like any datagram when the connection is busy.
+                        let _ = conn.send_datagram(&frame[wire::HEADER_LEN..]);
+                    } else if let Err(e) = write_message(&mut send, &frame).await {
+                        return ConnectionEnd::Closed(e);
+                    }
+                }
+                Some(Ok(Message::Close(close_frame))) => {
+                    let (code, reason) = match close_frame {
+                        Some(f) => {
+                            use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+                            let code = match f.code {
+                                CloseCode::Policy => close_code::POLICY,
+                                CloseCode::Protocol => close_code::PROTOCOL,
+                                CloseCode::Again => close_code::AGAIN,
+                                _ => close_code::NORMAL,
+                            };
+                            (code, f.reason.to_string())
+                        }
+                        None => (close_code::NORMAL, "the shard's machine closed".to_string()),
+                    };
+                    let _ = send.finish().await;
+                    return close(conn, code, &reason);
+                }
+                Some(Ok(_)) => {}
+                Some(Err(e)) => {
+                    return close(conn, close_code::AGAIN, &format!("relay: {e}"));
+                }
+                None => return close(conn, close_code::AGAIN, "the shard's machine closed"),
+            },
+            message = read_message(&mut recv, MAX_CLIENT_MESSAGE) => match message {
+                Ok(Some(bytes)) => {
+                    if up_tx.send(Message::Binary(bytes.into())).await.is_err() {
+                        return close(conn, close_code::AGAIN, "the shard's machine closed");
+                    }
+                }
+                Ok(None) => {
+                    let _ = up_tx.close().await;
+                    return ConnectionEnd::ClientClosed;
+                }
+                Err(e) => {
+                    let _ = up_tx.close().await;
+                    return ConnectionEnd::Closed(e);
+                }
+            },
+            datagram = conn.receive_datagram() => match datagram {
+                Ok(d) => {
+                    if wire::decode_datagram_acks(&d).is_some()
+                        && up_tx.send(Message::Binary(d.payload().to_vec().into())).await.is_err()
+                    {
+                        return close(conn, close_code::AGAIN, "the shard's machine closed");
+                    }
+                }
+                Err(_) => {
+                    let _ = up_tx.close().await;
+                    return ConnectionEnd::ClientClosed;
+                }
+            },
+        }
+    }
+}
+
+/// Percent-encode a query value (everything but unreserved characters).
+fn encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 /// Close codes, for tests and clients: (normal, policy, protocol, again).

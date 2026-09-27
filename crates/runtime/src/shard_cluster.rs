@@ -140,6 +140,9 @@ pub struct Machine {
     pub load: u32,
     /// Its current lease epoch (see [`Placement::epoch`]).
     pub epoch: i64,
+    /// The hashes of its WebTransport certificates, base64, comma-separated
+    /// (see `shard_wt`); None when it serves no WebTransport.
+    pub wt_hashes: Option<String>,
 }
 
 impl Machine {
@@ -307,6 +310,21 @@ impl ShardDirectory {
             for statement in SQLITE_SCHEMA {
                 tx.execute(statement, &[])?;
             }
+            // A directory from before the column.
+            let has_wt = tx
+                .query(
+                    "SELECT count(*) FROM pragma_table_info('_pylon_shard_machines')
+                     WHERE name = 'wt_hashes'",
+                    &[],
+                )?
+                .first()
+                .is_some_and(|r| r.i64(0) > 0);
+            if !has_wt {
+                tx.execute(
+                    "ALTER TABLE _pylon_shard_machines ADD COLUMN wt_hashes TEXT",
+                    &[],
+                )?;
+            }
             tx.execute("DELETE FROM _pylon_shard_machines", &[])?;
             Ok(())
         })?;
@@ -357,17 +375,30 @@ impl ShardDirectory {
     /// leaves or goes silent for the dead time, so it never takes shards
     /// the first is still running.
     pub fn heartbeat(&self, me: &MachineConfig, epoch: i64) -> Result<bool, String> {
+        // This machine's WebTransport certificates, which a client that
+        // reached another machine must also accept (Fly routes its UDP to
+        // any machine).
+        self.heartbeat_with(me, epoch, crate::shard_wt::own_hashes_text().as_deref())
+    }
+
+    /// [`Self::heartbeat`], recording `wt_hashes` (see [`Machine::wt_hashes`]).
+    pub(crate) fn heartbeat_with(
+        &self,
+        me: &MachineConfig,
+        epoch: i64,
+        wt_hashes: Option<&str>,
+    ) -> Result<bool, String> {
         let d = self.d();
-        let [p1, p2, p3, p4, p5, p6] = d.params();
+        let [p1, p2, p3, p4, p5, p6, p7] = d.params();
         let now = d.now_ms();
         let sql = format!(
             "INSERT INTO _pylon_shard_machines AS m
-                (machine_id, address, fly_instance, capacity, heartbeat_at, epoch)
-             VALUES ({p1}, {p2}, {p3}, {p4}, {now}, {p5})
+                (machine_id, address, fly_instance, capacity, heartbeat_at, epoch, wt_hashes)
+             VALUES ({p1}, {p2}, {p3}, {p4}, {now}, {p5}, {p7})
              ON CONFLICT (machine_id) DO UPDATE SET
                 address = EXCLUDED.address, fly_instance = EXCLUDED.fly_instance,
                 capacity = EXCLUDED.capacity, heartbeat_at = EXCLUDED.heartbeat_at,
-                epoch = EXCLUDED.epoch
+                epoch = EXCLUDED.epoch, wt_hashes = EXCLUDED.wt_hashes
              WHERE m.epoch = EXCLUDED.epoch OR m.heartbeat_at <= {now} - {p6}"
         );
         let window = self.window();
@@ -381,6 +412,7 @@ impl ShardDirectory {
                     Val::I32(me.capacity as i32),
                     Val::I64(epoch),
                     Val::I64(window),
+                    Val::OptText(wt_hashes),
                 ],
             )? == 1)
         })
@@ -396,7 +428,7 @@ impl ShardDirectory {
             "SELECT m.machine_id, m.address, m.fly_instance, m.capacity,
                     (SELECT count(*) FROM _pylon_shard_placements p
                      WHERE p.machine_id = m.machine_id),
-                    m.epoch
+                    m.epoch, m.wt_hashes
              FROM _pylon_shard_machines m
              WHERE m.heartbeat_at > {now} - {p1}
              ORDER BY m.machine_id"
@@ -413,6 +445,7 @@ impl ShardDirectory {
                     capacity: r.i64(3).max(0) as u32,
                     load: r.i64(4).clamp(0, u32::MAX as i64) as u32,
                     epoch: r.i64(5),
+                    wt_hashes: r.opt_string(6),
                 })
                 .collect())
         })
@@ -1134,6 +1167,9 @@ fn create_pg_schema(pool: &PgPool) -> Result<(), String> {
                 "ALTER TABLE _pylon_shard_machines ADD COLUMN epoch BIGINT NOT NULL DEFAULT 0",
             )?;
         }
+        if !column(&mut tx, "_pylon_shard_machines", "wt_hashes")? {
+            tx.batch_execute("ALTER TABLE _pylon_shard_machines ADD COLUMN wt_hashes TEXT")?;
+        }
         // An unused column from before; kept (a machine on an older build
         // may still write it) but no longer required.
         if column(&mut tx, "_pylon_shard_machines", "load")? {
@@ -1245,7 +1281,8 @@ const SQLITE_SCHEMA: &[&str] = &[
         fly_instance TEXT,
         capacity INTEGER NOT NULL,
         heartbeat_at INTEGER NOT NULL,
-        epoch INTEGER NOT NULL DEFAULT 0
+        epoch INTEGER NOT NULL DEFAULT 0,
+        wt_hashes TEXT
     )",
     "CREATE TABLE IF NOT EXISTS _pylon_shard_placements (
         shard_id TEXT PRIMARY KEY,
@@ -1670,6 +1707,7 @@ pub(crate) mod tests {
             capacity,
             load,
             epoch: 0,
+            wt_hashes: None,
         }
     }
 
@@ -1847,6 +1885,35 @@ pub(crate) mod tests {
         let _serial = DIRECTORY_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let pool = PgPool::connect(&url, 4, Duration::from_secs(5)).expect("test Postgres pool");
         test(Arc::new(ShardDirectory::open_pg(pool).expect("directory")));
+    }
+
+    #[test]
+    fn a_heartbeat_records_the_machines_webtransport_hashes() {
+        on_each_directory(|dir| {
+            // Unique ids: the Postgres directory is shared with other tests.
+            let tag = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let (a, b) = (format!("wt-a-{tag}"), format!("wt-b-{tag}"));
+            assert!(dir.heartbeat_with(&me(&a), 1, Some("AAAA,BBBB")).unwrap());
+            assert!(dir.heartbeat_with(&me(&b), 1, None).unwrap());
+            let hashes = |id: &str| {
+                dir.live_machines()
+                    .unwrap()
+                    .into_iter()
+                    .find(|m| m.id == id)
+                    .unwrap()
+                    .wt_hashes
+            };
+            assert_eq!(hashes(&a).as_deref(), Some("AAAA,BBBB"));
+            assert_eq!(hashes(&b), None);
+            // A new certificate replaces the old ones.
+            assert!(dir.heartbeat_with(&me(&a), 1, Some("CCCC")).unwrap());
+            assert_eq!(hashes(&a).as_deref(), Some("CCCC"));
+            dir.leave(&a, 1).unwrap();
+            dir.leave(&b, 1).unwrap();
+        });
     }
 
     fn me(id: &str) -> MachineConfig {

@@ -1946,6 +1946,7 @@ mod tests {
             capacity: 10,
             load: 0,
             epoch: c.current_epoch().unwrap(),
+            wt_hashes: None,
         }];
         assert!(!host.may_take_orphan(c, &orphan, &alone));
         host.cluster_round();

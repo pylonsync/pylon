@@ -73,6 +73,13 @@ Options:
   --shard <id>         Join this running shard with locally minted tickets
   --sid-prefix <p>     Subscriber ids for --shard (default \"bot-\")
   --bot-offset <n>     First bot number, for runs on several machines
+  --transport <t>      websocket (default) or webtransport: bots connect
+                       over WebTransport to the address and certificates
+                       the app gives at /_pylon/shard/webtransport, and
+                       take replication updates as datagrams
+  --drop-datagrams <p> Drop this percent of received datagrams before the
+                       bot sees them (tests loss handling; real network
+                       loss needs a lossy link)
   --report <file>      Write a JSON report for `pylon bench merge`
   --json               Print the report as JSON";
 
@@ -84,6 +91,13 @@ Options:
 pub enum JoinMode {
     Function(String),
     Shard(String),
+}
+
+/// How bots connect to the shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+    WebSocket,
+    WebTransport,
 }
 
 #[derive(Debug, Clone)]
@@ -100,6 +114,9 @@ pub struct BenchConfig {
     pub sid_prefix: String,
     pub bot_offset: usize,
     pub report: Option<String>,
+    pub transport: Transport,
+    /// Percent of received datagrams a bot drops (see `--drop-datagrams`).
+    pub drop_datagrams: f64,
 }
 
 impl BenchConfig {
@@ -115,6 +132,8 @@ impl BenchConfig {
         let mut sid_prefix = "bot-".to_string();
         let mut bot_offset = 0usize;
         let mut report = None;
+        let mut transport = Transport::WebSocket;
+        let mut drop_datagrams = 0.0f64;
         let mut i = 0;
         let value = |i: usize, flag: &str| -> Result<String, String> {
             args.get(i + 1)
@@ -154,6 +173,23 @@ impl BenchConfig {
                 "--sid-prefix" => sid_prefix = value(i, flag)?,
                 "--bot-offset" => bot_offset = number(value(i, flag)?, flag)? as usize,
                 "--report" => report = Some(value(i, flag)?),
+                "--transport" => {
+                    transport = match value(i, flag)?.as_str() {
+                        "websocket" => Transport::WebSocket,
+                        "webtransport" => Transport::WebTransport,
+                        other => {
+                            return Err(format!(
+                                "--transport must be websocket or webtransport, got {other}"
+                            ))
+                        }
+                    }
+                }
+                "--drop-datagrams" => {
+                    drop_datagrams = number(value(i, flag)?, flag)?;
+                    if drop_datagrams > 100.0 {
+                        return Err("--drop-datagrams is a percent, at most 100".into());
+                    }
+                }
                 "--json" => {
                     i += 1;
                     continue;
@@ -194,6 +230,8 @@ impl BenchConfig {
             sid_prefix,
             bot_offset,
             report,
+            transport,
+            drop_datagrams,
         })
     }
 
@@ -642,6 +680,42 @@ fn run_shard(config: BenchConfig, json_mode: bool) -> ExitCode {
     }
 }
 
+/// Where WebTransport bots connect, from the app.
+#[derive(Clone)]
+struct WtEndpoint {
+    url: String,
+    hashes: Vec<[u8; 32]>,
+}
+
+/// `GET /_pylon/shard/webtransport`.
+fn fetch_wt_endpoint(config: &BenchConfig) -> Result<WtEndpoint, String> {
+    use base64::Engine;
+    let info: serde_json::Value = ureq::AgentBuilder::new()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .get(&format!("{}/_pylon/shard/webtransport", config.url))
+        .call()
+        .map_err(|e| short_http_error("webtransport endpoint", e))?
+        .into_json()
+        .map_err(|e| format!("webtransport endpoint: bad JSON: {e}"))?;
+    let url = info["url"]
+        .as_str()
+        .ok_or("webtransport endpoint: no url")?
+        .to_string();
+    let hashes = info["certHashes"]
+        .as_array()
+        .ok_or("webtransport endpoint: no certHashes")?
+        .iter()
+        .filter_map(|h| h.as_str())
+        .filter_map(|h| base64::engine::general_purpose::STANDARD.decode(h).ok())
+        .filter_map(|b| <[u8; 32]>::try_from(b).ok())
+        .collect::<Vec<_>>();
+    if hashes.is_empty() {
+        return Err("webtransport endpoint: no usable certificate hash".into());
+    }
+    Ok(WtEndpoint { url, hashes })
+}
+
 async fn run_bots(config: Arc<BenchConfig>) -> Report {
     let report = Arc::new(Mutex::new(Report {
         runs: vec![RunInfo {
@@ -654,14 +728,36 @@ async fn run_bots(config: Arc<BenchConfig>) -> Report {
         bots: config.bots as u64,
         ..Report::default()
     }));
+    let wt = match config.transport {
+        Transport::WebSocket => None,
+        Transport::WebTransport => {
+            let c = Arc::clone(&config);
+            match tokio::task::spawn_blocking(move || fetch_wt_endpoint(&c)).await {
+                Ok(Ok(e)) => Some(Arc::new(e)),
+                Ok(Err(why)) => {
+                    let mut r = report.lock().unwrap();
+                    r.failed = config.bots as u64;
+                    r.errors.insert(why, config.bots as u64);
+                    return r.clone();
+                }
+                Err(e) => {
+                    let mut r = report.lock().unwrap();
+                    r.failed = config.bots as u64;
+                    r.errors
+                        .insert(format!("endpoint task failed: {e}"), config.bots as u64);
+                    return r.clone();
+                }
+            }
+        }
+    };
     let mut tasks = Vec::with_capacity(config.bots);
     for i in 0..config.bots {
         let bot = config.bot_offset + i;
         let delay = config.ramp.mul_f64(i as f64 / config.bots as f64);
-        let (config, report) = (Arc::clone(&config), Arc::clone(&report));
+        let (config, report, wt) = (Arc::clone(&config), Arc::clone(&report), wt.clone());
         tasks.push(tokio::spawn(async move {
             tokio::time::sleep(delay).await;
-            let outcome = run_bot(&config, bot).await;
+            let outcome = run_bot(&config, bot, wt.as_deref()).await;
             let mut r = report.lock().unwrap();
             match outcome {
                 Ok(stats) => {
@@ -798,7 +894,11 @@ impl BotStats {
 /// grow the bench's memory without bound.
 const MAX_PENDING: usize = 10_000;
 
-async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
+async fn run_bot(
+    config: &BenchConfig,
+    bot: usize,
+    wt: Option<&WtEndpoint>,
+) -> Result<BotStats, String> {
     let join = match &config.join {
         JoinMode::Function(f) => {
             let (c, f) = (config.clone(), f.clone());
@@ -843,7 +943,242 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
     // One connection per pass; a transfer frame starts the next one, to the
     // shard (and with the ticket) it names.
     let mut first = true;
+    let mut drop_rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(!(bot as u64));
     'connection: loop {
+        let link = tokio::time::timeout(Duration::from_secs(15), Link::open(config, &join, wt))
+            .await
+            .map_err(|_| "connect: timed out".to_string())
+            .and_then(|r| r);
+        let mut link = match link {
+            Ok(link) => link,
+            Err(why) if first => return Err(why),
+            // A reconnect after a transfer that fails: the move lost the bot.
+            Err(why) => {
+                stats.dropped = true;
+                stats.drop_reason = Some(format!("after a transfer: {why}"));
+                break 'connection;
+            }
+        };
+        first = false;
+        // Each connection starts over: its codec, its acks, its baseline.
+        let mut pending: VecDeque<(u64, Instant)> = VecDeque::new();
+        let mut codec: Option<u8> = None;
+        let mut last_frame: Option<Instant> = None;
+        let mut last_tick: u64 = 0;
+        let mut replica = pylon_realtime::ReplicaTable::new();
+
+        loop {
+            // What arrived, reduced to what the bot measures: a state update
+            // at a tick with an input ack, a rejection, or a transfer.
+            let incoming = tokio::select! {
+                _ = tokio::time::sleep_until(end) => {
+                    link.close().await;
+                    break 'connection;
+                }
+                _ = async {
+                    match input_timer.as_mut() {
+                        Some(t) => { t.tick().await; }
+                        None => std::future::pending::<()>().await,
+                    }
+                } => {
+                    let template = &config.inputs[(seq as usize) % config.inputs.len()];
+                    seq += 1;
+                    let input = expand_template(template, bot, &join.sid, &mut rng);
+                    let envelope = serde_json::json!({ "input": input, "client_seq": seq });
+                    // Timestamp before the send: time spent sending into a slow
+                    // connection is part of the latency.
+                    let sent_at = Instant::now();
+                    // A server that stops reading fills the socket; the send
+                    // must not outlive the run.
+                    let msgpack = codec == Some(wire::codec::MESSAGE_PACK);
+                    match tokio::time::timeout_at(end, link.send_input(&envelope, msgpack)).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            stats.dropped = true;
+                            stats.drop_reason = Some(format!("send: {e}"));
+                            break 'connection;
+                        }
+                        Err(_) => break 'connection,
+                    }
+                    if pending.len() >= MAX_PENDING {
+                        pending.pop_front();
+                        stats.inputs_unacked_dropped += 1;
+                    }
+                    pending.push_back((seq, sent_at));
+                    stats.inputs_sent += 1;
+                    continue;
+                }
+                incoming = link.next() => incoming,
+            };
+            let now = Instant::now();
+            let (tick, ack) = match incoming {
+                Incoming::Closed(why) => {
+                    stats.dropped = true;
+                    stats.drop_reason = Some(why);
+                    break 'connection;
+                }
+                Incoming::Datagram(bytes) => {
+                    if config.drop_datagrams > 0.0
+                        && rand::Rng::gen_range(&mut drop_rng, 0.0..100.0) < config.drop_datagrams
+                    {
+                        continue;
+                    }
+                    stats.bytes += bytes.len() as u64;
+                    match replica.apply_datagram(&bytes) {
+                        Ok(summary) => {
+                            link.send_acks(&[(summary.frame, replica.frames_applied)]);
+                            stats.frames += 1;
+                            (summary.tick, summary.ack)
+                        }
+                        Err(_) => {
+                            stats.decode_errors += 1;
+                            continue;
+                        }
+                    }
+                }
+                Incoming::Frame(bytes) => {
+                    stats.bytes += bytes.len() as u64;
+                    let Some(frame) = parse_frame(&bytes) else {
+                        stats.decode_errors += 1;
+                        continue;
+                    };
+                    // A replication frame's codec byte names the frame format,
+                    // not the shard's input codec.
+                    if frame.kind != wire::kind::REPLICATION && frame.kind != wire::kind::DATAGRAM {
+                        codec = Some(frame.codec);
+                    }
+                    match frame.kind {
+                        wire::kind::SNAPSHOT | wire::kind::REPLICATION => {
+                            stats.frames += 1;
+                            let decoded = if frame.kind == wire::kind::REPLICATION {
+                                // Apply it like a client: a frame that does not
+                                // apply to this bot's table is a decode error.
+                                replica.apply(frame.payload).is_ok()
+                            } else {
+                                decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload)
+                                    .is_some()
+                            };
+                            if !decoded {
+                                stats.decode_errors += 1;
+                            }
+                            (frame.tick, frame.ack)
+                        }
+                        wire::kind::INPUT_REJECTED => {
+                            match decode_payload::<InputRejection>(frame.codec, frame.payload) {
+                                Some(r) => {
+                                    // A refused input may never be acked (refused
+                                    // before it was queued); stop waiting for it.
+                                    if let Some(seq) = r.client_seq {
+                                        if let Some(i) = pending.iter().position(|(s, _)| *s == seq)
+                                        {
+                                            pending.remove(i);
+                                        }
+                                    }
+                                    *stats.rejections.entry(r.code).or_insert(0) += 1;
+                                }
+                                None => stats.decode_errors += 1,
+                            }
+                            (0, frame.ack)
+                        }
+                        wire::kind::TRANSFER => {
+                            match decode_payload::<wire::TransferNotice>(frame.codec, frame.payload)
+                            {
+                                Some(notice) => {
+                                    // The last frame on this connection: follow it.
+                                    // Inputs not acked yet may be lost in the move.
+                                    stats.moves += 1;
+                                    stats.inputs_unacked_dropped += pending.len() as u64;
+                                    join.shard = notice.shard;
+                                    join.ticket = notice.ticket;
+                                    continue 'connection;
+                                }
+                                None => {
+                                    stats.decode_errors += 1;
+                                    continue;
+                                }
+                            }
+                        }
+                        _ => {
+                            stats.decode_errors += 1;
+                            continue;
+                        }
+                    }
+                }
+            };
+            // A new tick's state: the snapshot interval is the time between
+            // ticks, however many frames and datagrams one tick takes.
+            if tick > last_tick {
+                if let Some(prev) = last_frame {
+                    stats
+                        .snapshot_interval_us
+                        .record(now.duration_since(prev).as_micros() as u64);
+                }
+                last_frame = Some(now);
+                stats.ticks_seen += 1;
+                last_tick = tick;
+            }
+            while let Some(&(s, sent)) = pending.front() {
+                if s > ack {
+                    break;
+                }
+                pending.pop_front();
+                stats.inputs_acked += 1;
+                stats
+                    .ack_latency_us
+                    .record(now.duration_since(sent).as_micros() as u64);
+            }
+        }
+    }
+    stats.connected_for = started.elapsed();
+    Ok(stats)
+}
+
+/// What a bot's connection delivered.
+enum Incoming {
+    /// A wire version 2 frame (18-byte header, payload).
+    Frame(Vec<u8>),
+    /// A replication datagram (WebTransport).
+    Datagram(Vec<u8>),
+    /// The connection ended, and why.
+    Closed(String),
+}
+
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
+type WsStream = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
+/// One bot connection, over either transport.
+enum Link {
+    Ws {
+        sink: WsSink,
+        stream: WsStream,
+    },
+    Wt {
+        conn: wtransport::Connection,
+        send: wtransport::SendStream,
+        /// Stream frames, read on their own task.
+        frames: tokio::sync::mpsc::UnboundedReceiver<Result<Vec<u8>, String>>,
+    },
+}
+
+impl Link {
+    async fn open(
+        config: &BenchConfig,
+        join: &Join,
+        wt: Option<&WtEndpoint>,
+    ) -> Result<Link, String> {
+        match (config.transport, wt) {
+            (Transport::WebTransport, Some(wt)) => Self::open_wt(join, wt).await,
+            (Transport::WebTransport, None) => Err("no WebTransport endpoint".into()),
+            (Transport::WebSocket, _) => Self::open_ws(config, join).await,
+        }
+    }
+
+    async fn open_ws(config: &BenchConfig, join: &Join) -> Result<Link, String> {
         let url = format!(
             "{}/shard?shard={}&sid={}&v=2",
             config.ws_base(),
@@ -865,165 +1200,163 @@ async fn run_bot(config: &BenchConfig, bot: usize) -> Result<BotStats, String> {
             HeaderValue::from_str(&protocols.join(","))
                 .map_err(|e| format!("bad subprotocol header: {e}"))?,
         );
-        let connected = tokio::time::timeout(
-            Duration::from_secs(15),
-            tokio_tungstenite::connect_async(request),
-        )
-        .await
-        .map_err(|_| "connect: timed out".to_string())
-        .and_then(|r| r.map_err(|e| format!("connect: {}", short_ws_error(&e))));
-        let ws = match connected {
-            Ok((ws, _)) => ws,
-            Err(why) if first => return Err(why),
-            // A reconnect after a transfer that fails: the move lost the bot.
-            Err(why) => {
-                stats.dropped = true;
-                stats.drop_reason = Some(format!("after a transfer: {why}"));
-                break 'connection;
-            }
-        };
-        first = false;
-        let (mut sink, mut stream) = ws.split();
-        // Each connection starts over: its codec, its acks, its baseline.
-        let mut pending: VecDeque<(u64, Instant)> = VecDeque::new();
-        let mut codec: Option<u8> = None;
-        let mut last_frame: Option<Instant> = None;
-        let mut last_tick: u64 = 0;
-        let mut replica = pylon_realtime::ReplicaTable::new();
+        let (ws, _) = tokio_tungstenite::connect_async(request)
+            .await
+            .map_err(|e| format!("connect: {}", short_ws_error(&e)))?;
+        let (sink, stream) = ws.split();
+        Ok(Link::Ws { sink, stream })
+    }
 
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep_until(end) => {
-                    let _ = tokio::time::timeout(Duration::from_secs(2), sink.send(Message::Close(None))).await;
-                    break 'connection;
+    async fn open_wt(join: &Join, wt: &WtEndpoint) -> Result<Link, String> {
+        let config = wtransport::ClientConfig::builder()
+            .with_bind_default()
+            .with_server_certificate_hashes(
+                wt.hashes
+                    .iter()
+                    .map(|h| wtransport::tls::Sha256Digest::new(*h)),
+            )
+            .build();
+        let endpoint = wtransport::Endpoint::client(config).map_err(|e| format!("connect: {e}"))?;
+        let conn = endpoint
+            .connect(wt.url.as_str())
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| format!("connect: {e}"))?
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        let hello = serde_json::json!({
+            "shard": join.shard,
+            "sid": join.sid,
+            "ticket": join.ticket,
+            "token": join.token,
+        })
+        .to_string();
+        write_wt_message(&mut send, hello.as_bytes()).await?;
+        let (tx, frames) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let mut len = [0u8; 4];
+                if let Err(e) = recv.read_exact(&mut len).await {
+                    let _ = tx.send(Err(format!("stream: {e}")));
+                    return;
                 }
-                _ = async {
-                    match input_timer.as_mut() {
-                        Some(t) => { t.tick().await; }
-                        None => std::future::pending::<()>().await,
-                    }
-                } => {
-                    let template = &config.inputs[(seq as usize) % config.inputs.len()];
-                    seq += 1;
-                    let input = expand_template(template, bot, &join.sid, &mut rng);
-                    let envelope = serde_json::json!({ "input": input, "client_seq": seq });
-                    // Binary MessagePack once the shard's codec is known to be
-                    // MessagePack; JSON text otherwise, which every shard takes.
-                    let msg = if codec == Some(wire::codec::MESSAGE_PACK) {
-                        match rmp_serde::to_vec_named(&envelope) {
-                            Ok(b) => Message::Binary(b),
-                            Err(_) => Message::Text(envelope.to_string()),
-                        }
-                    } else {
-                        Message::Text(envelope.to_string())
-                    };
-                    // Timestamp before the send: time spent sending into a slow
-                    // connection is part of the latency.
-                    let sent_at = Instant::now();
-                    // A server that stops reading fills the socket; the send
-                    // must not outlive the run.
-                    match tokio::time::timeout_at(end, sink.send(msg)).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => {
-                            stats.dropped = true;
-                            stats.drop_reason = Some(format!("send: {e}"));
-                            break 'connection;
-                        }
-                        Err(_) => break 'connection,
-                    }
-                    if pending.len() >= MAX_PENDING {
-                        pending.pop_front();
-                        stats.inputs_unacked_dropped += 1;
-                    }
-                    pending.push_back((seq, sent_at));
-                    stats.inputs_sent += 1;
+                let mut frame = vec![0u8; u32::from_be_bytes(len) as usize];
+                if let Err(e) = recv.read_exact(&mut frame).await {
+                    let _ = tx.send(Err(format!("stream: {e}")));
+                    return;
                 }
-                next = stream.next() => {
-                    let bytes = match next {
-                        Some(Ok(Message::Binary(b))) => b,
-                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
-                            stats.dropped = true;
-                            stats.drop_reason = Some("the server closed the connection".into());
-                            break 'connection;
-                        }
-                        Some(Ok(_)) => continue,
-                    };
-                    let now = Instant::now();
-                    stats.bytes += bytes.len() as u64;
-                    let Some(frame) = parse_frame(&bytes) else {
-                        stats.decode_errors += 1;
-                        continue;
-                    };
-                    // A replication frame's codec byte names the frame format,
-                    // not the shard's input codec.
-                    if frame.kind != wire::kind::REPLICATION {
-                        codec = Some(frame.codec);
+                if tx.send(Ok(frame)).is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(Link::Wt { conn, send, frames })
+    }
+
+    async fn next(&mut self) -> Incoming {
+        match self {
+            Link::Ws { stream, .. } => loop {
+                match stream.next().await {
+                    Some(Ok(Message::Binary(b))) => return Incoming::Frame(b.to_vec()),
+                    Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
+                        return Incoming::Closed("the server closed the connection".into())
                     }
-                    match frame.kind {
-                        wire::kind::SNAPSHOT | wire::kind::REPLICATION => {
-                            stats.frames += 1;
-                            let decoded = if frame.kind == wire::kind::REPLICATION {
-                                // Apply it like a client: a frame that does not
-                                // apply to this bot's table is a decode error.
-                                replica.apply(frame.payload).is_ok()
-                            } else {
-                                decode_payload::<serde::de::IgnoredAny>(frame.codec, frame.payload).is_some()
-                            };
-                            if !decoded {
-                                stats.decode_errors += 1;
-                            }
-                            if let Some(prev) = last_frame {
-                                stats.snapshot_interval_us.record(now.duration_since(prev).as_micros() as u64);
-                            }
-                            last_frame = Some(now);
-                            if frame.tick > last_tick {
-                                stats.ticks_seen += 1;
-                                last_tick = frame.tick;
-                            }
-                        }
-                        wire::kind::INPUT_REJECTED => {
-                            match decode_payload::<InputRejection>(frame.codec, frame.payload) {
-                                Some(r) => {
-                                    // A refused input may never be acked (refused
-                                    // before it was queued); stop waiting for it.
-                                    if let Some(seq) = r.client_seq {
-                                        if let Some(i) = pending.iter().position(|(s, _)| *s == seq) {
-                                            pending.remove(i);
-                                        }
-                                    }
-                                    *stats.rejections.entry(r.code).or_insert(0) += 1;
-                                }
-                                None => stats.decode_errors += 1,
-                            }
-                        }
-                        wire::kind::TRANSFER => match decode_payload::<wire::TransferNotice>(frame.codec, frame.payload) {
-                            Some(notice) => {
-                                // The last frame on this connection: follow it.
-                                // Inputs not acked yet may be lost in the move.
-                                stats.moves += 1;
-                                stats.inputs_unacked_dropped += pending.len() as u64;
-                                join.shard = notice.shard;
-                                join.ticket = notice.ticket;
-                                continue 'connection;
-                            }
-                            None => stats.decode_errors += 1,
-                        },
-                        _ => stats.decode_errors += 1,
+                    Some(Ok(_)) => {}
+                }
+            },
+            Link::Wt { conn, frames, .. } => tokio::select! {
+                frame = frames.recv() => match frame {
+                    Some(Ok(f)) => Incoming::Frame(f),
+                    // The session closed: its close reason says more than the
+                    // stream's end.
+                    Some(Err(_)) | None => Incoming::Closed(wt_close_reason(conn).await),
+                },
+                d = conn.receive_datagram() => match d {
+                    Ok(d) => Incoming::Datagram(d.payload().to_vec()),
+                    Err(e) => Incoming::Closed(format!("the server closed the session: {e}")),
+                },
+            },
+        }
+    }
+
+    async fn send_input(
+        &mut self,
+        envelope: &serde_json::Value,
+        msgpack: bool,
+    ) -> Result<(), String> {
+        match self {
+            // Binary MessagePack once the shard's codec is known to be
+            // MessagePack; JSON text otherwise, which every shard takes.
+            Link::Ws { sink, .. } => {
+                let msg = match msgpack
+                    .then(|| rmp_serde::to_vec_named(envelope).ok())
+                    .flatten()
+                {
+                    Some(b) => Message::Binary(b.into()),
+                    None => Message::Text(envelope.to_string().into()),
+                };
+                sink.send(msg).await.map_err(|e| e.to_string())
+            }
+            Link::Wt { send, .. } => {
+                let mut msg = Vec::new();
+                match msgpack
+                    .then(|| rmp_serde::to_vec_named(envelope).ok())
+                    .flatten()
+                {
+                    Some(b) => {
+                        msg.push(wire::client::INPUT);
+                        msg.extend(b);
                     }
-                    while let Some(&(s, sent)) = pending.front() {
-                        if s > frame.ack {
-                            break;
-                        }
-                        pending.pop_front();
-                        stats.inputs_acked += 1;
-                        stats.ack_latency_us.record(now.duration_since(sent).as_micros() as u64);
+                    None => {
+                        msg.push(wire::client::JSON_INPUT);
+                        msg.extend(envelope.to_string().into_bytes());
                     }
                 }
+                write_wt_message(send, &msg).await
             }
         }
     }
-    stats.connected_for = started.elapsed();
-    Ok(stats)
+
+    /// Ack datagrams (WebTransport only; a WebSocket bot gets none).
+    fn send_acks(&mut self, acks: &[(u64, u64)]) {
+        if let Link::Wt { conn, .. } = self {
+            // An ack lost here is like one the network drops.
+            let _ = conn.send_datagram(wire::encode_datagram_acks(acks));
+        }
+    }
+
+    async fn close(&mut self) {
+        match self {
+            Link::Ws { sink, .. } => {
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(2), sink.send(Message::Close(None)))
+                        .await;
+            }
+            Link::Wt { conn, .. } => conn.close(wtransport::VarInt::from_u32(0), b"bench done"),
+        }
+    }
+}
+
+async fn write_wt_message(send: &mut wtransport::SendStream, bytes: &[u8]) -> Result<(), String> {
+    send.write_all(&(bytes.len() as u32).to_be_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    send.write_all(bytes).await.map_err(|e| e.to_string())
+}
+
+/// Why a WebTransport session ended, from its close frame.
+async fn wt_close_reason(conn: &wtransport::Connection) -> String {
+    match tokio::time::timeout(Duration::from_secs(1), conn.closed()).await {
+        Ok(wtransport::error::ConnectionError::ApplicationClosed(c)) => format!(
+            "the server closed the session: {}",
+            String::from_utf8_lossy(c.reason())
+        ),
+        Ok(e) => format!("the session ended: {e}"),
+        Err(_) => "the server closed the stream".into(),
+    }
 }
 
 struct ParsedFrame<'a> {
