@@ -419,6 +419,12 @@ pub trait DataStore: Send + Sync {
     /// - `CRDT_DECODE_FAILED` — bytes weren't a valid Loro update.
     /// - Storage failures from the underlying SQLite write.
     ///
+    /// `authorize` receives the projected columns of the merged doc before
+    /// anything commits. An `Err` from it aborts the write: the snapshot,
+    /// the materialized row, and any cached doc state roll back, and the
+    /// error is returned as-is. The router uses it to check the update
+    /// policy against the post-merge row.
+    ///
     /// Default impl returns `NOT_SUPPORTED` so backends without CRDT
     /// support compile cleanly.
     fn crdt_apply_update(
@@ -426,6 +432,7 @@ pub trait DataStore: Send + Sync {
         _entity: &str,
         _row_id: &str,
         _update: &[u8],
+        _authorize: &dyn Fn(&serde_json::Value) -> Result<(), DataError>,
     ) -> Result<Vec<u8>, DataError> {
         Err(DataError {
             code: "NOT_SUPPORTED".into(),

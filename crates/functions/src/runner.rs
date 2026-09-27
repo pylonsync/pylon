@@ -292,9 +292,14 @@ pub type ConnectionHook = Box<
 /// adapter that calls into `pylon_policy::PolicyEngine`.
 pub trait PolicyGate: Send + Sync {
     /// Decide whether `op` on `entity` is allowed for the
-    /// caller described by `auth`. `data` carries the proposed
-    /// row payload for writes (None for reads). Returns
-    /// `Ok(())` to allow, or `Err((code, reason))` to deny.
+    /// caller described by `auth`.
+    ///
+    /// - `existing` is the stored row for Update and Delete (None when
+    ///   the row doesn't exist, and for Read and Insert).
+    /// - `data` is the new row for Insert and the patch for Update
+    ///   (None for Read and Delete).
+    ///
+    /// Returns `Ok(())` to allow, or `Err((code, reason))` to deny.
     /// The runner surfaces the denial as a `DataError` with the
     /// supplied code; the TS handler sees it as a regular
     /// thrown error from `ctx.db.*`.
@@ -303,6 +308,7 @@ pub trait PolicyGate: Send + Sync {
         op: PolicyOp,
         entity: &str,
         auth: &crate::protocol::AuthInfo,
+        existing: Option<&serde_json::Value>,
         data: Option<&serde_json::Value>,
     ) -> Result<(), (String, String)>;
 
@@ -2522,7 +2528,22 @@ fn execute_db_op(
                     DbOp::Insert | DbOp::Update => msg.data.as_ref(),
                     _ => None,
                 };
-                if let Err((code, reason)) = gate.check_op(op, &msg.entity, auth, data_for_check) {
+                // Update and Delete rules are row rules: they need the
+                // stored row, and Update also checks the row after the
+                // patch (see `PolicyEngine::check_entity_update`).
+                let existing = match msg.op {
+                    DbOp::Update | DbOp::Delete => match msg.id.as_deref() {
+                        Some(id) => match store.get_by_id(&msg.entity, id) {
+                            Ok(row) => row,
+                            Err(e) => return (Err(e), None),
+                        },
+                        None => None,
+                    },
+                    _ => None,
+                };
+                if let Err((code, reason)) =
+                    gate.check_op(op, &msg.entity, auth, existing.as_ref(), data_for_check)
+                {
                     return (
                         Err(pylon_http::DataError {
                             code,
@@ -3017,7 +3038,13 @@ mod tests {
         fn insert(&self, _: &str, _: &serde_json::Value) -> Result<String, DataError> {
             Ok("stub-id".into())
         }
-        fn get_by_id(&self, _: &str, _: &str) -> Result<Option<serde_json::Value>, DataError> {
+        fn get_by_id(&self, _: &str, id: &str) -> Result<Option<serde_json::Value>, DataError> {
+            // One stored row so write-gate tests can see what the gate got.
+            if id == "stored-1" {
+                return Ok(Some(
+                    serde_json::json!({"id": "stored-1", "orgId": "org-a"}),
+                ));
+            }
             Ok(None)
         }
         fn list(&self, _: &str) -> Result<Vec<serde_json::Value>, DataError> {
@@ -3082,6 +3109,7 @@ mod tests {
             op: PolicyOp,
             entity: &str,
             auth: &AuthInfo,
+            _existing: Option<&serde_json::Value>,
             _data: Option<&serde_json::Value>,
         ) -> Result<(), (String, String)> {
             self.calls
@@ -3177,6 +3205,61 @@ mod tests {
         }
     }
 
+    /// One gate call: the op, the stored row, and the payload.
+    type GateCall = (
+        PolicyOp,
+        Option<serde_json::Value>,
+        Option<serde_json::Value>,
+    );
+
+    /// Gate that records the stored row and the payload it was given.
+    #[derive(Default)]
+    struct RecordingGate {
+        seen: StdMutex<Vec<GateCall>>,
+    }
+    impl PolicyGate for RecordingGate {
+        fn check_op(
+            &self,
+            op: PolicyOp,
+            _entity: &str,
+            _auth: &AuthInfo,
+            existing: Option<&serde_json::Value>,
+            data: Option<&serde_json::Value>,
+        ) -> Result<(), (String, String)> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((op, existing.cloned(), data.cloned()));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn write_gate_gets_the_stored_row_and_the_patch() {
+        // Update rules are checked against the stored row and the row after
+        // the patch, so the gate needs both. Delete needs the stored row.
+        let store = AlwaysOkStore;
+        let gate = RecordingGate::default();
+        let stored = serde_json::json!({"id": "stored-1", "orgId": "org-a"});
+        let patch = serde_json::json!({"orgId": "org-b"});
+
+        let mut update = db_msg(DbOp::Update, "Project", false);
+        update.id = Some("stored-1".into());
+        update.data = Some(patch.clone());
+        let _ = execute_db_op(&store, &update, Some(&gate), &user_auth(), true);
+
+        let mut delete = db_msg(DbOp::Delete, "Project", false);
+        delete.id = Some("stored-1".into());
+        let _ = execute_db_op(&store, &delete, Some(&gate), &user_auth(), true);
+
+        let seen = gate.seen.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            (PolicyOp::Update, Some(stored.clone()), Some(patch))
+        );
+        assert_eq!(seen[1], (PolicyOp::Delete, Some(stored), None));
+    }
+
     #[test]
     fn gate_skipped_when_strict_off() {
         // Default (strict_policies=false): gate never consulted.
@@ -3249,6 +3332,7 @@ mod tests {
             _: PolicyOp,
             _: &str,
             _: &AuthInfo,
+            _: Option<&serde_json::Value>,
             _: Option<&serde_json::Value>,
         ) -> Result<(), (String, String)> {
             Ok(())

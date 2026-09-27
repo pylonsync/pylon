@@ -148,10 +148,13 @@ How to convert each rule:
 
 - `request.auth.uid` maps to `auth.userId`. `request.auth != null` maps to
   `auth.userId != null`.
-- `resource.data.*` (the current row) maps to `data.*` on reads, and to
-  `existing.*` on update and delete.
+- `resource.data.*` (the current row) maps to `data.*` on reads and deletes.
 - `request.resource.data.*` (the incoming write) maps to `data.*` in the insert
-  and update policy.
+  policy.
+- An update rule maps to `allowUpdate`, which Pylon checks against the stored
+  row and against the row after the write. A rule that compares the two
+  (`request.resource.data.x == resource.data.x`) maps to a readonly field
+  (`field.string().readonly()` or `.owner()`) or to a server function.
 - `get()` / `exists()` cross-document checks map to `exists(Entity where field ==
   auth.userId)`.
 - To lock an immutable field (Firestore's `request.resource.data.author ==

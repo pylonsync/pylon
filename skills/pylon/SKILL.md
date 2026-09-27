@@ -266,8 +266,8 @@ Policies are boolean string expressions. They guard direct `/api/entities/*` acc
 - `auth.userId` — `string | null`
 - `auth.isAdmin` — `boolean` (true for the `admin` role / admin token / Studio cookie)
 - `auth.tenantId` — `string | null` (the selected org, for multi-tenant apps)
-- `data.*` — the row: incoming payload on insert; the **current stored row** on read/update/delete
-- `existing.*` — synonym for the current row (same as `data.*` on read/update/delete); use whichever reads clearer
+- `data.*` — the row: incoming payload on insert; the **stored row** on read/delete; on update, see below
+- `existing.*` — synonym for `data.*`; use whichever reads clearer
 - `now` — current UTC time as an ISO-8601 string, for time windows
 - `ago("30d")` — the instant that long before `now`, for ROLLING windows (`data.createdAt >= ago("30d")`). Units `s/m/h/d/w`, compound allowed (`"1d12h"`); a bad duration fails at boot, not silently at eval
 
@@ -276,6 +276,8 @@ Roles are checked with the **`auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` f
 **Actions:**
 - `allowRead` — applied to query results; unmatched rows are filtered out silently.
 - `allowInsert` / `allowUpdate` / `allowDelete` — reject the op with `POLICY_DENIED` if false.
+- **`allowUpdate` runs twice: on the stored row, then on the row after the write** (stored row + patched fields). Both must pass. With `auth.tenantId == data.orgId`, a member can edit their org's rows but a patch of `{ orgId: "<other org>" }` is denied. This applies to every client write path: `PATCH /api/entities`, `/api/sync/push`, `/api/link`, `/api/unlink`, and CRDT pushes. A state change the rule forbids for the new row (`data.status == "draft"` and an edit that publishes) is denied too; do that change in a server function.
+- `allowDelete` runs on the stored row.
 - **Omitted actions default to deny.**
 
 **Operators — the COMPLETE set (the policy language is deliberately tiny):**
@@ -1113,6 +1115,9 @@ pylon deploy --verify
 # Dry-run a policy expression with the PRODUCTION evaluator before you
 # ship it — allow/deny + the exact comparison that failed. Exit 0=allow, 1=deny.
 pylon policy test 'auth.userId == data.ownerId' --auth userId=u1 --row '{"ownerId":"u2"}'
+# An update rule: --row is the stored row, --patch the write. Checks both rows.
+pylon policy test 'auth.tenantId == data.orgId' --auth userId=u1,tenantId=t1 \
+  --row '{"orgId":"t1"}' --patch '{"orgId":"t2"}'
 ```
 
 And a running app can be attached directly to your tool loop over MCP:

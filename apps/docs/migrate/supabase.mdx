@@ -46,8 +46,8 @@ What Pylon adds or does differently:
 | Delete | `.delete().eq('id', id)` | `.remove(id)` / `ctx.db.delete(...)` |
 | Upsert | `.upsert({...}, { onConflict })` | insert-or-update in a `mutation` |
 | Access control | RLS: `enable`, then `create policy` | `policy({...})` (deny by default, no enable step) |
-| Policy: existing row | `using (...)` | `allowRead`, and `existing.*` on update/delete |
-| Policy: incoming write | `with check (...)` | `allowInsert` / `allowUpdate` on `data.*` |
+| Policy: existing row | `using (...)` | `allowRead`, `allowUpdate`, `allowDelete` |
+| Policy: incoming write | `with check (...)` | `allowInsert`, `allowUpdate` |
 | Policy: user id | `auth.uid()` | `auth.userId` |
 | Auth (email/password) | `signInWithPassword(...)` | `POST /api/auth/password/login` |
 | Auth (magic link) | `signInWithOtp({ email })` | `POST /api/auth/magic/send` + `/magic/verify` |
@@ -147,10 +147,13 @@ How to convert each policy:
 
 - `auth.uid()` maps to `auth.userId`. `auth.jwt()` claims (roles) map to
   `auth.roles` / `auth.hasAnyRole(...)`.
-- `using (...)` is the existing-row side. It maps to `allowRead`, and to
-  `existing.*` in the update and delete policy.
-- `with check (...)` is the incoming-write side. It maps to `allowInsert` and
-  `allowUpdate`, evaluated on `data.*` (the row being written).
+- `using (...)` is the existing-row side. It maps to `allowRead` and
+  `allowDelete`.
+- `with check (...)` is the incoming-write side. It maps to `allowInsert`.
+- An update policy maps to `allowUpdate`. Pylon checks it against the stored
+  row and against the row after the write, like a Postgres update policy with
+  no separate `with check`. If your `using` and `with check` clauses differ,
+  move the update into a server function.
 - To lock an immutable field, use `field.string().owner()` instead of a `with
   check` that compares the new value to the old one.
 - A cross-table check (`exists (select 1 from members ...)`) maps to

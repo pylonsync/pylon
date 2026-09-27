@@ -25,8 +25,8 @@ const noteOwner = policy({
 | `auth.userId` | `string \| null` | Current user's id, `null` if unauthenticated |
 | `auth.isAdmin` | `boolean` | `true` for the `admin` role / admin token / Studio session |
 | `auth.tenantId` | `string \| null` | Selected organization id (multi-tenant apps) |
-| `data.*` | `object` | The row: incoming payload on insert; the **current stored row** on read/update/delete |
-| `existing.*` | `object` | Synonym for the current row (same as `data.*` on read/update/delete) |
+| `data.*` | `object` | The row: incoming payload on insert; the **stored row** on read/delete; on update, see `allowUpdate` below |
+| `existing.*` | `object` | Synonym for `data.*` |
 | `now` | `string` | Current UTC time as an ISO-8601 string, for time windows |
 | `ago("30d")` | `string` | The instant that long before `now`, for rolling windows. Units `s`/`m`/`h`/`d`/`w`, compound allowed (`"1d12h"`). A malformed duration fails at boot, not silently at evaluation |
 
@@ -36,8 +36,8 @@ Roles are checked with the `auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` fun
 
 - **`allowRead`** — runs on query results. If false, row is filtered out.
 - **`allowInsert`** — runs against the proposed `data` (the incoming row).
-- **`allowUpdate`** — runs against the current stored row (bound as both `data` and `existing`), so ownership checks see the truth, not the caller's patch.
-- **`allowDelete`** — runs against the current row (`data` / `existing`).
+- **`allowUpdate`** — runs twice, and both must pass. First on the stored row, so a caller can't edit a row it doesn't own. Then on the row after the write (the stored row with the patched fields applied), so a caller can't move a row out of its scope. With `auth.tenantId == data.orgId`, a member can edit their org's rows, but a patch of `{ orgId: "<other org>" }` is denied. `data` and `existing` both name the row being checked in each pass. This is the same as a Postgres RLS `USING` clause that also serves as `WITH CHECK`. It applies to every client write: `PATCH /api/entities`, `/api/sync/push`, `/api/link`, `/api/unlink`, and CRDT pushes. A state change the rule forbids for the new row (for example `data.status == "draft"` and an edit that publishes) is denied; make that change in a server function.
+- **`allowDelete`** — runs against the stored row (`data` / `existing`).
 
 If a policy is omitted, that action is denied by default.
 

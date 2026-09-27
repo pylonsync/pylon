@@ -168,6 +168,7 @@ fn tool_definitions() -> Value {
                 "expr": {"type":"string","description":"Policy expression, e.g. \"auth.userId == data.ownerId\""},
                 "auth": {"type":"object","description":"Auth context: {userId, isAdmin, isGuest, tenantId, roles}"},
                 "row": {"type":"object","description":"Row JSON binding data.*"},
+                "patch": {"type":"object","description":"Test an update rule: row is the stored row, patch the write. The rule must pass on both the stored row and the row after the patch."},
                 "input": {"type":"object","description":"Incoming write JSON binding input.*"}
             },"required":["expr"],"additionalProperties":false}
         },
@@ -283,7 +284,18 @@ fn tool_policy_test(args: &Value) -> Result<Value, String> {
     }
     let row = args.get("row").filter(|v| !v.is_null()).cloned();
     let input = args.get("input").filter(|v| !v.is_null()).cloned();
-    match pylon_policy::evaluate_expression(expr, &auth, row.as_ref(), input.as_ref()) {
+    let patch = args.get("patch").filter(|v| !v.is_null()).cloned();
+    let result = match patch.as_ref() {
+        Some(patch) => pylon_policy::evaluate_update_expression(
+            expr,
+            &auth,
+            row.as_ref(),
+            patch,
+            input.as_ref(),
+        ),
+        None => pylon_policy::evaluate_expression(expr, &auth, row.as_ref(), input.as_ref()),
+    };
+    match result {
         pylon_policy::PolicyResult::Allowed => Ok(json!({"result": "allow"})),
         pylon_policy::PolicyResult::Denied { reason, .. } => {
             Ok(json!({"result": "deny", "reason": reason}))

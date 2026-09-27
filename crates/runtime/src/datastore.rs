@@ -1050,6 +1050,7 @@ impl DataStore for Runtime {
         entity: &str,
         row_id: &str,
         update: &[u8],
+        authorize: &dyn Fn(&serde_json::Value) -> Result<(), DataError>,
     ) -> Result<Vec<u8>, DataError> {
         // Postgres: import the binary update into the row's PG-side
         // LoroDoc, persist the new snapshot in `_pylon_crdt_snapshots`,
@@ -1168,6 +1169,8 @@ impl DataStore for Runtime {
                             .crdt
                             .project_stored(tx, entity, row_id, &crdt_fields)
                             .map_err(crdt_err)?;
+                        // The update policy must hold for the merged row.
+                        authorize(&projected)?;
                         // Only the fields this push changed or set: a column
                         // the doc does not hold a value for (one it could not
                         // take) keeps its value.
@@ -1239,7 +1242,7 @@ impl DataStore for Runtime {
         let crdt_fields = self.crdt_fields_for(&ent).map_err(into_data_error)?;
 
         let conn = self.lock_conn_pub().map_err(into_data_error)?;
-        crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
+        let result = crate::with_write_tx(self, &conn, || -> Result<Vec<u8>, crate::RuntimeError> {
             // A row a delete removed after the router's check: no snapshot
             // for a row that does not exist (as on Postgres).
             if self
@@ -1286,6 +1289,10 @@ impl DataStore for Runtime {
                     code: "CRDT_APPLY_FAILED".into(),
                     message: format!("read the doc of {entity}/{row_id}: {e}"),
                 })?;
+            authorize(&projected).map_err(|e| crate::RuntimeError {
+                code: e.code,
+                message: e.message,
+            })?;
 
             // Re-project into the materialized SQLite row so SELECT
             // queries see the merged content. Build SET clauses from
@@ -1353,7 +1360,14 @@ impl DataStore for Runtime {
                 })?;
             Ok(snap)
         })
-        .map_err(into_data_error)
+        .map_err(into_data_error);
+        if result.is_err() {
+            // The cached LoroDoc absorbed the update before the tx rolled
+            // back. Evict it so the next reader re-hydrates from the
+            // persisted snapshot.
+            self.crdt_store().evict(entity, row_id);
+        }
+        result
     }
 }
 
@@ -5339,6 +5353,7 @@ impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
         op: pylon_functions::runner::PolicyOp,
         entity: &str,
         auth: &pylon_functions::protocol::AuthInfo,
+        existing: Option<&serde_json::Value>,
         data: Option<&serde_json::Value>,
     ) -> Result<(), (String, String)> {
         let auth_ctx = policy_auth_ctx(auth);
@@ -5349,11 +5364,11 @@ impl pylon_functions::runner::PolicyGate for PolicyGateAdapter {
             pylon_functions::runner::PolicyOp::Insert => {
                 self.engine.check_entity_insert(entity, &auth_ctx, data)
             }
-            pylon_functions::runner::PolicyOp::Update => {
-                self.engine.check_entity_update(entity, &auth_ctx, data)
-            }
+            pylon_functions::runner::PolicyOp::Update => self
+                .engine
+                .check_entity_update(entity, &auth_ctx, existing, data),
             pylon_functions::runner::PolicyOp::Delete => {
-                self.engine.check_entity_delete(entity, &auth_ctx, data)
+                self.engine.check_entity_delete(entity, &auth_ctx, existing)
             }
         };
         match result {
@@ -9254,6 +9269,44 @@ mod ssr_client_read_fence_tests {
         let gate = adapter(&m);
         let out = gate.filter_client_read("Note", &user("u2"), rows());
         assert_eq!(out, vec![serde_json::json!({"id": "2", "owner": "u2"})]);
+    }
+
+    /// `ctx.db.update` / `ctx.db.delete` under PYLON_STRICT_FN_POLICIES get
+    /// the same row rules as the client write paths: the stored row must
+    /// pass, and an update's post-write row must pass too.
+    #[test]
+    fn strict_fn_update_cannot_move_a_row_to_another_owner() {
+        use pylon_functions::runner::{PolicyGate, PolicyOp};
+        let mut m = note_manifest();
+        m.policies[0].allow_update = Some("data.owner == auth.userId".into());
+        m.policies[0].allow_delete = Some("data.owner == auth.userId".into());
+        let gate = adapter(&m);
+        let stored = serde_json::json!({"id": "1", "owner": "u1"});
+        let u1 = user("u1");
+        assert!(gate
+            .check_op(
+                PolicyOp::Update,
+                "Note",
+                &u1,
+                Some(&stored),
+                Some(&serde_json::json!({"secret": "x"})),
+            )
+            .is_ok());
+        assert!(gate
+            .check_op(
+                PolicyOp::Update,
+                "Note",
+                &u1,
+                Some(&stored),
+                Some(&serde_json::json!({"owner": "u2"})),
+            )
+            .is_err());
+        assert!(gate
+            .check_op(PolicyOp::Delete, "Note", &u1, Some(&stored), None)
+            .is_ok());
+        assert!(gate
+            .check_op(PolicyOp::Delete, "Note", &user("u2"), Some(&stored), None)
+            .is_err());
     }
 
     #[test]

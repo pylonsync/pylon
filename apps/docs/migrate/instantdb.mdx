@@ -97,7 +97,7 @@ Pylon adds four things:
 | One-shot read | `db.queryOnce(...)`, admin `db.query(...)` | `ctx.db.query / list / get` (server) |
 | Aggregates | not in the client API | `db.useAggregate(...)` |
 | Permissions | `instant.perms.ts` — `view/create/update/delete`, default allow | `policy({ allowRead/Insert/Update/Delete })`, default deny |
-| Lock a field | `newData.x == data.x` in an `update` rule | `field.string().owner()` (built in), or `existing.*` |
+| Lock a field | `newData.x == data.x` in an `update` rule | `field.string().owner()` or `.readonly()` |
 | Auth (email) | `db.auth.sendMagicCode` / `signInWithMagicCode` | `POST /api/auth/magic/send` + `/magic/verify` |
 | Auth (OAuth) | `db.auth.signInWithIdToken` / `createAuthorizationURL` | `GET /api/auth/login/:provider?callback=` |
 | Auth state | `db.useAuth()` → `{ user }` | `db.useUser()` (client), `ctx.auth` (server) |

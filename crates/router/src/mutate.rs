@@ -238,6 +238,37 @@ pub fn apply_mutation(ctx: &MutationCtx, op: MutationOp) -> Result<MutationOutco
     // `MutationCtx::bypass_policy`) — those have already established
     // trust at the route layer via `require_admin`.
     if !ctx.bypass_policy {
+        // The columns an update-shaped op writes. The update rule is
+        // checked against the stored row and against the stored row with
+        // these columns applied, so no update path can move a row out of
+        // the caller's scope (see `PolicyEngine::check_entity_update`).
+        let update_patch: Option<serde_json::Value> = match &op {
+            MutationOp::Update { data, .. } => Some((*data).clone()),
+            MutationOp::Link {
+                relation,
+                target_id,
+                ..
+            } => relation_field(ctx.store, &entity, relation)
+                .map(|f| serde_json::json!({ f: target_id })),
+            MutationOp::Unlink { relation, .. } => relation_field(ctx.store, &entity, relation)
+                .map(|f| serde_json::json!({ f: serde_json::Value::Null })),
+            _ => None,
+        };
+        // Link/Unlink write one FK column. A readonly FK column (an owner
+        // or tenant id) is as immutable here as it is on PATCH and push.
+        if matches!(op, MutationOp::Link { .. } | MutationOp::Unlink { .. }) {
+            if let Some(patch) = update_patch.as_ref() {
+                if let Err((code, message)) =
+                    crate::reject_readonly_payload(ctx.store.manifest(), &entity, patch, ctx.auth)
+                {
+                    return Err(MutationError::Hook {
+                        status: 400,
+                        code: code.to_string(),
+                        message,
+                    });
+                }
+            }
+        }
         let policy_result = match &op {
             MutationOp::Insert { data, .. } => {
                 ctx.policy
@@ -245,7 +276,7 @@ pub fn apply_mutation(ctx: &MutationCtx, op: MutationOp) -> Result<MutationOutco
             }
             MutationOp::Update { .. } | MutationOp::Link { .. } | MutationOp::Unlink { .. } => ctx
                 .policy
-                .check_entity_update(&entity, ctx.auth, pre_row.as_ref()),
+                .check_entity_update(&entity, ctx.auth, pre_row.as_ref(), update_patch.as_ref()),
             MutationOp::Delete { .. } => {
                 ctx.policy
                     .check_entity_delete(&entity, ctx.auth, pre_row.as_ref())
@@ -540,6 +571,21 @@ pub fn apply_mutation(ctx: &MutationCtx, op: MutationOp) -> Result<MutationOutco
             kind,
         })
     }
+}
+
+/// The FK column `relation` sets on `entity`, from the manifest. `None` when
+/// the entity or relation is unknown; the store call then fails with its own
+/// error.
+fn relation_field(store: &dyn DataStore, entity: &str, relation: &str) -> Option<String> {
+    store
+        .manifest()
+        .entities
+        .iter()
+        .find(|e| e.name == entity)?
+        .relations
+        .iter()
+        .find(|r| r.name == relation)
+        .map(|r| r.field.clone())
 }
 
 /// Re-read a row after a successful insert/update. The three

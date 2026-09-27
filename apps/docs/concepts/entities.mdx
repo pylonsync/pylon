@@ -114,17 +114,17 @@ Replica rows simply never hold the column, so declare such fields `.optional()` 
 
 If you want the field exposed to a specific client, re-serialize it inside a function return. `ctx.db.unsafe.get` (post v0.3.160) skips the strip; the default `ctx.db.get` honors it.
 
-**`.readonly()`** — the field is settable on insert but rejected on update. Any `PATCH /api/entities/<entity>/<id>` payload that mentions the field returns `400 READONLY_FIELD` before the policy even runs. Closes the canonical IDOR-via-update-payload shape:
+**`.readonly()`** — the field is settable on insert but rejected on update. A client write that sets the field returns `400 READONLY_FIELD` before the policy runs. That covers `PATCH /api/entities/<entity>/<id>`, an update in `/api/sync/push`, `/api/link` and `/api/unlink` on a readonly foreign key, and a CRDT push that changes the field. Closes the canonical IDOR-via-update-payload shape:
 
 ```ts
 // Policy says: "you can update a Note if you own it."
 allowUpdate: "data.authorId == auth.userId"
 
-// Without readonly: attacker PATCHes { authorId: <attacker_id> } to flip ownership.
+// allowUpdate already runs on the stored row and on the row after the
+// write, so { authorId: <someone else> } fails the policy either way.
 //
-// With readonly() on authorId: framework refuses the update before
-// policy evaluation — attacker can never get the payload to include
-// their own id without hitting READONLY_FIELD.
+// With readonly() on authorId: the framework refuses any payload that
+// mentions authorId before the policy runs, whatever the policy says.
 authorId: field.id("User").readonly()
 ```
 

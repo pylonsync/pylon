@@ -13,6 +13,11 @@
 //! pylon policy test 'auth.tenantId == data.orgId' \
 //!     --auth userId=u1,tenantId=t1 --row '{"orgId":"t2"}' --json
 //! # → {"result":"deny","reason":"..."}
+//!
+//! # An update rule: --row is the stored row, --patch the write.
+//! pylon policy test 'auth.tenantId == data.orgId' \
+//!     --auth userId=u1,tenantId=t1 --row '{"orgId":"t1"}' --patch '{"orgId":"t2"}'
+//! # → DENY (the row after the update fails the rule)
 //! ```
 //!
 //! Exit codes are scriptable: 0 = allowed, 1 = denied, 64 = usage /
@@ -40,6 +45,7 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
     let mut auth_kvs: Option<&str> = None;
     let mut row_json: Option<&str> = None;
     let mut input_json: Option<&str> = None;
+    let mut patch_json: Option<&str> = None;
 
     let rest: Vec<&String> = it.collect();
     let mut i = 0;
@@ -55,6 +61,10 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
             }
             "--input" if i + 1 < rest.len() => {
                 input_json = Some(rest[i + 1]);
+                i += 2;
+            }
+            "--patch" if i + 1 < rest.len() => {
+                patch_json = Some(rest[i + 1]);
                 i += 2;
             }
             "--json" => {
@@ -105,7 +115,27 @@ pub fn run(args: &[String], json_mode: bool) -> ExitCode {
         },
     };
 
-    let result = pylon_policy::evaluate_expression(expr, &auth, row.as_ref(), input.as_ref());
+    let patch: Option<serde_json::Value> = match patch_json {
+        None => None,
+        Some(s) => match serde_json::from_str(s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                output::print_error(&format!("--patch is not valid JSON: {e}"));
+                return ExitCode::Usage;
+            }
+        },
+    };
+
+    let result = match patch.as_ref() {
+        Some(patch) => pylon_policy::evaluate_update_expression(
+            expr,
+            &auth,
+            row.as_ref(),
+            patch,
+            input.as_ref(),
+        ),
+        None => pylon_policy::evaluate_expression(expr, &auth, row.as_ref(), input.as_ref()),
+    };
 
     match result {
         PolicyResult::Allowed => {
@@ -211,7 +241,7 @@ fn summarize_auth(auth: &AuthContext) -> String {
 
 fn print_usage() {
     println!(
-        "Usage: pylon policy test <expr> [--auth k=v,...] [--row <json>] [--input <json>] [--json]"
+        "Usage: pylon policy test <expr> [--auth k=v,...] [--row <json>] [--patch <json>] [--input <json>] [--json]"
     );
     println!();
     println!("  Dry-run a policy expression with the production evaluator.");
@@ -219,6 +249,8 @@ fn print_usage() {
     println!();
     println!("  --auth   userId=u1,isAdmin=false,isGuest=false,tenantId=t1,roles=admin|editor");
     println!("  --row    the row's JSON (binds data.*)");
+    println!("  --patch  test an update rule: --row is the stored row, --patch the write.");
+    println!("           The rule must pass on the stored row and on the row after the patch.");
     println!("  --input  the incoming write's JSON (binds input.*)");
     println!();
     println!("  Example:");
@@ -253,6 +285,29 @@ mod tests {
     fn parse_auth_rejects_unknown_keys_and_bad_bools() {
         assert!(parse_auth("email=x@y.com").is_err());
         assert!(parse_auth("isAdmin=yes").is_err());
+    }
+
+    #[test]
+    fn patch_checks_the_row_after_the_update() {
+        let auth = parse_auth("userId=u1,tenantId=t1").unwrap();
+        let row = serde_json::json!({"orgId": "t1"});
+        let rule = "auth.tenantId == data.orgId";
+        assert!(pylon_policy::evaluate_update_expression(
+            rule,
+            &auth,
+            Some(&row),
+            &serde_json::json!({"name": "x"}),
+            None
+        )
+        .is_allowed());
+        assert!(!pylon_policy::evaluate_update_expression(
+            rule,
+            &auth,
+            Some(&row),
+            &serde_json::json!({"orgId": "t2"}),
+            None
+        )
+        .is_allowed());
     }
 
     #[test]

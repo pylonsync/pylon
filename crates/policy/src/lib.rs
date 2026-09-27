@@ -676,16 +676,55 @@ impl PolicyEngine {
         self.check_entity(entity_name, EntityAction::Insert, auth, data)
     }
 
-    /// Check if an entity update is allowed. `data` should be the existing
-    /// row so ownership checks like `data.authorId == auth.userId` evaluate
-    /// against truth instead of the incoming patch.
+    /// Check if an entity update is allowed.
+    ///
+    /// `existing` is the stored row. `patch` is the set of columns the write
+    /// changes (the PATCH body, the sync-push `data`, the FK column a link
+    /// sets, or the changed columns of a CRDT merge).
+    ///
+    /// The update rule must hold for the row before the write AND for the
+    /// row after it. This is how a Postgres RLS `USING` clause behaves when
+    /// it also serves as the `WITH CHECK` clause.
+    ///
+    /// 1. The rule runs with `data.*` (and its alias `existing.*`) bound to
+    ///    the stored row. This stops a caller from editing a row it can't
+    ///    edit.
+    /// 2. The rule runs again with both names bound to the stored row with
+    ///    `patch` applied (see [`merge_update_row`]). This stops a caller
+    ///    from moving a row it can edit out of its scope, for example
+    ///    `{"orgId": "<other org>"}` under `auth.tenantId == data.orgId`.
+    ///    An insert of the resulting row gets the same check.
+    ///
+    /// A state change the rule forbids for the new row (for example
+    /// `data.status == "draft"` and an edit that publishes) is denied. Do
+    /// that change in a server function.
+    ///
+    /// When `patch` is `None` only pass 1 runs.
     pub fn check_entity_update(
         &self,
         entity_name: &str,
         auth: &AuthContext,
-        data: Option<&serde_json::Value>,
+        existing: Option<&serde_json::Value>,
+        patch: Option<&serde_json::Value>,
     ) -> PolicyResult {
-        self.check_entity(entity_name, EntityAction::Update, auth, data)
+        let before = self.check_entity(entity_name, EntityAction::Update, auth, existing);
+        if !before.is_allowed() {
+            return before;
+        }
+        let Some(patch) = patch else {
+            return before;
+        };
+        let after = merge_update_row(existing, patch);
+        match self.check_entity(entity_name, EntityAction::Update, auth, Some(&after)) {
+            PolicyResult::Allowed => PolicyResult::Allowed,
+            PolicyResult::Denied {
+                policy_name,
+                reason,
+            } => PolicyResult::Denied {
+                policy_name,
+                reason: format!("{reason} (checked against the row after the update)"),
+            },
+        }
     }
 
     /// Check if an entity delete is allowed. `data` is the row about to be
@@ -811,6 +850,30 @@ fn evaluate_allow(
     evaluate_allow_inner(expr, auth, data, input, None)
 }
 
+/// The row an update produces: `existing` with each top-level key of
+/// `patch` written over it. This matches how every store applies an update
+/// (one column per top-level key, `null` clears the column). A non-object
+/// `patch` is ignored, and a missing `existing` row yields the patch alone.
+pub fn merge_update_row(
+    existing: Option<&serde_json::Value>,
+    patch: &serde_json::Value,
+) -> serde_json::Value {
+    let mut out = match existing {
+        Some(serde_json::Value::Object(m)) => m.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if let serde_json::Value::Object(p) = patch {
+        for (k, v) in p {
+            // The row id never changes on update.
+            if k == "id" && out.contains_key("id") {
+                continue;
+            }
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    serde_json::Value::Object(out)
+}
+
 /// Evaluate a single policy expression against an explicit context —
 /// the dry-run entry point behind `pylon policy test`. Same tokenizer,
 /// parser, and evaluator as production enforcement, so an expression
@@ -825,6 +888,33 @@ pub fn evaluate_expression(
     input: Option<&serde_json::Value>,
 ) -> PolicyResult {
     evaluate_allow_inner(expr, auth, data, input, None)
+}
+
+/// Dry-run an update rule the way enforcement runs it: once against the
+/// stored row, then against the row after `patch` (see
+/// [`PolicyEngine::check_entity_update`]). Both must pass.
+pub fn evaluate_update_expression(
+    expr: &str,
+    auth: &AuthContext,
+    existing: Option<&serde_json::Value>,
+    patch: &serde_json::Value,
+    input: Option<&serde_json::Value>,
+) -> PolicyResult {
+    let before = evaluate_allow_inner(expr, auth, existing, input, None);
+    if !before.is_allowed() {
+        return before;
+    }
+    let after = merge_update_row(existing, patch);
+    match evaluate_allow_inner(expr, auth, Some(&after), input, None) {
+        PolicyResult::Allowed => PolicyResult::Allowed,
+        PolicyResult::Denied {
+            policy_name,
+            reason,
+        } => PolicyResult::Denied {
+            policy_name,
+            reason: format!("{reason} (checked against the row after the update)"),
+        },
+    }
 }
 
 /// Tokenize + parse + at-end check an expression into an `Ast`. `Err` is a
@@ -1813,11 +1903,12 @@ impl<'a> EvalEnv<'a> {
         match parts[0].as_str() {
             "auth" => self.resolve_auth(&parts[1..]),
             "data" => self.resolve_json(self.data, &parts[1..]),
-            // On read/update/delete the route handler passes the CURRENT row
-            // as `data` (the call sites bind it from `existing_row`/`pre_row`),
-            // so `existing.*` is an alias for the same row — the more intuitive
-            // name when gating against stored values. On insert there is no
-            // prior row, so it aliases the incoming payload.
+            // `existing.*` is an alias for `data.*`: the row the rule is
+            // checked against. On read/delete that is the stored row. On
+            // update the rule runs twice, once on the stored row and once
+            // on the row after the write (see
+            // `PolicyEngine::check_entity_update`), and both names follow
+            // it. On insert it is the incoming payload.
             "existing" => self.resolve_json(self.data, &parts[1..]),
             "input" => self.resolve_json(self.input, &parts[1..]),
             // `now` is the current UTC time as an ISO-8601 string, for time
@@ -2677,7 +2768,7 @@ mod tests {
             !insert.is_allowed(),
             "insert must be denied without an allow_insert rule"
         );
-        let update = engine.check_entity_update("Todo", &user, None);
+        let update = engine.check_entity_update("Todo", &user, None, None);
         assert!(
             !update.is_allowed(),
             "update must be denied without an allow_update rule"
@@ -3572,5 +3663,197 @@ mod exists_memo_tests {
             2,
             "the second scope reused the first scope's cache"
         );
+    }
+}
+
+#[cfg(test)]
+mod update_policy_tests {
+    //! Update rules hold before AND after the write. A caller who may edit
+    //! a row must not be able to write it into a state the rule forbids
+    //! (the cross-tenant move `{"orgId": "<other org>"}`).
+    use super::*;
+    use pylon_kernel::{AppManifest, ManifestPolicy};
+    use serde_json::json;
+
+    fn engine(allow_update: &str) -> PolicyEngine {
+        PolicyEngine::from_manifest(&AppManifest {
+            policies: vec![ManifestPolicy {
+                name: "project".into(),
+                entity: Some("Project".into()),
+                allow_update: Some(allow_update.into()),
+                allow_delete: Some(allow_update.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    }
+
+    fn member_of(org: &str) -> AuthContext {
+        AuthContext::authenticated("alice".into()).with_tenant(org.into())
+    }
+
+    fn project(org: &str) -> serde_json::Value {
+        json!({ "id": "p1", "orgId": org, "name": "Roadmap", "status": "draft", "ownerId": "alice" })
+    }
+
+    #[test]
+    fn moving_a_row_to_another_tenant_is_denied() {
+        let e = engine("auth.tenantId == data.orgId");
+        let r = e.check_entity_update(
+            "Project",
+            &member_of("org-a"),
+            Some(&project("org-a")),
+            Some(&json!({ "orgId": "org-b" })),
+        );
+        assert!(!r.is_allowed(), "cross-tenant move must be denied: {r:?}");
+    }
+
+    #[test]
+    fn same_tenant_update_is_allowed() {
+        let e = engine("auth.tenantId == data.orgId");
+        let auth = member_of("org-a");
+        for patch in [
+            json!({ "name": "Q3 roadmap" }),
+            // Restating the current tenant is not a move.
+            json!({ "orgId": "org-a", "name": "Q3" }),
+        ] {
+            assert!(
+                e.check_entity_update("Project", &auth, Some(&project("org-a")), Some(&patch))
+                    .is_allowed(),
+                "patch {patch} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn editing_a_foreign_row_is_denied_even_if_the_patch_moves_it_home() {
+        let e = engine("auth.tenantId == data.orgId");
+        let r = e.check_entity_update(
+            "Project",
+            &member_of("org-a"),
+            Some(&project("org-b")),
+            Some(&json!({ "orgId": "org-a" })),
+        );
+        assert!(!r.is_allowed(), "the stored row must pass too: {r:?}");
+    }
+
+    #[test]
+    fn owner_rules_cannot_give_a_row_away() {
+        let e = engine("auth.userId == data.ownerId");
+        let alice = AuthContext::authenticated("alice".into());
+        assert!(!e
+            .check_entity_update(
+                "Project",
+                &alice,
+                Some(&project("org-a")),
+                Some(&json!({ "ownerId": "mallory" })),
+            )
+            .is_allowed());
+        // Clearing the owner is a move out of scope too.
+        assert!(!e
+            .check_entity_update(
+                "Project",
+                &alice,
+                Some(&project("org-a")),
+                Some(&json!({ "ownerId": null })),
+            )
+            .is_allowed());
+    }
+
+    #[test]
+    fn existing_alias_is_checked_after_the_write_too() {
+        // `existing.*` is the documented alias for the row. Rules written
+        // with it must fence the post-write row the same way `data.*` does.
+        let e = engine("auth.tenantId == existing.orgId");
+        let auth = member_of("org-a");
+        assert!(!e
+            .check_entity_update(
+                "Project",
+                &auth,
+                Some(&project("org-a")),
+                Some(&json!({ "orgId": "org-b" })),
+            )
+            .is_allowed());
+        assert!(e
+            .check_entity_update(
+                "Project",
+                &auth,
+                Some(&project("org-a")),
+                Some(&json!({ "name": "Q3" })),
+            )
+            .is_allowed());
+    }
+
+    #[test]
+    fn data_status_rule_also_constrains_the_new_value() {
+        // With `data.status`, the rule applies to the post-write row like
+        // an insert would: the edit can't leave the allowed state.
+        let e = engine("data.status == \"draft\"");
+        let auth = AuthContext::authenticated("alice".into());
+        assert!(!e
+            .check_entity_update(
+                "Project",
+                &auth,
+                Some(&project("org-a")),
+                Some(&json!({ "status": "published" })),
+            )
+            .is_allowed());
+    }
+
+    #[test]
+    fn allow_write_fallback_gets_the_same_two_pass_check() {
+        let e = PolicyEngine::from_manifest(&AppManifest {
+            policies: vec![ManifestPolicy {
+                name: "project".into(),
+                entity: Some("Project".into()),
+                allow_write: Some("auth.tenantId == data.orgId".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(!e
+            .check_entity_update(
+                "Project",
+                &member_of("org-a"),
+                Some(&project("org-a")),
+                Some(&json!({ "orgId": "org-b" })),
+            )
+            .is_allowed());
+    }
+
+    #[test]
+    fn delete_checks_the_stored_row() {
+        let e = engine("auth.tenantId == data.orgId");
+        assert!(e
+            .check_entity_delete("Project", &member_of("org-a"), Some(&project("org-a")))
+            .is_allowed());
+        assert!(!e
+            .check_entity_delete("Project", &member_of("org-a"), Some(&project("org-b")))
+            .is_allowed());
+    }
+
+    #[test]
+    fn admin_still_bypasses_update_rules() {
+        let e = engine("auth.tenantId == data.orgId");
+        assert!(e
+            .check_entity_update(
+                "Project",
+                &AuthContext::admin(),
+                Some(&project("org-a")),
+                Some(&json!({ "orgId": "org-b" })),
+            )
+            .is_allowed());
+    }
+
+    #[test]
+    fn merge_update_row_writes_top_level_keys_and_keeps_the_id() {
+        let merged = merge_update_row(
+            Some(&project("org-a")),
+            &json!({ "orgId": "org-b", "name": null, "id": "p2" }),
+        );
+        assert_eq!(merged["orgId"], "org-b");
+        assert_eq!(merged["name"], serde_json::Value::Null);
+        assert_eq!(merged["id"], "p1");
+        assert_eq!(merged["status"], "draft");
     }
 }

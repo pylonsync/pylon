@@ -236,7 +236,7 @@ fn crdt_paths_return_safe_defaults_in_postgres_mode() {
     );
     // crdt_apply_update is rejected explicitly so SDKs see a clean
     // NOT_SUPPORTED instead of silently doing the wrong thing.
-    let err = DataStore::crdt_apply_update(&rt, "User", &id, &[1, 2, 3]).unwrap_err();
+    let err = DataStore::crdt_apply_update(&rt, "User", &id, &[1, 2, 3], &|_| Ok(())).unwrap_err();
     assert_eq!(err.code, "NOT_SUPPORTED");
 }
 
@@ -987,8 +987,8 @@ fn crdt_apply_update_reprojects_to_postgres_row() {
     peer.commit();
     let update = encode_snapshot(&peer);
 
-    let new_snap =
-        DataStore::crdt_apply_update(&rt, "Note", &id, &update).expect("crdt_apply_update");
+    let new_snap = DataStore::crdt_apply_update(&rt, "Note", &id, &update, &|_| Ok(()))
+        .expect("crdt_apply_update");
     assert!(!new_snap.is_empty());
 
     // The materialized row's title column should now reflect the

@@ -86,7 +86,7 @@ pub(crate) fn handle(
         reason,
     } = ctx
         .policy_engine
-        .check_entity_update(entity, ctx.auth_ctx, existing_row.as_ref())
+        .check_entity_update(entity, ctx.auth_ctx, existing_row.as_ref(), None)
     {
         tracing::warn!(
             "[policy] crdt push {entity}/{row_id} denied by \"{policy_name}\": {reason}"
@@ -131,8 +131,20 @@ pub(crate) fn handle(
     {
         return Some((status, json_error(&code, &msg)));
     }
+    // The check above only saw the stored row. The merged doc is known
+    // only inside the store's transaction, so the store hands its
+    // projected columns to this closure before committing. The update
+    // rule must also hold for the row after the merge (see
+    // `PolicyEngine::check_entity_update`), and a readonly column (owner,
+    // tenant) can't change. Either failure rolls the merge back.
+    let authorize = |projected: &serde_json::Value| -> Result<(), pylon_http::DataError> {
+        authorize_crdt_merge(ctx, entity, existing_row.as_ref(), projected)
+    };
     Some(
-        match ctx.store.crdt_apply_update(entity, row_id, &update_bytes) {
+        match ctx
+            .store
+            .crdt_apply_update(entity, row_id, &update_bytes, &authorize)
+        {
             Ok(snapshot) => {
                 ctx.plugin_hooks
                     .after_update(entity, row_id, &hook_data, ctx.auth_ctx);
@@ -198,6 +210,18 @@ pub(crate) fn handle(
                 }
                 (200, serde_json::json!({"ok": true}).to_string())
             }
+            Err(e) if e.code == "POLICY_DENIED" => {
+                tracing::warn!("[policy] crdt push {entity}/{row_id} denied: {}", e.message);
+                (
+                    403,
+                    json_error_with_hint(
+                        "POLICY_DENIED",
+                        "Access denied by policy",
+                        "Check your auth token or the policy rules in your schema",
+                    ),
+                )
+            }
+            Err(e) if e.code == "READONLY_FIELD" => (400, json_error(&e.code, &e.message)),
             Err(e) => {
                 let status = match e.code.as_str() {
                     "ENTITY_NOT_FOUND" => 404,
@@ -209,4 +233,63 @@ pub(crate) fn handle(
             }
         },
     )
+}
+
+/// Authorize a CRDT merge against its projected columns before the store
+/// commits it. The row after the merge is the stored row with the
+/// projected columns written over it.
+fn authorize_crdt_merge(
+    ctx: &RouterContext,
+    entity: &str,
+    existing: Option<&serde_json::Value>,
+    projected: &serde_json::Value,
+) -> Result<(), pylon_http::DataError> {
+    // Only columns whose value changes count as written. The projection
+    // carries every CRDT column, including ones the peer did not touch.
+    let changed: serde_json::Map<String, serde_json::Value> = projected
+        .as_object()
+        .map(|cols| {
+            cols.iter()
+                .filter(|(k, v)| {
+                    k.as_str() != "id"
+                        && !existing
+                            .and_then(|row| row.get(k.as_str()))
+                            .is_some_and(|stored| same_value(stored, v))
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let patch = serde_json::Value::Object(changed);
+    if let Err((code, message)) =
+        crate::reject_readonly_payload(ctx.store.manifest(), entity, &patch, ctx.auth_ctx)
+    {
+        return Err(pylon_http::DataError {
+            code: code.into(),
+            message,
+        });
+    }
+    match ctx
+        .policy_engine
+        .check_entity_update(entity, ctx.auth_ctx, existing, Some(&patch))
+    {
+        pylon_policy::PolicyResult::Allowed => Ok(()),
+        pylon_policy::PolicyResult::Denied { reason, .. } => Err(pylon_http::DataError {
+            code: "POLICY_DENIED".into(),
+            message: reason,
+        }),
+    }
+}
+
+/// Value equality that ignores storage representation: `1` and `1.0` are
+/// the same number, and SQLite's `0`/`1` equal `false`/`true`.
+fn same_value(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Bool(x), Value::Number(n)) | (Value::Number(n), Value::Bool(x)) => {
+            n.as_f64() == Some(if *x { 1.0 } else { 0.0 })
+        }
+        _ => a == b,
+    }
 }

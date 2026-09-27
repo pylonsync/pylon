@@ -1935,11 +1935,11 @@ pub(crate) fn handle_update(
             )
         }
     };
-    // Route entry already ran `check_entity_update` against the
-    // existing row. Use bypass_policy so the pipeline runs hooks +
-    // store + reread + broadcast + after-hook + change-seq header
-    // without re-evaluating policy.
-    let mctx = mutate::MutationCtx::from_router_admin(ctx);
+    // Route entry already ran `check_entity_update`. The pipeline runs it
+    // again against the row it loads itself, so a concurrent write
+    // between the route check and the store update can't slip a row
+    // past the rule.
+    let mctx = mutate::MutationCtx::from_router(ctx);
     match mutate::apply_mutation(
         &mctx,
         mutate::MutationOp::Update {
@@ -1962,10 +1962,11 @@ pub(crate) fn handle_update(
 }
 
 pub(crate) fn handle_delete(ctx: &RouterContext, entity: &str, id: &str) -> (u16, String) {
-    // Route entry already ran `check_entity_delete` against the
-    // existing row. Pipeline handles pre-delete snapshot capture,
-    // plugin hooks, broadcast, and after-hook.
-    let mctx = mutate::MutationCtx::from_router_admin(ctx);
+    // Route entry already ran `check_entity_delete`. The pipeline runs it
+    // again against the row it loads itself (same reason as
+    // `handle_update`), then handles the pre-delete snapshot, plugin
+    // hooks, broadcast, and after-hook.
+    let mctx = mutate::MutationCtx::from_router(ctx);
     match mutate::apply_mutation(&mctx, mutate::MutationOp::Delete { entity, row_id: id }) {
         Ok(outcome) => {
             if outcome.seq > 0 {

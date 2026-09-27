@@ -216,8 +216,8 @@ Policies are boolean string expressions. They guard direct `/api/entities/*` acc
 - `auth.userId` — `string | null`
 - `auth.isAdmin` — `boolean` (true for the `admin` role / admin token / Studio cookie)
 - `auth.tenantId` — `string | null` (the selected org, for multi-tenant apps)
-- `data.*` — the row: incoming payload on insert; the **current stored row** on read/update/delete
-- `existing.*` — synonym for the current row (same as `data.*` on read/update/delete); use whichever reads clearer
+- `data.*` — the row: incoming payload on insert; the **stored row** on read/delete. `allowUpdate` runs twice, on the stored row and on the row after the write; both must pass
+- `existing.*` — synonym for `data.*`; use whichever reads clearer
 - `now` — current UTC time as an ISO-8601 string, for time windows
 
 Roles are checked with the **`auth.hasRole("x")` / `auth.hasAnyRole("a", "b")` functions** — there is **no `auth.roles` array and no `auth.email`** binding in policy expressions. (The SSR page `auth` prop and the session DO expose roles/email; the policy evaluator does not.)

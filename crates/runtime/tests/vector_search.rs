@@ -332,7 +332,7 @@ fn crdt_peer_merge_never_touches_embeddings() {
         .unwrap();
     peer.commit();
     let update = pylon_crdt::encode_update_since(&peer, &before);
-    DataStore::crdt_apply_update(&rt, "Note", &id, &update).unwrap();
+    DataStore::crdt_apply_update(&rt, "Note", &id, &update, &|_| Ok(())).unwrap();
 
     let row = rt.get_by_id("Note", &id).unwrap().unwrap();
     assert_eq!(row["body"], json!("edited by peer"), "merge applied");

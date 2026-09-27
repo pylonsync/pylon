@@ -446,10 +446,13 @@ pub(crate) fn handle(
                 ctx.auth_ctx,
                 parsed_body_for_policy.as_ref(),
             ),
+            // Checked against the stored row AND the row after the patch,
+            // so a PATCH can't move a row out of the caller's scope.
             HttpMethod::Patch => ctx.policy_engine.check_entity_update(
                 entity_name,
                 ctx.auth_ctx,
                 existing_row_for_policy.as_ref(),
+                parsed_body_for_policy.as_ref(),
             ),
             HttpMethod::Delete => ctx.policy_engine.check_entity_delete(
                 entity_name,
