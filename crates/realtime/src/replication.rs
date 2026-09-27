@@ -28,7 +28,7 @@
 
 use std::collections::HashMap;
 
-use pylon_replication::frame::{encode_update_body, quantize3, ComponentChange, FrameBuilder};
+use pylon_replication::frame::{encode_update_body_into, quantize3, ComponentChange, FrameBuilder};
 use pylon_replication::{EntityId, Replicated};
 
 use crate::interest::{EntityPos, InterestArea};
@@ -118,7 +118,9 @@ struct Sent {
 
 #[derive(Debug, Default)]
 struct Baseline {
-    entities: HashMap<EntityId, Sent>,
+    /// What the subscriber has, sorted by id. Sorted like the visible list,
+    /// so one merge of the two finds the despawns, spawns, and updates.
+    entities: Vec<(EntityId, Sent)>,
     /// The precision the subscriber's positions are in.
     precision: f32,
     /// The outbound queue's dropped-frame count when this baseline was
@@ -151,21 +153,74 @@ pub struct FrameOutput {
 #[derive(Debug, Default)]
 pub struct Replicator {
     baselines: HashMap<u64, Baseline>,
+    /// The store's entities this tick, sorted by id (see `TickEntity`),
+    /// and their ids.
+    table: Vec<TickEntity>,
     all_ids: Vec<EntityId>,
-    candidates: Vec<Candidate>,
+    /// The store version the table describes: (store id, change counter).
+    table_of: Option<(u64, u64)>,
+    /// The precision `TickEntity::q` is in, as bits.
+    table_precision: Option<u32>,
     /// The store the baselines describe. The game can swap in another
     /// (a clone for a rollback, a new one for a round); its sequence
     /// numbers mean nothing against these baselines.
     store_id: Option<u64>,
+    // Buffers reused across frames, so a frame allocates only its output.
+    candidates: Vec<Candidate>,
+    /// Every candidate's update body, back to back.
+    bodies: Vec<u8>,
+    /// The baseline being built this frame; swapped with the old one.
+    next: Vec<(EntityId, Sent)>,
+    /// Candidates in priority order, when the budget must choose: see
+    /// `rank_key`.
+    order: Vec<u128>,
+}
+
+/// What every subscriber's frame needs from one entity this tick. Built
+/// once per tick, so a frame reads a sorted array in place of the store's
+/// tree, and quantizes nothing.
+#[derive(Debug, Clone, Copy)]
+struct TickEntity {
+    id: EntityId,
+    seq: u64,
+    spawn_seq: u64,
+    /// The newest change counter among the components (removed ones too):
+    /// the store is read for components only when this is newer than
+    /// what the subscriber has.
+    component_seq: u64,
+    pos: [f32; 3],
+    /// `pos` quantized to `Replicator::table_precision`.
+    q: [i64; 3],
+}
+
+/// The first index in `table[from..]` whose id is `id` or greater (a
+/// galloping search: the ids a frame looks up ascend), and whether it is
+/// `id`.
+fn seek(table: &[TickEntity], from: usize, id: EntityId) -> (usize, bool) {
+    let rest = &table[from..];
+    let mut bound = 1;
+    while bound < rest.len() && rest[bound].id < id {
+        bound *= 2;
+    }
+    let lo = bound / 2;
+    let hi = (bound + 1).min(rest.len());
+    match rest[lo..hi].binary_search_by_key(&id, |t| t.id) {
+        Ok(i) => (from + lo + i, true),
+        Err(i) => (from + lo + i, false),
+    }
 }
 
 #[derive(Debug)]
 struct Candidate {
     id: EntityId,
     priority: f64,
-    body: Vec<u8>,
+    /// The update body: `bodies[body.0..body.1]`.
+    body: (usize, usize),
     delta: [i64; 3],
     seq: u64,
+    /// Where the entity's entry is in the new baseline.
+    slot: usize,
+    chosen: bool,
 }
 
 impl Replicator {
@@ -185,8 +240,30 @@ impl Replicator {
             self.baselines.clear();
             self.store_id = Some(store.store_id());
         }
+        self.refresh_table(store);
+    }
+
+    /// Rebuild the tick table when the store changed since it was built.
+    /// `frame` calls it too, so a frame built after a change without a
+    /// `begin_tick` (a full frame the queue asked for) is still current.
+    fn refresh_table(&mut self, store: &Replicated) {
+        let of = (store.store_id(), store.seq());
+        if self.table_of == Some(of) {
+            return;
+        }
+        self.table_of = Some(of);
+        self.table_precision = None;
+        self.table.clear();
+        self.table.extend(store.iter().map(|(id, e)| TickEntity {
+            id,
+            seq: e.seq,
+            spawn_seq: e.spawn_seq,
+            component_seq: e.components.values().map(|c| c.seq).max().unwrap_or(0),
+            pos: e.pos,
+            q: [0; 3],
+        }));
         self.all_ids.clear();
-        self.all_ids.extend(store.iter().map(|(id, _)| id));
+        self.all_ids.extend(self.table.iter().map(|t| t.id));
     }
 
     /// Build one subscription's frame for `tick`.
@@ -197,9 +274,26 @@ impl Replicator {
         tick: u64,
         input: FrameInput<'_>,
     ) -> FrameOutput {
+        self.refresh_table(store);
         let precision = sanitize_precision(config.precision);
-        let visible: &[EntityId] = input.visible.unwrap_or(&self.all_ids);
-        let base = self.baselines.entry(input.key).or_default();
+        if self.table_precision != Some(precision.to_bits()) {
+            for t in &mut self.table {
+                t.q = quantize3(t.pos, precision);
+            }
+            self.table_precision = Some(precision.to_bits());
+        }
+        let Replicator {
+            baselines,
+            table,
+            all_ids,
+            candidates,
+            bodies,
+            next,
+            order,
+            ..
+        } = self;
+        let visible: &[EntityId] = input.visible.unwrap_or(all_ids);
+        let base = baselines.entry(input.key).or_default();
         // A new precision rescales every position the client has.
         let full = !base.started
             || input.dropped != base.dropped
@@ -209,140 +303,192 @@ impl Replicator {
         base.dropped = input.dropped;
         base.precision = precision;
         let mut frame = FrameBuilder::new(full, precision);
-
         if full {
             base.entities.clear();
-        } else {
-            // Despawn what the subscriber has and no longer sees.
-            // Despawn what the subscriber has and no longer sees, and ids
-            // that now name a new entity (it spawns again below, with its
-            // full state, so nothing of the old entity lingers).
-            let gone: Vec<EntityId> = base
-                .entities
-                .iter()
-                .filter(|(id, sent)| {
-                    visible.binary_search(id).is_err()
-                        || store
-                            .get(**id)
-                            .is_none_or(|e| e.spawn_seq != sent.spawn_seq)
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            for id in gone {
-                base.entities.remove(&id);
-                frame.despawn(id);
-            }
         }
 
-        // Spawns (ascending, since `visible` is sorted), and update
-        // candidates for entities the subscriber already has.
-        self.candidates.clear();
-        for &id in visible {
-            let Some(e) = store.get(id) else { continue };
-            match base.entities.get(&id) {
-                None => {
-                    let q = quantize3(e.pos, precision);
-                    frame.spawn(
-                        id,
-                        q,
+        // One merge of the visible ids and the baseline, both sorted:
+        // - in the baseline only: left the view, so despawn;
+        // - visible only: came into view, so spawn;
+        // - in both: despawn and spawn again if the id now names a new
+        //   entity (or despawn if the entity is gone), else an update
+        //   candidate if it changed.
+        // Spawns come out in ascending id order, as the frame needs.
+        candidates.clear();
+        bodies.clear();
+        next.clear();
+        let seq = store.seq();
+        // One entity's changed components; it borrows the store, so it
+        // lives for this frame only.
+        let mut changes: Vec<ComponentChange<'_>> = Vec::new();
+        let mut cursor = 0usize;
+        let mut had = base.entities.iter().peekable();
+        let mut vis = visible.iter().copied().peekable();
+        loop {
+            let (id, sent) = match (vis.peek().copied(), had.peek().map(|(id, _)| *id)) {
+                (None, None) => break,
+                (Some(v), Some(h)) if h < v => {
+                    had.next();
+                    frame.despawn(h);
+                    continue;
+                }
+                (None, Some(h)) => {
+                    had.next();
+                    frame.despawn(h);
+                    continue;
+                }
+                (Some(v), Some(h)) if h == v => {
+                    vis.next();
+                    (v, had.next().map(|(_, s)| *s))
+                }
+                (Some(v), _) => {
+                    vis.next();
+                    (v, None)
+                }
+            };
+            let (at, found) = seek(table, cursor, id);
+            cursor = at;
+            if !found {
+                // Not in the store (a view can name an id it no longer has).
+                if sent.is_some() {
+                    frame.despawn(id);
+                }
+                continue;
+            }
+            let t = table[at];
+            let sent = match sent {
+                Some(sent) if t.spawn_seq != sent.spawn_seq => {
+                    // The id names a new entity: nothing of the old one
+                    // may linger, so it spawns again with its full state.
+                    frame.despawn(id);
+                    None
+                }
+                other => other,
+            };
+            let Some(mut sent) = sent else {
+                // The table is current, so the store has the entity.
+                let e = store.get(id).expect("the tick table matches the store");
+                frame.spawn(
+                    id,
+                    t.q,
+                    e.components
+                        .iter()
+                        .filter_map(|(c, v)| v.bytes.as_deref().map(|b| (*c, b)))
+                        .collect::<Vec<_>>()
+                        .into_iter(),
+                );
+                next.push((
+                    id,
+                    Sent {
+                        spawn_seq: t.spawn_seq,
+                        q: t.q,
+                        seq,
+                        tick,
+                    },
+                ));
+                continue;
+            };
+            if t.seq > sent.seq {
+                let q = t.q;
+                // Wrapping, like the decoder's add: any finite position
+                // round-trips, even across the whole i64 range.
+                let delta = [
+                    q[0].wrapping_sub(sent.q[0]),
+                    q[1].wrapping_sub(sent.q[1]),
+                    q[2].wrapping_sub(sent.q[2]),
+                ];
+                changes.clear();
+                if t.component_seq > sent.seq {
+                    let e = store.get(id).expect("the tick table matches the store");
+                    changes.extend(
                         e.components
                             .iter()
-                            .filter_map(|(c, v)| v.bytes.as_deref().map(|b| (*c, b)))
-                            .collect::<Vec<_>>()
-                            .into_iter(),
-                    );
-                    base.entities.insert(
-                        id,
-                        Sent {
-                            spawn_seq: e.spawn_seq,
-                            q,
-                            seq: store.seq(),
-                            tick,
-                        },
+                            .filter(|(_, c)| c.seq > sent.seq)
+                            .map(|(id, c)| (*id, c.bytes.as_deref())),
                     );
                 }
-                Some(sent) if e.changed_since(sent.seq) => {
-                    let q = quantize3(e.pos, precision);
-                    // Wrapping, like the decoder's add: any finite position
-                    // round-trips, even across the whole i64 range.
-                    let delta = [
-                        q[0].wrapping_sub(sent.q[0]),
-                        q[1].wrapping_sub(sent.q[1]),
-                        q[2].wrapping_sub(sent.q[2]),
-                    ];
-                    let comps: Vec<ComponentChange<'_>> = e
-                        .components
-                        .iter()
-                        .filter(|(_, c)| c.seq > sent.seq)
-                        .map(|(id, c)| (*id, c.bytes.as_deref()))
-                        .collect();
-                    if delta == [0, 0, 0] && comps.is_empty() {
-                        // Moved less than the precision: nothing to send, and
-                        // the position baseline stays where the client is.
-                        let sent = base.entities.get_mut(&id).expect("present");
-                        sent.seq = store.seq();
-                        continue;
-                    }
+                if delta == [0, 0, 0] && changes.is_empty() {
+                    // Moved less than the precision: nothing to send, and
+                    // the position baseline stays where the client is.
+                    sent.seq = seq;
+                } else {
                     let staleness = (tick.saturating_sub(sent.tick) + 1) as f64;
                     let distance = input.area.map_or(0.0, |a| {
-                        let (x, y) = config.plane.project(e.pos);
+                        let (x, y) = config.plane.project(t.pos);
                         let (dx, dy) = (x as f64 - a.x as f64, y as f64 - a.y as f64);
                         (dx * dx + dy * dy).sqrt() / (a.radius as f64).max(1e-6)
                     });
-                    self.candidates.push(Candidate {
+                    let priority = staleness / (1.0 + distance);
+                    let start = bodies.len();
+                    encode_update_body_into(bodies, delta, &changes);
+                    candidates.push(Candidate {
                         id,
-                        priority: staleness / (1.0 + distance),
-                        body: encode_update_body(delta, &comps),
+                        // A non-finite position gives no usable distance;
+                        // such an update ranks last.
+                        priority: if priority.is_nan() { 0.0 } else { priority },
+                        body: (start, bodies.len()),
                         delta,
-                        seq: store.seq(),
+                        seq,
+                        slot: next.len(),
+                        chosen: true,
                     });
                 }
-                Some(_) => {}
             }
+            next.push((id, sent));
         }
 
-        // Choose updates within the budget, highest priority first, then
-        // write them in id order.
+        // Choose updates within the budget, highest priority first. When
+        // every update fits, all go and there is nothing to rank.
         let budget = config.max_bytes_per_tick;
-        if budget > 0 {
-            self.candidates.sort_by(|a, b| {
-                b.priority
-                    .partial_cmp(&a.priority)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then(a.id.cmp(&b.id))
-            });
+        let cost = |c: &Candidate| c.body.1 - c.body.0 + pylon_replication::varint::len_u64(c.id);
+        if budget > 0 && candidates.iter().map(cost).sum::<usize>() > budget {
+            order.clear();
+            order.extend(candidates.iter().map(|c| rank_key(c.priority, c.id)));
+            order.sort_unstable();
             let mut used = 0usize;
             let mut first = true;
-            self.candidates.retain(|c| {
-                // The id is delta-coded after sorting; its absolute length
+            for &key in order.iter() {
+                // Candidates are sorted by id, so the id finds its entry.
+                let i = candidates
+                    .binary_search_by_key(&(key as u64), |c| c.id)
+                    .expect("a ranked candidate is present");
+                let c = &mut candidates[i];
+                // The id is delta-coded in the frame; its absolute length
                 // bounds that.
-                let cost = c.body.len() + pylon_replication::varint::len_u64(c.id);
+                let n = cost(c);
                 // The top candidate always goes, even past the budget, so an
                 // update bigger than the budget still arrives.
-                if first || used + cost <= budget {
+                c.chosen = first || used + n <= budget;
+                if c.chosen {
                     first = false;
-                    used += cost;
-                    true
-                } else {
-                    false
+                    used += n;
                 }
-            });
-            self.candidates.sort_by_key(|c| c.id);
+            }
         }
-        for c in &self.candidates {
-            frame.update(c.id, &c.body);
-            let sent = base.entities.get_mut(&c.id).expect("present");
+        // Candidates are in id order already: the merge made them so.
+        for c in candidates.iter().filter(|c| c.chosen) {
+            frame.update(c.id, &bodies[c.body.0..c.body.1]);
+            let sent = &mut next[c.slot].1;
             for i in 0..3 {
                 sent.q[i] = sent.q[i].wrapping_add(c.delta[i]);
             }
             sent.seq = c.seq;
             sent.tick = tick;
         }
+        std::mem::swap(&mut base.entities, next);
         FrameOutput {
             bytes: frame.finish(),
             delta_of: (!full).then_some(input.dropped),
         }
     }
+}
+
+/// A sort key that puts higher priority first and, among equal priority,
+/// the lower id first. Priorities are positive and finite (or 0), and for
+/// those the IEEE bit pattern orders like the number, so its complement
+/// sorts descending.
+fn rank_key(priority: f64, id: EntityId) -> u128 {
+    (((!priority.to_bits()) as u128) << 64) | id as u128
 }
 
 fn sanitize_precision(p: f32) -> f32 {

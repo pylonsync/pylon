@@ -33,12 +33,14 @@ fn by_kind(rows: Vec<(String, String, ShardStats)>) -> Vec<(String, ShardStats)>
         a.inputs += b.inputs;
         a.tick += b.tick;
         a.interest += b.interest;
+        a.frames += b.frames;
         a.encode += b.encode;
         for (mine, theirs) in [
             (&mut t.tick_ms, s.tick_ms),
             (&mut t.inputs_ms, s.inputs_ms),
             (&mut t.sim_ms, s.sim_ms),
             (&mut t.interest_ms, s.interest_ms),
+            (&mut t.frames_ms, s.frames_ms),
             (&mut t.encode_ms, s.encode_ms),
             (&mut t.bytes_per_tick, s.bytes_per_tick),
             (&mut t.bytes_per_subscriber, s.bytes_per_subscriber),
@@ -176,13 +178,14 @@ fn render(shards: Vec<(String, String, ShardStats)>, per_kind: bool) -> String {
         &mut out,
         "pylon_shard_phase_seconds_total",
         "counter",
-        "Time spent per tick phase: inputs (apply_input), tick, interest (interest management and snapshot building), encode (encoding and queueing frames).",
+        "Time spent per tick phase: inputs (apply_input), tick, interest (interest management, and snapshots for a shard that does not replicate), frames (replication frames), encode (encoding and queueing frames).",
     );
     for (l, s) in rows() {
         let p = s.phase_seconds_total;
         f.sample("", l, "phase=\"inputs\"", p.inputs);
         f.sample("", l, "phase=\"tick\"", p.tick);
         f.sample("", l, "phase=\"interest\"", p.interest);
+        f.sample("", l, "phase=\"frames\"", p.frames);
         f.sample("", l, "phase=\"encode\"", p.encode);
     }
     let mut f = Family::new(
@@ -196,6 +199,7 @@ fn render(shards: Vec<(String, String, ShardStats)>, per_kind: bool) -> String {
             ("inputs", s.inputs_ms),
             ("tick", s.sim_ms),
             ("interest", s.interest_ms),
+            ("frames", s.frames_ms),
             ("encode", s.encode_ms),
         ] {
             f.sample(
