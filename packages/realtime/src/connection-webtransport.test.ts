@@ -541,3 +541,39 @@ test("a closing frame refuses fixed credentials, though the browser gets no code
   expect(FakeWebTransport.sessions.length).toBe(1);
   client.close();
 });
+
+test("a stream frame waits for its tick's datagrams, and the handlers get both with the tick's ack", async () => {
+  const { client, wt } = await openWithBaseline();
+  const seen: Array<{ spawned: number[]; updated: number[]; ack: number }> = [];
+  client.onReplication((_, summary, _tick, ack) => {
+    if (!summary.full) seen.push({ spawned: summary.spawned, updated: summary.updated, ack });
+  });
+  // Tick 2's stream frame: entity 4 spawns at x = 50 (q 5000).
+  const precision = [...new Uint8Array(new Float32Array([0.01]).buffer)];
+  const spawn = Uint8Array.from([1, 0, ...precision, 0, 1, 4, ...varint(10000), 0, 0, 0, 0]);
+  wt.sendFrames([frame(3, 4, 2, 3, spawn)]);
+  await settleSoon();
+  expect(client.entities.get(4)).toBeUndefined();
+  expect(seen).toEqual([]);
+
+  wt.sendDatagram(dg({ frame: 1, tick: 2, ack: 3, streamTick: 2, parts: 1 }, [[1, 150]]));
+  await until("tick 2", () => seen.length === 1);
+  expect(client.entities.get(4)?.qx).toBe(5000);
+  expect(seen[0]).toEqual({ spawned: [4], updated: [1], ack: 3 });
+  // Acked with the stream tick the table had then.
+  expect([...wt.datagramsIn[0]]).toEqual([1, 1, 1, 2]);
+  client.close();
+});
+
+test("a session whose datagrams stop arriving closes", async () => {
+  const errors: string[] = [];
+  const { client, wt } = await openWithBaseline();
+  client.onError((e) => errors.push(e.message));
+  // Every tick misses a part, so none is ever whole.
+  for (let tick = 2; tick <= 103; tick++) {
+    wt.sendDatagram(dg({ frame: tick, tick, ack: 0, parts: 2 }, [[1, tick]]));
+  }
+  await until("the close", () => wt.clientClose !== null);
+  expect(errors).toContain("WebTransport to shard field: datagrams stopped arriving");
+  client.close();
+});

@@ -351,10 +351,12 @@ per ack the datagram's frame number and `EntityTable.streamTick`.
 
 Each datagram names how many datagrams its tick has and the tick of the
 last stream frame sent by then. Every tick without a full frame sends at
-least one. The client applies a tick's datagrams, and takes its input
-ack, only when it has all of them and that stream frame, or when a later
-tick is whole. So the ack always describes the table, which prediction
-needs. Before the server closes a session it sends a closing frame (kind
+least one. The client applies a tick's stream frames and datagrams, and
+takes its input ack, only when it has all of them, or when a later tick
+is whole. So the ack always describes the table, which prediction needs.
+When 100 ticks pass with none whole, the datagrams have stopped arriving:
+the client closes the session, and `"auto"` uses a WebSocket from then
+on. Acks go in datagrams no larger than the session allows. Before the server closes a session it sends a closing frame (kind
 `6`, JSON `{ code, reason }`), because a browser's `closed` does not get
 the code from a server close; the client closes the session when it
 reads it.
