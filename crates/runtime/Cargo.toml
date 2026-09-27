@@ -117,6 +117,11 @@ socket2 = "0.6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# GetThreadTimes: a WebAssembly shard's time budget counts the tick
+# thread's CPU time (see shard_wasm.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [dev-dependencies]
 rand = { workspace = true }
 # shard_wasm tests write small modules in the text format.

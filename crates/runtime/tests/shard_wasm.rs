@@ -404,6 +404,34 @@ fn a_tick_past_its_budget_stops_the_shard() {
     assert!(failure.contains("time budget"), "{failure}");
 }
 
+/// The budget counts the module's CPU time, not wall time: host work in the
+/// tick between the module's calls (here a hook that sleeps) and time the
+/// thread waits for a CPU do not use it up.
+#[test]
+fn host_time_in_a_tick_does_not_count_against_the_budget() {
+    let k = kind(
+        SnapshotFormat::Json,
+        WasmLimits {
+            budget: Duration::from_millis(50),
+            ..Default::default()
+        },
+    );
+    let s = Shard::new(
+        "a1",
+        k.instantiate("a1", &json!({})).unwrap(),
+        k.config().clone(),
+    );
+    join(&s, "u1");
+    // The hook runs after the module's `tick` and before its snapshots, in
+    // the same tick budget.
+    s.set_on_tick(|_, _| std::thread::sleep(Duration::from_millis(200)));
+    for _ in 0..3 {
+        send(&s, "u1", json!({ "input": { "move": { "dx": 1, "dy": 0 } } })).unwrap();
+        s.run_tick();
+    }
+    assert!(s.is_running(), "{:?}", s.with_state(|sim| sim.failure()));
+}
+
 #[test]
 fn the_budget_covers_the_whole_tick_not_each_call() {
     let kind_with = |ms: u64| {

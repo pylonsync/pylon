@@ -13,8 +13,10 @@
 //!
 //! Limits:
 //! - Each tick (its inputs, `tick`, and the snapshots) has one time budget,
-//!   and so does each authorize call and init. A module that runs past it
-//!   traps, and the shard stops.
+//!   and so does each authorize call and init. The budget counts the CPU
+//!   time the module's calls use: not the host's work between calls, and
+//!   not time the thread waits for a CPU (a busy or throttled machine). A
+//!   module that runs past it traps, and the shard stops.
 //! - Each instance has a memory cap. A module that grows past it traps.
 //! - A module may import only `pylon.log`. It gets no clock, randomness,
 //!   files, or network, so the same inputs replay to the same state.
@@ -115,8 +117,9 @@ fn engine() -> &'static Engine {
 pub struct WasmLimits {
     /// Linear memory cap per instance.
     pub memory_bytes: usize,
-    /// Time budget for one tick (its inputs, `tick`, and the snapshots), or
-    /// for one authorize call or init. Past it the module traps.
+    /// CPU time budget for the module's calls in one tick (its inputs,
+    /// `tick`, and the snapshots), or in one authorize call or init. Past
+    /// it the module traps.
     pub budget: Duration,
     /// Instances of this kind that may run at once.
     pub max_instances: usize,
@@ -396,17 +399,22 @@ impl WasmShardKind {
                 shard_id: shard_id.to_string(),
                 log_budget: LogBudget::new(self.limits.log_lines_per_sec),
                 last_error_line: None,
-                deadline: Instant::now() + self.limits.budget,
+                budget: self.limits.budget,
+                spent: Duration::ZERO,
+                // The start function runs inside `instantiate`.
+                call_started: Some(thread_cpu_time()),
                 lease: self.lease.get().cloned(),
             },
         );
         store.limiter(|s| &mut s.limits);
-        // The epoch thread only wakes the check. The deadline itself is wall
-        // time: on a loaded machine the thread's 2 ms sleeps run long, and a
-        // budget counted in epoch ticks would stretch with them.
+        // The epoch thread only wakes the check. The budget itself is the
+        // thread's CPU time: on a loaded machine the epoch thread's 2 ms
+        // sleeps run long, and a budget counted in epoch ticks would stretch
+        // with them; wall time would count time the tick thread waits for a
+        // CPU, which is not the module's.
         store.epoch_deadline_callback(|ctx| {
             Ok(
-                if Instant::now() >= ctx.data().deadline || ctx.data().lease_lapsed() {
+                if ctx.data().used() >= ctx.data().budget || ctx.data().lease_lapsed() {
                     UpdateDeadline::Interrupt
                 } else {
                     UpdateDeadline::Continue(1)
@@ -427,6 +435,11 @@ impl WasmShardKind {
                     describe_error(&store, &e, self.limits.budget)
                 }
             })?;
+        // The start function is done; the host's setup below is not the
+        // module's time.
+        let data = store.data_mut();
+        data.spent = data.used();
+        data.call_started = None;
         let memory = instance
             .get_memory(&mut store, "memory")
             .ok_or("the module's `memory` export is not a memory")?;
@@ -583,13 +596,26 @@ struct HostState {
     /// The last error-level line the module logged. The guest SDK logs a
     /// panic's message just before it traps.
     last_error_line: Option<String>,
-    /// When the current operation's time budget ends.
-    deadline: Instant,
+    /// The current operation's CPU time budget.
+    budget: Duration,
+    /// CPU time the operation's finished calls used.
+    spent: Duration,
+    /// The thread's CPU time when the running call started; None between
+    /// calls. The host's work between calls does not count.
+    call_started: Option<Duration>,
     /// The machine's lease in a cluster.
     lease: Option<Arc<LeaseClock>>,
 }
 
 impl HostState {
+    /// CPU time the operation has used, including the running call.
+    fn used(&self) -> Duration {
+        self.spent
+            + self
+                .call_started
+                .map_or(Duration::ZERO, |s| thread_cpu_time().saturating_sub(s))
+    }
+
     fn lease_lapsed(&self) -> bool {
         self.lease.as_ref().is_some_and(|l| l.expired())
     }
@@ -657,11 +683,56 @@ fn guest_log(mut caller: Caller<'_, HostState>, level: i32, ptr: i32, len: i32) 
     }
 }
 
+/// The calling thread's CPU time: time it ran, not time it waited.
+#[cfg(unix)]
+fn thread_cpu_time() -> Duration {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `ts` is a valid, writable timespec, and the clock id is a
+    // constant the platform defines.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    if rc != 0 {
+        return Duration::ZERO;
+    }
+    Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
+}
+
+/// The calling thread's CPU time: time it ran, not time it waited.
+#[cfg(windows)]
+fn thread_cpu_time() -> Duration {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+    let zero = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
+    let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+    // SAFETY: GetCurrentThread returns a pseudo-handle valid on this
+    // thread, and every pointer is to a local FILETIME.
+    let ok = unsafe {
+        GetThreadTimes(
+            GetCurrentThread(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    };
+    if ok == 0 {
+        return Duration::ZERO;
+    }
+    let ticks = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+    // FILETIME counts 100 ns intervals.
+    Duration::from_nanos((ticks(kernel) + ticks(user)).saturating_mul(100))
+}
+
 const LEASE_LAPSED: &str = "this machine's lease on the shard directory lapsed";
 
 fn describe_error(store: &Store<HostState>, err: &wasmtime::Error, budget: Duration) -> String {
     let base = match err.downcast_ref::<Trap>() {
-        Some(Trap::Interrupt) => format!("the module ran past its {budget:?} time budget"),
+        Some(Trap::Interrupt) => format!("the module ran past its {budget:?} CPU time budget"),
         Some(trap) => format!("the module trapped: {trap}"),
         // The top-level message is "error while executing at wasm
         // backtrace"; the cause (a memory limit, a host error) is at the root.
@@ -788,7 +859,12 @@ impl Inner {
             self.failed.set(&why);
             return Err(why);
         }
-        f.call(&mut self.store, params).map_err(|e| {
+        self.store.data_mut().call_started = Some(thread_cpu_time());
+        let result = f.call(&mut self.store, params);
+        let data = self.store.data_mut();
+        data.spent = data.used();
+        data.call_started = None;
+        result.map_err(|e| {
             let why = if self.store.data().lease_lapsed() {
                 LEASE_LAPSED.to_string()
             } else {
@@ -802,7 +878,7 @@ impl Inner {
 
     /// Start a time budget. Every call until the next `begin_op` shares it.
     fn begin_op(&mut self) {
-        self.store.data_mut().deadline = Instant::now() + self.budget;
+        self.store.data_mut().spent = Duration::ZERO;
         self.store.set_epoch_deadline(1);
     }
 

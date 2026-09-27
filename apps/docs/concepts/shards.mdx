@@ -326,7 +326,7 @@ export default buildManifest({
 | `maxSubscribers` | Subscribers per shard. | 256 |
 | `maxInstances` | Shards of this kind that may run at once. | 64 |
 | `memoryMb` | Memory cap per shard. | 64 |
-| `tickBudgetMs` | Time limit for one tick (inputs, `tick`, snapshots), or for one authorize call. | 100 |
+| `tickBudgetMs` | CPU time limit for the module in one tick (inputs, `tick`, snapshots), or in one authorize call. Only the module's own code counts: not the host's work, and not time the tick waits for a CPU. | 100 |
 | `idleShutdownSecs` | Stop a shard with no subscribers after this long. `0` never stops it. | 90 |
 | `input` | `ratePerSec`, `burst`, `maxQueued`, `maxPerTick` per subscriber. | 120, 240, 256, 32 |
 
@@ -906,7 +906,7 @@ starts it from that save; its clients reconnect after the gap. Give the platform
 
 ## Limits and failures
 
-- A tick that runs past `tickBudgetMs` stops the shard.
+- A tick whose module code uses more CPU time than `tickBudgetMs` stops the shard.
 - A module that grows past `memoryMb` stops the shard.
 - A panic stops the shard. The server log shows the panic message.
 - `ctx.shards.get(id)` returns the reason in `error` until the host removes
