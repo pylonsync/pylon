@@ -6,7 +6,7 @@
  */
 
 import { ShardClock } from "./clock";
-import { EntityTable, readDatagramHeader, type ReplicationSummary } from "./replication";
+import { EntityTable, isFullFrame, readDatagramHeader, type ReplicationSummary } from "./replication";
 import {
   SHARD_PROTOCOL_VERSION,
   ShardFrameKind,
@@ -14,8 +14,7 @@ import {
   StreamFrames,
   decodeWebTransportInfo,
   type WebTransportInfo,
-  MAX_ACKS_PER_MESSAGE,
-  encodeDatagramAcks,
+  encodeDatagramAckBatches,
   encodeWebTransportHello,
   encodeWebTransportInput,
   decodeShardPayload,
@@ -187,8 +186,8 @@ interface Link {
   readonly open: boolean;
   /** Send an input, as `encodeShardInput` made it. */
   send(input: string | Uint8Array): void;
-  /** Send datagram acks (`encodeDatagramAcks`). WebTransport only. */
-  ack(acks: Uint8Array): void;
+  /** Send datagram acks: (datagram number, stream tick). WebTransport only. */
+  ack(acks: Array<[number, number]>): void;
   /**
    * What the server said before it closed the session (a closing frame):
    * a WebTransport close from the server does not reach the browser's
@@ -207,8 +206,21 @@ interface PendingTick {
   datagrams: Map<number, Uint8Array>;
 }
 
-/** Ticks of datagrams kept waiting at most; older ones count as lost. */
-const MAX_PENDING_TICKS = 32;
+/** A stream frame waiting until its tick is whole. */
+interface PendingFrame {
+  tick: number;
+  payload: Uint8Array;
+}
+
+/**
+ * How long a WebTransport session may go without a whole tick (ms). Past
+ * that, its datagrams have stopped arriving: the client closes it. The
+ * server sends at least one datagram every tick.
+ */
+const STALL_MS = 5000;
+
+/** Ticks kept waiting at most; more means the datagrams have stopped. */
+const MAX_PENDING_TICKS = 100;
 
 /** The parts of the browser's `WebTransport` the client uses. */
 interface WebTransportSession {
@@ -216,6 +228,8 @@ interface WebTransportSession {
   readonly closed: Promise<{ closeCode?: number; reason?: string } | undefined>;
   readonly datagrams: {
     readonly readable: ReadableStream<Uint8Array>;
+    /** The largest datagram the session can send now. */
+    readonly maxDatagramSize?: number;
     readonly writable?: WritableStream<Uint8Array>;
     createWritable?: () => WritableStream<Uint8Array>;
   };
@@ -286,6 +300,15 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   // newer ticks that are not whole yet (see `pylon_replication::datagram`).
   let wholeTick = -1;
   const pending = new Map<number, PendingTick>();
+  // Stream frames (not full) that wait with their tick's datagrams, in
+  // order, and the tick of the newest one.
+  const pendingStream: PendingFrame[] = [];
+  let receivedStreamTick = -1;
+  // When the table last held a whole tick (or the session opened).
+  let lastWholeAt = 0;
+  // Whether this link replicates entities. Only then does the server send
+  // datagrams every tick; a snapshot shard sends none.
+  let replicating = false;
   let lastKind: Link["kind"] | null = null;
   let clientSeq = 0;
   let closed = false;
@@ -422,6 +445,10 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     reportedTick = -1;
     wholeTick = -1;
     pending.clear();
+    pendingStream.length = 0;
+    receivedStreamTick = -1;
+    lastWholeAt = now();
+    replicating = false;
     // Inputs sent on the old connection are never acknowledged on this
     // one (acks restart with the connection).
     sentAt.clear();
@@ -452,25 +479,54 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
   };
 
   /**
-   * Apply the buffered datagrams of the newest whole tick and of every
-   * tick before it, oldest first, then take that tick's ack and ack the
-   * datagrams. A tick is whole when all its datagrams are here and the
-   * table has the stream frames sent by then.
+   * Apply everything buffered up to the newest whole tick, oldest tick
+   * first (each tick's stream frames, then its datagrams), then take that
+   * tick's ack, tell the handlers once, and ack the datagrams. A tick is
+   * whole when all its datagrams are here and so are the stream frames
+   * sent by then. Until then its changes wait, so the handlers never see a
+   * table newer than the ack they get with it (prediction relies on that).
    */
   const applyWhole = (from: Link, at: number) => {
+    try {
+      applyWholeTick(from, at);
+    } catch (e) {
+      // Out of sync with the server. Reconnecting gets a full baseline.
+      dispatchError(e instanceof Error ? e : new Error(String(e)));
+      entities.clear();
+      from.close();
+    }
+  };
+
+  const applyWholeTick = (from: Link, at: number) => {
     let whole = -1;
     for (const [tick, p] of pending) {
-      if (tick > whole && p.datagrams.size === p.parts && entities.streamTick >= p.streamTick) {
+      if (tick > whole && p.datagrams.size === p.parts && receivedStreamTick >= p.streamTick) {
         whole = tick;
       }
     }
     if (whole < 0) return;
     const ack = (pending.get(whole) as PendingTick).ack;
-    const ticks = [...pending.keys()].filter((t) => t <= whole).sort((a, b) => a - b);
+    const ticks = new Set<number>();
+    for (const t of pending.keys()) if (t <= whole) ticks.add(t);
+    for (const f of pendingStream) if (f.tick <= whole) ticks.add(f.tick);
+    const spawned = new Set<number>();
+    const despawned = new Set<number>();
     const updated = new Set<number>();
     const acks: Array<[number, number]> = [];
-    for (const t of ticks) {
-      const p = pending.get(t) as PendingTick;
+    for (const t of [...ticks].sort((a, b) => a - b)) {
+      while (pendingStream.length > 0 && pendingStream[0].tick === t) {
+        const f = pendingStream.shift() as PendingFrame;
+        const s = entities.apply(f.payload, f.tick);
+        for (const id of s.despawned) {
+          despawned.add(id);
+          spawned.delete(id);
+          updated.delete(id);
+        }
+        for (const id of s.spawned) spawned.add(id);
+        for (const id of s.updated) updated.add(id);
+      }
+      const p = pending.get(t);
+      if (!p) continue;
       pending.delete(t);
       for (const number of [...p.datagrams.keys()].sort((a, b) => a - b)) {
         const s = entities.applyDatagram(p.datagrams.get(number) as Uint8Array);
@@ -478,14 +534,39 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
         acks.push([s.frame, entities.streamTick]);
       }
     }
+    for (const id of spawned) updated.delete(id);
     wholeTick = whole;
+    lastWholeAt = at;
     takeAck(ack, at);
     backoff = options.reconnectBackoffMs ?? 500;
-    report({ full: false, spawned: [], updated: [...updated], despawned: [] }, whole);
-    for (let i = 0; i < acks.length; i += MAX_ACKS_PER_MESSAGE) {
-      from.ack(encodeDatagramAcks(acks.slice(i, i + MAX_ACKS_PER_MESSAGE)));
-    }
+    report(
+      { full: false, spawned: [...spawned], updated: [...updated], despawned: [...despawned] },
+      whole,
+    );
+    if (acks.length > 0) from.ack(acks);
   };
+
+  /**
+   * Too many ticks without one whole: the datagrams stopped arriving (UDP
+   * blocked partway, say). Close the session; `"auto"` uses WebSockets
+   * from then on.
+   */
+  const stalled = (from: Link) => {
+    if (
+      from !== link ||
+      !replicating ||
+      (now() - lastWholeAt <= STALL_MS &&
+        pending.size <= MAX_PENDING_TICKS &&
+        pendingStream.length <= MAX_PENDING_TICKS)
+    ) {
+      return false;
+    }
+    dispatchError(new Error(`WebTransport to shard ${currentShard}: datagrams stopped arriving`));
+    if ((options.transport ?? "websocket") === "auto") webSocketOnly = true;
+    from.close();
+    return true;
+  };
+
   /** A frame from the server: a WebSocket message, or one from the WebTransport stream. */
   const onFrame = (from: Link, data: ArrayBuffer, at: number) => {
     if (from !== link) return;
@@ -531,6 +612,14 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
         // tick's frame is built, and would make the clock run early.
         observeTick(frame.tick, at);
       }
+      if (frame.kind === ShardFrameKind.Replication) replicating = true;
+      if (frame.kind === ShardFrameKind.Replication && from.kind === "webtransport" && !isFullFrame(frame.payload)) {
+        // It waits with its tick's datagrams (see `applyWhole`).
+        pendingStream.push({ tick: frame.tick, payload: frame.payload });
+        receivedStreamTick = Math.max(receivedStreamTick, frame.tick);
+        if (!stalled(from)) applyWhole(from, at);
+        return;
+      }
       if (frame.kind === ShardFrameKind.Replication) {
         let summary: ReplicationSummary;
         try {
@@ -542,14 +631,15 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
           from.close();
           return;
         }
-        // Over WebTransport a stream frame holds only the tick's spawns
-        // and despawns; its ack describes the table once the tick's
-        // datagrams are in too. A full frame holds everything.
-        if (from.kind === "websocket" || summary.full) takeAck(frame.ack, at);
-        if (from.kind === "webtransport" && summary.full) {
-          // Datagrams built before it describe a table that is gone.
+        // A full frame holds everything, so its ack describes the table.
+        takeAck(frame.ack, at);
+        if (from.kind === "webtransport") {
+          // What was built before it describes a table that is gone.
           wholeTick = Math.max(wholeTick, frame.tick);
+          lastWholeAt = at;
+          receivedStreamTick = Math.max(receivedStreamTick, frame.tick);
           for (const t of [...pending.keys()]) if (t <= frame.tick) pending.delete(t);
+          while (pendingStream.length > 0 && pendingStream[0].tick <= frame.tick) pendingStream.shift();
         }
         // A frame applied: the connection works, so the next reconnect
         // starts from the short delay again. (Resetting on open would
@@ -587,16 +677,16 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     if (from !== link) return;
     try {
       const h = readDatagramHeader(datagram);
+      replicating = true;
       if (h.tick <= wholeTick || h.parts < 1) return;
       observeTick(h.tick, at);
       let p = pending.get(h.tick);
       if (!p) {
         p = { parts: h.parts, streamTick: h.streamTick, ack: h.ack, datagrams: new Map() };
         pending.set(h.tick, p);
-        if (pending.size > MAX_PENDING_TICKS) pending.delete(Math.min(...pending.keys()));
       }
       p.datagrams.set(h.frame, datagram);
-      applyWhole(from, at);
+      if (!stalled(from)) applyWhole(from, at);
     } catch (e) {
       // Not a datagram this client can read: start over with a baseline.
       dispatchError(e instanceof Error ? e : new Error(String(e)));
@@ -781,7 +871,11 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
         writer.write(encodeWebTransportInput(input)).catch(ignore);
       },
       ack(acks) {
-        datagrams.write(acks).catch(ignore);
+        // A datagram larger than the session allows never arrives.
+        const max = session.datagrams.maxDatagramSize ?? 1200;
+        for (const message of encodeDatagramAckBatches(acks, max)) {
+          datagrams.write(message).catch(ignore);
+        }
       },
       notice: null,
       close() {
@@ -794,6 +888,10 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
       },
     };
     began(l);
+    // Checks for a stall also while nothing arrives at all.
+    const watchdog = setInterval(() => {
+      if (link === l) stalled(l);
+    }, 1000);
 
     void (async () => {
       const reader = stream.readable.getReader();
@@ -833,6 +931,7 @@ export function connectShard<TSnapshot = unknown, TInput = unknown>(
     // `closed` does not get them from a server close.
     const closedWith = (info: { closeCode?: number; reason?: string } | null) => {
       isOpen = false;
+      clearInterval(watchdog);
       const code = l.notice?.code ?? info?.closeCode;
       const reason = l.notice?.reason ?? info?.reason ?? "";
       const refused = code === WEBTRANSPORT_CLOSE.Policy && reason.startsWith("unauthorized");

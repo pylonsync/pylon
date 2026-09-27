@@ -105,6 +105,11 @@ export interface ReplicationSummary {
   despawned: number[];
 }
 
+/** True when a replication frame is a full frame (it replaces the table). */
+export function isFullFrame(frame: Uint8Array): boolean {
+  return frame.length >= 2 && (frame[1] & FLAG_FULL) !== 0;
+}
+
 /**
  * A datagram's frame number, tick, and input ack, without applying it.
  * Throws on bytes that are not a datagram.

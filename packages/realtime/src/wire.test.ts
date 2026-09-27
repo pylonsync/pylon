@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { encode as msgpackEncode, decode as msgpackDecode } from "@msgpack/msgpack";
 
 import {
+  MAX_ACKS_PER_MESSAGE,
   SHARD_HEADER_LEN,
   ShardCodec,
   ShardFrameKind,
   decodeShardPayload,
   decodeShardRejection,
+  encodeDatagramAckBatches,
   encodeShardInput,
   parseShardFrame,
 } from "./wire";
@@ -69,4 +71,19 @@ test("inputs are MessagePack for MessagePack shards and JSON otherwise", () => {
   expect(msgpackDecode(bin as Uint8Array)).toEqual({ input: { move: "n" }, client_seq: 4 });
   expect(encodeShardInput(null, 5, 1)).toBe('{"input":5,"client_seq":1}');
   expect(encodeShardInput(ShardCodec.Json, 5, 2)).toBe('{"input":5,"client_seq":2}');
+});
+
+test("ack batches stay within the datagram size", () => {
+  const acks = Array.from({ length: 1300 }, (_, i) => [2_000_000 + i, 1_000_000] as [number, number]);
+  const batches = encodeDatagramAckBatches(acks, 200);
+  let total = 0;
+  for (const b of batches) {
+    expect(b.length).toBeLessThanOrEqual(200);
+    expect(b[0]).toBe(1);
+    // The count is the second byte (under 128 here).
+    total += b[1];
+  }
+  expect(total).toBe(1300);
+  const big = encodeDatagramAckBatches(Array.from({ length: 1300 }, (_, i) => [i % 100, 1] as [number, number]), 1_000_000);
+  expect(big.length).toBe(Math.ceil(1300 / MAX_ACKS_PER_MESSAGE));
 });

@@ -238,6 +238,42 @@ export function encodeDatagramAcks(acks: ReadonlyArray<readonly [number, number]
   return Uint8Array.from(out);
 }
 
+/** Bytes `pushVarint` writes for `v`. */
+function varintLen(v: number): number {
+  let n = 1;
+  while (v >= 0x80) {
+    v = Math.floor(v / 0x80);
+    n += 1;
+  }
+  return n;
+}
+
+/**
+ * `encodeDatagramAcks` split into messages of at most `maxBytes` bytes and
+ * `MAX_ACKS_PER_MESSAGE` acks each, so every one fits in a datagram.
+ */
+export function encodeDatagramAckBatches(
+  acks: ReadonlyArray<readonly [number, number]>,
+  maxBytes: number,
+): Uint8Array[] {
+  const out: Uint8Array[] = [];
+  let start = 0;
+  // Type byte plus the count, which is below 2^14 (two varint bytes).
+  let size = 3;
+  for (let i = 0; i < acks.length; i++) {
+    const [frame, applied] = acks[i];
+    const n = varintLen(frame) + varintLen(applied);
+    if (i > start && (size + n > maxBytes || i - start === MAX_ACKS_PER_MESSAGE)) {
+      out.push(encodeDatagramAcks(acks.slice(start, i)));
+      start = i;
+      size = 3;
+    }
+    size += n;
+  }
+  if (start < acks.length) out.push(encodeDatagramAcks(acks.slice(start)));
+  return out;
+}
+
 /** A message for a WebTransport stream: a 4-byte big-endian length, then `bytes`. */
 export function lengthPrefixed(bytes: Uint8Array): Uint8Array {
   const out = new Uint8Array(4 + bytes.length);
