@@ -1020,7 +1020,28 @@ fn merge_seq(
         }
     }
     // The source's unlinked elements, a run at a time, beside the images of
-    // their nearest neighbours still in the holder.
+    // their nearest neighbours still in the holder: after the nearest
+    // earlier one, else before the nearest later one, else at the end.
+    let image: Vec<Option<usize>> = src
+        .iter()
+        .map(|e| {
+            link.get(&e.id)
+                .copied()
+                .flatten()
+                .and_then(|t| at.get(&t))
+                .copied()
+        })
+        .collect();
+    // Per index k: the image of the nearest source element before k, and
+    // from k on.
+    let mut before = vec![None; src.len() + 1];
+    for k in 0..src.len() {
+        before[k + 1] = image[k].or(before[k]);
+    }
+    let mut from = vec![None; src.len() + 1];
+    for k in (0..src.len()).rev() {
+        from[k] = image[k].or(from[k + 1]);
+    }
     let mut i = 0;
     while i < src.len() {
         if link.contains_key(&src[i].id) {
@@ -1031,11 +1052,8 @@ fn merge_seq(
         while j < src.len() && !link.contains_key(&src[j].id) {
             j += 1;
         }
-        edits.push(Edit::Insert {
-            at: anchor(&src, &link, &at, i, j, dst.len()),
-            i,
-            j,
-        });
+        let at = before[i].map(|p| p + 1).or(from[j]).unwrap_or(dst.len());
+        edits.push(Edit::Insert { at, i, j });
         i = j;
     }
     edits.sort_by_key(|e| std::cmp::Reverse(e.key()));
@@ -1066,33 +1084,6 @@ fn merge_seq(
         },
         nodes: None,
     })
-}
-
-/// Where the source's elements `i..j` go in the holder: after the image of
-/// the nearest earlier source element whose image is still there, else
-/// before that of the nearest later one, else at the end.
-fn anchor(
-    src: &[Elem],
-    link: &HashMap<ID, Option<ID>>,
-    at: &HashMap<ID, usize>,
-    i: usize,
-    j: usize,
-    len: usize,
-) -> usize {
-    let image = |e: &Elem| {
-        link.get(&e.id)
-            .copied()
-            .flatten()
-            .and_then(|t| at.get(&t))
-            .copied()
-    };
-    src[..i]
-        .iter()
-        .rev()
-        .find_map(image)
-        .map(|p| p + 1)
-        .or_else(|| src[j..].iter().find_map(image))
-        .unwrap_or(len)
 }
 
 fn node_id(node: &Value) -> Option<&str> {

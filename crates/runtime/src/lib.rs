@@ -7711,9 +7711,10 @@ mod tests {
         assert_eq!(row["body"], "typed");
     }
 
-    /// A later push that deletes much of a merged text whose images a
-    /// server write already deleted: the merge reads the holder once, not
-    /// once per deleted element.
+    /// Later pushes that delete much of a merged text whose images a server
+    /// write already deleted, then insert between what is left: the merge
+    /// reads the holder once, not once per deleted element, and finds each
+    /// insert's place in one pass.
     #[test]
     fn a_merge_over_deleted_images_stays_fast() {
         use pylon_http::DataStore;
@@ -7748,6 +7749,24 @@ mod tests {
         push_since(&rt, &id, &offline, &pushed);
         let took = started.elapsed();
         assert_eq!(body_of(&rt, &id), "rewritten");
+        assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+        // New characters between the ones whose images are gone: each run
+        // of them finds its place without a scan of the whole text.
+        let pushed = offline.oplog_vv();
+        let t = text_in(&offline, "body");
+        let mut pos = t.len_unicode();
+        while pos > 0 {
+            t.insert(pos, "+").unwrap();
+            pos -= 1;
+        }
+        offline.commit();
+        let started = std::time::Instant::now();
+        push_since(&rt, &id, &offline, &pushed);
+        let took = started.elapsed();
+        assert_eq!(
+            body_of(&rt, &id).matches('+').count(),
+            text_in(&offline, "body").len_unicode() / 2
+        );
         assert!(took < std::time::Duration::from_secs(3), "{took:?}");
     }
 
